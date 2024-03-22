@@ -294,7 +294,7 @@ void parseData() {      // split the data into its parts
       digitalWrite(pumpValvePin1, HIGH);
       digitalWrite(pumpValvePin2, HIGH);
       digitalWrite(pumpPin, HIGH);
-      delay(300);
+      // delay(300);
       gripperPumpOn = true;
       gripperClosed = false;
       unsigned long currentMillis = millis();
@@ -323,9 +323,10 @@ void parseData() {      // split the data into its parts
     motorsActive = false;
   }
   else {
-    digitalWrite(ledPin,HIGH);
-    delay(500);
-    digitalWrite(ledPin,LOW);
+    blinkLED();
+    // digitalWrite(ledPin,HIGH);
+    // delay(500);
+    // digitalWrite(ledPin,LOW);
     state = "Free";
   }
   newData = false;
@@ -337,7 +338,7 @@ void setup() {
 
   setupPins();
 
-  SPI.begin();
+  // SPI.begin();
   motorX.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
   motorY.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
   motorZ.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
