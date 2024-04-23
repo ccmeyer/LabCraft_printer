@@ -3,6 +3,9 @@
 // The section below comes from this git repo: https://github.com/maxgerhardt/nucleo-f446ze-with-arduino/tree/main
 // It was originally located after the void loop() but I moved it up to make sure that I set the
 // clock speed before beginning the other communication.
+
+bool clockConfig = false;
+
 extern "C" void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -48,6 +51,7 @@ extern "C" void SystemClock_Config(void)
   {
     Error_Handler();
   }
+  clockConfig = true;
 }
 
 #include <TMCStepper.h>         // Sets up UART communication
@@ -55,7 +59,7 @@ extern "C" void SystemClock_Config(void)
 #include <Wire.h>
 #include "pin_assignments.h"
 #include "pin_functions.h"
-#include "StepperMotor.h"
+// #include "StepperMotor.h"
 #include "all_constants.h"
 #include "PressureSensor.h"
 
@@ -109,10 +113,38 @@ int updateCounter = 0;
 String event = "";
 bool newData = false;
 
-StepperMotor motorZ = StepperMotor(X_EN_PIN,X_DIR_PIN,X_STEP_PIN,X_SW_RX,X_SW_TX,R_SENSE);
-StepperMotor motorY = StepperMotor(Y_EN_PIN,Y_DIR_PIN,Y_STEP_PIN,Y_SW_RX,Y_SW_TX,R_SENSE);
-StepperMotor motorX = StepperMotor(Z_EN_PIN,Z_DIR_PIN,Z_STEP_PIN,Z_SW_RX,Z_SW_TX,R_SENSE);
-StepperMotor motorP = StepperMotor(P_EN_PIN,P_DIR_PIN,P_STEP_PIN,P_SW_RX,P_SW_TX,R_SENSE);
+unsigned long currentMillis;
+unsigned long currentMicros;
+
+unsigned long endMicros;
+unsigned long cycleTime = 0;
+static const int numCycles = 5;
+unsigned long cycleTimes[numCycles];
+int cycleIndex = 0;
+unsigned long averageCycle = 0;
+bool pressureRead = false;
+unsigned long maxCycle = 0;
+
+int numIterations = 0;
+
+int frequency = 1000000;
+
+bool pressureCorrect = false;
+
+// StepperMotor motorZ = StepperMotor(X_EN_PIN,X_DIR_PIN,X_STEP_PIN,X_SW_RX,X_SW_TX,R_SENSE);
+// StepperMotor motorY = StepperMotor(Y_EN_PIN,Y_DIR_PIN,Y_STEP_PIN,Y_SW_RX,Y_SW_TX,R_SENSE);
+// StepperMotor motorX = StepperMotor(Z_EN_PIN,Z_DIR_PIN,Z_STEP_PIN,Z_SW_RX,Z_SW_TX,R_SENSE);
+// StepperMotor motorP = StepperMotor(P_EN_PIN,P_DIR_PIN,P_STEP_PIN,P_SW_RX,P_SW_TX,R_SENSE);
+
+TMC2208Stepper driverX = TMC2208Stepper(X_SW_RX, X_SW_TX, R_SENSE); // Software serial
+TMC2208Stepper driverY = TMC2208Stepper(Y_SW_RX, Y_SW_TX, R_SENSE); // Software serial
+TMC2208Stepper driverZ = TMC2208Stepper(Z_SW_RX, Z_SW_TX, R_SENSE); // Software serial
+TMC2208Stepper driverP = TMC2208Stepper(P_SW_RX, P_SW_TX, R_SENSE); // Software serial
+
+AccelStepper stepperX = AccelStepper(stepperX.DRIVER, X_STEP_PIN, X_DIR_PIN);
+AccelStepper stepperY = AccelStepper(stepperY.DRIVER, Y_STEP_PIN, Y_DIR_PIN);
+AccelStepper stepperZ = AccelStepper(stepperZ.DRIVER, Z_STEP_PIN, Z_DIR_PIN);
+AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
@@ -121,9 +153,12 @@ void XlimitISR() {
   switch_time = millis();
   if (switch_time - last_switch_time > debounce){
     digitalWrite(ledPin, HIGH);
-    motorX.stop();
-    motorY.stop();
-    motorZ.stop();
+    // motorX.stop();
+    // motorY.stop();
+    // motorZ.stop();
+    stepperX.stop();
+    stepperY.stop();
+    stepperZ.stop();
     last_switch_time = switch_time;
   } 
 }
@@ -176,10 +211,12 @@ void parseData() {      // split the data into its parts
     
     strtokIndx = strtok(NULL, ",");
     stepsZ = atoi(strtokIndx);     
-
-    motorX.moveTo(motorX.currentPosition()+stepsX);
-    motorY.moveTo(motorY.currentPosition()+stepsY);
-    motorZ.moveTo(motorZ.currentPosition()+stepsZ);
+    // motorX.moveTo(motorX.currentPosition()+stepsX);
+    // motorY.moveTo(motorY.currentPosition()+stepsY);
+    // motorZ.moveTo(motorZ.currentPosition()+stepsZ);
+    stepperX.moveTo(stepperX.currentPosition()+stepsX);
+    stepperY.moveTo(stepperY.currentPosition()+stepsY);
+    stepperZ.moveTo(stepperZ.currentPosition()+stepsZ);
     correctPos = false;
     state = "MovingXYZ";
   }
@@ -193,9 +230,12 @@ void parseData() {      // split the data into its parts
     strtokIndx = strtok(NULL, ",");
     stepsZ = atoi(strtokIndx);     
 
-    motorX.moveTo(stepsX);
-    motorY.moveTo(stepsY);
-    motorZ.moveTo(stepsZ);
+    // motorX.moveTo(stepsX);
+    // motorY.moveTo(stepsY);
+    // motorZ.moveTo(stepsZ);
+    stepperX.moveTo(stepsX);
+    stepperY.moveTo(stepsY);
+    stepperZ.moveTo(stepsZ);
     correctPos = false;
     state = "MovingXYZ";
   }
@@ -234,19 +274,18 @@ void parseData() {      // split the data into its parts
     changeCurrent = atoi(strtokIndx);     // convert this part to an integer
 
     rmsCurrent = rmsCurrent + changeCurrent;
-    motorX.rms_current(rmsCurrent);
-    motorY.rms_current(rmsCurrent);
-    motorZ.rms_current(rmsCurrent);
-    motorP.rms_current(rmsCurrent);
-
+    driverX.rms_current(rmsCurrent);
+    driverY.rms_current(rmsCurrent);
+    driverZ.rms_current(rmsCurrent);
+    driverP.rms_current(rmsCurrent);
     changeCurrent = 0;
 
     state = "Changing current";
   }
   else if (command == "resetXYZ"){
-    motorX.setCurrentPosition(0);
-    motorY.setCurrentPosition(0);
-    motorZ.setCurrentPosition(0);
+    stepperX.setCurrentPosition(0);
+    stepperY.setCurrentPosition(0);
+    stepperZ.setCurrentPosition(0);
     state = "resetting XYZ";
   }
   else if (command == "print"){
@@ -266,16 +305,16 @@ void parseData() {      // split the data into its parts
     delay(50);
     printSyringeOpen = false;
     manualControl = false;
-    motorP.setCurrentPosition(0);
+    stepperP.setCurrentPosition(0);
   }
   else if (command == "resetP") {
-    motorP.stop();
+    stepperP.stop();
     resetP = true;
     digitalWrite(printValvePin, HIGH);
     printSyringeOpen = true;
     delay(50);
-    motorP.moveTo(0);
-    motorP.run();
+    stepperP.moveTo(0);
+    stepperP.run();
   }
   else if (command == "gripperToggle"){
     if (gripperActive == false) {
@@ -309,17 +348,17 @@ void parseData() {      // split the data into its parts
     gripperClosed = false;
   }
   else if (command == "enable"){
-    motorX.enableOutputs();
-    motorY.enableOutputs();
-    motorZ.enableOutputs();
-    motorP.enableOutputs();
+    stepperX.enableOutputs();
+    stepperY.enableOutputs();
+    stepperZ.enableOutputs();
+    stepperP.enableOutputs();
     motorsActive = true;
   }
   else if (command == "disable"){
-    motorX.disableOutputs();
-    motorY.disableOutputs();
-    motorZ.disableOutputs();
-    motorP.disableOutputs();
+    stepperX.disableOutputs();
+    stepperY.disableOutputs();
+    stepperZ.disableOutputs();
+    stepperP.disableOutputs();
     motorsActive = false;
   }
   else {
@@ -332,20 +371,77 @@ void parseData() {      // split the data into its parts
   newData = false;
 }
 
+unsigned long average (unsigned long * array, int len)  // assuming array is int.
+{
+  long sum = 0L ;  // sum will be larger than an item, long for safety.
+  for (int i = 0 ; i < len ; i++)
+    sum += array [i] ;
+  return  ((unsigned long) sum) / len ;  // average will be fractional, so float may be appropriate.
+}
+
 void setup() {
+  SystemClock_Config();
 	Serial.begin(115200);
   while(!Serial);
 
   setupPins();
 
   // SPI.begin();
-  motorX.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  motorY.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  motorZ.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  motorP.setupMotor(rmsCurrent,microsteps,maxSpeedP,accelerationP);   // rmsCurrent,microsteps,maxSpeed,acceleration
+  // motorX.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
+  // motorY.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
+  // motorZ.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
+  // motorP.setupMotor(rmsCurrent,microsteps,maxSpeedP,accelerationP);   // rmsCurrent,microsteps,maxSpeed,acceleration
   
+  driverX.begin();             // Initiate pins and registeries
+  driverX.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driverX.pwm_autoscale(1);
+  driverX.microsteps(8);
+
+  stepperX.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
+  stepperX.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperX.setEnablePin(X_EN_PIN);
+  stepperX.setPinsInverted(false, false, true);
+  stepperX.disableOutputs();
+
+  driverY.begin();             // Initiate pins and registeries
+  driverY.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driverY.pwm_autoscale(1);
+  driverY.microsteps(8);
+
+  stepperY.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
+  stepperY.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperY.setEnablePin(Y_EN_PIN);
+  stepperY.setPinsInverted(false, false, true);
+  stepperY.disableOutputs();
+
+  driverZ.begin();             // Initiate pins and registeries
+  driverZ.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driverZ.pwm_autoscale(1);
+  driverZ.microsteps(8);
+
+  stepperZ.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
+  stepperZ.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperZ.setEnablePin(Z_EN_PIN);
+  stepperZ.setPinsInverted(false, false, true);
+  stepperZ.disableOutputs();
+
+  driverP.begin();             // Initiate pins and registeries
+  driverP.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  driverP.pwm_autoscale(1);
+  driverP.microsteps(8);
+
+  stepperP.setMaxSpeed(50*steps_per_mm); // 100mm/s @ 80 steps/mm
+  stepperP.setAcceleration(50*steps_per_mm); // 2000mm/s^2
+  stepperP.setEnablePin(P_EN_PIN);
+  stepperP.setPinsInverted(false, false, true);
+  stepperP.disableOutputs();
+
   pressureSensor.resetPressure();
-  pressureSensor.beginCommunication(sdaPin,sclPin);
+  pressureSensor.beginCommunication(sdaPin,sclPin,frequency);
+
+  for (int i = 0; i < numCycles; i++) {
+        cycleTimes[i] = 0;
+  }
   
   delay(500);
   blinkLED();
@@ -353,7 +449,9 @@ void setup() {
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
+  currentMillis = millis();
+  currentMicros = micros();
+
 
   if (currentMillis - previousMillisLimit > intervalLimit) {
     previousMillisLimit = currentMillis;
@@ -369,28 +467,46 @@ void loop() {
   if (currentMillis - previousMillisPressure > intervalPressure) {
     previousMillisPressure = currentMillis;
     currentPressure = pressureSensor.smoothPressure();
+    pressureRead = true;
+
   }
 
   if (currentMillis - previousMillisWrite > intervalWrite) {
     previousMillisWrite = currentMillis;
-    // currentPressure = pressureSensor.getPressure();
+    // averageCycle = average(cycleTimes,numCycles);
+    
+    if (stepperY.distanceToGo() != 0) {
+      state = "MovingY";
+    } else if (stepperX.distanceToGo() != 0){
+      state = "MovingX";
+    } else if (stepperZ.distanceToGo() != 0){
+      state = "MovingZ";
+    } else if (currentDroplets != targetDroplets){
+      state = "Printing";
+    } else {
+      state = "Free";
+    }
+
     Serial.print("Serial:");
     Serial.print(state);
     Serial.print(",");
-    Serial.print("Event:");
-    Serial.print(event);
+    Serial.print("Max_cycle:");
+    Serial.print(maxCycle);
+    Serial.print(",");
+    Serial.print("Cycle_count:");
+    Serial.print(numIterations);
     Serial.print(",");
     Serial.print("X:");
-    Serial.print(motorX.currentPosition());
+    Serial.print(stepperX.currentPosition());
     Serial.print(",");
     Serial.print("Y:");
-    Serial.print(motorY.currentPosition());
+    Serial.print(stepperY.currentPosition());
     Serial.print(",");
     Serial.print("Z:");
-    Serial.print(motorZ.currentPosition());
+    Serial.print(stepperZ.currentPosition());
     Serial.print(",");
     Serial.print("P:");
-    Serial.print(motorP.currentPosition());
+    Serial.print(stepperP.currentPosition());
     Serial.print(",");
     Serial.print("Current:");
     Serial.print(rmsCurrent);
@@ -406,6 +522,8 @@ void loop() {
     Serial.print(",");
     Serial.print("Print_pressure:");
     Serial.println(currentPressure);
+    numIterations = 0;
+    maxCycle = 0;
   }
 
   // Read data coming from the Serial communication with the PC
@@ -420,18 +538,18 @@ void loop() {
   }
 
   // Drive motors sequentially, X before Y, Y before Z
-  if (motorY.distanceToGo() != 0) {
-    motorY.run();
-    correctPos = false;
-    state = "MovingY";
-  } else if (motorX.distanceToGo() != 0){
-    motorX.run();
-    correctPos = false;
-    state = "MovingX";
-  } else if (motorZ.distanceToGo() != 0){
-    motorZ.run();
-    correctPos = false;
-    state = "MovingZ";
+  if (stepperY.distanceToGo() != 0) {
+    stepperY.run();
+    // correctPos = false;
+    // state = "MovingY";
+  } else if (stepperX.distanceToGo() != 0){
+    stepperX.run();
+    // correctPos = false;
+    // state = "MovingX";
+  } else if (stepperZ.distanceToGo() != 0){
+    stepperZ.run();
+    // correctPos = false;
+    // state = "MovingZ";
   } else {
     correctPos = true;
   }
@@ -451,20 +569,23 @@ void loop() {
   }
 
   // Pass a signal to the PC that it is open for the next command
-  if (correctPos == true && currentDroplets == targetDroplets){
-    state = "Free";
-  }
+  // if (correctPos == true && currentDroplets == targetDroplets){
+  //   state = "Free";
+  // }
+  // if (correctPos == true){
+  //   state = "Free";
+  // }
 
-  // Adjust the syringe pump to maintain the desired pressure
-  // Resetting begins when the plunger is near the end of the syringe
-  // the valve connected to the syringe is opened and the plunger is pulled to the back of the syringe to reset the position
+  // // Adjust the syringe pump to maintain the desired pressure
+  // // Resetting begins when the plunger is near the end of the syringe
+  // // the valve connected to the syringe is opened and the plunger is pulled to the back of the syringe to reset the position
   if (motorsActive == true && manualControl == false){
 
-    if (resetP == true && motorP.distanceToGo() != 0) //Continue resetting
+    if (resetP == true && stepperP.distanceToGo() != 0) //Continue resetting
     { 
-      motorP.run();
+      stepperP.run();
     } 
-    else if (resetP == true && motorP.distanceToGo() == 0) //Flag reset complete
+    else if (resetP == true && stepperP.distanceToGo() == 0) //Flag reset complete
     {
       digitalWrite(printValvePin, LOW);
       printSyringeOpen = false;
@@ -473,35 +594,42 @@ void loop() {
     }
     else if (resetP == false)
     {
-      if (motorP.currentPosition() < lowerBound || motorP.currentPosition() > upperBound) // Start reset
+      if (stepperP.currentPosition() < lowerBound || stepperP.currentPosition() > upperBound) // Start reset
       {
-        motorP.stop();
+        stepperP.stop();
         resetP = true;
         digitalWrite(printValvePin, HIGH);
         printSyringeOpen = true;
         delay(50);
-        motorP.moveTo(0);
-        motorP.run();
+        stepperP.moveTo(0);
+        stepperP.run();
 
         // Drives the syringe motor fast or slow depending on the desired pressure change
       } else if (currentPressure > targetPressureP + 1000) {
-        motorP.setSpeed(20*steps_per_mm);
-        motorP.move(100);
-        motorP.runSpeed();
+        pressureCorrect = false;
+        stepperP.setSpeed(20*steps_per_mm);
+        stepperP.move(100);
+        stepperP.runSpeed();
       } else if (currentPressure < targetPressureP - 1000) {
-        motorP.setSpeed(-20*steps_per_mm);
-        motorP.move(-100);
-        motorP.runSpeed();
+        pressureCorrect = false;
+        stepperP.setSpeed(-20*steps_per_mm);
+        stepperP.move(-100);
+        stepperP.runSpeed();
       } else if (currentPressure > targetPressureP + tolerancePump) {
-        motorP.setSpeed(5*steps_per_mm);
-        motorP.move(10);
-        motorP.runSpeed();
+        pressureCorrect = false;
+        stepperP.setSpeed(5*steps_per_mm);
+        stepperP.move(10);
+        stepperP.runSpeed();
       } else if (currentPressure < targetPressureP - tolerancePump) {
-        motorP.setSpeed(-5*steps_per_mm);
-        motorP.move(-10);
-        motorP.runSpeed();
+        pressureCorrect = false;
+        stepperP.setSpeed(-5*steps_per_mm);
+        stepperP.move(-10);
+        stepperP.runSpeed();
       } else {
-        motorP.stop();
+        if (pressureCorrect == false){
+          stepperP.stop();
+          pressureCorrect = true;
+        }
       }
     } 
     // else if (resetP == false && currentPressure != 0) {
@@ -526,4 +654,22 @@ void loop() {
       gripperPumpOn = true;
     }
   }
+
+  // delayMicroseconds(5);
+  if (pressureRead == true){
+    endMicros = micros();
+    cycleTime = endMicros - currentMicros;
+
+    // if (cycleIndex >= numCycles) {
+    //   cycleIndex = 0;
+    // }
+    // cycleTimes[cycleIndex] = cycleTime;
+    // cycleIndex++;
+    if (cycleTime > maxCycle){
+      maxCycle = cycleTime;
+    }
+    pressureRead = false;
+  }
+  
+  numIterations++;
 }

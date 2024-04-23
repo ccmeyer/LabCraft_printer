@@ -36,10 +36,10 @@ unsigned long previousMillisWrite = 0;
 unsigned long intervalWrite = 100;
 
 unsigned long previousMillisRead = 0;
-unsigned long intervalRead = 20;
+unsigned long intervalRead = 21;
 
 unsigned long previousMillisPressure = 0;
-unsigned long intervalPressure = 15; // 120msec / 255cycles ~= 0.5 msec/cycle
+unsigned long intervalPressure = 6; // 120msec / 255cycles ~= 0.5 msec/cycle
 
 unsigned long previousMillisDroplet = 0;
 unsigned long intervalDroplet = 47;
@@ -51,7 +51,7 @@ unsigned long previousMillisGripperRestart = 0;
 unsigned long intervalGripperRestart = 60000;
 
 unsigned long previousMillisLimit = 0;
-unsigned long intervalLimit = 10;
+unsigned long intervalLimit = 9;
 
 
 #endif

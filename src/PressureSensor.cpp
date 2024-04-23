@@ -4,10 +4,11 @@ byte p1, p2, t1, t2;
 
 PressureSensor::PressureSensor(int TCAAddress, int sensorAddress) : TCAAddress(TCAAddress),sensorAddress(sensorAddress) {}
 
-void PressureSensor::beginCommunication(int sdaPin, int sclPin) {
+void PressureSensor::beginCommunication(int sdaPin, int sclPin, int frequency) {
     Wire.setSDA(sdaPin);
     Wire.setSCL(sclPin);
     Wire.begin();        // join i2c bus (address optional for master)
+    Wire.setClock(frequency);
 }
 
 void PressureSensor::resetPressure() {
@@ -32,7 +33,7 @@ void PressureSensor::tcaselect(int port) {
 }
 
 float PressureSensor::readPressure(int port) {
-    tcaselect(port);
+    // tcaselect(port);
     Wire.requestFrom(40, 4);    // Request 4 bytes from peripheral device
     while (Wire.available()) { // peripheral may send less than requested
         p1 = Wire.read();

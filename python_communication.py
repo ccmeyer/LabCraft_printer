@@ -163,25 +163,25 @@ class Monitor(threading.Thread):
         self.i_11 = ttk.Label(self.root, textvariable=self.info_11)
         self.i_11.grid(column=1, row=11, sticky=tk.W, padx=5, pady=5)
 
-        # self.label_12 = tk.StringVar()
-        # self.label_12.set('Refuel_valve:')
-        # self.l_12 = ttk.Label(self.root, textvariable=self.label_12)
-        # self.l_12.grid(column=0, row=12, sticky=tk.W, padx=5, pady=5)
+        self.label_12 = tk.StringVar()
+        self.label_12.set('Clock:')
+        self.l_12 = ttk.Label(self.root, textvariable=self.label_12)
+        self.l_12.grid(column=0, row=12, sticky=tk.W, padx=5, pady=5)
 
-        # self.info_12 = tk.StringVar()
-        # self.info_12.set('---')
-        # self.i_12 = ttk.Label(self.root, textvariable=self.info_12)
-        # self.i_12.grid(column=1, row=12, sticky=tk.W, padx=5, pady=5)
+        self.info_12 = tk.StringVar()
+        self.info_12.set('---')
+        self.i_12 = ttk.Label(self.root, textvariable=self.info_12)
+        self.i_12.grid(column=1, row=12, sticky=tk.W, padx=5, pady=5)
 
-        # self.label_13 = tk.StringVar()
-        # self.label_13.set('Mass:')
-        # self.l_13 = ttk.Label(self.root, textvariable=self.label_13)
-        # self.l_13.grid(column=0, row=13, sticky=tk.W, padx=5, pady=5)
+        self.label_13 = tk.StringVar()
+        self.label_13.set('Cycle_Count:')
+        self.l_13 = ttk.Label(self.root, textvariable=self.label_13)
+        self.l_13.grid(column=0, row=13, sticky=tk.W, padx=5, pady=5)
 
-        # self.info_13 = tk.StringVar()
-        # self.info_13.set('---')
-        # self.i_13 = ttk.Label(self.root, textvariable=self.info_13)
-        # self.i_13.grid(column=1, row=13, sticky=tk.W, padx=5, pady=5)
+        self.info_13 = tk.StringVar()
+        self.info_13.set('---')
+        self.i_13 = ttk.Label(self.root, textvariable=self.info_13)
+        self.i_13.grid(column=1, row=13, sticky=tk.W, padx=5, pady=5)
 
         # self.label_14 = tk.StringVar()
         # self.label_14.set('Droplets:')
@@ -220,6 +220,7 @@ class Platform():
         self.print_valve = 'Unknown'
         self.target_print = 'Unknown'
         self.current = 'Unknown'
+        self.clock = 'Unknown'
 
         self.log_path = 'Unknown'
         self.log_note = ''
@@ -278,22 +279,26 @@ class Platform():
                         data_dict = {}
                         [data_dict.update({t.split(':')[0]:t.split(':')[1]}) for t in data_arr]
                         self.ard_state = data_dict['Serial']
-                        self.event = data_dict['Event']
+                        self.clock = float(data_dict['Max_cycle'])
+                        self.cycle_count = float(data_dict['Cycle_count'])
+                        # # self.event = data_dict['Event']
                         self.x_pos = float(data_dict['X'])
                         self.y_pos = float(data_dict['Y'])
                         self.z_pos = float(data_dict['Z'])
                         self.p_pos = float(data_dict['P'])
-                        # self.r_pos = float(data_dict['R'])
+                        # # self.r_pos = float(data_dict['R'])
+                        self.current = float(data_dict['Current'])
                         self.print_valve = data_dict['Print_valve']
-                        # self.refuel_valve = data_dict['Refuel_valve']
-                        # self.refuel_state = float(data_dict['Refuel_state'])
-                        # self.print_state = float(data_dict['Print_state'])
+                        
+
+                        # # self.refuel_valve = data_dict['Refuel_valve']
+                        # # self.refuel_state = float(data_dict['Refuel_state'])
+                        # # self.print_state = float(data_dict['Print_state'])
                         self.actual_droplets = float(data_dict['Droplets'])
-                        # self.refuel_pressure = float(data_dict['Refuel_data'])
-                        # self.refuel_pressure = 1600
+                        # # self.refuel_pressure = float(data_dict['Refuel_data'])
+                        # # self.refuel_pressure = 1600
                         self.print_pressure = float(data_dict['Print_pressure'])
                         self.target_print = float(data_dict['Set_print'])
-                        self.current = float(data_dict['Current'])
 
                         # self.print_pressure_avg = float(data_dict['Average_Print'])
 
@@ -381,6 +386,8 @@ class Platform():
             self.monitor.info_9.set(str(self.mass))
             self.monitor.info_10.set(str(self.target_print))
             self.monitor.info_11.set(str(self.current))
+            self.monitor.info_12.set(str(self.clock))
+            self.monitor.info_13.set(str(self.cycle_count))
 
             # self.monitor.info_10.set(str(self.r_pos))
             # self.monitor.info_11.set(str(self.print_valve))

@@ -8,7 +8,7 @@
 class PressureSensor {
 public:
     PressureSensor(int TCAAddress, int sensorAddress);
-    void beginCommunication(int sdaPin, int sclPin);
+    void beginCommunication(int sdaPin, int sclPin, int frequency);
     void resetPressure();
     float getPressure();
     float readPressure(int port);
