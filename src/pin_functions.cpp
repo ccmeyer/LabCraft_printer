@@ -22,6 +22,9 @@ void setupPins()
     digitalWrite(printValvePin,LOW);
 
     pinMode(xstop, INPUT);
+    pinMode(ystop, INPUT);
+    pinMode(zstop, INPUT);
+    pinMode(pstop, INPUT);
 }
 
 void blinkLED()

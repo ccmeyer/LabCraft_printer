@@ -315,12 +315,13 @@ class Platform():
             time.sleep(0.005)
 
     def convert_pressure(self):
-        FSS = 13107;
-        offset = 1600;
-        maxP = 250;
-        psiConv = 68.948;
+        FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
+        offset = 1638 #Set in manual 10-90% transfer function option Gage type sensor
+        maxP = 15 # Max pressure for sensor is 15 psi
+        # psiConv = 68.948 # Conversion of mbar to psi
         try:
-            self.print_psi = round(((self.print_pressure - offset) / FSS) * (maxP / psiConv),4)
+            # self.print_psi = round(((self.print_pressure - offset) / FSS) * (maxP / psiConv),4)
+            self.print_psi = round(((self.print_pressure - offset) / FSS) * (maxP),4)
         except:
             self.print_psi = '---'
         # self.refuel_psi = round(((self.refuel_pressure - offset) / FSS) * (maxP / psiConv),4)

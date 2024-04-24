@@ -6,14 +6,17 @@ const int ledPin = PA13;
 
 //== FAN PINS ===========================================
 const int printPin = PA8;           // Fan0
-const int pumpPin = PE5;            // Fan1
-const int pumpValvePin1 = PD12;     // Fan2
-const int pumpValvePin2 = PD13;     // Fan3
+const int pumpValvePin1 = PE5;            // Fan1
+const int pumpValvePin2 = PD12;     // Fan2
+const int pumpPin = PD13;     // Fan3
 const int printValvePin = PD14;      // Fan4
 const int Fan5 = PD15;      // Fan5
 
 //== LIMIT SWITCH PINS ===========================================
 const int xstop = PG6;
+const int ystop = PG9;
+const int zstop = PG10;
+const int pstop = PG11;
 
 //==STEPPER MOTOR PINS ===========================================
 

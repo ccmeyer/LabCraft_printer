@@ -64,11 +64,27 @@ extern "C" void SystemClock_Config(void)
 #include "PressureSensor.h"
 
 bool xstopPressed = false;
+bool ystopPressed = false;
+bool zstopPressed = false;
+bool pstopPressed = false;
 
 // Limit switch variables
 int limitXstate = 0;
-unsigned long switch_time = 0;
-unsigned long last_switch_time = 0;
+unsigned long switch_time_X = 0;
+unsigned long last_switch_time_X = 0;
+
+int limitYstate = 0;
+unsigned long switch_time_Y = 0;
+unsigned long last_switch_time_Y = 0;
+
+int limitZstate = 0;
+unsigned long switch_time_Z = 0;
+unsigned long last_switch_time_Z = 0;
+
+int limitPstate = 0;
+unsigned long switch_time_P = 0;
+unsigned long last_switch_time_P = 0;
+
 int debounce = 50;
 
 // Printing variables
@@ -136,10 +152,10 @@ bool pressureCorrect = false;
 // StepperMotor motorX = StepperMotor(Z_EN_PIN,Z_DIR_PIN,Z_STEP_PIN,Z_SW_RX,Z_SW_TX,R_SENSE);
 // StepperMotor motorP = StepperMotor(P_EN_PIN,P_DIR_PIN,P_STEP_PIN,P_SW_RX,P_SW_TX,R_SENSE);
 
-TMC2208Stepper driverX = TMC2208Stepper(X_SW_RX, X_SW_TX, R_SENSE); // Software serial
-TMC2208Stepper driverY = TMC2208Stepper(Y_SW_RX, Y_SW_TX, R_SENSE); // Software serial
-TMC2208Stepper driverZ = TMC2208Stepper(Z_SW_RX, Z_SW_TX, R_SENSE); // Software serial
-TMC2208Stepper driverP = TMC2208Stepper(P_SW_RX, P_SW_TX, R_SENSE); // Software serial
+// TMC2208Stepper driverX = TMC2208Stepper(X_SW_RX, X_SW_TX, R_SENSE); // Software serial
+// TMC2208Stepper driverY = TMC2208Stepper(Y_SW_RX, Y_SW_TX, R_SENSE); // Software serial
+// TMC2208Stepper driverZ = TMC2208Stepper(Z_SW_RX, Z_SW_TX, R_SENSE); // Software serial
+// TMC2208Stepper driverP = TMC2208Stepper(P_SW_RX, P_SW_TX, R_SENSE); // Software serial
 
 AccelStepper stepperX = AccelStepper(stepperX.DRIVER, X_STEP_PIN, X_DIR_PIN);
 AccelStepper stepperY = AccelStepper(stepperY.DRIVER, Y_STEP_PIN, Y_DIR_PIN);
@@ -150,17 +166,102 @@ PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
 
 void XlimitISR() {
-  switch_time = millis();
-  if (switch_time - last_switch_time > debounce){
+  switch_time_X = millis();
+  if (switch_time_X - last_switch_time_X > debounce){
     digitalWrite(ledPin, HIGH);
-    // motorX.stop();
-    // motorY.stop();
-    // motorZ.stop();
     stepperX.stop();
-    stepperY.stop();
-    stepperZ.stop();
-    last_switch_time = switch_time;
+    last_switch_time_X = switch_time_X;
   } 
+}
+
+void YlimitISR() {
+  switch_time_Y = millis();
+  if (switch_time_Y - last_switch_time_Y > debounce){
+    digitalWrite(ledPin, HIGH);
+    stepperY.stop();
+    last_switch_time_Y = switch_time_Y;
+  } 
+}
+
+void ZlimitISR() {
+  switch_time_Z = millis();
+  if (switch_time_Z - last_switch_time_Z > debounce){
+    digitalWrite(ledPin, HIGH);
+    stepperZ.stop();
+    last_switch_time_Z = switch_time_Z;
+  } 
+}
+
+void PlimitISR() {
+  switch_time_P = millis();
+  if (switch_time_P - last_switch_time_P > debounce){
+    digitalWrite(ledPin, HIGH);
+    stepperP.stop();
+    last_switch_time_P = switch_time_P;
+  } 
+}
+
+enum LimitSwitch {
+    LimitX,
+    LimitY,
+    LimitZ,
+    LimitP,
+    NUM_SWITCHES
+};
+
+LimitSwitch currentLimitSwitch = LimitX;
+int numLimitSwitches = 4;
+
+void readLimitSwitch(LimitSwitch current){
+  switch (current){
+    case LimitX:
+      xstopPressed = digitalRead(xstop);
+      if (xstopPressed == true){
+        XlimitISR();
+      }
+      else {
+        digitalWrite(ledPin, LOW);      
+      }
+      break;
+
+    case LimitY:
+      ystopPressed = digitalRead(ystop);
+      if (ystopPressed == true){
+        YlimitISR();
+      }
+      else {
+        digitalWrite(ledPin, LOW);      
+      }
+      break;
+
+    case LimitZ:
+      zstopPressed = digitalRead(zstop);
+      if (zstopPressed == true){
+        ZlimitISR();
+      }
+      else {
+        digitalWrite(ledPin, LOW);      
+      }
+      break;
+
+    case LimitP:
+      pstopPressed = digitalRead(pstop);
+      if (pstopPressed == true){
+        PlimitISR();
+      }
+      else {
+        digitalWrite(ledPin, LOW);      
+      }
+      break;
+
+    default:
+      digitalWrite(ledPin, HIGH); 
+      break;
+  }
+}
+
+void cycleLimitSwitch() {
+    currentLimitSwitch = static_cast<LimitSwitch>((static_cast<int>(currentLimitSwitch) + 1) % static_cast<int>(NUM_SWITCHES));
 }
 
 void readSerial(){
@@ -274,10 +375,10 @@ void parseData() {      // split the data into its parts
     changeCurrent = atoi(strtokIndx);     // convert this part to an integer
 
     rmsCurrent = rmsCurrent + changeCurrent;
-    driverX.rms_current(rmsCurrent);
-    driverY.rms_current(rmsCurrent);
-    driverZ.rms_current(rmsCurrent);
-    driverP.rms_current(rmsCurrent);
+    // driverX.rms_current(rmsCurrent);
+    // driverY.rms_current(rmsCurrent);
+    // driverZ.rms_current(rmsCurrent);
+    // driverP.rms_current(rmsCurrent);
     changeCurrent = 0;
 
     state = "Changing current";
@@ -392,10 +493,10 @@ void setup() {
   // motorZ.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
   // motorP.setupMotor(rmsCurrent,microsteps,maxSpeedP,accelerationP);   // rmsCurrent,microsteps,maxSpeed,acceleration
   
-  driverX.begin();             // Initiate pins and registeries
-  driverX.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
-  driverX.pwm_autoscale(1);
-  driverX.microsteps(8);
+  // driverX.begin();             // Initiate pins and registeries
+  // driverX.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  // driverX.pwm_autoscale(1);
+  // driverX.microsteps(8);
 
   stepperX.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
   stepperX.setAcceleration(100*steps_per_mm); // 2000mm/s^2
@@ -403,10 +504,10 @@ void setup() {
   stepperX.setPinsInverted(false, false, true);
   stepperX.disableOutputs();
 
-  driverY.begin();             // Initiate pins and registeries
-  driverY.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
-  driverY.pwm_autoscale(1);
-  driverY.microsteps(8);
+  // driverY.begin();             // Initiate pins and registeries
+  // driverY.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  // driverY.pwm_autoscale(1);
+  // driverY.microsteps(8);
 
   stepperY.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
   stepperY.setAcceleration(100*steps_per_mm); // 2000mm/s^2
@@ -414,10 +515,10 @@ void setup() {
   stepperY.setPinsInverted(false, false, true);
   stepperY.disableOutputs();
 
-  driverZ.begin();             // Initiate pins and registeries
-  driverZ.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
-  driverZ.pwm_autoscale(1);
-  driverZ.microsteps(8);
+  // driverZ.begin();             // Initiate pins and registeries
+  // driverZ.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  // driverZ.pwm_autoscale(1);
+  // driverZ.microsteps(8);
 
   stepperZ.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
   stepperZ.setAcceleration(100*steps_per_mm); // 2000mm/s^2
@@ -425,10 +526,10 @@ void setup() {
   stepperZ.setPinsInverted(false, false, true);
   stepperZ.disableOutputs();
 
-  driverP.begin();             // Initiate pins and registeries
-  driverP.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
-  driverP.pwm_autoscale(1);
-  driverP.microsteps(8);
+  // driverP.begin();             // Initiate pins and registeries
+  // driverP.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
+  // driverP.pwm_autoscale(1);
+  // driverP.microsteps(8);
 
   stepperP.setMaxSpeed(50*steps_per_mm); // 100mm/s @ 80 steps/mm
   stepperP.setAcceleration(50*steps_per_mm); // 2000mm/s^2
@@ -455,20 +556,14 @@ void loop() {
 
   if (currentMillis - previousMillisLimit > intervalLimit) {
     previousMillisLimit = currentMillis;
-    xstopPressed = digitalRead(xstop);
-    if (xstopPressed == true){
-      XlimitISR();
-    }
-    else {
-      digitalWrite(ledPin, LOW);      
-    }
+    readLimitSwitch(currentLimitSwitch);
+    cycleLimitSwitch();
   }
 
   if (currentMillis - previousMillisPressure > intervalPressure) {
     previousMillisPressure = currentMillis;
     currentPressure = pressureSensor.smoothPressure();
     pressureRead = true;
-
   }
 
   if (currentMillis - previousMillisWrite > intervalWrite) {
@@ -540,16 +635,10 @@ void loop() {
   // Drive motors sequentially, X before Y, Y before Z
   if (stepperY.distanceToGo() != 0) {
     stepperY.run();
-    // correctPos = false;
-    // state = "MovingY";
   } else if (stepperX.distanceToGo() != 0){
     stepperX.run();
-    // correctPos = false;
-    // state = "MovingX";
   } else if (stepperZ.distanceToGo() != 0){
     stepperZ.run();
-    // correctPos = false;
-    // state = "MovingZ";
   } else {
     correctPos = true;
   }
