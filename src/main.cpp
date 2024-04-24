@@ -68,6 +68,11 @@ bool ystopPressed = false;
 bool zstopPressed = false;
 bool pstopPressed = false;
 
+bool triggeredX = false;
+bool triggeredY = false;
+bool triggeredZ = false;
+bool triggeredP = false;
+
 // Limit switch variables
 int limitXstate = 0;
 unsigned long switch_time_X = 0;
@@ -166,39 +171,55 @@ PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
 
 void XlimitISR() {
-  switch_time_X = millis();
-  if (switch_time_X - last_switch_time_X > debounce){
-    digitalWrite(ledPin, HIGH);
-    stepperX.stop();
-    last_switch_time_X = switch_time_X;
-  } 
+  xstopPressed = digitalRead(xstop);
+  if (xstopPressed == true){
+    switch_time_X = millis();
+    if (switch_time_X - last_switch_time_X > debounce){
+      triggeredX = true;
+      last_switch_time_X = switch_time_X;
+    } 
+  } else {
+    triggeredX = false;
+  }
 }
 
 void YlimitISR() {
-  switch_time_Y = millis();
-  if (switch_time_Y - last_switch_time_Y > debounce){
-    digitalWrite(ledPin, HIGH);
-    stepperY.stop();
-    last_switch_time_Y = switch_time_Y;
-  } 
+  ystopPressed = digitalRead(ystop);
+  if (ystopPressed == true){
+    switch_time_Y = millis();
+    if (switch_time_Y - last_switch_time_Y > debounce){
+      triggeredY = true;
+      last_switch_time_Y = switch_time_Y;
+    } 
+  } else {
+    triggeredY = false;
+  }
 }
 
 void ZlimitISR() {
-  switch_time_Z = millis();
-  if (switch_time_Z - last_switch_time_Z > debounce){
-    digitalWrite(ledPin, HIGH);
-    stepperZ.stop();
-    last_switch_time_Z = switch_time_Z;
-  } 
+  zstopPressed = digitalRead(zstop);
+  if (zstopPressed == true){
+    switch_time_Z = millis();
+    if (switch_time_Z - last_switch_time_Z > debounce){
+      triggeredZ = true;
+      last_switch_time_Z = switch_time_Z;
+    } 
+  } else {
+    triggeredZ = false;
+  }
+  
 }
 
 void PlimitISR() {
-  switch_time_P = millis();
-  if (switch_time_P - last_switch_time_P > debounce){
-    digitalWrite(ledPin, HIGH);
-    stepperP.stop();
-    last_switch_time_P = switch_time_P;
-  } 
+  pstopPressed = digitalRead(pstop);
+  if (pstopPressed == true){
+    switch_time_P = millis();
+    if (switch_time_P - last_switch_time_P > debounce){
+      digitalWrite(ledPin, HIGH);
+      stepperP.stop();
+      last_switch_time_P = switch_time_P;
+    } 
+  }
 }
 
 enum LimitSwitch {
@@ -215,45 +236,17 @@ int numLimitSwitches = 4;
 void readLimitSwitch(LimitSwitch current){
   switch (current){
     case LimitX:
-      xstopPressed = digitalRead(xstop);
-      if (xstopPressed == true){
-        XlimitISR();
-      }
-      else {
-        digitalWrite(ledPin, LOW);      
-      }
+      XlimitISR();
       break;
-
     case LimitY:
-      ystopPressed = digitalRead(ystop);
-      if (ystopPressed == true){
-        YlimitISR();
-      }
-      else {
-        digitalWrite(ledPin, LOW);      
-      }
+      YlimitISR();
       break;
-
     case LimitZ:
-      zstopPressed = digitalRead(zstop);
-      if (zstopPressed == true){
-        ZlimitISR();
-      }
-      else {
-        digitalWrite(ledPin, LOW);      
-      }
+      ZlimitISR();
       break;
-
     case LimitP:
-      pstopPressed = digitalRead(pstop);
-      if (pstopPressed == true){
-        PlimitISR();
-      }
-      else {
-        digitalWrite(ledPin, LOW);      
-      }
+      PlimitISR();
       break;
-
     default:
       digitalWrite(ledPin, HIGH); 
       break;
@@ -262,6 +255,90 @@ void readLimitSwitch(LimitSwitch current){
 
 void cycleLimitSwitch() {
     currentLimitSwitch = static_cast<LimitSwitch>((static_cast<int>(currentLimitSwitch) + 1) % static_cast<int>(NUM_SWITCHES));
+}
+
+enum HomingState {
+    IDLE,
+    X_HOMING,
+    X_RETRACTION,
+    Y_HOMING,
+    Y_RETRACTION,
+    Z_HOMING,
+    Z_RETRACTION
+};
+
+HomingState homingState = IDLE;
+
+void homingProtocol(){
+  switch(homingState){
+    case IDLE:
+      break;
+    case X_HOMING:
+      if (triggeredX == true){
+        stepperX.stop();
+        homingState = X_RETRACTION;
+        state = "X-retracting";
+      } else {
+        stepperX.setSpeed(10*steps_per_mm);
+        stepperX.move(100);
+        stepperX.runSpeed();
+      }
+      break;
+    case X_RETRACTION:
+      if (triggeredX == false){
+        stepperX.stop();
+        stepperX.setCurrentPosition(0);
+        homingState = Y_HOMING;
+      } else {
+        stepperX.setSpeed(-1*steps_per_mm);
+        stepperX.move(-10);
+        stepperX.runSpeed();
+      }
+    case Y_HOMING:
+      if (triggeredY == true){
+        stepperY.stop();
+        homingState = Y_RETRACTION;
+        state = "Y-retracting";
+      } else {
+        stepperY.setSpeed(-10*steps_per_mm);
+        stepperY.move(-100);
+        stepperY.runSpeed();
+      }
+      break;
+    case Y_RETRACTION:
+      if (triggeredY == false){
+        stepperY.stop();
+        stepperY.setCurrentPosition(0);
+        homingState = Z_HOMING;
+      } else {
+        stepperY.setSpeed(1*steps_per_mm);
+        stepperY.move(10);
+        stepperY.runSpeed();
+      }
+    case Z_HOMING:
+      if (triggeredZ == true){
+        stepperZ.stop();
+        homingState = Z_RETRACTION;
+        state = "Z-retracting";
+      } else {
+        stepperZ.setSpeed(20*steps_per_mm);
+        stepperZ.move(100);
+        stepperZ.runSpeed();
+      }
+      break;
+    case Z_RETRACTION:
+      if (triggeredZ == false){
+        stepperZ.stop();
+        stepperZ.setCurrentPosition(0);
+        homingState = IDLE;
+      } else {
+        stepperZ.setSpeed(-2*steps_per_mm);
+        stepperZ.move(-10);
+        stepperZ.runSpeed();
+      }
+    default:
+      break;
+  }
 }
 
 void readSerial(){
@@ -462,6 +539,10 @@ void parseData() {      // split the data into its parts
     stepperP.disableOutputs();
     motorsActive = false;
   }
+  else if (command == "homeAll"){
+    homingState = X_HOMING;
+    state = "X-Homing";
+  }
   else {
     blinkLED();
     // digitalWrite(ledPin,HIGH);
@@ -560,6 +641,8 @@ void loop() {
     cycleLimitSwitch();
   }
 
+  homingProtocol();
+
   if (currentMillis - previousMillisPressure > intervalPressure) {
     previousMillisPressure = currentMillis;
     currentPressure = pressureSensor.smoothPressure();
@@ -633,29 +716,33 @@ void loop() {
   }
 
   // Drive motors sequentially, X before Y, Y before Z
-  if (stepperY.distanceToGo() != 0) {
-    stepperY.run();
-  } else if (stepperX.distanceToGo() != 0){
-    stepperX.run();
-  } else if (stepperZ.distanceToGo() != 0){
-    stepperZ.run();
-  } else {
-    correctPos = true;
-  }
+  if (homingState == IDLE){
+    if (stepperY.distanceToGo() != 0) {
+      stepperY.run();
+    } else if (stepperX.distanceToGo() != 0){
+      stepperX.run();
+    } else if (stepperZ.distanceToGo() != 0){
+      stepperZ.run();
+    } else {
+      correctPos = true;
+    }
 
-  // Checks if droplets needed to be printed and prints if in the right position
-  if (correctPos == true && currentDroplets < targetDroplets){
-    if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
-      state = "Printing";
-      if (currentMillis - previousMillisDroplet > intervalDroplet) {
-        previousMillisDroplet = currentMillis;
-        digitalWrite(printPin, HIGH);
-        delayMicroseconds(3000);
-        digitalWrite(printPin, LOW);
-        currentDroplets++;
+    // Checks if droplets needed to be printed and prints if in the right position
+    if (correctPos == true && currentDroplets < targetDroplets){
+      if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
+        state = "Printing";
+        if (currentMillis - previousMillisDroplet > intervalDroplet) {
+          previousMillisDroplet = currentMillis;
+          digitalWrite(printPin, HIGH);
+          delayMicroseconds(3000);
+          digitalWrite(printPin, LOW);
+          currentDroplets++;
+        }
       }
     }
   }
+  
+  
 
   // Pass a signal to the PC that it is open for the next command
   // if (correctPos == true && currentDroplets == targetDroplets){

@@ -318,7 +318,7 @@ class Platform():
         FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
         offset = 1638 #Set in manual 10-90% transfer function option Gage type sensor
         maxP = 15 # Max pressure for sensor is 15 psi
-        # psiConv = 68.948 # Conversion of mbar to psi
+        # psiConv = 68.948 # Conversion of mbar to psi 
         try:
             # self.print_psi = round(((self.print_pressure - offset) / FSS) * (maxP / psiConv),4)
             self.print_psi = round(((self.print_pressure - offset) / FSS) * (maxP),4)
@@ -612,6 +612,15 @@ class Platform():
                     self.new_signal = '<relativeXYZ,0,0,1000>'
                 elif key == 'R':
                     self.new_signal = '<resetXYZ>'
+                
+                elif key == 'H':
+                    self.new_signal = '<homeAll>'
+                elif key == 'D':
+                    self.new_signal = '<absoluteXYZ,-3000,3000,-22000>'
+                elif key == 'F':
+                    self.new_signal = '<absoluteXYZ,-5000,7000,-29000>'
+                elif key == 'T':
+                    self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
 
                 elif key == 'c':
                     self.print_droplets(5)
