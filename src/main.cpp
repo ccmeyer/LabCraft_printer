@@ -314,6 +314,7 @@ void homingProtocolXYZ(){
         stepperX.move(-10);
         stepperX.runSpeed();
       }
+      break;
     case X_RESET:
       if (stepperX.currentPosition() == -500){
         stepperX.stop();
@@ -321,6 +322,7 @@ void homingProtocolXYZ(){
       } else {
         stepperX.run();
       }
+      break;
     case Y_HOMING:
       if (triggeredY == true){
         stepperY.stop();
@@ -344,6 +346,7 @@ void homingProtocolXYZ(){
         stepperY.move(10);
         stepperY.runSpeed();
       }
+      break;
     case Y_RESET:
       if (stepperY.currentPosition() == 500){
         stepperY.stop();
@@ -351,6 +354,7 @@ void homingProtocolXYZ(){
       } else {
         stepperY.run();
       }
+      break;
     case Z_HOMING:
       if (triggeredZ == true){
         stepperZ.stop();
@@ -374,6 +378,7 @@ void homingProtocolXYZ(){
         stepperZ.move(-10);
         stepperZ.runSpeed();
       }
+      break;
     case Z_RESET:
       if (stepperZ.currentPosition() == -500){
         stepperZ.stop();
@@ -384,6 +389,7 @@ void homingProtocolXYZ(){
       } else {
         stepperZ.run();
       }
+      break;
     case P_HOMING:
       if (triggeredP == true){
         stepperP.stop();
@@ -407,6 +413,7 @@ void homingProtocolXYZ(){
         stepperP.move(-10);
         stepperP.runSpeed();
       }
+      break;
     case P_RESET:
       if (stepperP.currentPosition() == -500){
         stepperP.stop();
@@ -421,6 +428,7 @@ void homingProtocolXYZ(){
       } else {
         stepperP.run();
       }
+      break;
     default:
       break;
   }

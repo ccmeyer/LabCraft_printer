@@ -543,10 +543,6 @@ class Platform():
     def move_to_well(self,row,col):
         row_spacing = 100
         col_spacing = 100
-        # x_offset = -4500
-        # y_offset = 3500
-        # z_offset = -35000
-
 
         while True:
             if self.ard_state == 'Free':
