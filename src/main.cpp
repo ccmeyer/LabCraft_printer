@@ -115,7 +115,7 @@ bool motorsActive = false;
 
 // BIDIRECTIONAL SERIAL COMMUNICATION VARIABLES
 
-const byte numChars = 32;
+const byte numChars = 64;
 char receivedChars[numChars];
 char tempChars[numChars];        // temporary array for use when parsing
 
@@ -151,6 +151,7 @@ int numIterations = 0;
 int frequency = 1000000;
 
 bool pressureCorrect = false;
+bool regulatePressure = false;
 
 // StepperMotor motorZ = StepperMotor(X_EN_PIN,X_DIR_PIN,X_STEP_PIN,X_SW_RX,X_SW_TX,R_SENSE);
 // StepperMotor motorY = StepperMotor(Y_EN_PIN,Y_DIR_PIN,Y_STEP_PIN,Y_SW_RX,Y_SW_TX,R_SENSE);
@@ -169,6 +170,23 @@ AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
+enum HomingState {
+    IDLE,
+    X_HOMING,
+    X_RETRACTION,
+    X_RESET,
+    Y_HOMING,
+    Y_RETRACTION,
+    Y_RESET,
+    Z_HOMING,
+    Z_RETRACTION,
+    Z_RESET,
+    P_HOMING,
+    P_RETRACTION,
+    P_RESET
+};
+
+HomingState homingState = IDLE;
 
 void XlimitISR() {
   xstopPressed = digitalRead(xstop);
@@ -177,6 +195,9 @@ void XlimitISR() {
     if (switch_time_X - last_switch_time_X > debounce){
       triggeredX = true;
       last_switch_time_X = switch_time_X;
+      if (homingState == IDLE){
+        stepperX.stop();
+      }
     } 
   } else {
     triggeredX = false;
@@ -190,6 +211,9 @@ void YlimitISR() {
     if (switch_time_Y - last_switch_time_Y > debounce){
       triggeredY = true;
       last_switch_time_Y = switch_time_Y;
+      if (homingState == IDLE){
+        stepperY.stop();
+      }
     } 
   } else {
     triggeredY = false;
@@ -203,11 +227,13 @@ void ZlimitISR() {
     if (switch_time_Z - last_switch_time_Z > debounce){
       triggeredZ = true;
       last_switch_time_Z = switch_time_Z;
+      if (homingState == IDLE){
+        stepperZ.stop();
+      }
     } 
   } else {
     triggeredZ = false;
   }
-  
 }
 
 void PlimitISR() {
@@ -215,10 +241,14 @@ void PlimitISR() {
   if (pstopPressed == true){
     switch_time_P = millis();
     if (switch_time_P - last_switch_time_P > debounce){
-      digitalWrite(ledPin, HIGH);
-      stepperP.stop();
+      triggeredP = true;
       last_switch_time_P = switch_time_P;
+      if (homingState == IDLE){
+        stepperP.stop();
+      }
     } 
+  } else {
+    triggeredP = false;
   }
 }
 
@@ -257,19 +287,7 @@ void cycleLimitSwitch() {
     currentLimitSwitch = static_cast<LimitSwitch>((static_cast<int>(currentLimitSwitch) + 1) % static_cast<int>(NUM_SWITCHES));
 }
 
-enum HomingState {
-    IDLE,
-    X_HOMING,
-    X_RETRACTION,
-    Y_HOMING,
-    Y_RETRACTION,
-    Z_HOMING,
-    Z_RETRACTION
-};
-
-HomingState homingState = IDLE;
-
-void homingProtocol(){
+void homingProtocolXYZ(){
   switch(homingState){
     case IDLE:
       break;
@@ -288,11 +306,20 @@ void homingProtocol(){
       if (triggeredX == false){
         stepperX.stop();
         stepperX.setCurrentPosition(0);
-        homingState = Y_HOMING;
+        stepperX.setSpeed(-10*steps_per_mm);
+        stepperX.moveTo(-500);
+        homingState = X_RESET;
       } else {
         stepperX.setSpeed(-1*steps_per_mm);
         stepperX.move(-10);
         stepperX.runSpeed();
+      }
+    case X_RESET:
+      if (stepperX.currentPosition() == -500){
+        stepperX.stop();
+        homingState = Y_HOMING;
+      } else {
+        stepperX.run();
       }
     case Y_HOMING:
       if (triggeredY == true){
@@ -309,11 +336,20 @@ void homingProtocol(){
       if (triggeredY == false){
         stepperY.stop();
         stepperY.setCurrentPosition(0);
-        homingState = Z_HOMING;
+        stepperY.setSpeed(10*steps_per_mm);
+        stepperY.moveTo(500);
+        homingState = Y_RESET;
       } else {
         stepperY.setSpeed(1*steps_per_mm);
         stepperY.move(10);
         stepperY.runSpeed();
+      }
+    case Y_RESET:
+      if (stepperY.currentPosition() == 500){
+        stepperY.stop();
+        homingState = Z_HOMING;
+      } else {
+        stepperY.run();
       }
     case Z_HOMING:
       if (triggeredZ == true){
@@ -330,11 +366,60 @@ void homingProtocol(){
       if (triggeredZ == false){
         stepperZ.stop();
         stepperZ.setCurrentPosition(0);
-        homingState = IDLE;
+        stepperZ.setSpeed(-10*steps_per_mm);
+        stepperZ.moveTo(-500);
+        homingState = Z_RESET;
       } else {
         stepperZ.setSpeed(-2*steps_per_mm);
         stepperZ.move(-10);
         stepperZ.runSpeed();
+      }
+    case Z_RESET:
+      if (stepperZ.currentPosition() == -500){
+        stepperZ.stop();
+        digitalWrite(printValvePin, HIGH);
+        printSyringeOpen = true;
+        delay(50);
+        homingState = P_HOMING;
+      } else {
+        stepperZ.run();
+      }
+    case P_HOMING:
+      if (triggeredP == true){
+        stepperP.stop();
+        homingState = P_RETRACTION;
+        state = "P-retracting";
+      } else {
+        stepperP.setSpeed(20*steps_per_mm);
+        stepperP.move(100);
+        stepperP.runSpeed();
+      }
+      break;
+    case P_RETRACTION:
+      if (triggeredP == false){
+        stepperP.stop();
+        stepperP.setCurrentPosition(0);
+        stepperP.setSpeed(-10*steps_per_mm);
+        stepperP.moveTo(-500);
+        homingState = P_RESET;
+      } else {
+        stepperP.setSpeed(-2*steps_per_mm);
+        stepperP.move(-10);
+        stepperP.runSpeed();
+      }
+    case P_RESET:
+      if (stepperP.currentPosition() == -500){
+        stepperP.stop();
+        digitalWrite(printValvePin, LOW);
+        printSyringeOpen = false;
+        digitalWrite(printValvePin, HIGH);
+        printSyringeOpen = true;
+        delay(10);
+        digitalWrite(printValvePin, LOW);
+        printSyringeOpen = false;
+        homingState = IDLE;
+      } else {
+        stepperP.run();
       }
     default:
       break;
@@ -424,6 +509,7 @@ void parseData() {      // split the data into its parts
     strtokIndx = strtok(NULL, ","); 
     changeR = atoi(strtokIndx);
 
+    // stepperP.moveTo(stepperP.currentPosition()+changeP);
     targetPressureP = targetPressureP + changeP;
     targetPressureR = targetPressureR + changeR;
 
@@ -491,7 +577,7 @@ void parseData() {      // split the data into its parts
     digitalWrite(printValvePin, HIGH);
     printSyringeOpen = true;
     delay(50);
-    stepperP.moveTo(0);
+    stepperP.moveTo(-1000);
     stepperP.run();
   }
   else if (command == "gripperToggle"){
@@ -542,6 +628,12 @@ void parseData() {      // split the data into its parts
   else if (command == "homeAll"){
     homingState = X_HOMING;
     state = "X-Homing";
+  }
+  else if (command == "regPressure"){
+    regulatePressure = true;
+  }
+  else if (command == "unregPressure"){
+    regulatePressure = false;
   }
   else {
     blinkLED();
@@ -641,7 +733,7 @@ void loop() {
     cycleLimitSwitch();
   }
 
-  homingProtocol();
+  homingProtocolXYZ();
 
   if (currentMillis - previousMillisPressure > intervalPressure) {
     previousMillisPressure = currentMillis;
@@ -687,7 +779,7 @@ void loop() {
     Serial.print(stepperP.currentPosition());
     Serial.print(",");
     Serial.print("Current:");
-    Serial.print(rmsCurrent);
+    Serial.print(stepsZ);
     Serial.print(",");
     Serial.print("Print_valve:");
     Serial.print(printSyringeOpen);
@@ -723,6 +815,8 @@ void loop() {
       stepperX.run();
     } else if (stepperZ.distanceToGo() != 0){
       stepperZ.run();
+    // } else if (stepperP.distanceToGo() != 0){
+    //   stepperP.run();
     } else {
       correctPos = true;
     }
@@ -755,7 +849,9 @@ void loop() {
   // // Adjust the syringe pump to maintain the desired pressure
   // // Resetting begins when the plunger is near the end of the syringe
   // // the valve connected to the syringe is opened and the plunger is pulled to the back of the syringe to reset the position
-  if (motorsActive == true && manualControl == false){
+  
+  
+  if (motorsActive == true && manualControl == false && regulatePressure == true){
 
     if (resetP == true && stepperP.distanceToGo() != 0) //Continue resetting
     { 

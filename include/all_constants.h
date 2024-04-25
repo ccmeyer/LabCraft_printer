@@ -23,13 +23,13 @@ const int sclPin = PB8;
 
 int targetPressureP = 1600;
 int targetPressureR = 1600;
-int tolerancePump = 100;
-int toleranceDroplet = 400;
+int tolerancePump = 5;
+int toleranceDroplet = 20;
 int changeP = 0;
 int changeR = 0;
 
-int lowerBound = -10000;
-int upperBound = 1000;
+int lowerBound = -20000;
+int upperBound = 0;
 
 // Timing variables
 unsigned long previousMillisWrite = 0;

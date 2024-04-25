@@ -222,6 +222,10 @@ class Platform():
         self.current = 'Unknown'
         self.clock = 'Unknown'
 
+        self.array_start_x = 0
+        self.array_start_y = 0
+        self.array_start_z = 0
+
         self.log_path = 'Unknown'
         self.log_note = ''
 
@@ -539,10 +543,14 @@ class Platform():
     def move_to_well(self,row,col):
         row_spacing = 100
         col_spacing = 100
+        # x_offset = -4500
+        # y_offset = 3500
+        # z_offset = -35000
+
 
         while True:
             if self.ard_state == 'Free':
-                self.new_signal = f'<absoluteXYZ,{row_spacing*row},{col_spacing*col},0>'
+                self.new_signal = f'<absoluteXYZ,{(row_spacing*row)+self.array_start_x},{(col_spacing*col)+self.array_start_y},{self.array_start_z}>'
                 return
             else:
                 print('---Arduino is:',self.ard_state)
@@ -564,12 +572,16 @@ class Platform():
 
         if not self.ask_yes_no(message="Print an array? (y/n)"):
             return
-
         all_arrays = self.get_all_paths('Print_arrays/*.csv',base=True)
         chosen_path,quit = select_options(all_arrays,message='Select one of the arrays:',trim=True)
         if quit: return
 
         arr = pd.read_csv(chosen_path)
+
+        self.array_start_x = self.x_pos
+        self.array_start_y = self.y_pos
+        self.array_start_z = self.z_pos
+
 
         for index, line in arr.iterrows():
             if self.check_for_pause():
@@ -616,11 +628,11 @@ class Platform():
                 elif key == 'H':
                     self.new_signal = '<homeAll>'
                 elif key == 'D':
-                    self.new_signal = '<absoluteXYZ,-3000,3000,-22000>'
+                    self.new_signal = '<absoluteXYZ,-4500,3500,-35000>'
                 elif key == 'F':
-                    self.new_signal = '<absoluteXYZ,-5000,7000,-29000>'
-                elif key == 'T':
-                    self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
+                    self.new_signal = '<absoluteXYZ,-5000,7000,-20000>'
+                # elif key == 'T':
+                #     self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
 
                 elif key == 'c':
                     self.print_droplets(5)
@@ -649,28 +661,35 @@ class Platform():
                 elif key == '{':
                     self.new_signal = '<resetP>'
 
-                elif key == '1':
-                    self.new_signal = '<relativeCurrent,-100>'
+                # elif key == '1':
+                #     self.new_signal = '<relativeCurrent,-100>'
+                    # self.new_signal = '<relativeCurrent,-100>'
                 # elif key == '2':
                 #     self.new_signal = '<relativePR,0,-100>'
                 # elif key == '3':
                 #     self.new_signal = '<relativePR,0,100>'
-                elif key == '4':
-                    self.new_signal = '<relativeCurrent,100>'
+                # elif key == '4':
+                #     self.new_signal = '<relativeCurrent,-100>'
+                    # self.new_signal = '<relativeCurrent,100>'
 
                 elif key == '6':
-                    self.new_signal = '<relativePR,-500,0>'
+                    self.new_signal = '<relativePR,-250,0>'
                 elif key == '7':
-                    self.new_signal = '<relativePR,-100,0>'
+                    self.new_signal = '<relativePR,-50,0>'
                 elif key == '8':
-                    self.new_signal = '<relativePR,100,0>'
+                    self.new_signal = '<relativePR,50,0>'
                 elif key == '9':
-                    self.new_signal = '<relativePR,500,0>'
+                    self.new_signal = '<relativePR,250,0>'
+
+                elif key == '+':
+                    self.new_signal = '<regPressure>'
+                elif key == '-':
+                    self.new_signal = '<unregPressure>'
 
                 elif key == '5':
                     self.new_signal = '<absolutePR,1600,1600>'
                 elif key == '0':
-                    self.new_signal = '<absolutePR,12000,1600>'
+                    self.new_signal = '<absolutePR,2500,1600>'
 
 
                 elif key == 'S':
