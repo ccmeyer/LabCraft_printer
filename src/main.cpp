@@ -171,6 +171,15 @@ AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
+// Reads the pressure sensor if it is the right time
+void checkPressure(){
+  if (currentMillis - previousMillisPressure > intervalPressure) {
+    previousMillisPressure = currentMillis;
+    currentPressure = pressureSensor.smoothPressure();
+    pressureRead = true;
+  }
+}
+
 enum HomingState {
     IDLE,
     X_HOMING,
@@ -264,6 +273,7 @@ enum LimitSwitch {
 LimitSwitch currentLimitSwitch = LimitX;
 int numLimitSwitches = 4;
 
+// Triggers the limit switch service routine
 void readLimitSwitch(LimitSwitch current){
   switch (current){
     case LimitX:
@@ -284,8 +294,18 @@ void readLimitSwitch(LimitSwitch current){
   }
 }
 
+// Loops the limit switch back to the start
 void cycleLimitSwitch() {
     currentLimitSwitch = static_cast<LimitSwitch>((static_cast<int>(currentLimitSwitch) + 1) % static_cast<int>(NUM_SWITCHES));
+}
+
+// Checks the next limit switch in the sequence
+void checkLimitSwitches() {
+  if (currentMillis - previousMillisLimit > intervalLimit) {
+    previousMillisLimit = currentMillis;
+    readLimitSwitch(currentLimitSwitch);
+    cycleLimitSwitch();
+  }
 }
 
 void homingProtocolXYZ(){
@@ -483,9 +503,7 @@ void parseData() {      // split the data into its parts
     
     strtokIndx = strtok(NULL, ",");
     stepsZ = atoi(strtokIndx);     
-    // motorX.moveTo(motorX.currentPosition()+stepsX);
-    // motorY.moveTo(motorY.currentPosition()+stepsY);
-    // motorZ.moveTo(motorZ.currentPosition()+stepsZ);
+
     stepperX.moveTo(stepperX.currentPosition()+stepsX);
     stepperY.moveTo(stepperY.currentPosition()+stepsY);
     stepperZ.moveTo(stepperZ.currentPosition()+stepsZ);
@@ -502,9 +520,6 @@ void parseData() {      // split the data into its parts
     strtokIndx = strtok(NULL, ",");
     stepsZ = atoi(strtokIndx);     
 
-    // motorX.moveTo(stepsX);
-    // motorY.moveTo(stepsY);
-    // motorZ.moveTo(stepsZ);
     stepperX.moveTo(stepsX);
     stepperY.moveTo(stepsY);
     stepperZ.moveTo(stepsZ);
@@ -518,7 +533,6 @@ void parseData() {      // split the data into its parts
     strtokIndx = strtok(NULL, ","); 
     changeR = atoi(strtokIndx);
 
-    // stepperP.moveTo(stepperP.currentPosition()+changeP);
     targetPressureP = targetPressureP + changeP;
     targetPressureR = targetPressureR + changeR;
 
@@ -646,12 +660,207 @@ void parseData() {      // split the data into its parts
   }
   else {
     blinkLED();
-    // digitalWrite(ledPin,HIGH);
-    // delay(500);
-    // digitalWrite(ledPin,LOW);
     state = "Free";
   }
   newData = false;
+}
+
+// Sends the current status of the machine to the computer via Serial
+void sendStatus() {
+  if (currentMillis - previousMillisWrite > intervalWrite) {
+    previousMillisWrite = currentMillis;
+
+    if (stepperY.distanceToGo() != 0) {
+      state = "MovingY";
+    } else if (stepperX.distanceToGo() != 0){
+      state = "MovingX";
+    } else if (stepperZ.distanceToGo() != 0){
+      state = "MovingZ";
+    } else if (currentDroplets != targetDroplets){
+      state = "Printing";
+    } else {
+      state = "Free";
+    }
+
+    Serial.print("Serial:");
+    Serial.print(state);
+    Serial.print(",");
+    Serial.print("Max_cycle:");
+    Serial.print(maxCycle);
+    Serial.print(",");
+    Serial.print("Cycle_count:");
+    Serial.print(numIterations);
+    Serial.print(",");
+    Serial.print("X:");
+    Serial.print(stepperX.currentPosition());
+    Serial.print(",");
+    Serial.print("Y:");
+    Serial.print(stepperY.currentPosition());
+    Serial.print(",");
+    Serial.print("Z:");
+    Serial.print(stepperZ.currentPosition());
+    Serial.print(",");
+    Serial.print("P:");
+    Serial.print(stepperP.currentPosition());
+    Serial.print(",");
+    Serial.print("Current:");
+    Serial.print(stepsZ);
+    Serial.print(",");
+    Serial.print("Print_valve:");
+    Serial.print(printSyringeOpen);
+    Serial.print(",");
+    Serial.print("Droplets:");
+    Serial.print(currentDroplets);
+    Serial.print(",");
+    Serial.print("Set_print:");
+    Serial.print(targetPressureP);
+    Serial.print(",");
+    Serial.print("Print_pressure:");
+    Serial.println(currentPressure);
+    numIterations = 0;
+    maxCycle = 0;
+  }
+}
+
+// Checks for and parses new commands
+void getNewCommand(){
+  // Read data coming from the Serial communication with the PC
+  if (currentMillis - previousMillisRead > intervalRead && state == "Free" && newData == false) {
+    previousMillisRead = currentMillis;
+    readSerial();
+  }
+
+  // If new data is found parse the signal and execute the command
+  if (newData == true){
+    parseData();
+  }
+}
+
+void checkMotors(){
+  if (homingState == IDLE){
+    if (stepperY.distanceToGo() != 0) {
+      stepperY.run();
+    } else if (stepperX.distanceToGo() != 0){
+      stepperX.run();
+    } else if (stepperZ.distanceToGo() != 0){
+      stepperZ.run();
+    } else {
+      correctPos = true;
+    }
+  }
+}
+
+void printDroplet(){
+  digitalWrite(printPin, HIGH);
+  delayMicroseconds(3000);
+  digitalWrite(printPin, LOW);
+  currentDroplets++;
+}
+
+void checkDroplets(){
+  if (correctPos == true && currentDroplets < targetDroplets){
+    if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
+      state = "Printing";
+      if (currentMillis - previousMillisDroplet > intervalDroplet) {
+        previousMillisDroplet = currentMillis;
+        printDroplet();
+        currentDroplets++;
+      }
+    }
+  }
+}
+
+void adjustPressure(){
+  // // Adjust the syringe pump to maintain the desired pressure
+  // // Resetting begins when the plunger is near the end of the syringe
+  // // the valve connected to the syringe is opened and the plunger is pulled to the back of the syringe to reset the position
+
+  if (motorsActive == true && manualControl == false && regulatePressure == true){
+
+    if (resetP == true && stepperP.distanceToGo() != 0) //Continue resetting
+    { 
+      stepperP.run();
+    } 
+    else if (resetP == true && stepperP.distanceToGo() == 0) //Flag reset complete
+    {
+      digitalWrite(printValvePin, LOW);
+      printSyringeOpen = false;
+      delay(50);
+      resetP = false;
+    }
+    else if (resetP == false)
+    {
+      if (stepperP.currentPosition() < lowerBound || stepperP.currentPosition() > upperBound) // Start reset
+      {
+        stepperP.stop();
+        resetP = true;
+        digitalWrite(printValvePin, HIGH);
+        printSyringeOpen = true;
+        delay(50);
+        stepperP.moveTo(0);
+        stepperP.run();
+
+        // Drives the syringe motor fast or slow depending on the desired pressure change
+      } else if (currentPressure > targetPressureP + 1000) {
+        pressureCorrect = false;
+        stepperP.setSpeed(20*steps_per_mm);
+        stepperP.move(100);
+        stepperP.runSpeed();
+      } else if (currentPressure < targetPressureP - 1000) {
+        pressureCorrect = false;
+        stepperP.setSpeed(-20*steps_per_mm);
+        stepperP.move(-100);
+        stepperP.runSpeed();
+      } else if (currentPressure > targetPressureP + tolerancePump) {
+        pressureCorrect = false;
+        stepperP.setSpeed(5*steps_per_mm);
+        stepperP.move(10);
+        stepperP.runSpeed();
+      } else if (currentPressure < targetPressureP - tolerancePump) {
+        pressureCorrect = false;
+        stepperP.setSpeed(-5*steps_per_mm);
+        stepperP.move(-10);
+        stepperP.runSpeed();
+      } else {
+        if (pressureCorrect == false){
+          stepperP.stop();
+          pressureCorrect = true;
+        }
+      }
+    } 
+  }
+}
+
+void checkGripper(){
+  if (gripperPumpOn == true) {
+    if (currentMillis - previousMillisGripperOn > intervalGripperOn) {
+      previousMillisGripperOn = currentMillis;
+      digitalWrite(pumpPin, LOW);
+      gripperPumpOn = false;
+    }
+  }
+}
+
+// Refresh the vacuum in the gripper on a constant interval
+void refreshGripper(){
+  if (gripperActive == true) {
+    if (currentMillis - previousMillisGripperOn > intervalGripperRestart) {
+      digitalWrite(pumpPin, HIGH);
+      previousMillisGripperOn = currentMillis;
+      gripperPumpOn = true;
+    }
+  }
+}
+
+void getCycleTime(){
+  if (pressureRead == true){
+    endMicros = micros();
+    cycleTime = endMicros - currentMicros;
+    if (cycleTime > maxCycle){
+      maxCycle = cycleTime;
+    }
+    pressureRead = false;
+  }
 }
 
 unsigned long average (unsigned long * array, int len)  // assuming array is int.
@@ -736,221 +945,27 @@ void loop() {
   currentMicros = micros();
 
 
-  if (currentMillis - previousMillisLimit > intervalLimit) {
-    previousMillisLimit = currentMillis;
-    readLimitSwitch(currentLimitSwitch);
-    cycleLimitSwitch();
-  }
+  checkLimitSwitches();
 
   homingProtocolXYZ();
 
-  if (currentMillis - previousMillisPressure > intervalPressure) {
-    previousMillisPressure = currentMillis;
-    currentPressure = pressureSensor.smoothPressure();
-    pressureRead = true;
-  }
+  checkPressure();
 
-  if (currentMillis - previousMillisWrite > intervalWrite) {
-    previousMillisWrite = currentMillis;
-    // averageCycle = average(cycleTimes,numCycles);
-    
-    if (stepperY.distanceToGo() != 0) {
-      state = "MovingY";
-    } else if (stepperX.distanceToGo() != 0){
-      state = "MovingX";
-    } else if (stepperZ.distanceToGo() != 0){
-      state = "MovingZ";
-    } else if (currentDroplets != targetDroplets){
-      state = "Printing";
-    } else {
-      state = "Free";
-    }
+  sendStatus();
 
-    Serial.print("Serial:");
-    Serial.print(state);
-    Serial.print(",");
-    Serial.print("Max_cycle:");
-    Serial.print(maxCycle);
-    Serial.print(",");
-    Serial.print("Cycle_count:");
-    Serial.print(numIterations);
-    Serial.print(",");
-    Serial.print("X:");
-    Serial.print(stepperX.currentPosition());
-    Serial.print(",");
-    Serial.print("Y:");
-    Serial.print(stepperY.currentPosition());
-    Serial.print(",");
-    Serial.print("Z:");
-    Serial.print(stepperZ.currentPosition());
-    Serial.print(",");
-    Serial.print("P:");
-    Serial.print(stepperP.currentPosition());
-    Serial.print(",");
-    Serial.print("Current:");
-    Serial.print(stepsZ);
-    Serial.print(",");
-    Serial.print("Print_valve:");
-    Serial.print(printSyringeOpen);
-    Serial.print(",");
-    Serial.print("Droplets:");
-    Serial.print(currentDroplets);
-    Serial.print(",");
-    Serial.print("Set_print:");
-    Serial.print(targetPressureP);
-    Serial.print(",");
-    Serial.print("Print_pressure:");
-    Serial.println(currentPressure);
-    numIterations = 0;
-    maxCycle = 0;
-  }
+  getNewCommand();
 
-  // Read data coming from the Serial communication with the PC
-  if (currentMillis - previousMillisRead > intervalRead && state == "Free" && newData == false) {
-    previousMillisRead = currentMillis;
-    readSerial();
-  }
+  checkMotors();
 
-  // If new data is found parse the signal and execute the command
-  if (newData == true){
-    parseData();
-  }
+  checkDroplets();
 
-  // Drive motors sequentially, X before Y, Y before Z
-  if (homingState == IDLE){
-    if (stepperY.distanceToGo() != 0) {
-      stepperY.run();
-    } else if (stepperX.distanceToGo() != 0){
-      stepperX.run();
-    } else if (stepperZ.distanceToGo() != 0){
-      stepperZ.run();
-    // } else if (stepperP.distanceToGo() != 0){
-    //   stepperP.run();
-    } else {
-      correctPos = true;
-    }
+  adjustPressure();
 
-    // Checks if droplets needed to be printed and prints if in the right position
-    if (correctPos == true && currentDroplets < targetDroplets){
-      if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
-        state = "Printing";
-        if (currentMillis - previousMillisDroplet > intervalDroplet) {
-          previousMillisDroplet = currentMillis;
-          digitalWrite(printPin, HIGH);
-          delayMicroseconds(3000);
-          digitalWrite(printPin, LOW);
-          currentDroplets++;
-        }
-      }
-    }
-  }
-  
-  
+  checkGripper();
 
-  // Pass a signal to the PC that it is open for the next command
-  // if (correctPos == true && currentDroplets == targetDroplets){
-  //   state = "Free";
-  // }
-  // if (correctPos == true){
-  //   state = "Free";
-  // }
+  refreshGripper();
 
-  // // Adjust the syringe pump to maintain the desired pressure
-  // // Resetting begins when the plunger is near the end of the syringe
-  // // the valve connected to the syringe is opened and the plunger is pulled to the back of the syringe to reset the position
-  
-  
-  if (motorsActive == true && manualControl == false && regulatePressure == true){
-
-    if (resetP == true && stepperP.distanceToGo() != 0) //Continue resetting
-    { 
-      stepperP.run();
-    } 
-    else if (resetP == true && stepperP.distanceToGo() == 0) //Flag reset complete
-    {
-      digitalWrite(printValvePin, LOW);
-      printSyringeOpen = false;
-      delay(50);
-      resetP = false;
-    }
-    else if (resetP == false)
-    {
-      if (stepperP.currentPosition() < lowerBound || stepperP.currentPosition() > upperBound) // Start reset
-      {
-        stepperP.stop();
-        resetP = true;
-        digitalWrite(printValvePin, HIGH);
-        printSyringeOpen = true;
-        delay(50);
-        stepperP.moveTo(0);
-        stepperP.run();
-
-        // Drives the syringe motor fast or slow depending on the desired pressure change
-      } else if (currentPressure > targetPressureP + 1000) {
-        pressureCorrect = false;
-        stepperP.setSpeed(20*steps_per_mm);
-        stepperP.move(100);
-        stepperP.runSpeed();
-      } else if (currentPressure < targetPressureP - 1000) {
-        pressureCorrect = false;
-        stepperP.setSpeed(-20*steps_per_mm);
-        stepperP.move(-100);
-        stepperP.runSpeed();
-      } else if (currentPressure > targetPressureP + tolerancePump) {
-        pressureCorrect = false;
-        stepperP.setSpeed(5*steps_per_mm);
-        stepperP.move(10);
-        stepperP.runSpeed();
-      } else if (currentPressure < targetPressureP - tolerancePump) {
-        pressureCorrect = false;
-        stepperP.setSpeed(-5*steps_per_mm);
-        stepperP.move(-10);
-        stepperP.runSpeed();
-      } else {
-        if (pressureCorrect == false){
-          stepperP.stop();
-          pressureCorrect = true;
-        }
-      }
-    } 
-    // else if (resetP == false && currentPressure != 0) {
-    //   state = "P-state wrong";
-    // }
-  }
-
-  // Gripper shutoff when the timer for the pump is over
-  if (gripperPumpOn == true) {
-    if (currentMillis - previousMillisGripperOn > intervalGripperOn) {
-      previousMillisGripperOn = currentMillis;
-      digitalWrite(pumpPin, LOW);
-      gripperPumpOn = false;
-    }
-  }
-  
-  // Refresh the vacuum in the gripper on a constant interval
-  if (gripperActive == true) {
-    if (currentMillis - previousMillisGripperOn > intervalGripperRestart) {
-      digitalWrite(pumpPin, HIGH);
-      previousMillisGripperOn = currentMillis;
-      gripperPumpOn = true;
-    }
-  }
-
-  // delayMicroseconds(5);
-  if (pressureRead == true){
-    endMicros = micros();
-    cycleTime = endMicros - currentMicros;
-
-    // if (cycleIndex >= numCycles) {
-    //   cycleIndex = 0;
-    // }
-    // cycleTimes[cycleIndex] = cycleTime;
-    // cycleIndex++;
-    if (cycleTime > maxCycle){
-      maxCycle = cycleTime;
-    }
-    pressureRead = false;
-  }
+  getCycleTime();
   
   numIterations++;
 }
