@@ -57,6 +57,7 @@ extern "C" void SystemClock_Config(void)
 #include <TMCStepper.h>         // Sets up UART communication
 #include <AccelStepper.h>       // Coordinates motor movements
 #include <Wire.h>
+#include <queue>
 #include "pin_assignments.h"
 #include "pin_functions.h"
 // #include "StepperMotor.h"
