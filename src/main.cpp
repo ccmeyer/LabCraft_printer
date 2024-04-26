@@ -58,6 +58,7 @@ extern "C" void SystemClock_Config(void)
 #include <AccelStepper.h>       // Coordinates motor movements
 #include <Wire.h>
 #include <queue>
+#include <vector>
 #include "pin_assignments.h"
 #include "pin_functions.h"
 // #include "StepperMotor.h"
@@ -754,7 +755,6 @@ void printDroplet(){
   digitalWrite(printPin, HIGH);
   delayMicroseconds(3000);
   digitalWrite(printPin, LOW);
-  currentDroplets++;
 }
 
 void checkDroplets(){
@@ -944,28 +944,24 @@ void loop() {
   currentMillis = millis();
   currentMicros = micros();
 
-
   checkLimitSwitches();
 
   homingProtocolXYZ();
 
   checkPressure();
-
-  sendStatus();
-
-  getNewCommand();
+  adjustPressure();
 
   checkMotors();
 
   checkDroplets();
 
-  adjustPressure();
-
   checkGripper();
-
   refreshGripper();
 
   getCycleTime();
+
+  sendStatus();
+  getNewCommand();
   
   numIterations++;
 }
