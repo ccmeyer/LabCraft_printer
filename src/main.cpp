@@ -174,11 +174,8 @@ PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
 // Reads the pressure sensor if it is the right time
 void checkPressure(){
-  if (currentMillis - previousMillisPressure > intervalPressure) {
-    previousMillisPressure = currentMillis;
-    currentPressure = pressureSensor.smoothPressure();
-    pressureRead = true;
-  }
+  currentPressure = pressureSensor.smoothPressure();
+  pressureRead = true;
 }
 
 enum HomingState {
@@ -302,11 +299,8 @@ void cycleLimitSwitch() {
 
 // Checks the next limit switch in the sequence
 void checkLimitSwitches() {
-  if (currentMillis - previousMillisLimit > intervalLimit) {
-    previousMillisLimit = currentMillis;
-    readLimitSwitch(currentLimitSwitch);
-    cycleLimitSwitch();
-  }
+  readLimitSwitch(currentLimitSwitch);
+  cycleLimitSwitch();
 }
 
 void homingProtocolXYZ(){
@@ -668,68 +662,61 @@ void parseData() {      // split the data into its parts
 
 // Sends the current status of the machine to the computer via Serial
 void sendStatus() {
-  if (currentMillis - previousMillisWrite > intervalWrite) {
-    previousMillisWrite = currentMillis;
-
-    if (stepperY.distanceToGo() != 0) {
-      state = "MovingY";
-    } else if (stepperX.distanceToGo() != 0){
-      state = "MovingX";
-    } else if (stepperZ.distanceToGo() != 0){
-      state = "MovingZ";
-    } else if (currentDroplets != targetDroplets){
-      state = "Printing";
-    } else {
-      state = "Free";
-    }
-
-    Serial.print("Serial:");
-    Serial.print(state);
-    Serial.print(",");
-    Serial.print("Max_cycle:");
-    Serial.print(maxCycle);
-    Serial.print(",");
-    Serial.print("Cycle_count:");
-    Serial.print(numIterations);
-    Serial.print(",");
-    Serial.print("X:");
-    Serial.print(stepperX.currentPosition());
-    Serial.print(",");
-    Serial.print("Y:");
-    Serial.print(stepperY.currentPosition());
-    Serial.print(",");
-    Serial.print("Z:");
-    Serial.print(stepperZ.currentPosition());
-    Serial.print(",");
-    Serial.print("P:");
-    Serial.print(stepperP.currentPosition());
-    Serial.print(",");
-    Serial.print("Current:");
-    Serial.print(stepsZ);
-    Serial.print(",");
-    Serial.print("Print_valve:");
-    Serial.print(printSyringeOpen);
-    Serial.print(",");
-    Serial.print("Droplets:");
-    Serial.print(currentDroplets);
-    Serial.print(",");
-    Serial.print("Set_print:");
-    Serial.print(targetPressureP);
-    Serial.print(",");
-    Serial.print("Print_pressure:");
-    Serial.println(currentPressure);
-    numIterations = 0;
-    maxCycle = 0;
+  if (stepperY.distanceToGo() != 0) {
+    state = "MovingY";
+  } else if (stepperX.distanceToGo() != 0){
+    state = "MovingX";
+  } else if (stepperZ.distanceToGo() != 0){
+    state = "MovingZ";
+  } else if (currentDroplets != targetDroplets){
+    state = "Printing";
+  } else {
+    state = "Free";
   }
+
+  Serial.print("Serial:");
+  Serial.print(state);
+  Serial.print(",");
+  Serial.print("Max_cycle:");
+  Serial.print(maxCycle);
+  Serial.print(",");
+  Serial.print("Cycle_count:");
+  Serial.print(numIterations);
+  Serial.print(",");
+  Serial.print("X:");
+  Serial.print(stepperX.currentPosition());
+  Serial.print(",");
+  Serial.print("Y:");
+  Serial.print(stepperY.currentPosition());
+  Serial.print(",");
+  Serial.print("Z:");
+  Serial.print(stepperZ.currentPosition());
+  Serial.print(",");
+  Serial.print("P:");
+  Serial.print(stepperP.currentPosition());
+  Serial.print(",");
+  Serial.print("Current:");
+  Serial.print(stepsZ);
+  Serial.print(",");
+  Serial.print("Print_valve:");
+  Serial.print(printSyringeOpen);
+  Serial.print(",");
+  Serial.print("Droplets:");
+  Serial.print(currentDroplets);
+  Serial.print(",");
+  Serial.print("Set_print:");
+  Serial.print(targetPressureP);
+  Serial.print(",");
+  Serial.print("Print_pressure:");
+  Serial.println(currentPressure);
+  numIterations = 0;
+  maxCycle = 0;
 }
 
 // Checks for and parses new commands
 void getNewCommand(){
   // Read data coming from the Serial communication with the PC
-  if (currentMillis - previousMillisRead > intervalRead && state == "Free" && newData == false) {
-    previousMillisRead = currentMillis;
-    readSerial();
-  }
+  readSerial();
 
   // If new data is found parse the signal and execute the command
   if (newData == true){
@@ -833,22 +820,16 @@ void adjustPressure(){
 
 void checkGripper(){
   if (gripperPumpOn == true) {
-    if (currentMillis - previousMillisGripperOn > intervalGripperOn) {
-      previousMillisGripperOn = currentMillis;
-      digitalWrite(pumpPin, LOW);
-      gripperPumpOn = false;
-    }
+    digitalWrite(pumpPin, LOW);
+    gripperPumpOn = false;
   }
 }
 
 // Refresh the vacuum in the gripper on a constant interval
 void refreshGripper(){
   if (gripperActive == true) {
-    if (currentMillis - previousMillisGripperOn > intervalGripperRestart) {
-      digitalWrite(pumpPin, HIGH);
-      previousMillisGripperOn = currentMillis;
-      gripperPumpOn = true;
-    }
+    digitalWrite(pumpPin, HIGH);
+    gripperPumpOn = true;
   }
 }
 
@@ -870,6 +851,24 @@ unsigned long average (unsigned long * array, int len)  // assuming array is int
     sum += array [i] ;
   return  ((unsigned long) sum) / len ;  // average will be fractional, so float may be appropriate.
 }
+
+// Define structure for a task
+struct Task {
+    void (*function)(); // Function pointer for the task
+    unsigned long interval; // Interval in milliseconds
+    unsigned long lastExecutionTime; // Last execution time in milliseconds
+};
+
+// Initialize tasks
+std::vector<Task> tasks = {
+    {checkLimitSwitches, 2, 0}, // Task 1
+    {checkPressure, 10, 3},
+    {checkGripper, 500, 23},
+    {refreshGripper, 60000, 0},
+    {sendStatus, 50, 3},
+    {getNewCommand, 10, 0},
+    // Add more tasks as needed
+};
 
 void setup() {
   SystemClock_Config();
@@ -944,24 +943,21 @@ void loop() {
   currentMillis = millis();
   currentMicros = micros();
 
-  checkLimitSwitches();
-
-  homingProtocolXYZ();
-
-  checkPressure();
+  // Iterate over tasks
+  for (auto& task : tasks) {
+      // Check if enough time has elapsed for the task
+      if (currentMillis - task.lastExecutionTime >= task.interval) {
+          // Execute the task function
+          task.function();
+          // Update the last execution time
+          task.lastExecutionTime = currentMillis;
+      }
+  }
   adjustPressure();
-
+  homingProtocolXYZ();
   checkMotors();
-
   checkDroplets();
-
-  checkGripper();
-  refreshGripper();
-
   getCycleTime();
 
-  sendStatus();
-  getNewCommand();
-  
   numIterations++;
 }
