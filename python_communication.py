@@ -222,6 +222,14 @@ class Platform():
         self.current = 'Unknown'
         self.clock = 'Unknown'
 
+        # PRESSURE CONVERSION VARIABLES
+        self.FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
+        self.offset = 1638 #Set in manual 10-90% transfer function option Gage type sensor
+        self.maxP = 15 # Max pressure for sensor is 15 psi
+
+        self.command_number = 0
+        self.command_log = {}
+
         self.array_start_x = 0
         self.array_start_y = 0
         self.array_start_z = 0
@@ -546,23 +554,26 @@ class Platform():
 
         while True:
             if self.ard_state == 'Free':
-                self.new_signal = f'<absoluteXYZ,{(row_spacing*row)+self.array_start_x},{(col_spacing*col)+self.array_start_y},{self.array_start_z}>'
+                new_x = (row_spacing*row)+self.array_start_x
+                new_y = (col_spacing*col)+self.array_start_y
+                new_z = self.array_start_z
+                self.set_absolute_coordinates(new_x,new_y,new_z)
                 return
             else:
                 print('---Arduino is:',self.ard_state)
                 time.sleep(0.2)
 
-    def print_droplets(self,droplets):
-        while True:
-            if self.ard_state == 'Free':
-                self.new_signal = f'<print,{droplets}>'
-                if self.active_log:
-                    note_str = f'print,{droplets}'
-                    self.log_note = note_str
-                return
-            else:
-                print('---Arduino is:',self.ard_state)
-                time.sleep(0.2)
+    # def print_droplets(self,droplets):
+    #     while True:
+    #         if self.ard_state == 'Free':
+    #             self.new_signal = f'<print,{droplets}>'
+    #             if self.active_log:
+    #                 note_str = f'print,{droplets}'
+    #                 self.log_note = note_str
+    #             return
+    #         else:
+    #             print('---Arduino is:',self.ard_state)
+    #             time.sleep(0.2)
 
     def print_array(self):
 
@@ -592,6 +603,78 @@ class Platform():
             self.print_droplets(line['Droplet'])
             time.sleep(0.2)
 
+        return
+
+    def generate_command(self,commandName,param1,param2,param3):
+        self.new_signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
+        self.command_log.update({self.command_number:self.new_signal})
+        self.command_number += 1
+        return
+
+    def set_relative_coordinates(self,x,y,z):
+        self.generate_command('RELATIVE_XYZ',x,y,z)
+        return
+    
+    def set_absolute_coordinates(self,x,y,z):
+        self.generate_command('ABSOLUTE_XYZ',x,y,z)
+        return
+    
+    def print_droplets(self,droplet_count):
+        self.generate_command('PRINT',droplet_count,0,0)
+        return
+
+    def convert_psi(self,psi):
+        return ((psi / self.maxP) * self.FSS) + self.offset
+    
+    def set_relative_pressure(self,pressure):
+        raw_pressure = self.convert_psi(pressure)
+        self.generate_command('RELATIVE_P',raw_pressure,0,0)
+        return
+
+    def set_absolute_pressure(self,pressure):
+        raw_pressure = self.convert_psi(pressure)
+        self.generate_command('ABSOLUTE_P',raw_pressure,0,0)
+        return
+    
+    def reset_syringe(self):
+        self.generate_command('RESET_P',0,0,0)
+        return
+    
+    def toggle_gripper(self):
+        self.generate_command('TOGGLE_GRIPPER',0,0,0)
+        return
+    
+    def gripper_off(self):
+        self.generate_command('GRIPPER_OFF',0,0,0)
+        return
+    
+    def enable_motors(self):
+        self.generate_command('ENABLE_MOTORS',0,0,0)
+        return
+    
+    def disable_motors(self):
+        self.generate_command('DISABLE_MOTORS',0,0,0)
+        return
+    
+    def home_all(self):
+        self.generate_command('HOME_ALL',0,0,0)
+        return
+    
+    def regulate_pressure(self):
+        self.generate_command('REGULATE_P',0,0,0)
+        return
+    
+    def unregulate_pressure(self):
+        self.generate_command('UNREGULATE_P',0,0,0)
+        return
+    
+    def pause_robot(self):
+        self.generate_command('PAUSE',0,0,0)
+        return
+    
+    def clear_queue(self):
+        self.generate_command('CLEAR_QUEUE',0,0,0)
+        return
 
     def drive_platform(self):
         '''
@@ -607,26 +690,26 @@ class Platform():
                 key = self.get_current_key()
                 print(key)
                 if key == Key.up:
-                    self.new_signal = '<relativeXYZ,1000,0,0>'
+                    self.set_relative_coordinates(1000,0,0)
                 elif key == Key.down:
-                    self.new_signal = '<relativeXYZ,-1000,0,0>'
+                    self.set_relative_coordinates(-1000,0,0)
                 elif key == Key.left:
-                    self.new_signal = '<relativeXYZ,0,1000,0>'
+                    self.set_relative_coordinates(0,1000,0)
                 elif key == Key.right:
-                    self.new_signal = '<relativeXYZ,0,-1000,0>'
+                    self.set_relative_coordinates(0,-1000,0)
                 elif key == 'k':
-                    self.new_signal = '<relativeXYZ,0,0,-1000>'
+                    self.set_relative_coordinates(0,0,-1000)
                 elif key == 'm':
-                    self.new_signal = '<relativeXYZ,0,0,1000>'
-                elif key == 'R':
-                    self.new_signal = '<resetXYZ>'
+                    self.set_relative_coordinates(0,0,1000)
+                # elif key == 'R':
+                #     self.new_signal = '<resetXYZ>'
                 
                 elif key == 'H':
-                    self.new_signal = '<homeAll>'
+                    self.home_all()
                 elif key == 'D':
-                    self.new_signal = '<absoluteXYZ,-4500,3500,-35000>'
+                    self.set_absolute_coordinates(-4500,3500,-35000)
                 elif key == 'F':
-                    self.new_signal = '<absoluteXYZ,-5000,7000,-20000>'
+                    self.set_absolute_coordinates(-5000,7000,-20000)
                 # elif key == 'T':
                 #     self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
 
@@ -641,21 +724,24 @@ class Platform():
                     self.print_array()
 
                 elif key == 'g':
-                    self.new_signal = '<gripperToggle>'
+                    self.toggle_gripper()
                 elif key == 'G':
-                    self.new_signal = '<gripperOff>'
-
+                    self.gripper_off()
                 elif key == 'I':
-                    self.new_signal = '<enable>'
+                    self.enable_motors()
                 elif key == 'O':
-                    self.new_signal = '<disable>'
+                    self.disable_motors()
 
-                elif key == '^':
-                    self.new_signal = '<openP>'
-                elif key == '(':
-                    self.new_signal = '<closeP>'
-                elif key == '{':
-                    self.new_signal = '<resetP>'
+                elif key == '!':
+                    for key, value in self.command_log.items():
+                        print(f'{key}: {value}')
+
+                # elif key == '^':
+                #     self.new_signal = '<openP>'
+                # elif key == '(':
+                #     self.new_signal = '<closeP>'
+                # elif key == '{':
+                #     self.new_signal = '<resetP>'
 
                 # elif key == '1':
                 #     self.new_signal = '<relativeCurrent,-100>'
@@ -669,23 +755,23 @@ class Platform():
                     # self.new_signal = '<relativeCurrent,100>'
 
                 elif key == '6':
-                    self.new_signal = '<relativePR,-250,0>'
+                    self.set_relative_pressure(-0.2)
                 elif key == '7':
-                    self.new_signal = '<relativePR,-50,0>'
+                    self.set_relative_pressure(-0.05)
                 elif key == '8':
-                    self.new_signal = '<relativePR,50,0>'
+                    self.set_relative_pressure(0.05)
                 elif key == '9':
-                    self.new_signal = '<relativePR,250,0>'
+                    self.set_relative_pressure(0.2)
 
                 elif key == '+':
-                    self.new_signal = '<regPressure>'
+                    self.regulate_pressure()
                 elif key == '-':
-                    self.new_signal = '<unregPressure>'
+                    self.unregulate_pressure()
 
                 elif key == '5':
-                    self.new_signal = '<absolutePR,1600,1600>'
+                    self.set_absolute_pressure(0)
                 elif key == '0':
-                    self.new_signal = '<absolutePR,2500,1600>'
+                    self.set_absolute_pressure(1.8)
 
 
                 elif key == 'S':
@@ -694,9 +780,9 @@ class Platform():
                     self.initiate_log()
 
                 elif key == 'q':
-                    self.new_signal = '<disable>'
+                    self.disable_motors()
                     time.sleep(0.5)
-                    self.new_signal = '<gripperOff>'
+                    self.gripper_off()
                     time.sleep(0.5)
                     print('\n---Quitting---\n')
                     return

@@ -65,51 +65,133 @@ extern "C" void SystemClock_Config(void)
 #include "all_constants.h"
 #include "PressureSensor.h"
 
-bool xstopPressed = false;
-bool ystopPressed = false;
-bool zstopPressed = false;
-bool pstopPressed = false;
+class LimitSwitch {
+private:
+    char axis;
+    bool pressed;
+    bool triggered;
+    unsigned long switchTime;
+    unsigned long lastSwitchTime;
+    int pin;
+    int debounce;
+    bool homing;
+    int led;
 
-bool triggeredX = false;
-bool triggeredY = false;
-bool triggeredZ = false;
-bool triggeredP = false;
+public:
+    // Constructor
+    LimitSwitch(char axis, int pin, int debounce, int led)
+        : axis(axis), pressed(false), triggered(false),
+          switchTime(0), lastSwitchTime(0), pin(pin), debounce(debounce), led(led), homing(false) {}
 
-// Limit switch variables
-int limitXstate = 0;
-unsigned long switch_time_X = 0;
-unsigned long last_switch_time_X = 0;
+    // Getter methods for accessing private member variables
+    char getAxis() const { return axis; }
+    bool isPressed() const { return pressed; }
+    bool isTriggered() const { return triggered; }
+    unsigned long getSwitchTime() const { return switchTime; }
+    unsigned long getLastSwitchTime() const { return lastSwitchTime; }
 
-int limitYstate = 0;
-unsigned long switch_time_Y = 0;
-unsigned long last_switch_time_Y = 0;
+    void startHoming() {homing = true;}
+    void stopHoming() {homing = false;}
 
-int limitZstate = 0;
-unsigned long switch_time_Z = 0;
-unsigned long last_switch_time_Z = 0;
 
-int limitPstate = 0;
-unsigned long switch_time_P = 0;
-unsigned long last_switch_time_P = 0;
-
-int debounce = 50;
+    // Method to handle interrupt service routine
+    void isr() {
+        pressed = digitalRead(pin);
+        if (pressed) {
+            switchTime = millis();
+            if (switchTime - lastSwitchTime > debounce) {
+                triggered = true;
+                lastSwitchTime = switchTime;
+                digitalWrite(led, HIGH);
+            }
+        } else {
+            triggered = false;
+            digitalWrite(led, LOW);
+        }
+    }
+};
 
 // Printing variables
 int currentDroplets = 0;
 int targetDroplets = 0;
 int newDroplets = 0;
 
-// Gripper variables
-bool gripperActive = false;
-bool gripperClosed = false;
-bool gripperPumpOn = false;
+class Gripper {
+private:
+    bool active;
+    bool closed;
+    bool pumpOn;
+    unsigned long lastExecution;
+    int pumpInterval;
 
+    int pumpValvePin1;
+    int pumpValvePin2;
+    int pumpPin;
+
+public:
+  // Constructor to initialize variables
+  Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin)
+    : active(false), closed(false), pumpOn(false),
+      lastExecution(0), pumpInterval(500),
+      pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin) {}
+
+  bool isActive() const { return active; }
+  bool isClosed() const { return closed; }
+  bool isPumpOn() const { return pumpOn; }
+  unsigned long previousMillis() const { return lastExecution; }
+
+
+  void activatePump() {
+    digitalWrite(pumpPin, HIGH);
+    pumpOn = true;
+    lastExecution = millis();
+  }
+
+  void checkPump() {
+    if(active && pumpOn && millis() - lastExecution >= pumpInterval) {
+      digitalWrite(pumpPin, LOW);
+      pumpOn = false;
+    }
+  }
+  
+  // Method to toggle the gripper state
+  void toggleGripper() {
+    if (!active) {
+      active = true;
+    }
+    if (!closed) {
+      digitalWrite(pumpValvePin1, LOW);
+      digitalWrite(pumpValvePin2, LOW);
+      closed = true;
+      activatePump();
+    } else {
+      digitalWrite(pumpValvePin1, HIGH);
+      digitalWrite(pumpValvePin2, HIGH);
+      closed = false;
+      activatePump();
+    }
+  }
+
+  // Method to turn off the gripper
+  void gripperOff() {
+    digitalWrite(pumpValvePin1, LOW);
+    digitalWrite(pumpValvePin2, LOW);
+    digitalWrite(pumpPin, LOW);
+    active = false;
+    closed = false;
+  }
+};
+
+Gripper gripper = Gripper(pumpValvePin1,pumpValvePin2,pumpPin);
+
+// Function wrapper to periodically check if the pump is still on
+void checkGripper(){
+  gripper.checkPump();
+}
 // Pressure control variables
 bool manualControl = false;
 bool printSyringeOpen = false;
-bool refuelSyringeOpen = false;
 bool resetP = false;
-bool resetR = false;
 
 int changeCurrent = 0;
 
@@ -122,13 +204,13 @@ char receivedChars[numChars];
 char tempChars[numChars];        // temporary array for use when parsing
 
 // variables to hold the parsed data
-char commandID[numChars] = {0};
-String command = "";
-int stepsX = 0;
-int stepsY = 0;
-int stepsZ = 0;
-int stepsP = 0;
-int stepsR = 0;
+char commandName[numChars] = {0};
+int commandNum = 0;
+// String commandName = "";
+long param1 = 0;
+long param2 = 0;
+long param3 = 0;
+
 bool correctPos = true;
 
 String state = "Free";
@@ -142,7 +224,7 @@ unsigned long currentMicros;
 unsigned long endMicros;
 unsigned long cycleTime = 0;
 static const int numCycles = 5;
-unsigned long cycleTimes[numCycles];
+// unsigned long cycleTimes[numCycles];
 int cycleIndex = 0;
 unsigned long averageCycle = 0;
 bool pressureRead = false;
@@ -172,6 +254,31 @@ AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
+LimitSwitch limitX = LimitSwitch('X',xstop,debounceAll,ledPin);
+LimitSwitch limitY = LimitSwitch('Y',ystop,debounceAll,ledPin);
+LimitSwitch limitZ = LimitSwitch('Z',zstop,debounceAll,ledPin);
+LimitSwitch limitP = LimitSwitch('P',pstop,debounceAll,ledPin);
+
+// Define an array to hold all limit switch objects
+LimitSwitch limits[] = {limitX, limitY, limitZ, limitP};
+
+// Static variable to keep track of the current switch index
+static int currentSwitchIndex = 0;
+
+void checkLimitSwitches() {
+    // // Get the current limit switch object
+    // LimitSwitch& currentSwitch = limits[currentSwitchIndex];
+
+    // // Call the isr() function for the current switch
+    // currentSwitch.isr();
+    limitX.isr();
+
+    // Increment the switch index for the next call
+    currentSwitchIndex++;
+    if (currentSwitchIndex >= 4) {
+        currentSwitchIndex = 0;
+    }
+}
 // Reads the pressure sensor if it is the right time
 void checkPressure(){
   currentPressure = pressureSensor.smoothPressure();
@@ -196,119 +303,12 @@ enum HomingState {
 
 HomingState homingState = IDLE;
 
-void XlimitISR() {
-  xstopPressed = digitalRead(xstop);
-  if (xstopPressed == true){
-    switch_time_X = millis();
-    if (switch_time_X - last_switch_time_X > debounce){
-      triggeredX = true;
-      last_switch_time_X = switch_time_X;
-      if (homingState == IDLE){
-        stepperX.stop();
-      }
-    } 
-  } else {
-    triggeredX = false;
-  }
-}
-
-void YlimitISR() {
-  ystopPressed = digitalRead(ystop);
-  if (ystopPressed == true){
-    switch_time_Y = millis();
-    if (switch_time_Y - last_switch_time_Y > debounce){
-      triggeredY = true;
-      last_switch_time_Y = switch_time_Y;
-      if (homingState == IDLE){
-        stepperY.stop();
-      }
-    } 
-  } else {
-    triggeredY = false;
-  }
-}
-
-void ZlimitISR() {
-  zstopPressed = digitalRead(zstop);
-  if (zstopPressed == true){
-    switch_time_Z = millis();
-    if (switch_time_Z - last_switch_time_Z > debounce){
-      triggeredZ = true;
-      last_switch_time_Z = switch_time_Z;
-      if (homingState == IDLE){
-        stepperZ.stop();
-      }
-    } 
-  } else {
-    triggeredZ = false;
-  }
-}
-
-void PlimitISR() {
-  pstopPressed = digitalRead(pstop);
-  if (pstopPressed == true){
-    switch_time_P = millis();
-    if (switch_time_P - last_switch_time_P > debounce){
-      triggeredP = true;
-      last_switch_time_P = switch_time_P;
-      if (homingState == IDLE){
-        stepperP.stop();
-      }
-    } 
-  } else {
-    triggeredP = false;
-  }
-}
-
-enum LimitSwitch {
-    LimitX,
-    LimitY,
-    LimitZ,
-    LimitP,
-    NUM_SWITCHES
-};
-
-LimitSwitch currentLimitSwitch = LimitX;
-int numLimitSwitches = 4;
-
-// Triggers the limit switch service routine
-void readLimitSwitch(LimitSwitch current){
-  switch (current){
-    case LimitX:
-      XlimitISR();
-      break;
-    case LimitY:
-      YlimitISR();
-      break;
-    case LimitZ:
-      ZlimitISR();
-      break;
-    case LimitP:
-      PlimitISR();
-      break;
-    default:
-      digitalWrite(ledPin, HIGH); 
-      break;
-  }
-}
-
-// Loops the limit switch back to the start
-void cycleLimitSwitch() {
-    currentLimitSwitch = static_cast<LimitSwitch>((static_cast<int>(currentLimitSwitch) + 1) % static_cast<int>(NUM_SWITCHES));
-}
-
-// Checks the next limit switch in the sequence
-void checkLimitSwitches() {
-  readLimitSwitch(currentLimitSwitch);
-  cycleLimitSwitch();
-}
-
 void homingProtocolXYZ(){
   switch(homingState){
     case IDLE:
       break;
     case X_HOMING:
-      if (triggeredX == true){
+      if (limitX.isTriggered() == true){
         stepperX.stop();
         homingState = X_RETRACTION;
         state = "X-retracting";
@@ -319,7 +319,7 @@ void homingProtocolXYZ(){
       }
       break;
     case X_RETRACTION:
-      if (triggeredX == false){
+      if (limitX.isTriggered() == false){
         stepperX.stop();
         stepperX.setCurrentPosition(0);
         stepperX.setSpeed(-10*steps_per_mm);
@@ -335,12 +335,14 @@ void homingProtocolXYZ(){
       if (stepperX.currentPosition() == -500){
         stepperX.stop();
         homingState = Y_HOMING;
+        limitX.stopHoming();
+        limitY.startHoming();
       } else {
         stepperX.run();
       }
       break;
     case Y_HOMING:
-      if (triggeredY == true){
+      if (limitY.isTriggered() == true){
         stepperY.stop();
         homingState = Y_RETRACTION;
         state = "Y-retracting";
@@ -351,7 +353,7 @@ void homingProtocolXYZ(){
       }
       break;
     case Y_RETRACTION:
-      if (triggeredY == false){
+      if (limitY.isTriggered() == false){
         stepperY.stop();
         stepperY.setCurrentPosition(0);
         stepperY.setSpeed(10*steps_per_mm);
@@ -367,12 +369,14 @@ void homingProtocolXYZ(){
       if (stepperY.currentPosition() == 500){
         stepperY.stop();
         homingState = Z_HOMING;
+        limitY.stopHoming();
+        limitZ.startHoming();
       } else {
         stepperY.run();
       }
       break;
     case Z_HOMING:
-      if (triggeredZ == true){
+      if (limitZ.isTriggered() == true){
         stepperZ.stop();
         homingState = Z_RETRACTION;
         state = "Z-retracting";
@@ -383,7 +387,7 @@ void homingProtocolXYZ(){
       }
       break;
     case Z_RETRACTION:
-      if (triggeredZ == false){
+      if (limitZ.isTriggered() == false){
         stepperZ.stop();
         stepperZ.setCurrentPosition(0);
         stepperZ.setSpeed(-10*steps_per_mm);
@@ -402,12 +406,14 @@ void homingProtocolXYZ(){
         printSyringeOpen = true;
         delay(50);
         homingState = P_HOMING;
+        limitZ.stopHoming();
+        limitP.startHoming();
       } else {
         stepperZ.run();
       }
       break;
     case P_HOMING:
-      if (triggeredP == true){
+      if (limitP.isTriggered() == true){
         stepperP.stop();
         homingState = P_RETRACTION;
         state = "P-retracting";
@@ -418,7 +424,7 @@ void homingProtocolXYZ(){
       }
       break;
     case P_RETRACTION:
-      if (triggeredP == false){
+      if (limitP.isTriggered() == false){
         stepperP.stop();
         stepperP.setCurrentPosition(0);
         stepperP.setSpeed(-10*steps_per_mm);
@@ -441,6 +447,7 @@ void homingProtocolXYZ(){
         digitalWrite(printValvePin, LOW);
         printSyringeOpen = false;
         homingState = IDLE;
+        limitP.stopHoming();
       } else {
         stepperP.run();
       }
@@ -482,182 +489,239 @@ void readSerial(){
   }
 }
 
-void parseData() {      // split the data into its parts
+enum CommandType {
+    RELATIVE_XYZ,
+    ABSOLUTE_XYZ,
+    RELATIVE_P,
+    ABSOLUTE_P,
+    PRINT,
+    RESET_P,
+    TOGGLE_GRIPPER,
+    GRIPPER_OFF,
+    ENABLE_MOTORS,
+    DISABLE_MOTORS,
+    HOME_ALL,
+    REGULATE_P,
+    UNREGULATE_P,
+    PAUSE,
+    CLEAR_QUEUE,
+    UNKNOWN
+    // Add more command types as needed
+};
+
+struct Command {
+    int commandNum;
+    CommandType type;
+    long param1;
+    long param2;
+    long param3;
+    // Add more parameters as needed
+    Command(int num, CommandType t, long p1, long p2, long p3) : 
+        commandNum(num), type(t), param1(p1), param2(p2), param3(p3) {}
+};
+
+CommandType commandType;
+
+enum State {
+    FREE,
+    MOVING_XYZ,
+    CHANGING_PRESSURE,
+    PRINTING,
+    HOMING,
+    WAITING,
+    // Add more states as needed
+};
+
+// Command queue
+std::queue<Command> commandQueue;
+
+// Current state
+State currentState = FREE;
+
+// Function to map command names to command types
+CommandType mapCommandType(const char* commandName) {
+    if (strcmp(commandName, "RELATIVE_XYZ") == 0) {
+        return RELATIVE_XYZ;
+    } else if (strcmp(commandName, "ABSOLUTE_XYZ") == 0) {
+        return ABSOLUTE_XYZ;
+    } else if (strcmp(commandName, "RELATIVE_P") == 0) {
+        return RELATIVE_P;
+    } else if (strcmp(commandName, "ABSOLUTE_P") == 0) {
+        return ABSOLUTE_P;
+    } else if (strcmp(commandName, "PRINT") == 0) {
+        return PRINT;
+    } else if (strcmp(commandName, "RESET_P") == 0) {
+        return RESET_P;
+    } else if (strcmp(commandName, "TOGGLE_GRIPPER") == 0) {
+        return TOGGLE_GRIPPER;
+    } else if (strcmp(commandName, "GRIPPER_OFF") == 0) {
+        return GRIPPER_OFF;
+    } else if (strcmp(commandName, "ENABLE_MOTORS") == 0) {
+        return ENABLE_MOTORS;
+    } else if (strcmp(commandName, "DISABLE_MOTORS") == 0) {
+        return DISABLE_MOTORS;
+    } else if (strcmp(commandName, "HOME_ALL") == 0) {
+        return HOME_ALL;
+    } else if (strcmp(commandName, "REGULATE_P") == 0) {
+        return REGULATE_P;
+    } else if (strcmp(commandName, "UNREGULATE_P") == 0) {
+        return UNREGULATE_P;
+    } else if (strcmp(commandName, "PAUSE") == 0) {
+        return PAUSE;
+    } else if (strcmp(commandName, "CLEAR_QUEUE") == 0) {
+        return CLEAR_QUEUE;
+    }
+    // Default case for unknown commands
+    return UNKNOWN;
+}
+
+Command convertCommand() {
   strcpy(tempChars, receivedChars);
   char * strtokIndx; // this is used by strtok() as an index
   
   strtokIndx = strtok(tempChars,",");      // get the first part - the command ID
-  strcpy(commandID, strtokIndx); // copy it to messageFromPC
-  command = String(commandID);
-  if (command == "relativeXYZ"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    stepsX = atoi(strtokIndx);     // convert this part to an integer
-    
-    strtokIndx = strtok(NULL, ","); 
-    stepsY = atoi(strtokIndx);    
-    
-    strtokIndx = strtok(NULL, ",");
-    stepsZ = atoi(strtokIndx);     
+  if (strtokIndx == NULL) {
+    // Handle missing commandNum
+    Command newCommand(0, UNKNOWN, 0, 0, 0);
+    return newCommand;
+  }
+  commandNum = atoi(strtokIndx); 
 
-    stepperX.moveTo(stepperX.currentPosition()+stepsX);
-    stepperY.moveTo(stepperY.currentPosition()+stepsY);
-    stepperZ.moveTo(stepperZ.currentPosition()+stepsZ);
-    correctPos = false;
-    state = "MovingXYZ";
+  
+  strtokIndx = strtok(NULL, ",");
+  if (strtokIndx == NULL) {
+    // Handle missing commandName
+    Command newCommand(0, UNKNOWN, 0, 0, 0);
+    return newCommand;
   }
-  else if (command == "absoluteXYZ"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    stepsX = atoi(strtokIndx);     // convert this part to an integer
-    
-    strtokIndx = strtok(NULL, ","); 
-    stepsY = atoi(strtokIndx);    
-    
-    strtokIndx = strtok(NULL, ",");
-    stepsZ = atoi(strtokIndx);     
+  strcpy(commandName, strtokIndx); // copy it to messageFromPC
+  // commandName = String(commandText);
 
-    stepperX.moveTo(stepsX);
-    stepperY.moveTo(stepsY);
-    stepperZ.moveTo(stepsZ);
-    correctPos = false;
-    state = "MovingXYZ";
+  strtokIndx = strtok(NULL, ",");
+  if (strtokIndx == NULL) {
+    // Handle missing param1
+    Command newCommand(0, UNKNOWN, 0, 0, 0);
+    return newCommand;
   }
-  else if (command == "relativePR"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    changeP = atoi(strtokIndx);     // convert this part to an integer
-    
-    strtokIndx = strtok(NULL, ","); 
-    changeR = atoi(strtokIndx);
+  param1 = atol(strtokIndx);
 
-    targetPressureP = targetPressureP + changeP;
-    targetPressureR = targetPressureR + changeR;
+  strtokIndx = strtok(NULL, ",");
+  if (strtokIndx == NULL) {
+    // Handle missing param2
+    Command newCommand(0, UNKNOWN, 0, 0, 0);
+    return newCommand;
+  }
+  param2 = atol(strtokIndx);
 
-    changeP = 0;
-    changeR = 0;
+  strtokIndx = strtok(NULL, ",");
+  if (strtokIndx == NULL) {
+    // Handle missing param3
+    Command newCommand(0, UNKNOWN, 0, 0, 0);
+    return newCommand;
+  }
+  param3 = atol(strtokIndx);
+  commandType = mapCommandType(commandName);
+  Command newCommand(commandNum, commandType, param1, param2, param3);
+  return newCommand;
+}
 
-    state = "Changing pressures";
-  }
-  else if (command == "absolutePR"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    changeP = atoi(strtokIndx);     // convert this part to an integer
-    
-    strtokIndx = strtok(NULL, ","); 
-    changeR = atoi(strtokIndx);
+void updateCommandQueue(Command& newCommand) {
+  commandQueue.push(newCommand);
+}
 
-    targetPressureP = changeP;
-    targetPressureR = changeR;
+void executeCommand(const Command& cmd) {
+  // Perform actions based on the command type
+  switch (cmd.type) {
+    case RELATIVE_XYZ:
+      stepperX.moveTo(stepperX.currentPosition()+cmd.param1);
+      stepperY.moveTo(stepperY.currentPosition()+cmd.param2);
+      stepperZ.moveTo(stepperZ.currentPosition()+cmd.param3);
+      correctPos = false;
+      // currentState = MOVING_XYZ;
+      break;
+    case ABSOLUTE_XYZ:
+      stepperX.moveTo(cmd.param1);
+      stepperY.moveTo(cmd.param2);
+      stepperZ.moveTo(cmd.param3);
+      correctPos = false;
+      // currentState = MOVING_XYZ;
+      break;
+    case RELATIVE_P:
+      targetPressureP = targetPressureP + cmd.param1;
+      // currentState = CHANGING_PRESSURE;
+      break;
+    case ABSOLUTE_P:
+      targetPressureP = cmd.param1;
+      // currentState = CHANGING_PRESSURE;
+      break;
+    case PRINT:
+      targetDroplets = targetDroplets + cmd.param1;
+      // currentState = PRINTING;
+      break;
+    case RESET_P:
+      stepperP.stop();
+      resetP = true;
+      digitalWrite(printValvePin, HIGH);
+      printSyringeOpen = true;
+      delay(50);
+      stepperP.moveTo(-1000);
+      stepperP.run();
+      break;
+    case TOGGLE_GRIPPER:
+      gripper.toggleGripper();
+      break;
+    case GRIPPER_OFF:
+      gripper.gripperOff();
+      break;
+    case ENABLE_MOTORS:
+      stepperX.enableOutputs();
+      stepperY.enableOutputs();
+      stepperZ.enableOutputs();
+      stepperP.enableOutputs();
+      motorsActive = true;
+      break;
+    case DISABLE_MOTORS:
+      stepperX.disableOutputs();
+      stepperY.disableOutputs();
+      stepperZ.disableOutputs();
+      stepperP.disableOutputs();
+      motorsActive = false;
+      break;
+    case HOME_ALL:
+      homingState = X_HOMING;
+      limitX.startHoming();
+      // currentState = HOMING;
+      break;
+    case REGULATE_P:
+      regulatePressure = true;
+      break;
+    case UNREGULATE_P:
+      regulatePressure = false;
+      break;
+    case PAUSE:
 
-    changeP = 0;
-    changeR = 0;
+      break;
+    case CLEAR_QUEUE:
 
-    state = "Changing pressures";
-  }
-  else if (command == "relativeCurrent"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    changeCurrent = atoi(strtokIndx);     // convert this part to an integer
+      break;
+    case UNKNOWN:
 
-    rmsCurrent = rmsCurrent + changeCurrent;
-    // driverX.rms_current(rmsCurrent);
-    // driverY.rms_current(rmsCurrent);
-    // driverZ.rms_current(rmsCurrent);
-    // driverP.rms_current(rmsCurrent);
-    changeCurrent = 0;
+      break;
+    default:
+      currentState = FREE;
+    // Add cases for other command types
+  }
+}
 
-    state = "Changing current";
-  }
-  else if (command == "resetXYZ"){
-    stepperX.setCurrentPosition(0);
-    stepperY.setCurrentPosition(0);
-    stepperZ.setCurrentPosition(0);
-    state = "resetting XYZ";
-  }
-  else if (command == "print"){
-    strtokIndx = strtok(NULL, ","); // this continues where the previous call left off
-    newDroplets = atoi(strtokIndx);     // convert this part to an integer
-    targetDroplets = targetDroplets + newDroplets;
-    state = "Printing";
-  } 
-  else if (command == "openP"){
-    manualControl = true;
-    digitalWrite(printValvePin, HIGH);
-    printSyringeOpen = true;
-    delay(50);
-  }
-  else if (command == "closeP"){
-    digitalWrite(printValvePin, LOW);
-    delay(50);
-    printSyringeOpen = false;
-    manualControl = false;
-    stepperP.setCurrentPosition(0);
-  }
-  else if (command == "resetP") {
-    stepperP.stop();
-    resetP = true;
-    digitalWrite(printValvePin, HIGH);
-    printSyringeOpen = true;
-    delay(50);
-    stepperP.moveTo(-1000);
-    stepperP.run();
-  }
-  else if (command == "gripperToggle"){
-    if (gripperActive == false) {
-      gripperActive = true;
-    }
-    if (gripperClosed == false){
-      digitalWrite(pumpValvePin1, LOW);
-      digitalWrite(pumpValvePin2, LOW);
-      digitalWrite(pumpPin, HIGH);
+void executeNextCommand(){
+  if (!commandQueue.empty() && currentState == FREE) {
+    // Dequeue the next command
+    Command nextCmd = commandQueue.front();
+    commandQueue.pop();
 
-      gripperPumpOn = true;
-      gripperClosed = true;
-      unsigned long currentMillis = millis();
-      previousMillisGripperOn = currentMillis;
-    } else {
-      digitalWrite(pumpValvePin1, HIGH);
-      digitalWrite(pumpValvePin2, HIGH);
-      digitalWrite(pumpPin, HIGH);
-      // delay(300);
-      gripperPumpOn = true;
-      gripperClosed = false;
-      unsigned long currentMillis = millis();
-      previousMillisGripperOn = currentMillis;
-    }
+    // Execute the command
+    executeCommand(nextCmd);
   }
-  else if (command == "gripperOff"){
-    digitalWrite(pumpValvePin1, LOW);
-    digitalWrite(pumpValvePin2, LOW);
-    digitalWrite(pumpPin, LOW);
-    gripperActive = false;
-    gripperClosed = false;
-  }
-  else if (command == "enable"){
-    stepperX.enableOutputs();
-    stepperY.enableOutputs();
-    stepperZ.enableOutputs();
-    stepperP.enableOutputs();
-    motorsActive = true;
-  }
-  else if (command == "disable"){
-    stepperX.disableOutputs();
-    stepperY.disableOutputs();
-    stepperZ.disableOutputs();
-    stepperP.disableOutputs();
-    motorsActive = false;
-  }
-  else if (command == "homeAll"){
-    homingState = X_HOMING;
-    state = "X-Homing";
-  }
-  else if (command == "regPressure"){
-    regulatePressure = true;
-  }
-  else if (command == "unregPressure"){
-    regulatePressure = false;
-  }
-  else {
-    blinkLED();
-    state = "Free";
-  }
-  newData = false;
 }
 
 // Sends the current status of the machine to the computer via Serial
@@ -673,42 +737,18 @@ void sendStatus() {
   } else {
     state = "Free";
   }
-
-  Serial.print("Serial:");
-  Serial.print(state);
-  Serial.print(",");
-  Serial.print("Max_cycle:");
-  Serial.print(maxCycle);
-  Serial.print(",");
-  Serial.print("Cycle_count:");
-  Serial.print(numIterations);
-  Serial.print(",");
-  Serial.print("X:");
-  Serial.print(stepperX.currentPosition());
-  Serial.print(",");
-  Serial.print("Y:");
-  Serial.print(stepperY.currentPosition());
-  Serial.print(",");
-  Serial.print("Z:");
-  Serial.print(stepperZ.currentPosition());
-  Serial.print(",");
-  Serial.print("P:");
-  Serial.print(stepperP.currentPosition());
-  Serial.print(",");
-  Serial.print("Current:");
-  Serial.print(stepsZ);
-  Serial.print(",");
-  Serial.print("Print_valve:");
-  Serial.print(printSyringeOpen);
-  Serial.print(",");
-  Serial.print("Droplets:");
-  Serial.print(currentDroplets);
-  Serial.print(",");
-  Serial.print("Set_print:");
-  Serial.print(targetPressureP);
-  Serial.print(",");
-  Serial.print("Print_pressure:");
-  Serial.println(currentPressure);
+  Serial.print("Serial:"); Serial.print(state);
+  Serial.print(",Max_cycle:"); Serial.print(maxCycle);
+  Serial.print(",Cycle_count:"); Serial.print(numIterations);
+  Serial.print(",X:"); Serial.print(stepperX.currentPosition());
+  Serial.print(",Y:"); Serial.print(stepperY.currentPosition());
+  Serial.print(",Z:"); Serial.print(stepperZ.currentPosition());
+  Serial.print(",P:"); Serial.print(stepperP.currentPosition());
+  Serial.print(",Current:"); Serial.print(changeCurrent);
+  Serial.print(",Print_valve:"); Serial.print(printSyringeOpen);
+  Serial.print(",Droplets:"); Serial.print(currentDroplets);
+  Serial.print(",Set_print:"); Serial.print(targetPressureP);
+  Serial.print(",Print_pressure:"); Serial.println(currentPressure);
   numIterations = 0;
   maxCycle = 0;
 }
@@ -720,12 +760,28 @@ void getNewCommand(){
 
   // If new data is found parse the signal and execute the command
   if (newData == true){
-    parseData();
+    Command newCommand = convertCommand();
+    newData = false;
+    updateCommandQueue(newCommand);
   }
 }
 
+// Steps motor if it is the right time, moves Y -> X -> Z
 void checkMotors(){
   if (homingState == IDLE){
+    if (limitX.isTriggered()){
+      stepperX.moveTo(stepperX.currentPosition());
+      delay(10);
+    }
+    if (limitY.isTriggered()){
+      stepperY.moveTo(stepperY.currentPosition());
+      delay(10);
+    }
+    if (limitZ.isTriggered()){
+      stepperZ.moveTo(stepperZ.currentPosition());
+      delay(10);
+    }
+
     if (stepperY.distanceToGo() != 0) {
       stepperY.run();
     } else if (stepperX.distanceToGo() != 0){
@@ -735,6 +791,8 @@ void checkMotors(){
     } else {
       correctPos = true;
     }
+  } else {
+    homingProtocolXYZ();
   }
 }
 
@@ -744,19 +802,21 @@ void printDroplet(){
   digitalWrite(printPin, LOW);
 }
 
+// Prints droplets if in the correct position and at correct pressure
 void checkDroplets(){
   if (correctPos == true && currentDroplets < targetDroplets){
     if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
       state = "Printing";
       if (currentMillis - previousMillisDroplet > intervalDroplet) {
-        previousMillisDroplet = currentMillis;
         printDroplet();
         currentDroplets++;
+        previousMillisDroplet = currentMillis;
       }
     }
   }
 }
 
+// Changes pressure to reach the target pressure
 void adjustPressure(){
   // // Adjust the syringe pump to maintain the desired pressure
   // // Resetting begins when the plunger is near the end of the syringe
@@ -818,18 +878,10 @@ void adjustPressure(){
   }
 }
 
-void checkGripper(){
-  if (gripperPumpOn == true) {
-    digitalWrite(pumpPin, LOW);
-    gripperPumpOn = false;
-  }
-}
-
 // Refresh the vacuum in the gripper on a constant interval
 void refreshGripper(){
-  if (gripperActive == true) {
-    digitalWrite(pumpPin, HIGH);
-    gripperPumpOn = true;
+  if (gripper.isActive() == true) {
+    gripper.activatePump();
   }
 }
 
@@ -863,10 +915,11 @@ struct Task {
 std::vector<Task> tasks = {
     {checkLimitSwitches, 2, 0}, // Task 1
     {checkPressure, 10, 3},
-    {checkGripper, 500, 23},
+    {checkGripper, 50, 23},
     {refreshGripper, 60000, 0},
     {sendStatus, 50, 3},
     {getNewCommand, 10, 0},
+    {executeNextCommand, 10, 5},
     // Add more tasks as needed
 };
 
@@ -930,9 +983,9 @@ void setup() {
   pressureSensor.resetPressure();
   pressureSensor.beginCommunication(sdaPin,sclPin,frequency);
 
-  for (int i = 0; i < numCycles; i++) {
-        cycleTimes[i] = 0;
-  }
+  // for (int i = 0; i < numCycles; i++) {
+  //       cycleTimes[i] = 0;
+  // }
   
   delay(500);
   blinkLED();
@@ -954,7 +1007,6 @@ void loop() {
       }
   }
   adjustPressure();
-  homingProtocolXYZ();
   checkMotors();
   checkDroplets();
   getCycleTime();

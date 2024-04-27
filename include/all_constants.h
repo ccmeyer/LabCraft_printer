@@ -31,6 +31,8 @@ int changeR = 0;
 int lowerBound = -20000;
 int upperBound = 0;
 
+int debounceAll = 50;
+
 // Timing variables
 unsigned long previousMillisWrite = 0;
 unsigned long intervalWrite = 51;
