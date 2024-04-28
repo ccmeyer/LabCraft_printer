@@ -34,7 +34,7 @@ int toleranceDroplet = 20;
 int changeP = 0;
 int changeR = 0;
 
-int lowerBound = -10000;
+int lowerBound = -30000;
 int upperBound = 300;
 
 int debounceAll = 50;

@@ -215,7 +215,6 @@ bool correctPos = true;
 
 String state = "Free";
 int updateCounter = 0;
-String event = "";
 bool newData = false;
 
 bool receivingNewData = true;
@@ -385,6 +384,118 @@ void homeAxis() {
       break;
     default:
       break;
+  }
+}
+
+// Steps motor if it is the right time, moves Y -> X -> Z
+void checkMotors(){
+  if (homingState == IDLE){
+    if (stepperY.distanceToGo() != 0) {
+      stepperY.run();
+    } else if (stepperX.distanceToGo() != 0){
+      stepperX.run();
+    } else if (stepperZ.distanceToGo() != 0){
+      stepperZ.run();
+    } else {
+      correctPos = true;
+    }
+  } else {
+    homeAxis();
+  }
+}
+
+void printDroplet(){
+  digitalWrite(printPin, HIGH);
+  delayMicroseconds(3000);
+  digitalWrite(printPin, LOW);
+}
+
+// Prints droplets if in the correct position and at correct pressure
+void checkDroplets(){
+  if (correctPos == true && currentDroplets < targetDroplets){
+    if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
+      state = "Printing";
+      if (currentMillis - previousMillisDroplet > intervalDroplet) {
+        printDroplet();
+        currentDroplets++;
+        previousMillisDroplet = currentMillis;
+      }
+    }
+  }
+}
+
+void resetSyringe() {
+  if (!resetP) {    // Initiate the reset process
+    stepperP.stop();
+    resetP = true;
+    digitalWrite(printValvePin, HIGH);
+    printSyringeOpen = true;
+    delay(50);
+    stepperP.moveTo(-200);
+    stepperP.run();
+  } 
+  else if (stepperP.distanceToGo() != 0) { //Continue resetting
+    stepperP.run();
+  } 
+  else {                            //Flag reset complete
+    digitalWrite(printValvePin, LOW);
+    printSyringeOpen = false;
+    delay(50);
+    resetP = false;
+  }
+}
+
+void adjustPressure() {
+  if (!motorsActive || !regulatePressure) {   // Only regulate pressure when motors are active and instructed to
+    return;
+  }
+
+  if (resetP || stepperP.currentPosition() < lowerBound || stepperP.currentPosition() > upperBound) {
+    resetSyringe();
+    return;
+  }
+  // Calculate the difference between current pressure and target pressure
+  int pressureDifference = currentPressure - targetPressureP;
+
+  // Determine the speed based on the difference
+  if (pressureDifference > cutoffSyringe) {
+      syringeSpeed = syringeMaxSpeed;  // Move quickly when far above target pressure
+  } else if (pressureDifference < -cutoffSyringe) {
+      syringeSpeed = -syringeMaxSpeed; // Move quickly when far below target pressure
+  } else if (abs(pressureDifference) <= toleranceSyringe) {
+      syringeSpeed = 0;          // Stop moving when within tolerance range
+  } else {
+      // Map the absolute value of pressure difference to a speed between the min and max speed
+        syringeSpeed = map(abs(pressureDifference), toleranceSyringe, cutoffSyringe, syringeMinSpeed, syringeMaxSpeed);
+        // Apply the sign of the pressure difference to the speed
+        syringeSpeed *= (pressureDifference < 0) ? -1 : 1;
+  }
+
+  // Set the speed of the stepper motor
+  stepperP.setSpeed(syringeSpeed);
+
+  // Move the stepper motor towards the target position
+  stepperP.move(syringeSpeed);
+
+  // Run the stepper motor at the set speed
+  stepperP.runSpeed();
+}
+
+// Refresh the vacuum in the gripper on a constant interval
+void refreshGripper(){
+  if (gripper.isActive() == true) {
+    gripper.activatePump();
+  }
+}
+
+void getCycleTime(){
+  if (pressureRead == true){
+    endMicros = micros();
+    cycleTime = endMicros - currentMicros;
+    if (cycleTime > maxCycle){
+      maxCycle = cycleTime;
+    }
+    pressureRead = false;
   }
 }
 
@@ -590,13 +701,7 @@ void executeCommand(const Command& cmd) {
       currentState = PRINTING;
       break;
     case RESET_P:
-      stepperP.stop();
-      resetP = true;
-      digitalWrite(printValvePin, HIGH);
-      printSyringeOpen = true;
-      delay(50);
-      stepperP.moveTo(-1000);
-      stepperP.run();
+      resetSyringe();
       break;
     case TOGGLE_GRIPPER:
       gripper.toggleGripper();
@@ -702,118 +807,6 @@ void getNewCommand(){
     newData = false;
     updateCommandQueue(newCommand);
     receivingNewData = true;
-  }
-}
-
-// Steps motor if it is the right time, moves Y -> X -> Z
-void checkMotors(){
-  if (homingState == IDLE){
-    if (stepperY.distanceToGo() != 0) {
-      stepperY.run();
-    } else if (stepperX.distanceToGo() != 0){
-      stepperX.run();
-    } else if (stepperZ.distanceToGo() != 0){
-      stepperZ.run();
-    } else {
-      correctPos = true;
-    }
-  } else {
-    homeAxis();
-  }
-}
-
-void printDroplet(){
-  digitalWrite(printPin, HIGH);
-  delayMicroseconds(3000);
-  digitalWrite(printPin, LOW);
-}
-
-// Prints droplets if in the correct position and at correct pressure
-void checkDroplets(){
-  if (correctPos == true && currentDroplets < targetDroplets){
-    if (currentPressure > targetPressureP - toleranceDroplet && currentPressure < targetPressureP + toleranceDroplet && resetP == false){
-      state = "Printing";
-      if (currentMillis - previousMillisDroplet > intervalDroplet) {
-        printDroplet();
-        currentDroplets++;
-        previousMillisDroplet = currentMillis;
-      }
-    }
-  }
-}
-
-void resetSyringe() {
-  if (!resetP) {    // Initiate the reset process
-    stepperP.stop();
-    resetP = true;
-    digitalWrite(printValvePin, HIGH);
-    printSyringeOpen = true;
-    delay(50);
-    stepperP.moveTo(-200);
-    stepperP.run();
-  } 
-  else if (stepperP.distanceToGo() != 0) { //Continue resetting
-    stepperP.run();
-  } 
-  else {                            //Flag reset complete
-    digitalWrite(printValvePin, LOW);
-    printSyringeOpen = false;
-    delay(50);
-    resetP = false;
-  }
-}
-
-void adjustPressure() {
-  if (!motorsActive || !regulatePressure) {   // Only regulate pressure when motors are active and instructed to
-    return;
-  }
-
-  if (resetP || stepperP.currentPosition() < lowerBound || stepperP.currentPosition() > upperBound) {
-    resetSyringe();
-    return;
-  }
-  // Calculate the difference between current pressure and target pressure
-  int pressureDifference = currentPressure - targetPressureP;
-
-  // Determine the speed based on the difference
-  if (pressureDifference > cutoffSyringe) {
-      syringeSpeed = syringeMaxSpeed;  // Move quickly when far above target pressure
-  } else if (pressureDifference < -cutoffSyringe) {
-      syringeSpeed = -syringeMaxSpeed; // Move quickly when far below target pressure
-  } else if (abs(pressureDifference) <= toleranceSyringe) {
-      syringeSpeed = 0;          // Stop moving when within tolerance range
-  } else {
-      // Map the absolute value of pressure difference to a speed between the min and max speed
-        syringeSpeed = map(abs(pressureDifference), toleranceSyringe, cutoffSyringe, syringeMinSpeed, syringeMaxSpeed);
-        // Apply the sign of the pressure difference to the speed
-        syringeSpeed *= (pressureDifference < 0) ? -1 : 1;
-  }
-
-  // Set the speed of the stepper motor
-  stepperP.setSpeed(syringeSpeed);
-
-  // Move the stepper motor towards the target position
-  stepperP.move(syringeSpeed);
-
-  // Run the stepper motor at the set speed
-  stepperP.runSpeed();
-}
-
-// Refresh the vacuum in the gripper on a constant interval
-void refreshGripper(){
-  if (gripper.isActive() == true) {
-    gripper.activatePump();
-  }
-}
-
-void getCycleTime(){
-  if (pressureRead == true){
-    endMicros = micros();
-    cycleTime = endMicros - currentMicros;
-    if (cycleTime > maxCycle){
-      maxCycle = cycleTime;
-    }
-    pressureRead = false;
   }
 }
 

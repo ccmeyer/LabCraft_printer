@@ -684,6 +684,10 @@ class Platform():
     def unregulate_pressure(self):
         self.generate_command('UNREGULATE_P',0,0,0)
         return
+
+    def reset_syringe(self):
+        self.generate_command('RESET_P',0,0,0)
+        return
     
     def pause_robot(self):
         self.generate_command('PAUSE',0,0,0)
@@ -757,8 +761,8 @@ class Platform():
                 #     self.new_signal = '<openP>'
                 # elif key == '(':
                 #     self.new_signal = '<closeP>'
-                # elif key == '{':
-                #     self.new_signal = '<resetP>'
+                elif key == '{':
+                    self.reset_syringe()
 
                 # elif key == '1':
                 #     self.new_signal = '<relativeCurrent,-100>'
