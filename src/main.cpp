@@ -218,6 +218,8 @@ int updateCounter = 0;
 String event = "";
 bool newData = false;
 
+bool receivingNewData = true;
+
 unsigned long currentMillis;
 unsigned long currentMicros;
 
@@ -394,7 +396,7 @@ void readSerial(){
   char rc;
 
   while (Serial.available() > 0) {
-
+    receivingNewData = false;
     rc = Serial.read();
 
     if (recvInProgress == true) {
@@ -555,25 +557,27 @@ Command convertCommand() {
 }
 
 void updateCommandQueue(Command& newCommand) {
+  lastAddedCmdNum = newCommand.commandNum;
   commandQueue.push(newCommand);
 }
 
 void executeCommand(const Command& cmd) {
   // Perform actions based on the command type
+  currentCmdNum = cmd.commandNum;
   switch (cmd.type) {
     case RELATIVE_XYZ:
       stepperX.moveTo(stepperX.currentPosition()+cmd.param1);
       stepperY.moveTo(stepperY.currentPosition()+cmd.param2);
       stepperZ.moveTo(stepperZ.currentPosition()+cmd.param3);
       correctPos = false;
-      // currentState = MOVING_XYZ;
+      currentState = MOVING_XYZ;
       break;
     case ABSOLUTE_XYZ:
       stepperX.moveTo(cmd.param1);
       stepperY.moveTo(cmd.param2);
       stepperZ.moveTo(cmd.param3);
       correctPos = false;
-      // currentState = MOVING_XYZ;
+      currentState = MOVING_XYZ;
       break;
     case RELATIVE_P:
       targetPressureP = targetPressureP + cmd.param1;
@@ -585,7 +589,7 @@ void executeCommand(const Command& cmd) {
       break;
     case PRINT:
       targetDroplets = targetDroplets + cmd.param1;
-      // currentState = PRINTING;
+      currentState = PRINTING;
       break;
     case RESET_P:
       stepperP.stop();
@@ -619,7 +623,7 @@ void executeCommand(const Command& cmd) {
     case HOME_ALL:
       homingState = INITIATE;
       homingAxisNumber = 0;
-      // currentState = HOMING;
+      currentState = HOMING_AXIS;
       break;
     case REGULATE_P:
       regulatePressure = true;
@@ -656,17 +660,25 @@ void executeNextCommand(){
 // Sends the current status of the machine to the computer via Serial
 void sendStatus() {
   if (stepperY.distanceToGo() != 0) {
+    currentState = MOVING_XYZ;
     state = "MovingY";
   } else if (stepperX.distanceToGo() != 0){
+    currentState = MOVING_XYZ;
     state = "MovingX";
   } else if (stepperZ.distanceToGo() != 0){
+    currentState = MOVING_XYZ;
     state = "MovingZ";
   } else if (currentDroplets != targetDroplets){
+    currentState = PRINTING;
     state = "Printing";
   } else {
+    currentState = FREE;
     state = "Free";
   }
   Serial.print("Serial:"); Serial.print(state);
+  Serial.print(",Com_open:"); Serial.print(receivingNewData);
+  Serial.print(",Current_command:"); Serial.print(currentCmdNum);
+  Serial.print(",Last_added:"); Serial.print(lastAddedCmdNum);
   Serial.print(",Max_cycle:"); Serial.print(maxCycle);
   Serial.print(",Cycle_count:"); Serial.print(numIterations);
   Serial.print(",X:"); Serial.print(stepperX.currentPosition());
@@ -692,25 +704,13 @@ void getNewCommand(){
     Command newCommand = convertCommand();
     newData = false;
     updateCommandQueue(newCommand);
+    receivingNewData = true;
   }
 }
 
 // Steps motor if it is the right time, moves Y -> X -> Z
 void checkMotors(){
   if (homingState == IDLE){
-    // if (limitX.isTriggered()){
-    //   stepperX.moveTo(stepperX.currentPosition());
-    //   delay(10);
-    // }
-    // if (limitY.isTriggered()){
-    //   stepperY.moveTo(stepperY.currentPosition());
-    //   delay(10);
-    // }
-    // if (limitZ.isTriggered()){
-    //   stepperZ.moveTo(stepperZ.currentPosition());
-    //   delay(10);
-    // }
-
     if (stepperY.distanceToGo() != 0) {
       stepperY.run();
     } else if (stepperX.distanceToGo() != 0){
@@ -721,7 +721,6 @@ void checkMotors(){
       correctPos = true;
     }
   } else {
-    // homingProtocolXYZ();
     homeAxis();
   }
 }

@@ -124,7 +124,7 @@ class Monitor(threading.Thread):
         self.i_7.grid(column=1, row=7, sticky=tk.W, padx=5, pady=5)
 
         self.label_8 = tk.StringVar()
-        self.label_8.set('Print_valve:')
+        self.label_8.set('Com_open:')
         self.l_8 = ttk.Label(self.root, textvariable=self.label_8)
         self.l_8.grid(column=0, row=8, sticky=tk.W, padx=5, pady=5)
 
@@ -154,7 +154,7 @@ class Monitor(threading.Thread):
         self.i_10.grid(column=1, row=10, sticky=tk.W, padx=5, pady=5)
 
         self.label_11 = tk.StringVar()
-        self.label_11.set('Current:')
+        self.label_11.set('Current_command:')
         self.l_11 = ttk.Label(self.root, textvariable=self.label_11)
         self.l_11.grid(column=0, row=11, sticky=tk.W, padx=5, pady=5)
 
@@ -183,15 +183,15 @@ class Monitor(threading.Thread):
         self.i_13 = ttk.Label(self.root, textvariable=self.info_13)
         self.i_13.grid(column=1, row=13, sticky=tk.W, padx=5, pady=5)
 
-        # self.label_14 = tk.StringVar()
-        # self.label_14.set('Droplets:')
-        # self.l_14 = ttk.Label(self.root, textvariable=self.label_14)
-        # self.l_14.grid(column=0, row=14, sticky=tk.W, padx=5, pady=5)
+        self.label_14 = tk.StringVar()
+        self.label_14.set('Last_added:')
+        self.l_14 = ttk.Label(self.root, textvariable=self.label_14)
+        self.l_14.grid(column=0, row=14, sticky=tk.W, padx=5, pady=5)
 
-        # self.info_14 = tk.StringVar()
-        # self.info_14.set('---')
-        # self.i_14 = ttk.Label(self.root, textvariable=self.info_14)
-        # self.i_14.grid(column=1, row=14, sticky=tk.W, padx=5, pady=5)
+        self.info_14 = tk.StringVar()
+        self.info_14.set('---')
+        self.i_14 = ttk.Label(self.root, textvariable=self.info_14)
+        self.i_14.grid(column=1, row=14, sticky=tk.W, padx=5, pady=5)
 
         self.root.mainloop()
 
@@ -221,6 +221,10 @@ class Platform():
         self.target_print = 'Unknown'
         self.current = 'Unknown'
         self.clock = 'Unknown'
+
+        self.com_open = 'Unknown'
+        self.current_cmd = 'Unknown'
+        self.last_added_cmd = 'Unknown'
 
         # PRESSURE CONVERSION VARIABLES
         self.FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
@@ -299,7 +303,10 @@ class Platform():
                         self.z_pos = float(data_dict['Z'])
                         self.p_pos = float(data_dict['P'])
                         # # self.r_pos = float(data_dict['R'])
-                        self.current = float(data_dict['Current'])
+                        self.com_open = int(data_dict['Com_open'])
+                        self.current_cmd = int(data_dict['Current_command'])
+                        self.last_added_cmd = int(data_dict['Last_added'])
+
                         self.print_valve = data_dict['Print_valve']
                         
 
@@ -395,12 +402,14 @@ class Platform():
             self.monitor.info_5.set(str(self.actual_droplets))
             self.monitor.info_6.set(str(self.print_pressure))
             self.monitor.info_7.set(str(self.print_psi))
-            self.monitor.info_8.set(str(self.print_valve))
+            self.monitor.info_8.set(str(self.com_open))
             self.monitor.info_9.set(str(self.mass))
             self.monitor.info_10.set(str(self.target_print))
-            self.monitor.info_11.set(str(self.current))
+            self.monitor.info_11.set(str(self.current_cmd))
             self.monitor.info_12.set(str(self.clock))
             self.monitor.info_13.set(str(self.cycle_count))
+            self.monitor.info_14.set(str(self.last_added_cmd))
+
 
             # self.monitor.info_10.set(str(self.r_pos))
             # self.monitor.info_11.set(str(self.print_valve))
@@ -552,16 +561,16 @@ class Platform():
         row_spacing = 100
         col_spacing = 100
 
-        while True:
-            if self.ard_state == 'Free':
-                new_x = (row_spacing*row)+self.array_start_x
-                new_y = (col_spacing*col)+self.array_start_y
-                new_z = self.array_start_z
-                self.set_absolute_coordinates(new_x,new_y,new_z)
-                return
-            else:
-                print('---Arduino is:',self.ard_state)
-                time.sleep(0.2)
+        # while True:
+        #     if self.ard_state == 'Free':
+        new_x = (row_spacing*row)+self.array_start_x
+        new_y = (col_spacing*col)+self.array_start_y
+        new_z = self.array_start_z
+        self.set_absolute_coordinates(new_x,new_y,new_z)
+        return
+            # else:
+            #     print('---Arduino is:',self.ard_state)
+            #     time.sleep(0.2)
 
     # def print_droplets(self,droplets):
     #     while True:
@@ -605,10 +614,18 @@ class Platform():
 
         return
 
-    def generate_command(self,commandName,param1,param2,param3):
-        self.new_signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
-        self.command_log.update({self.command_number:self.new_signal})
-        self.command_number += 1
+    def generate_command(self,commandName,param1,param2,param3,timeout=0):
+        if self.com_open == 1 and self.last_added_cmd - self.current_cmd <= 1:
+            self.new_signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
+            self.command_log.update({self.command_number:self.new_signal})
+            self.command_number += 1
+        elif timeout > 100:
+            print('-COMMAND FAILED TO SEND-')
+        else:
+            time.sleep(0.2)
+            print(f'---Waiting for Com:{timeout}---')
+            timeout += 1
+            self.generate_command(commandName,param1,param2,param3,timeout=timeout)
         return
 
     def set_relative_coordinates(self,x,y,z):
@@ -685,7 +702,7 @@ class Platform():
         print("Driving platform...")
 
         while True:
-            if self.ard_state == 'Free':
+            if self.com_open == 1:
                 print('Arduino is:',self.ard_state)
                 key = self.get_current_key()
                 print(key)

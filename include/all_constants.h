@@ -33,6 +33,8 @@ int upperBound = 0;
 
 int debounceAll = 50;
 
+int currentCmdNum = 0;
+int lastAddedCmdNum = 0;
 // Timing variables
 unsigned long previousMillisWrite = 0;
 unsigned long intervalWrite = 51;
