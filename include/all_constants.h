@@ -21,15 +21,21 @@ float currentPressure;
 const int sdaPin = PB9;
 const int sclPin = PB8;
 
-int targetPressureP = 1600;
-int targetPressureR = 1600;
-int tolerancePump = 5;
+const int syringeMaxSpeed = 1500;      // Maximum speed when far from target pressure
+const int syringeMinSpeed = 300;       // Minimum speed when close to target pressure
+const int toleranceSyringe = 3;  // Tolerance range around target pressure
+const int cutoffSyringe = 200;
+
+int pressureDifference;
+int syringeSpeed;
+
+int targetPressureP = 1638;
 int toleranceDroplet = 20;
 int changeP = 0;
 int changeR = 0;
 
-int lowerBound = -20000;
-int upperBound = 0;
+int lowerBound = -10000;
+int upperBound = 300;
 
 int debounceAll = 50;
 
