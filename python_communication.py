@@ -627,7 +627,7 @@ class Platform():
         return ((psi / self.maxP) * self.FSS) + self.offset
     
     def set_relative_pressure(self,pressure):
-        raw_pressure = self.convert_psi(pressure)
+        raw_pressure = self.convert_psi(pressure) - self.offset
         self.generate_command('RELATIVE_P',raw_pressure,0,0)
         return
 

@@ -74,14 +74,14 @@ private:
     unsigned long lastSwitchTime;
     int pin;
     int debounce;
-    bool homing;
     int led;
+    bool triggerCaught;
 
 public:
     // Constructor
     LimitSwitch(char axis, int pin, int debounce, int led)
         : axis(axis), pressed(false), triggered(false),
-          switchTime(0), lastSwitchTime(0), pin(pin), debounce(debounce), led(led), homing(false) {}
+          switchTime(0), lastSwitchTime(0), pin(pin), debounce(debounce), led(led) {}
 
     // Getter methods for accessing private member variables
     char getAxis() const { return axis; }
@@ -89,10 +89,9 @@ public:
     bool isTriggered() const { return triggered; }
     unsigned long getSwitchTime() const { return switchTime; }
     unsigned long getLastSwitchTime() const { return lastSwitchTime; }
+    bool isTriggerCaught() const { return triggerCaught; }
 
-    void startHoming() {homing = true;}
-    void stopHoming() {homing = false;}
-
+    void catchTrigger() {triggerCaught = true;}
 
     // Method to handle interrupt service routine
     void isr() {
@@ -101,12 +100,13 @@ public:
             switchTime = millis();
             if (switchTime - lastSwitchTime > debounce) {
                 triggered = true;
+                triggerCaught = false;
                 lastSwitchTime = switchTime;
-                digitalWrite(led, HIGH);
+                // digitalWrite(led, HIGH);
             }
         } else {
             triggered = false;
-            digitalWrite(led, LOW);
+            // digitalWrite(led, LOW);
         }
     }
 };
@@ -252,6 +252,8 @@ AccelStepper stepperY = AccelStepper(stepperY.DRIVER, Y_STEP_PIN, Y_DIR_PIN);
 AccelStepper stepperZ = AccelStepper(stepperZ.DRIVER, Z_STEP_PIN, Z_DIR_PIN);
 AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
+AccelStepper* steppers[] = {&stepperX,&stepperY,&stepperZ,&stepperP};
+
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
 LimitSwitch limitX = LimitSwitch('X',xstop,debounceAll,ledPin);
@@ -260,18 +262,39 @@ LimitSwitch limitZ = LimitSwitch('Z',zstop,debounceAll,ledPin);
 LimitSwitch limitP = LimitSwitch('P',pstop,debounceAll,ledPin);
 
 // Define an array to hold all limit switch objects
-LimitSwitch limits[] = {limitX, limitY, limitZ, limitP};
+LimitSwitch* limits[] = {&limitX, &limitY, &limitZ, &limitP};
 
 // Static variable to keep track of the current switch index
 static int currentSwitchIndex = 0;
 
+enum HomingState {
+    IDLE,
+    INITIATE,
+    HOMING,
+    RETRACTION,
+    RESET_POS
+};
+
+HomingState homingState = IDLE;
+
 void checkLimitSwitches() {
     // // Get the current limit switch object
-    // LimitSwitch& currentSwitch = limits[currentSwitchIndex];
-
+    LimitSwitch* currentSwitch = limits[currentSwitchIndex];
+    AccelStepper* currentStepper = steppers[currentSwitchIndex];
     // // Call the isr() function for the current switch
-    // currentSwitch.isr();
-    limitX.isr();
+    currentSwitch->isr();
+
+    if (homingState == IDLE) {
+      if (currentSwitch->isTriggered() && !currentSwitch->isTriggerCaught()){
+        currentStepper->stop();
+        currentSwitch->catchTrigger();
+        digitalWrite(ledPin, HIGH);
+      } else if (currentSwitch->isTriggered() && currentSwitch->isTriggerCaught()) {
+        digitalWrite(ledPin, HIGH);
+      } else {
+        digitalWrite(ledPin, LOW);
+      }
+    }
 
     // Increment the switch index for the next call
     currentSwitchIndex++;
@@ -285,171 +308,77 @@ void checkPressure(){
   pressureRead = true;
 }
 
-enum HomingState {
-    IDLE,
-    X_HOMING,
-    X_RETRACTION,
-    X_RESET,
-    Y_HOMING,
-    Y_RETRACTION,
-    Y_RESET,
-    Z_HOMING,
-    Z_RETRACTION,
-    Z_RESET,
-    P_HOMING,
-    P_RETRACTION,
-    P_RESET
+// Define a structure to hold information for each stage of homing
+struct HomingStage {
+    int direction;
+    int homingSpeed;           // Speed for homing
+    int retractionSpeed;       // Speed for retraction
 };
 
-HomingState homingState = IDLE;
+// Array of homing stages for each motor
+HomingStage homingStages[] = {
+    {1,1000, -100},  // X homing
+    {-1,1000, -100},   // Y homing
+    {1,2000, -200},   // Z homing
+    {1,2000, -200},            // P homing
+};
 
-void homingProtocolXYZ(){
-  switch(homingState){
+int homingAxisNumber = 4;
+
+void homeAxis() {
+  if (homingAxisNumber >= 4){
+    return;
+  }
+  LimitSwitch* currentSwitch = limits[homingAxisNumber];
+  AccelStepper* currentStepper = steppers[homingAxisNumber];
+  HomingStage currentStage = homingStages[homingAxisNumber];
+
+  switch(homingState) {
     case IDLE:
       break;
-    case X_HOMING:
-      if (limitX.isTriggered() == true){
-        stepperX.stop();
-        homingState = X_RETRACTION;
-        state = "X-retracting";
-      } else {
-        stepperX.setSpeed(10*steps_per_mm);
-        stepperX.move(100);
-        stepperX.runSpeed();
-      }
-      break;
-    case X_RETRACTION:
-      if (limitX.isTriggered() == false){
-        stepperX.stop();
-        stepperX.setCurrentPosition(0);
-        stepperX.setSpeed(-10*steps_per_mm);
-        stepperX.moveTo(-500);
-        homingState = X_RESET;
-      } else {
-        stepperX.setSpeed(-1*steps_per_mm);
-        stepperX.move(-10);
-        stepperX.runSpeed();
-      }
-      break;
-    case X_RESET:
-      if (stepperX.currentPosition() == -500){
-        stepperX.stop();
-        homingState = Y_HOMING;
-        limitX.stopHoming();
-        limitY.startHoming();
-      } else {
-        stepperX.run();
-      }
-      break;
-    case Y_HOMING:
-      if (limitY.isTriggered() == true){
-        stepperY.stop();
-        homingState = Y_RETRACTION;
-        state = "Y-retracting";
-      } else {
-        stepperY.setSpeed(-10*steps_per_mm);
-        stepperY.move(-100);
-        stepperY.runSpeed();
-      }
-      break;
-    case Y_RETRACTION:
-      if (limitY.isTriggered() == false){
-        stepperY.stop();
-        stepperY.setCurrentPosition(0);
-        stepperY.setSpeed(10*steps_per_mm);
-        stepperY.moveTo(500);
-        homingState = Y_RESET;
-      } else {
-        stepperY.setSpeed(1*steps_per_mm);
-        stepperY.move(10);
-        stepperY.runSpeed();
-      }
-      break;
-    case Y_RESET:
-      if (stepperY.currentPosition() == 500){
-        stepperY.stop();
-        homingState = Z_HOMING;
-        limitY.stopHoming();
-        limitZ.startHoming();
-      } else {
-        stepperY.run();
-      }
-      break;
-    case Z_HOMING:
-      if (limitZ.isTriggered() == true){
-        stepperZ.stop();
-        homingState = Z_RETRACTION;
-        state = "Z-retracting";
-      } else {
-        stepperZ.setSpeed(20*steps_per_mm);
-        stepperZ.move(100);
-        stepperZ.runSpeed();
-      }
-      break;
-    case Z_RETRACTION:
-      if (limitZ.isTriggered() == false){
-        stepperZ.stop();
-        stepperZ.setCurrentPosition(0);
-        stepperZ.setSpeed(-10*steps_per_mm);
-        stepperZ.moveTo(-500);
-        homingState = Z_RESET;
-      } else {
-        stepperZ.setSpeed(-2*steps_per_mm);
-        stepperZ.move(-10);
-        stepperZ.runSpeed();
-      }
-      break;
-    case Z_RESET:
-      if (stepperZ.currentPosition() == -500){
-        stepperZ.stop();
+    case INITIATE:
+      if (homingAxisNumber == 3) {
         digitalWrite(printValvePin, HIGH);
         printSyringeOpen = true;
-        delay(50);
-        homingState = P_HOMING;
-        limitZ.stopHoming();
-        limitP.startHoming();
+      }
+      homingState = HOMING;
+      break;
+    case HOMING:
+      if (!currentSwitch->isTriggered()) {
+        currentStepper->setSpeed(currentStage.direction * currentStage.homingSpeed);
+        currentStepper->move(currentStage.direction * 100);
+        currentStepper->runSpeed();
       } else {
-        stepperZ.run();
+        currentStepper->stop();
+        homingState = RETRACTION;
       }
       break;
-    case P_HOMING:
-      if (limitP.isTriggered() == true){
-        stepperP.stop();
-        homingState = P_RETRACTION;
-        state = "P-retracting";
+    case RETRACTION:
+      if (currentSwitch->isTriggered()) {
+        currentStepper->setSpeed(currentStage.direction * currentStage.retractionSpeed);
+        currentStepper->move(currentStage.direction * 10);
+        currentStepper->runSpeed();
       } else {
-        stepperP.setSpeed(20*steps_per_mm);
-        stepperP.move(100);
-        stepperP.runSpeed();
+        currentStepper->stop();
+        currentStepper->setCurrentPosition(0);
+        currentStepper->setSpeed(currentStage.direction * currentStage.homingSpeed);
+        currentStepper->moveTo(currentStage.direction * -500);
+        homingState = RESET_POS;
       }
       break;
-    case P_RETRACTION:
-      if (limitP.isTriggered() == false){
-        stepperP.stop();
-        stepperP.setCurrentPosition(0);
-        stepperP.setSpeed(-10*steps_per_mm);
-        stepperP.moveTo(-500);
-        homingState = P_RESET;
+    case RESET_POS:
+      if (currentStepper->distanceToGo() != 0) {
+        currentStepper->run();
       } else {
-        stepperP.setSpeed(-2*steps_per_mm);
-        stepperP.move(-10);
-        stepperP.runSpeed();
-      }
-      break;
-    case P_RESET:
-      if (stepperP.currentPosition() == -500){
-        stepperP.stop();
-        digitalWrite(printValvePin, LOW);
-        printSyringeOpen = false;
-        digitalWrite(printValvePin, HIGH);
-        printSyringeOpen = true;
-        delay(10);
-        digitalWrite(printValvePin, LOW);
-        printSyringeOpen = false;
-        homingState = IDLE;
-        limitP.stopHoming();
-      } else {
-        stepperP.run();
+        currentStepper->stop();
+        if (homingAxisNumber == 3){
+          homingState = IDLE;
+          digitalWrite(printValvePin, LOW);
+          printSyringeOpen = false;
+        } else {
+          homingState = INITIATE;
+        }
+        homingAxisNumber++;
       }
       break;
     default:
@@ -527,7 +456,7 @@ enum State {
     MOVING_XYZ,
     CHANGING_PRESSURE,
     PRINTING,
-    HOMING,
+    HOMING_AXIS,
     WAITING,
     // Add more states as needed
 };
@@ -688,8 +617,8 @@ void executeCommand(const Command& cmd) {
       motorsActive = false;
       break;
     case HOME_ALL:
-      homingState = X_HOMING;
-      limitX.startHoming();
+      homingState = INITIATE;
+      homingAxisNumber = 0;
       // currentState = HOMING;
       break;
     case REGULATE_P:
@@ -745,8 +674,8 @@ void sendStatus() {
   Serial.print(",Z:"); Serial.print(stepperZ.currentPosition());
   Serial.print(",P:"); Serial.print(stepperP.currentPosition());
   Serial.print(",Current:"); Serial.print(changeCurrent);
-  Serial.print(",Print_valve:"); Serial.print(printSyringeOpen);
-  Serial.print(",Droplets:"); Serial.print(currentDroplets);
+  Serial.print(",Print_valve:"); Serial.print(limitX.isTriggered());
+  Serial.print(",Droplets:"); Serial.print(currentSwitchIndex);
   Serial.print(",Set_print:"); Serial.print(targetPressureP);
   Serial.print(",Print_pressure:"); Serial.println(currentPressure);
   numIterations = 0;
@@ -769,18 +698,18 @@ void getNewCommand(){
 // Steps motor if it is the right time, moves Y -> X -> Z
 void checkMotors(){
   if (homingState == IDLE){
-    if (limitX.isTriggered()){
-      stepperX.moveTo(stepperX.currentPosition());
-      delay(10);
-    }
-    if (limitY.isTriggered()){
-      stepperY.moveTo(stepperY.currentPosition());
-      delay(10);
-    }
-    if (limitZ.isTriggered()){
-      stepperZ.moveTo(stepperZ.currentPosition());
-      delay(10);
-    }
+    // if (limitX.isTriggered()){
+    //   stepperX.moveTo(stepperX.currentPosition());
+    //   delay(10);
+    // }
+    // if (limitY.isTriggered()){
+    //   stepperY.moveTo(stepperY.currentPosition());
+    //   delay(10);
+    // }
+    // if (limitZ.isTriggered()){
+    //   stepperZ.moveTo(stepperZ.currentPosition());
+    //   delay(10);
+    // }
 
     if (stepperY.distanceToGo() != 0) {
       stepperY.run();
@@ -792,7 +721,8 @@ void checkMotors(){
       correctPos = true;
     }
   } else {
-    homingProtocolXYZ();
+    // homingProtocolXYZ();
+    homeAxis();
   }
 }
 
@@ -848,12 +778,12 @@ void adjustPressure(){
         stepperP.run();
 
         // Drives the syringe motor fast or slow depending on the desired pressure change
-      } else if (currentPressure > targetPressureP + 1000) {
+      } else if (currentPressure > targetPressureP + 200) {
         pressureCorrect = false;
         stepperP.setSpeed(20*steps_per_mm);
         stepperP.move(100);
         stepperP.runSpeed();
-      } else if (currentPressure < targetPressureP - 1000) {
+      } else if (currentPressure < targetPressureP - 200) {
         pressureCorrect = false;
         stepperP.setSpeed(-20*steps_per_mm);
         stepperP.move(-100);
