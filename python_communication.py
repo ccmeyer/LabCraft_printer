@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import glob
+import json
 import math
 import os
 import shutil
@@ -198,33 +199,42 @@ class Monitor(threading.Thread):
 
 class Platform():
     '''
-    The platform class includes all the methods required to control the Dobot
-    robotic arm, the Arduino and the Precigenome pressure regulator
+    The platform class includes all the methods required to control all components of the printer
     '''
     def __init__(self):
         print('Created platform instance')
         self.last_signal = 'N'
         self.new_signal = 'N'
-        self.ard_state = 'Free'
+        self.controller_state = 'Free'
         self.x_pos = 'Unknown'
         self.y_pos = 'Unknown'
         self.z_pos = 'Unknown'
         self.p_pos = 'Unknown'
-        self.r_pos = 'Unknown'
-        self.refuel_state = 'Unknown'
+
+        self.step_size = 1000
+        self.step_num = 3
+        self.possible_steps = [50,250,500,1000,2000]
+
+        self.default_pressure = 0
         self.print_state = 'Unknown'
-        self.refuel_pressure = 'Unknown'
         self.print_pressure = 'Unknown'
-        self.refuel_psi = 'Unknown'
         self.print_psi = 'Unknown'
-        self.print_valve = 'Unknown'
         self.target_print = 'Unknown'
+        self.print_valve = 'Unknown'
+        
         self.current = 'Unknown'
         self.clock = 'Unknown'
+        self.cycle_count = 'Unknown'
+        self.location = 'Unknown'
 
         self.com_open = 'Unknown'
         self.current_cmd = 'Unknown'
         self.last_added_cmd = 'Unknown'
+
+        self.homed = False
+        self.regulating_pressure = False
+        self.gripper_active = False
+        self.motors_active = False
 
         # PRESSURE CONVERSION VARIABLES
         self.FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
@@ -242,7 +252,7 @@ class Platform():
         self.log_note = ''
 
         self.active_log = False
-        self.log_cols = ['time','run_number','x_pos', 'y_pos', 'z_pos', 'p_pos', 'r_pos','print_psi','refuel_psi','print_valve','refuel_valve','mass','actual_droplets','log_note']
+        self.log_cols = ['time','run_number','x_pos', 'y_pos', 'z_pos', 'p_pos','print_psi','print_valve','mass','actual_droplets','log_note']
         self.log_counter = 0
         self.run_number = 0
 
@@ -262,39 +272,43 @@ class Platform():
         self.terminate = False
         self.base = './'
 
-        self.initiate_arduino('COM7')
-        self.initiate_balance('COM6')
+        self.read_defaults()
+        self.select_mode(mode_name=self.default_settings['DEFAULT_DISPENSER'])
+        self.load_default_positions()
 
-    def initiate_arduino(self,port):
+        self.initiate_controller(self.default_settings['BOARD_PORT'])
+        self.initiate_balance(self.default_settings['BALANCE_PORT'])
+
+    def initiate_controller(self,port):
         try:
-            self.arduino = serial.Serial(port=port, baudrate=115200)
-            print('Arduino starting...')
+            self.controller = serial.Serial(port=port, baudrate=115200)
+            print('Controller starting...')
             time.sleep(2)
-            print('Arduino started')
-            self.ard_status = Thread(target = self.get_status,args=[])
-            self.ard_status.daemon = True
-            self.ard_status.start()
+            print('Controller started')
+            self.controller_status = Thread(target = self.get_status,args=[])
+            self.controller_status.daemon = True
+            self.controller_status.start()
         except:
-            print('\n---Arduino unable to connect\n')
+            print('\n---Controller unable to connect\n')
 
     def get_status(self):
-        print('\n- Started arduino thread')
+        print('\n- Started controller thread')
         counter = 0
         while(True):
             if self.new_signal != self.last_signal:
-                self.arduino.write(self.new_signal.encode())
-                self.arduino.flush()
+                self.controller.write(self.new_signal.encode())
+                self.controller.flush()
                 self.new_signal = self.last_signal
 
-            if self.arduino.in_waiting > 0:
+            if self.controller.in_waiting > 0:
                 try:
-                    data = self.arduino.readline().decode().strip()
+                    data = self.controller.readline().decode().strip()
                     try:
                         data_arr = data.split(',')
 
                         data_dict = {}
                         [data_dict.update({t.split(':')[0]:t.split(':')[1]}) for t in data_arr]
-                        self.ard_state = data_dict['Serial']
+                        self.controller_state = data_dict['Serial']
                         self.clock = float(data_dict['Max_cycle'])
                         self.cycle_count = float(data_dict['Cycle_count'])
                         # # self.event = data_dict['Event']
@@ -394,7 +408,7 @@ class Platform():
         while True:
             # try:
             self.convert_pressure()
-            self.monitor.info_0.set(str(self.ard_state))
+            self.monitor.info_0.set(str(self.controller_state))
             self.monitor.info_1.set(str(self.x_pos))
             self.monitor.info_2.set(str(self.y_pos))
             self.monitor.info_3.set(str(self.z_pos))
@@ -520,10 +534,10 @@ class Platform():
         self.terminate = True
         self.update_thread.join()
         print('\nJoined update thread')
-        self.ard_status.join()
-        print('Joined arduino status thread')
-        self.arduino.close()
-        print('Closed Arduino')
+        self.controller_status.join()
+        print('Joined controller status thread')
+        self.controller.close()
+        print('Closed controller')
         return
 
     def initiate_log(self):
@@ -557,47 +571,169 @@ class Platform():
         export_df.set_index(self.log_cols[0]).to_excel(self.log_path)
         return
 
+    def read_defaults(self):
+        with open('./default_settings.json') as json_file:
+            self.default_settings =  json.load(json_file)
+        print('Read the default_settings.json file')
+        self.base = self.default_settings['BASE_PATH']
+        self.possible_dispensers = list(self.default_settings['DISPENSER_TYPES'].keys())
+        print('Possible modes:',self.possible_dispensers)
+
+        self.mode = None
+        return
+    
+    def select_mode(self,mode_name=False):
+        if not mode_name:
+            current_index = self.possible_dispensers.index(self.mode)
+            new_index = (current_index + 1) % len(self.possible_dispensers)
+            print(self.possible_dispensers[new_index])
+
+            self.load_dispenser_defaults(self.possible_dispensers[new_index])
+            return
+        elif self.mode == mode_name:
+            print('Already in the selected mode')
+            self.load_dispenser_defaults(mode_name)
+            return
+        else:
+            if not mode_name in self.possible_dispensers:
+                print('Not an available mode')
+                return
+            else:
+                self.load_dispenser_defaults(mode_name)
+                # self.set_absolute_pressure(self.pulse_pressure,self.refuel_pressure)
+                return
+    
+    def load_dispenser_defaults(self,mode):
+        print('Loading mode:',mode)
+        self.height = self.default_settings['DISPENSER_TYPES'][mode]['height']
+        self.safe_y = self.default_settings['DISPENSER_TYPES'][mode]['safe_y']
+        self.pulse_width = self.default_settings['DISPENSER_TYPES'][mode]['pulse_width']
+        self.default_pressure = self.default_settings['DISPENSER_TYPES'][mode]['print_pressure']
+
+        self.frequency = self.default_settings['DISPENSER_TYPES'][mode]['frequency']
+        self.max_volume =  self.default_settings['DISPENSER_TYPES'][mode]['max_volume']
+        self.min_volume =  self.default_settings['DISPENSER_TYPES'][mode]['min_volume']
+        self.current_volume = 0
+        self.calibrated = False
+        self.tracking_volume = False
+        self.mode = mode
+
+        return            
+
+    def load_default_positions(self):
+        # Extract all calibration data
+        try:
+            self.calibration_file_path = self.get_file_path('Calibrations/default_positions_{}.json'.format(self.mode),base=True)
+            with open(self.calibration_file_path) as json_file:
+                self.calibration_data =  json.load(json_file)
+            print('Loaded default positions:{}'.format(self.mode))
+
+        except:
+            all_calibrations = self.get_all_paths('Calibrations/*.json',base=True)
+            print('Possible printing calibrations:')
+
+            target = select_options(all_calibrations,trim=True)
+            print('Chosen plate: ',target)
+            self.calibration_file_path = target
+
+            with open(self.calibration_file_path) as json_file:
+                self.calibration_data =  json.load(json_file)
+        return
+
+    def move_to_location(self,location=False,direct=False,safe_y=False):
+        print('Current',self.location)
+        if not location:
+            location,quit = select_options(list(self.calibration_data.keys()))
+            if quit: return
+        print('Moving to:',location)
+
+        if self.location == location:
+            print('Already in {} position'.format(location))
+            return
+        available_locations = list(self.calibration_data.keys())
+        if location not in available_locations:
+            print(f'{location} not present in calibration data')
+            return
+
+        if direct == False and safe_y == False:
+            self.set_absolute_coordinates(self.x_pos,self.y_pos,self.height)
+            self.set_absolute_coordinates(self.x_pos,self.calibration_data[location]['y'],self.height)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.height)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        elif direct == True and safe_y == False:
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        elif direct == False and safe_y == True:
+            self.set_absolute_coordinates(self.x_pos,self.y_pos,self.height)
+            self.set_absolute_coordinates(self.x_pos,self.safe_y,self.height)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.safe_y,self.height)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.height)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        elif direct == True and safe_y == True:
+            self.set_absolute_coordinates(self.x_pos,self.safe_y,self.z_pos)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.safe_y,self.z_pos)
+            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        return
+    
+    def save_position(self,location=False,new=False,ask=True):
+        if new:
+            if not self.ask_yes_no(message=f"Create a new position? (y/n)"): return
+            location = input('Enter the name of the position: ')
+            self.calibration_data.update({location:{"x":self.x_pos,"y":self.y_pos,"z":self.z_pos}})
+        elif not location and not new:
+            print('Select which position to set:')
+            location,quit = select_options(list(self.calibration_data.keys()))
+            if quit: return
+            self.calibration_data[location] = {"x":self.x_pos,"y":self.y_pos,"z":self.z_pos}
+        else:
+            self.calibration_data[location] = {"x":self.x_pos,"y":self.y_pos,"z":self.z_pos}
+        
+        if ask:
+            if not self.ask_yes_no(message=f"Write {location} position to file? (y/n)"): return
+        
+        with open(self.calibration_file_path, 'w') as outfile:
+            json.dump(self.calibration_data, outfile)
+        print("Position data saved")
+
+        return
+
     def move_to_well(self,row,col):
         row_spacing = 100
         col_spacing = 100
 
-        # while True:
-        #     if self.ard_state == 'Free':
         new_x = (row_spacing*row)+self.array_start_x
         new_y = (col_spacing*col)+self.array_start_y
         new_z = self.array_start_z
         self.set_absolute_coordinates(new_x,new_y,new_z)
         return
-            # else:
-            #     print('---Arduino is:',self.ard_state)
-            #     time.sleep(0.2)
-
-    # def print_droplets(self,droplets):
-    #     while True:
-    #         if self.ard_state == 'Free':
-    #             self.new_signal = f'<print,{droplets}>'
-    #             if self.active_log:
-    #                 note_str = f'print,{droplets}'
-    #                 self.log_note = note_str
-    #             return
-    #         else:
-    #             print('---Arduino is:',self.ard_state)
-    #             time.sleep(0.2)
-
+    
     def print_array(self):
-
+        if not self.motors_active:
+            print('Motors must be active')
+            return
+        if not self.regulating_pressure:
+            print('Must regulate pressure')
+            return
         if not self.ask_yes_no(message="Print an array? (y/n)"):
             return
         all_arrays = self.get_all_paths('Print_arrays/*.csv',base=True)
         chosen_path,quit = select_options(all_arrays,message='Select one of the arrays:',trim=True)
         if quit: return
 
+        if not self.gripper_active:
+            self.toggle_gripper()
+        
+        location= 'print'
+        if self.ask_yes_no(message=f"Move to {location} position? (y/n)"):
+            self.move_to_location(location='print',direct=True,safe_y=False)
+            self.array_start_x = self.calibration_data[location]['x']
+            self.array_start_y = self.calibration_data[location]['y']
+            self.array_start_z = self.calibration_data[location]['z']
+        else:
+            self.array_start_x = self.x_pos
+            self.array_start_y = self.y_pos
+            self.array_start_z = self.z_pos
+        
         arr = pd.read_csv(chosen_path)
-
-        self.array_start_x = self.x_pos
-        self.array_start_y = self.y_pos
-        self.array_start_z = self.z_pos
-
 
         for index, line in arr.iterrows():
             if self.check_for_pause():
@@ -608,24 +744,24 @@ class Platform():
             print('\nOn {} out of {}'.format(index+1,len(arr)))
 
             self.move_to_well(line['Row'],line['Column'])
-            time.sleep(0.2)
             self.print_droplets(line['Droplet'])
-            time.sleep(0.2)
-
+        self.move_to_location(location='loading_position',direct=True,safe_y=False)
         return
-
-    def generate_command(self,commandName,param1,param2,param3,timeout=0):
-        if self.com_open == 1 and self.last_added_cmd - self.current_cmd <= 1:
-            self.new_signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
-            self.command_log.update({self.command_number:self.new_signal})
-            self.command_number += 1
-        elif timeout > 100:
-            print('-COMMAND FAILED TO SEND-')
-        else:
+    
+    def generate_command(self, commandName, param1, param2, param3, timeout=0):
+        while self.com_open == 0 or self.last_added_cmd - self.current_cmd > 1:
             time.sleep(0.2)
             print(f'---Waiting for Com:{timeout}---')
             timeout += 1
-            self.generate_command(commandName,param1,param2,param3,timeout=timeout)
+            if timeout > 100:
+                print('-COMMAND FAILED TO SEND-')
+                return
+        
+        self.new_signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
+        self.command_log.update({self.command_number: self.new_signal})
+        self.command_number += 1
+
+        time.sleep(0.2)
         return
 
     def set_relative_coordinates(self,x,y,z):
@@ -637,6 +773,9 @@ class Platform():
         return
     
     def print_droplets(self,droplet_count):
+        if not self.regulating_pressure:
+            print('Must be regulating pressure')
+            return
         self.generate_command('PRINT',droplet_count,0,0)
         return
 
@@ -659,33 +798,49 @@ class Platform():
     
     def toggle_gripper(self):
         self.generate_command('TOGGLE_GRIPPER',0,0,0)
+        self.gripper_active = True
         return
     
     def gripper_off(self):
         self.generate_command('GRIPPER_OFF',0,0,0)
+        self.gripper_active = False
         return
     
     def enable_motors(self):
         self.generate_command('ENABLE_MOTORS',0,0,0)
+        self.motors_active = True
         return
     
     def disable_motors(self):
         self.generate_command('DISABLE_MOTORS',0,0,0)
+        self.motors_active = False
         return
     
     def home_all(self):
+        if not self.motors_active:
+            print('Most activate motors first')
+            return
         self.generate_command('HOME_ALL',0,0,0)
+        self.homed = True
         return
     
     def regulate_pressure(self):
+        if not self.homed:
+            print('Must home before regulating pressure')
+            return
         self.generate_command('REGULATE_P',0,0,0)
+        self.regulating_pressure = True
         return
     
     def unregulate_pressure(self):
         self.generate_command('UNREGULATE_P',0,0,0)
+        self.regulating_pressure = False
         return
 
     def reset_syringe(self):
+        if not self.motors_active:
+            print('Motors must be active')
+            return
         self.generate_command('RESET_P',0,0,0)
         return
     
@@ -707,32 +862,38 @@ class Platform():
 
         while True:
             if self.com_open == 1:
-                print('Arduino is:',self.ard_state)
+                print('Controller is:',self.controller_state)
                 key = self.get_current_key()
                 print(key)
                 if key == Key.up:
-                    self.set_relative_coordinates(1000,0,0)
+                    self.set_relative_coordinates(self.step_size,0,0)
                 elif key == Key.down:
-                    self.set_relative_coordinates(-1000,0,0)
+                    self.set_relative_coordinates(-self.step_size,0,0)
                 elif key == Key.left:
-                    self.set_relative_coordinates(0,1000,0)
+                    self.set_relative_coordinates(0,self.step_size,0)
                 elif key == Key.right:
-                    self.set_relative_coordinates(0,-1000,0)
+                    self.set_relative_coordinates(0,-self.step_size,0)
                 elif key == 'k':
-                    self.set_relative_coordinates(0,0,-1000)
+                    self.set_relative_coordinates(0,0,self.step_size)
                 elif key == 'm':
-                    self.set_relative_coordinates(0,0,1000)
+                    self.set_relative_coordinates(0,0,-self.step_size)
                 # elif key == 'R':
                 #     self.new_signal = '<resetXYZ>'
                 
                 elif key == 'H':
                     self.home_all()
                 elif key == 'D':
-                    self.set_absolute_coordinates(-4500,3500,-35000)
+                    self.move_to_location(direct=True,safe_y=False)
+                    # self.set_absolute_coordinates(-4500,3500,-35000)
                 elif key == 'F':
-                    self.set_absolute_coordinates(-5000,7000,-20000)
+                    # self.set_absolute_coordinates(-5000,7000,-20000)
+                    self.move_to_location(direct=False,safe_y=True)
                 # elif key == 'T':
                 #     self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
+                elif key == 'L':
+                    self.move_to_location(location='loading_position',direct=True,safe_y=False)
+                elif key == '{':
+                    self.move_to_location(location='print',direct=True,safe_y=False)
 
                 elif key == 'c':
                     self.print_droplets(5)
@@ -761,7 +922,7 @@ class Platform():
                 #     self.new_signal = '<openP>'
                 # elif key == '(':
                 #     self.new_signal = '<closeP>'
-                elif key == '{':
+                elif key == '}':
                     self.reset_syringe()
 
                 # elif key == '1':
@@ -795,11 +956,25 @@ class Platform():
                     self.set_absolute_pressure(1.8)
 
 
-                elif key == 'S':
-                    self.toggle_log()
-                elif key == 'L':
-                    self.initiate_log()
+                # elif key == 'S':
+                #     self.toggle_log()
+                # elif key == 'L':
+                #     self.initiate_log()
 
+                elif key == 'Z':
+                    self.save_position(new=False)
+                elif key == 'X':
+                    self.save_position(new=True)
+
+                elif key == ';':
+                    self.step_num += 1
+                    self.step_size = self.possible_steps[abs(self.step_num) % len(self.possible_steps)]
+                    print('Changed to {}'.format(self.step_size))
+                elif key == '.':
+                    self.step_num -= 1
+                    self.step_size = self.possible_steps[abs(self.step_num) % len(self.possible_steps)]
+                    print('Changed to {}'.format(self.step_size))
+                
                 elif key == 'q':
                     self.disable_motors()
                     time.sleep(0.5)
@@ -808,7 +983,7 @@ class Platform():
                     print('\n---Quitting---\n')
                     return
             else:
-                print('---Arduino is:',self.ard_state)
+                print('---Controller is:',self.controller_state)
                 time.sleep(0.5)
 
 
