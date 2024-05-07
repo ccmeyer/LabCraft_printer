@@ -24,16 +24,17 @@ def select_options(lst,message='Select one of the options:', trim=False):
     else:
         simple_paths = lst
     exit_option = 'Exit'
+    options = simple_paths + [exit_option]
     lst.append(exit_option)
-    simple_paths.append(exit_option)
+    # simple_paths.append(exit_option)
 
-    for index,opt in enumerate(simple_paths):
+    for index,opt in enumerate(options):
         print(index,opt)
     enteredStr = input(message)
-    while not enteredStr.isnumeric() or int(enteredStr) >= len(lst) or int(enteredStr) < 0:
+    while not enteredStr.isnumeric() or int(enteredStr) >= len(options) or int(enteredStr) < 0:
         enteredStr = input("The entered command is invalid. Please enter a valid index: ")
     print('Option selected: ',lst[int(enteredStr)],'\n')
-    if lst[int(enteredStr)] == exit_option:
+    if options[int(enteredStr)] == exit_option:
         quit = True
     else:
         quit = False

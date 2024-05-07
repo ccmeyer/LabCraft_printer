@@ -641,6 +641,11 @@ class Platform():
         return
 
     def move_to_location(self,location=False,direct=False,safe_y=False):
+        '''
+        Tells the robot to move to a location based on the defined coordinates in the calibration file.
+        If direct is set to True, the robot will move directly to the location. If safe_y is set to True, 
+        the robot will move to the safe_y position before moving to the location to avoid running into an obsticle.
+        '''
         print('Current',self.location)
         if not location:
             location,quit = select_options(list(self.calibration_data.keys()))
@@ -654,24 +659,44 @@ class Platform():
         if location not in available_locations:
             print(f'{location} not present in calibration data')
             return
+        
+        if location == 'balance' or self.location == 'balance':
+            safe_y = True
+            direct = False
 
-        if direct == False and safe_y == False:
-            self.set_absolute_coordinates(self.x_pos,self.y_pos,self.height)
-            self.set_absolute_coordinates(self.x_pos,self.calibration_data[location]['y'],self.height)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.height)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
-        elif direct == True and safe_y == False:
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
-        elif direct == False and safe_y == True:
-            self.set_absolute_coordinates(self.x_pos,self.y_pos,self.height)
-            self.set_absolute_coordinates(self.x_pos,self.safe_y,self.height)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.safe_y,self.height)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.height)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
-        elif direct == True and safe_y == True:
-            self.set_absolute_coordinates(self.x_pos,self.safe_y,self.z_pos)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.safe_y,self.z_pos)
-            self.set_absolute_coordinates(self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        target_coordinates = self.calibration_data[location]
+        up_first = False
+        if direct and self.z_pos < target_coordinates['z']:
+            up_first = True
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, target_coordinates['z'])
+
+        x_limit = -4500
+        if self.x_pos > x_limit and target_coordinates['x'] < x_limit or self.x_pos < x_limit and target_coordinates['x'] > x_limit:
+            safe_y = True
+
+        if direct and not safe_y:
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        elif not direct and not safe_y:
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.target_coordinates['z'])
+        elif not direct and safe_y:
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
+            self.set_absolute_coordinates(self.x_pos, self.safe_y, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        elif direct and safe_y:
+            if up_first:
+                self.set_absolute_coordinates(self.x_pos, self.safe_y, target_coordinates['z'])
+                self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, target_coordinates['z'])
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+            else:
+                self.set_absolute_coordinates(self.x_pos, self.safe_y, self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        self.location = location
         return
     
     def save_position(self,location=False,new=False,ask=True):
@@ -745,7 +770,7 @@ class Platform():
 
             self.move_to_well(line['Row'],line['Column'])
             self.print_droplets(line['Droplet'])
-        self.move_to_location(location='loading_position',direct=True,safe_y=False)
+        self.move_to_location(location='loading',direct=True,safe_y=False)
         return
     
     def generate_command(self, commandName, param1, param2, param3, timeout=0):
@@ -822,6 +847,7 @@ class Platform():
             return
         self.generate_command('HOME_ALL',0,0,0)
         self.homed = True
+        self.location = 'home'
         return
     
     def regulate_pressure(self):
@@ -891,7 +917,7 @@ class Platform():
                 # elif key == 'T':
                 #     self.new_signal = '<absoluteXYZ,-5000,2000,-29000>'
                 elif key == 'L':
-                    self.move_to_location(location='loading_position',direct=True,safe_y=False)
+                    self.move_to_location(location='loading',direct=True,safe_y=False)
                 elif key == '{':
                     self.move_to_location(location='print',direct=True,safe_y=False)
 
