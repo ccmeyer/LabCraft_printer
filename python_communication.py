@@ -401,6 +401,67 @@ class Platform():
                     self.mass_counter = 0
             time.sleep(0.1)
 
+    def wait_for_stable_mass(self):
+        print('--- Waiting for balance to stabilize...')
+        count = 0
+        time.sleep(0.5)
+        while True:
+            if self.stable_mass != 'not_stable':
+                print(f'Count:{count}')
+                count += 1
+            else:
+                count = 0
+                print('.',end='')
+            if count == 10:
+                print('Mass stabilized')
+                return self.stable_mass
+
+            if self.check_for_pause():
+                if self.ask_yes_no(message="Quit waiting for scale? (y/n)"):
+                    print('Quitting\n')
+                    return self.stable_mass
+            time.sleep(0.5)
+    
+    def calibrate_pressure(self,target_volume=50,tolerance=0.02):
+        if not self.regulating_pressure:
+            print('Must regulate pressure')
+            return
+        if not self.ask_yes_no(message='Calibrate printer head? (y/n)'):
+            print('Did not calibrate...')
+            section_break()
+            return
+        
+        if not self.gripper_active:
+            self.toggle_gripper()
+
+        self.move_to_location(location='balance',direct=False,safe_y=True)
+        
+        target_mass = (target_volume/1000) *100 # target_volume in nL and target_mass in mg
+        max_pressure_change = 0.5  # maximum change in pressure in a single step
+        while True:
+            mass_initial = self.wait_for_stable_mass()
+            self.print_droplets(100)
+            mass_final = self.wait_for_stable_mass()
+            mass_diff = mass_final - mass_initial
+            print(f'Mass difference: {mass_diff}')
+            if mass_diff > (target_mass*(1-tolerance)) and mass_diff < (target_mass*(1+tolerance)):
+                print('TARGET VOLUME ACHIEVED')
+                return
+            else:
+                proportion = (mass_diff / target_mass)
+                print('Current proportion:',round(proportion,2))
+                if not self.ask_yes_no(message='Continue calibrating? (y/n)'):
+                    return
+                pressure_change = (self.print_psi / proportion) - self.print_psi
+                if abs(pressure_change) > max_pressure_change:
+                    pressure_change = max_pressure_change if pressure_change > 0 else -max_pressure_change
+                new_pressure = self.print_psi + pressure_change
+
+                print('New pressure: ',new_pressure)
+                self.set_absolute_pressure(new_pressure)
+                time.sleep(0.2)
+
+
     def update_monitor(self):
         time.sleep(3)
         print('--- Now updating monitor')
@@ -430,6 +491,19 @@ class Platform():
             # self.monitor.info_12.set(str(self.refuel_valve))
             # self.monitor.info_13.set(str(self.mass))
             # self.monitor.info_14.set(str(self.actual_droplets))
+
+            if self.mass != 'unknown':
+                self.mass_record.append(self.mass)
+                if len(self.mass_record) > 10:
+                    self.mass_record.pop(0)
+                if len(self.mass_record) == 10:
+                    mass_std = np.std(self.mass_record)
+                    if mass_std < 0.01:
+                        self.stable_mass = round(np.mean(self.mass_record),3)
+                    else:
+                        self.stable_mass = 'not_stable'
+
+
 
             if self.active_log == True and self.log_counter >= 3:
                 self.log_state()
@@ -609,7 +683,7 @@ class Platform():
         self.safe_y = self.default_settings['DISPENSER_TYPES'][mode]['safe_y']
         self.pulse_width = self.default_settings['DISPENSER_TYPES'][mode]['pulse_width']
         self.default_pressure = self.default_settings['DISPENSER_TYPES'][mode]['print_pressure']
-
+        self.target_volume = self.default_settings['DISPENSER_TYPES'][mode]['target_disp_volume']
         self.frequency = self.default_settings['DISPENSER_TYPES'][mode]['frequency']
         self.max_volume =  self.default_settings['DISPENSER_TYPES'][mode]['max_volume']
         self.min_volume =  self.default_settings['DISPENSER_TYPES'][mode]['min_volume']
@@ -646,6 +720,9 @@ class Platform():
         If direct is set to True, the robot will move directly to the location. If safe_y is set to True, 
         the robot will move to the safe_y position before moving to the location to avoid running into an obsticle.
         '''
+        if self.motors_active == False:
+            print('Motors must be active')
+            return
         print('Current',self.location)
         if not location:
             location,quit = select_options(list(self.calibration_data.keys()))
@@ -927,6 +1004,9 @@ class Platform():
                     self.print_droplets(20)
                 elif key == 'b':
                     self.print_droplets(100)
+
+                elif key == 'C':
+                    self.calibrate_pressure(target_volume=self.target_volume,tolerance=0.02)
 
                 elif key == 'P':
                     self.print_array()
