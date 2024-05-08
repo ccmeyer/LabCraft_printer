@@ -116,6 +116,17 @@ int currentDroplets = 0;
 int targetDroplets = 0;
 int newDroplets = 0;
 
+// Define structure for a task
+struct Task {
+    void (*function)(); // Function pointer for the task
+    unsigned long interval; // Interval in milliseconds
+    unsigned long lastExecutionTime; // Last execution time in milliseconds
+};
+
+Task* refreshGripperTaskPtr = nullptr; // Define the pointer
+int refreshGripperTaskIndex = 3;
+
+
 class Gripper {
 private:
     bool active;
@@ -127,13 +138,14 @@ private:
     int pumpValvePin1;
     int pumpValvePin2;
     int pumpPin;
+    Task* refreshGripperTaskPtr;
 
 public:
   // Constructor to initialize variables
-  Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin)
+  Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin, Task* refreshGripperTaskPtr)
     : active(false), closed(false), pumpOn(false),
       lastExecution(0), pumpInterval(500),
-      pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin) {}
+      pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin), refreshGripperTaskPtr(refreshGripperTaskPtr) {}
 
   bool isActive() const { return active; }
   bool isClosed() const { return closed; }
@@ -145,6 +157,9 @@ public:
     digitalWrite(pumpPin, HIGH);
     pumpOn = true;
     lastExecution = millis();
+    if(refreshGripperTaskPtr != nullptr) { // Check if the pointer has been set
+        refreshGripperTaskPtr->lastExecutionTime = lastExecution;
+    }
   }
 
   void checkPump() {
@@ -155,21 +170,25 @@ public:
   }
   
   // Method to toggle the gripper state
-  void toggleGripper() {
+  void closeGripper() {
     if (!active) {
       active = true;
     }
-    if (!closed) {
-      digitalWrite(pumpValvePin1, LOW);
-      digitalWrite(pumpValvePin2, LOW);
-      closed = true;
-      activatePump();
-    } else {
-      digitalWrite(pumpValvePin1, HIGH);
-      digitalWrite(pumpValvePin2, HIGH);
-      closed = false;
-      activatePump();
+    digitalWrite(pumpValvePin1, LOW);
+    digitalWrite(pumpValvePin2, LOW);
+    closed = true;
+    activatePump();
+  }
+
+  // Method to toggle the gripper state
+  void openGripper() {
+    if (!active) {
+      active = true;
     }
+    digitalWrite(pumpValvePin1, HIGH);
+    digitalWrite(pumpValvePin2, HIGH);
+    closed = false;
+    activatePump();
   }
 
   // Method to turn off the gripper
@@ -182,7 +201,7 @@ public:
   }
 };
 
-Gripper gripper = Gripper(pumpValvePin1,pumpValvePin2,pumpPin);
+Gripper gripper = Gripper(pumpValvePin1,pumpValvePin2,pumpPin,refreshGripperTaskPtr);
 
 // Function wrapper to periodically check if the pump is still on
 void checkGripper(){
@@ -253,7 +272,7 @@ AccelStepper stepperY = AccelStepper(stepperY.DRIVER, Y_STEP_PIN, Y_DIR_PIN);
 AccelStepper stepperZ = AccelStepper(stepperZ.DRIVER, Z_STEP_PIN, Z_DIR_PIN);
 AccelStepper stepperP = AccelStepper(stepperP.DRIVER, P_STEP_PIN, P_DIR_PIN);
 
-AccelStepper* steppers[] = {&stepperX,&stepperY,&stepperZ,&stepperP};
+AccelStepper* steppers[] = {&stepperZ,&stepperX,&stepperY,&stepperP};
 
 PressureSensor pressureSensor = PressureSensor(TCAAddress, sensorAddress);
 
@@ -263,7 +282,7 @@ LimitSwitch limitZ = LimitSwitch('Z',zstop,debounceAll,ledPin);
 LimitSwitch limitP = LimitSwitch('P',pstop,debounceAll,ledPin);
 
 // Define an array to hold all limit switch objects
-LimitSwitch* limits[] = {&limitX, &limitY, &limitZ, &limitP};
+LimitSwitch* limits[] = {&limitZ, &limitX, &limitY, &limitP};
 
 // Static variable to keep track of the current switch index
 static int currentSwitchIndex = 0;
@@ -318,9 +337,9 @@ struct HomingStage {
 
 // Array of homing stages for each motor
 HomingStage homingStages[] = {
+    {1,2500, -300},   // Z homing
     {1,1500, -100},   // X homing
     {-1,1500, -100},  // Y homing
-    {1,2500, -300},   // Z homing
     {1,3000, -300},   // P homing
 };
 
@@ -538,7 +557,8 @@ enum CommandType {
     ABSOLUTE_P,
     PRINT,
     RESET_P,
-    TOGGLE_GRIPPER,
+    OPEN_GRIPPER,
+    CLOSE_GRIPPER,
     GRIPPER_OFF,
     ENABLE_MOTORS,
     DISABLE_MOTORS,
@@ -570,6 +590,7 @@ enum State {
     CHANGING_PRESSURE,
     PRINTING,
     HOMING_AXIS,
+    PUMPING,
     WAITING,
     // Add more states as needed
 };
@@ -594,8 +615,10 @@ CommandType mapCommandType(const char* commandName) {
         return PRINT;
     } else if (strcmp(commandName, "RESET_P") == 0) {
         return RESET_P;
-    } else if (strcmp(commandName, "TOGGLE_GRIPPER") == 0) {
-        return TOGGLE_GRIPPER;
+    } else if (strcmp(commandName, "OPEN_GRIPPER") == 0) {
+        return OPEN_GRIPPER;
+    } else if (strcmp(commandName, "CLOSE_GRIPPER") == 0) {
+        return CLOSE_GRIPPER;
     } else if (strcmp(commandName, "GRIPPER_OFF") == 0) {
         return GRIPPER_OFF;
     } else if (strcmp(commandName, "ENABLE_MOTORS") == 0) {
@@ -703,8 +726,11 @@ void executeCommand(const Command& cmd) {
     case RESET_P:
       resetSyringe();
       break;
-    case TOGGLE_GRIPPER:
-      gripper.toggleGripper();
+    case OPEN_GRIPPER:
+      gripper.openGripper();
+      break;
+    case CLOSE_GRIPPER:
+      gripper.closeGripper();
       break;
     case GRIPPER_OFF:
       gripper.gripperOff();
@@ -773,6 +799,9 @@ void sendStatus() {
   } else if (currentDroplets != targetDroplets){
     currentState = PRINTING;
     state = "Printing";
+  } else if (gripper.isPumpOn() == true){
+    currentState = PUMPING;
+    state = "Pump_on";
   } else {
     currentState = FREE;
     state = "Free";
@@ -818,18 +847,19 @@ unsigned long average (unsigned long * array, int len)  // assuming array is int
   return  ((unsigned long) sum) / len ;  // average will be fractional, so float may be appropriate.
 }
 
-// Define structure for a task
-struct Task {
-    void (*function)(); // Function pointer for the task
-    unsigned long interval; // Interval in milliseconds
-    unsigned long lastExecutionTime; // Last execution time in milliseconds
-};
-
-// Initialize tasks
+// Initialize tasks: 
+// Order of tasks in the vector is used elsewhere:
+// Task 1: Check limit switches every 2 milliseconds
+// Task 2: Check pressure every 10 milliseconds
+// Task 3: Check gripper every 500 milliseconds
+// Task 4: Refresh gripper every 60000 milliseconds
+// Task 5: Send status every 50 milliseconds
+// Task 6: Get new command every 10 milliseconds
+// Task 7: Execute next command every 10 milliseconds
 std::vector<Task> tasks = {
     {checkLimitSwitches, 2, 0}, // Task 1
     {checkPressure, 10, 3},
-    {checkGripper, 50, 23},
+    {checkGripper, 500, 23},
     {refreshGripper, 60000, 0},
     {sendStatus, 50, 3},
     {getNewCommand, 10, 0},

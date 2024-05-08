@@ -212,8 +212,8 @@ class Platform():
         self.p_pos = 'Unknown'
 
         self.step_size = 1000
-        self.step_num = 3
-        self.possible_steps = [50,250,500,1000,2000]
+        self.step_num = 4
+        self.possible_steps = [2,10,50,250,500,1000,2000]
 
         self.default_pressure = 0
         self.print_state = 'Unknown'
@@ -233,8 +233,14 @@ class Platform():
 
         self.homed = False
         self.regulating_pressure = False
+        self.gripper_closed = False
         self.gripper_active = False
         self.motors_active = False
+        self.chip_loaded = True
+        self.rack_state = [False,False]
+        self.pause_time = 2
+
+        self.rack_offset = -2500
 
         # PRESSURE CONVERSION VARIABLES
         self.FSS = 13107 #Set in manual 10-90% transfer function option Gage type sensor
@@ -279,6 +285,14 @@ class Platform():
         self.initiate_controller(self.default_settings['BOARD_PORT'])
         self.initiate_balance(self.default_settings['BALANCE_PORT'])
 
+        self.ask_for_status()
+
+    def ask_for_status(self):
+        self.chip_loaded = self.ask_yes_no(message='Is a chip loaded in the gripper? (y/n)')
+        for i,pos in enumerate(self.rack_state):
+            self.rack_state[pos] = self.ask_yes_no(message=f'Position {i}: Loaded? (y/n)')
+        return
+    
     def initiate_controller(self,port):
         try:
             self.controller = serial.Serial(port=port, baudrate=115200)
@@ -404,7 +418,7 @@ class Platform():
     def wait_for_stable_mass(self):
         print('--- Waiting for balance to stabilize...')
         count = 0
-        time.sleep(0.5)
+        time.sleep(2)
         while True:
             if self.stable_mass != 'not_stable':
                 print(f'Count:{count}')
@@ -727,7 +741,6 @@ class Platform():
         if not location:
             location,quit = select_options(list(self.calibration_data.keys()))
             if quit: return
-        print('Moving to:',location)
 
         if self.location == location:
             print('Already in {} position'.format(location))
@@ -741,13 +754,20 @@ class Platform():
             safe_y = True
             direct = False
 
-        target_coordinates = self.calibration_data[location]
+        target_coordinates = self.calibration_data[location].copy()
+        
+        if 'rack_position' in location:
+            print('Moving to rack position:',location,'Applying X offset')
+            target_coordinates['x'] += self.rack_offset
+        else:
+            print('Moving to:',location)
+
         up_first = False
         if direct and self.z_pos < target_coordinates['z']:
             up_first = True
             self.set_absolute_coordinates(self.x_pos, self.y_pos, target_coordinates['z'])
 
-        x_limit = -4500
+        x_limit = -5500
         if self.x_pos > x_limit and target_coordinates['x'] < x_limit or self.x_pos < x_limit and target_coordinates['x'] > x_limit:
             safe_y = True
 
@@ -776,7 +796,69 @@ class Platform():
         self.location = location
         return
     
+    def _move_printer_head(self, position, load):
+        '''
+        Internal function to move the printer head to a position and load or unload a printer head
+        '''
+        if not position:
+            print('Select which position to interact with:')
+            rack_positions = [pos for pos in self.calibration_data.keys() if 'rack_position' in pos]
+            position, quit = select_options(rack_positions)
+            if quit: return
+
+        num_slot = int(position.split('_')[-1])
+        if load and not self.rack_state[num_slot]:
+            print(f'Position {num_slot} is empty')
+            if not self.ask_yes_no('Load a printer head now? (y/n)'): return
+            self.rack_state[num_slot] = True
+        elif not load and self.rack_state[num_slot]:
+            print(f'Position {num_slot} is loaded')
+            if not self.ask_yes_no('Unload the printer head now? (y/n)'): return
+            self.rack_state[num_slot] = False
+        
+        self.move_to_location(location=position, direct=True, safe_y=False)
+        
+        target_coordinates = self.calibration_data[position]
+        self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        if load:
+            self.close_gripper()
+        else:
+            self.open_gripper()
+        time.sleep(self.pause_time)
+        self.set_absolute_coordinates(target_coordinates['x']+self.rack_offset, target_coordinates['y'], target_coordinates['z'])
+        self.chip_loaded = load
+        self.rack_state[num_slot] = not self.rack_state[num_slot]
+        return
+
+    def pick_up_printer_head(self, position=False):
+        '''
+        Pick up a printer head from a rack position
+        '''
+        print('Picking up printer head')
+        if self.chip_loaded:
+            print('Chip already loaded')
+            return
+        self.open_gripper()
+        time.sleep(self.pause_time)
+        self._move_printer_head(position, load=True)
+        return
+
+    def drop_off_printer_head(self, position=False):
+        '''
+        Drop off a printer head at a rack position
+        '''
+        print('Dropping off printer head')
+        if not self.chip_loaded:
+            print('Chip is not loaded')
+            return
+        self._move_printer_head(position, load=False)
+        return
+
+    
     def save_position(self,location=False,new=False,ask=True):
+        '''
+        Save the current position to the calibration file
+        '''
         if new:
             if not self.ask_yes_no(message=f"Create a new position? (y/n)"): return
             location = input('Enter the name of the position: ')
@@ -799,6 +881,9 @@ class Platform():
         return
 
     def move_to_well(self,row,col):
+        '''
+        Move the printer head to a well in a defined well plate
+        '''
         row_spacing = 100
         col_spacing = 100
 
@@ -809,6 +894,9 @@ class Platform():
         return
     
     def print_array(self):
+        '''
+        Print an array of droplets based on a csv file
+        '''
         if not self.motors_active:
             print('Motors must be active')
             return
@@ -851,6 +939,9 @@ class Platform():
         return
     
     def generate_command(self, commandName, param1, param2, param3, timeout=0):
+        '''
+        Generate a command to be sent to the controller
+        '''
         while self.com_open == 0 or self.last_added_cmd - self.current_cmd > 1:
             time.sleep(0.2)
             print(f'---Waiting for Com:{timeout}---')
@@ -898,9 +989,16 @@ class Platform():
         self.generate_command('RESET_P',0,0,0)
         return
     
-    def toggle_gripper(self):
-        self.generate_command('TOGGLE_GRIPPER',0,0,0)
+    def open_gripper(self):
+        self.generate_command('OPEN_GRIPPER',0,0,0)
         self.gripper_active = True
+        self.gripper_closed = False
+        return
+    
+    def close_gripper(self):
+        self.generate_command('CLOSE_GRIPPER',0,0,0)
+        self.gripper_active = True
+        self.gripper_closed = True
         return
     
     def gripper_off(self):
@@ -1012,7 +1110,11 @@ class Platform():
                     self.print_array()
 
                 elif key == 'g':
-                    self.toggle_gripper()
+                    if not self.gripper_closed:
+                        self.close_gripper()
+                    else:
+                        self.open_gripper()
+
                 elif key == 'G':
                     self.gripper_off()
                 elif key == 'I':
@@ -1031,16 +1133,14 @@ class Platform():
                 elif key == '}':
                     self.reset_syringe()
 
-                # elif key == '1':
-                #     self.new_signal = '<relativeCurrent,-100>'
-                    # self.new_signal = '<relativeCurrent,-100>'
-                # elif key == '2':
-                #     self.new_signal = '<relativePR,0,-100>'
+                elif key == '1':
+                    self.pick_up_printer_head(position=False)
+                elif key == '2':
+                    self.drop_off_printer_head(position=False)
                 # elif key == '3':
-                #     self.new_signal = '<relativePR,0,100>'
+                    
                 # elif key == '4':
-                #     self.new_signal = '<relativeCurrent,-100>'
-                    # self.new_signal = '<relativeCurrent,100>'
+                    
 
                 elif key == '6':
                     self.set_relative_pressure(-0.2)
