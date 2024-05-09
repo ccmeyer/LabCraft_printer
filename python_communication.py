@@ -436,17 +436,18 @@ class Platform():
                     return self.stable_mass
             time.sleep(0.5)
     
-    def calibrate_pressure(self,target_volume=50,tolerance=0.02):
+    def calibrate_pressure(self,target_volume=50,tolerance=0.02,ask=True):
         if not self.regulating_pressure:
             print('Must regulate pressure')
             return
-        if not self.ask_yes_no(message='Calibrate printer head? (y/n)'):
-            print('Did not calibrate...')
-            section_break()
-            return
+        if ask:
+            if not self.ask_yes_no(message='Calibrate printer head? (y/n)'):
+                print('Did not calibrate...')
+                section_break()
+                return
         
         if not self.gripper_active:
-            self.toggle_gripper()
+            self.close_gripper()
 
         self.move_to_location(location='balance',direct=False,safe_y=True)
         
@@ -893,7 +894,7 @@ class Platform():
         self.set_absolute_coordinates(new_x,new_y,new_z)
         return
     
-    def print_array(self):
+    def print_array(self,chosen_path=False,ask=True):
         '''
         Print an array of droplets based on a csv file
         '''
@@ -903,17 +904,30 @@ class Platform():
         if not self.regulating_pressure:
             print('Must regulate pressure')
             return
-        if not self.ask_yes_no(message="Print an array? (y/n)"):
-            return
+        if ask:
+            if not self.ask_yes_no(message="Print an array? (y/n)"):
+                return
         all_arrays = self.get_all_paths('Print_arrays/*.csv',base=True)
-        chosen_path,quit = select_options(all_arrays,message='Select one of the arrays:',trim=True)
-        if quit: return
+        
+        if not chosen_path:
+            chosen_path,quit = select_options(all_arrays,message='Select one of the arrays:',trim=True)
+            if quit: return
+        try:
+            arr = pd.read_csv(chosen_path)
+        except:
+            print('Could not read the csv file')
+            return
 
         if not self.gripper_active:
-            self.toggle_gripper()
+            self.close_gripper()
         
         location= 'print'
-        if self.ask_yes_no(message=f"Move to {location} position? (y/n)"):
+        if ask:
+            move_to_print = self.ask_yes_no(message=f"Move to {location} position? (y/n)")
+        else:
+            move_to_print = True
+
+        if move_to_print:
             self.move_to_location(location='print',direct=True,safe_y=False)
             self.array_start_x = self.calibration_data[location]['x']
             self.array_start_y = self.calibration_data[location]['y']
@@ -923,8 +937,6 @@ class Platform():
             self.array_start_y = self.y_pos
             self.array_start_z = self.z_pos
         
-        arr = pd.read_csv(chosen_path)
-
         for index, line in arr.iterrows():
             if self.check_for_pause():
                 if self.ask_yes_no(message="Quit print? (y/n)"):
@@ -935,7 +947,7 @@ class Platform():
 
             self.move_to_well(line['Row'],line['Column'])
             self.print_droplets(line['Droplet'])
-        self.move_to_location(location='loading',direct=True,safe_y=False)
+        # self.move_to_location(location='loading',direct=True,safe_y=False)
         return
     
     def generate_command(self, commandName, param1, param2, param3, timeout=0):
@@ -1053,6 +1065,41 @@ class Platform():
         self.generate_command('CLEAR_QUEUE',0,0,0)
         return
 
+    def run_complete_print(self):
+        if not self.ask_yes_no('Run a complete print? (y/n)'): return
+        
+        print('Pick up printer head')
+        self.pick_up_printer_head(position='rack_position_0')
+        time.sleep(1)
+        input('Press enter to continue')
+        if self.check_for_pause():
+            if self.ask_yes_no(message="Quit complete print? (y/n)"):
+                print('Quitting\n')
+                return
+        print('Calibrating pressure')
+        self.calibrate_pressure(target_volume=self.target_volume,tolerance=0.02,ask=False)
+        time.sleep(1)
+        input('Press enter to continue')
+        if self.check_for_pause():
+            if self.ask_yes_no(message="Quit complete print? (y/n)"):
+                print('Quitting\n')
+                return
+        print('Starting print')
+        self.print_array(chosen_path='Print_arrays/5drops_10x10.csv',ask=False)
+        time.sleep(1)
+        input('Press enter to continue')
+        if self.check_for_pause():
+            if self.ask_yes_no(message="Quit complete print? (y/n)"):
+                print('Quitting\n')
+                return
+        print('Dropping off printer head')
+        self.drop_off_printer_head(position='rack_position_0')
+        time.sleep(1)
+        input('Press enter to continue')
+        print('Complete print finished')
+        self.move_to_location(location='loading',direct=True,safe_y=False)
+        return
+    
     def drive_platform(self):
         '''
         Comprehensive manually driving function. Within this method, the
@@ -1108,6 +1155,8 @@ class Platform():
 
                 elif key == 'P':
                     self.print_array()
+                elif key == 'T':
+                    self.run_complete_print()
 
                 elif key == 'g':
                     if not self.gripper_closed:

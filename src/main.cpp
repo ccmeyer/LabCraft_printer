@@ -337,10 +337,10 @@ struct HomingStage {
 
 // Array of homing stages for each motor
 HomingStage homingStages[] = {
-    {1,2500, -300},   // Z homing
-    {1,1500, -100},   // X homing
-    {-1,1500, -100},  // Y homing
-    {1,3000, -300},   // P homing
+    {1,2500, -200},   // Z homing
+    {1,1500, -25},   // X homing
+    {-1,1500, -25},  // Y homing
+    {1,3000, -200},   // P homing
 };
 
 int homingAxisNumber = 4;
