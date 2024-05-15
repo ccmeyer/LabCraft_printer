@@ -1,0 +1,36 @@
+QPushButton {
+    background-color: #333;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    padding: 10px;
+    text-align: center;
+}
+
+QPushButton:checked {
+    background-color:#E32F25
+}
+QPushButton#active {
+    background-color:#09B6B6
+}
+
+QPushButton:hover {
+    background-color: #666;
+}
+
+QPushButton:pressed {
+    background-color: #999;
+}
+
+QLabel#title {
+    font-size: 16px;
+    font-weight: bold;
+    color: #333;
+    border-radius: 5px;
+    text-align: center;
+}
+
+QLabel#tableValue {
+    font-size: 14px;
+    color: #666;
+}

@@ -1,11 +1,18 @@
 import time
 import threading
+from Frames import *
+
+class CartridgeSlot:
+    def __init__(self, slot_number, cartridge_loaded=None):
+        self.slot_number = slot_number
+        self.cartridge_loaded = cartridge_loaded
 
 class Machine():
     def __init__(self, app):
         print('Created Machine instance')
         self.app = app
         self.motors_active = False
+        self.balance_active = False
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
@@ -36,6 +43,8 @@ class Machine():
         
         self.command_number = 0
         self.command_log = {}
+
+        self.slots = [CartridgeSlot(i) for i in range(4)]
 
     def update_states(self):
         while True:
@@ -167,3 +176,13 @@ class Machine():
     def stop_pressure_regulation(self):
         self.regulating_pressure = False
         self.execute_command('UNREGULATE_PRESSURE')
+
+    def get_slots(self):
+        return self.slots
+    
+    def get_slot(self, slot_number):
+        return self.slots[slot_number]
+    
+    def load_cartridge(self, slot_number, cartridge):
+        self.slots[slot_number].cartridge_loaded = cartridge
+        # self.execute_command(f'LOAD_CARTRIDGE,{slot_number},{cartridge}')

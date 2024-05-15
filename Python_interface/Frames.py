@@ -182,6 +182,8 @@ class ScrollableCommandFrame(ctk.CTkScrollableFrame):
         super().__init__(master, width=window_width,height=window_height, **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=5)
+        self.title_label = ctk.CTkLabel(self, text="COMMAND LOG", fg_color="gray30", corner_radius=6,font=("Arial", 14))
+        self.title_label.grid(row=0, column=0, columnspan=2, padx=0, pady=10)
 
         self.num_list = []
         self.command_list = []
@@ -194,8 +196,8 @@ class ScrollableCommandFrame(ctk.CTkScrollableFrame):
         self.command_list.insert(0, command_label)
 
         for i, (number_label, command_label) in enumerate(zip(self.num_list, self.command_list)):
-            number_label.grid(row=i, column=0, pady=(0, 10), sticky="w")
-            command_label.grid(row=i, column=1, pady=(0, 10), padx=5)
+            number_label.grid(row=i+1, column=0, pady=(0, 10), sticky="w")
+            command_label.grid(row=i+1, column=1, pady=(0, 10), padx=5)
 
 class ScrollableShortcutsFrame(ctk.CTkScrollableFrame):
     def __init__(self, master, app, width: int = 500, height: int = 800, **kwargs):
@@ -206,6 +208,8 @@ class ScrollableShortcutsFrame(ctk.CTkScrollableFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=5)
 
+        self.title_label = ctk.CTkLabel(self, text="SHORTCUTS", fg_color="gray30", corner_radius=6,font=("Arial", 14))
+        self.title_label.grid(row=0, column=0, columnspan=2, padx=0, pady=10)
         self.key_list = []
         self.name_list = []
         for shortcut in app.shortcuts:
@@ -214,10 +218,26 @@ class ScrollableShortcutsFrame(ctk.CTkScrollableFrame):
     def add_shortcut(self, shortcut):
         key_label = ctk.CTkLabel(self, text=shortcut.key, compound="left", padx=5, anchor="w")
         name_label = ctk.CTkLabel(self, text=shortcut.name, compound="left", padx=5, anchor="w")
-        key_label.grid(row=len(self.key_list), column=0, pady=(0, 10), sticky="w")
-        name_label.grid(row=len(self.key_list), column=1, pady=(0, 10), sticky="w")
+        key_label.grid(row=len(self.key_list)+1, column=0, pady=(0, 10), sticky="w")
+        name_label.grid(row=len(self.key_list)+1, column=1, pady=(0, 10), sticky="w")
 
         self.key_list.append(key_label)
         self.name_list.append(name_label)
 
-        
+
+class CartridgeSlotsFrame(ctk.CTkFrame):
+    def __init__(self, master, slots, **kwargs):
+        super().__init__(master, **kwargs)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.slots = slots
+        self.slot_labels = []
+
+        for slot in self.slots:
+            slot_label = ctk.CTkLabel(self, text=f"Slot {slot.slot_number}: {slot.cartridge_loaded or 'Empty'}", compound="left", padx=5, anchor="w")
+            slot_label.grid(row=0, column=slot.slot_number, pady=(0, 10), padx=5)
+            self.slot_labels.append(slot_label)
+
+    def update_slots(self):
+        for slot, slot_label in zip(self.slots, self.slot_labels):
+            slot_label.config(text=f"Slot {slot.slot_number}: {slot.cartridge_loaded or 'Empty'}")

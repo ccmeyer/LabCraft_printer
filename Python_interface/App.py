@@ -43,10 +43,14 @@ class App(ctk.CTk):
         self.pressure_plot_frame.grid(row=2, column=0, padx=10, pady=10, sticky="ew")  # Add the PressurePlotFrame to the grid
 
         self.command_log_frame = ScrollableCommandFrame(self, self.machine,self)  # Create the ScollableFrame
-        self.command_log_frame.grid(row=0, column=1,rowspan=2, padx=10, pady=10, sticky="ew")  # Add the ScollableFrame to the grid
+        self.command_log_frame.grid(row=0, column=1, padx=10, pady=10, sticky="ew")  # Add the ScollableFrame to the grid
 
         self.shortcut_frame = ScrollableShortcutsFrame(self,self)  # Create the ScollableFrame
-        self.shortcut_frame.grid(row=0, column=2,rowspan=2, padx=10, pady=10, sticky="ew")  # Add the ScollableFrame to the grid
+        self.shortcut_frame.grid(row=1, column=1, padx=10, pady=10, sticky="ew")  # Add the ScollableFrame to the grid
+
+        self.cartridge_slots_frame = CartridgeSlotsFrame(self, self.machine.slots)
+        self.cartridge_slots_frame.grid(row=2, column=1,columnspan=3, padx=10, pady=10, sticky="ew")
+
 
 
     def on_key_press(self, event):
@@ -84,6 +88,11 @@ class App(ctk.CTk):
 
     def add_command_to_log(self, command_number, command):
         self.command_log_frame.add_command(command_number, command)
+
+    def load_cartridge(self, slot_number):
+        self.machine.load_cartridge(slot_number)
+        self.cartridge_slots_frame.update_cartridge(slot_number)
+
 if __name__ == "__main__":
     app = App()
     app.mainloop()
