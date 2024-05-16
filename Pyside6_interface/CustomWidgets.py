@@ -6,26 +6,69 @@ import numpy as np
 from Machine import Machine,Command
 
 
-# class Plate():
-#     def __init__(self, name, rows=16, columns=24):
-#         self.name = name
-#         self.rows = rows
-#         self.columns = columns
+class Plate():
+    def __init__(self, name, rows=16, columns=24):
+        self.name = name
+        self.rows = rows
+        self.columns = columns
 
-# class PlateBox(QtWidgets.QGroupBox):
-#     def __init__(self, title, plate):
-#         super().__init__(title)
-#         self.plate = plate
-#         self.layout = QtWidgets.QGridLayout(self)
-#         self.rows = plate.rows
-#         self.columns = plate.columns
-#         self.cells = []
-#         for row in range(self.rows):
-#             for column in range(self.columns):
-#                 cell = QtWidgets.QPushButton(f"{row+1}, {column+1}")
-#                 cell.setFocusPolicy(QtCore.Qt.NoFocus)
-#                 self.layout.addWidget(cell, row, column)
-#                 self.cells.append(cell)
+class PlateBox(QtWidgets.QGroupBox):
+    def __init__(self,main_window, title, plate):
+        super().__init__(title)
+        self.main_window = main_window
+        self.plate = plate
+        self.layout = QtWidgets.QVBoxLayout(self)
+        self.grid = QtWidgets.QGridLayout()
+        self.rows = plate.rows
+        self.columns = plate.columns
+        self.cells = []
+        for row in range(self.rows):
+            for column in range(self.columns):
+                cell = QtWidgets.QPushButton(f"")
+                cell.setFocusPolicy(QtCore.Qt.NoFocus)
+                self.grid.addWidget(cell, row, column)
+                self.cells.append(cell)
+
+        self.layout.addLayout(self.grid)
+
+        self.reagent_combo = QtWidgets.QComboBox()
+        self.reagent_combo.setFocusPolicy(QtCore.Qt.NoFocus)
+        for reagent in self.main_window.reagents:
+            self.reagent_combo.addItem(reagent.name)
+        self.layout.addWidget(self.reagent_combo)
+
+        self.simulate_button = QtWidgets.QPushButton("Simulate")
+        self.simulate_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.simulate_button.clicked.connect(self.simulate_plate)
+        self.layout.addWidget(self.simulate_button)
+
+    def simulate_plate(self):
+        reagent_name = self.reagent_combo.currentText()
+        reagent = next(r for r in self.main_window.reagents if r.name == reagent_name)
+        target_amounts = self.generate_target_amounts()
+        self.update_plate_single(reagent, target_amounts)
+    
+    def generate_target_amounts(self):
+        target_amounts = []
+        for row in range(self.rows):
+            for column in range(self.columns):
+                target_amounts.append(np.random.randint(0, 10))
+        return target_amounts
+    
+    def update_plate_single(self, reagent, target_amounts):
+        max_amount = max(target_amounts)
+        for row in range(self.rows):
+            for column in range(self.columns):
+                target_amount = target_amounts[row * self.columns + column]
+                self.set_cell_color(row, column, reagent,target_amount,max_amount)
+    
+    def set_cell_color(self, row, column, reagent,target_amount,max_amount):
+        cell = self.cells[row * self.columns + column]
+        opacity = target_amount / max_amount
+        color = QtGui.QColor(reagent.hex_color)
+        color.setAlphaF(opacity)
+        rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
+        cell.setStyleSheet(f"background-color: {rgba_color};")
 
 
 class CustomWidget(QtWidgets.QWidget):
@@ -44,10 +87,10 @@ class CustomWidget(QtWidgets.QWidget):
         self.layout.addWidget(self.reagent_input_button)
     
     def open_reagent_input(self):
-        self.reagent_input_window = ReagentInputWindow(self.main_window)
-        self.reagent_input_window.show()
+        self.array_design_window = ArrayDesignWindow(self.main_window)
+        self.array_design_window.show()
 
-class ReagentInputWindow(QtWidgets.QDialog):
+class ArrayDesignWindow(QtWidgets.QDialog):
     def __init__(self,main_window):
         super().__init__()
         self.main_window = main_window
@@ -55,25 +98,63 @@ class ReagentInputWindow(QtWidgets.QDialog):
         self.resize(800, 600)
         self.layout = QtWidgets.QVBoxLayout(self)
 
-        self.reagent_table = QtWidgets.QTableWidget(0, 4)  # 0 rows, 4 columns
-        self.reagent_table.setHorizontalHeaderLabels(["Reagent Name", "Min Concentration", "Max Concentration", "Number of Concentrations"])
+        self.reagent_table = QtWidgets.QTableWidget(0, 5)  # 0 rows, 4 columns
+        self.reagent_table.setHorizontalHeaderLabels(["Reagent Name", "Min Concentration", "Max Concentration", "Number of Concentrations","Delete"])
         self.layout.addWidget(self.reagent_table)
         # Set the width of the columns
         for i in range(self.reagent_table.columnCount()):
             self.reagent_table.setColumnWidth(i, 150)
 
+        # Create a grid layout for the widgets below the table
+        self.grid_layout = QtWidgets.QGridLayout()
+        self.grid_layout.setColumnStretch(0, 1)  # Set the stretch factor of the first column to 1
+        self.grid_layout.setColumnStretch(1, 1)  # Set the stretch factor of the second column to 1
+        self.grid_layout.setColumnStretch(2, 3)  # Set the stretch factor of the third column to 1
+
         add_reagent_button = QtWidgets.QPushButton("Add Row")
         add_reagent_button.clicked.connect(self.add_reagent_row)
-        self.layout.addWidget(add_reagent_button)
+        self.grid_layout.addWidget(add_reagent_button, 0, 2)
 
         add_new_reagent_button = QtWidgets.QPushButton("Edit Reagent")
         add_new_reagent_button.clicked.connect(self.edit_reagents)
-        self.layout.addWidget(add_new_reagent_button)
+        self.grid_layout.addWidget(add_new_reagent_button,1,2)
 
         submit_button = QtWidgets.QPushButton("Submit")
+        submit_button.setStyleSheet(f"background-color: {self.main_window.colors['red']}")
         submit_button.clicked.connect(self.submit)
-        self.layout.addWidget(submit_button)
+        self.grid_layout.addWidget(submit_button,2,2)
+
         self.add_reagent_row()
+
+        self.replicates_label = QtWidgets.QLabel("Number of replicates:")
+        self.grid_layout.addWidget(self.replicates_label, 0, 0)
+
+        self.replicates_input = QtWidgets.QDoubleSpinBox()
+        self.replicates_input.setRange(1, 100)  # Set a minimum and maximum value
+        self.replicates_input.setDecimals(0)  # Set the number of decimal places
+        self.replicates_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
+        self.replicates_input.valueChanged.connect(self.update_combinations_label)
+        self.grid_layout.addWidget(self.replicates_input,0,1)
+        
+        self.combinations_label = QtWidgets.QLabel("Number of combinations:")
+        self.grid_layout.addWidget(self.combinations_label,1,0)
+        self.combinations_value = QtWidgets.QLabel()
+        self.grid_layout.addWidget(self.combinations_value,1,1)
+        
+        self.layout.addLayout(self.grid_layout)
+        self.update_combinations_label()
+
+    def calculate_combinations(self):
+        combinations = 1
+        for row in range(self.reagent_table.rowCount()):
+            num_concentrations = self.reagent_table.cellWidget(row, 3).value()
+            combinations *= num_concentrations
+        combinations *= self.replicates_input.value()
+        return int(combinations)
+
+    def update_combinations_label(self):
+        combinations = self.calculate_combinations()
+        self.combinations_value.setText(str(combinations))
 
     def edit_reagents(self):
         editor = ReagentEditor(self.main_window, self.add_reagent_to_main)
@@ -112,13 +193,30 @@ class ReagentInputWindow(QtWidgets.QDialog):
         
         num_concentrations_input = QtWidgets.QSpinBox()
         num_concentrations_input.setRange(1, 100)  # Set a minimum and maximum value
-        
+        num_concentrations_input.valueChanged.connect(self.update_combinations_label)
+
         self.reagent_table.setCellWidget(row, 0, reagent_name_input)
         self.reagent_table.setCellWidget(row, 1, min_concentration_input)
         self.reagent_table.setCellWidget(row, 2, max_concentration_input)
         self.reagent_table.setCellWidget(row, 3, num_concentrations_input)
 
+        delete_button = QtWidgets.QPushButton("Delete")
+        delete_button.clicked.connect(lambda: self.delete_reagent_row(row))
+        self.reagent_table.setCellWidget(row, 4, delete_button)
+        self.reagent_table.setRowHeight(row, delete_button.sizeHint().height())
+
+    def delete_reagent_row(self, row):
+        self.reagent_table.removeRow(row)
+        self.update_combinations_label()
+
+        # Update the row numbers in the lambda functions
+        for row in range(self.reagent_table.rowCount()):
+            delete_button = self.reagent_table.cellWidget(row, 4)
+            delete_button.clicked.disconnect()
+            delete_button.clicked.connect(lambda: self.delete_reagent_row(row))
+
     def submit(self):
+        self.update_combinations_label()
         for row in range(self.reagent_table.rowCount()):
             reagent_name = self.reagent_table.cellWidget(row, 0).currentText()
             min_concentration = self.reagent_table.cellWidget(row, 1).value()
@@ -326,6 +424,9 @@ class Reagent():
         self.color_name = color_name
         self.hex_color = self.color_dict[self.color_name]
 
+    def to_dict(self):
+        return {"name": self.name, "color_name": self.color_name}
+
 class Slot:
     def __init__(self, number, reagent):
         self.number = number
@@ -399,6 +500,7 @@ class ReagentEditor:
             new_reagent = Reagent(name, self.colors, color)
             self.reagents.append(new_reagent)
         self.main_window.reagents = self.reagents
+        self.main_window.write_reagents_file()
         self.on_submit()
         self.new_reagent_window.close()
     

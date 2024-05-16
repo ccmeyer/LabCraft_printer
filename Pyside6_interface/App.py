@@ -5,6 +5,8 @@ from PySide6.QtCore import QTimer, QPointF
 import numpy as np
 from Machine import Machine,Command
 from CustomWidgets import *
+import json
+
 
 
 class Shortcut:
@@ -34,31 +36,12 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
             Shortcut("Add Reagent", "A", lambda: self.add_reagent())
         ]
-        self.colors = {
-            'black': '#000000',
-            'darker_gray': '#2c2c2c',
-            'dark_gray': '#4d4d4d',
-            'mid_gray': '#6e6e6e',
-            'light_gray': '#7c7c7c',
-            'white': '#ffffff',
-            'red': '#a92222',
-            'green': '#1c591e',
-            'blue': '#1e64b4',
-            'yellow': '#f4d13b',
-            'teal': '#26b5b2',
-            'orange': '#f4743b',
-            'purple': '#842593',
-            'brown': '#915b3d',
-        }
+        
+        self.read_colors_file()
+        self.read_reagents_file()
+        
         self.num_slots = 6
         self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.num_slots)]
-
-        self.reagents = [
-            Reagent('Water',self.colors,'blue'),
-            Reagent('Mg',self.colors,'green'),
-            Reagent('K',self.colors,'red'),
-            Reagent('Empty',self.colors,'dark_gray')
-        ]
         
         self.setWindowTitle("My App")
         transparent_icon = self.make_transparent_icon()
@@ -126,8 +109,13 @@ class MainWindow(QtWidgets.QMainWindow):
         mid_panel.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
-        self.custom_widget = CustomWidget(self)
-        mid_layout.addWidget(self.custom_widget)
+        self.current_plate = Plate('5x10',rows=16,columns=24)
+        self.plate_box = PlateBox(self,'PLATE',self.current_plate)
+        self.plate_box.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
+        mid_layout.addWidget(self.plate_box)
+
+        # self.custom_widget = CustomWidget(self)
+        # mid_layout.addWidget(self.custom_widget)
 
         self.rack_box = RackBox(self,self.slots,self.reagents)
         self.rack_box.setFixedHeight(200)
@@ -156,6 +144,20 @@ class MainWindow(QtWidgets.QMainWindow):
         # Window dimensions
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
+    
+    def read_reagents_file(self):
+        with open('./Presets/reagents.json', 'r') as f:
+            reagents = json.load(f)
+        self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name']) for reagent in reagents]
+    
+    def write_reagents_file(self):
+        reagents = [reagent.to_dict() for reagent in self.reagents]
+        with open('./Presets/reagents.json', 'w') as f:
+            json.dump(reagents, f)
+    
+    def read_colors_file(self):
+        with open('./Presets/Colors.json', 'r') as f:
+            self.colors = json.load(f)
 
     def keyPressEvent(self, event):
         for shortcut in self.shortcuts:
@@ -255,14 +257,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box.load_reagent(slot_obj.number, slot_obj.reagent)
 
 
-
-
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
-    # Load the font file
     
     with open("stylesheet.qss", "r") as f:
         app.setStyleSheet(f.read())
+
     window = MainWindow()
     window.show()
     app.exec()
