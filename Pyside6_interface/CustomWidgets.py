@@ -66,8 +66,8 @@ class ReagentInputWindow(QtWidgets.QDialog):
         add_reagent_button.clicked.connect(self.add_reagent_row)
         self.layout.addWidget(add_reagent_button)
 
-        add_new_reagent_button = QtWidgets.QPushButton("Add New Reagent")
-        add_new_reagent_button.clicked.connect(self.add_new_reagent)
+        add_new_reagent_button = QtWidgets.QPushButton("Edit Reagent")
+        add_new_reagent_button.clicked.connect(self.edit_reagents)
         self.layout.addWidget(add_new_reagent_button)
 
         submit_button = QtWidgets.QPushButton("Submit")
@@ -75,40 +75,23 @@ class ReagentInputWindow(QtWidgets.QDialog):
         self.layout.addWidget(submit_button)
         self.add_reagent_row()
 
-    def add_new_reagent(self):
-        self.new_reagent_window = QtWidgets.QDialog()
-        self.new_reagent_window.setWindowTitle("Add new reagent")
+    def edit_reagents(self):
+        editor = ReagentEditor(self.main_window, self.add_reagent_to_main)
+        editor.exec()
 
-        window_layout = QtWidgets.QVBoxLayout(self.new_reagent_window)
-
-        self.name_input = QtWidgets.QLineEdit()
-        self.color_input = QtWidgets.QComboBox()
-        self.color_input.addItems(list(self.main_window.colors.keys()))
-        
-        window_layout.addWidget(QtWidgets.QLabel("Name:"))
-        window_layout.addWidget(self.name_input)
-        window_layout.addWidget(QtWidgets.QLabel("Color:"))
-        window_layout.addWidget(self.color_input)
-
-        add_button = QtWidgets.QPushButton("Add Reagent")
-        add_button.clicked.connect(self.add_reagent_to_main)
-        window_layout.addWidget(add_button)
-
-        self.new_reagent_window.exec()
-    
     def add_reagent_to_main(self):
-        name = self.name_input.text()
-        color = self.color_input.currentText()
-
-        new_reagent = Reagent(name, color)
-        self.main_window.reagents.append(new_reagent)
-
         # Update the items in the combo boxes
         for row in range(self.reagent_table.rowCount()):
-            self.reagent_table.cellWidget(row, 0).clear()
-            self.reagent_table.cellWidget(row, 0).addItems(self.main_window.get_reagent_names())
+            combo_box = self.reagent_table.cellWidget(row, 0)
+            current_reagent = combo_box.currentText()
 
-        self.new_reagent_window.close()
+            combo_box.clear()
+            combo_box.addItems(self.main_window.get_reagent_names())
+
+            index = combo_box.findText(current_reagent)
+            if index != -1:
+                combo_box.setCurrentIndex(index)
+        self.main_window.update_slot_reagents()
 
     def add_reagent_row(self):
         row = self.reagent_table.rowCount()
@@ -337,9 +320,11 @@ class CommandTable(QtWidgets.QWidget):
         self.table.setItem(0, 1, QtWidgets.QTableWidgetItem(new_command.get_command()))
 
 class Reagent():
-    def __init__(self, name, color='white'):
+    def __init__(self, name, color_dict,color_name):
         self.name = name
-        self.color = color
+        self.color_dict = color_dict
+        self.color_name = color_name
+        self.hex_color = self.color_dict[self.color_name]
 
 class Slot:
     def __init__(self, number, reagent):
@@ -348,6 +333,77 @@ class Slot:
     
     def change_reagent(self, new_reagent):
         self.reagent = new_reagent
+
+class ReagentEditor:
+    def __init__(self, main_window, on_submit):
+        self.main_window = main_window
+        self.reagents = self.main_window.reagents
+        self.colors = self.main_window.colors
+        self.on_submit = on_submit
+
+        self.new_reagent_window = QtWidgets.QDialog()
+        self.new_reagent_window.setWindowTitle("Edit reagents")
+        window_layout = QtWidgets.QVBoxLayout(self.new_reagent_window)
+
+        self.reagent_table = QtWidgets.QTableWidget()
+        self.reagent_table.setColumnCount(2)
+        self.reagent_table.setHorizontalHeaderLabels(["Name", "Color"])
+        window_layout.addWidget(self.reagent_table)
+
+        for reagent in self.reagents:
+            self.add_reagent_to_table(reagent)
+
+        add_button = QtWidgets.QPushButton("Add Reagent")
+        add_button.clicked.connect(self.add_new_reagent_row)
+        window_layout.addWidget(add_button)
+
+        submit_button = QtWidgets.QPushButton("Submit")
+        submit_button.clicked.connect(self.submit_reagents)
+        window_layout.addWidget(submit_button)
+    
+    def add_reagent_to_table(self, reagent):
+        row = self.reagent_table.rowCount()
+        self.reagent_table.insertRow(row)
+
+        name_item = QtWidgets.QTableWidgetItem(reagent.name)
+        self.reagent_table.setItem(row, 0, name_item)
+
+        color_input = QtWidgets.QComboBox()
+        color_input.addItems(list(self.colors.keys()))
+        color_input.setCurrentText(reagent.color_name)
+        self.reagent_table.setCellWidget(row, 1, color_input)
+
+    def add_new_reagent_row(self):
+        row = self.reagent_table.rowCount()
+        self.reagent_table.insertRow(row)
+
+        name_input = QtWidgets.QLineEdit()
+        self.reagent_table.setCellWidget(row, 0, name_input)
+
+        color_input = QtWidgets.QComboBox()
+        color_input.addItems(list(self.main_window.colors.keys()))
+        self.reagent_table.setCellWidget(row, 1, color_input) 
+           
+    def submit_reagents(self):
+        self.reagents.clear()
+
+        for row in range(self.reagent_table.rowCount()):
+            name_item_or_widget = self.reagent_table.item(row, 0)
+            if name_item_or_widget is None:
+                name_item_or_widget = self.reagent_table.cellWidget(row, 0)
+            name = name_item_or_widget.text()
+
+            color_item_or_widget = self.reagent_table.cellWidget(row, 1)
+            color = color_item_or_widget.currentText()
+
+            new_reagent = Reagent(name, self.colors, color)
+            self.reagents.append(new_reagent)
+        self.main_window.reagents = self.reagents
+        self.on_submit()
+        self.new_reagent_window.close()
+    
+    def exec(self):
+        self.new_reagent_window.exec()
 
 class RackBox(QtWidgets.QWidget):
     reagent_loaded = QtCore.Signal(Slot)
@@ -364,8 +420,8 @@ class RackBox(QtWidgets.QWidget):
         num_slots = len(slots)
         self.reagent_names = [reagent.name for reagent in reagents]
 
-        self.add_reagent_button = QtWidgets.QPushButton("Add Reagent")
-        self.add_reagent_button.clicked.connect(self.add_reagent)
+        self.add_reagent_button = QtWidgets.QPushButton("Edit Reagents")
+        self.add_reagent_button.clicked.connect(self.edit_reagents)
         self.add_reagent_button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         self.add_reagent_button.setFocusPolicy(QtCore.Qt.NoFocus)
         # self.add_reagent_button.setObjectName("active")
@@ -403,17 +459,21 @@ class RackBox(QtWidgets.QWidget):
             self.reagent_loaded.emit(Slot(slot, reagent))
         return emit_signal
     
-    def update_reagents_dropdown(self, reagents):
-        self.reagents = reagents
-        self.reagent_names = [reagent.name for reagent in reagents]
+    def update_reagents_dropdown(self):
         for slot_num in range(len(self.slots)):
-            self.slot_dropdowns[slot_num].clear()
-            self.slot_dropdowns[slot_num].addItems(self.reagent_names)
+            combo_box = self.slot_dropdowns[slot_num]
+            current_reagent = combo_box.currentText()
+
+            combo_box.clear()
+            combo_box.addItems(self.main_window.get_reagent_names())
+            index = combo_box.findText(current_reagent)
+            if index != -1:
+                combo_box.setCurrentIndex(index)
 
     def load_reagent(self, slot, reagent):    
         self.slots[slot].reagent = reagent
         self.current_reagents[slot].setText(reagent.name)
-        self.current_reagents[slot].setStyleSheet(f"background-color: {reagent.color}")
+        self.current_reagents[slot].setStyleSheet(f"background-color: {reagent.hex_color}")
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -422,39 +482,6 @@ class RackBox(QtWidgets.QWidget):
         transparent_icon = QtGui.QIcon(transparent_pixmap)
         return transparent_icon
     
-    def add_reagent(self):
-        self.new_reagent_window = QtWidgets.QDialog()
-        self.new_reagent_window.setWindowTitle("Add new reagent")
-        transparent_icon = self.make_transparent_icon()
-        self.new_reagent_window.setWindowIcon(transparent_icon)
-        window_layout = QtWidgets.QVBoxLayout(self.new_reagent_window)
-        # Create input fields for the name and color of the reagent
-        self.name_input = QtWidgets.QLineEdit()
-        self.color_input = QtWidgets.QComboBox()
-        self.color_input.addItems(list(self.main_window.colors.keys()))  # Add color options from main_window.colors
-
-        window_layout.addWidget(QtWidgets.QLabel("Name:"))
-        window_layout.addWidget(self.name_input)
-        window_layout.addWidget(QtWidgets.QLabel("Color:"))
-        window_layout.addWidget(self.color_input)
-
-        # Create a button to add the new reagent
-        add_button = QtWidgets.QPushButton("Add Reagent")
-        add_button.clicked.connect(self.add_new_reagent)
-        window_layout.addWidget(add_button)
-        self.new_reagent_window.exec()
-    
-    def add_new_reagent(self):
-        # Get the name and color from the input fields
-        name = self.name_input.text()
-        color = self.color_input.currentText()
-
-        # Create a new reagent and add it to the list of reagents
-        new_reagent = Reagent(name, color)
-        self.reagents.append(new_reagent)
-
-        # Update the dropdowns with the new reagent
-        self.update_reagents_dropdown(self.reagents)
-
-        # Close the new reagent window
-        self.new_reagent_window.close()
+    def edit_reagents(self):
+        editor = ReagentEditor(self.main_window, self.update_reagents_dropdown)
+        editor.exec()

@@ -51,22 +51,20 @@ class MainWindow(QtWidgets.QMainWindow):
             'brown': '#915b3d',
         }
         self.num_slots = 6
-        self.slots = [Slot(i, Reagent('Empty',color=self.colors['red'])) for i in range(self.num_slots)]
+        self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.num_slots)]
 
-        self.reagents = [Reagent('Water',color=self.colors['blue']),Reagent('Mg',self.colors['green']),Reagent('K',self.colors['red']),Reagent('Empty',self.colors['dark_gray'])]
+        self.reagents = [
+            Reagent('Water',self.colors,'blue'),
+            Reagent('Mg',self.colors,'green'),
+            Reagent('K',self.colors,'red'),
+            Reagent('Empty',self.colors,'dark_gray')
+        ]
         
         self.setWindowTitle("My App")
         transparent_icon = self.make_transparent_icon()
         self.setWindowIcon(transparent_icon)
         # Create the menu bar
         menu_bar = self.menuBar()
-
-        font_id = QtGui.QFontDatabase.addApplicationFont("./Fonts/Inter.ttc")
-        if font_id != -1:  # If the font loaded successfully
-            font_families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
-            if font_families:  # If the font has any families
-                # Create a QFont object
-                self.font_obj = QtGui.QFont(font_families[0], 12)  # 10 is the font size, you can change it as per your needs
 
         # Create a menu
         file_menu = menu_bar.addMenu("File")
@@ -141,7 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         right_panel = QtWidgets.QWidget()
         right_panel.setFixedWidth(300)
-        right_panel.setStyleSheet("background-color: #474747;")
+        right_panel.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)  # Use a vertical box layout
 
         self.command_box = CommandTable(self.machine.get_command_log())
@@ -198,6 +196,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pressure_log = self.machine.get_pressure_log()
         target_pressure = self.machine.get_target_pressure()
         self.pressure_box.update_pressure(pressure_log,target_pressure)
+    
+    def update_slot_reagents(self):
+        self.rack_box.update_reagents_dropdown()
 
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
