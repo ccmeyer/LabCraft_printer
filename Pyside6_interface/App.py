@@ -18,7 +18,6 @@ class Shortcut:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.machine = Machine(self)
         self.shortcuts = [
             Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.move_relative({'X': 0, 'Y': 10, 'Z': 0, 'P': 0})),
             Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.move_relative({'X': 0, 'Y': -10, 'Z': 0, 'P': 0})),
@@ -39,6 +38,12 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.read_colors_file()
         self.read_reagents_file()
+
+        self.machine = Machine(self)
+        self.gripper_reagent = Reagent("Empty", self.colors, "dark_gray")
+        self.communication_timer = QTimer()
+        self.communication_timer.timeout.connect(self.machine.update_states)
+        self.communication_timer.start(101)  # Update every 100 ms
         
         self.num_slots = 6
         self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.num_slots)]
@@ -102,6 +107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_coordinates)
         self.timer.timeout.connect(self.update_pressure)
+        # self.timer.timeout.connect(self.machine.update_states)
 
         self.timer.start(100)  # Update every 100 ms
         
@@ -120,7 +126,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box = RackBox(self,self.slots,self.reagents)
         self.rack_box.setFixedHeight(200)
         self.rack_box.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
-        self.rack_box.reagent_loaded.connect(self.change_reagent)
+        self.rack_box.reagent_changed.connect(self.change_reagent)
+        self.rack_box.reagent_loaded.connect(self.transfer_reagent)
         mid_layout.addWidget(self.rack_box)
 
         layout.addWidget(mid_panel)
@@ -130,10 +137,11 @@ class MainWindow(QtWidgets.QMainWindow):
         right_panel.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)  # Use a vertical box layout
 
-        self.command_box = CommandTable(self.machine.get_command_log())
+        self.command_box = CommandTable(self,self.machine.get_command_log())
         self.command_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.command_box)
-        self.machine.command_executed.connect(self.add_command)
+        self.machine.command_added.connect(self.add_command)
+        self.machine.command_executed.connect(self.execute_command)
 
         self.shortcut_box = ShortcutTable(self.shortcuts)
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -145,6 +153,9 @@ class MainWindow(QtWidgets.QMainWindow):
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
     
+    def print_status(self, status):
+        self.statusBar().showMessage(status)
+
     def read_reagents_file(self):
         with open('./Presets/reagents.json', 'r') as f:
             reagents = json.load(f)
@@ -251,11 +262,38 @@ class MainWindow(QtWidgets.QMainWindow):
     def add_command(self, command):
         self.command_box.add_command(command)
 
+    @QtCore.Slot(Command)
+    def execute_command(self, command):
+        self.command_box.execute_command(command.get_number())
+
     @QtCore.Slot(Slot)
     def change_reagent(self,slot_obj):
         self.statusBar().showMessage(f"Slot-{slot_obj.number} loaded with {slot_obj.reagent.name}")
-        self.rack_box.load_reagent(slot_obj.number, slot_obj.reagent)
+        self.rack_box.change_reagent(slot_obj.number, slot_obj.reagent)
+        self.rack_box.update_load_buttons()
 
+    @QtCore.Slot(Slot)
+    def transfer_reagent(self,slot):
+        if self.machine.motors_active:
+            reagent = slot.reagent
+            if reagent.name != "Empty" and self.gripper_reagent.name == "Empty":
+                self.machine.pick_up_reagent(slot)
+                # Set the slot to be empty
+                self.rack_box.change_reagent(slot.number, Reagent("Empty", self.colors, "dark_gray"))
+                # Add the reagent to the gripper
+                self.rack_box.change_gripper_reagent(reagent)
+            elif reagent.name == "Empty" and self.gripper_reagent.name != "Empty":
+                self.machine.drop_reagent(slot)
+                # Set the slot to have the gripper reagent
+                self.rack_box.change_reagent(slot.number, self.gripper_reagent)
+                # Set the gripper reagent to be empty
+                self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
+            else:
+                print(f"Invalid transfer-{reagent.name}-{self.gripper_reagent.name}")
+
+            self.rack_box.update_load_buttons()
+        else:
+            self.print_status('Motors are not active')
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])

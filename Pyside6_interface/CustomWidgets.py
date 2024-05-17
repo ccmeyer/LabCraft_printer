@@ -3,7 +3,6 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6 import QtCharts
 from PySide6.QtCore import QTimer, QPointF
 import numpy as np
-from Machine import Machine,Command
 
 
 class Plate():
@@ -394,8 +393,9 @@ class ShortcutTable(QtWidgets.QWidget):
         self.layout.addWidget(self.table)
 
 class CommandTable(QtWidgets.QWidget):
-    def __init__(self, commands):
+    def __init__(self, main_window,commands):
         super().__init__()
+        self.main_window = main_window
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QVBoxLayout(self)
 
@@ -406,16 +406,28 @@ class CommandTable(QtWidgets.QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setRowCount(1)
 
-        for i, command_num in enumerate(commands.keys()):
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(commands[command_num].get_number())))
-            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(commands[command_num].get_command()))
+        for i, command in enumerate(commands):
+            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(command.get_number())))
+            self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(command.get_command()))
         self.table.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.table)
+        self.table.setColumnWidth(0, 60)
     
     def add_command(self, new_command):
         self.table.insertRow(0)
         self.table.setItem(0, 0, QtWidgets.QTableWidgetItem(str(new_command.get_number())))
         self.table.setItem(0, 1, QtWidgets.QTableWidgetItem(new_command.get_command()))
+        self.table.item(0, 0).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['darker_gray'])))  # Set initial color to red
+        self.table.item(0, 1).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['darker_gray'])))  # Set initial color to red
+        self.table.viewport().update()
+
+    def execute_command(self, command_number):
+        for i in range(self.table.rowCount()):
+            if self.table.item(i, 0).text() == str(command_number):
+                for j in range(self.table.columnCount()):
+                    self.table.item(i, j).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['dark_gray'])))
+                break
+        self.table.viewport().update()
 
 class Reagent():
     def __init__(self, name, color_dict,color_name):
@@ -435,7 +447,7 @@ class Slot:
     def change_reagent(self, new_reagent):
         self.reagent = new_reagent
 
-class ReagentEditor:
+class ReagentEditor():
     def __init__(self, main_window, on_submit):
         self.main_window = main_window
         self.reagents = self.main_window.reagents
@@ -444,6 +456,7 @@ class ReagentEditor:
 
         self.new_reagent_window = QtWidgets.QDialog()
         self.new_reagent_window.setWindowTitle("Edit reagents")
+        self.new_reagent_window.resize(400, 600)
         window_layout = QtWidgets.QVBoxLayout(self.new_reagent_window)
 
         self.reagent_table = QtWidgets.QTableWidget()
@@ -508,6 +521,7 @@ class ReagentEditor:
         self.new_reagent_window.exec()
 
 class RackBox(QtWidgets.QWidget):
+    reagent_changed = QtCore.Signal(Slot)
     reagent_loaded = QtCore.Signal(Slot)
 
     def __init__(self,main_window, slots,reagents):
@@ -518,48 +532,89 @@ class RackBox(QtWidgets.QWidget):
         self.current_reagents = []
         self.slot_dropdowns = []
         self.slot_buttons = []
+        self.loading_buttons = []
         self.slots = slots
         num_slots = len(slots)
         self.reagent_names = [reagent.name for reagent in reagents]
 
-        self.add_reagent_button = QtWidgets.QPushButton("Edit Reagents")
+        # Add gripper label
+        self.gripper_label = QtWidgets.QLabel("Gripper")
+        self.gripper_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.gripper_label.setStyleSheet(f"background-color: {self.main_window.colors['darker_gray']}; color: white;")
+        self.gripper_label.setFixedHeight(20)
+        self.layout.addWidget(self.gripper_label, 0, 0)
+
+        # Add gripper slot
+        self.gripper_slot = QtWidgets.QLabel()
+        self.gripper_slot.setStyleSheet(f"background-color: {self.main_window.colors['darker_gray']}")
+        self.gripper_slot.setStyleSheet("color: white")
+        self.gripper_slot.setText("Empty")
+        self.gripper_slot.setAlignment(QtCore.Qt.AlignCenter)
+        self.layout.addWidget(self.gripper_slot, 1, 0,4,1)
+
+        # Add an empty column for the gap
+        self.layout.setColumnMinimumWidth(1, 10)
+
+        self.add_reagent_button = QtWidgets.QPushButton("Edit\nReagents")
         self.add_reagent_button.clicked.connect(self.edit_reagents)
         self.add_reagent_button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         self.add_reagent_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.add_reagent_button.setObjectName("active")
         self.add_reagent_button.setCheckable(True)
-        self.layout.addWidget(self.add_reagent_button, 0, num_slots,3,1)
+        self.layout.setColumnMinimumWidth(num_slots+2, 10)
+
+        self.layout.addWidget(self.add_reagent_button, 0, num_slots+3,5,1)
 
         for slot in range(num_slots):
+            # Add slot label
+            slot_label = QtWidgets.QLabel(f"Slot {slot+1}")
+            slot_label.setAlignment(QtCore.Qt.AlignCenter)
+            slot_label.setStyleSheet(f"background-color: {self.main_window.colors['darker_gray']}; color: white;")
+            slot_label.setFixedHeight(20)
+            self.layout.addWidget(slot_label, 0, slot+2)
+
             current_reagent = QtWidgets.QLabel()
-            # current_reagent.setObjectName("title")
-            current_reagent.setStyleSheet(f"background-color: {self.main_window.colors['red']}")
+            current_reagent.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}")
             current_reagent.setStyleSheet("color: white")
             current_reagent.setText("Empty")
             current_reagent.setAlignment(QtCore.Qt.AlignCenter)
             self.current_reagents.append(current_reagent)
-            self.layout.addWidget(self.current_reagents[slot], 0, slot)
+            self.layout.addWidget(self.current_reagents[slot], 1, slot+2)
 
             slot_options = QtWidgets.QComboBox()
             slot_options.addItems(self.reagent_names)
-            slot_options.setStyleSheet("background-color: #474747; color: white;")
+            slot_options.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: white;")
             slot_options.setFocusPolicy(QtCore.Qt.NoFocus)
             self.slot_dropdowns.append(slot_options)
-            self.layout.addWidget(self.slot_dropdowns[slot], 1, slot)
+            self.layout.addWidget(self.slot_dropdowns[slot], 2, slot+2)
 
-            slot_button = QtWidgets.QPushButton("Load")
+            slot_button = QtWidgets.QPushButton("Change")
             slot_button.setFocusPolicy(QtCore.Qt.NoFocus)
             slot_button.setStyleSheet("background-color: #1e64b4")
             self.slot_buttons.append(slot_button)
-            self.slot_buttons[slot].clicked.connect(self.emit_loading_signal(slot))
-            self.layout.addWidget(self.slot_buttons[slot], 2, slot) 
+            self.slot_buttons[slot].clicked.connect(self.emit_changing_signal(slot))
+            self.layout.addWidget(self.slot_buttons[slot], 3, slot+2)
+
+            loading_button = QtWidgets.QPushButton("Load")
+            loading_button.setFocusPolicy(QtCore.Qt.NoFocus)
+            loading_button.setStyleSheet(f"background-color: {self.main_window.colors['red']}")
+            self.loading_buttons.append(loading_button)
+            self.loading_buttons[slot].clicked.connect(self.emit_loading_signal(slot))
+            self.layout.addWidget(self.loading_buttons[slot], 4, slot+2)
+        self.update_load_buttons()
     
-    def emit_loading_signal(self, slot):
-        def emit_signal():
+    def emit_changing_signal(self, slot):
+        def emit_change_signal():
             target_name = self.slot_dropdowns[slot].currentText()
             reagent = next((r for r in self.reagents if r.name == target_name), None)
+            self.reagent_changed.emit(Slot(slot, reagent))
+        return emit_change_signal
+    
+    def emit_loading_signal(self, slot):
+        def emit_loading_signal():
+            target_name = self.current_reagents[slot].text()
+            reagent = next((r for r in self.reagents if r.name == target_name), None)
             self.reagent_loaded.emit(Slot(slot, reagent))
-        return emit_signal
+        return emit_loading_signal
     
     def update_reagents_dropdown(self):
         for slot_num in range(len(self.slots)):
@@ -572,10 +627,34 @@ class RackBox(QtWidgets.QWidget):
             if index != -1:
                 combo_box.setCurrentIndex(index)
 
-    def load_reagent(self, slot, reagent):    
-        self.slots[slot].reagent = reagent
-        self.current_reagents[slot].setText(reagent.name)
-        self.current_reagents[slot].setStyleSheet(f"background-color: {reagent.hex_color}")
+    def change_reagent(self, slot_num, reagent):    
+        self.slots[slot_num].reagent = reagent
+        self.current_reagents[slot_num].setText(reagent.name)
+        self.current_reagents[slot_num].setStyleSheet(f"background-color: {reagent.hex_color}")
+
+    def change_gripper_reagent(self, reagent):
+        self.main_window.gripper_reagent = reagent
+        self.gripper_slot.setText(reagent.name)
+        self.gripper_slot.setStyleSheet(f"background-color: {reagent.hex_color}")
+    
+    def update_load_buttons(self):
+        for i, slot in enumerate(self.slots):
+            if slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name == "Empty":
+                self.loading_buttons[i].setEnabled(False)
+                self.loading_buttons[i].setText("Load")
+                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
+            elif slot.reagent.name != "Empty" and self.main_window.gripper_reagent.name == "Empty":
+                self.loading_buttons[i].setEnabled(True)
+                self.loading_buttons[i].setText("Load")
+                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['blue']}; color: white")
+            elif slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name != "Empty":
+                self.loading_buttons[i].setEnabled(True)
+                self.loading_buttons[i].setText("Unload")
+                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['red']}; color: white")
+            else:
+                self.loading_buttons[i].setEnabled(False)
+                self.loading_buttons[i].setText("Unload")
+                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
