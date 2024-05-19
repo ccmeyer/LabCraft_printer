@@ -6,6 +6,7 @@ import numpy as np
 from Machine import Machine,Command
 from CustomWidgets import *
 import json
+import pandas as pd
 
 
 
@@ -41,6 +42,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.machine = Machine(self)
         self.gripper_reagent = Reagent("Empty", self.colors, "dark_gray")
+        self.experiment_name = 'Untitled Experiment'
+
+        self.all_reactions = pd.DataFrame()
+        self.reaction_metadata = pd.DataFrame()
+        self.wells_df = pd.DataFrame()
+        self.full_array = pd.DataFrame()
+
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.machine.update_states)
         self.communication_timer.start(101)  # Update every 100 ms
@@ -116,12 +124,12 @@ class MainWindow(QtWidgets.QMainWindow):
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
         self.current_plate = Plate('5x10',rows=16,columns=24)
-        self.plate_box = PlateBox(self,'PLATE',self.current_plate)
+        self.plate_box = PlateBox(self,'PLATE')
         self.plate_box.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
         mid_layout.addWidget(self.plate_box)
 
-        # self.custom_widget = CustomWidget(self)
-        # mid_layout.addWidget(self.custom_widget)
+        self.array_widget = ArrayWidget(self)
+        mid_layout.addWidget(self.array_widget)
 
         self.rack_box = RackBox(self,self.slots,self.reagents)
         self.rack_box.setFixedHeight(200)
@@ -137,13 +145,13 @@ class MainWindow(QtWidgets.QMainWindow):
         right_panel.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)  # Use a vertical box layout
 
-        self.command_box = CommandTable(self,self.machine.get_command_log())
+        self.command_box = CommandTable(self,self.machine.get_command_log(),"COMMANDS")
         self.command_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.command_box)
         self.machine.command_added.connect(self.add_command)
         self.machine.command_executed.connect(self.execute_command)
 
-        self.shortcut_box = ShortcutTable(self.shortcuts)
+        self.shortcut_box = ShortcutTable(self.shortcuts,"SHORTCUTS")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.shortcut_box)
 
@@ -153,18 +161,60 @@ class MainWindow(QtWidgets.QMainWindow):
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
     
+    def update_plate_box(self):
+        self.plate_box.update_plate_box()
+    
     def print_status(self, status):
         self.statusBar().showMessage(status)
 
+    def popup_message(self,title, message):
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        msg.exec()
+    
     def read_reagents_file(self):
-        with open('./Presets/reagents.json', 'r') as f:
+        with open('./Presets/Reagents.json', 'r') as f:
             reagents = json.load(f)
         self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name']) for reagent in reagents]
     
     def write_reagents_file(self):
         reagents = [reagent.to_dict() for reagent in self.reagents]
-        with open('./Presets/reagents.json', 'w') as f:
+        with open('./Presets/Reagents.json', 'w') as f:
             json.dump(reagents, f)
+
+    def select_experiment_directory(self):
+        current_directory = os.getcwd()  # Get the current working directory
+        dialog = QtWidgets.QFileDialog(self)
+        dialog.setFileMode(QtWidgets.QFileDialog.Directory)
+        current_directory += '\Experiments'
+        dialog.setDirectory(current_directory)
+        if dialog.exec():
+            selected_directory = dialog.selectedFiles()[0]
+            return selected_directory
+        else:
+            return None
+        
+    def load_experiment(self):
+        selected_directory = self.select_experiment_directory()
+        if selected_directory:
+            self.experiment_name = selected_directory.split('/')[-1]
+            self.all_reactions = pd.read_csv(f"{selected_directory}/{self.experiment_name}_reactions.csv")
+            self.reaction_metadata = pd.read_csv(f"{selected_directory}/{self.experiment_name}_metadata.csv")
+            self.update_plate_box()
+        else:
+            self.popup_message('Error','No experiment selected')
+    
+    def get_printing_reagents(self):
+        return self.full_array['reagent'].unique().tolist()
+    
+    def set_cartridges(self):
+        reagents_to_print = self.get_printing_reagents()
+        for i,reagent in enumerate(reagents_to_print):
+            print(reagent,type(reagent))
+            print([r.name for r in self.reagents])
+            reagent_obj = next((r for r in self.reagents if r.name == reagent), None)
+            self.rack_box.change_reagent(i,reagent_obj)
     
     def read_colors_file(self):
         with open('./Presets/Colors.json', 'r') as f:
@@ -253,10 +303,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.machine.deregulate_pressure()
             self.pressure_box.pressure_regulation_button.setStyleSheet("background-color: #1e64b4")
             self.pressure_box.pressure_regulation_button.setText("Regulate Pressure")
+            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
         else:
             self.machine.regulate_pressure()
             self.pressure_box.pressure_regulation_button.setStyleSheet("background-color: #a92222")
             self.pressure_box.pressure_regulation_button.setText("Deregulate Pressure")
+            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
 
     @QtCore.Slot(Command)
     def add_command(self, command):

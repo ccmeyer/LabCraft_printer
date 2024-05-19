@@ -1,0 +1,23 @@
+[
+    {
+        "name": "50well-5x10",
+        "rows": 5,
+        "columns": 10,
+        "spacing": 10,
+        "default": true
+    },
+    {
+        "name": "96well-8x12",
+        "rows": 8,
+        "columns": 12,
+        "spacing": 10,
+        "default": false
+    },
+    {
+        "name": "384well-16x24",
+        "rows": 16,
+        "columns": 24,
+        "spacing": 10,
+        "default": false
+    }
+]

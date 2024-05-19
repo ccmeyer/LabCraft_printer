@@ -7,6 +7,13 @@ QPushButton {
     text-align: center;
 }
 
+QLabel {
+    border: none;
+    border-radius: 5px;
+    padding: 2px;
+    text-align: center;
+}
+
 QPushButton:checked {
     background-color:#E32F25
 }
