@@ -204,12 +204,8 @@ class ArrayWidget(QtWidgets.QWidget):
         self.reagent_input_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.reagent_input_button.clicked.connect(self.open_reagent_input)
         self.layout.addWidget(self.reagent_input_button)
-        
-        self.set_cartridge_button = QtWidgets.QPushButton("Set Cartridges")
-        self.set_cartridge_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.set_cartridge_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}")
-        self.set_cartridge_button.clicked.connect(self.set_cartridges)
-        self.layout.addWidget(self.set_cartridge_button)
+
+        self.activate_array_buttons()
 
     def open_reagent_input(self):
         self.array_design_window = ArrayDesignWindow(self.main_window)
@@ -217,9 +213,18 @@ class ArrayWidget(QtWidgets.QWidget):
     
     def load_experiment(self):
         self.main_window.load_experiment()
+
+    def deactivate_array_buttons(self):
+        self.array_load_button.setEnabled(False)
+        self.reagent_input_button.setEnabled(False)
+        self.array_load_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['mid_gray']}")
+        self.reagent_input_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['mid_gray']}")
     
-    def set_cartridges(self):
-        self.main_window.set_cartridges()
+    def activate_array_buttons(self):
+        self.array_load_button.setEnabled(True)
+        self.reagent_input_button.setEnabled(True)
+        self.array_load_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['white']}")
+        self.reagent_input_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['white']}")
 
 class ArrayDesignWindow(QtWidgets.QDialog):
     def __init__(self,main_window):
@@ -339,8 +344,8 @@ class ArrayDesignWindow(QtWidgets.QDialog):
                 combo_box.setCurrentIndex(index)
         self.fill_reagent_input.clear()
         self.fill_reagent_input.addItems(self.main_window.get_reagent_names())
-        self.fill_reagent_input.currentIndexChanged(self.update_all_reagent_combo_boxes)
-        self.main_window.update_slot_reagents()
+        self.fill_reagent_input.currentIndexChanged.connect(self.update_all_reagent_combo_boxes)
+        # self.main_window.update_slot_reagents()
 
     def add_reagent_row(self,row_data=None):
         row = self.reagent_table.rowCount()
@@ -481,6 +486,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.main_window.reaction_metadata = self.reaction_metadata
         self.main_window.experiment_name = self.experiment_name_input.text()
         self.main_window.update_plate_box()
+        self.main_window.set_cartridges()
         self.close()
 
 
@@ -712,9 +718,13 @@ class Slot:
     def __init__(self, number, reagent):
         self.number = number
         self.reagent = reagent
+        self.confirmed = False
     
     def change_reagent(self, new_reagent):
         self.reagent = new_reagent
+    
+    def confirm(self):
+        self.confirmed = True
 
 class ReagentEditor():
     def __init__(self, main_window, on_submit):
@@ -790,7 +800,7 @@ class ReagentEditor():
         self.new_reagent_window.exec()
 
 class RackBox(QtWidgets.QWidget):
-    reagent_changed = QtCore.Signal(Slot)
+    reagent_confirmed = QtCore.Signal(Slot)
     reagent_loaded = QtCore.Signal(Slot)
 
     def __init__(self,main_window, slots,reagents):
@@ -824,15 +834,6 @@ class RackBox(QtWidgets.QWidget):
         # Add an empty column for the gap
         self.layout.setColumnMinimumWidth(1, 10)
 
-        self.add_reagent_button = QtWidgets.QPushButton("Edit\nReagents")
-        self.add_reagent_button.clicked.connect(self.edit_reagents)
-        self.add_reagent_button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        self.add_reagent_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.add_reagent_button.setCheckable(True)
-        self.layout.setColumnMinimumWidth(num_slots+2, 10)
-
-        self.layout.addWidget(self.add_reagent_button, 0, num_slots+3,5,1)
-
         for slot in range(num_slots):
             # Add slot label
             slot_label = QtWidgets.QLabel(f"Slot {slot+1}")
@@ -847,20 +848,13 @@ class RackBox(QtWidgets.QWidget):
             current_reagent.setText("Empty")
             current_reagent.setAlignment(QtCore.Qt.AlignCenter)
             self.current_reagents.append(current_reagent)
-            self.layout.addWidget(self.current_reagents[slot], 1, slot+2)
+            self.layout.addWidget(self.current_reagents[slot], 1, slot+2,2,1)
 
-            slot_options = QtWidgets.QComboBox()
-            slot_options.addItems(self.reagent_names)
-            slot_options.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: white;")
-            slot_options.setFocusPolicy(QtCore.Qt.NoFocus)
-            self.slot_dropdowns.append(slot_options)
-            self.layout.addWidget(self.slot_dropdowns[slot], 2, slot+2)
-
-            slot_button = QtWidgets.QPushButton("Change")
+            slot_button = QtWidgets.QPushButton("Confirm")
             slot_button.setFocusPolicy(QtCore.Qt.NoFocus)
             slot_button.setStyleSheet("background-color: #1e64b4")
             self.slot_buttons.append(slot_button)
-            self.slot_buttons[slot].clicked.connect(self.emit_changing_signal(slot))
+            self.slot_buttons[slot].clicked.connect(self.emit_confirmation_signal(slot))
             self.layout.addWidget(self.slot_buttons[slot], 3, slot+2)
 
             loading_button = QtWidgets.QPushButton("Load")
@@ -871,13 +865,11 @@ class RackBox(QtWidgets.QWidget):
             self.layout.addWidget(self.loading_buttons[slot], 4, slot+2)
         self.update_load_buttons()
     
-    def emit_changing_signal(self, slot):
-        def emit_change_signal():
-            target_name = self.slot_dropdowns[slot].currentText()
-            reagent = next((r for r in self.reagents if r.name == target_name), None)
-            self.reagent_changed.emit(Slot(slot, reagent))
-        return emit_change_signal
-    
+    def emit_confirmation_signal(self, slot):
+        def emit_confirmation_signal():
+            self.reagent_confirmed.emit(self.slots[slot])
+        return emit_confirmation_signal
+
     def emit_loading_signal(self, slot):
         def emit_loading_signal():
             target_name = self.current_reagents[slot].text()
@@ -885,17 +877,17 @@ class RackBox(QtWidgets.QWidget):
             self.reagent_loaded.emit(Slot(slot, reagent))
         return emit_loading_signal
     
-    def update_reagents_dropdown(self):
-        for slot_num in range(len(self.slots)):
-            combo_box = self.slot_dropdowns[slot_num]
-            current_reagent = combo_box.currentText()
+    def reset_confirmation(self):
+        for slot in self.slots:
+            slot.confirmed = False
+        self.update_load_buttons()
 
-            combo_box.clear()
-            combo_box.addItems(self.main_window.get_reagent_names())
-            index = combo_box.findText(current_reagent)
-            if index != -1:
-                combo_box.setCurrentIndex(index)
-
+    def confirm_reagent(self, slot_num, reagent):
+        self.slots[slot_num].confirm()
+        self.slot_buttons[slot_num].setEnabled(False)
+        self.slot_buttons[slot_num].setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
+        self.update_load_buttons()
+    
     def change_reagent(self, slot_num, reagent):    
         self.slots[slot_num].reagent = reagent
         self.current_reagents[slot_num].setText(reagent.name)
@@ -906,24 +898,31 @@ class RackBox(QtWidgets.QWidget):
         self.gripper_slot.setText(reagent.name)
         self.gripper_slot.setStyleSheet(f"background-color: {reagent.hex_color}")
     
+    def activate_button(self,button,text,color):
+        button.setEnabled(True)
+        button.setText(text)
+        button.setStyleSheet(f"background-color: {self.main_window.colors[color]}; color: white")
+
+    def deactivate_button(self,button,text):
+        button.setEnabled(False)
+        button.setText(text)
+        button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
+
+    
     def update_load_buttons(self):
         for i, slot in enumerate(self.slots):
-            if slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name == "Empty":
-                self.loading_buttons[i].setEnabled(False)
-                self.loading_buttons[i].setText("Load")
-                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
-            elif slot.reagent.name != "Empty" and self.main_window.gripper_reagent.name == "Empty":
-                self.loading_buttons[i].setEnabled(True)
-                self.loading_buttons[i].setText("Load")
-                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['blue']}; color: white")
-            elif slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name != "Empty":
-                self.loading_buttons[i].setEnabled(True)
-                self.loading_buttons[i].setText("Unload")
-                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['red']}; color: white")
+            if not slot.confirmed:
+                self.deactivate_button(self.loading_buttons[i],"Load")
+                self.activate_button(self.slot_buttons[i],"Confirm","blue")
             else:
-                self.loading_buttons[i].setEnabled(False)
-                self.loading_buttons[i].setText("Unload")
-                self.loading_buttons[i].setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
+                if slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name == "Empty":
+                    self.deactivate_button(self.loading_buttons[i],"Load")
+                elif slot.reagent.name != "Empty" and self.main_window.gripper_reagent.name == "Empty":
+                    self.activate_button(self.loading_buttons[i],"Load","blue")
+                elif slot.reagent.name == "Empty" and self.main_window.gripper_reagent.name != "Empty":
+                    self.activate_button(self.loading_buttons[i],"Unload","red")
+                else:
+                    self.deactivate_button(self.loading_buttons[i],"Unload")
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -931,7 +930,3 @@ class RackBox(QtWidgets.QWidget):
         transparent_pixmap = QtGui.QPixmap.fromImage(transparent_image)
         transparent_icon = QtGui.QIcon(transparent_pixmap)
         return transparent_icon
-    
-    def edit_reagents(self):
-        editor = ReagentEditor(self.main_window, self.update_reagents_dropdown)
-        editor.exec()

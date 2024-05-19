@@ -15,10 +15,10 @@ QLabel {
 }
 
 QPushButton:checked {
-    background-color:#E32F25
+    background-color:#E32F25;
 }
 QPushButton#active {
-    background-color:#09B6B6
+    background-color:#09B6B6;
 }
 
 QPushButton:hover {

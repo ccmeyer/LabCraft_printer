@@ -134,7 +134,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box = RackBox(self,self.slots,self.reagents)
         self.rack_box.setFixedHeight(200)
         self.rack_box.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
-        self.rack_box.reagent_changed.connect(self.change_reagent)
+        self.rack_box.reagent_confirmed.connect(self.confirm_reagent)
         self.rack_box.reagent_loaded.connect(self.transfer_reagent)
         mid_layout.addWidget(self.rack_box)
 
@@ -171,6 +171,8 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = QtWidgets.QMessageBox()
         msg.setWindowTitle(title)
         msg.setText(message)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
         msg.exec()
     
     def read_reagents_file(self):
@@ -202,6 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.all_reactions = pd.read_csv(f"{selected_directory}/{self.experiment_name}_reactions.csv")
             self.reaction_metadata = pd.read_csv(f"{selected_directory}/{self.experiment_name}_metadata.csv")
             self.update_plate_box()
+            self.set_cartridges()
         else:
             self.popup_message('Error','No experiment selected')
     
@@ -211,10 +214,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_cartridges(self):
         reagents_to_print = self.get_printing_reagents()
         for i,reagent in enumerate(reagents_to_print):
-            print(reagent,type(reagent))
-            print([r.name for r in self.reagents])
             reagent_obj = next((r for r in self.reagents if r.name == reagent), None)
             self.rack_box.change_reagent(i,reagent_obj)
+        self.rack_box.reset_confirmation()
     
     def read_colors_file(self):
         with open('./Presets/Colors.json', 'r') as f:
@@ -262,6 +264,12 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def update_slot_reagents(self):
         self.rack_box.update_reagents_dropdown()
+
+    def deactivate_loading_and_editing(self):
+        self.array_widget.deactivate_array_buttons()
+
+    def activate_loading_and_editing(self):
+        self.array_widget.activate_array_buttons()
 
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
@@ -319,10 +327,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.command_box.execute_command(command.get_number())
 
     @QtCore.Slot(Slot)
-    def change_reagent(self,slot_obj):
-        self.statusBar().showMessage(f"Slot-{slot_obj.number} loaded with {slot_obj.reagent.name}")
-        self.rack_box.change_reagent(slot_obj.number, slot_obj.reagent)
-        self.rack_box.update_load_buttons()
+    def confirm_reagent(self,slot_obj):
+        self.statusBar().showMessage(f"Slot-{slot_obj.number} loaded with {slot_obj.reagent.name} confirmed")
+        self.rack_box.confirm_reagent(slot_obj.number, slot_obj.reagent)
 
     @QtCore.Slot(Slot)
     def transfer_reagent(self,slot):
@@ -334,18 +341,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.rack_box.change_reagent(slot.number, Reagent("Empty", self.colors, "dark_gray"))
                 # Add the reagent to the gripper
                 self.rack_box.change_gripper_reagent(reagent)
+                # Deactivate the buttons to avoid duplication of reagents
+                self.deactivate_loading_and_editing()
             elif reagent.name == "Empty" and self.gripper_reagent.name != "Empty":
                 self.machine.drop_reagent(slot)
                 # Set the slot to have the gripper reagent
                 self.rack_box.change_reagent(slot.number, self.gripper_reagent)
                 # Set the gripper reagent to be empty
                 self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
+                # Reactivate the buttons to allow for editing
+                self.activate_loading_and_editing()
             else:
                 print(f"Invalid transfer-{reagent.name}-{self.gripper_reagent.name}")
 
             self.rack_box.update_load_buttons()
         else:
-            self.print_status('Motors are not active')
+            self.popup_message('Error','Machine not connected')
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
