@@ -56,6 +56,115 @@ class Command():
         """
         self.executed = True
 
+class BoardCommand():
+    def __init__(self,command_type,param1,param2,param3):
+        self.command_type = command_type
+        self.param1 = param1
+        self.param2 = param2
+        self.param3 = param3
+    def execute(self):
+        if self.command_type == 'INITIALIZE':
+            print('Initializing machine')
+        elif self.command_type == 'ENABLE_MOTORS':
+            print('Enabling motors')
+        elif self.command_type == 'DISABLE_MOTORS':
+            print('Disabling motors')
+        elif self.command_type == 'OPEN_GRIPPER':
+            print('Opening gripper')
+        elif self.command_type == 'CLOSE_GRIPPER':
+            print('Closing gripper')
+        elif self.command_type == 'ABSOLUTE_XYZ':
+            print('Moving to absolute coordinates:', self.param1, self.param2, self.param3)
+
+
+class ControlBoard():
+    def __init__(self,machine):
+        """
+        Initializes a ControlBoard object.
+
+        Attributes:
+            command_number: Current command number.
+            command_queue: List containing the command queue.
+            past_commands: List containing the executed commands.
+            state: Current state of the machine (Free or Busy).
+        """
+        self.machine = machine
+        self.command_number = 0
+        self.command_queue = []
+        self.current_command_number = 0
+        self.past_commands = []
+        self.state = "Free"
+        self.simulate = True
+        self.x_pos = 0
+        self.y_pos = 0
+        self.z_pos = 0
+        self.p_pos = 0
+
+        self.target_x = 0
+        self.target_y = 0
+        self.target_z = 0
+        self.target_p = 0
+
+        self.pressure = 0
+        self.target_pressure = 0
+
+        self.total_droplets = 0
+
+        self.gripper_open = False
+        self.target_gripper_open = False
+    
+    def get_complete_state(self):
+        if self.simulate:
+            full_string = f'State:{self.state},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open}'
+            return full_string
+
+    def check_for_command(self):
+        if self.machine.sent_command is not None:
+            if self.machine.sent_command.get_number() == self.current_command_number+1:
+                self.add_command_to_queue(self.machine.sent_command.get_command())
+                self.current_command_number += 1
+                self.machine.sent_command = None
+    
+    def update_states(self):
+        if self.z_pos < self.target_z:
+            self.z_pos += 1
+        elif self.z_pos > self.target_z:
+            self.z_pos -= 1
+        elif self.y_pos < self.target_y:
+            self.y_pos += 1
+        elif self.y_pos > self.target_y:
+            self.y_pos -= 1
+        elif self.x_pos < self.target_x:
+            self.x_pos += 1
+        elif self.x_pos > self.target_x:
+            self.x_pos -= 1
+        elif self.pressure < self.target_pressure:
+            self.pressure += 1
+        elif self.pressure > self.target_pressure:
+            self.pressure -= 1
+        elif self.gripper_open != self.target_gripper_open:
+            self.gripper_open = self.target_gripper_open
+        else:
+            self.state = "Free"
+            self.execute_command_from_queue()
+        
+
+
+    def add_command_to_queue(self, command):
+        new_command = Command(self.command_number, command)
+        self.command_queue.append(new_command)
+        self.command_number += 1
+
+    def convert_command(self, command):
+        command_type,p1,p2,p3 = command.split(',')
+        return BoardCommand(command_type,p1,p2,p3)
+    
+    def execute_command_from_queue(self):
+        for command in self.command_queue:
+            if not command.executed:
+                command.execute()  # Set the command as executed
+
+
 class Machine(QtWidgets.QWidget):
     """
     Represents a machine with various functionalities such as controlling motors, gripper, reagents, and pressure regulation.
@@ -99,6 +208,8 @@ class Machine(QtWidgets.QWidget):
         super().__init__()
         print('Created Machine instance')
         self.main_window = main_window
+        self.board = ControlBoard(self)
+
         self.machine_connected = False
         self.balance_connected = False
         self.motors_active = False
@@ -124,9 +235,9 @@ class Machine(QtWidgets.QWidget):
         self.gripper_reagent = Reagent("Empty", self.main_window.colors, "dark_gray")
 
         self.command_number = 0
-        self.command_queue = [Command(0, 'INITIALIZE')]
+        self.command_queue = []
         self.past_commands = []
-        self.command_number += 1
+        self.sent_command = None
         self.state = "Free"
 
     def activate_motors(self):
@@ -195,6 +306,11 @@ class Machine(QtWidgets.QWidget):
                 self.target_coordinates[axis] += relative_coordinates[axis]
             self.add_command_to_queue(f'RELATIVE_XYZ,{relative_coordinates["X"]},{relative_coordinates["Y"]},{relative_coordinates["Z"]}')
     
+    def move_absolute(self, target_coordinates):
+        if self.motors_active:
+            for axis in ['X', 'Y', 'Z', 'P']:
+                self.target_coordinates[axis] = target_coordinates[axis]
+            self.add_command_to_queue(f'ABSOLUTE_XYZ,{target_coordinates["X"]},{target_coordinates["Y"]},{target_coordinates["Z"]}')
     
     def set_relative_pressure(self, pressure_change):
         self.target_pressure += pressure_change
@@ -237,31 +353,59 @@ class Machine(QtWidgets.QWidget):
                 command.execute()  # Set the command as executed
                 self.command_executed.emit(command)
                 break  # Exit the loop after executing a command
-
-    def update_states(self):
-        if self.motors_active:
-            for axis in ['X', 'Y', 'Z', 'P']:
-                if self.coordinates[axis] < self.target_coordinates[axis]:
-                    self.coordinates[axis] += 1
-                elif self.coordinates[axis] > self.target_coordinates[axis]:
-                    self.coordinates[axis] -= 1
-        if self.regulating_pressure:
-            if self.current_pressure < self.target_pressure:
-                self.current_pressure += 1
-            elif self.current_pressure > self.target_pressure:
-                self.current_pressure -= 1
-
-        # Check if all coordinates and pressure equal their target values
-        if (self.coordinates == self.target_coordinates and
-            self.current_pressure == self.target_pressure):
-            self.state = "Free"
-        else:
-            self.state = "Busy"
-
-        if self.state == "Free":
-            self.main_window.print_status('Machine is idle')
-            self.execute_command_from_queue()
+    
+    def get_state_from_board(self):
+        return self.board.get_complete_state()
+    
+    def convert_state(self, state):
+        state_dict = {}
+        state_list = state.split(',')
+        for item in state_list:
+            key,value = item.split(':')
+            state_dict[key] = value
+        return state_dict
+    
+    def update_state(self, state):
+        self.state = state['State']
+        self.x_pos = int(state['X'])
+        self.y_pos = int(state['Y'])
+        self.z_pos = int(state['Z'])
+        self.p_pos = int(state['P'])
+        self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
+        self.current_pressure = int(state['Pressure'])
+        self.gripper_open = state['Gripper']
 
         self.pressure_log.append(self.current_pressure)
         if len(self.pressure_log) > 100:
             self.pressure_log.pop(0)  # Remove the oldest reading
+
+    def check_board(self):
+        self.update_state(self.convert_state(self.get_state_from_board()))
+
+    # def update_states(self):
+    #     if self.motors_active:
+    #         for axis in ['X', 'Y', 'Z', 'P']:
+    #             if self.coordinates[axis] < self.target_coordinates[axis]:
+    #                 self.coordinates[axis] += 1
+    #             elif self.coordinates[axis] > self.target_coordinates[axis]:
+    #                 self.coordinates[axis] -= 1
+    #     if self.regulating_pressure:
+    #         if self.current_pressure < self.target_pressure:
+    #             self.current_pressure += 1
+    #         elif self.current_pressure > self.target_pressure:
+    #             self.current_pressure -= 1
+
+    #     # Check if all coordinates and pressure equal their target values
+    #     if (self.coordinates == self.target_coordinates and
+    #         self.current_pressure == self.target_pressure):
+    #         self.state = "Free"
+    #     else:
+    #         self.state = "Busy"
+
+    #     if self.state == "Free":
+    #         self.main_window.print_status('Machine is idle')
+    #         self.execute_command_from_queue()
+
+        # self.pressure_log.append(self.current_pressure)
+        # if len(self.pressure_log) > 100:
+        #     self.pressure_log.pop(0)  # Remove the oldest reading
