@@ -10,7 +10,18 @@ import os
 
 
 class Plate():
-    def __init__(self, name, rows=16, columns=24,spacing=10,default=False):
+    """
+    Represents a plate with a specified name, number of rows, number of columns, spacing, and default value.
+
+    Attributes:
+        name (str): The name of the plate.
+        rows (int): The number of rows in the plate.
+        columns (int): The number of columns in the plate.
+        spacing (int): The spacing between elements in the plate.
+        default (bool): The default value of the plate.
+    """
+
+    def __init__(self, name, rows=16, columns=24, spacing=10, default=False):
         self.name = name
         self.rows = rows
         self.columns = columns
@@ -18,6 +29,47 @@ class Plate():
         self.default = default
 
 class PlateBox(QtWidgets.QGroupBox):
+    """
+    A custom widget representing a plate box.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window object.
+        title (str): The title of the plate box.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window object.
+        layout (QtWidgets.QVBoxLayout): The layout of the plate box.
+        top_layout (QtWidgets.QHBoxLayout): The top layout of the plate box.
+        experiment_label (QtWidgets.QLabel): The label for the experiment.
+        experiment_name (QtWidgets.QLabel): The label for the experiment name.
+        plate_label (QtWidgets.QLabel): The label for the plate.
+        plate_combo (QtWidgets.QComboBox): The combo box for selecting the plate.
+        plate_activate_button (QtWidgets.QPushButton): The button for activating the plate.
+        grid (QtWidgets.QGridLayout): The grid layout for the plate cells.
+        bottom_layout (QtWidgets.QHBoxLayout): The bottom layout of the plate box.
+        reagent_combo_label (QtWidgets.QLabel): The label for the active reagent combo box.
+        reagent_combo (QtWidgets.QComboBox): The combo box for selecting the active reagent.
+        cells (dict): A dictionary mapping well numbers to cell buttons.
+        current_plate (Plate): The currently selected plate.
+        rows (int): The number of rows in the plate.
+        columns (int): The number of columns in the plate.
+        wells_df (pd.DataFrame): The DataFrame representing the wells in the plate.
+        full_array (pd.DataFrame): The DataFrame representing the full plate array.
+
+    Methods:
+        update_plate_box(): Updates the plate box.
+        update_plate_reagents(): Updates the available reagents in the reagent combo box.
+        update_experiment_name(): Updates the experiment name label.
+        read_plate_file(): Reads the plate options from a JSON file.
+        create_plate(plate): Creates the plate cells based on the selected plate.
+        activate_plate(): Activates the selected plate.
+        snake_df(df): Sorts the DataFrame in a snake-like pattern.
+        assign_wells(): Assigns reactions to wells in the plate.
+        preview_array(): Previews the plate array for the selected reagent.
+        update_plate_single(current_array, reagent): Updates the plate cells for a single reagent.
+        set_cell_color(well_number, reagent, target_amount, max_amount): Sets the color of a cell based on the reagent and amount.
+
+    """
     def __init__(self,main_window, title):
         super().__init__(title)
         self.main_window = main_window
@@ -70,10 +122,6 @@ class PlateBox(QtWidgets.QGroupBox):
         self.reagent_combo.currentIndexChanged.connect(self.activate_plate)
         self.bottom_layout.addWidget(self.reagent_combo)
         self.layout.addLayout(self.bottom_layout)
-        # self.simulate_button = QtWidgets.QPushButton("Simulate")
-        # self.simulate_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.simulate_button.clicked.connect(self.simulate_plate)
-        # self.layout.addWidget(self.simulate_button)
 
     def update_plate_box(self):
         self.update_experiment_name()
@@ -187,7 +235,27 @@ class PlateBox(QtWidgets.QGroupBox):
 
 
 class ArrayWidget(QtWidgets.QWidget):
-    def __init__(self,main_window):
+    """
+    A custom widget for handling array-related functionality.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        layout (QtWidgets.QHBoxLayout): The layout of the widget.
+        array_load_button (QtWidgets.QPushButton): The button for loading an array.
+        reagent_input_button (QtWidgets.QPushButton): The button for editing experiment design.
+        array_design_window (ArrayDesignWindow): The window for array design.
+
+    Methods:
+        open_reagent_input: Opens the reagent input window.
+        load_experiment: Loads the experiment.
+        deactivate_array_buttons: Deactivates the array buttons.
+        activate_array_buttons: Activates the array buttons.
+    """
+
+    def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
 
@@ -208,26 +276,71 @@ class ArrayWidget(QtWidgets.QWidget):
         self.activate_array_buttons()
 
     def open_reagent_input(self):
+        """
+        Opens the reagent input window.
+        """
         self.array_design_window = ArrayDesignWindow(self.main_window)
         self.array_design_window.show()
     
     def load_experiment(self):
+        """
+        Loads the experiment.
+        """
         self.main_window.load_experiment()
 
     def deactivate_array_buttons(self):
+        """
+        Deactivates the array buttons.
+        """
         self.array_load_button.setEnabled(False)
         self.reagent_input_button.setEnabled(False)
         self.array_load_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['mid_gray']}")
         self.reagent_input_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['mid_gray']}")
     
     def activate_array_buttons(self):
+        """
+        Activates the array buttons.
+        """
         self.array_load_button.setEnabled(True)
         self.reagent_input_button.setEnabled(True)
         self.array_load_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['white']}")
         self.reagent_input_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['white']}")
 
 class ArrayDesignWindow(QtWidgets.QDialog):
-    def __init__(self,main_window):
+    """
+    A dialog window for designing arrays.
+
+    This class provides a dialog window for designing arrays. It allows users to input reagent information,
+    such as reagent name, minimum and maximum concentration, number of concentrations, and other parameters.
+    Users can add, edit, and delete reagent rows, and calculate the number of combinations based on the input.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window object.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window object.
+        all_reactions (list): A list of all reactions.
+        reaction_metadata (pandas.DataFrame): Metadata for reactions.
+        layout (QtWidgets.QVBoxLayout): The layout of the dialog window.
+        reagent_table (QtWidgets.QTableWidget): The table widget for displaying reagent information.
+        grid_layout (QtWidgets.QGridLayout): The grid layout for the widgets below the table.
+        experiment_name_input (QtWidgets.QLineEdit): The input field for the experiment name.
+        fill_reagent_input (QtWidgets.QComboBox): The combo box for selecting the fill reagent.
+        volume_input (QtWidgets.QDoubleSpinBox): The spin box for entering the volume.
+        replicates_input (QtWidgets.QDoubleSpinBox): The spin box for entering the number of replicates.
+        combinations_value (QtWidgets.QLabel): The label for displaying the number of combinations.
+
+    Methods:
+        calculate_combinations: Calculates the number of combinations based on the input.
+        update_combinations_label: Updates the label for displaying the number of combinations.
+        edit_reagents: Opens the reagent editor dialog.
+        add_reagent_to_main: Adds a reagent to the main window.
+        add_reagent_row: Adds a new row to the reagent table.
+        update_all_reagent_combo_boxes: Updates all reagent combo boxes.
+        delete_reagent_row: Deletes a reagent row from the table.
+        calculate_reactions: Calculates the reactions based on the input.
+    """
+    def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
         self.setWindowTitle("Reagent Input")
@@ -493,6 +606,22 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         
 
 class CoordinateBox(QtWidgets.QGroupBox):
+    """
+    A custom widget that displays coordinate values.
+
+    Args:
+        title (str): The title of the coordinate box.
+        main_window (QtWidgets.QMainWindow): The main window object.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window object.
+        layout (QtWidgets.QGridLayout): The layout of the coordinate box.
+        value_labels (list): A list of value labels.
+        entries (dict): A dictionary of coordinate value labels.
+        target_entries (dict): A dictionary of target coordinate value labels.
+
+    """
+
     def __init__(self, title, main_window):
         super().__init__(title)
         self.main_window = main_window
@@ -520,11 +649,27 @@ class CoordinateBox(QtWidgets.QGroupBox):
 
 
     def update_coordinates(self, values,target_values):
+        """
+        Update the coordinate values and target coordinate values.
+
+        Args:
+            values (dict): A dictionary of coordinate values.
+            target_values (dict): A dictionary of target coordinate values.
+
+        """
         for axis in values.keys():
             self.entries[axis].setText(str(values[axis]))
             self.target_entries[axis].setText(str(target_values[axis]))
 
     def set_text_bg_color(self, color,bg_color):
+        """
+        Set the text and background color of the coordinate value labels.
+
+        Args:
+            color (str): The color of the text.
+            bg_color (str): The background color.
+
+        """
         for axis in self.entries.keys():
             self.entries[axis].setStyleSheet(f"color: {color}")
             self.entries[axis].setStyleSheet(f"background-color: {bg_color}")
@@ -532,11 +677,29 @@ class CoordinateBox(QtWidgets.QGroupBox):
             self.target_entries[axis].setStyleSheet(f"background-color: {bg_color}")
 
 
-class DropdownBox(QtWidgets.QGroupBox):
+class ConnectionBox(QtWidgets.QGroupBox):
+    """
+    A custom widget for managing connections.
+
+    This widget provides options for connecting to machine and balance ports.
+
+    Signals:
+        - machine_connected: emitted when the machine is connected, with the selected port as the argument.
+        - balance_connected: emitted when the balance is connected, with the selected port as the argument.
+    """
+
     machine_connected = QtCore.Signal(str)  # Define a new signal
     balance_connected = QtCore.Signal(str)  # Define a new signal
     
-    def __init__(self, title,main_window):
+    def __init__(self, title, main_window):
+        """
+        Initialize the ConnectionBox.
+
+        Args:
+            title (str): The title of the group box.
+            main_window (QtWidgets.QMainWindow): The main window object.
+
+        """
         super().__init__(title)
         self.main_window = main_window
         self.layout = QtWidgets.QGridLayout(self)
@@ -565,7 +728,20 @@ class DropdownBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.balance_connect_button, 1, 2)
 
 class PressurePlotBox(QtWidgets.QGroupBox):
+    """
+    A custom widget that displays a pressure plot with current and target pressure values.
+
+    Args:
+        title (str): The title of the group box.
+        main_window (QtWidgets.QMainWindow): The main window object.
+
+    Signals:
+        regulating_pressure(bool): Signal emitted when the pressure regulation button is toggled.
+
+    """
+
     regulating_pressure = QtCore.Signal(bool)
+
     def __init__(self, title, main_window):
         super().__init__(title)
         self.main_window = main_window
@@ -648,7 +824,19 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.regulating_pressure.emit(self.regulating)
 
 class ShortcutTable(QtWidgets.QGroupBox):
-    def __init__(self, shortcuts,title):
+    """
+    A custom widget that displays a table of shortcuts.
+
+    Args:
+        shortcuts (list): A list of Shortcut objects.
+        title (str): The title of the group box.
+
+    Attributes:
+        layout (QtWidgets.QVBoxLayout): The layout of the group box.
+        table (QtWidgets.QTableWidget): The table widget that displays the shortcuts.
+
+    """
+    def __init__(self, shortcuts, title):
         super().__init__(title)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
 
@@ -668,7 +856,22 @@ class ShortcutTable(QtWidgets.QGroupBox):
         self.layout.addWidget(self.table)
 
 class CommandTable(QtWidgets.QGroupBox):
-    def __init__(self, main_window,commands,title):
+    """
+    A custom widget that displays a table of commands.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        commands (list): A list of command objects.
+        title (str): The title of the group box.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        layout (QtWidgets.QVBoxLayout): The layout of the group box.
+        table (QtWidgets.QTableWidget): The table widget that displays the commands.
+
+    """
+
+    def __init__(self, main_window, commands, title):
         super().__init__(title)
         self.main_window = main_window
         self.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -687,8 +890,15 @@ class CommandTable(QtWidgets.QGroupBox):
         self.table.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.table)
         self.table.setColumnWidth(0, 60)
-    
+
     def add_command(self, new_command):
+        """
+        Adds a new command to the table.
+
+        Args:
+            new_command: The new command object to be added.
+
+        """
         self.table.insertRow(0)
         self.table.setItem(0, 0, QtWidgets.QTableWidgetItem(str(new_command.get_number())))
         self.table.setItem(0, 1, QtWidgets.QTableWidgetItem(new_command.get_command()))
@@ -697,6 +907,13 @@ class CommandTable(QtWidgets.QGroupBox):
         self.table.viewport().update()
 
     def execute_command(self, command_number):
+        """
+        Executes a command by highlighting it in the table.
+
+        Args:
+            command_number: The number of the command to be executed.
+
+        """
         for i in range(self.table.rowCount()):
             if self.table.item(i, 0).text() == str(command_number):
                 for j in range(self.table.columnCount()):
@@ -705,28 +922,84 @@ class CommandTable(QtWidgets.QGroupBox):
         self.table.viewport().update()
 
 class Reagent():
-    def __init__(self, name, color_dict,color_name):
+    """
+    Represents a reagent with a name, color dictionary, color name, and hex color.
+
+    Attributes:
+        name (str): The name of the reagent.
+        color_dict (dict): A dictionary mapping color names to hex values.
+        color_name (str): The name of the color for the reagent.
+        hex_color (str): The hex value of the color for the reagent.
+    """
+
+    def __init__(self, name, color_dict, color_name):
         self.name = name
         self.color_dict = color_dict
         self.color_name = color_name
         self.hex_color = self.color_dict[self.color_name]
 
     def to_dict(self):
+        """
+        Converts the reagent object to a dictionary.
+
+        Returns:
+            dict: A dictionary representation of the reagent object.
+        """
         return {"name": self.name, "color_name": self.color_name}
 
 class Slot:
+    """
+    Represents a slot in a system.
+
+    Attributes:
+        number (int): The slot number.
+        reagent (str): The reagent in the slot.
+        confirmed (bool): Indicates if the slot has been confirmed.
+    """
+
     def __init__(self, number, reagent):
         self.number = number
         self.reagent = reagent
         self.confirmed = False
     
     def change_reagent(self, new_reagent):
+        """
+        Changes the reagent in the slot.
+
+        Args:
+            new_reagent (str): The new reagent to be placed in the slot.
+        """
         self.reagent = new_reagent
     
     def confirm(self):
+        """
+        Confirms the slot.
+        """
         self.confirmed = True
 
 class ReagentEditor():
+    """
+    A class that represents a reagent editor window.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        on_submit (function): A callback function to be called when reagents are submitted.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        reagents (list): A list of reagents.
+        colors (dict): A dictionary of color names and corresponding values.
+        on_submit (function): A callback function to be called when reagents are submitted.
+        new_reagent_window (QtWidgets.QDialog): The dialog window for editing reagents.
+        reagent_table (QtWidgets.QTableWidget): The table widget for displaying reagents.
+
+    Methods:
+        add_reagent_to_table: Adds a reagent to the table widget.
+        add_new_reagent_row: Adds a new row to the table widget for adding a new reagent.
+        submit_reagents: Submits the edited reagents and performs necessary actions.
+        exec: Executes the reagent editor window.
+    """
+
     def __init__(self, main_window, on_submit):
         self.main_window = main_window
         self.reagents = self.main_window.reagents
@@ -800,10 +1073,56 @@ class ReagentEditor():
         self.new_reagent_window.exec()
 
 class RackBox(QtWidgets.QWidget):
+    """
+    A custom widget representing a rack box.
+
+    This widget displays slots for reagents and provides functionality to confirm and load/unload reagents.
+
+    Signals:
+        - reagent_confirmed: Signal emitted when a reagent is confirmed in a slot.
+        - reagent_loaded: Signal emitted when a reagent is loaded into a slot.
+
+    Args:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        slots (List[Slot]): A list of Slot objects representing the slots in the rack box.
+        reagents (List[Reagent]): A list of Reagent objects representing the available reagents.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window of the application.
+        layout (QtWidgets.QGridLayout): The layout of the widget.
+        reagents (List[Reagent]): A list of Reagent objects representing the available reagents.
+        current_reagents (List[QtWidgets.QLabel]): A list of QLabel objects representing the current reagents in each slot.
+        slot_dropdowns (List[QtWidgets.QComboBox]): A list of QComboBox objects representing the dropdowns for selecting reagents.
+        slot_buttons (List[QtWidgets.QPushButton]): A list of QPushButtons representing the confirmation buttons for each slot.
+        loading_buttons (List[QtWidgets.QPushButton]): A list of QPushButtons representing the loading/unloading buttons for each slot.
+        slots (List[Slot]): A list of Slot objects representing the slots in the rack box.
+        reagent_names (List[str]): A list of reagent names.
+
+    Methods:
+        - emit_confirmation_signal(slot): Returns a function that emits the reagent_confirmed signal for the given slot.
+        - emit_loading_signal(slot): Returns a function that emits the reagent_loaded signal for the given slot.
+        - reset_confirmation(): Resets the confirmation status of all slots.
+        - confirm_reagent(slot_num, reagent): Confirms the reagent in the specified slot.
+        - change_reagent(slot_num, reagent): Changes the reagent in the specified slot.
+        - change_gripper_reagent(reagent): Changes the reagent in the gripper slot.
+        - activate_button(button, text, color): Activates the specified button with the given text and color.
+        - deactivate_button(button, text): Deactivates the specified button with the given text.
+        - update_load_buttons(): Updates the state of the load/unload buttons based on the current slot and gripper reagents.
+        - make_transparent_icon(): Creates a transparent QIcon.
+
+    """
     reagent_confirmed = QtCore.Signal(Slot)
     reagent_loaded = QtCore.Signal(Slot)
 
-    def __init__(self,main_window, slots,reagents):
+    def __init__(self, main_window, slots, reagents):
+        """
+        Initializes a RackBox object.
+
+        Args:
+            main_window (QtWidgets.QMainWindow): The main window of the application.
+            slots (List[Slot]): A list of Slot objects representing the slots in the rack box.
+            reagents (List[Reagent]): A list of Reagent objects representing the available reagents.
+        """
         super().__init__()
         self.main_window = main_window
         self.layout = QtWidgets.QGridLayout(self)

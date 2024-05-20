@@ -12,11 +12,52 @@ import pandas as pd
 
 class Shortcut:
     def __init__(self, name, key, function):
-        self.name = name
-        self.key = key
-        self.function = function
+            """
+            Initialize a new instance of the class.
+
+            Args:
+                name (str): The name of the instance.
+                key (str): The key of the instance.
+                function (callable): The function associated with the instance.
+            """
+            self.name = name
+            self.key = key
+            self.function = function
 
 class MainWindow(QtWidgets.QMainWindow):
+    """
+    The main window of the application.
+
+    This class represents the main window of the application and contains various widgets and functionality.
+    It inherits from the `QtWidgets.QMainWindow` class.
+
+    Attributes:
+        shortcuts (list): A list of shortcuts defined for the application.
+        machine (Machine): An instance of the `Machine` class representing the machine used in the application.
+        gripper_reagent (Reagent): An instance of the `Reagent` class representing the gripper reagent.
+        experiment_name (str): The name of the current experiment.
+        all_reactions (pd.DataFrame): A pandas DataFrame containing all the reactions.
+        reaction_metadata (pd.DataFrame): A pandas DataFrame containing the metadata of the reactions.
+        wells_df (pd.DataFrame): A pandas DataFrame containing the wells information.
+        full_array (pd.DataFrame): A pandas DataFrame containing the full array information.
+        communication_timer (QTimer): A QTimer object for updating machine states.
+        num_slots (int): The number of slots in the rack.
+        slots (list): A list of Slot objects representing the slots in the rack.
+
+    Methods:
+        update_plate_box: Updates the plate box widget.
+        print_status: Prints a status message on the status bar.
+        popup_message: Displays a popup message box.
+        read_reagents_file: Reads the reagents from a JSON file.
+        write_reagents_file: Writes the reagents to a JSON file.
+        select_experiment_directory: Opens a file dialog to select an experiment directory.
+        load_experiment: Loads an experiment from the selected directory.
+        get_printing_reagents: Returns a list of reagents used in the printing process.
+        set_cartridges: Sets the cartridges in the rack based on the printing reagents.
+        read_colors_file: Reads the colors from a JSON file.
+        keyPressEvent: Overrides the key press event handler.
+    """
+
     def __init__(self):
         super().__init__()
         self.shortcuts = [
@@ -95,7 +136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout = QtWidgets.QVBoxLayout(left_panel)  # Use a vertical box layout
 
         # Create three sections with different numbers of variables
-        self.connection_box = DropdownBox("CONNECTION",self)
+        self.connection_box = ConnectionBox("CONNECTION",self)
         self.connection_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self.connection_box.machine_connected.connect(self.set_machine_connected_status)
         self.connection_box.balance_connected.connect(self.set_balance_connected_status)

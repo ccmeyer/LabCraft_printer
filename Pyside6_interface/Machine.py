@@ -4,25 +4,94 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from CustomWidgets import *
 
 class Command():
-    def __init__(self,command_number, command_string):
+    def __init__(self, command_number, command_string):
+        """
+        Initializes a Command object.
+
+        Args:
+            command_number (int): The number associated with the command.
+            command_string (str): The command string.
+
+        Attributes:
+            command_number (int): The number associated with the command.
+            command_string (str): The command string.
+            executed (bool): Indicates whether the command has been executed.
+            timestamp (float): The timestamp when the command was created.
+        """
         self.command_number = command_number
         self.command_string = command_string
         self.executed = False
         self.timestamp = time.time()
     
     def get_number(self):
+        """
+        Returns the number associated with the command.
+
+        Returns:
+            int: The command number.
+        """
         return self.command_number
     
     def get_command(self):
+        """
+        Returns the command string.
+
+        Returns:
+            str: The command string.
+        """
         return self.command_string
     
     def get_timestamp(self):
+        """
+        Returns the timestamp when the command was created.
+
+        Returns:
+            float: The timestamp.
+        """
         return self.timestamp
     
     def execute(self):
+        """
+        Executes the command by setting the executed flag to True.
+        """
         self.executed = True
 
 class Machine(QtWidgets.QWidget):
+    """
+    Represents a machine with various functionalities such as controlling motors, gripper, reagents, and pressure regulation.
+
+    Signals:
+        - command_added: Signal emitted when a command is added to the command queue.
+        - command_executed: Signal emitted when a command is executed from the command queue.
+
+    Attributes:
+        - main_window: Reference to the main window object.
+        - machine_connected: Boolean indicating if the machine is connected.
+        - balance_connected: Boolean indicating if the balance is connected.
+        - motors_active: Boolean indicating if the motors are active.
+        - x_pos: Current X-axis position.
+        - y_pos: Current Y-axis position.
+        - z_pos: Current Z-axis position.
+        - p_pos: Current P-axis position.
+        - coordinates: Dictionary containing the current coordinates (X, Y, Z, P).
+        - target_x: Target X-axis position.
+        - target_y: Target Y-axis position.
+        - target_z: Target Z-axis position.
+        - target_p: Target P-axis position.
+        - target_coordinates: Dictionary containing the target coordinates (X, Y, Z, P).
+        - current_pressure: Current pressure value.
+        - target_pressure: Target pressure value.
+        - pressure_log: List containing the pressure log history.
+        - regulating_pressure: Boolean indicating if pressure regulation is active.
+        - gripper_open: Boolean indicating if the gripper is open.
+        - gripper_empty: Boolean indicating if the gripper is empty.
+        - gripper_reagent: Reagent object representing the loaded reagent.
+        - command_number: Current command number.
+        - command_queue: List containing the command queue.
+        - past_commands: List containing the executed commands.
+        - state: Current state of the machine (Free or Busy).
+    """
+
     command_added = QtCore.Signal(Command)
     command_executed = QtCore.Signal(Command)
 

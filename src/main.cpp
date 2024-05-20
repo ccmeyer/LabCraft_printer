@@ -1,3 +1,12 @@
+/**
+ * @file main.cpp
+ * @brief This file contains the main code for the Octopus Connect project.
+ *
+ * The main.cpp file includes various libraries and defines classes and functions
+ * used in the Octopus Connect project. It also contains the setup and loop functions
+ * for the Arduino board. The code initializes the system clock, sets up limit switches,
+ * defines a Gripper class, and handles serial communication and pressure control.
+ */
 #include <Arduino.h>
 
 // The section below comes from this git repo: https://github.com/maxgerhardt/nucleo-f446ze-with-arduino/tree/main
@@ -61,10 +70,18 @@ extern "C" void SystemClock_Config(void)
 #include <vector>
 #include "pin_assignments.h"
 #include "pin_functions.h"
-// #include "StepperMotor.h"
 #include "all_constants.h"
 #include "PressureSensor.h"
 
+/**
+ * @class LimitSwitch
+ * @brief Represents a limit switch for a specific axis.
+ * 
+ * The LimitSwitch class provides functionality to handle a limit switch
+ * connected to a specific pin on a microcontroller. It keeps track of the
+ * switch state, debounce time, and provides methods to access the switch
+ * status and time of triggering.
+ */
 class LimitSwitch {
 private:
     char axis;
@@ -117,6 +134,9 @@ int targetDroplets = 0;
 int newDroplets = 0;
 
 // Define structure for a task
+/**
+ * @brief Represents a task to be executed periodically.
+ */
 struct Task {
     void (*function)(); // Function pointer for the task
     unsigned long interval; // Interval in milliseconds
@@ -127,6 +147,10 @@ Task* refreshGripperTaskPtr = nullptr; // Define the pointer
 int refreshGripperTaskIndex = 3;
 
 
+/**
+ * @class Gripper
+ * @brief Represents a gripper object used for controlling a gripper mechanism.
+ */
 class Gripper {
 private:
     bool active;
@@ -257,11 +281,6 @@ int frequency = 1000000;
 bool pressureCorrect = false;
 bool regulatePressure = false;
 
-// StepperMotor motorZ = StepperMotor(X_EN_PIN,X_DIR_PIN,X_STEP_PIN,X_SW_RX,X_SW_TX,R_SENSE);
-// StepperMotor motorY = StepperMotor(Y_EN_PIN,Y_DIR_PIN,Y_STEP_PIN,Y_SW_RX,Y_SW_TX,R_SENSE);
-// StepperMotor motorX = StepperMotor(Z_EN_PIN,Z_DIR_PIN,Z_STEP_PIN,Z_SW_RX,Z_SW_TX,R_SENSE);
-// StepperMotor motorP = StepperMotor(P_EN_PIN,P_DIR_PIN,P_STEP_PIN,P_SW_RX,P_SW_TX,R_SENSE);
-
 // TMC2208Stepper driverX = TMC2208Stepper(X_SW_RX, X_SW_TX, R_SENSE); // Software serial
 // TMC2208Stepper driverY = TMC2208Stepper(Y_SW_RX, Y_SW_TX, R_SENSE); // Software serial
 // TMC2208Stepper driverZ = TMC2208Stepper(Z_SW_RX, Z_SW_TX, R_SENSE); // Software serial
@@ -287,6 +306,14 @@ LimitSwitch* limits[] = {&limitZ, &limitX, &limitY, &limitP};
 // Static variable to keep track of the current switch index
 static int currentSwitchIndex = 0;
 
+/**
+ * @enum HomingState
+ * @brief Represents the different states of the homing process.
+ * 
+ * The HomingState enum defines the possible states of the homing process
+ * for the motor axes. It is used to track the current state of the homing
+ * process and determine the next action to be taken.
+ */
 enum HomingState {
     IDLE,
     INITIATE,
@@ -297,6 +324,12 @@ enum HomingState {
 
 HomingState homingState = IDLE;
 
+
+/**
+ * Checks the limit switches and performs necessary actions based on their state.
+ * This function is responsible for stopping the stepper motor, catching the trigger,
+ * and controlling the LED pin based on the state of the limit switches.
+ */
 void checkLimitSwitches() {
     // // Get the current limit switch object
     LimitSwitch* currentSwitch = limits[currentSwitchIndex];
@@ -345,6 +378,15 @@ HomingStage homingStages[] = {
 
 int homingAxisNumber = 4;
 
+/**
+ * Moves the home axis through the homing stages.
+ * 
+ * The function moves the home axis through a series of homing stages, including initiation, homing, retraction, and reset position.
+ * It uses limit switches to determine the position of the axis and stepper motors to control the movement.
+ * 
+ * @param None
+ * @return None
+ */
 void homeAxis() {
   if (homingAxisNumber >= 4){
     return;
@@ -443,6 +485,11 @@ void checkDroplets(){
   }
 }
 
+/**
+ * Resets the syringe by moving the stepper motor to a specific position.
+ * If the reset process is already initiated, it continues until the stepper motor reaches its destination.
+ * Once the reset is complete, the syringe is closed and the reset flag is set to false.
+ */
 void resetSyringe() {
   if (!resetP) {    // Initiate the reset process
     stepperP.stop();
@@ -464,6 +511,21 @@ void resetSyringe() {
   }
 }
 
+/**
+ * Adjusts the pressure based on the target pressure and current pressure.
+ * This function regulates the pressure by controlling the speed of a stepper motor.
+ * It calculates the difference between the current pressure and the target pressure,
+ * and adjusts the speed of the stepper motor accordingly.
+ * 
+ * Preconditions:
+ * - The motors must be active.
+ * - The pressure regulation must be enabled.
+ * 
+ * Postconditions:
+ * - The stepper motor speed is adjusted based on the pressure difference.
+ * - The stepper motor moves towards the target position.
+ * - The stepper motor runs at the set speed.
+ */
 void adjustPressure() {
   if (!motorsActive || !regulatePressure) {   // Only regulate pressure when motors are active and instructed to
     return;
@@ -518,6 +580,21 @@ void getCycleTime(){
   }
 }
 
+/**
+ * @brief Reads data from the serial port and stores it in a character array.
+ * 
+ * This function reads data from the serial port and stores it in the `receivedChars` character array.
+ * It uses the `<` character as the start marker and the `>` character as the end marker to identify the beginning and end of a message.
+ * The received data is stored in the `receivedChars` array until the end marker is received, at which point the function sets the `newData` flag to true.
+ * 
+ * @note This function assumes that the `receivedChars` array has been declared and initialized before calling this function.
+ * 
+ * @note This function assumes that the `numChars` variable has been defined and represents the maximum number of characters that can be stored in the `receivedChars` array.
+ * 
+ * @note This function assumes that the `receivingNewData` and `newData` variables have been declared and initialized before calling this function.
+ * 
+ * @note This function assumes that the `Serial` object has been initialized and is available for reading.
+ */
 void readSerial(){
   static bool recvInProgress = false;
   static byte ndx = 0;
@@ -571,15 +648,26 @@ enum CommandType {
     // Add more command types as needed
 };
 
+/**
+ * @brief Represents a command with associated parameters.
+ */
 struct Command {
-    int commandNum;
-    CommandType type;
-    long param1;
-    long param2;
-    long param3;
-    // Add more parameters as needed
-    Command(int num, CommandType t, long p1, long p2, long p3) : 
-        commandNum(num), type(t), param1(p1), param2(p2), param3(p3) {}
+  int commandNum; /**< The command number. */
+  CommandType type; /**< The type of command. */
+  long param1; /**< The first parameter. */
+  long param2; /**< The second parameter. */
+  long param3; /**< The third parameter. */
+  
+  /**
+   * @brief Constructs a Command object with the specified parameters.
+   * @param num The command number.
+   * @param t The type of command.
+   * @param p1 The first parameter.
+   * @param p2 The second parameter.
+   * @param p3 The third parameter.
+   */
+  Command(int num, CommandType t, long p1, long p2, long p3) : 
+    commandNum(num), type(t), param1(p1), param2(p2), param3(p3) {}
 };
 
 CommandType commandType;
@@ -695,6 +783,11 @@ void updateCommandQueue(Command& newCommand) {
   commandQueue.push(newCommand);
 }
 
+/**
+ * Executes the given command.
+ *
+ * @param cmd The command to be executed.
+ */
 void executeCommand(const Command& cmd) {
   // Perform actions based on the command type
   currentCmdNum = cmd.commandNum;
@@ -774,6 +867,9 @@ void executeCommand(const Command& cmd) {
   }
 }
 
+/**
+ * Executes the next command in the command queue if the queue is not empty and the current state is FREE.
+ */
 void executeNextCommand(){
   if (!commandQueue.empty() && currentState == FREE) {
     // Dequeue the next command
