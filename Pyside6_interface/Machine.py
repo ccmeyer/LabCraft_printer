@@ -379,33 +379,33 @@ class Machine(QtWidgets.QWidget):
         if len(self.pressure_log) > 100:
             self.pressure_log.pop(0)  # Remove the oldest reading
 
-    def check_board(self):
-        self.update_state(self.convert_state(self.get_state_from_board()))
+    # def check_board(self):
+    #     self.update_state(self.convert_state(self.get_state_from_board()))
 
-    # def update_states(self):
-    #     if self.motors_active:
-    #         for axis in ['X', 'Y', 'Z', 'P']:
-    #             if self.coordinates[axis] < self.target_coordinates[axis]:
-    #                 self.coordinates[axis] += 1
-    #             elif self.coordinates[axis] > self.target_coordinates[axis]:
-    #                 self.coordinates[axis] -= 1
-    #     if self.regulating_pressure:
-    #         if self.current_pressure < self.target_pressure:
-    #             self.current_pressure += 1
-    #         elif self.current_pressure > self.target_pressure:
-    #             self.current_pressure -= 1
+    def update_states(self):
+        if self.motors_active:
+            for axis in ['X', 'Y', 'Z', 'P']:
+                if self.coordinates[axis] < self.target_coordinates[axis]:
+                    self.coordinates[axis] += 1
+                elif self.coordinates[axis] > self.target_coordinates[axis]:
+                    self.coordinates[axis] -= 1
+        if self.regulating_pressure:
+            if self.current_pressure < self.target_pressure:
+                self.current_pressure += 1
+            elif self.current_pressure > self.target_pressure:
+                self.current_pressure -= 1
 
-    #     # Check if all coordinates and pressure equal their target values
-    #     if (self.coordinates == self.target_coordinates and
-    #         self.current_pressure == self.target_pressure):
-    #         self.state = "Free"
-    #     else:
-    #         self.state = "Busy"
+        # Check if all coordinates and pressure equal their target values
+        if (self.coordinates == self.target_coordinates and
+            self.current_pressure == self.target_pressure):
+            self.state = "Free"
+        else:
+            self.state = "Busy"
 
-    #     if self.state == "Free":
-    #         self.main_window.print_status('Machine is idle')
-    #         self.execute_command_from_queue()
+        if self.state == "Free":
+            self.main_window.print_status('Machine is idle')
+            self.execute_command_from_queue()
 
-        # self.pressure_log.append(self.current_pressure)
-        # if len(self.pressure_log) > 100:
-        #     self.pressure_log.pop(0)  # Remove the oldest reading
+        self.pressure_log.append(self.current_pressure)
+        if len(self.pressure_log) > 100:
+            self.pressure_log.pop(0)  # Remove the oldest reading
