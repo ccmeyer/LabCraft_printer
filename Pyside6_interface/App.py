@@ -61,12 +61,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.shortcuts = [
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.move_relative({'X': 0, 'Y': 10, 'Z': 0, 'P': 0})),
-            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.move_relative({'X': 0, 'Y': -10, 'Z': 0, 'P': 0})),
-            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.move_relative({'X': -10, 'Y': 0, 'Z': 0, 'P': 0})),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.move_relative({'X': 10, 'Y': 0, 'Z': 0, 'P': 0})),
-            Shortcut("Move Up", "k", lambda: self.machine.move_relative({'X': 0, 'Y': 0, 'Z': 10, 'P': 0})),
-            Shortcut("Move Down", "m", lambda: self.machine.move_relative({'X': 0, 'Y': 0, 'Z': -10, 'P': 0})),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(0,10,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(0,-10,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(-10,0,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(10,0,0)),
+            Shortcut("Move Up", "k", lambda: self.machine.set_relative_coordinates(0,0,10)),
+            Shortcut("Move Down", "m", lambda: self.machine.set_relative_coordinates(0,0,-10)),
             Shortcut("Large Increase Pressure", "9", lambda: self.machine.set_relative_pressure(10)),
             Shortcut("Small Increase Pressure", "8", lambda: self.machine.set_relative_pressure(2)),
             Shortcut("Small Decrease Pressure", "7", lambda: self.machine.set_relative_pressure(-2)),
@@ -75,7 +75,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus, lambda: self.machine.deregulate_pressure),
             Shortcut("Print to Console Upper", "P", lambda: self.print_to_console_upper()),
             Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
-            Shortcut("Add Reagent", "A", lambda: self.add_reagent())
+            Shortcut("Add Reagent", "A", lambda: self.add_reagent()),
+            Shortcut("Test Popup", "T", lambda: self.test_popup()),
         ]
         
         self.read_colors_file()
@@ -91,9 +92,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.full_array = pd.DataFrame()
 
         self.communication_timer = QTimer()
-        self.communication_timer.timeout.connect(self.machine.update_states)
+        self.communication_timer.timeout.connect(self.machine.get_state_from_board)
         self.communication_timer.start(101)  # Update every 100 ms
         
+        self.execution_timer = QTimer()
+        self.execution_timer.timeout.connect(self.machine.execute_command_from_queue)
+        self.execution_timer.start(50)  # Update every 100 ms
+        
+        self.board_check_timer = QTimer()
+        self.board_check_timer.timeout.connect(self.machine.board.check_for_command)
+        self.board_check_timer.start(20)  # Update every 20 ms
+        
+        self.board_update_timer = QTimer()
+        self.board_update_timer.timeout.connect(self.machine.board.update_states)
+        self.board_update_timer.start(10)  # Update every 20 ms
+
+
         self.num_slots = 6
         self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.num_slots)]
         
@@ -190,7 +204,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.command_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.command_box)
         self.machine.command_added.connect(self.add_command)
-        self.machine.command_executed.connect(self.execute_command)
+        self.machine.command_sent.connect(self.execute_command)
 
         self.shortcut_box = ShortcutTable(self.shortcuts,"SHORTCUTS")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -215,6 +229,21 @@ class MainWindow(QtWidgets.QMainWindow):
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
         msg.exec()
+
+    def test_popup(self):
+        response = self.popup_options('Test','This is a test message',['Option 1','Option 2'])
+        print(response)
+
+    def popup_options(self,title, message, options):
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        for option in options:
+            msg.addButton(option, QtWidgets.QMessageBox.AcceptRole)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        msg.exec()
+        return msg.clickedButton().text()
     
     def read_reagents_file(self):
         with open('./Presets/Reagents.json', 'r') as f:
@@ -315,19 +344,19 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
         if self.connection_box.machine_connect_button.text() == "Disconnect":
-            self.machine.deactivate_motors()
+            self.machine.disable_motors()
             self.statusBar().showMessage("Machine disconnected")
             self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['blue']}")
             self.connection_box.machine_connect_button.setText("Connect")
             self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
         elif port == 'COM1':
-            self.machine.activate_motors()
+            self.machine.enable_motors()
             self.statusBar().showMessage(f"Machine connected to port {port}")
             self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['red']}")
             self.connection_box.machine_connect_button.setText("Disconnect")
             self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
         else:
-            self.machine.deactivate_motors()
+            self.machine.disable_motors()
             self.statusBar().showMessage("Machine not connected")
             self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['blue']}")
             self.connection_box.machine_connect_button.setText("Connect")
