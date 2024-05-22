@@ -26,10 +26,10 @@ class ControlBoard():
             state: Current state of the machine (Free or Busy).
         """
         self.machine = machine
-        self.command_number = 0
         self.command_queue = []
         self.current_command_number = 0
-        self.past_commands = []
+        self.last_completed_command_number = 0
+        self.last_added_command_number = 0
         self.state = "Free"
         self.simulate = simulate
 
@@ -57,14 +57,12 @@ class ControlBoard():
     
     def get_complete_state(self):
         if self.simulate:
-            full_string = f'State:{self.state},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open}'
+            full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open}'
             return full_string
 
     def check_for_command(self):
         if self.machine.sent_command is not None:
-            # if self.machine.sent_command.get_number() == self.current_command_number+1:
             self.add_command_to_queue(self.machine.sent_command.get_command())
-            self.current_command_number += 1
             self.machine.sent_command = None
     
     def update_states(self):
@@ -100,20 +98,22 @@ class ControlBoard():
             self.gripper_open = self.target_gripper_open
         if self.correct_pos and self.correct_pressure:
             self.state = "Free"
+            self.last_completed_command_number = self.current_command_number
             self.execute_command_from_queue()
         
     def add_command_to_queue(self, command):
         new_command = self.convert_command(command)
         self.command_queue.append(new_command)
-        self.command_number += 1
 
     def convert_command(self, command):
         [command_number,command_type,p1,p2,p3] = command[1:-1].split(',')
+        self.last_added_command_number = int(command_number)
         return BoardCommand(command_number,command_type,p1,p2,p3)
     
     def execute_command_from_queue(self):
         for i,command in enumerate(self.command_queue):
             if not command.executed:
+                self.current_command_number = int(command.command_number)
                 self.execute_command(i)
                 break            
 
@@ -125,7 +125,6 @@ class ControlBoard():
             self.target_x += int(command.param1)
             self.target_y += int(command.param2)
             self.target_z += int(command.param3)
-            print('---CHANGE---',self.target_x,self.target_y,self.target_z)
         elif command.command_type == 'ABSOLUTE_XYZ':
             self.correct_pos = False
             self.target_x = int(command.param1)
@@ -156,7 +155,7 @@ class ControlBoard():
         self.command_queue[command_index].executed = True
 
 class Command():
-    def __init__(self, command_number, command_string):
+    def __init__(self, command_number,command_type,param1,param2,param3):
         """
         Initializes a Command object.
 
@@ -171,7 +170,11 @@ class Command():
             timestamp (float): The timestamp when the command was created.
         """
         self.command_number = command_number
-        self.command_string = command_string
+        self.command_type = command_type
+        self.param1 = param1
+        self.param2 = param2
+        self.param3 = param3
+        self.signal = f'<{self.command_number},{command_type},{param1},{param2},{param3}>'
         self.executed = False
         self.timestamp = time.time()
     
@@ -179,7 +182,7 @@ class Command():
         return self.command_number
     
     def get_command(self):
-        return self.command_string
+        return self.signal
     
     def get_timestamp(self):
         return self.timestamp
@@ -225,6 +228,8 @@ class Machine(QtWidgets.QWidget):
 
     command_added = QtCore.Signal(Command)
     command_sent = QtCore.Signal(Command)
+    command_executed = QtCore.Signal(Command)
+    command_completed = QtCore.Signal(Command)
 
     def __init__(self, main_window):
         super().__init__()
@@ -260,12 +265,132 @@ class Machine(QtWidgets.QWidget):
 
         self.command_number = 0
         self.command_queue = []
-        self.past_commands = []
+        self.last_added_command_number = 0
+        self.current_command_number = 0
+        self.last_completed_command_number = 0
         self.sent_command = None
         self.state = "Free"
 
         self.calibration_file_path = './Calibrations/default_positions.json'
         self.calibration_data = {}
+
+    def add_command_to_queue(self, command_type, param1, param2, param3,):
+        new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3)
+        self.command_queue.append(new_command)
+        self.command_added.emit(new_command)
+        self.command_number += 1
+
+    def execute_command_from_queue(self):
+        if self.sent_command == None:
+            if self.last_added_command_number < self.last_completed_command_number + 3:
+                for command in self.command_queue:
+                    if not command.executed:
+                        print('Executing command:',command.get_command())
+                        self.send_command_to_board(command)
+                        self.update_targets_from_command(command)
+                        self.command_sent.emit(command)
+                        break                
+
+    def update_targets_from_command(self,command):
+        if command.command_type == 'RELATIVE_XYZ':
+            self.target_coordinates['X'] += int(command.param1)
+            self.target_coordinates['Y'] += int(command.param2)
+            self.target_coordinates['Z'] += int(command.param3)
+        elif command.command_type == 'ABSOLUTE_XYZ':
+            self.target_coordinates['X'] = int(command.param1)
+            self.target_coordinates['Y'] = int(command.param2)
+            self.target_coordinates['Z'] = int(command.param3)
+        elif command.command_type == 'RELATIVE_PRESSURE':
+            self.target_pressure += int(command.param1)
+        elif command.command_type == 'ABSOLUTE_PRESSURE':
+            self.target_pressure = int(command.param1)
+        elif command.command_type == 'REGULATE_PRESSURE':
+            self.regulating_pressure = True
+        elif command.command_type == 'DEREGULATE_PRESSURE':
+            self.regulating_pressure = False
+        elif command.command_type == 'OPEN_GRIPPER':
+            self.gripper_open = True
+        elif command.command_type == 'CLOSE_GRIPPER':
+            self.gripper_open = False
+        elif command.command_type == 'ENABLE_MOTORS':
+            self.motors_active = True
+        elif command.command_type == 'DISABLE_MOTORS':
+            self.motors_active = False
+        else:
+            print('Unknown command:',command.command_type)
+
+    def send_command_to_board(self,command):
+        if self.simulate:
+            self.sent_command = command
+            command.execute()
+
+    def get_state_from_board(self):
+        signal = self.board.get_complete_state()
+        self.update_state(self.convert_state(signal))
+        return signal
+    
+    def convert_state(self, state):
+        state_dict = {}
+        state_list = state.split(',')
+        for item in state_list:
+            key,value = item.split(':')
+            state_dict[key] = value
+        return state_dict
+    
+    def update_state(self, state):
+        self.state = state['State']
+        self.last_added_command_number = int(state['Last_added'])
+        self.current_command_number = int(state['Current_command'])
+        self.last_completed_command_number = int(state['Last_completed'])
+        self.x_pos = int(state['X'])
+        self.y_pos = int(state['Y'])
+        self.z_pos = int(state['Z'])
+        self.p_pos = int(state['P'])
+        self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
+        self.current_pressure = int(state['Pressure'])
+        self.gripper_open = state['Gripper']
+
+        self.pressure_log.append(self.current_pressure)
+        if len(self.pressure_log) > 100:
+            self.pressure_log.pop(0)  # Remove the oldest reading
+        if self.command_queue != []:
+            if self.current_command_number == self.last_completed_command_number:
+                self.command_completed.emit(self.command_queue[self.current_command_number])
+            else:
+                self.command_executed.emit(self.command_queue[self.current_command_number])
+
+    def enable_motors(self):
+        self.add_command_to_queue('ENABLE_MOTORS',0,0,0)
+        return
+    
+    def disable_motors(self):
+        self.add_command_to_queue('DISABLE_MOTORS',0,0,0)
+        return
+
+    def set_absolute_coordinates(self,x,y,z):
+        self.add_command_to_queue('ABSOLUTE_XYZ',x,y,z)
+        return
+    
+    def set_relative_coordinates(self,x,y,z):
+        self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
+        return
+    
+    def set_absolute_pressure(self,pressure):
+        self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0)
+        return
+    
+    def set_relative_pressure(self,pressure):
+        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0)
+        return
+    
+    def regulate_pressure(self):
+        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0)
+        return
+    
+    def deregulate_pressure(self):
+        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0)
+        return
+    
 
 
     # def load_positions_from_file(self):
@@ -340,89 +465,6 @@ class Machine(QtWidgets.QWidget):
     #     return
 
 
-    def add_command_to_queue(self, commandName, param1, param2, param3,):
-        signal = f'<{self.command_number},{commandName},{param1},{param2},{param3}>'
-        new_command = Command(self.command_number, signal)
-        self.command_queue.append(new_command)
-        self.command_added.emit(new_command)
-        self.command_number += 1
-
-    def execute_command_from_queue(self):
-        if self.sent_command == None:
-            for command in self.command_queue:
-                if not command.executed:
-                    print('Executing command:',command.get_command())
-                    self.send_command_to_board(command)
-                    self.command_sent.emit(command)
-                    break                
-
-    def send_command_to_board(self,command):
-        if self.simulate:
-            self.sent_command = command
-            command.execute()
-
-    def get_state_from_board(self):
-        signal = self.board.get_complete_state()
-        self.update_state(self.convert_state(signal))
-        return signal
-    
-    def convert_state(self, state):
-        state_dict = {}
-        state_list = state.split(',')
-        for item in state_list:
-            key,value = item.split(':')
-            state_dict[key] = value
-        return state_dict
-    
-    def update_state(self, state):
-        self.state = state['State']
-        self.x_pos = int(state['X'])
-        self.y_pos = int(state['Y'])
-        self.z_pos = int(state['Z'])
-        self.p_pos = int(state['P'])
-        self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
-        self.current_pressure = int(state['Pressure'])
-        self.gripper_open = state['Gripper']
-
-        self.pressure_log.append(self.current_pressure)
-        if len(self.pressure_log) > 100:
-            self.pressure_log.pop(0)  # Remove the oldest reading
-
-    def enable_motors(self):
-        self.add_command_to_queue('ENABLE_MOTORS',0,0,0)
-        self.motors_active = True
-        return
-    
-    def disable_motors(self):
-        self.add_command_to_queue('DISABLE_MOTORS',0,0,0)
-        self.motors_active = False
-        return
-
-    def set_absolute_coordinates(self,x,y,z):
-        self.add_command_to_queue('ABSOLUTE_XYZ',x,y,z)
-        return
-    
-    def set_relative_coordinates(self,x,y,z):
-        self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
-        return
-    
-    def set_absolute_pressure(self,pressure):
-        self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0)
-        return
-    
-    def set_relative_pressure(self,pressure):
-        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0)
-        return
-    
-    def regulate_pressure(self):
-        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0)
-        self.regulating_pressure = True
-        return
-    
-    def deregulate_pressure(self):
-        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0)
-        self.regulating_pressure = False
-        return
     
 
 

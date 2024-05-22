@@ -61,16 +61,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.shortcuts = [
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(0,10,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(0,-10,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(-10,0,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(10,0,0)),
-            Shortcut("Move Up", "k", lambda: self.machine.set_relative_coordinates(0,0,10)),
-            Shortcut("Move Down", "m", lambda: self.machine.set_relative_coordinates(0,0,-10)),
-            Shortcut("Large Increase Pressure", "9", lambda: self.machine.set_relative_pressure(10)),
-            Shortcut("Small Increase Pressure", "8", lambda: self.machine.set_relative_pressure(2)),
-            Shortcut("Small Decrease Pressure", "7", lambda: self.machine.set_relative_pressure(-2)),
-            Shortcut("Large Decrease Pressure", "6", lambda: self.machine.set_relative_pressure(-10)),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(0,100,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(0,-100,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(-100,0,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(100,0,0)),
+            Shortcut("Move Up", "k", lambda: self.machine.set_relative_coordinates(0,0,100)),
+            Shortcut("Move Down", "m", lambda: self.machine.set_relative_coordinates(0,0,-100)),
+            Shortcut("Large Increase Pressure", "9", lambda: self.machine.set_relative_pressure(100)),
+            Shortcut("Small Increase Pressure", "8", lambda: self.machine.set_relative_pressure(20)),
+            Shortcut("Small Decrease Pressure", "7", lambda: self.machine.set_relative_pressure(-20)),
+            Shortcut("Large Decrease Pressure", "6", lambda: self.machine.set_relative_pressure(-100)),
             Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus, lambda: self.machine.regulate_pressure),
             Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus, lambda: self.machine.deregulate_pressure),
             Shortcut("Print to Console Upper", "P", lambda: self.print_to_console_upper()),
@@ -97,7 +97,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.execution_timer = QTimer()
         self.execution_timer.timeout.connect(self.machine.execute_command_from_queue)
-        self.execution_timer.start(50)  # Update every 100 ms
+        self.execution_timer.start(90)  # Update every 100 ms
         
         self.board_check_timer = QTimer()
         self.board_check_timer.timeout.connect(self.machine.board.check_for_command)
@@ -204,7 +204,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.command_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.command_box)
         self.machine.command_added.connect(self.add_command)
-        self.machine.command_sent.connect(self.execute_command)
+        self.machine.command_sent.connect(self.sent_command)
+        self.machine.command_executed.connect(self.execute_command)
+        self.machine.command_completed.connect(self.completed_command)
 
         self.shortcut_box = ShortcutTable(self.shortcuts,"SHORTCUTS")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -393,8 +395,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.command_box.add_command(command)
 
     @QtCore.Slot(Command)
+    def sent_command(self, command):
+        self.command_box.sent_command(command.get_number())
+
+    @QtCore.Slot(Command)
     def execute_command(self, command):
         self.command_box.execute_command(command.get_number())
+    
+    @QtCore.Slot(Command)
+    def completed_command(self, command):
+        self.command_box.completed_command(command.get_number())
 
     @QtCore.Slot(Slot)
     def confirm_reagent(self,slot_obj):

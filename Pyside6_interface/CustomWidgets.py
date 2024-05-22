@@ -906,12 +906,48 @@ class CommandTable(QtWidgets.QGroupBox):
         self.table.item(0, 1).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['darker_gray'])))  # Set initial color to red
         self.table.viewport().update()
 
+    def sent_command(self, command_number):
+        """
+        Executes a command by highlighting it in the table.
+
+        Args:
+            command_number: The number of the command to be executed.
+
+        """
+        for i in range(self.table.rowCount()):
+            if self.table.item(i, 0).text() == str(command_number):
+                for j in range(self.table.columnCount()):
+                    self.table.item(i, j).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['mid_gray'])))
+                break
+        self.table.viewport().update()
+
     def execute_command(self, command_number):
         """
         Executes a command by highlighting it in the table.
 
         Args:
             command_number: The number of the command to be executed.
+
+        """
+        current_command_found = False
+        for i in range(self.table.rowCount()):
+            item = self.table.item(i, 0)
+            if item is not None:
+                if item.text() == str(command_number):
+                    current_command_found = True
+                    for j in range(self.table.columnCount()):
+                        self.table.item(i, j).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['red'])))
+                elif current_command_found and int(item.text()) < command_number:
+                    for j in range(self.table.columnCount()):
+                        self.table.item(i, j).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['dark_gray'])))
+        self.table.viewport().update()
+    
+    def completed_command(self, command_number):
+        """
+        Marks a command as completed by highlighting it in the table.
+
+        Args:
+            command_number: The number of the command to be marked as completed.
 
         """
         for i in range(self.table.rowCount()):
