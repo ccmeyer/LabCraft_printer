@@ -9,6 +9,104 @@ import json
 import os
 
 
+class MovementBox(QtWidgets.QGroupBox):
+    """
+    A custom widget for displaying past and future movements.
+    """
+
+    def __init__(self, title, main_window):
+        super().__init__(title)
+        self.main_window = main_window
+        self.layout = QtWidgets.QHBoxLayout(self)
+
+        self.x_min = -15000
+        self.x_max = 0
+        self.y_min = 0
+        self.y_max = 10000
+        self.z_min = -35000
+        self.z_max = 0
+
+        # Create a chart, a chart view and a line series for X and Y coordinates
+        self.xy_chart = QtCharts.QChart()
+        self.xy_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.xy_chart.setBackgroundBrush(QtGui.QBrush(self.main_window.colors['dark_gray']))  # Set the background color to grey
+        self.xy_chart_view = QtCharts.QChartView(self.xy_chart)
+        self.xy_series = QtCharts.QLineSeries()
+        self.xy_position_series = QtCharts.QScatterSeries()
+
+        # Add the series to the XY chart
+        self.xy_chart.addSeries(self.xy_series)
+        self.xy_chart.addSeries(self.xy_position_series)
+
+        # Create a chart, a chart view and a line series for Z coordinate
+        self.z_chart = QtCharts.QChart()
+        self.z_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.z_chart.setBackgroundBrush(QtGui.QBrush(self.main_window.colors['dark_gray']))  # Set the background color to grey
+        self.z_chart_view = QtCharts.QChartView(self.z_chart)
+        self.z_series = QtCharts.QLineSeries()
+        self.z_position_series = QtCharts.QScatterSeries()
+
+        # Add the series to the Z chart
+        self.z_chart.addSeries(self.z_series)
+        self.z_chart.addSeries(self.z_position_series)
+
+        # Set the chart views to render using OpenGL (for better performance)
+        self.xy_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.z_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        # Prevent the chart views from taking focus
+        self.xy_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.z_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.xy_chart.legend().hide()  # Hide the legend
+        self.z_chart.legend().hide()  # Hide the legend
+
+
+        # Add the chart views to the layout
+        self.layout.addWidget(self.xy_chart_view,3)
+        self.layout.addWidget(self.z_chart_view,1)
+
+        # Set the layout for the widget
+        self.setLayout(self.layout)
+
+        # Create axes, add them to the charts and attach them to the series
+        self.xy_chart.createDefaultAxes()
+        self.xy_chart.axisY().setRange(self.x_min, self.x_max)
+        self.xy_chart.axisX().setRange(self.y_min, self.y_max)
+
+        self.z_chart.createDefaultAxes()
+        self.z_chart.axisX().setRange(-1, 1)
+        self.z_chart.axisX().setLabelsVisible(False)
+        self.z_chart.axisY().setRange(self.z_min, self.z_max)
+        
+
+    def plot_movements(self):
+        # Clear the series
+        self.xy_series.clear()
+        self.z_series.clear()
+
+        # Get the target coordinates from the machine
+        target_coordinates = self.main_window.machine.target_coordinates
+
+        # Add the coordinates to the series
+        for coord in target_coordinates:
+            self.xy_series.append(coord[0], coord[1])
+            self.z_series.append(coord[2], 0)
+
+    def update_machine_position(self):
+        # Clear the position series
+        self.xy_position_series.clear()
+        self.z_position_series.clear()
+
+        # Get the current position from the machine
+        x_pos = self.main_window.machine.x_pos
+        y_pos = self.main_window.machine.y_pos
+        z_pos = self.main_window.machine.z_pos
+
+        # Add the current position to the position series
+        self.xy_position_series.append(y_pos, x_pos)
+        self.z_position_series.append(0,z_pos)
+
 class Plate():
     """
     Represents a plate with a specified name, number of rows, number of columns, spacing, and default value.
@@ -235,7 +333,7 @@ class PlateBox(QtWidgets.QGroupBox):
         color.setAlphaF(opacity)
         rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
         if added:
-            cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {self.main_window.colors['red']};")
+            cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {self.main_window.colors['white']};")
         else:
             cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid black;")
 
@@ -966,6 +1064,20 @@ class CommandTable(QtWidgets.QGroupBox):
             if self.table.item(i, 0).text() == str(command_number):
                 for j in range(self.table.columnCount()):
                     self.table.item(i, j).setBackground(QtGui.QBrush(QtGui.QColor(self.main_window.colors['dark_gray'])))
+                break
+        self.table.viewport().update()
+
+    def remove_command(self, command_number):
+        """
+        Removes a command from the table.
+
+        Args:
+            command_number: The number of the command to be removed.
+
+        """
+        for i in range(self.table.rowCount()):
+            if self.table.item(i, 0).text() == str(command_number):
+                self.table.removeRow(i)
                 break
         self.table.viewport().update()
 

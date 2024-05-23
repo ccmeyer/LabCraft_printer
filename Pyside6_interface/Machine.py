@@ -32,6 +32,7 @@ class ControlBoard():
         self.last_added_command_number = 0
         self.wait_flag = False
         self.wait_time = 0
+        self.pause = False
         self.initial_time = 0
         self.state = "Free"
         self.simulate = simulate
@@ -42,6 +43,8 @@ class ControlBoard():
         self.z_pos = 0
         self.p_pos = 0
         self.correct_pos = True
+        self.xy_speed = 50
+        self.z_speed = 50
 
         self.target_x = 0
         self.target_y = 0
@@ -61,6 +64,31 @@ class ControlBoard():
         self.target_gripper_open = False
         self.correct_gripper = True
     
+    def pause_commands(self):
+        self.state = "Paused"
+        self.pause = True
+        
+    def resume_commands(self):
+        self.state = "Free"
+        self.pause = False
+
+    def clear_command_queue(self):
+        # new_command_queue = [command for command in self.command_queue if command.executed]
+        self.command_queue = []
+        self.current_command_number = 0
+        self.last_completed_command_number = 0
+        self.last_added_command_number = 0
+        self.state = "Free"
+        self.pause = False
+
+        self.target_x = self.x_pos
+        self.target_y = self.y_pos
+        self.target_z = self.z_pos
+        self.target_pressure = self.pressure
+        self.target_gripper_open = self.gripper_open
+        self.target_droplets = self.current_droplets
+
+    
     def get_complete_state(self):
         if self.simulate:
             full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open},Droplets:{self.current_droplets}'
@@ -72,24 +100,26 @@ class ControlBoard():
             self.machine.sent_command = None
     
     def update_states(self):
+        if self.pause:
+            return
         if self.wait_flag:
             if time.time() - self.initial_time > self.wait_time:
                 self.wait_flag = False
             else:
                 return
         if self.motors_active:
-            if self.z_pos < self.target_z:
-                self.z_pos += 50
-            elif self.z_pos > self.target_z:
-                self.z_pos -= 50
-            elif self.y_pos < self.target_y:
-                self.y_pos += 50
+            if self.y_pos < self.target_y:
+                self.y_pos += self.xy_speed
             elif self.y_pos > self.target_y:
-                self.y_pos -= 50
+                self.y_pos -= self.xy_speed
             elif self.x_pos < self.target_x:
-                self.x_pos += 50
+                self.x_pos += self.xy_speed
             elif self.x_pos > self.target_x:
-                self.x_pos -= 50
+                self.x_pos -= self.xy_speed
+            elif self.z_pos < self.target_z:
+                self.z_pos += self.z_speed
+            elif self.z_pos > self.target_z:
+                self.z_pos -= self.z_speed
             else:
                 self.correct_pos = True
         else:
@@ -113,6 +143,7 @@ class ControlBoard():
 
         if self.correct_pos and self.correct_pressure and self.correct_gripper:
             if self.current_droplets < self.target_droplets:
+                time.sleep(0.1)
                 self.current_droplets += 1
             else:
                 self.correct_droplets = True
@@ -126,7 +157,17 @@ class ControlBoard():
         
     def add_command_to_queue(self, command):
         new_command = self.convert_command(command)
-        self.command_queue.append(new_command)
+        if new_command.command_type == 'PAUSE':
+            self.pause_commands()
+            print('Received pause command')
+        elif new_command.command_type == 'RESUME':
+            self.resume_commands()
+            print('Received resume command')
+        elif new_command.command_type == 'CLEAR_QUEUE':
+            self.clear_command_queue()
+            print('Received clear command')
+        else:
+            self.command_queue.append(new_command)
 
     def convert_command(self, command):
         [command_number,command_type,p1,p2,p3] = command[1:-1].split(',')
@@ -180,6 +221,9 @@ class ControlBoard():
             self.wait_time = int(command.param1)
             self.initial_time = time.time()
             self.wait_flag = True
+        elif command.command_type == 'PRINT':
+            self.correct_droplets = False
+            self.target_droplets = int(command.param1)
         else:
             print('Unknown command:',command.command_type)
         self.correct_pos = False
@@ -211,6 +255,7 @@ class Command():
         self.signal = f'<{self.command_number},{command_type},{param1},{param2},{param3}>'
         self.sent = False
         self.executed = False
+        self.completed = False
         self.timestamp = time.time()
         self.handler = handler
         self.kwargs = kwargs if kwargs is not None else {}
@@ -231,6 +276,9 @@ class Command():
         if self.handler is not None:
             self.handler(**self.kwargs)
         self.executed = True
+    
+    def complete(self):
+        self.completed = True
 
 class Machine(QtWidgets.QWidget):
     """
@@ -374,6 +422,14 @@ class Machine(QtWidgets.QWidget):
             self.motors_active = True
         elif command.command_type == 'DISABLE_MOTORS':
             self.motors_active = False
+        elif command.command_type == 'PRINT':
+            pass
+        elif command.command_type == 'PAUSE':
+            print('--Pausing')
+            pass
+        elif command.command_type == 'RESUME':
+            print('--Resuming')
+            pass
         else:
             print('Unknown command:',command.command_type)
 
@@ -434,7 +490,10 @@ class Machine(QtWidgets.QWidget):
         
         if self.command_queue != []:
             if self.current_command_number == self.last_completed_command_number:
-                self.command_completed.emit(self.command_queue[self.current_command_number])
+                current_command = self.command_queue[self.current_command_number]
+                if current_command.executed and not current_command.completed:
+                    self.command_completed.emit(self.command_queue[self.current_command_number])
+                    current_command.complete()
             else:
                 self.command_executed.emit(self.command_queue[self.current_command_number])
 
@@ -445,13 +504,7 @@ class Machine(QtWidgets.QWidget):
                         completed_command = self.incomplete_commands.pop(i)
                         completed_command.execute_handler()
 
-                    
-    
-    # def print_enabled(self):
-    #     print("Printing enabled")    
-    
-    # def print_disabled(self):
-    #     print("Printing disabled")
+        self.main_window.update_machine_position()
 
     def print_handler(self,message='Default message'):
         print(message)
@@ -459,6 +512,51 @@ class Machine(QtWidgets.QWidget):
     def well_complete_handler(self, well_number=None,reagent=None):
         print(f'Well {well_number} printed with {reagent}')
         self.main_window.mark_reagent_as_added(well_number,reagent)
+
+    def pause_commands(self):
+        print('Pausing commands')
+        new_command = Command(0, command_type='PAUSE', param1=0, param2=0, param3=0)
+        if self.simulate:
+            if self.sent_command is not None:
+                print('Overriding command:',self.sent_command.get_command())
+            print('Sending pause command')
+            self.send_command_to_board(new_command)
+    
+    def resume_commands(self):
+        new_command = Command(0, command_type='RESUME', param1=0, param2=0, param3=0)
+        if self.simulate:
+            if self.sent_command is not None:
+                print('Overriding command:',self.sent_command.get_command())
+            self.send_command_to_board(new_command)
+
+    def clear_command_queue(self):
+        print('Clearing command queue')
+        new_command = Command(0, command_type='CLEAR_QUEUE', param1=0, param2=0, param3=0)
+        if self.simulate:
+            if self.sent_command is not None:
+                print('Overriding command:',self.sent_command.get_command())
+            self.send_command_to_board(new_command)
+
+        self.main_window.remove_commands(self.command_queue)
+        self.command_queue = []
+        self.current_command_number = 0
+        self.last_completed_command_number = 0
+        self.command_number = 0
+        self.incomplete_commands = []
+
+        self.target_x = self.x_pos
+        self.target_y = self.y_pos
+        self.target_z = self.z_pos
+        self.target_p = self.p_pos
+        self.target_coordinates = {'X': self.target_x, 'Y': self.target_y, 'Z': self.target_z, 'P': self.target_p}
+        self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
+        self.target_pressure = self.current_pressure
+        self.target_gripper_open = self.gripper_open
+        self.target_droplets = self.current_droplets
+
+        self.main_window.update_coordinates()
+        self.main_window.update_pressure()
+
 
 
     def enable_motors(self):
@@ -521,23 +619,34 @@ class Machine(QtWidgets.QWidget):
     
     def get_regulation_state(self):
         return self.regulating_pressure
+    
+    def set_gripper_reagent(self,reagent):
+        self.gripper_reagent = reagent
+        return
 
     def pick_up_reagent(self,slot):
         self.open_gripper()
         self.wait_command()
         print('Picking up reagent:',slot.reagent.name)
-        self.move_to_location(f'rack_position_{slot.number}')
+        location = f'rack_position_{slot.number}'
+        self.move_to_location(location)
+        target_coordinates = self.calibration_data[location].copy()
+        self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         self.close_gripper()
         self.wait_command()
-        print("Moving to loading position")
-        self.move_to_location('loading')
+        self.set_gripper_reagent(slot.reagent)
+        self.set_absolute_coordinates(target_coordinates['x']+self.rack_offset, target_coordinates['y'], target_coordinates['z'])
         return
     
     def drop_reagent(self,slot):
-        self.move_to_location(f'rack_position_{slot.number}')
+        location = f'rack_position_{slot.number}'
+        self.move_to_location(location)
+        target_coordinates = self.calibration_data[location].copy()
+        self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         self.open_gripper()
         self.wait_command()
-        self.move_to_location('loading')
+        self.set_gripper_reagent(Reagent("Empty", self.main_window.colors, "dark_gray"))
+        self.set_absolute_coordinates(target_coordinates['x']+self.rack_offset, target_coordinates['y'], target_coordinates['z'])
         self.close_gripper()
         self.wait_command()
         return
@@ -626,11 +735,18 @@ class Machine(QtWidgets.QWidget):
     
     def print_array(self,array,ask=True):
         if not self.motors_active:
-            print('Motors must be active')
+            self.main_window.popup_message('Motors not active','Motors must be active to print an array')
             return
         if not self.regulating_pressure:
-            print('Must regulate pressure')
+            self.main_window.popup_message('Pressure not regulated','Pressure must be regulated to print an array')
             return
+        if self.gripper_reagent.name == 'Empty':
+            self.main_window.popup_message('No reagent loaded','A reagent must be loaded to print an array')
+            return
+        if self.main_window.full_array.empty:
+            self.main_window.popup_message('No array loaded','Please load an array first')
+            return
+        
         if ask:
             response = self.main_window.popup_yes_no('Print array',message='Print an array? (y/n)')
             if response == '&No':
@@ -648,11 +764,13 @@ class Machine(QtWidgets.QWidget):
         self.array_start_y = self.calibration_data[location]['y']
         self.array_start_z = self.calibration_data[location]['z']
         
-        current_reagent = array['reagent'].iloc[0]
+        current_reagent = self.gripper_reagent.name
         print('Current reagent:',current_reagent)
         reagent_array = array[array['reagent'] == current_reagent].copy()
 
         for index,line in reagent_array.iterrows():
+            if line['Added'] == True:
+                continue
             print('Printing:',line['row'],line['column'],line['amount'])
             self.move_to_well(line['row'],line['column'])
             self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})

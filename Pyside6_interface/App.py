@@ -61,10 +61,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.shortcuts = [
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(0,100,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(0,-100,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(-100,0,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(100,0,0)),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(100,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(-100,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(0,-100,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(0,100,0)),
             Shortcut("Move Up", "k", lambda: self.machine.set_relative_coordinates(0,0,100)),
             Shortcut("Move Down", "m", lambda: self.machine.set_relative_coordinates(0,0,-100)),
             Shortcut("Large Increase Pressure", "9", lambda: self.machine.set_relative_pressure(100)),
@@ -82,6 +82,7 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Close Gripper", "g", lambda: self.manual_close_gripper()),
             Shortcut("Move to location", "L", lambda: self.machine.move_to_location(location=False)),
             Shortcut("Print array", "P", lambda: self.print_array()),
+            Shortcut("Pause", QtCore.Qt.Key_Escape, lambda: self.pause_execution()),
         ]
         
         self.read_colors_file()
@@ -188,10 +189,20 @@ class MainWindow(QtWidgets.QMainWindow):
         mid_panel.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
+        tab_widget = QtWidgets.QTabWidget()
+
+        tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
+
         self.current_plate = Plate('5x10',rows=16,columns=24)
         self.plate_box = PlateBox(self,'PLATE')
         self.plate_box.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
-        mid_layout.addWidget(self.plate_box)
+        
+        tab_widget.addTab(self.plate_box, "Plate")
+        # Create another widget and add it to the second tab
+        self.movement_box = MovementBox("MOVEMENT",self)
+        tab_widget.addTab(self.movement_box, "MOVEMENT")
+        
+        mid_layout.addWidget(tab_widget)
 
         self.array_widget = ArrayWidget(self)
         mid_layout.addWidget(self.array_widget)
@@ -325,6 +336,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 break
         self.update_coordinates()
 
+    def pause_execution(self):
+        self.machine.pause_commands()
+        response = self.popup_yes_no('Pause','Execution paused. Do you want to resume?')
+        if response == '&Yes':
+            print('Resuming execution')
+            self.machine.resume_commands()
+            return
+        else:
+            print('Clearing Queue')
+            self.machine.clear_command_queue()
+        
     def add_reagent(self):
         self.rack_box.add_reagent()
 
@@ -384,6 +406,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plate_box.mark_reagent_as_added(well_number,reagent_name)
         print(self.full_array['Added'].value_counts())
         self.plate_box.preview_array()
+
+    def update_movement_plot(self):
+        self.movement_box.plot_movements()
+    
+    def update_machine_position(self):
+        self.movement_box.update_machine_position()
+
+    def remove_commands(self,removed_commands):
+        for command in removed_commands:
+            self.command_box.remove_command(command.get_number())
 
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
@@ -447,6 +479,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(Command)
     def completed_command(self, command):
         self.command_box.completed_command(command.get_number())
+        print(f"Command {command.get_number()} completed")
 
     @QtCore.Slot(Slot)
     def confirm_reagent(self,slot_obj):
