@@ -30,6 +30,9 @@ class ControlBoard():
         self.current_command_number = 0
         self.last_completed_command_number = 0
         self.last_added_command_number = 0
+        self.wait_flag = False
+        self.wait_time = 0
+        self.initial_time = 0
         self.state = "Free"
         self.simulate = simulate
 
@@ -54,6 +57,7 @@ class ControlBoard():
 
         self.gripper_open = False
         self.target_gripper_open = False
+        self.correct_gripper = True
     
     def get_complete_state(self):
         if self.simulate:
@@ -66,6 +70,11 @@ class ControlBoard():
             self.machine.sent_command = None
     
     def update_states(self):
+        if self.wait_flag:
+            if time.time() - self.initial_time > self.wait_time:
+                self.wait_flag = False
+            else:
+                return
         if self.motors_active:
             if self.z_pos < self.target_z:
                 self.z_pos += 1
@@ -94,9 +103,13 @@ class ControlBoard():
         else:
             self.correct_pressure = True
 
-        if self.gripper_open != self.target_gripper_open:
-            self.gripper_open = self.target_gripper_open
         if self.correct_pos and self.correct_pressure:
+            if self.gripper_open != self.target_gripper_open:
+                self.gripper_open = self.target_gripper_open
+            else:
+                self.correct_gripper = True
+
+        if self.correct_pos and self.correct_pressure and self.correct_gripper:
             self.state = "Free"
             self.last_completed_command_number = self.current_command_number
             self.execute_command_from_queue()
@@ -111,11 +124,13 @@ class ControlBoard():
         return BoardCommand(command_number,command_type,p1,p2,p3)
     
     def execute_command_from_queue(self):
-        for i,command in enumerate(self.command_queue):
-            if not command.executed:
-                self.current_command_number = int(command.command_number)
-                self.execute_command(i)
-                break            
+        if self.state == "Free":
+            for i,command in enumerate(self.command_queue):
+                if not command.executed:
+                    self.current_command_number = int(command.command_number)
+                    self.execute_command(i)
+                    self.state = "Busy"
+                    break            
 
     def execute_command(self,command_index):
         command = self.command_queue[command_index]
@@ -150,9 +165,17 @@ class ControlBoard():
             self.motors_active = True
         elif command.command_type == 'DISABLE_MOTORS':
             self.motors_active = False
+        elif command.command_type == 'WAIT':
+            self.wait_time = int(command.param1)
+            self.initial_time = time.time()
+            self.wait_flag = True
         else:
             print('Unknown command:',command.command_type)
+        self.correct_pos = False
+        self.correct_pressure = False
+        self.correct_gripper = False
         self.command_queue[command_index].executed = True
+        self.state = "Busy"
 
 class Command():
     def __init__(self, command_number,command_type,param1,param2,param3):
@@ -259,8 +282,10 @@ class Machine(QtWidgets.QWidget):
         self.pressure_log = [0]
         self.regulating_pressure = False
 
+        self.previous_gripper_state = False
         self.gripper_open = False
         self.gripper_empty = True
+        self.gripper_busy = False
         self.gripper_reagent = Reagent("Empty", self.main_window.colors, "dark_gray")
 
         self.command_number = 0
@@ -309,9 +334,15 @@ class Machine(QtWidgets.QWidget):
         elif command.command_type == 'DEREGULATE_PRESSURE':
             self.regulating_pressure = False
         elif command.command_type == 'OPEN_GRIPPER':
-            self.gripper_open = True
+            # self.gripper_open = True
+            # self.main_window.open_gripper()
+            pass
         elif command.command_type == 'CLOSE_GRIPPER':
-            self.gripper_open = False
+            # self.gripper_open = False
+            # self.main_window.close_gripper()
+            pass
+        elif command.command_type == 'WAIT':
+            pass
         elif command.command_type == 'ENABLE_MOTORS':
             self.motors_active = True
         elif command.command_type == 'DISABLE_MOTORS':
@@ -348,7 +379,21 @@ class Machine(QtWidgets.QWidget):
         self.p_pos = int(state['P'])
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
         self.current_pressure = int(state['Pressure'])
-        self.gripper_open = state['Gripper']
+        # self.gripper_open = state['Gripper']
+        target_gripper_open = state['Gripper'] == 'True'
+        if self.gripper_open != target_gripper_open:
+            # The gripper state has changed
+            if not self.gripper_busy:
+                # The gripper is not currently in the process of opening or closing
+                self.gripper_open = target_gripper_open
+                self.gripper_busy = True  # The gripper is now in the process of opening or closing
+                if self.gripper_open:
+                    self.main_window.open_gripper()
+                else:
+                    self.main_window.close_gripper()
+        elif self.gripper_busy:
+            # The gripper has finished opening or closing
+            self.gripper_busy = False
 
         self.pressure_log.append(self.current_pressure)
         if len(self.pressure_log) > 100:
@@ -391,11 +436,29 @@ class Machine(QtWidgets.QWidget):
         self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0)
         return
     
+    def open_gripper(self):
+        self.add_command_to_queue('OPEN_GRIPPER',0,0,0)
+        return
 
+    def close_gripper(self):
+        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0)
+        return
+    
+    def wait_command(self):
+        self.add_command_to_queue('WAIT',1,0,0)
 
-    # def load_positions_from_file(self):
-    #     with open(self.calibration_file_path, 'r') as file:
-    #         self.calibration_data = json.load(file)
+    def pick_up_reagent(self):
+        self.open_gripper()
+        self.wait_command()
+        self.set_absolute_coordinates(100,100,100)
+        self.close_gripper()
+        self.wait_command()
+        self.set_absolute_coordinates(0,0,0)
+        return
+
+    def load_positions_from_file(self):
+        with open(self.calibration_file_path, 'r') as file:
+            self.calibration_data = json.load(file)
 
     # def move_to_location(self,location=False,direct=False,safe_y=False):
     #     '''

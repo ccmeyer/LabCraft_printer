@@ -137,7 +137,7 @@ class PlateBox(QtWidgets.QGroupBox):
         self.experiment_name.setText(self.main_window.experiment_name)
     
     def read_plate_file(self):
-        with open('./Presets/Plates.json', 'r') as f:
+        with open('./Pyside6_interface/Presets/Plates.json', 'r') as f:
             plates = json.load(f)
         self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default']) for plate in plates]
     
@@ -1149,6 +1149,7 @@ class RackBox(QtWidgets.QWidget):
     """
     reagent_confirmed = QtCore.Signal(Slot)
     reagent_loaded = QtCore.Signal(Slot)
+    gripper_toggled = QtCore.Signal()
 
     def __init__(self, main_window, slots, reagents):
         """
@@ -1184,8 +1185,14 @@ class RackBox(QtWidgets.QWidget):
         self.gripper_slot.setStyleSheet("color: white")
         self.gripper_slot.setText("Empty")
         self.gripper_slot.setAlignment(QtCore.Qt.AlignCenter)
-        self.layout.addWidget(self.gripper_slot, 1, 0,4,1)
+        self.layout.addWidget(self.gripper_slot, 1, 0,3,1)
 
+        self.gripper_state_label = QtWidgets.QLabel("Gripper Open")
+        self.gripper_state_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.gripper_state_label.setStyleSheet(f"background-color: {self.main_window.colors['darker_gray']}; color: white;")
+        self.gripper_state_label.setFixedHeight(20)
+        self.layout.addWidget(self.gripper_state_label, 4, 0)
+        self.close_gripper()
         # Add an empty column for the gap
         self.layout.setColumnMinimumWidth(1, 10)
 
@@ -1220,6 +1227,14 @@ class RackBox(QtWidgets.QWidget):
             self.layout.addWidget(self.loading_buttons[slot], 4, slot+2)
         self.update_load_buttons()
     
+    def open_gripper(self):
+        self.gripper_state_label.setText("Gripper Open")
+        self.gripper_state_label.setStyleSheet(f"background-color: {self.main_window.colors['red']}; color: white;")
+    
+    def close_gripper(self):
+        self.gripper_state_label.setText("Gripper Closed")
+        self.gripper_state_label.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: white;")
+
     def emit_confirmation_signal(self, slot):
         def emit_confirmation_signal():
             self.reagent_confirmed.emit(self.slots[slot])
@@ -1263,7 +1278,6 @@ class RackBox(QtWidgets.QWidget):
         button.setText(text)
         button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}; color: {self.main_window.colors['light_gray']}")
 
-    
     def update_load_buttons(self):
         for i, slot in enumerate(self.slots):
             if not slot.confirmed:

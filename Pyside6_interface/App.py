@@ -77,6 +77,9 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
             Shortcut("Add Reagent", "A", lambda: self.add_reagent()),
             Shortcut("Test Popup", "T", lambda: self.test_popup()),
+            Shortcut("Pick Up Reagent", "O", lambda: self.machine.pick_up_reagent()),
+            Shortcut("Open Gripper", "G", lambda: self.manual_open_gripper()),
+            Shortcut("Close Gripper", "g", lambda: self.manual_close_gripper()),
         ]
         
         self.read_colors_file()
@@ -167,6 +170,10 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(self.pressure_box)
         layout.addWidget(left_panel)
 
+        # self.gripper_timer = QTimer()
+        # self.gripper_timer.timeout.connect(self.toggle_gripper)
+        # self.gripper_timer.start(500)  # Update every 1000 ms
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_coordinates)
         self.timer.timeout.connect(self.update_pressure)
@@ -248,13 +255,13 @@ class MainWindow(QtWidgets.QMainWindow):
         return msg.clickedButton().text()
     
     def read_reagents_file(self):
-        with open('./Presets/Reagents.json', 'r') as f:
+        with open('./Pyside6_interface/Presets/Reagents.json', 'r') as f:
             reagents = json.load(f)
         self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name']) for reagent in reagents]
     
     def write_reagents_file(self):
         reagents = [reagent.to_dict() for reagent in self.reagents]
-        with open('./Presets/Reagents.json', 'w') as f:
+        with open('./Pyside6_interface/Presets/Reagents.json', 'w') as f:
             json.dump(reagents, f)
 
     def select_experiment_directory(self):
@@ -291,7 +298,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box.reset_confirmation()
     
     def read_colors_file(self):
-        with open('./Presets/Colors.json', 'r') as f:
+        with open('./Pyside6_interface/Presets/Colors.json', 'r') as f:
             self.colors = json.load(f)
 
     def keyPressEvent(self, event):
@@ -342,6 +349,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def activate_loading_and_editing(self):
         self.array_widget.activate_array_buttons()
+
+    def manual_open_gripper(self):
+        self.machine.open_gripper()
+        self.rack_box.open_gripper(True)
+    
+    def manual_close_gripper(self):
+        self.machine.close_gripper()
+        self.rack_box.close_gripper(False)
+    
+    def open_gripper(self):
+        self.rack_box.open_gripper()
+    
+    def close_gripper(self):
+        self.rack_box.close_gripper()
 
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
@@ -441,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
     
-    with open("stylesheet.qss", "r") as f:
+    with open("./Pyside6_interface/stylesheet.qss", "r") as f:
         app.setStyleSheet(f.read())
 
     window = MainWindow()
