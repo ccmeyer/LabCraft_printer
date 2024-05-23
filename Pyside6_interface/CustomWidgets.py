@@ -120,6 +120,7 @@ class PlateBox(QtWidgets.QGroupBox):
             for reagent in self.main_window.reagents:
                 self.reagent_combo.addItem(reagent.name)
         self.reagent_combo.currentIndexChanged.connect(self.activate_plate)
+        # self.reagent_combo.currentIndexChanged.connect(self.preview_array)
         self.bottom_layout.addWidget(self.reagent_combo)
         self.layout.addLayout(self.bottom_layout)
 
@@ -173,7 +174,8 @@ class PlateBox(QtWidgets.QGroupBox):
         plate_name = self.plate_combo.currentText()
         plate = next(p for p in self.plate_options if p.name == plate_name)
         self.create_plate(plate)
-        self.assign_wells()
+        if self.main_window.actual_array.empty:
+            self.assign_wells()
         self.preview_array()
     
     def snake_df(self,df):
@@ -219,10 +221,11 @@ class PlateBox(QtWidgets.QGroupBox):
 
     def update_plate_single(self, current_array,reagent):
         max_amount = max(current_array['amount'])
+        # print(current_array)
         for i, row in current_array.iterrows():
-            self.set_cell_color(row['well_number'], reagent, row['amount'], max_amount)
+            self.set_cell_color(row['well_number'], reagent, row['amount'], max_amount,row['Added'])
 
-    def set_cell_color(self, well_number, reagent,target_amount,max_amount):
+    def set_cell_color(self, well_number, reagent,target_amount,max_amount,added):
         cell = self.cells[well_number]
         if max_amount == 0:
             opacity = 0
@@ -231,9 +234,18 @@ class PlateBox(QtWidgets.QGroupBox):
         color = QtGui.QColor(reagent.hex_color)
         color.setAlphaF(opacity)
         rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
-        cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid black;")
+        if added:
+            cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {self.main_window.colors['red']};")
+        else:
+            cell.setStyleSheet(f"background-color: {rgba_color}; border: 1px solid black;")
 
-
+    def mark_reagent_as_added(self, well_number, reagent_name):
+        # Find the row with the matching well_number and reagent_name
+        mask = (self.main_window.full_array['well_number'] == well_number) & (self.main_window.full_array['reagent'] == reagent_name)
+        
+        # Set the 'Added' column to True for this row
+        self.main_window.full_array.loc[mask, 'Added'] = True
+    
 class ArrayWidget(QtWidgets.QWidget):
     """
     A custom widget for handling array-related functionality.

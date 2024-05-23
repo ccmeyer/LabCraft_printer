@@ -53,7 +53,9 @@ class ControlBoard():
         self.regulate_pressure = False
         self.correct_pressure = True
 
-        self.total_droplets = 0
+        self.current_droplets = 0
+        self.target_droplets = 0
+        self.correct_droplets = True
 
         self.gripper_open = False
         self.target_gripper_open = False
@@ -61,7 +63,7 @@ class ControlBoard():
     
     def get_complete_state(self):
         if self.simulate:
-            full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open}'
+            full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open},Droplets:{self.current_droplets}'
             return full_string
 
     def check_for_command(self):
@@ -77,17 +79,17 @@ class ControlBoard():
                 return
         if self.motors_active:
             if self.z_pos < self.target_z:
-                self.z_pos += 1
+                self.z_pos += 50
             elif self.z_pos > self.target_z:
-                self.z_pos -= 1
+                self.z_pos -= 50
             elif self.y_pos < self.target_y:
-                self.y_pos += 1
+                self.y_pos += 50
             elif self.y_pos > self.target_y:
-                self.y_pos -= 1
+                self.y_pos -= 50
             elif self.x_pos < self.target_x:
-                self.x_pos += 1
+                self.x_pos += 50
             elif self.x_pos > self.target_x:
-                self.x_pos -= 1
+                self.x_pos -= 50
             else:
                 self.correct_pos = True
         else:
@@ -110,8 +112,16 @@ class ControlBoard():
                 self.correct_gripper = True
 
         if self.correct_pos and self.correct_pressure and self.correct_gripper:
+            if self.current_droplets < self.target_droplets:
+                self.current_droplets += 1
+            else:
+                self.correct_droplets = True
+
+        if self.correct_pos and self.correct_pressure and self.correct_gripper and self.correct_droplets:
             self.state = "Free"
             self.last_completed_command_number = self.current_command_number
+            # if self.command_queue != []:
+            #     self.command_queue[self.current_command_number].executed = True
             self.execute_command_from_queue()
         
     def add_command_to_queue(self, command):
@@ -129,6 +139,7 @@ class ControlBoard():
                 if not command.executed:
                     self.current_command_number = int(command.command_number)
                     self.execute_command(i)
+                    self.command_queue[self.current_command_number].executed = True
                     self.state = "Busy"
                     break            
 
@@ -174,11 +185,11 @@ class ControlBoard():
         self.correct_pos = False
         self.correct_pressure = False
         self.correct_gripper = False
-        self.command_queue[command_index].executed = True
+        # self.command_queue[command_index].executed = True
         self.state = "Busy"
 
 class Command():
-    def __init__(self, command_number,command_type,param1,param2,param3):
+    def __init__(self, command_number,command_type,param1,param2,param3,handler=None,kwargs=None):
         """
         Initializes a Command object.
 
@@ -198,8 +209,11 @@ class Command():
         self.param2 = param2
         self.param3 = param3
         self.signal = f'<{self.command_number},{command_type},{param1},{param2},{param3}>'
+        self.sent = False
         self.executed = False
         self.timestamp = time.time()
+        self.handler = handler
+        self.kwargs = kwargs if kwargs is not None else {}
     
     def get_number(self):
         return self.command_number
@@ -210,7 +224,12 @@ class Command():
     def get_timestamp(self):
         return self.timestamp
     
-    def execute(self):
+    def send(self):
+        self.sent = True
+    
+    def execute_handler(self):
+        if self.handler is not None:
+            self.handler(**self.kwargs)
         self.executed = True
 
 class Machine(QtWidgets.QWidget):
@@ -288,20 +307,32 @@ class Machine(QtWidgets.QWidget):
         self.gripper_busy = False
         self.gripper_reagent = Reagent("Empty", self.main_window.colors, "dark_gray")
 
+        self.current_droplets = 0
+
         self.command_number = 0
         self.command_queue = []
+        self.incomplete_commands = []
         self.last_added_command_number = 0
         self.current_command_number = 0
         self.last_completed_command_number = 0
         self.sent_command = None
         self.state = "Free"
 
-        self.calibration_file_path = './Calibrations/default_positions.json'
+        self.calibration_file_path = './Pyside6_interface/Calibrations/default_positions.json'
         self.calibration_data = {}
+        self.load_positions_from_file()
 
-    def add_command_to_queue(self, command_type, param1, param2, param3,):
-        new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3)
+        self.rack_offset = -2500
+        self.height = -15000
+        self.safe_y = 3500
+
+        self.picking_up = False
+        self.dropping_off = False
+
+    def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
+        new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3,handler=handler,kwargs=kwargs)
         self.command_queue.append(new_command)
+        self.incomplete_commands.append(new_command)
         self.command_added.emit(new_command)
         self.command_number += 1
 
@@ -309,8 +340,8 @@ class Machine(QtWidgets.QWidget):
         if self.sent_command == None:
             if self.last_added_command_number < self.last_completed_command_number + 3:
                 for command in self.command_queue:
-                    if not command.executed:
-                        print('Executing command:',command.get_command())
+                    if not command.sent:
+                        print('Sending command:',command.get_command())
                         self.send_command_to_board(command)
                         self.update_targets_from_command(command)
                         self.command_sent.emit(command)
@@ -334,12 +365,8 @@ class Machine(QtWidgets.QWidget):
         elif command.command_type == 'DEREGULATE_PRESSURE':
             self.regulating_pressure = False
         elif command.command_type == 'OPEN_GRIPPER':
-            # self.gripper_open = True
-            # self.main_window.open_gripper()
             pass
         elif command.command_type == 'CLOSE_GRIPPER':
-            # self.gripper_open = False
-            # self.main_window.close_gripper()
             pass
         elif command.command_type == 'WAIT':
             pass
@@ -353,8 +380,14 @@ class Machine(QtWidgets.QWidget):
     def send_command_to_board(self,command):
         if self.simulate:
             self.sent_command = command
-            command.execute()
+            command.send()
 
+    def get_command_number(self):
+        return self.command_number
+    
+    def get_command_log(self):
+        return self.command_queue
+    
     def get_state_from_board(self):
         signal = self.board.get_complete_state()
         self.update_state(self.convert_state(signal))
@@ -379,7 +412,7 @@ class Machine(QtWidgets.QWidget):
         self.p_pos = int(state['P'])
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
         self.current_pressure = int(state['Pressure'])
-        # self.gripper_open = state['Gripper']
+        self.current_droplets = int(state['Droplets'])
         target_gripper_open = state['Gripper'] == 'True'
         if self.gripper_open != target_gripper_open:
             # The gripper state has changed
@@ -398,18 +431,42 @@ class Machine(QtWidgets.QWidget):
         self.pressure_log.append(self.current_pressure)
         if len(self.pressure_log) > 100:
             self.pressure_log.pop(0)  # Remove the oldest reading
+        
         if self.command_queue != []:
             if self.current_command_number == self.last_completed_command_number:
                 self.command_completed.emit(self.command_queue[self.current_command_number])
             else:
                 self.command_executed.emit(self.command_queue[self.current_command_number])
 
+        if self.incomplete_commands != []:
+            for i,command in enumerate(self.incomplete_commands):
+                if command.get_number() <= self.current_command_number:
+                    if command.sent and not command.executed:
+                        completed_command = self.incomplete_commands.pop(i)
+                        completed_command.execute_handler()
+
+                    
+    
+    # def print_enabled(self):
+    #     print("Printing enabled")    
+    
+    # def print_disabled(self):
+    #     print("Printing disabled")
+
+    def print_handler(self,message='Default message'):
+        print(message)
+
+    def well_complete_handler(self, well_number=None,reagent=None):
+        print(f'Well {well_number} printed with {reagent}')
+        self.main_window.mark_reagent_as_added(well_number,reagent)
+
+
     def enable_motors(self):
-        self.add_command_to_queue('ENABLE_MOTORS',0,0,0)
+        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=self.print_handler,kwargs={'message':'Motors enabled'})
         return
     
     def disable_motors(self):
-        self.add_command_to_queue('DISABLE_MOTORS',0,0,0)
+        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=self.print_handler,kwargs={'message':'Motors disabled'})
         return
 
     def set_absolute_coordinates(self,x,y,z):
@@ -447,149 +504,8 @@ class Machine(QtWidgets.QWidget):
     def wait_command(self):
         self.add_command_to_queue('WAIT',1,0,0)
 
-    def pick_up_reagent(self):
-        self.open_gripper()
-        self.wait_command()
-        self.set_absolute_coordinates(100,100,100)
-        self.close_gripper()
-        self.wait_command()
-        self.set_absolute_coordinates(0,0,0)
-        return
-
-    def load_positions_from_file(self):
-        with open(self.calibration_file_path, 'r') as file:
-            self.calibration_data = json.load(file)
-
-    # def move_to_location(self,location=False,direct=False,safe_y=False):
-    #     '''
-    #     Tells the robot to move to a location based on the defined coordinates in the calibration file.
-    #     If direct is set to True, the robot will move directly to the location. If safe_y is set to True, 
-    #     the robot will move to the safe_y position before moving to the location to avoid running into an obsticle.
-    #     '''
-    #     if self.motors_active == False:
-    #         print('Motors must be active')
-    #         return
-    #     print('Current',self.location)
-    #     if not location:
-    #         location = self.main_window.popup_options('Move to Location','Select location:',list(self.calibration_data.keys()))
-
-    #     if self.location == location:
-    #         print('Already in {} position'.format(location))
-    #         return
-    #     available_locations = list(self.calibration_data.keys())
-    #     if location not in available_locations:
-    #         self.main_window.popup_message('Location not present','{} not present in calibration data'.format(location))
-    #         return
-        
-    #     if location == 'balance' or self.location == 'balance':
-    #         safe_y = True
-    #         direct = False
-
-    #     target_coordinates = self.calibration_data[location].copy()
-        
-    #     if 'rack_position' in location:
-    #         print('Moving to rack position:',location,'Applying X offset')
-    #         target_coordinates['x'] += self.rack_offset
-    #     else:
-    #         print('Moving to:',location)
-
-    #     up_first = False
-    #     if direct and self.z_pos < target_coordinates['z']:
-    #         up_first = True
-    #         self.set_absolute_coordinates(self.x_pos, self.y_pos, target_coordinates['z'])
-
-    #     x_limit = -5500
-    #     if self.x_pos > x_limit and target_coordinates['x'] < x_limit or self.x_pos < x_limit and target_coordinates['x'] > x_limit:
-    #         safe_y = True
-
-    #     if direct and not safe_y:
-    #         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-    #     elif not direct and not safe_y:
-    #         self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
-    #         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
-    #         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.target_coordinates['z'])
-    #     elif not direct and safe_y:
-    #         self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
-    #         self.set_absolute_coordinates(self.x_pos, self.safe_y, self.height)
-    #         self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.height)
-    #         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
-    #         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-    #     elif direct and safe_y:
-    #         if up_first:
-    #             self.set_absolute_coordinates(self.x_pos, self.safe_y, target_coordinates['z'])
-    #             self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, target_coordinates['z'])
-    #             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-    #         else:
-    #             self.set_absolute_coordinates(self.x_pos, self.safe_y, self.z_pos)
-    #             self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.z_pos)
-    #             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.z_pos)
-    #             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-    #     self.location = location
-    #     return
-
-
-    
-
-
-
-
-
-
-
-
-    # def activate_motors(self):
-    #     self.motors_active = True
-    #     self.add_command_to_queue('ENABLE_MOTORS')
-
-    # def deactivate_motors(self):
-    #     self.motors_active = False
-    #     self.add_command_to_queue('DISABLE_MOTORS')
-    
-    # def open_gripper(self):
-    #     self.gripper_open = True
-    #     self.add_command_to_queue('OPEN_GRIPPER')
-    
-    # def close_gripper(self):
-    #     self.gripper_open = False
-    #     self.add_command_to_queue('CLOSE_GRIPPER')
-
-    # def get_gripper_state(self):
-    #     return self.gripper_open
-    
-    # def get_loaded_reagent(self):
-    #     return self.loaded_reagent
-    
-    # def move_to_slot(self, slot_number):
-    #     if self.motors_active:
-    #         self.add_command_to_queue(f'MOVE_TO_SLOT_{slot_number}')
-    #     else:
-    #         self.main_window.print_status('Motors are not active')
-    
-    # def move_to_print(self):
-    #     if self.motors_active:
-    #         self.add_command_to_queue(f'MOVE_TO_PRINT')
-    #     else:
-    #         self.main_window.print_status('Motors are not active')
-
-    # def pick_up_reagent(self, slot):
-    #     if self.motors_active:
-    #         self.open_gripper()
-    #         self.move_to_slot(slot.number)
-    #         self.close_gripper()
-    #         self.loaded_reagent = slot.reagent
-    #         self.move_to_print()
-    #     else:
-    #         self.main_window.print_status('Motors are not active')
-    
-    # def drop_reagent(self,slot):
-    #     if self.motors_active:
-    #         self.move_to_slot(slot.number)
-    #         self.open_gripper()
-    #         self.loaded_reagent = None
-    #         self.move_to_print()
-    #         self.close_gripper()
-    #     else:
-    #         self.main_window.print_status('Motors are not active')
+    def print_droplets(self,droplet_count,handler=None,kwargs=None):
+        self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs)
 
     def get_coordinates(self):
         return self.coordinates
@@ -597,88 +513,149 @@ class Machine(QtWidgets.QWidget):
     def get_target_coordinates(self):
         return self.target_coordinates
     
-    # def move_relative(self, relative_coordinates):
-    #     if self.motors_active:
-    #         for axis in ['X', 'Y', 'Z', 'P']:
-    #             self.target_coordinates[axis] += relative_coordinates[axis]
-    #         self.add_command_to_queue(f'RELATIVE_XYZ,{relative_coordinates["X"]},{relative_coordinates["Y"]},{relative_coordinates["Z"]}')
-
-    # def move_absolute(self, target_coordinates):
-    #     if self.motors_active:
-    #         for axis in ['X', 'Y', 'Z', 'P']:
-    #             self.target_coordinates[axis] = target_coordinates[axis]
-    #         self.add_command_to_queue(f'ABSOLUTE_XYZ,{target_coordinates["X"]},{target_coordinates["Y"]},{target_coordinates["Z"]}')
-    
-    # def set_relative_pressure(self, pressure_change):
-    #     self.target_pressure += pressure_change
-    #     self.add_command_to_queue(f'RELATIVE_PRESSURE,{pressure_change}')
-    
     def get_target_pressure(self):
         return self.target_pressure
     
     def get_pressure_log(self):
         return self.pressure_log
-
-    # def regulate_pressure(self):
-    #     self.regulating_pressure = True
-    #     self.add_command_to_queue('REGULATE_PRESSURE')
-
-    # def deregulate_pressure(self):
-    #     self.regulating_pressure = False
-    #     self.add_command_to_queue('DEGULATE_PRESSURE')
     
     def get_regulation_state(self):
         return self.regulating_pressure
 
-    def get_command_number(self):
-        return self.command_number
+    def pick_up_reagent(self,slot):
+        self.open_gripper()
+        self.wait_command()
+        print('Picking up reagent:',slot.reagent.name)
+        self.move_to_location(f'rack_position_{slot.number}')
+        self.close_gripper()
+        self.wait_command()
+        print("Moving to loading position")
+        self.move_to_location('loading')
+        return
     
-    def get_command_log(self):
-        return self.command_queue
+    def drop_reagent(self,slot):
+        self.move_to_location(f'rack_position_{slot.number}')
+        self.open_gripper()
+        self.wait_command()
+        self.move_to_location('loading')
+        self.close_gripper()
+        self.wait_command()
+        return
+
+    def load_positions_from_file(self):
+        with open(self.calibration_file_path, 'r') as file:
+            self.calibration_data = json.load(file)
+
+    def move_to_location(self,location=False,direct=False,safe_y=False):
+        '''
+        Tells the robot to move to a location based on the defined coordinates in the calibration file.
+        If direct is set to True, the robot will move directly to the location. If safe_y is set to True, 
+        the robot will move to the safe_y position before moving to the location to avoid running into an obsticle.
+        '''
+        if self.motors_active == False:
+            self.main_window.popup_message('Motors not active','Motors are not active')
+            return
+        print('Current',self.location)
+        if not location:
+            location = self.main_window.popup_options('Move to Location','Select location:',list(self.calibration_data.keys()))
+
+        if self.location == location:
+            print('Already in {} position'.format(location))
+            return
+        available_locations = list(self.calibration_data.keys())
+        if location not in available_locations:
+            self.main_window.popup_message('Location not present','{} not present in calibration data'.format(location))
+            return
+        
+        if location == 'balance' or self.location == 'balance':
+            safe_y = True
+            direct = False
+
+        target_coordinates = self.calibration_data[location].copy()
+        
+        if 'rack_position' in location:
+            print('Moving to rack position:',location,'Applying X offset')
+            target_coordinates['x'] += self.rack_offset
+        else:
+            print('Moving to:',location)
+
+        up_first = False
+        if direct and self.z_pos < target_coordinates['z']:
+            up_first = True
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, target_coordinates['z'])
+
+        x_limit = -5500
+        if self.x_pos > x_limit and target_coordinates['x'] < x_limit or self.x_pos < x_limit and target_coordinates['x'] > x_limit:
+            safe_y = True
+
+        if direct and not safe_y:
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        elif not direct and not safe_y:
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        elif not direct and safe_y:
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
+            self.set_absolute_coordinates(self.x_pos, self.safe_y, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        elif direct and safe_y:
+            if up_first:
+                self.set_absolute_coordinates(self.x_pos, self.safe_y, target_coordinates['z'])
+                self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, target_coordinates['z'])
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+            else:
+                self.set_absolute_coordinates(self.x_pos, self.safe_y, self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.z_pos)
+                self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
+        self.location = location
+        return
+
+    def move_to_well(self,row,col):
+        row_spacing = 200
+        col_spacing = 200
+
+        new_x = (row_spacing*row)+self.array_start_x
+        new_y = (col_spacing*col)+self.array_start_y
+        new_z = self.array_start_z
+        self.set_absolute_coordinates(new_x,new_y,new_z)
+        return
+
     
-    # def add_command_to_queue(self, command):
-    #     new_command = Command(self.command_number, command)
-    #     self.command_queue.append(new_command)
-    #     self.command_added.emit(new_command)
-    #     print('Command added:', command)
-    #     self.command_number += 1
+    def print_array(self,array,ask=True):
+        if not self.motors_active:
+            print('Motors must be active')
+            return
+        if not self.regulating_pressure:
+            print('Must regulate pressure')
+            return
+        if ask:
+            response = self.main_window.popup_yes_no('Print array',message='Print an array? (y/n)')
+            if response == '&No':
+                print('Not printing')
+                return
 
-    # def execute_command_from_queue(self):
-    #     for command in self.command_queue:
-    #         if not command.executed:
-    #             print('Command executed:', command.get_command())
-    #             command.execute()  # Set the command as executed
-    #             self.command_executed.emit(command)
-    #             break  # Exit the loop after executing a command
+        self.main_window.actual_array = array.copy()
+
+        self.close_gripper()
+        self.wait_command()
+
+        location = 'print'
+        self.move_to_location(location)
+        self.array_start_x = self.calibration_data[location]['x']
+        self.array_start_y = self.calibration_data[location]['y']
+        self.array_start_z = self.calibration_data[location]['z']
+        
+        current_reagent = array['reagent'].iloc[0]
+        print('Current reagent:',current_reagent)
+        reagent_array = array[array['reagent'] == current_reagent].copy()
+
+        for index,line in reagent_array.iterrows():
+            print('Printing:',line['row'],line['column'],line['amount'])
+            self.move_to_well(line['row'],line['column'])
+            self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})
+            
+
     
-    
-    # def check_board(self):
-    #     self.update_state(self.convert_state(self.get_state_from_board()))
-
-    # def update_states(self):
-    #     if self.motors_active:
-    #         for axis in ['X', 'Y', 'Z', 'P']:
-    #             if self.coordinates[axis] < self.target_coordinates[axis]:
-    #                 self.coordinates[axis] += 1
-    #             elif self.coordinates[axis] > self.target_coordinates[axis]:
-    #                 self.coordinates[axis] -= 1
-    #     if self.regulating_pressure:
-    #         if self.current_pressure < self.target_pressure:
-    #             self.current_pressure += 1
-    #         elif self.current_pressure > self.target_pressure:
-    #             self.current_pressure -= 1
-
-    #     # Check if all coordinates and pressure equal their target values
-    #     if (self.coordinates == self.target_coordinates and
-    #         self.current_pressure == self.target_pressure):
-    #         self.state = "Free"
-    #     else:
-    #         self.state = "Busy"
-
-    #     if self.state == "Free":
-    #         self.main_window.print_status('Machine is idle')
-    #         self.execute_command_from_queue()
-
-    #     self.pressure_log.append(self.current_pressure)
-    #     if len(self.pressure_log) > 100:
-    #         self.pressure_log.pop(0)  # Remove the oldest reading

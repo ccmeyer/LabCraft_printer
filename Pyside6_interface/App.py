@@ -73,13 +73,15 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Large Decrease Pressure", "6", lambda: self.machine.set_relative_pressure(-100)),
             Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus, lambda: self.machine.regulate_pressure),
             Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus, lambda: self.machine.deregulate_pressure),
-            Shortcut("Print to Console Upper", "P", lambda: self.print_to_console_upper()),
-            Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
+            # Shortcut("Print to Console Upper", "P", lambda: self.print_to_console_upper()),
+            # Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
             Shortcut("Add Reagent", "A", lambda: self.add_reagent()),
             Shortcut("Test Popup", "T", lambda: self.test_popup()),
             Shortcut("Pick Up Reagent", "O", lambda: self.machine.pick_up_reagent()),
             Shortcut("Open Gripper", "G", lambda: self.manual_open_gripper()),
             Shortcut("Close Gripper", "g", lambda: self.manual_close_gripper()),
+            Shortcut("Move to location", "L", lambda: self.machine.move_to_location(location=False)),
+            Shortcut("Print array", "P", lambda: self.print_array()),
         ]
         
         self.read_colors_file()
@@ -93,6 +95,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reaction_metadata = pd.DataFrame()
         self.wells_df = pd.DataFrame()
         self.full_array = pd.DataFrame()
+        self.actual_array = pd.DataFrame()
 
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.machine.get_state_from_board)
@@ -254,6 +257,16 @@ class MainWindow(QtWidgets.QMainWindow):
         msg.exec()
         return msg.clickedButton().text()
     
+    def popup_yes_no(self,title, message):
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        msg.exec()
+        return msg.clickedButton().text()
+    
     def read_reagents_file(self):
         with open('./Pyside6_interface/Presets/Reagents.json', 'r') as f:
             reagents = json.load(f)
@@ -268,7 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         current_directory = os.getcwd()  # Get the current working directory
         dialog = QtWidgets.QFileDialog(self)
         dialog.setFileMode(QtWidgets.QFileDialog.Directory)
-        current_directory += '\Experiments'
+        current_directory += '.\Pyside6_interface\Experiments'
         dialog.setDirectory(current_directory)
         if dialog.exec():
             selected_directory = dialog.selectedFiles()[0]
@@ -363,6 +376,14 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def close_gripper(self):
         self.rack_box.close_gripper()
+
+    def print_array(self):
+        self.machine.print_array(self.full_array)
+
+    def mark_reagent_as_added(self,well_number,reagent_name):
+        self.plate_box.mark_reagent_as_added(well_number,reagent_name)
+        print(self.full_array['Added'].value_counts())
+        self.plate_box.preview_array()
 
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
