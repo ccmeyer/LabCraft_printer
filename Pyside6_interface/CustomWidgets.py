@@ -885,15 +885,14 @@ class ConnectionBox(QtWidgets.QGroupBox):
         # Get a list of all connected COM ports
         ports = comports()
         port_names = [port.device for port in ports]
-        port_names.append('Virtual machine')
 
         # Clear the current items in the combo boxes
         self.machine_port_options.clear()
         self.balance_port_options.clear()
 
         # Add the new items to the combo boxes
-        self.machine_port_options.addItems(port_names)
-        self.balance_port_options.addItems(port_names)
+        self.machine_port_options.addItems(port_names+['Virtual machine'])
+        self.balance_port_options.addItems(port_names+['Virtual balance'])
 
 class PressurePlotBox(QtWidgets.QGroupBox):
     """
@@ -984,8 +983,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.axisY.setRange(min_pressure, max_pressure)
 
-        self.current_pressure_value.setText(f"{pressure_log[-1]}")  # Update the current pressure value
-        self.target_pressure_value.setText(f"{target_pressure}")  # Update the target pressure value
+        self.current_pressure_value.setText(f"{pressure_log[-1]:.3f}")  # Update the current pressure value
+        self.target_pressure_value.setText(f"{target_pressure:.3f}")  # Update the target pressure value
     
     def toggle_regulation(self):
         self.regulating = not self.regulating

@@ -239,6 +239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if response == '&Yes':
             # self.machine.pause_commands()
             self.machine.clear_command_queue()
+            time.sleep(1)
             self.machine.disconnect_machine()
             event.accept()
         else:
@@ -487,18 +488,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.machine.connect_machine(port)
         self.change_connection_button()
 
-    @QtCore.Slot(str)
-    def set_balance_connected_status(self, port):
-        if port == 'COM2':
-            self.machine.motors_active = True
-            self.statusBar().showMessage(f"Balance connected to port {port}")
+    def change_balance_connection_button(self):
+        if self.machine.balance_connected:
             self.connection_box.balance_connect_button.setStyleSheet("background-color: #a92222")
             self.connection_box.balance_connect_button.setText("Disconnect")
         else:
-            self.machine.motors_active = False
-            self.statusBar().showMessage("Balance not connected")
             self.connection_box.balance_connect_button.setStyleSheet("background-color: #1e64b4")
             self.connection_box.balance_connect_button.setText("Connect")
+    
+    
+    @QtCore.Slot(str)
+    def set_balance_connected_status(self, port):
+        if self.connection_box.balance_connect_button.text() == "Disconnect":
+            self.machine.disconnect_balance()
+        else:
+            self.machine.connect_balance(port)
+        self.change_balance_connection_button()
         
     def change_motor_activation(self,activated=False):
         if activated:
@@ -520,19 +525,23 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(bool)
     def home_motors(self):
         self.machine.home_motors()
+
+    def change_regulation_button(self):
+        if not self.machine.get_regulation_state():
+            self.pressure_box.pressure_regulation_button.setStyleSheet(f"background-color: {self.colors['blue']}")
+            self.pressure_box.pressure_regulation_button.setText("Regulate Pressure")
+            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
+        else:
+            self.pressure_box.pressure_regulation_button.setStyleSheet(f"background-color: {self.colors['red']}")
+            self.pressure_box.pressure_regulation_button.setText("Deregulate Pressure")
+            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
     
     @QtCore.Slot(str)
     def toggle_regulation(self):
         if self.machine.get_regulation_state():
             self.machine.deregulate_pressure()
-            self.pressure_box.pressure_regulation_button.setStyleSheet("background-color: #1e64b4")
-            self.pressure_box.pressure_regulation_button.setText("Regulate Pressure")
-            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
         else:
             self.machine.regulate_pressure()
-            self.pressure_box.pressure_regulation_button.setStyleSheet("background-color: #a92222")
-            self.pressure_box.pressure_regulation_button.setText("Deregulate Pressure")
-            self.pressure_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
 
     @QtCore.Slot(Command)
     def add_command(self, command):
@@ -575,11 +584,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.deactivate_loading_and_editing()
             elif reagent.name == "Empty" and self.gripper_reagent.name != "Empty":
                 self.machine.drop_reagent(slot)
-                # # Set the slot to have the gripper reagent
-                # self.rack_box.change_reagent(slot.number, self.gripper_reagent)
-                # # Set the gripper reagent to be empty
-                # self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
-                # Reactivate the buttons to allow for editing
                 self.activate_loading_and_editing()
             else:
                 print(f"Invalid transfer-{reagent.name}-{self.gripper_reagent.name}")

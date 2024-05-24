@@ -3,8 +3,23 @@ import time
 from PySide6 import QtCore, QtWidgets, QtGui
 from CustomWidgets import *
 import serial
-from functools import partial
 
+class Balance():
+    def __init__(self,main_window):
+        self.main_window = main_window
+        self.connected = False
+
+        self.balance_check_timer = QtCore.QTimer()
+        self.balance_check_timer.timeout.connect(self.check_for_weight)
+        self.balance_check_timer.start(25)
+
+    def show_connection(self):
+        print('Balance connected')
+    
+    def check_for_weight(self):
+        if self.connected:
+            weight = self.get_weight()
+            self.main_window.update_balance(weight)
 
 class BoardCommand():
     def __init__(self,command_number,command_type,param1,param2,param3):
@@ -71,6 +86,7 @@ class ControlBoard():
         self.target_droplets = 0
         self.correct_droplets = True
 
+        self.gripper_active = False
         self.gripper_open = False
         self.target_gripper_open = False
         self.correct_gripper = True
@@ -152,7 +168,6 @@ class ControlBoard():
             self.correct_pos = True
 
         if self.regulate_pressure:
-            print(self.pressure,self.target_pressure)
             if self.pressure < self.target_pressure:
                 self.pressure += 1
             elif self.pressure > self.target_pressure:
@@ -207,7 +222,9 @@ class ControlBoard():
                 if not command.executed:
                     self.current_command_number = int(command.command_number)
                     self.execute_command(i)
-                    self.command_queue[self.current_command_number].executed = True
+                    print("Command queue:",self.command_queue,i,self.current_command_number)
+                    # self.command_queue[self.current_command_number].executed = True
+                    self.command_queue[i].executed = True
                     self.state = "Busy"
                     break            
 
@@ -237,9 +254,15 @@ class ControlBoard():
             self.correct_pressure = True
             self.regulate_pressure = False
         elif command.command_type == 'OPEN_GRIPPER':
+            if not self.gripper_active:
+                self.gripper_active = True
             self.target_gripper_open = True
         elif command.command_type == 'CLOSE_GRIPPER':
+            if not self.gripper_active:
+                self.gripper_active = True
             self.target_gripper_open = False
+        elif command.command_type == 'GRIPPER_OFF':
+            self.gripper_active = False
         elif command.command_type == 'ENABLE_MOTORS':
             self.motors_active = True
         elif command.command_type == 'DISABLE_MOTORS':
@@ -364,7 +387,9 @@ class Machine(QtWidgets.QWidget):
         print('Created Machine instance')
         self.main_window = main_window
         self.simulate = True
+        self.simulate_balance = True
         self.board = ControlBoard(self)
+        self.balance = Balance(self)
 
         self.machine_connected = False
         self.balance_connected = False
@@ -426,32 +451,59 @@ class Machine(QtWidgets.QWidget):
             self.simulate = True
             self.board = ControlBoard(self)
             self.machine_connected = True
-            return True
         else:
-            self.simulate = False
             try:
                 self.board = serial.Serial(port, baudrate=115200)
                 self.machine_connected = True
-                return True
+                self.simulate = False
             except:
                 self.main_window.popup_message('Connection error',f'Could not connect to machine at port {port}')
                 self.machine_connected = False
                 return False
+        self.get_state_from_board()
+        self.target_x = self.x_pos
+        self.target_y = self.y_pos
+        self.target_z = self.z_pos
+        self.target_p = self.p_pos
+        self.target_coordinates = {'X': self.target_x, 'Y': self.target_y, 'Z': self.target_z, 'P': self.target_p}
+        self.target_psi = self.current_psi
+        self.target_gripper_open = self.gripper_open
+        self.target_droplets = self.current_droplets
+        return True
                 
     def disconnect_machine(self):
         self.disable_motors()
         self.deregulate_pressure()
         self.gripper_off()
         print('Disconnected from machine')
-        time.sleep(2)
-        # while len(self.incomplete_commands) > 0:
-        #     print('Waiting for incomplete commands to finish')
-        #     # self.get_state_from_board()
-        #     time.sleep(1)
+        time.sleep(1)
         if not self.simulate:
             self.board.close()
         self.machine_connected = False
-        
+        return
+    
+    def connect_balance(self,port):
+        if port == 'Virtual balance':
+            self.balance_connected = True
+            self.simulate_balance = True
+            self.balance.show_connection()
+            return True
+        else:
+            try:
+                self.balance = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
+                self.balance_connected = True
+                self.simulate_balance = False
+                return True
+            except:
+                self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
+                self.balance_connected = False
+                return False
+
+    def disconnect_balance(self):
+        print('Disconnected from balance')
+        if not self.simulate_balance:
+            self.balance.close()
+        self.balance_connected = False
         return
     
     def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
@@ -482,7 +534,9 @@ class Machine(QtWidgets.QWidget):
             self.target_coordinates['Y'] = int(command.param2)
             self.target_coordinates['Z'] = int(command.param3)
         elif command.command_type == 'RELATIVE_PRESSURE':
-            self.target_psi += self.convert_to_psi(int(command.param1))
+            rel_pressure = int(command.param1) + self.psi_offset
+            rel_psi = round(self.convert_to_psi(rel_pressure),3)
+            self.target_psi += rel_psi
         elif command.command_type == 'ABSOLUTE_PRESSURE':
             self.target_psi = self.convert_to_psi(int(command.param1))
         elif command.command_type == 'REGULATE_PRESSURE':
@@ -699,15 +753,29 @@ class Machine(QtWidgets.QWidget):
     
     def set_relative_pressure(self,psi):
         pressure = self.convert_to_raw_pressure(psi)
+        pressure -= self.psi_offset
+        print('Setting relative pressure:',pressure)
         self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0)
         return
     
-    def regulate_pressure(self):
-        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0)
+    def regulate_pressure_handler(self):
+        self.regulating_pressure = True
+        self.main_window.change_regulation_button()
+
+    def regulate_pressure(self,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.regulate_pressure_handler
+        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs)
         return
     
-    def deregulate_pressure(self):
-        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0)
+    def deregulate_pressure_handler(self):
+        self.regulating_pressure = False
+        self.main_window.change_regulation_button()
+
+    def deregulate_pressure(self,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.deregulate_pressure_handler
+        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs)
         return
     
     def open_gripper(self,handler=None,kwargs=None):
