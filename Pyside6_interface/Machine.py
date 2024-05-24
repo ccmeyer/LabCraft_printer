@@ -2,7 +2,8 @@ import threading
 import time
 from PySide6 import QtCore, QtWidgets, QtGui
 from CustomWidgets import *
-
+import serial
+from functools import partial
 
 
 class BoardCommand():
@@ -15,7 +16,7 @@ class BoardCommand():
         self.executed = False
 
 class ControlBoard():
-    def __init__(self,machine,simulate):
+    def __init__(self,machine):
         """
         Initializes a ControlBoard object.
 
@@ -35,7 +36,14 @@ class ControlBoard():
         self.pause = False
         self.initial_time = 0
         self.state = "Free"
-        self.simulate = simulate
+
+        self.board_check_timer = QTimer()
+        self.board_check_timer.timeout.connect(self.check_for_command)
+        self.board_check_timer.start(20)  # Update every 20 ms
+        
+        self.board_update_timer = QTimer()
+        self.board_update_timer.timeout.connect(self.update_states)
+        self.board_update_timer.start(10)  # Update every 20 ms
 
         self.motors_active = False
         self.x_pos = 0
@@ -51,8 +59,8 @@ class ControlBoard():
         self.target_z = 0
         self.target_p = 0
 
-        self.pressure = 0
-        self.target_pressure = 0
+        self.pressure = 1638
+        self.target_pressure = 1638
         self.regulate_pressure = False
         self.correct_pressure = True
 
@@ -90,9 +98,9 @@ class ControlBoard():
 
     
     def get_complete_state(self):
-        if self.simulate:
-            full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open},Droplets:{self.current_droplets}'
-            return full_string
+        # if self.simulate:
+        full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open},Droplets:{self.current_droplets}'
+        return full_string
 
     def check_for_command(self):
         if self.machine.sent_command is not None:
@@ -224,6 +232,8 @@ class ControlBoard():
         elif command.command_type == 'PRINT':
             self.correct_droplets = False
             self.target_droplets = int(command.param1)
+        elif command.command_type == 'RESET_P':
+            self.p_pos = 0
         else:
             print('Unknown command:',command.command_type)
         self.correct_pos = False
@@ -326,7 +336,7 @@ class Machine(QtWidgets.QWidget):
         print('Created Machine instance')
         self.main_window = main_window
         self.simulate = True
-        self.board = ControlBoard(self,self.simulate)
+        self.board = ControlBoard(self)
 
         self.machine_connected = False
         self.balance_connected = False
@@ -345,7 +355,12 @@ class Machine(QtWidgets.QWidget):
         self.target_coordinates = {'X': self.target_x, 'Y': self.target_y, 'Z': self.target_z, 'P': self.target_p}
 
         self.current_pressure = 0
-        self.target_pressure = 0
+        self.current_psi = 0
+        self.target_psi = 0
+        self.fss = self.main_window.settings['PRESSURE_CONVERSION']['FSS']
+        self.psi_offset = self.main_window.settings['PRESSURE_CONVERSION']['OFFSET']
+        self.psi_max = self.main_window.settings['PRESSURE_CONVERSION']['MAX_PRESSURE']
+
         self.pressure_log = [0]
         self.regulating_pressure = False
 
@@ -370,13 +385,23 @@ class Machine(QtWidgets.QWidget):
         self.calibration_data = {}
         self.load_positions_from_file()
 
-        self.rack_offset = -2500
-        self.height = -15000
-        self.safe_y = 3500
+        self.rack_offset = self.main_window.rack_offset
+        self.safe_height = self.main_window.safe_height
+        self.safe_y = self.main_window.safe_y
 
         self.picking_up = False
         self.dropping_off = False
 
+    def connect_machine(self,port):
+        if port == 'Virtual machine':
+            self.simulate = True
+            self.board = ControlBoard(self)
+        else:
+            self.simulate = False
+            self.board = serial.Serial(port, baudrate=115200)
+        self.machine_connected = True
+        return
+    
     def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
         new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3,handler=handler,kwargs=kwargs)
         self.command_queue.append(new_command)
@@ -405,9 +430,9 @@ class Machine(QtWidgets.QWidget):
             self.target_coordinates['Y'] = int(command.param2)
             self.target_coordinates['Z'] = int(command.param3)
         elif command.command_type == 'RELATIVE_PRESSURE':
-            self.target_pressure += int(command.param1)
+            self.target_psi += int(command.param1)
         elif command.command_type == 'ABSOLUTE_PRESSURE':
-            self.target_pressure = int(command.param1)
+            self.target_psi = int(command.param1)
         elif command.command_type == 'REGULATE_PRESSURE':
             self.regulating_pressure = True
         elif command.command_type == 'DEREGULATE_PRESSURE':
@@ -436,7 +461,10 @@ class Machine(QtWidgets.QWidget):
     def send_command_to_board(self,command):
         if self.simulate:
             self.sent_command = command
-            command.send()
+        else:
+            self.board.write(command.get_command())
+            self.board.flush()
+        command.send()
 
     def get_command_number(self):
         return self.command_number
@@ -445,10 +473,24 @@ class Machine(QtWidgets.QWidget):
         return self.command_queue
     
     def get_state_from_board(self):
-        signal = self.board.get_complete_state()
+        if self.simulate:
+            signal = self.board.get_complete_state()
+        else:
+            if self.board.in_waiting > 0:
+                try:
+                    signal = self.board.readline().decode('utf-8').strip()
+                except:
+                    signal = ''
+                    self.window.popup_message('Connection error','Could not read from board')
         self.update_state(self.convert_state(signal))
         return signal
     
+    def convert_to_psi(self,pressure):
+        return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
+    
+    def convert_to_raw_pressure(self,psi):
+        return round((psi / self.psi_max) * self.fss + self.psi_offset,0)
+
     def convert_state(self, state):
         state_dict = {}
         state_list = state.split(',')
@@ -468,6 +510,7 @@ class Machine(QtWidgets.QWidget):
         self.p_pos = int(state['P'])
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
         self.current_pressure = int(state['Pressure'])
+        self.current_psi = self.convert_to_psi(self.current_pressure)
         self.current_droplets = int(state['Droplets'])
         target_gripper_open = state['Gripper'] == 'True'
         if self.gripper_open != target_gripper_open:
@@ -484,7 +527,7 @@ class Machine(QtWidgets.QWidget):
             # The gripper has finished opening or closing
             self.gripper_busy = False
 
-        self.pressure_log.append(self.current_pressure)
+        self.pressure_log.append(self.current_psi)
         if len(self.pressure_log) > 100:
             self.pressure_log.pop(0)  # Remove the oldest reading
         
@@ -516,26 +559,23 @@ class Machine(QtWidgets.QWidget):
     def pause_commands(self):
         print('Pausing commands')
         new_command = Command(0, command_type='PAUSE', param1=0, param2=0, param3=0)
-        if self.simulate:
-            if self.sent_command is not None:
-                print('Overriding command:',self.sent_command.get_command())
-            print('Sending pause command')
-            self.send_command_to_board(new_command)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending pause command')
+        self.send_command_to_board(new_command)
     
     def resume_commands(self):
         new_command = Command(0, command_type='RESUME', param1=0, param2=0, param3=0)
-        if self.simulate:
-            if self.sent_command is not None:
-                print('Overriding command:',self.sent_command.get_command())
-            self.send_command_to_board(new_command)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        self.send_command_to_board(new_command)
 
     def clear_command_queue(self):
         print('Clearing command queue')
         new_command = Command(0, command_type='CLEAR_QUEUE', param1=0, param2=0, param3=0)
-        if self.simulate:
-            if self.sent_command is not None:
-                print('Overriding command:',self.sent_command.get_command())
-            self.send_command_to_board(new_command)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        self.send_command_to_board(new_command)
 
         self.main_window.remove_commands(self.command_queue)
         self.command_queue = []
@@ -550,21 +590,31 @@ class Machine(QtWidgets.QWidget):
         self.target_p = self.p_pos
         self.target_coordinates = {'X': self.target_x, 'Y': self.target_y, 'Z': self.target_z, 'P': self.target_p}
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
-        self.target_pressure = self.current_pressure
+        self.target_psi = self.current_psi
         self.target_gripper_open = self.gripper_open
         self.target_droplets = self.current_droplets
 
         self.main_window.update_coordinates()
         self.main_window.update_pressure()
 
+    def enable_motors_handler(self):
+        self.motors_active = True
+        self.main_window.change_motor_connection(True)
+    
+    def disable_motors_handler(self):
+        self.motors_active = False
+        self.main_window.change_motor_connection(False)
 
-
-    def enable_motors(self):
-        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=self.print_handler,kwargs={'message':'Motors enabled'})
+    def enable_motors(self,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.enable_motors_handler
+        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs)
         return
     
-    def disable_motors(self):
-        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=self.print_handler,kwargs={'message':'Motors disabled'})
+    def disable_motors(self,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.disable_motors_handler
+        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs)
         return
 
     def set_absolute_coordinates(self,x,y,z):
@@ -575,11 +625,13 @@ class Machine(QtWidgets.QWidget):
         self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
         return
     
-    def set_absolute_pressure(self,pressure):
+    def set_absolute_pressure(self,psi):
+        pressure = self.convert_to_raw_pressure(psi)
         self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0)
         return
     
-    def set_relative_pressure(self,pressure):
+    def set_relative_pressure(self,psi):
+        pressure = self.convert_to_raw_pressure(psi)
         self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0)
         return
     
@@ -591,28 +643,43 @@ class Machine(QtWidgets.QWidget):
         self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0)
         return
     
-    def open_gripper(self):
-        self.add_command_to_queue('OPEN_GRIPPER',0,0,0)
+    def open_gripper(self,handler=None,kwargs=None):
+        self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=handler,kwargs=kwargs)
         return
 
-    def close_gripper(self):
-        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0)
+    def close_gripper(self,handler=None,kwargs=None):
+        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=handler,kwargs=kwargs)
         return
     
+    def gripper_off_handler(self):
+        self.gripper_active = False
+    
+    def gripper_off(self,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.gripper_off_handler
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs)
+        return
+
     def wait_command(self):
         self.add_command_to_queue('WAIT',1,0,0)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None):
+        if not self.regulating_pressure:
+            self.main_window.popup_message('Pressure not regulated','Pressure must be regulated to print droplets')
+            return
         self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs)
 
+    def reset_syringe(self):
+        self.add_command_to_queue('RESET_P',0,0,0)
+    
     def get_coordinates(self):
         return self.coordinates
     
     def get_target_coordinates(self):
         return self.target_coordinates
     
-    def get_target_pressure(self):
-        return self.target_pressure
+    def get_target_psi(self):
+        return self.target_psi
     
     def get_pressure_log(self):
         return self.pressure_log
@@ -624,7 +691,17 @@ class Machine(QtWidgets.QWidget):
         self.gripper_reagent = reagent
         return
 
-    def pick_up_reagent(self,slot):
+    def pick_up_reagent_handler(self,slot=None):
+        self.main_window.change_reagent_pickup(slot)
+
+    def drop_reagent_handler(self,slot=None):
+        self.main_window.change_reagent_drop(slot)
+
+    
+    def pick_up_reagent(self,slot,handler=None,kwargs=None):
+        if handler is None:
+            handler = self.pick_up_reagent_handler
+            kwargs = {'slot':slot}
         self.open_gripper()
         self.wait_command()
         print('Picking up reagent:',slot.reagent.name)
@@ -632,7 +709,7 @@ class Machine(QtWidgets.QWidget):
         self.move_to_location(location)
         target_coordinates = self.calibration_data[location].copy()
         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-        self.close_gripper()
+        self.close_gripper(handler=handler,kwargs=kwargs)
         self.wait_command()
         self.set_gripper_reagent(slot.reagent)
         self.set_absolute_coordinates(target_coordinates['x']+self.rack_offset, target_coordinates['y'], target_coordinates['z'])
@@ -643,7 +720,7 @@ class Machine(QtWidgets.QWidget):
         self.move_to_location(location)
         target_coordinates = self.calibration_data[location].copy()
         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
-        self.open_gripper()
+        self.open_gripper(handler=self.drop_reagent_handler,kwargs={'slot':slot})
         self.wait_command()
         self.set_gripper_reagent(Reagent("Empty", self.main_window.colors, "dark_gray"))
         self.set_absolute_coordinates(target_coordinates['x']+self.rack_offset, target_coordinates['y'], target_coordinates['z'])
@@ -700,14 +777,14 @@ class Machine(QtWidgets.QWidget):
         if direct and not safe_y:
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif not direct and not safe_y:
-            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
-            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.safe_height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif not direct and safe_y:
-            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.height)
-            self.set_absolute_coordinates(self.x_pos, self.safe_y, self.height)
-            self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.height)
-            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.height)
+            self.set_absolute_coordinates(self.x_pos, self.y_pos, self.safe_height)
+            self.set_absolute_coordinates(self.x_pos, self.safe_y, self.safe_height)
+            self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.safe_height)
+            self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif direct and safe_y:
             if up_first:

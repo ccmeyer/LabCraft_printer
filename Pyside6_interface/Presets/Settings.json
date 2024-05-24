@@ -5,6 +5,12 @@
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",
     "DEFAULT_REAGENT":"water",
+    "RACK_SLOTS":6,
+    "PRESSURE_CONVERSION":{
+        "FSS":13107,
+        "OFFSET":1638,
+        "MAX_PRESSURE":15
+    },
     "DISPENSER_TYPES":{
         "droplet":{
             "print_pressure":1.8,
@@ -14,7 +20,8 @@
             "safe_y":3500,
             "max_volume":200,
             "min_volume":20,
-            "target_disp_volume":40
+            "target_disp_volume":30,
+            "rack_offset":-2500
         }
     }
 }

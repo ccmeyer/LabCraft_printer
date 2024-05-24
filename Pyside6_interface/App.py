@@ -9,9 +9,8 @@ import json
 import pandas as pd
 
 
-
 class Shortcut:
-    def __init__(self, name, key, function):
+    def __init__(self, name, key, key_name, function):
             """
             Initialize a new instance of the class.
 
@@ -22,6 +21,7 @@ class Shortcut:
             """
             self.name = name
             self.key = key
+            self.key_name = key_name
             self.function = function
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -61,30 +61,29 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.shortcuts = [
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, lambda: self.machine.set_relative_coordinates(100,0,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down, lambda: self.machine.set_relative_coordinates(-100,0,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left, lambda: self.machine.set_relative_coordinates(0,-100,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, lambda: self.machine.set_relative_coordinates(0,100,0)),
-            Shortcut("Move Up", "k", lambda: self.machine.set_relative_coordinates(0,0,100)),
-            Shortcut("Move Down", "m", lambda: self.machine.set_relative_coordinates(0,0,-100)),
-            Shortcut("Large Increase Pressure", "9", lambda: self.machine.set_relative_pressure(100)),
-            Shortcut("Small Increase Pressure", "8", lambda: self.machine.set_relative_pressure(20)),
-            Shortcut("Small Decrease Pressure", "7", lambda: self.machine.set_relative_pressure(-20)),
-            Shortcut("Large Decrease Pressure", "6", lambda: self.machine.set_relative_pressure(-100)),
-            Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus, lambda: self.machine.regulate_pressure),
-            Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus, lambda: self.machine.deregulate_pressure),
-            # Shortcut("Print to Console Upper", "P", lambda: self.print_to_console_upper()),
-            # Shortcut("Print to Console Lower", "p", lambda: self.print_to_console_lower()),
-            Shortcut("Add Reagent", "A", lambda: self.add_reagent()),
-            Shortcut("Test Popup", "T", lambda: self.test_popup()),
-            Shortcut("Pick Up Reagent", "O", lambda: self.machine.pick_up_reagent()),
-            Shortcut("Open Gripper", "G", lambda: self.manual_open_gripper()),
-            Shortcut("Close Gripper", "g", lambda: self.manual_close_gripper()),
-            Shortcut("Move to location", "L", lambda: self.machine.move_to_location(location=False)),
-            Shortcut("Print array", "P", lambda: self.print_array()),
-            Shortcut("Pause", QtCore.Qt.Key_Escape, lambda: self.pause_execution()),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(100,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-100,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-100,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,100,0)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,100)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-100)),
+            Shortcut("Large Increase Pressure", "9","9", lambda: self.machine.set_relative_pressure(0.5)),
+            Shortcut("Small Increase Pressure", "8","8", lambda: self.machine.set_relative_pressure(0.1)),
+            Shortcut("Small Decrease Pressure", "7","7", lambda: self.machine.set_relative_pressure(-0.1)),
+            Shortcut("Large Decrease Pressure", "6","6", lambda: self.machine.set_relative_pressure(-0.5)),
+            Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus,"+", lambda: self.machine.regulate_pressure),
+            Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus,"-", lambda: self.machine.deregulate_pressure),
+            Shortcut("Add Reagent", "A","A", lambda: self.add_reagent()),
+            Shortcut("Test Popup", "T","T", lambda: self.test_popup()),
+            Shortcut("Pick Up Reagent", "O","O", lambda: self.machine.pick_up_reagent()),
+            Shortcut("Open Gripper", "G","G", lambda: self.manual_open_gripper()),
+            Shortcut("Close Gripper", "g","g", lambda: self.manual_close_gripper()),
+            Shortcut("Move to location", "L","L", lambda: self.machine.move_to_location(location=False)),
+            Shortcut("Print array", "P","P", lambda: self.print_array()),
+            Shortcut("Pause", QtCore.Qt.Key_Escape,"Esc", lambda: self.pause_execution()),
         ]
-        
+        self.read_settings_file()
+        self.select_mode(mode_name=self.settings['DEFAULT_DISPENSER'])
         self.read_colors_file()
         self.read_reagents_file()
 
@@ -106,17 +105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.execution_timer.timeout.connect(self.machine.execute_command_from_queue)
         self.execution_timer.start(90)  # Update every 100 ms
         
-        self.board_check_timer = QTimer()
-        self.board_check_timer.timeout.connect(self.machine.board.check_for_command)
-        self.board_check_timer.start(20)  # Update every 20 ms
-        
-        self.board_update_timer = QTimer()
-        self.board_update_timer.timeout.connect(self.machine.board.update_states)
-        self.board_update_timer.start(10)  # Update every 20 ms
-
-
-        self.num_slots = 6
-        self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.num_slots)]
+        self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.rack_slots)]
         
         self.setWindowTitle("My App")
         transparent_icon = self.make_transparent_icon()
@@ -174,16 +163,11 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(self.pressure_box)
         layout.addWidget(left_panel)
 
-        # self.gripper_timer = QTimer()
-        # self.gripper_timer.timeout.connect(self.toggle_gripper)
-        # self.gripper_timer.start(500)  # Update every 1000 ms
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_coordinates)
+        self.update_timer.timeout.connect(self.update_pressure)
 
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_coordinates)
-        self.timer.timeout.connect(self.update_pressure)
-        # self.timer.timeout.connect(self.machine.update_states)
-
-        self.timer.start(100)  # Update every 100 ms
+        self.update_timer.start(100)  # Update every 100 ms
         
         mid_panel = QtWidgets.QWidget()
         mid_panel.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
@@ -277,6 +261,40 @@ class MainWindow(QtWidgets.QMainWindow):
         msg.setWindowIcon(transparent_icon)
         msg.exec()
         return msg.clickedButton().text()
+    
+    def read_settings_file(self):
+        with open('./Pyside6_interface/Presets/Settings.json', 'r') as f:
+            settings = json.load(f)
+        self.settings = settings
+        self.base = settings['BASE_PATH']
+        self.possible_dispensers = list(self.settings['DISPENSER_TYPES'].keys())
+        self.rack_slots = settings['RACK_SLOTS']
+        self.mode = None
+        return
+    
+    def select_mode(self,mode_name=False):
+        if not mode_name:
+            mode_name = self.popup_options('Select Mode','Select the mode you want to use',self.possible_dispensers)
+        elif self.mode == mode_name:
+            return
+        if mode_name not in self.possible_dispensers:
+            self.popup_message('Error','Invalid mode selected')
+            return
+        self.load_dispenser_settings(mode_name)
+    
+    def load_dispenser_settings(self,mode_name):
+        self.safe_height = self.settings['DISPENSER_TYPES'][mode_name]['height']
+        self.safe_y = self.settings['DISPENSER_TYPES'][mode_name]['safe_y']
+        self.pulse_width = self.settings['DISPENSER_TYPES'][mode_name]['pulse_width']
+        self.default_pressure = self.settings['DISPENSER_TYPES'][mode_name]['print_pressure']
+        self.target_volume = self.settings['DISPENSER_TYPES'][mode_name]['target_disp_volume']
+        self.frequency = self.settings['DISPENSER_TYPES'][mode_name]['frequency']
+        self.max_volume = self.settings['DISPENSER_TYPES'][mode_name]['max_volume']
+        self.min_volume = self.settings['DISPENSER_TYPES'][mode_name]['min_volume']
+        self.rack_offset = self.settings['DISPENSER_TYPES'][mode_name]['rack_offset']
+        self.calibrated = False
+        self.mode = mode_name
+        return
     
     def read_reagents_file(self):
         with open('./Pyside6_interface/Presets/Reagents.json', 'r') as f:
@@ -373,8 +391,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_pressure(self):
         pressure_log = self.machine.get_pressure_log()
-        target_pressure = self.machine.get_target_pressure()
-        self.pressure_box.update_pressure(pressure_log,target_pressure)
+        target_psi = self.machine.get_target_psi()
+        self.pressure_box.update_pressure(pressure_log,target_psi)
     
     def update_slot_reagents(self):
         self.rack_box.update_reagents_dropdown()
@@ -417,26 +435,27 @@ class MainWindow(QtWidgets.QMainWindow):
         for command in removed_commands:
             self.command_box.remove_command(command.get_number())
 
+    def change_motor_connection(self,connected=False):
+        if connected:
+            self.connection_box.machine_connect_button.setStyleSheet("background-color: #a92222")
+            self.connection_box.machine_connect_button.setText("Disconnect")
+            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
+        else:
+            self.connection_box.machine_connect_button.setStyleSheet("background-color: #1e64b4")
+            self.connection_box.machine_connect_button.setText("Connect")
+            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
+    
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
         if self.connection_box.machine_connect_button.text() == "Disconnect":
             self.machine.disable_motors()
-            self.statusBar().showMessage("Machine disconnected")
-            self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['blue']}")
-            self.connection_box.machine_connect_button.setText("Connect")
-            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
         elif port == 'COM1':
             self.machine.enable_motors()
-            self.statusBar().showMessage(f"Machine connected to port {port}")
-            self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['red']}")
-            self.connection_box.machine_connect_button.setText("Disconnect")
-            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
+        elif port == 'Virtual machine':
+            self.machine.simulate = True
+            self.machine.enable_motors()
         else:
             self.machine.disable_motors()
-            self.statusBar().showMessage("Machine not connected")
-            self.connection_box.machine_connect_button.setStyleSheet(f"background-color: {self.colors['blue']}")
-            self.connection_box.machine_connect_button.setText("Connect")
-            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
 
     @QtCore.Slot(str)
     def set_balance_connected_status(self, port):
@@ -486,24 +505,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Slot-{slot_obj.number} loaded with {slot_obj.reagent.name} confirmed")
         self.rack_box.confirm_reagent(slot_obj.number, slot_obj.reagent)
 
+    def change_reagent_pickup(self,slot):
+        self.rack_box.change_reagent(slot.number,Reagent("Empty", self.colors, "dark_gray"))
+        self.rack_box.change_gripper_reagent(slot.reagent)
+        self.rack_box.update_load_buttons()
+    
+    def change_reagent_drop(self,slot):
+        self.rack_box.change_reagent(slot.number,self.gripper_reagent)
+        self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
+        self.rack_box.update_load_buttons()
+
     @QtCore.Slot(Slot)
     def transfer_reagent(self,slot):
         if self.machine.motors_active:
             reagent = slot.reagent
             if reagent.name != "Empty" and self.gripper_reagent.name == "Empty":
                 self.machine.pick_up_reagent(slot)
-                # Set the slot to be empty
-                self.rack_box.change_reagent(slot.number, Reagent("Empty", self.colors, "dark_gray"))
-                # Add the reagent to the gripper
-                self.rack_box.change_gripper_reagent(reagent)
-                # Deactivate the buttons to avoid duplication of reagents
                 self.deactivate_loading_and_editing()
             elif reagent.name == "Empty" and self.gripper_reagent.name != "Empty":
                 self.machine.drop_reagent(slot)
-                # Set the slot to have the gripper reagent
-                self.rack_box.change_reagent(slot.number, self.gripper_reagent)
-                # Set the gripper reagent to be empty
-                self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
+                # # Set the slot to have the gripper reagent
+                # self.rack_box.change_reagent(slot.number, self.gripper_reagent)
+                # # Set the gripper reagent to be empty
+                # self.rack_box.change_gripper_reagent(Reagent("Empty", self.colors, "dark_gray"))
                 # Reactivate the buttons to allow for editing
                 self.activate_loading_and_editing()
             else:

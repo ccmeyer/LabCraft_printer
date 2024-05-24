@@ -7,6 +7,8 @@ import pandas as pd
 import itertools
 import json
 import os
+from serial.tools.list_ports import comports
+import time
 
 
 class MovementBox(QtWidgets.QGroupBox):
@@ -837,6 +839,22 @@ class ConnectionBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.balance_port_options, 1, 1)
         self.layout.addWidget(self.balance_connect_button, 1, 2)
 
+        self.update_ports()
+
+    def update_ports(self):
+        # Get a list of all connected COM ports
+        ports = comports()
+        port_names = [port.device for port in ports]
+        port_names.append('Virtual machine')
+
+        # Clear the current items in the combo boxes
+        self.machine_port_options.clear()
+        self.balance_port_options.clear()
+
+        # Add the new items to the combo boxes
+        self.machine_port_options.addItems(port_names)
+        self.balance_port_options.addItems(port_names)
+
 class PressurePlotBox(QtWidgets.QGroupBox):
     """
     A custom widget that displays a pressure plot with current and target pressure values.
@@ -960,7 +978,9 @@ class ShortcutTable(QtWidgets.QGroupBox):
         self.table.setRowCount(len(shortcuts))
 
         for i, shortcut in enumerate(shortcuts):
-            self.table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(shortcut.key)))
+            item = QtWidgets.QTableWidgetItem(shortcut.key_name)
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.table.setItem(i, 0, item)
             self.table.setItem(i, 1, QtWidgets.QTableWidgetItem(shortcut.name))
         self.table.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.table)
