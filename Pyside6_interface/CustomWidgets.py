@@ -385,6 +385,11 @@ class ArrayWidget(QtWidgets.QWidget):
         self.reagent_input_button.clicked.connect(self.open_reagent_input)
         self.layout.addWidget(self.reagent_input_button)
 
+        self.print_array_button = QtWidgets.QPushButton("Print Array")
+        self.print_array_button.setStyleSheet(f"background-color: {self.main_window.colors['dark_gray']}")
+        self.print_array_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_array_button.clicked.connect(self.main_window.print_array)
+
         self.activate_array_buttons()
 
     def open_reagent_input(self):
@@ -714,6 +719,16 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.main_window.set_cartridges()
         self.close()
 
+class CustomSpinBox(QtWidgets.QDoubleSpinBox):
+    def __init__(self,possible_steps, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.values = possible_steps
+        self.setDecimals(0)
+
+    def stepBy(self, steps):
+        current_index = self.values.index(self.value())
+        new_index = max(0, min(current_index + steps, len(self.values) - 1))
+        self.setValue(self.values[new_index])
 
         
 
@@ -733,7 +748,8 @@ class CoordinateBox(QtWidgets.QGroupBox):
         target_entries (dict): A dictionary of target coordinate value labels.
 
     """
-
+    motors_activated = QtCore.Signal(bool)
+    home_motors = QtCore.Signal(bool)
     def __init__(self, title, main_window):
         super().__init__(title)
         self.main_window = main_window
@@ -758,7 +774,31 @@ class CoordinateBox(QtWidgets.QGroupBox):
             self.layout.addWidget(target_entry, i, 2)
             self.target_entries[axis] = target_entry
         self.set_text_bg_color('white',self.main_window.colors['dark_gray'])
+        self.activate_motors_button = QtWidgets.QPushButton("Activate")
+        self.activate_motors_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.activate_motors_button.setStyleSheet(f"background-color: {self.main_window.colors['blue']}")
+        self.activate_motors_button.clicked.connect(lambda: self.motors_activated.emit(True))
+        self.activate_motors_button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.layout.addWidget(self.activate_motors_button, 0, 3, 1, 1)
 
+        self.home_motors_button = QtWidgets.QPushButton("Home")
+        self.home_motors_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.home_motors_button.setStyleSheet(f"background-color: {self.main_window.colors['green']}")
+        self.home_motors_button.clicked.connect(lambda: self.home_motors.emit(True))
+        self.home_motors_button.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.layout.addWidget(self.home_motors_button, 1, 3, 1, 1)
+
+        self.step_size_label = QtWidgets.QLabel("Step Size:")
+        self.layout.addWidget(self.step_size_label, 2, 3)
+        self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
+        self.step_size_input.setRange(2, 1000)
+        self.step_size_input.setValue(500)
+        self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
+
+    def update_step_size(self,step_size):
+        self.step_size_input.setValue(step_size)
 
     def update_coordinates(self, values,target_values):
         """

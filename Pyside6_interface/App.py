@@ -61,12 +61,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.shortcuts = [
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(100,0,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-100,0,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-100,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,100,0)),
-            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,100)),
-            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-100)),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.step_size,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.step_size,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.step_size,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.step_size,0)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.step_size)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.step_size)),
             Shortcut("Large Increase Pressure", "9","9", lambda: self.machine.set_relative_pressure(0.5)),
             Shortcut("Small Increase Pressure", "8","8", lambda: self.machine.set_relative_pressure(0.1)),
             Shortcut("Small Decrease Pressure", "7","7", lambda: self.machine.set_relative_pressure(-0.1)),
@@ -81,6 +81,11 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Move to location", "L","L", lambda: self.machine.move_to_location(location=False)),
             Shortcut("Print array", "P","P", lambda: self.print_array()),
             Shortcut("Pause", QtCore.Qt.Key_Escape,"Esc", lambda: self.pause_execution()),
+            Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
+            Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
+            Shortcut("Print 5", "c","c", lambda: self.print_droplets(5)),
+            Shortcut("Print 20", "v","v", lambda: self.print_droplets(20)),
+            Shortcut("Print 100", "b","b", lambda: self.print_droplets(100)),
         ]
         self.read_settings_file()
         self.select_mode(mode_name=self.settings['DEFAULT_DISPENSER'])
@@ -152,8 +157,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connection_box.balance_connected.connect(self.set_balance_connected_status)
         left_layout.addWidget(self.connection_box)
 
+        self.step_num = 4
+        self.possible_steps = [2,10,50,250,500,1000,2000]
+        self.step_size = self.possible_steps[self.step_num]
+        
         self.coordinates_box = CoordinateBox("COORDINATES",self)
         self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.coordinates_box.motors_activated.connect(self.set_motors_active)
+        self.coordinates_box.home_motors.connect(self.home_motors)
         left_layout.addWidget(self.coordinates_box)
 
         self.pressure_box = PressurePlotBox("PRESSURE", self)
@@ -222,6 +233,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # Window dimensions
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
+    
+    def closeEvent(self, event):
+        response = self.popup_yes_no('Exit','Are you sure you want to exit?')
+        if response == '&Yes':
+            # self.machine.pause_commands()
+            self.machine.clear_command_queue()
+            self.machine.disconnect_machine()
+            event.accept()
+        else:
+            event.ignore()
+
+    def print_droplets(self,num_droplets):
+        self.machine.print_droplets(num_droplets)
+    
+    def inc_step(self):
+        if self.step_num < len(self.possible_steps)-1:
+            self.step_num += 1
+            self.step_size = self.possible_steps[self.step_num]
+            self.coordinates_box.update_step_size(self.step_size)
+    
+    def dec_step(self):
+        if self.step_num > 0:
+            self.step_num -= 1
+            self.step_size = self.possible_steps[self.step_num]
+            self.coordinates_box.update_step_size(self.step_size)
     
     def update_plate_box(self):
         self.plate_box.update_plate_box()
@@ -435,27 +471,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for command in removed_commands:
             self.command_box.remove_command(command.get_number())
 
-    def change_motor_connection(self,connected=False):
-        if connected:
+    def change_connection_button(self):
+        if self.machine.machine_connected:
             self.connection_box.machine_connect_button.setStyleSheet("background-color: #a92222")
             self.connection_box.machine_connect_button.setText("Disconnect")
-            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
         else:
             self.connection_box.machine_connect_button.setStyleSheet("background-color: #1e64b4")
             self.connection_box.machine_connect_button.setText("Connect")
-            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
     
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
         if self.connection_box.machine_connect_button.text() == "Disconnect":
-            self.machine.disable_motors()
-        elif port == 'COM1':
-            self.machine.enable_motors()
-        elif port == 'Virtual machine':
-            self.machine.simulate = True
-            self.machine.enable_motors()
+            self.machine.disconnect_machine()
         else:
-            self.machine.disable_motors()
+            self.machine.connect_machine(port)
+        self.change_connection_button()
 
     @QtCore.Slot(str)
     def set_balance_connected_status(self, port):
@@ -470,6 +500,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connection_box.balance_connect_button.setStyleSheet("background-color: #1e64b4")
             self.connection_box.balance_connect_button.setText("Connect")
         
+    def change_motor_activation(self,activated=False):
+        if activated:
+            self.coordinates_box.activate_motors_button.setStyleSheet("background-color: #a92222")
+            self.coordinates_box.activate_motors_button.setText("Deactivate")
+            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['darker_gray'])
+        else:
+            self.coordinates_box.activate_motors_button.setStyleSheet("background-color: #1e64b4")
+            self.coordinates_box.activate_motors_button.setText("Activate")
+            self.coordinates_box.set_text_bg_color(self.colors['white'],self.colors['dark_gray'])
+    
+    @QtCore.Slot(bool)
+    def set_motors_active(self):
+        if self.coordinates_box.activate_motors_button.text() == "Activate":
+            self.machine.enable_motors()
+        else:
+            self.machine.disable_motors()
+
+    @QtCore.Slot(bool)
+    def home_motors(self):
+        self.machine.home_motors()
+    
     @QtCore.Slot(str)
     def toggle_regulation(self):
         if self.machine.get_regulation_state():

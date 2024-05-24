@@ -36,6 +36,9 @@ class ControlBoard():
         self.pause = False
         self.initial_time = 0
         self.state = "Free"
+        self.com_open = True
+        self.max_cycle = 300
+        self.cycle_count = 10000
 
         self.board_check_timer = QTimer()
         self.board_check_timer.timeout.connect(self.check_for_command)
@@ -99,7 +102,22 @@ class ControlBoard():
     
     def get_complete_state(self):
         # if self.simulate:
-        full_string = f'State:{self.state},Last_added:{self.last_added_command_number},Current_command:{self.current_command_number},Last_completed:{self.last_completed_command_number},X:{self.x_pos},Y:{self.y_pos},Z:{self.z_pos},P:{self.p_pos},Pressure:{self.pressure},Gripper:{self.gripper_open},Droplets:{self.current_droplets}'
+        full_string = (
+            f'State:{self.state},'
+            f'Com_open:{self.com_open},'
+            f'Last_added:{self.last_added_command_number},'
+            f'Current_command:{self.current_command_number},'
+            f'Last_completed:{self.last_completed_command_number},'
+            f'X:{self.x_pos},'
+            f'Y:{self.y_pos},'
+            f'Z:{self.z_pos},'
+            f'P:{self.p_pos},'
+            f'Pressure:{self.pressure},'
+            f'Gripper:{self.gripper_open},'
+            f'Droplets:{self.current_droplets},'
+            f'Max_cycle:{self.max_cycle},'
+            f'Cycle_count:{self.cycle_count}'
+        )
         return full_string
 
     def check_for_command(self):
@@ -134,6 +152,7 @@ class ControlBoard():
             self.correct_pos = True
 
         if self.regulate_pressure:
+            print(self.pressure,self.target_pressure)
             if self.pressure < self.target_pressure:
                 self.pressure += 1
             elif self.pressure > self.target_pressure:
@@ -234,6 +253,15 @@ class ControlBoard():
             self.target_droplets = int(command.param1)
         elif command.command_type == 'RESET_P':
             self.p_pos = 0
+        elif command.command_type == 'HOME_ALL':
+            self.x_pos = 0
+            self.y_pos = 0
+            self.z_pos = 0
+            self.p_pos = 0
+            self.target_x = 0
+            self.target_y = 0
+            self.target_z = 0
+            self.target_p = 0
         else:
             print('Unknown command:',command.command_type)
         self.correct_pos = False
@@ -379,6 +407,7 @@ class Machine(QtWidgets.QWidget):
         self.current_command_number = 0
         self.last_completed_command_number = 0
         self.sent_command = None
+        self.com_open = True
         self.state = "Free"
 
         self.calibration_file_path = './Pyside6_interface/Calibrations/default_positions.json'
@@ -396,10 +425,33 @@ class Machine(QtWidgets.QWidget):
         if port == 'Virtual machine':
             self.simulate = True
             self.board = ControlBoard(self)
+            self.machine_connected = True
+            return True
         else:
             self.simulate = False
-            self.board = serial.Serial(port, baudrate=115200)
-        self.machine_connected = True
+            try:
+                self.board = serial.Serial(port, baudrate=115200)
+                self.machine_connected = True
+                return True
+            except:
+                self.main_window.popup_message('Connection error',f'Could not connect to machine at port {port}')
+                self.machine_connected = False
+                return False
+                
+    def disconnect_machine(self):
+        self.disable_motors()
+        self.deregulate_pressure()
+        self.gripper_off()
+        print('Disconnected from machine')
+        time.sleep(2)
+        # while len(self.incomplete_commands) > 0:
+        #     print('Waiting for incomplete commands to finish')
+        #     # self.get_state_from_board()
+        #     time.sleep(1)
+        if not self.simulate:
+            self.board.close()
+        self.machine_connected = False
+        
         return
     
     def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
@@ -430,9 +482,9 @@ class Machine(QtWidgets.QWidget):
             self.target_coordinates['Y'] = int(command.param2)
             self.target_coordinates['Z'] = int(command.param3)
         elif command.command_type == 'RELATIVE_PRESSURE':
-            self.target_psi += int(command.param1)
+            self.target_psi += self.convert_to_psi(int(command.param1))
         elif command.command_type == 'ABSOLUTE_PRESSURE':
-            self.target_psi = int(command.param1)
+            self.target_psi = self.convert_to_psi(int(command.param1))
         elif command.command_type == 'REGULATE_PRESSURE':
             self.regulating_pressure = True
         elif command.command_type == 'DEREGULATE_PRESSURE':
@@ -455,22 +507,36 @@ class Machine(QtWidgets.QWidget):
         elif command.command_type == 'RESUME':
             print('--Resuming')
             pass
+        elif command.command_type == 'CLEAR_QUEUE':
+            pass
+        elif command.command_type == 'RESET_P':
+            self.target_p = 0
+        elif command.command_type == 'HOME_ALL':
+            self.target_x = 0
+            self.target_y = 0
+            self.target_z = 0
+            self.target_p = 0
+            self.target_coordinates = {'X': self.target_x, 'Y': self.target_y, 'Z': self.target_z, 'P': self.target_p}
         else:
             print('Unknown command:',command.command_type)
 
     def send_command_to_board(self,command):
-        if self.simulate:
-            self.sent_command = command
-        else:
-            self.board.write(command.get_command())
-            self.board.flush()
-        command.send()
+        if self.com_open == True:
+            if self.simulate:
+                self.sent_command = command
+            else:
+                self.board.write(command.get_command())
+                self.board.flush()
+            command.send()
 
     def get_command_number(self):
         return self.command_number
     
     def get_command_log(self):
         return self.command_queue
+    
+    def get_incomplete_commands(self):
+        return self.incomplete_commands
     
     def get_state_from_board(self):
         if self.simulate:
@@ -489,7 +555,7 @@ class Machine(QtWidgets.QWidget):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
     
     def convert_to_raw_pressure(self,psi):
-        return round((psi / self.psi_max) * self.fss + self.psi_offset,0)
+        return int((psi / self.psi_max) * self.fss + self.psi_offset)
 
     def convert_state(self, state):
         state_dict = {}
@@ -504,6 +570,7 @@ class Machine(QtWidgets.QWidget):
         self.last_added_command_number = int(state['Last_added'])
         self.current_command_number = int(state['Current_command'])
         self.last_completed_command_number = int(state['Last_completed'])
+        self.com_open = state['Com_open'] == 'True'
         self.x_pos = int(state['X'])
         self.y_pos = int(state['Y'])
         self.z_pos = int(state['Z'])
@@ -596,14 +663,14 @@ class Machine(QtWidgets.QWidget):
 
         self.main_window.update_coordinates()
         self.main_window.update_pressure()
-
+    
     def enable_motors_handler(self):
         self.motors_active = True
-        self.main_window.change_motor_connection(True)
+        self.main_window.change_motor_activation(True)
     
     def disable_motors_handler(self):
         self.motors_active = False
-        self.main_window.change_motor_connection(False)
+        self.main_window.change_motor_activation(False)
 
     def enable_motors(self,handler=None,kwargs=None):
         if handler is None:
@@ -672,6 +739,9 @@ class Machine(QtWidgets.QWidget):
     def reset_syringe(self):
         self.add_command_to_queue('RESET_P',0,0,0)
     
+    def home_motors(self):
+        self.add_command_to_queue('HOME_ALL',0,0,0)
+
     def get_coordinates(self):
         return self.coordinates
     

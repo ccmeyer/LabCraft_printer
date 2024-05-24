@@ -173,6 +173,7 @@ public:
 
   bool isActive() const { return active; }
   bool isClosed() const { return closed; }
+  bool isOpen() const { return !closed; }
   bool isPumpOn() const { return pumpOn; }
   unsigned long previousMillis() const { return lastExecution; }
 
@@ -249,6 +250,7 @@ char tempChars[numChars];        // temporary array for use when parsing
 // variables to hold the parsed data
 char commandName[numChars] = {0};
 int commandNum = 0;
+int lastCompletedCmdNum = 0;
 // String commandName = "";
 long param1 = 0;
 long param2 = 0;
@@ -261,6 +263,8 @@ int updateCounter = 0;
 bool newData = false;
 
 bool receivingNewData = true;
+unsigned long waitStartTime = 0;
+unsigned long waitTime = 0;
 
 unsigned long currentMillis;
 unsigned long currentMicros;
@@ -641,8 +645,10 @@ enum CommandType {
     DISABLE_MOTORS,
     HOME_ALL,
     REGULATE_P,
-    UNREGULATE_P,
+    DEREGULATE_P,
     PAUSE,
+    RESUME,
+    WAIT,
     CLEAR_QUEUE,
     UNKNOWN
     // Add more command types as needed
@@ -680,6 +686,7 @@ enum State {
     HOMING_AXIS,
     PUMPING,
     WAITING,
+    PAUSED
     // Add more states as needed
 };
 
@@ -715,14 +722,18 @@ CommandType mapCommandType(const char* commandName) {
         return DISABLE_MOTORS;
     } else if (strcmp(commandName, "HOME_ALL") == 0) {
         return HOME_ALL;
-    } else if (strcmp(commandName, "REGULATE_P") == 0) {
+    } else if (strcmp(commandName, "REGULATE") == 0) {
         return REGULATE_P;
-    } else if (strcmp(commandName, "UNREGULATE_P") == 0) {
-        return UNREGULATE_P;
+    } else if (strcmp(commandName, "DEREGULATE") == 0) {
+        return DEREGULATE_P;
     } else if (strcmp(commandName, "PAUSE") == 0) {
         return PAUSE;
+    } else if (strcmp(commandName, "RESUME") == 0) {
+        return RESUME;
     } else if (strcmp(commandName, "CLEAR_QUEUE") == 0) {
         return CLEAR_QUEUE;
+    } else if (strcmp(commandName, "WAIT") == 0) {
+        return WAIT;
     }
     // Default case for unknown commands
     return UNKNOWN;
@@ -850,7 +861,7 @@ void executeCommand(const Command& cmd) {
     case REGULATE_P:
       regulatePressure = true;
       break;
-    case UNREGULATE_P:
+    case DEREGULATE_P:
       regulatePressure = false;
       break;
     case PAUSE:
@@ -861,6 +872,11 @@ void executeCommand(const Command& cmd) {
       break;
     case UNKNOWN:
 
+      break;
+    case WAIT:
+      currentState = WAITING;
+      waitStartTime = millis();
+      waitTime = cmd.param1;
       break;
     default:
       currentState = FREE;
@@ -900,23 +916,23 @@ void sendStatus() {
     state = "Pump_on";
   } else {
     currentState = FREE;
+    lastCompletedCmdNum = currentCmdNum;
     state = "Free";
   }
-  Serial.print("Serial:"); Serial.print(state);
+  Serial.print("State:"); Serial.print(state);
   Serial.print(",Com_open:"); Serial.print(receivingNewData);
-  Serial.print(",Current_command:"); Serial.print(currentCmdNum);
+  Serial.print(",Last_completed:"); Serial.print(lastCompletedCmdNum);
   Serial.print(",Last_added:"); Serial.print(lastAddedCmdNum);
+  Serial.print(",Current_command:"); Serial.print(currentCmdNum);
   Serial.print(",Max_cycle:"); Serial.print(maxCycle);
   Serial.print(",Cycle_count:"); Serial.print(numIterations);
   Serial.print(",X:"); Serial.print(stepperX.currentPosition());
   Serial.print(",Y:"); Serial.print(stepperY.currentPosition());
   Serial.print(",Z:"); Serial.print(stepperZ.currentPosition());
   Serial.print(",P:"); Serial.print(stepperP.currentPosition());
-  Serial.print(",Current:"); Serial.print(changeCurrent);
-  Serial.print(",Print_valve:"); Serial.print(limitX.isTriggered());
   Serial.print(",Droplets:"); Serial.print(currentSwitchIndex);
-  Serial.print(",Set_print:"); Serial.print(targetPressureP);
-  Serial.print(",Print_pressure:"); Serial.println(currentPressure);
+  Serial.print(",Gripper:"); Serial.print(gripper.isOpen());
+  Serial.print(",Pressure:"); Serial.println(currentPressure);
   numIterations = 0;
   maxCycle = 0;
 }
@@ -929,8 +945,14 @@ void getNewCommand(){
   // If new data is found parse the signal and execute the command
   if (newData == true){
     Command newCommand = convertCommand();
+    if (newCommand.type == PAUSE){
+      currentState = PAUSED;
+    } else if (newCommand.type == RESUME){
+      currentState = FREE;
+    } else {
+      updateCommandQueue(newCommand);
+    }
     newData = false;
-    updateCommandQueue(newCommand);
     receivingNewData = true;
   }
 }
@@ -1046,9 +1068,15 @@ void loop() {
           task.lastExecutionTime = currentMillis;
       }
   }
-  adjustPressure();
-  checkMotors();
-  checkDroplets();
+  if (currentState != PAUSED && currentState != WAITING){
+    adjustPressure();
+    checkMotors();
+    checkDroplets();
+  } else if (currentState == WAITING){
+    if (currentMillis - waitStartTime > waitTime){
+      currentState = FREE;
+    }
+  }
   getCycleTime();
 
   numIterations++;
