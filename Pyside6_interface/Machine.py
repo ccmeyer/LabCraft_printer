@@ -3,23 +3,139 @@ import time
 from PySide6 import QtCore, QtWidgets, QtGui
 from CustomWidgets import *
 import serial
+import re
 
 class Balance():
-    def __init__(self,main_window):
-        self.main_window = main_window
+    def __init__(self,machine):
+        self.machine = machine
         self.connected = False
+        self.port = None
+        self.simulate = True
+        self.balance_check_timer = None
+        self.error_count = 0
+        self.current_mass = 0
+        self.mass_log = []
+        self.tolerance = 0.01
+        self.stable_count = 0
+        self.stable = False
 
-        self.balance_check_timer = QtCore.QTimer()
-        self.balance_check_timer.timeout.connect(self.check_for_weight)
-        self.balance_check_timer.start(25)
+    def is_connected(self):
+        return self.connected
+    
+    def is_stable(self):
+        return self.stable
+    
+    def connect_balance(self,port):
+        if port == 'Virtual balance':
+            self.connected = True
+            self.simulate = True
+            self.show_connection()
+            return True
+        try:
+            self.port = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
+            self.connected = True
+            self.simulate = False
+            self.show_connection()
+            return True
+        except:
+            self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
+            self.connected = False
+            return False
+        
+    def close_connection(self):
+        if not self.simulate:
+            self.port.close()
+        if self.balance_check_timer is not None:
+            self.balance_check_timer.stop()
+        self.connected = False
+        return
 
     def show_connection(self):
         print('Balance connected')
+
+    def begin_reading(self):
+        self.balance_check_timer = QtCore.QTimer()
+        self.balance_check_timer.timeout.connect(self.check_mass)
+        self.balance_check_timer.start(25)
     
-    def check_for_weight(self):
-        if self.connected:
-            weight = self.get_weight()
-            self.main_window.update_balance(weight)
+    def check_mass(self):
+        mass = self.get_mass()
+        if mass is not None:
+            self.add_mass_to_log(mass)
+            self.check_stability()
+            print('Current mass:',mass)
+
+    def get_mass(self):
+        if not self.simulate:
+            if self.port.in_waiting > 0:
+                data = self.port.readline()
+                try:
+                    data = data.decode("ASCII")
+                    [sign,mass] = re.findall(r'(-?) *([0-9]+\.[0-9]+) [a-zA-Z]*',data)[0]
+                    mass = float(''.join([sign,mass]))
+                    self.current_mass = mass
+                    return self.current_mass
+                except:
+                    print('Error reading from balance')
+                    self.error_count += 1
+                    if self.error_count > 100:
+                        self.close_connection()
+                        self.main_window.popup_message('Connection error','Lost connection to balance')
+                    pass
+        else:
+            if self.machine.balance_droplets != []:
+                [num_droplets,psi] = self.machine.balance_droplets.pop(0)
+                mass = self.simulate_mass(num_droplets,psi)
+                self.current_mass += mass
+            return self.current_mass
+
+    def simulate_mass(self,num_droplets,psi):
+        # Reference points
+        ref_droplets = 100
+        ref_psi_1 = 1.8
+        ref_mass_1 = 3
+        ref_psi_2 = 2.2
+        ref_mass_2 = 4
+
+        # Calculate the mass per droplet for each reference point
+        mass_per_droplet_1 = ref_mass_1 / ref_droplets
+        mass_per_droplet_2 = ref_mass_2 / ref_droplets
+
+        # Interpolate the mass per droplet for the given pressure
+        mass_per_droplet = mass_per_droplet_1 + (mass_per_droplet_2 - mass_per_droplet_1) * ((psi - ref_psi_1) / (ref_psi_2 - ref_psi_1))
+
+        # Calculate the mass for the given number of droplets
+        mass = mass_per_droplet * num_droplets
+
+        return mass
+    
+    def add_mass_to_log(self,mass):
+        self.mass_log.append(mass)
+        if len(self.mass_log) > 100:
+            self.mass_log.pop(0)
+        return
+    
+    def check_stability(self):
+        if len(self.mass_log) > 10:
+            if all(abs(self.mass_log[-1] - mass) < self.tolerance for mass in self.mass_log[-10:-1]):
+                self.stable_count += 1
+            else:
+                self.stable_count = 0
+            if self.stable_count > 10:
+                self.stable = True
+            else:
+                self.stable = False
+
+    def get_stable_mass(self):
+        if self.stable:
+            return self.current_mass
+        else:
+            return None
+                
+
+        
+
+            
 
 class BoardCommand():
     def __init__(self,command_number,command_type,param1,param2,param3):
@@ -222,8 +338,6 @@ class ControlBoard():
                 if not command.executed:
                     self.current_command_number = int(command.command_number)
                     self.execute_command(i)
-                    print("Command queue:",self.command_queue,i,self.current_command_number)
-                    # self.command_queue[self.current_command_number].executed = True
                     self.command_queue[i].executed = True
                     self.state = "Busy"
                     break            
@@ -390,9 +504,9 @@ class Machine(QtWidgets.QWidget):
         self.simulate_balance = True
         self.board = ControlBoard(self)
         self.balance = Balance(self)
+        self.balance_droplets = []
 
         self.machine_connected = False
-        self.balance_connected = False
         self.motors_active = False
         self.x_pos = 0
         self.y_pos = 0
@@ -446,6 +560,22 @@ class Machine(QtWidgets.QWidget):
         self.picking_up = False
         self.dropping_off = False
 
+    def begin_communication_timer(self):
+        self.communication_timer = QTimer()
+        self.communication_timer.timeout.connect(self.get_state_from_board)
+        self.communication_timer.start(10)  # Update every 100 ms
+    
+    def begin_execution_timer(self):
+        self.execution_timer = QTimer()
+        self.execution_timer.timeout.connect(self.execute_command_from_queue)
+        self.execution_timer.start(90)  # Update every 100 ms
+
+    def stop_communication_timer(self):
+        self.communication_timer.stop()
+
+    def stop_execution_timer(self):
+        self.execution_timer.stop()
+
     def connect_machine(self,port):
         if port == 'Virtual machine':
             self.simulate = True
@@ -461,6 +591,9 @@ class Machine(QtWidgets.QWidget):
                 self.machine_connected = False
                 return False
         self.get_state_from_board()
+        self.begin_communication_timer()
+        self.begin_execution_timer()
+
         self.target_x = self.x_pos
         self.target_y = self.y_pos
         self.target_z = self.z_pos
@@ -477,34 +610,28 @@ class Machine(QtWidgets.QWidget):
         self.gripper_off()
         print('Disconnected from machine')
         time.sleep(1)
+        self.stop_communication_timer()
+        self.stop_execution_timer()
+        time.sleep(1)
         if not self.simulate:
             self.board.close()
         self.machine_connected = False
         return
     
     def connect_balance(self,port):
-        if port == 'Virtual balance':
-            self.balance_connected = True
-            self.simulate_balance = True
-            self.balance.show_connection()
+        if self.balance.connect_balance(port):
+            self.balance.begin_reading()
             return True
         else:
-            try:
-                self.balance = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
-                self.balance_connected = True
-                self.simulate_balance = False
-                return True
-            except:
-                self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
-                self.balance_connected = False
-                return False
-
+            return False
+        
     def disconnect_balance(self):
         print('Disconnected from balance')
-        if not self.simulate_balance:
-            self.balance.close()
-        self.balance_connected = False
+        self.balance.close_connection()
         return
+    
+    def is_balance_connected(self):
+        return self.balance.connected
     
     def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
         new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3,handler=handler,kwargs=kwargs)
@@ -519,9 +646,11 @@ class Machine(QtWidgets.QWidget):
                 for command in self.command_queue:
                     if not command.sent:
                         print('Sending command:',command.get_command())
-                        self.send_command_to_board(command)
-                        self.update_targets_from_command(command)
-                        self.command_sent.emit(command)
+                        if self.send_command_to_board(command):
+                            self.update_targets_from_command(command)
+                            self.command_sent.emit(command)
+                        else:
+                            print('Failed to send command:',command.get_command(),self.com_open)
                         break                
 
     def update_targets_from_command(self,command):
@@ -579,10 +708,14 @@ class Machine(QtWidgets.QWidget):
             if self.simulate:
                 self.sent_command = command
             else:
-                self.board.write(command.get_command())
+                self.board.write(command.get_command().encode())
                 self.board.flush()
             command.send()
-
+            return True
+        else:
+            print('Cannot send command, communication is closed')
+            return False
+        
     def get_command_number(self):
         return self.command_number
     
@@ -593,17 +726,23 @@ class Machine(QtWidgets.QWidget):
         return self.incomplete_commands
     
     def get_state_from_board(self):
-        if self.simulate:
-            signal = self.board.get_complete_state()
-        else:
-            if self.board.in_waiting > 0:
-                try:
-                    signal = self.board.readline().decode('utf-8').strip()
-                except:
+        try:
+            if self.simulate:
+                signal = self.board.get_complete_state()
+            else:
+                if self.board.in_waiting > 0:
+                    try:
+                        signal = self.board.readline().decode('utf-8').strip()
+                    except:
+                        signal = ''
+                        self.window.popup_message('Connection error','Could not read from board')
+                else:
                     signal = ''
-                    self.window.popup_message('Connection error','Could not read from board')
-        self.update_state(self.convert_state(signal))
-        return signal
+            self.update_state(self.convert_state(signal))
+            return signal
+        except serial.SerialException:
+            self.main_window.popup_message('Connection error','Lost connection to machine')
+            return ''
     
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
@@ -612,25 +751,33 @@ class Machine(QtWidgets.QWidget):
         return int((psi / self.psi_max) * self.fss + self.psi_offset)
 
     def convert_state(self, state):
+        if state == '':
+            return {}
+        # print('Received state:',state)
         state_dict = {}
         state_list = state.split(',')
         for item in state_list:
             key,value = item.split(':')
-            state_dict[key] = value
+            state_dict[key] = value.strip()
         return state_dict
     
     def update_state(self, state):
+        if state == {}:
+            return
         self.state = state['State']
         self.last_added_command_number = int(state['Last_added'])
         self.current_command_number = int(state['Current_command'])
         self.last_completed_command_number = int(state['Last_completed'])
-        self.com_open = state['Com_open'] == 'True'
+        # print('--Com_open:',state['Com_open'],type(state['Com_open']))
+        if state['Com_open'] == 'True' or state['Com_open'] == '1':
+            self.com_open = True
+        # self.com_open = state['Com_open'] == 'True'
         self.x_pos = int(state['X'])
         self.y_pos = int(state['Y'])
         self.z_pos = int(state['Z'])
         self.p_pos = int(state['P'])
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
-        self.current_pressure = int(state['Pressure'])
+        self.current_pressure = float(state['Pressure'])
         self.current_psi = self.convert_to_psi(self.current_pressure)
         self.current_droplets = int(state['Droplets'])
         target_gripper_open = state['Gripper'] == 'True'
@@ -796,7 +943,7 @@ class Machine(QtWidgets.QWidget):
         return
 
     def wait_command(self):
-        self.add_command_to_queue('WAIT',1,0,0)
+        self.add_command_to_queue('WAIT',2000,0,0)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None):
         if not self.regulating_pressure:
@@ -866,6 +1013,53 @@ class Machine(QtWidgets.QWidget):
         self.wait_command()
         return
 
+    def calibrate_pressure_handler(self,num_droplets=100,psi=1.8):
+        self.balance_droplets.append([num_droplets,psi])
+    
+    def calibrate_pressure(self,target_volume=30,tolerance=0.02,ask=True,num_droplets=100):
+        if not self.is_balance_connected():
+            self.main_window.popup_message('Balance not connected','Connect to balance to calibrate pressure')
+            return
+        if not self.regulating_pressure:
+            self.main_window.popup_message('Pressure not regulated','Pressure must be regulated to calibrate pressure')
+            return
+        if self.gripper_reagent.name == 'Empty':
+            self.main_window.popup_message('No reagent loaded','A reagent must be loaded to calibrate pressure')
+            return
+        if ask:
+            response = self.main_window.popup_yes_no('Calibrate pressure','Calibrate pressure? (y/n)')
+            if response == '&No':
+                print('Not calibrating pressure')
+                return
+        
+        self.move_to_location('balance',direct=False,safe_y=True)
+        # target_mass = (target_volume * self.gripper_reagent.density) / 1000
+        density = 1
+        target_mass = (target_volume * density) / 1000
+        target_mass *= num_droplets
+        max_pressure_change = 0.5
+        while True:
+            mass_initial = self.balance.get_stable_mass()
+            self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,kwargs={'num_droplets':num_droplets,'psi':self.current_psi})
+            mass_final = self.balance.get_stable_mass()
+            mass_change = mass_final - mass_initial
+            print(mass_change)
+            if abs(mass_change - target_mass) < tolerance:
+                print('Calibration complete')
+                break
+            if mass_change > target_mass:
+                proportion = mass_change / target_mass
+                pressure_change = self.current_psi / proportion
+                if pressure_change > max_pressure_change:
+                    pressure_change = max_pressure_change
+                new_psi = self.current_psi + pressure_change
+                response = self.main_window.popup_yes_no('Pressure incorrect',f'Volume was off by {proportion:3f}\n Continue calibration and set pressure to {new_psi:3f} psi?')
+                if response == '&No':
+                    break
+                self.set_absolute_pressure(new_psi)
+                time.sleep(0.2)
+
+    
     def load_positions_from_file(self):
         with open(self.calibration_file_path, 'r') as file:
             self.calibration_data = json.load(file)
@@ -937,9 +1131,30 @@ class Machine(QtWidgets.QWidget):
         self.location = location
         return
 
+    def save_location(self, location=False, new=False, ask=True):
+        if new:
+            location = self.main_window.popup_input('Save Location','Enter location name:')
+            if location == '' or location == None:
+                return
+            self.calibration_data.update({location:{'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}})
+        elif not location and not new:
+            location = self.main_window.popup_options('Save Location','Select location:',list(self.calibration_data.keys()))
+            if location == None:
+                return
+            self.calibration_data[location] = {'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}
+
+        if ask:
+            response = self.main_window.popup_yes_no('Save Location','Write location {} to file?'.format(location))
+            if response == '&No':
+                return
+        with open(self.calibration_file_path, 'w') as outfile:
+            json.dump(self.calibration_data, outfile)
+        self.main_window.popup_message('Location saved','Location {} saved to file'.format(location))
+            
+
     def move_to_well(self,row,col):
-        row_spacing = 200
-        col_spacing = 200
+        row_spacing = 150
+        col_spacing = 150
 
         new_x = (row_spacing*row)+self.array_start_x
         new_y = (col_spacing*col)+self.array_start_y

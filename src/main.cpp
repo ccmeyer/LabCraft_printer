@@ -634,8 +634,8 @@ void readSerial(){
 enum CommandType {
     RELATIVE_XYZ,
     ABSOLUTE_XYZ,
-    RELATIVE_P,
-    ABSOLUTE_P,
+    RELATIVE_PRESSURE,
+    ABSOLUTE_PRESSURE,
     PRINT,
     RESET_P,
     OPEN_GRIPPER,
@@ -644,8 +644,8 @@ enum CommandType {
     ENABLE_MOTORS,
     DISABLE_MOTORS,
     HOME_ALL,
-    REGULATE_P,
-    DEREGULATE_P,
+    REGULATE_PRESSURE,
+    DEREGULATE_PRESSURE,
     PAUSE,
     RESUME,
     WAIT,
@@ -702,10 +702,10 @@ CommandType mapCommandType(const char* commandName) {
         return RELATIVE_XYZ;
     } else if (strcmp(commandName, "ABSOLUTE_XYZ") == 0) {
         return ABSOLUTE_XYZ;
-    } else if (strcmp(commandName, "RELATIVE_P") == 0) {
-        return RELATIVE_P;
-    } else if (strcmp(commandName, "ABSOLUTE_P") == 0) {
-        return ABSOLUTE_P;
+    } else if (strcmp(commandName, "RELATIVE_PRESSURE") == 0) {
+        return RELATIVE_PRESSURE;
+    } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
+        return ABSOLUTE_PRESSURE;
     } else if (strcmp(commandName, "PRINT") == 0) {
         return PRINT;
     } else if (strcmp(commandName, "RESET_P") == 0) {
@@ -722,10 +722,10 @@ CommandType mapCommandType(const char* commandName) {
         return DISABLE_MOTORS;
     } else if (strcmp(commandName, "HOME_ALL") == 0) {
         return HOME_ALL;
-    } else if (strcmp(commandName, "REGULATE") == 0) {
-        return REGULATE_P;
-    } else if (strcmp(commandName, "DEREGULATE") == 0) {
-        return DEREGULATE_P;
+    } else if (strcmp(commandName, "REGULATE_PRESSURE") == 0) {
+        return REGULATE_PRESSURE;
+    } else if (strcmp(commandName, "DEREGULATE_PRESSURE") == 0) {
+        return DEREGULATE_PRESSURE;
     } else if (strcmp(commandName, "PAUSE") == 0) {
         return PAUSE;
     } else if (strcmp(commandName, "RESUME") == 0) {
@@ -817,10 +817,10 @@ void executeCommand(const Command& cmd) {
       correctPos = false;
       currentState = MOVING_XYZ;
       break;
-    case RELATIVE_P:
+    case RELATIVE_PRESSURE:
       targetPressureP = targetPressureP + cmd.param1;
       break;
-    case ABSOLUTE_P:
+    case ABSOLUTE_PRESSURE:
       targetPressureP = cmd.param1;
       break;
     case PRINT:
@@ -858,10 +858,10 @@ void executeCommand(const Command& cmd) {
       homingAxisNumber = 0;
       currentState = HOMING_AXIS;
       break;
-    case REGULATE_P:
+    case REGULATE_PRESSURE:
       regulatePressure = true;
       break;
-    case DEREGULATE_P:
+    case DEREGULATE_PRESSURE:
       regulatePressure = false;
       break;
     case PAUSE:
@@ -930,7 +930,7 @@ void sendStatus() {
   Serial.print(",Y:"); Serial.print(stepperY.currentPosition());
   Serial.print(",Z:"); Serial.print(stepperZ.currentPosition());
   Serial.print(",P:"); Serial.print(stepperP.currentPosition());
-  Serial.print(",Droplets:"); Serial.print(currentSwitchIndex);
+  Serial.print(",Droplets:"); Serial.print(currentDroplets);
   Serial.print(",Gripper:"); Serial.print(gripper.isOpen());
   Serial.print(",Pressure:"); Serial.println(currentPressure);
   numIterations = 0;

@@ -510,7 +510,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.grid_layout.addWidget(volume_label, 2, 0)
 
         self.volume_input = QtWidgets.QDoubleSpinBox()
-        self.volume_input.setRange(1, 10)  # Set a minimum and maximum value
+        self.volume_input.setRange(1, 50)  # Set a minimum and maximum value
         self.volume_input.setDecimals(0)  # Set the number of decimal places
         self.volume_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
         self.grid_layout.addWidget(self.volume_input, 2, 1)
@@ -978,8 +978,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_pressure_series.append(0,target_pressure)  # Add the lower point of the target pressure line
         self.target_pressure_series.append(100,target_pressure)  # Add the upper point of the target pressure line
 
-        min_pressure = min(pressure_log + [target_pressure]) - 2
-        max_pressure = max(pressure_log + [target_pressure]) + 2
+        min_pressure = min(pressure_log + [target_pressure]) - 0.5
+        max_pressure = max(pressure_log + [target_pressure]) + 0.5
 
         self.axisY.setRange(min_pressure, max_pressure)
 

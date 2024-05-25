@@ -86,6 +86,9 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Print 5", "c","c", lambda: self.print_droplets(5)),
             Shortcut("Print 20", "v","v", lambda: self.print_droplets(20)),
             Shortcut("Print 100", "b","b", lambda: self.print_droplets(100)),
+            Shortcut("New Location", "Z","Z", lambda: self.machine.save_location(new=True)),
+            Shortcut("Overwrite Location", "X","X", lambda: self.machine.save_location(new=False)),
+            Shortcut("Reset Arrays", "R","R", lambda: self.reset_print_arrays()),
         ]
         self.read_settings_file()
         self.select_mode(mode_name=self.settings['DEFAULT_DISPENSER'])
@@ -102,14 +105,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.full_array = pd.DataFrame()
         self.actual_array = pd.DataFrame()
 
-        self.communication_timer = QTimer()
-        self.communication_timer.timeout.connect(self.machine.get_state_from_board)
-        self.communication_timer.start(101)  # Update every 100 ms
-        
-        self.execution_timer = QTimer()
-        self.execution_timer.timeout.connect(self.machine.execute_command_from_queue)
-        self.execution_timer.start(90)  # Update every 100 ms
-        
         self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.rack_slots)]
         
         self.setWindowTitle("My App")
@@ -234,13 +229,22 @@ class MainWindow(QtWidgets.QMainWindow):
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
     
+    def reset_print_arrays(self):
+        response = self.popup_yes_no('Reset','Are you sure you want to reset the print arrays?')
+        if response == '&Yes':
+            self.full_array['Added'] = False
+            self.actual_array['Added'] = False
+            self.plate_box.preview_array()
+
+    
     def closeEvent(self, event):
         response = self.popup_yes_no('Exit','Are you sure you want to exit?')
         if response == '&Yes':
             # self.machine.pause_commands()
-            self.machine.clear_command_queue()
+            if self.machine.machine_connected:
+                self.machine.clear_command_queue()
+                self.machine.disconnect_machine()
             time.sleep(1)
-            self.machine.disconnect_machine()
             event.accept()
         else:
             event.ignore()
@@ -284,10 +288,15 @@ class MainWindow(QtWidgets.QMainWindow):
         msg.setText(message)
         for option in options:
             msg.addButton(option, QtWidgets.QMessageBox.AcceptRole)
+        quit_button = msg.addButton("Quit", QtWidgets.QMessageBox.RejectRole)
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
         msg.exec()
-        return msg.clickedButton().text()
+        clicked_button = msg.clickedButton()
+        if clicked_button == quit_button:
+            return None
+        else:
+            return clicked_button.text()
     
     def popup_yes_no(self,title, message):
         msg = QtWidgets.QMessageBox()
@@ -298,6 +307,13 @@ class MainWindow(QtWidgets.QMainWindow):
         msg.setWindowIcon(transparent_icon)
         msg.exec()
         return msg.clickedButton().text()
+    
+    def popup_input(self,title, message):
+        text, ok = QtWidgets.QInputDialog.getText(self, title, message)
+        if ok:
+            return text
+        else:
+            return None
     
     def read_settings_file(self):
         with open('./Pyside6_interface/Presets/Settings.json', 'r') as f:
@@ -459,7 +475,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def mark_reagent_as_added(self,well_number,reagent_name):
         self.plate_box.mark_reagent_as_added(well_number,reagent_name)
-        print(self.full_array['Added'].value_counts())
         self.plate_box.preview_array()
 
     def update_movement_plot(self):
@@ -483,13 +498,15 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(str)
     def set_machine_connected_status(self, port):
         if self.connection_box.machine_connect_button.text() == "Disconnect":
-            self.machine.disconnect_machine()
+            response = self.popup_yes_no('Disconnect','Are you sure you want to disconnect?')
+            if response == '&Yes':
+                self.machine.disconnect_machine()
         else:
             self.machine.connect_machine(port)
         self.change_connection_button()
 
     def change_balance_connection_button(self):
-        if self.machine.balance_connected:
+        if self.machine.is_balance_connected():
             self.connection_box.balance_connect_button.setStyleSheet("background-color: #a92222")
             self.connection_box.balance_connect_button.setText("Disconnect")
         else:
@@ -524,7 +541,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(bool)
     def home_motors(self):
-        self.machine.home_motors()
+        response = self.popup_yes_no('Home Motors','Are you sure you want to home the motors?')
+        if response == '&Yes':
+            self.machine.home_motors()
 
     def change_regulation_button(self):
         if not self.machine.get_regulation_state():

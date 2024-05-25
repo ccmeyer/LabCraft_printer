@@ -16,7 +16,7 @@
             "print_pressure":1.8,
             "pulse_width":3000,
             "frequency":20,
-            "height":-15000,
+            "height":-5000,
             "safe_y":3500,
             "max_volume":200,
             "min_volume":20,
