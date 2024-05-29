@@ -5,7 +5,7 @@
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",
     "DEFAULT_REAGENT":"water",
-    "RACK_SLOTS":6,
+    "RACK_SLOTS":5,
     "PRESSURE_CONVERSION":{
         "FSS":13107,
         "OFFSET":1638,

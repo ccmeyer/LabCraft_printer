@@ -7,22 +7,9 @@ from Machine import Machine,Command
 from CustomWidgets import *
 import json
 import pandas as pd
+import cv2
+import time
 
-
-class Shortcut:
-    def __init__(self, name, key, key_name, function):
-            """
-            Initialize a new instance of the class.
-
-            Args:
-                name (str): The name of the instance.
-                key (str): The key of the instance.
-                function (callable): The function associated with the instance.
-            """
-            self.name = name
-            self.key = key
-            self.key_name = key_name
-            self.function = function
 
 class MainWindow(QtWidgets.QMainWindow):
     """
@@ -74,7 +61,6 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus,"+", lambda: self.machine.regulate_pressure),
             Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus,"-", lambda: self.machine.deregulate_pressure),
             Shortcut("Add Reagent", "A","A", lambda: self.add_reagent()),
-            Shortcut("Test Popup", "T","T", lambda: self.test_popup()),
             Shortcut("Pick Up Reagent", "O","O", lambda: self.machine.pick_up_reagent()),
             Shortcut("Open Gripper", "G","G", lambda: self.manual_open_gripper()),
             Shortcut("Close Gripper", "g","g", lambda: self.manual_close_gripper()),
@@ -90,12 +76,15 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Overwrite Location", "X","X", lambda: self.machine.save_location(new=False)),
             Shortcut("Reset Arrays", "R","R", lambda: self.reset_print_arrays()),
         ]
+
         self.read_settings_file()
         self.select_mode(mode_name=self.settings['DEFAULT_DISPENSER'])
         self.read_colors_file()
         self.read_reagents_file()
-
         self.machine = Machine(self)
+
+        self.read_plates_file()
+
         self.gripper_reagent = Reagent("Empty", self.colors, "dark_gray")
         self.experiment_name = 'Untitled Experiment'
 
@@ -105,7 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.full_array = pd.DataFrame()
         self.actual_array = pd.DataFrame()
 
-        self.slots = [Slot(i, Reagent('Empty',self.colors,'red')) for i in range(self.rack_slots)]
+        self.slots = [Slot(i+1, Reagent('Empty',self.colors,'red')) for i in range(self.rack_slots)]
         
         self.setWindowTitle("My App")
         transparent_icon = self.make_transparent_icon()
@@ -183,11 +172,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
 
-        self.current_plate = Plate('5x10',rows=16,columns=24)
         self.plate_box = PlateBox(self,'PLATE')
         self.plate_box.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
-        
+        self.plate_box.plate_changed.connect(self.update_current_plate)
+        self.plate_box.calibrate_plate_signal.connect(self.calibrate_plate)
         tab_widget.addTab(self.plate_box, "Plate")
+
+        # self.update_current_plate(self.plate_box.get_current_plate())
+        # self.plate_options = self.plate_box.get_plate_options()
         # Create another widget and add it to the second tab
         self.movement_box = MovementBox("MOVEMENT",self)
         tab_widget.addTab(self.movement_box, "MOVEMENT")
@@ -202,6 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
         self.rack_box.reagent_confirmed.connect(self.confirm_reagent)
         self.rack_box.reagent_loaded.connect(self.transfer_reagent)
+        self.rack_box.calibrate_rack.connect(self.calibrate_rack)
         mid_layout.addWidget(self.rack_box)
 
         layout.addWidget(mid_panel)
@@ -278,25 +271,10 @@ class MainWindow(QtWidgets.QMainWindow):
         msg.setWindowIcon(transparent_icon)
         msg.exec()
 
-    def test_popup(self):
-        response = self.popup_options('Test','This is a test message',['Option 1','Option 2'])
-        print(response)
-
-    def popup_options(self,title, message, options):
-        msg = QtWidgets.QMessageBox()
-        msg.setWindowTitle(title)
-        msg.setText(message)
-        for option in options:
-            msg.addButton(option, QtWidgets.QMessageBox.AcceptRole)
-        quit_button = msg.addButton("Quit", QtWidgets.QMessageBox.RejectRole)
-        transparent_icon = self.make_transparent_icon()
-        msg.setWindowIcon(transparent_icon)
-        msg.exec()
-        clicked_button = msg.clickedButton()
-        if clicked_button == quit_button:
-            return None
-        else:
-            return clicked_button.text()
+    def popup_options(self, title, message, options):
+        dialog = OptionsDialog(title, message, options)
+        clicked_option = dialog.exec()
+        return clicked_option
     
     def popup_yes_no(self,title, message):
         msg = QtWidgets.QMessageBox()
@@ -458,11 +436,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def manual_open_gripper(self):
         self.machine.open_gripper()
-        self.rack_box.open_gripper(True)
+        self.rack_box.open_gripper()
     
     def manual_close_gripper(self):
         self.machine.close_gripper()
-        self.rack_box.close_gripper(False)
+        self.rack_box.close_gripper()
     
     def open_gripper(self):
         self.rack_box.open_gripper()
@@ -582,7 +560,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(Slot)
     def confirm_reagent(self,slot_obj):
         self.statusBar().showMessage(f"Slot-{slot_obj.number} loaded with {slot_obj.reagent.name} confirmed")
-        self.rack_box.confirm_reagent(slot_obj.number, slot_obj.reagent)
+        self.rack_box.confirm_reagent(slot_obj.number-1, slot_obj.reagent)
 
     def change_reagent_pickup(self,slot):
         self.rack_box.change_reagent(slot.number,Reagent("Empty", self.colors, "dark_gray"))
@@ -610,6 +588,159 @@ class MainWindow(QtWidgets.QMainWindow):
             self.rack_box.update_load_buttons()
         else:
             self.popup_message('Error','Machine not connected')
+
+    @QtCore.Slot()
+    def calibrate_rack(self):
+        if not self.machine.motors_active or not self.machine.homed:
+            self.popup_message('Error','Motors must be active and homed to calibrate rack')
+            return
+        response = self.popup_yes_no('Calibration chip loaded','Is the calibration chip loaded?')
+        if response == '&No':
+            self.popup_message('Error','Please load the calibration chip before calibrating the rack')
+            return
+        rack_calibration_dialog = RackCalibrationDialog(self)
+        rack_calibration_dialog.exec()
+        print('Calibrating rack')
+
+    def read_plates_file(self):
+        with open('./Pyside6_interface/Presets/Plates.json', 'r') as f:
+            plates = json.load(f)
+        self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default'],calibrations=plate['calibrations']) for plate in plates]
+        self.current_plate = [plate for plate in self.plate_options if plate.default][0]
+        if self.current_plate is None:
+            self.current_plate = self.plate_options[0]
+        
+        if self.current_plate.calibrations != {}:
+            self.get_well_positions()
+        else:
+            self.popup_message('Must calibrate plate','Plate has not been calibrated. You must calibrate the plate prior to array printing.')    
+    
+    def get_well_positions(self):
+        self.well_coords_df = self.calculate_plate_matrix()
+        self.machine.set_well_positions(self.well_coords_df)
+
+    def get_coords(self,coords):
+        return np.array(list(coords.values()))
+    
+    def calculate_plate_matrix(self):
+        print('Calculating plate matrix')
+        print('Current Plate:',self.current_plate.to_dict())
+        self.calibrations = self.current_plate.calibrations
+        print("Calibrations:",self.calibrations)
+        self.corners = np.array([
+            [self.get_coords(self.calibrations['top_left'])[0:2]],
+            [self.get_coords(self.calibrations['top_right'])[0:2]],
+            [self.get_coords(self.calibrations['bottom_right'])[0:2]],
+            [self.get_coords(self.calibrations['bottom_left'])[0:2]]
+        ], dtype = "float32") 
+        self.max_columns = self.current_plate.columns - 1
+        self.max_rows = self.current_plate.rows - 1       
+        self.plate_width = self.max_columns * self.current_plate.spacing
+        self.plate_depth = self.max_rows * self.current_plate.spacing
+
+        self.plate_dimensions = np.array([
+            [0, 0],
+            [0, self.plate_width],
+            [self.plate_depth,self.plate_width],
+            [self.plate_depth,0]], dtype = "float32")
+
+        self.gen_trans_matrix()
+
+        self.row_z_step = (self.calibrations['bottom_left']['Z'] - self.calibrations['top_left']['Z']) / (self.current_plate.rows)
+        self.col_z_step =  (self.calibrations['top_right']['Z'] - self.calibrations['top_left']['Z']) / (self.current_plate.columns)
+
+        well_coords_df = self.calculate_all_well_positions()
+        return well_coords_df
+    
+    def gen_trans_matrix(self):
+        '''
+        Performs a 4-point transformation of the coordinate plane using the
+        experimentally derived plate corners. This takes the dobot coordinates
+        and finds the matrix required to convert them into the coordinate plane
+        that matches the defined geometry of the plate. This matrix can then be
+        reversed and used to take the positions where wells should be and
+        convert them into the corresponding dobot coordinates.
+
+        This transformation accounts for the deviations in the Dobot coordinate
+        system but only applies to the X and Y dimensions.
+        '''
+        self.trans_matrix = cv2.getPerspectiveTransform(self.corners, self.plate_dimensions)
+        self.inv_trans_matrix = np.linalg.pinv(self.trans_matrix)
+        return
+    
+    def correct_xy_coords(self,x,y):
+        '''
+        Uses the transformation matrix to correct the XY coordinates
+        '''
+        target = np.array([[x,y]], dtype = "float32")
+        target_transformed = cv2.perspectiveTransform(np.array(target[None,:,:]), self.inv_trans_matrix)
+        return target_transformed[0][0]
+
+    def get_well_coords(self,row,column):
+        '''
+        Uses the well indices to determine the dobot coordinates of the well
+        '''
+        x,y = self.correct_xy_coords(row*self.current_plate.spacing,column*self.current_plate.spacing)
+        z = self.calibrations['top_left']['Z'] + (row * self.row_z_step) + (column * self.col_z_step)
+        x = int(round(x,0))
+        y = int(round(y,0))
+        z = int(round(z,0))
+        return {'X':x, 'Y':y, 'Z':z}
+    
+    def calculate_all_well_positions(self):
+        # Create an empty list for the well positions
+        well_positions = []
+
+        # Iterate over all the rows and columns of the plate
+        for row in range(self.current_plate.rows):
+            for column in range(self.current_plate.columns):
+                # Calculate the corrected coordinates for the well
+                coords = self.get_well_coords(row, column)
+
+                # Add the well position to the list
+                well_positions.append({
+                    'row': row,
+                    'column': column,
+                    'X': coords['X'],
+                    'Y': coords['Y'],
+                    'Z': coords['Z']
+                })
+
+        # Create a DataFrame from the list
+        well_positions_df = pd.DataFrame(well_positions)
+        print(well_positions_df.head(50))
+        return well_positions_df
+
+    def write_plates_file(self):
+        plates = [plate.to_dict() for plate in self.plate_options]
+        with open('./Pyside6_interface/Presets/Plates.json', 'w') as f:
+            json.dump(plates, f)
+
+    @QtCore.Slot()
+    def calibrate_plate(self):
+        if not self.machine.motors_active or not self.machine.homed:
+            self.popup_message('Error','Motors must be active and homed to calibrate plate')
+            return
+        response = self.popup_yes_no('Calibration chip loaded','Is the calibration chip loaded?')
+        if response == '&No':
+            self.popup_message('Error','Please load the calibration chip before calibrating the plate')
+            return
+        plate_calibration_dialog = PlateCalibrationDialog(self)
+        plate_calibration_dialog.plate_calibration_complete.connect(self.update_plate_calibrations)
+        plate_calibration_dialog.exec()
+        print('Calibrating plate')
+
+    @QtCore.Slot(Plate)
+    def update_current_plate(self,plate):
+        self.current_plate = plate
+
+    @QtCore.Slot(Plate)
+    def update_plate_calibrations(self,updated_plate):
+        plate_index = next((index for (index, plate) in enumerate(self.plate_options) if plate.name == updated_plate.name), None)
+        self.plate_options[plate_index] = updated_plate
+        self.write_plates_file()
+        self.current_plate = updated_plate
+        self.get_well_positions()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])

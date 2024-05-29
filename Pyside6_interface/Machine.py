@@ -4,6 +4,8 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from CustomWidgets import *
 import serial
 import re
+import json
+import cv2
 
 class Balance():
     def __init__(self,machine):
@@ -138,7 +140,19 @@ class Balance():
             
 
 class BoardCommand():
-    def __init__(self,command_number,command_type,param1,param2,param3):
+    """
+    Represents a command to be executed on the board.
+
+    Attributes:
+        command_number (int): The number of the command.
+        command_type (str): The type of the command.
+        param1 (any): The first parameter of the command.
+        param2 (any): The second parameter of the command.
+        param3 (any): The third parameter of the command.
+        executed (bool): Indicates whether the command has been executed.
+    """
+
+    def __init__(self, command_number, command_type, param1, param2, param3):
         self.command_number = command_number
         self.command_type = command_type
         self.param1 = param1
@@ -184,6 +198,10 @@ class ControlBoard():
         self.y_pos = 0
         self.z_pos = 0
         self.p_pos = 0
+        self.x_correct = False
+        self.y_correct = False
+        self.z_correct = False
+
         self.correct_pos = True
         self.xy_speed = 50
         self.z_speed = 50
@@ -266,19 +284,39 @@ class ControlBoard():
             else:
                 return
         if self.motors_active:
-            if self.y_pos < self.target_y:
+            self.x_correct = False
+            self.y_correct = False
+            self.z_correct = False
+
+            if abs(self.y_pos - self.target_y) < self.xy_speed:
+                self.y_pos = self.target_y
+                self.y_correct = True
+            elif self.y_pos < self.target_y:
                 self.y_pos += self.xy_speed
             elif self.y_pos > self.target_y:
                 self.y_pos -= self.xy_speed
-            elif self.x_pos < self.target_x:
-                self.x_pos += self.xy_speed
-            elif self.x_pos > self.target_x:
-                self.x_pos -= self.xy_speed
-            elif self.z_pos < self.target_z:
-                self.z_pos += self.z_speed
-            elif self.z_pos > self.target_z:
-                self.z_pos -= self.z_speed
-            else:
+
+            # Only move the X axis if the Y axis has reached its target position
+            if self.y_correct:
+                if abs(self.x_pos - self.target_x) < self.xy_speed:
+                    self.x_pos = self.target_x
+                    self.x_correct = True
+                elif self.x_pos < self.target_x:
+                    self.x_pos += self.xy_speed
+                elif self.x_pos > self.target_x:
+                    self.x_pos -= self.xy_speed
+
+            # Only move the Z axis if the X and Y axes have reached their target positions
+            if self.x_correct and self.y_correct:
+                if abs(self.z_pos - self.target_z) < self.z_speed:
+                    self.z_pos = self.target_z
+                    self.z_correct = True
+                elif self.z_pos < self.target_z:
+                    self.z_pos += self.z_speed
+                elif self.z_pos > self.target_z:
+                    self.z_pos -= self.z_speed
+
+            if self.x_correct and self.y_correct and self.z_correct:
                 self.correct_pos = True
         else:
             self.correct_pos = True
@@ -309,8 +347,6 @@ class ControlBoard():
         if self.correct_pos and self.correct_pressure and self.correct_gripper and self.correct_droplets:
             self.state = "Free"
             self.last_completed_command_number = self.current_command_number
-            # if self.command_queue != []:
-            #     self.command_queue[self.current_command_number].executed = True
             self.execute_command_from_queue()
         
     def add_command_to_queue(self, command):
@@ -347,11 +383,19 @@ class ControlBoard():
         print('Board Executing command:',command.command_type,command.param1,command.param2,command.param3)
         if command.command_type == 'RELATIVE_XYZ':
             self.correct_pos = False
+            self.correct_x = False
+            self.correct_y = False
+            self.correct_z = False
+
             self.target_x += int(command.param1)
             self.target_y += int(command.param2)
             self.target_z += int(command.param3)
         elif command.command_type == 'ABSOLUTE_XYZ':
             self.correct_pos = False
+            self.correct_x = False
+            self.correct_y = False
+            self.correct_z = False
+
             self.target_x = int(command.param1)
             self.target_y = int(command.param2)
             self.target_z = int(command.param3)
@@ -382,7 +426,7 @@ class ControlBoard():
         elif command.command_type == 'DISABLE_MOTORS':
             self.motors_active = False
         elif command.command_type == 'WAIT':
-            self.wait_time = int(command.param1)
+            self.wait_time = int(command.param1) / 1000
             self.initial_time = time.time()
             self.wait_flag = True
         elif command.command_type == 'PRINT':
@@ -514,6 +558,7 @@ class Machine(QtWidgets.QWidget):
         self.p_pos = 0
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
         self.location = 'Unknown'
+        self.homed = False
 
         self.target_x = 0
         self.target_y = 0
@@ -552,6 +597,7 @@ class Machine(QtWidgets.QWidget):
         self.calibration_file_path = './Pyside6_interface/Calibrations/default_positions.json'
         self.calibration_data = {}
         self.load_positions_from_file()
+        self.well_positions = pd.DataFrame()
 
         self.rack_offset = self.main_window.rack_offset
         self.safe_height = self.main_window.safe_height
@@ -954,11 +1000,19 @@ class Machine(QtWidgets.QWidget):
     def reset_syringe(self):
         self.add_command_to_queue('RESET_P',0,0,0)
     
-    def home_motors(self):
-        self.add_command_to_queue('HOME_ALL',0,0,0)
+    def home_motor_handler(self):
+        self.homed = True
+
+    def home_motors(self,handler=None,kwargs=None):
+        if handler == None:
+            handler = self.home_motor_handler
+        self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs)
 
     def get_coordinates(self):
         return self.coordinates
+    
+    def get_XYZ_coordinates(self):
+        return {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos}
     
     def get_target_coordinates(self):
         return self.target_coordinates
@@ -990,7 +1044,7 @@ class Machine(QtWidgets.QWidget):
         self.open_gripper()
         self.wait_command()
         print('Picking up reagent:',slot.reagent.name)
-        location = f'rack_position_{slot.number}'
+        location = f'rack_position_{slot.number+1}_{self.main_window.rack_slots}'
         self.move_to_location(location)
         target_coordinates = self.calibration_data[location].copy()
         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
@@ -1001,7 +1055,7 @@ class Machine(QtWidgets.QWidget):
         return
     
     def drop_reagent(self,slot):
-        location = f'rack_position_{slot.number}'
+        location = f'rack_position_{slot.number+1}_{self.main_window.rack_slots}'
         self.move_to_location(location)
         target_coordinates = self.calibration_data[location].copy()
         self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
@@ -1142,25 +1196,38 @@ class Machine(QtWidgets.QWidget):
             if location == None:
                 return
             self.calibration_data[location] = {'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}
-
+        elif location and not new:
+            if location not in self.calibration_data.keys():
+                response = self.main_window.popup_yes_no('Location not present','Location {} not present in calibration data. Add?'.format(location))
+                if response == '&No':
+                    return
+                self.calibration_data.update({location:{'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}})
+            else:
+                self.calibration_data[location] = {'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}
         if ask:
             response = self.main_window.popup_yes_no('Save Location','Write location {} to file?'.format(location))
             if response == '&No':
                 return
         with open(self.calibration_file_path, 'w') as outfile:
             json.dump(self.calibration_data, outfile)
+        self.load_positions_from_file()
         self.main_window.popup_message('Location saved','Location {} saved to file'.format(location))
-            
+
+    def set_well_positions(self,well_positions):
+        self.well_positions = well_positions
 
     def move_to_well(self,row,col):
-        row_spacing = 150
-        col_spacing = 150
+        # Find the well position in the DataFrame
+        well_position = self.well_positions[(self.well_positions['row'] == row) & (self.well_positions['column'] == col)]
 
-        new_x = (row_spacing*row)+self.array_start_x
-        new_y = (col_spacing*col)+self.array_start_y
-        new_z = self.array_start_z
-        self.set_absolute_coordinates(new_x,new_y,new_z)
-        return
+        # If the well position is found, move to it
+        if not well_position.empty:
+            new_x = well_position['X'].values[0]
+            new_y = well_position['Y'].values[0]
+            new_z = well_position['Z'].values[0]
+            self.set_absolute_coordinates(new_x, new_y, new_z)
+        else:
+            print(f"Coordinates for well ({row}, {col}) not found.")
 
     
     def print_array(self,array,ask=True):
@@ -1176,6 +1243,9 @@ class Machine(QtWidgets.QWidget):
         if self.main_window.full_array.empty:
             self.main_window.popup_message('No array loaded','Please load an array first')
             return
+        if self.well_positions.empty:
+            self.main_window.popup_message('No well positions','Well positions not calibrated. Please calibrate the plate to proceed')
+            return
         
         if ask:
             response = self.main_window.popup_yes_no('Print array',message='Print an array? (y/n)')
@@ -1188,11 +1258,11 @@ class Machine(QtWidgets.QWidget):
         self.close_gripper()
         self.wait_command()
 
-        location = 'print'
+        location = 'pause'
         self.move_to_location(location)
-        self.array_start_x = self.calibration_data[location]['x']
-        self.array_start_y = self.calibration_data[location]['y']
-        self.array_start_z = self.calibration_data[location]['z']
+        # self.array_start_x = self.calibration_data[location]['x']
+        # self.array_start_y = self.calibration_data[location]['y']
+        # self.array_start_z = self.calibration_data[location]['z']
         
         current_reagent = self.gripper_reagent.name
         print('Current reagent:',current_reagent)
@@ -1205,5 +1275,3 @@ class Machine(QtWidgets.QWidget):
             self.move_to_well(line['row'],line['column'])
             self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})
             
-
-    

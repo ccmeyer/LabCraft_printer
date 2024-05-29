@@ -8,8 +8,323 @@ import itertools
 import json
 import os
 from serial.tools.list_ports import comports
-import time
 
+class Plate():
+    """
+    Represents a plate with a specified name, number of rows, number of columns, spacing, and default value.
+
+    Attributes:
+        name (str): The name of the plate.
+        rows (int): The number of rows in the plate.
+        columns (int): The number of columns in the plate.
+        spacing (int): The spacing between elements in the plate.
+        default (bool): The default value of the plate.
+    """
+
+    def __init__(self, name, rows=16, columns=24, spacing=10, default=False, calibrations={}):
+        self.name = name
+        self.rows = rows
+        self.columns = columns
+        self.spacing = spacing
+        self.default = default
+        self.calibrations = calibrations
+    
+    def to_dict(self):
+        return self.__dict__
+
+class OptionsDialog(QtWidgets.QDialog):
+    def __init__(self, title, message, options):
+        super().__init__()
+
+        self.setWindowTitle(title)
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        self.message_label = QtWidgets.QLabel(message)
+        self.layout.addWidget(self.message_label)
+
+        self.buttons_layout = QtWidgets.QGridLayout()
+        self.layout.addLayout(self.buttons_layout)
+
+        self.buttons = []
+        for i, option in enumerate(options):
+            button = QtWidgets.QPushButton(option)
+            button.clicked.connect(lambda _, option=option: self.button_clicked(option))
+            self.buttons_layout.addWidget(button, i // 5, i % 5)  # Change 5 to the number of buttons per row
+            self.buttons.append(button)
+
+        self.quit_button = QtWidgets.QPushButton("Quit")
+        self.quit_button.clicked.connect(self.reject)
+        self.layout.addWidget(self.quit_button)
+
+        self.clicked_option = None
+
+    def button_clicked(self, option):
+        self.clicked_option = option
+        self.accept()
+
+    def exec(self):
+        super().exec()
+        return self.clicked_option
+
+class Shortcut:
+    def __init__(self, name, key, key_name, function):
+            """
+            Initialize a new instance of the class.
+
+            Args:
+                name (str): The name of the instance.
+                key (str): The key of the instance.
+                function (callable): The function associated with the instance.
+            """
+            self.name = name
+            self.key = key
+            self.key_name = key_name
+            self.function = function
+
+class PlateCalibrationDialog(QtWidgets.QDialog):
+    plate_calibration_complete = QtCore.Signal(Plate)
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.machine = main_window.machine
+        self.all_calibrations = ["top_left","top_right","bottom_right","bottom_left"]
+        self.calibration_number = 0
+        self.current_calibration = self.all_calibrations[self.calibration_number]
+
+        self.current_plate = self.main_window.current_plate
+        print('Currnet plate:',self.current_plate.name)
+        self.updated_plate = self.current_plate
+
+        self.setWindowTitle("Plate Calibration")
+        self.resize(800, 400)
+
+        # Create a QVBoxLayout for the main layout
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        self.instructions_label = QtWidgets.QLabel()
+        self.instructions_label.setFont(QtGui.QFont("Arial", 20))  # Set the font size to 20
+        # self.instructions_label.setFixedWidth(500)
+        self.instructions_label.setWordWrap(True)
+        self.instructions_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.layout.addWidget(self.instructions_label)
+
+        # Create a QHBoxLayout for the simple_coord_box and movement_shortcuts_box
+        self.box_layout = QtWidgets.QHBoxLayout()
+        self.layout.addLayout(self.box_layout)
+
+        self.simple_coord_box = SimpleCoordinateBox("Coordinates",self.main_window)
+        self.simple_coord_box.setFixedWidth(400)
+        self.box_layout.addWidget(self.simple_coord_box)
+
+        self.movement_shortcuts = [
+            Shortcut("Save Position", "s", "s", lambda: self.save_plate_position()),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size)),
+            Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
+            Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
+        ]
+
+        self.movement_shortcuts_box = ShortcutTable(self.movement_shortcuts,"Movement Shortcuts")
+        self.box_layout.addWidget(self.movement_shortcuts_box)
+
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_coordinates)
+        self.update_timer.start(100)
+
+        self.update_instructions()
+        self.check_before_move()
+
+    def keyPressEvent(self, event):
+        for shortcut in self.movement_shortcuts:
+            if isinstance(shortcut.key, str):  # If the shortcut key is a string
+                if event.text() == shortcut.key:  # Convert the string to a key code
+                    shortcut.function()
+                    break
+            elif event.key() == shortcut.key:  # If the shortcut key is a key code
+                shortcut.function()
+                break
+        self.update_coordinates()
+
+    def update_coordinates(self):
+        current_coords = self.machine.get_coordinates()
+        target_coords = self.machine.get_target_coordinates()
+        self.simple_coord_box.update_coordinates(current_coords,target_coords)
+    
+    def inc_step(self):
+        if self.main_window.step_num < len(self.main_window.possible_steps)-1:
+            self.main_window.step_num += 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+    
+    def dec_step(self):
+        if self.main_window.step_num > 0:
+            self.main_window.step_num -= 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+    
+    def update_instructions(self):
+        self.instructions_label.setText(f"Calibrate the {self.current_calibration} corner of the plate")
+    
+    def save_plate_position(self):
+        response = self.main_window.popup_yes_no("Save Position",f"Are you sure you want to save the current position as the {self.current_calibration} corner of the plate?")
+        if response == '&No':
+            return
+        if self.current_calibration not in self.updated_plate.calibrations.keys():
+            self.updated_plate.calibrations.update({self.current_calibration: self.machine.get_XYZ_coordinates()})
+        else:
+            self.updated_plate.calibrations[self.current_calibration] = self.machine.get_XYZ_coordinates()
+        self.calibration_number += 1
+        if self.calibration_number < len(self.all_calibrations):
+            print('Applying offset')
+            self.machine.set_relative_coordinates(0,0,1000)
+            self.current_calibration = self.all_calibrations[self.calibration_number]
+            self.update_instructions()
+            self.check_before_move()
+        else:
+            self.plate_calibration_complete.emit(self.updated_plate)
+            self.main_window.popup_message("Calibration Complete","Plate calibration complete")
+            self.close()
+
+    def check_before_move(self):
+        if self.current_calibration in self.updated_plate.calibrations.keys():
+            response = self.main_window.popup_yes_no("Move to saved position",f"Would you like to move to the saved position for the {self.current_calibration} corner of the plate?")
+            if response == '&Yes':
+                new_coordinates = self.updated_plate.calibrations[self.current_calibration]
+                x = new_coordinates['X']
+                y = new_coordinates['Y']
+                z = new_coordinates['Z']
+                self.machine.set_absolute_coordinates(x,y,z)
+    
+class RackCalibrationDialog(QtWidgets.QDialog):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.machine = main_window.machine
+        self.all_calibrations = ["Left","Right"]
+        self.calibration_number = 0
+        self.current_calibration = self.all_calibrations[self.calibration_number]
+
+        self.setWindowTitle("Rack Calibration")
+        self.resize(800, 400)
+
+        # Create a QVBoxLayout for the main layout
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        self.instructions_label = QtWidgets.QLabel()
+        self.instructions_label.setFont(QtGui.QFont("Arial", 20))  # Set the font size to 20
+        # self.instructions_label.setFixedWidth(500)
+        self.instructions_label.setWordWrap(True)
+        self.instructions_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.layout.addWidget(self.instructions_label)
+
+        # Create a QHBoxLayout for the simple_coord_box and movement_shortcuts_box
+        self.box_layout = QtWidgets.QHBoxLayout()
+        self.layout.addLayout(self.box_layout)
+
+        self.simple_coord_box = SimpleCoordinateBox("Coordinates",self.main_window)
+        self.simple_coord_box.setFixedWidth(400)
+        self.box_layout.addWidget(self.simple_coord_box)
+
+        self.movement_shortcuts = [
+            Shortcut("Save Position", "s", "s", lambda: self.save_position()),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size)),
+            Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
+            Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
+        ]
+
+        self.movement_shortcuts_box = ShortcutTable(self.movement_shortcuts,"Movement Shortcuts")
+        self.box_layout.addWidget(self.movement_shortcuts_box)
+        
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_coordinates)
+        self.update_timer.start(100)
+
+        self.update_instructions()
+        self.check_before_move()
+    
+    def keyPressEvent(self, event):
+        for shortcut in self.movement_shortcuts:
+            if isinstance(shortcut.key, str):  # If the shortcut key is a string
+                if event.text() == shortcut.key:  # Convert the string to a key code
+                    shortcut.function()
+                    break
+            elif event.key() == shortcut.key:  # If the shortcut key is a key code
+                shortcut.function()
+                break
+        self.update_coordinates()
+
+    def update_coordinates(self):
+        current_coords = self.machine.get_coordinates()
+        target_coords = self.machine.get_target_coordinates()
+        self.simple_coord_box.update_coordinates(current_coords,target_coords)
+    
+    def inc_step(self):
+        if self.main_window.step_num < len(self.main_window.possible_steps)-1:
+            self.main_window.step_num += 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+    
+    def dec_step(self):
+        if self.main_window.step_num > 0:
+            self.main_window.step_num -= 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+
+    def check_before_move(self):
+        if f'rack_position_{self.current_calibration}' in self.machine.calibration_data.keys():
+            response = self.main_window.popup_yes_no("Move to saved position",f"Would you like to move to the saved position for the {self.current_calibration} side of the rack? It will apply an X-offset of {self.machine.rack_offset}")
+            if response == '&Yes':
+                self.machine.move_to_location(location=f'rack_position_{self.current_calibration}')
+
+
+    def update_instructions(self):
+        self.instructions_label.setText(f"Calibrate the {self.current_calibration} side of the rack")
+    
+    def save_position(self):
+        response = self.main_window.popup_yes_no("Save Position",f"Are you sure you want to save the current position as the {self.current_calibration} side of the rack?")
+        if response == '&No':
+            return
+        self.machine.save_location(location=f'rack_position_{self.current_calibration}',ask=False)
+        self.calibration_number += 1
+        if self.calibration_number < len(self.all_calibrations):
+            print('Applying offset')
+            self.machine.set_relative_coordinates(self.machine.rack_offset,0,0)
+            self.current_calibration = self.all_calibrations[self.calibration_number]
+            self.update_instructions()
+            self.check_before_move()
+        else:
+            self.calculate_rack_positions()
+            self.main_window.popup_message("Calibration Complete","Rack calibration complete")
+            self.close()
+
+    def calculate_rack_positions(self):
+        left_coords = self.machine.calibration_data['rack_position_Left']
+        right_coords = self.machine.calibration_data['rack_position_Right']
+        x_diff = right_coords['x'] - left_coords['x']
+        y_diff = right_coords['y'] - left_coords['y']
+        z_diff = right_coords['z'] - left_coords['z']
+        num_slots = self.main_window.rack_slots
+        slot_width = x_diff / (num_slots + 1)
+        slot_height = y_diff / (num_slots + 1)
+        slot_depth = z_diff / (num_slots + 1)
+        for i in range(1,num_slots+1):
+            x = int(left_coords['x'] + i*slot_width)
+            y = int(left_coords['y'] + i*slot_height)
+            z = int(left_coords['z'] + i*slot_depth)
+            self.machine.calibration_data[f"rack_position_{i}_{num_slots}"] = {'x':x,'y':y,'z':z}
+        with open(self.machine.calibration_file_path, 'w') as outfile:
+            json.dump(self.machine.calibration_data, outfile)
+        self.machine.load_positions_from_file()
+            
 
 class MovementBox(QtWidgets.QGroupBox):
     """
@@ -109,25 +424,6 @@ class MovementBox(QtWidgets.QGroupBox):
         self.xy_position_series.append(y_pos, x_pos)
         self.z_position_series.append(0,z_pos)
 
-class Plate():
-    """
-    Represents a plate with a specified name, number of rows, number of columns, spacing, and default value.
-
-    Attributes:
-        name (str): The name of the plate.
-        rows (int): The number of rows in the plate.
-        columns (int): The number of columns in the plate.
-        spacing (int): The spacing between elements in the plate.
-        default (bool): The default value of the plate.
-    """
-
-    def __init__(self, name, rows=16, columns=24, spacing=10, default=False):
-        self.name = name
-        self.rows = rows
-        self.columns = columns
-        self.spacing = spacing
-        self.default = default
-
 class PlateBox(QtWidgets.QGroupBox):
     """
     A custom widget representing a plate box.
@@ -170,9 +466,14 @@ class PlateBox(QtWidgets.QGroupBox):
         set_cell_color(well_number, reagent, target_amount, max_amount): Sets the color of a cell based on the reagent and amount.
 
     """
+    plate_changed = QtCore.Signal(Plate)
+    calibrate_plate_signal = QtCore.Signal()
     def __init__(self,main_window, title):
         super().__init__(title)
         self.main_window = main_window
+        self.plate_options = self.main_window.plate_options
+        self.current_plate = self.main_window.current_plate
+
         self.layout = QtWidgets.QVBoxLayout(self)
         self.top_layout = QtWidgets.QHBoxLayout()
 
@@ -186,7 +487,6 @@ class PlateBox(QtWidgets.QGroupBox):
         self.experiment_name.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         self.top_layout.addWidget(self.experiment_name)
 
-        self.read_plate_file()
         self.plate_label = QtWidgets.QLabel("Plate:")
         self.plate_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.plate_label.setFixedWidth(50)
@@ -203,10 +503,16 @@ class PlateBox(QtWidgets.QGroupBox):
         self.plate_activate_button.clicked.connect(self.activate_plate)
         self.top_layout.addWidget(self.plate_activate_button)
 
+        self.plate_calibrate_button = QtWidgets.QPushButton("Calibrate")
+        self.plate_calibrate_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.plate_calibrate_button.setStyleSheet(f"background-color: {self.main_window.colors['blue']}")
+        self.plate_calibrate_button.clicked.connect(self.calibrate_plate)
+        self.top_layout.addWidget(self.plate_calibrate_button)
+
         self.layout.addLayout(self.top_layout)
 
         self.grid = QtWidgets.QGridLayout()
-        self.current_plate = [plate for plate in self.plate_options if plate.default][0]
+        self.plate_combo.setCurrentText(self.current_plate.name)
         self.create_plate(self.current_plate)
         self.layout.addLayout(self.grid)
 
@@ -220,9 +526,14 @@ class PlateBox(QtWidgets.QGroupBox):
             for reagent in self.main_window.reagents:
                 self.reagent_combo.addItem(reagent.name)
         self.reagent_combo.currentIndexChanged.connect(self.activate_plate)
-        # self.reagent_combo.currentIndexChanged.connect(self.preview_array)
         self.bottom_layout.addWidget(self.reagent_combo)
         self.layout.addLayout(self.bottom_layout)
+
+    def get_current_plate(self):
+        return self.current_plate
+    
+    def get_plate_options(self):
+        return self.plate_options
 
     def update_plate_box(self):
         self.update_experiment_name()
@@ -240,8 +551,12 @@ class PlateBox(QtWidgets.QGroupBox):
     def read_plate_file(self):
         with open('./Pyside6_interface/Presets/Plates.json', 'r') as f:
             plates = json.load(f)
-        self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default']) for plate in plates]
+        self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default'],calibrations=plate['calibrations']) for plate in plates]
     
+    def write_plate_file(self):
+        with open('./Pyside6_interface/Presets/Plates.json', 'w') as f:
+            json.dump([plate.__dict__ for plate in self.plate_options], f, indent=4)
+
     def create_plate(self,plate):
         self.cells = {}
         self.current_plate = plate
@@ -277,6 +592,10 @@ class PlateBox(QtWidgets.QGroupBox):
         if self.main_window.actual_array.empty:
             self.assign_wells()
         self.preview_array()
+        self.plate_changed.emit(plate)
+    
+    def calibrate_plate(self):
+        self.calibrate_plate_signal.emit()
     
     def snake_df(self,df):
         sorted_array = []
@@ -730,7 +1049,48 @@ class CustomSpinBox(QtWidgets.QDoubleSpinBox):
         new_index = max(0, min(current_index + steps, len(self.values) - 1))
         self.setValue(self.values[new_index])
 
-        
+class SimpleCoordinateBox(QtWidgets.QGroupBox):
+    def __init__(self, title, main_window):
+        super().__init__(title)
+        self.main_window = main_window
+        self.layout = QtWidgets.QGridLayout(self)
+        self.value_labels = []
+
+        labels = ["X", "Y", "Z", "P"]
+        self.entries = {}
+        self.target_entries = {}
+
+        for i, axis in enumerate(labels):
+            label = QtWidgets.QLabel(axis)
+            self.layout.addWidget(label, i, 0)
+
+            entry = QtWidgets.QLabel()
+            entry.setAlignment(QtCore.Qt.AlignCenter)
+            self.layout.addWidget(entry, i, 1)
+            self.entries[axis] = entry
+
+            target_entry = QtWidgets.QLabel()
+            target_entry.setAlignment(QtCore.Qt.AlignCenter)
+            self.layout.addWidget(target_entry, i, 2)
+            self.target_entries[axis] = target_entry
+            
+        self.step_size_label = QtWidgets.QLabel("Step Size:")
+        self.layout.addWidget(self.step_size_label, 2, 3)
+        self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
+        self.step_size_input.setRange(2, 2000)
+        self.step_size_input.setValue(500)
+        self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
+
+    def update_coordinates(self, values,target_values):
+        for axis in values.keys():
+            self.entries[axis].setText(str(values[axis]))
+            self.target_entries[axis].setText(str(target_values[axis]))
+
+    def update_step_size(self,step_size):
+        self.step_size_input.setValue(step_size)
+
 
 class CoordinateBox(QtWidgets.QGroupBox):
     """
@@ -791,7 +1151,7 @@ class CoordinateBox(QtWidgets.QGroupBox):
         self.step_size_label = QtWidgets.QLabel("Step Size:")
         self.layout.addWidget(self.step_size_label, 2, 3)
         self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
-        self.step_size_input.setRange(2, 1000)
+        self.step_size_input.setRange(2, 2000)
         self.step_size_input.setValue(500)
         self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
         self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
@@ -1333,6 +1693,7 @@ class RackBox(QtWidgets.QWidget):
     reagent_confirmed = QtCore.Signal(Slot)
     reagent_loaded = QtCore.Signal(Slot)
     gripper_toggled = QtCore.Signal()
+    calibrate_rack = QtCore.Signal()
 
     def __init__(self, main_window, slots, reagents):
         """
@@ -1368,13 +1729,21 @@ class RackBox(QtWidgets.QWidget):
         self.gripper_slot.setStyleSheet("color: white")
         self.gripper_slot.setText("Empty")
         self.gripper_slot.setAlignment(QtCore.Qt.AlignCenter)
-        self.layout.addWidget(self.gripper_slot, 1, 0,3,1)
+        self.layout.addWidget(self.gripper_slot, 1, 0,2,1)
 
         self.gripper_state_label = QtWidgets.QLabel("Gripper Open")
         self.gripper_state_label.setAlignment(QtCore.Qt.AlignCenter)
         self.gripper_state_label.setStyleSheet(f"background-color: {self.main_window.colors['darker_gray']}; color: white;")
         self.gripper_state_label.setFixedHeight(20)
-        self.layout.addWidget(self.gripper_state_label, 4, 0)
+        self.layout.addWidget(self.gripper_state_label, 3, 0)
+
+        self.calibrate_rack_button = QtWidgets.QPushButton("Calibrate Rack")
+        self.calibrate_rack_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.calibrate_rack_button.setStyleSheet(f"background-color: {self.main_window.colors['blue']}")
+        self.calibrate_rack_button.clicked.connect(self.calibrate_rack)
+        self.layout.addWidget(self.calibrate_rack_button, 4, 0)
+
+
         self.close_gripper()
         # Add an empty column for the gap
         self.layout.setColumnMinimumWidth(1, 10)
