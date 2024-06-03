@@ -1324,7 +1324,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         replicates_df = replicates_df.set_index(['replicate_id','unique_id']).reset_index()
 
         experiment_name = self.experiment_name_input.text()
-        experiment_dir = f'./Experiments/{experiment_name}'
+        experiment_dir = f'./Pyside6_innterface/Experiments/{experiment_name}'
         os.makedirs(experiment_dir, exist_ok=True)
 
         # Write metadata to a CSV file

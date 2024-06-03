@@ -370,14 +370,16 @@ struct HomingStage {
     int direction;
     int homingSpeed;           // Speed for homing
     int retractionSpeed;       // Speed for retraction
+    int normalSpeed;           // Speed for normal operation
+    int normalAccel;           // Acceleration for normal operation
 };
 
 // Array of homing stages for each motor
 HomingStage homingStages[] = {
-    {1,2500, -200},   // Z homing
-    {1,1500, -25},   // X homing
-    {-1,1500, -25},  // Y homing
-    {1,3000, -200},   // P homing
+    {1,2500, -200,maxSpeedXYZ,accelerationXYZ},   // Z homing
+    {1,1500, -25,maxSpeedXYZ,accelerationXYZ},   // X homing
+    {-1,1500, -25,maxSpeedXYZ,accelerationXYZ},  // Y homing
+    {1,3000, -200,maxSpeedP,accelerationP},   // P homing
 };
 
 int homingAxisNumber = 4;
@@ -408,12 +410,13 @@ void homeAxis() {
         printSyringeOpen = true;
       }
       homingState = HOMING;
+      currentStepper->setAcceleration(10000);
       break;
     case HOMING:
       if (!currentSwitch->isTriggered()) {
-        currentStepper->setSpeed(currentStage.direction * currentStage.homingSpeed);
+        currentStepper->setMaxSpeed(currentStage.direction * currentStage.homingSpeed);
         currentStepper->move(currentStage.direction * 100);
-        currentStepper->runSpeed();
+        currentStepper->run();
       } else {
         currentStepper->stop();
         homingState = RETRACTION;
@@ -421,13 +424,13 @@ void homeAxis() {
       break;
     case RETRACTION:
       if (currentSwitch->isTriggered()) {
-        currentStepper->setSpeed(currentStage.direction * currentStage.retractionSpeed);
-        currentStepper->move(currentStage.direction * 10);
-        currentStepper->runSpeed();
+        currentStepper->setMaxSpeed(currentStage.direction * currentStage.retractionSpeed);
+        currentStepper->move(currentStage.direction * -10);
+        currentStepper->run();
       } else {
         currentStepper->stop();
         currentStepper->setCurrentPosition(0);
-        currentStepper->setSpeed(currentStage.direction * currentStage.homingSpeed);
+        currentStepper->setMaxSpeed(currentStage.direction * currentStage.homingSpeed);
         currentStepper->moveTo(currentStage.direction * -500);
         homingState = RESET_POS;
       }
@@ -437,6 +440,8 @@ void homeAxis() {
         currentStepper->run();
       } else {
         currentStepper->stop();
+        currentStepper->setMaxSpeed(currentStage.direction * currentStage.normalSpeed);
+        currentStepper->setAcceleration(currentStage.normalAccel);
         if (homingAxisNumber == 3){
           homingState = IDLE;
           digitalWrite(printValvePin, LOW);
@@ -992,19 +997,13 @@ void setup() {
 
   setupPins();
 
-  // SPI.begin();
-  // motorX.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  // motorY.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  // motorZ.setupMotor(rmsCurrent,microsteps,maxSpeedXYZ,accelerationXYZ);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  // motorP.setupMotor(rmsCurrent,microsteps,maxSpeedP,accelerationP);   // rmsCurrent,microsteps,maxSpeed,acceleration
-  
   // driverX.begin();             // Initiate pins and registeries
   // driverX.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);
   // driverX.pwm_autoscale(1);
   // driverX.microsteps(8);
 
-  stepperX.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
-  stepperX.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperX.setMaxSpeed(maxSpeedXYZ); // 100mm/s @ 80 steps/mm
+  stepperX.setAcceleration(accelerationXYZ); // 2000mm/s^2
   stepperX.setEnablePin(X_EN_PIN);
   stepperX.setPinsInverted(false, false, true);
   stepperX.disableOutputs();
@@ -1014,8 +1013,8 @@ void setup() {
   // driverY.pwm_autoscale(1);
   // driverY.microsteps(8);
 
-  stepperY.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
-  stepperY.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperY.setMaxSpeed(maxSpeedXYZ); // 100mm/s @ 80 steps/mm
+  stepperY.setAcceleration(accelerationXYZ); // 2000mm/s^2
   stepperY.setEnablePin(Y_EN_PIN);
   stepperY.setPinsInverted(false, false, true);
   stepperY.disableOutputs();
@@ -1025,8 +1024,8 @@ void setup() {
   // driverZ.pwm_autoscale(1);
   // driverZ.microsteps(8);
 
-  stepperZ.setMaxSpeed(100*steps_per_mm); // 100mm/s @ 80 steps/mm
-  stepperZ.setAcceleration(100*steps_per_mm); // 2000mm/s^2
+  stepperZ.setMaxSpeed(maxSpeedXYZ); // 100mm/s @ 80 steps/mm
+  stepperZ.setAcceleration(accelerationXYZ); // 2000mm/s^2
   stepperZ.setEnablePin(Z_EN_PIN);
   stepperZ.setPinsInverted(false, false, true);
   stepperZ.disableOutputs();
@@ -1036,8 +1035,8 @@ void setup() {
   // driverP.pwm_autoscale(1);
   // driverP.microsteps(8);
 
-  stepperP.setMaxSpeed(50*steps_per_mm); // 100mm/s @ 80 steps/mm
-  stepperP.setAcceleration(50*steps_per_mm); // 2000mm/s^2
+  stepperP.setMaxSpeed(maxSpeedP); // 100mm/s @ 80 steps/mm
+  stepperP.setAcceleration(accelerationP); // 2000mm/s^2
   stepperP.setEnablePin(P_EN_PIN);
   stepperP.setPinsInverted(false, false, true);
   stepperP.disableOutputs();
