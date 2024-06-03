@@ -158,6 +158,7 @@ private:
     bool pumpOn;
     unsigned long lastExecution;
     int pumpInterval;
+    int refreshInterval;
 
     int pumpValvePin1;
     int pumpValvePin2;
@@ -168,7 +169,7 @@ public:
   // Constructor to initialize variables
   Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin, Task* refreshGripperTaskPtr)
     : active(false), closed(false), pumpOn(false),
-      lastExecution(0), pumpInterval(500),
+      lastExecution(0), pumpInterval(500),refreshInterval(5000),
       pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin), refreshGripperTaskPtr(refreshGripperTaskPtr) {}
 
   bool isActive() const { return active; }
@@ -188,7 +189,7 @@ public:
   }
 
   void checkPump() {
-    if(active && pumpOn && millis() - lastExecution >= pumpInterval) {
+    if(pumpOn && millis() - lastExecution >= pumpInterval) {
       digitalWrite(pumpPin, LOW);
       pumpOn = false;
     }
@@ -223,6 +224,14 @@ public:
     digitalWrite(pumpPin, LOW);
     active = false;
     closed = false;
+  }
+
+  void refreshGripper() {
+    if (active) {
+      if (millis() - lastExecution >= refreshInterval) {
+        activatePump();
+      }
+    }
   }
 };
 
@@ -377,8 +386,8 @@ struct HomingStage {
 // Array of homing stages for each motor
 HomingStage homingStages[] = {
     {1,2500, -200,maxSpeedXYZ,accelerationXYZ},   // Z homing
-    {1,1500, -25,maxSpeedXYZ,accelerationXYZ},   // X homing
-    {-1,1500, -25,maxSpeedXYZ,accelerationXYZ},  // Y homing
+    {1,1500, -100,maxSpeedXYZ,accelerationXYZ},   // X homing
+    {-1,1500, -100,maxSpeedXYZ,accelerationXYZ},  // Y homing
     {1,3000, -200,maxSpeedP,accelerationP},   // P homing
 };
 
@@ -655,7 +664,9 @@ enum CommandType {
     RESUME,
     WAIT,
     CLEAR_QUEUE,
-    UNKNOWN
+    UNKNOWN,
+    CHANGE_ACCEL,
+    RESET_ACCEL,
     // Add more command types as needed
 };
 
@@ -739,9 +750,13 @@ CommandType mapCommandType(const char* commandName) {
         return CLEAR_QUEUE;
     } else if (strcmp(commandName, "WAIT") == 0) {
         return WAIT;
+    } else if (strcmp(commandName, "CHANGE_ACCEL") == 0) {
+        return CHANGE_ACCEL;
+    } else if (strcmp(commandName, "RESET_ACCEL") == 0) {
+        return RESET_ACCEL;
+    } else {
+        return UNKNOWN;
     }
-    // Default case for unknown commands
-    return UNKNOWN;
 }
 
 Command convertCommand() {
@@ -858,6 +873,16 @@ void executeCommand(const Command& cmd) {
       stepperP.disableOutputs();
       motorsActive = false;
       break;
+    case CHANGE_ACCEL:
+      stepperX.setAcceleration(cmd.param1);
+      stepperY.setAcceleration(cmd.param1);
+      stepperZ.setAcceleration(cmd.param1);
+      break;
+    case RESET_ACCEL:
+      stepperX.setAcceleration(accelerationXYZ);
+      stepperY.setAcceleration(accelerationXYZ);
+      stepperZ.setAcceleration(accelerationXYZ);
+      break;
     case HOME_ALL:
       homingState = INITIATE;
       homingAxisNumber = 0;
@@ -870,13 +895,24 @@ void executeCommand(const Command& cmd) {
       regulatePressure = false;
       break;
     case PAUSE:
-
       break;
     case CLEAR_QUEUE:
-
+      while (!commandQueue.empty()) {
+        commandQueue.pop();
+      }
+      stepperX.stop();
+      stepperY.stop();
+      stepperZ.stop();
+      stepperP.stop();
+      targetDroplets = 0;
+      currentDroplets = 0;
+      targetPressureP = currentPressure;
+      currentCmdNum = 0;
+      lastCompletedCmdNum = 0;
+      lastAddedCmdNum = 0;
+      currentState = FREE;
       break;
     case UNKNOWN:
-
       break;
     case WAIT:
       currentState = WAITING;
@@ -904,7 +940,9 @@ void executeNextCommand(){
 
 // Sends the current status of the machine to the computer via Serial
 void sendStatus() {
-  if (stepperY.distanceToGo() != 0) {
+  if (currentState == PAUSED) {
+    currentState = PAUSED;
+  } else if (stepperY.distanceToGo() != 0) {
     currentState = MOVING_XYZ;
     state = "MovingY";
   } else if (stepperX.distanceToGo() != 0){
@@ -954,7 +992,23 @@ void getNewCommand(){
       currentState = PAUSED;
     } else if (newCommand.type == RESUME){
       currentState = FREE;
-    } else {
+    } else if (newCommand.type == CLEAR_QUEUE){
+      while (!commandQueue.empty()) {
+        commandQueue.pop();
+      }
+      stepperX.stop();
+      stepperY.stop();
+      stepperZ.stop();
+      stepperP.stop();
+      targetDroplets = 0;
+      currentDroplets = 0;
+      targetPressureP = currentPressure;
+      currentCmdNum = 0;
+      lastCompletedCmdNum = 0;
+      lastAddedCmdNum = 0;
+
+      currentState = FREE;
+    }else {
       updateCommandQueue(newCommand);
     }
     newData = false;
@@ -982,7 +1036,7 @@ unsigned long average (unsigned long * array, int len)  // assuming array is int
 std::vector<Task> tasks = {
     {checkLimitSwitches, 2, 0}, // Task 1
     {checkPressure, 10, 3},
-    {checkGripper, 500, 23},
+    {checkGripper, 100, 23},
     {refreshGripper, 60000, 0},
     {sendStatus, 50, 3},
     {getNewCommand, 10, 0},

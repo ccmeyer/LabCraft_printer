@@ -216,7 +216,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.machine.command_sent.connect(self.sent_command)
         self.machine.command_executed.connect(self.execute_command)
         self.machine.command_completed.connect(self.completed_command)
-
+        self.machine.board_connected.connect(self.machine_triggered_disconnect)
+        self.machine.stop_timers_signal.connect(self.stop_machine_timers)
         self.shortcut_box = ShortcutTable(self.shortcuts,"SHORTCUTS")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.shortcut_box)
@@ -243,9 +244,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         response = self.popup_yes_no('Exit','Are you sure you want to exit?')
         if response == '&Yes':
-            # self.machine.pause_commands()
             if self.machine.machine_connected:
-                self.machine.clear_command_queue()
                 self.machine.disconnect_machine()
             time.sleep(1)
             event.accept()
@@ -333,6 +332,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_volume = self.settings['DISPENSER_TYPES'][mode_name]['max_volume']
         self.min_volume = self.settings['DISPENSER_TYPES'][mode_name]['min_volume']
         self.rack_offset = self.settings['DISPENSER_TYPES'][mode_name]['rack_offset']
+        self.max_x = self.settings['DISPENSER_TYPES'][mode_name]['max_x']
+        self.max_y = self.settings['DISPENSER_TYPES'][mode_name]['max_y']
+        self.max_z = self.settings['DISPENSER_TYPES'][mode_name]['max_z']
         self.calibrated = False
         self.mode = mode_name
         return
@@ -475,6 +477,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def remove_commands(self,removed_commands):
         for command in removed_commands:
             self.command_box.remove_command(command.get_number())
+
+    @QtCore.Slot()
+    def stop_machine_timers(self):
+        self.machine.stop_timers()
+
+    @QtCore.Slot(bool)
+    def machine_triggered_disconnect(self,connection):
+        self.change_connection_button()
+        if not connection:
+            print('Machine triggered disconnect')
+            self.popup_message('Connection error','Lost connection to machine')
+
 
     def change_connection_button(self):
         if self.machine.machine_connected:

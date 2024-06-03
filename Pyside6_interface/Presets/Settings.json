@@ -16,12 +16,15 @@
             "print_pressure":1.8,
             "pulse_width":3000,
             "frequency":20,
-            "height":-5000,
+            "height":-3000,
             "safe_y":3500,
             "max_volume":200,
             "min_volume":20,
             "target_disp_volume":30,
-            "rack_offset":-2500
+            "rack_offset":-2500,
+            "max_x":-13000,
+            "max_y":10000,
+            "max_z":-33000
         }
     }
 }

@@ -530,6 +530,8 @@ class Machine(QtWidgets.QWidget):
     command_sent = QtCore.Signal(Command)
     command_executed = QtCore.Signal(Command)
     command_completed = QtCore.Signal(Command)
+    board_connected = QtCore.Signal(bool)
+    stop_timers_signal = QtCore.Signal()
 
     def __init__(self, main_window):
         super().__init__()
@@ -594,6 +596,9 @@ class Machine(QtWidgets.QWidget):
         self.rack_offset = self.main_window.rack_offset
         self.safe_height = self.main_window.safe_height
         self.safe_y = self.main_window.safe_y
+        self.max_x = self.main_window.max_x
+        self.max_y = self.main_window.max_y
+        self.max_z = self.main_window.max_z
 
         self.picking_up = False
         self.dropping_off = False
@@ -644,23 +649,43 @@ class Machine(QtWidgets.QWidget):
         self.target_droplets = self.current_droplets
         return True
                 
-    def disconnect_machine(self):
-        self.disable_motors()
-        self.deregulate_pressure()
-        self.gripper_off()
-        print('Disconnected from machine')
-        time.sleep(1)
-        self.stop_communication_timer()
-        self.stop_execution_timer()
-        time.sleep(1)
-        if not self.simulate:
-            self.board.close()
-        self.machine_connected = False
-        return
+    def disconnect_machine(self,error=False):
+        def disconnect():
+            print('Disconnecting from machine')
+            if not error:
+                self.gripper_off()
+                self.disable_motors()
+                self.deregulate_pressure()
+                # self.clear_command_queue()
+
+            while self.incomplete_commands != []:
+                print('--Waiting', self.incomplete_commands)
+                self.execute_command_from_queue()
+                self.get_state_from_board()
+                time.sleep(0.1)
+
+            print('Disconnected from machine')
+            self.stop_timers_signal.emit()
+            if not self.simulate:
+                self.board.close()
+            self.machine_connected = False
+            if error:
+                self.board_connected.emit(False)
+                print('Emitting connection error')
+            else:
+                self.board_connected.emit(True)
+                print('Emitting disconnection')
+
+        disconnect_thread = threading.Thread(target=disconnect)
+        disconnect_thread.start()
+    
+    def stop_timers(self):
+        self.communication_timer.stop()
+        self.execution_timer.stop()
+        print('Stopped timers')
     
     def connect_balance(self,port):
         if self.balance.connect_balance(port):
-            # self.balance.begin_reading()
             self.balance_connected = True
             return True
         else:
@@ -783,7 +808,7 @@ class Machine(QtWidgets.QWidget):
             self.update_state(self.convert_state(signal))
             return signal
         except serial.SerialException:
-            self.main_window.popup_message('Connection error','Lost connection to machine')
+            self.disconnect_machine(error=True)
             return ''
     
     def convert_to_psi(self,pressure):
@@ -810,6 +835,7 @@ class Machine(QtWidgets.QWidget):
         self.last_added_command_number = int(state['Last_added'])
         self.current_command_number = int(state['Current_command'])
         self.last_completed_command_number = int(state['Last_completed'])
+        print('State:',self.state,self.last_added_command_number,self.current_command_number,self.last_completed_command_number)
         # print('--Com_open:',state['Com_open'],type(state['Com_open']))
         if state['Com_open'] == 'True' or state['Com_open'] == '1':
             self.com_open = True
@@ -848,7 +874,11 @@ class Machine(QtWidgets.QWidget):
                     self.command_completed.emit(self.command_queue[self.current_command_number])
                     current_command.complete()
             else:
-                self.command_executed.emit(self.command_queue[self.current_command_number])
+                try:
+                    self.command_executed.emit(self.command_queue[self.current_command_number])
+                except IndexError:
+                    print('Index error:',self.current_command_number,len(self.command_queue),self.command_queue[0].get_number(),self.command_queue[0].get_command())
+                    self.current_command_number = self.command_queue[-1].get_number()
 
         if self.incomplete_commands != []:
             for i,command in enumerate(self.incomplete_commands):
@@ -932,6 +962,16 @@ class Machine(QtWidgets.QWidget):
         return
     
     def set_relative_coordinates(self,x,y,z):
+        if self.x_pos - x < self.max_x:
+            self.main_window.popup_message('X-axis limit','Cannot move beyond X-axis limit')
+            x = self.max_x + self.x_pos
+        if self.y_pos + y > self.max_y:
+            self.main_window.popup_message('Y-axis limit','Cannot move beyond Y-axis limit')
+            y = self.max_y - self.y_pos
+        if self.z_pos - z < self.max_z:
+            self.main_window.popup_message('Z-axis limit','Cannot move beyond Z-axis limit')
+            z = self.max_z + self.z_pos
+            
         self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
         return
     
@@ -1009,6 +1049,12 @@ class Machine(QtWidgets.QWidget):
         if handler == None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs)
+
+    def change_acceleration(self,acceleration):
+        self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0)
+
+    def reset_acceleration(self):
+        self.add_command_to_queue('RESET_ACCEL',0,0,0)
 
     def get_coordinates(self):
         return self.coordinates
@@ -1120,14 +1166,14 @@ class Machine(QtWidgets.QWidget):
         with open(self.calibration_file_path, 'r') as file:
             self.calibration_data = json.load(file)
 
-    def move_to_location(self,location=False,direct=False,safe_y=False):
+    def move_to_location(self,location=False,direct=True,safe_y=False):
         '''
         Tells the robot to move to a location based on the defined coordinates in the calibration file.
         If direct is set to True, the robot will move directly to the location. If safe_y is set to True, 
         the robot will move to the safe_y position before moving to the location to avoid running into an obsticle.
         '''
-        if self.motors_active == False:
-            self.main_window.popup_message('Motors not active','Motors are not active')
+        if self.motors_active == False or self.homed == False:
+            self.main_window.popup_message('Motors not active or homed','Motors must be active and homed to move to location')
             return
         print('Current',self.location)
         if not location:
@@ -1262,9 +1308,7 @@ class Machine(QtWidgets.QWidget):
 
         location = 'pause'
         self.move_to_location(location)
-        # self.array_start_x = self.calibration_data[location]['x']
-        # self.array_start_y = self.calibration_data[location]['y']
-        # self.array_start_z = self.calibration_data[location]['z']
+        self.change_acceleration(8000)
         
         current_reagent = self.gripper_reagent.name
         print('Current reagent:',current_reagent)
@@ -1276,4 +1320,5 @@ class Machine(QtWidgets.QWidget):
             print('Printing:',line['row'],line['column'],line['amount'])
             self.move_to_well(line['row'],line['column'])
             self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})
+        self.reset_acceleration()
             
