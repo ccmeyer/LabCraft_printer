@@ -962,15 +962,16 @@ class Machine(QtWidgets.QWidget):
         return
     
     def set_relative_coordinates(self,x,y,z):
-        if self.x_pos - x < self.max_x:
-            self.main_window.popup_message('X-axis limit','Cannot move beyond X-axis limit')
-            x = self.max_x + self.x_pos
-        if self.y_pos + y > self.max_y:
-            self.main_window.popup_message('Y-axis limit','Cannot move beyond Y-axis limit')
-            y = self.max_y - self.y_pos
-        if self.z_pos - z < self.max_z:
-            self.main_window.popup_message('Z-axis limit','Cannot move beyond Z-axis limit')
-            z = self.max_z + self.z_pos
+        if self.homed:
+            if self.x_pos - x < self.max_x:
+                self.main_window.popup_message('X-axis limit','Cannot move beyond X-axis limit')
+                x = self.max_x + self.x_pos
+            if self.y_pos + y > self.max_y:
+                self.main_window.popup_message('Y-axis limit','Cannot move beyond Y-axis limit')
+                y = self.max_y - self.y_pos
+            if self.z_pos - z < self.max_z:
+                self.main_window.popup_message('Z-axis limit','Cannot move beyond Z-axis limit')
+                z = self.max_z + self.z_pos
             
         self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
         return
