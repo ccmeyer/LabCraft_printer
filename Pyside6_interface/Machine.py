@@ -13,31 +13,33 @@ class Balance():
         self.connected = False
         self.port = None
         self.simulate = True
-        self.balance_check_timer = None
         self.error_count = 0
         self.current_mass = 0
+        self.target_mass = 0
+        self.mass_update_timer = None
         self.mass_log = []
-        self.tolerance = 0.01
-        self.stable_count = 0
-        self.stable = False
 
     def is_connected(self):
         return self.connected
-    
-    def is_stable(self):
-        return self.stable
-    
+
     def connect_balance(self,port):
         if port == 'Virtual balance':
             self.connected = True
             self.simulate = True
+            self.mass_update_timer = QtCore.QTimer()
+            self.mass_update_timer.timeout.connect(self.update_simulated_mass)
+            self.mass_update_timer.start(25)
             self.show_connection()
+            self.begin_reading()
             return True
         try:
             self.port = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
+            if not self.port.is_open:  # Add this line
+                raise serial.SerialException('Could not open port')  # Add this line
             self.connected = True
             self.simulate = False
             self.show_connection()
+            self.begin_reading()
             return True
         except:
             self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
@@ -47,25 +49,15 @@ class Balance():
     def close_connection(self):
         if not self.simulate:
             self.port.close()
-        if self.balance_check_timer is not None:
-            self.balance_check_timer.stop()
+        else:
+            self.mass_update_timer.stop()
+        if self.mass_update_timer is not None:
+            self.mass_update_timer.stop()
         self.connected = False
         return
 
     def show_connection(self):
         print('Balance connected')
-
-    def begin_reading(self):
-        self.balance_check_timer = QtCore.QTimer()
-        self.balance_check_timer.timeout.connect(self.check_mass)
-        self.balance_check_timer.start(25)
-    
-    def check_mass(self):
-        mass = self.get_mass()
-        if mass is not None:
-            self.add_mass_to_log(mass)
-            self.check_stability()
-            print('Current mass:',mass)
 
     def get_mass(self):
         if not self.simulate:
@@ -73,69 +65,68 @@ class Balance():
                 data = self.port.readline()
                 try:
                     data = data.decode("ASCII")
+                    # print('Data:',data)
                     [sign,mass] = re.findall(r'(-?) *([0-9]+\.[0-9]+) [a-zA-Z]*',data)[0]
                     mass = float(''.join([sign,mass]))
                     self.current_mass = mass
-                    return self.current_mass
-                except:
-                    print('Error reading from balance')
+                    self.add_to_log(self.current_mass)
+                except Exception as e:
+                    print(f'--Error {e} reading from balance')
                     self.error_count += 1
                     if self.error_count > 100:
                         self.close_connection()
                         self.main_window.popup_message('Connection error','Lost connection to balance')
-                    pass
+                    
         else:
-            if self.machine.balance_droplets != []:
-                [num_droplets,psi] = self.machine.balance_droplets.pop(0)
-                mass = self.simulate_mass(num_droplets,psi)
-                self.current_mass += mass
-            return self.current_mass
+            self.add_to_log(self.current_mass)
+        
+    def begin_reading(self):
+        self.mass_update_timer = QtCore.QTimer()
+        self.mass_update_timer.timeout.connect(self.get_mass)
+        self.mass_update_timer.start(10)
+
+    def add_to_log(self,mass):
+        self.mass_log.append(mass)
+        if len(self.mass_log) > 100:
+            self.mass_log.pop(0)
+
+    def get_recent_mass(self):
+        if self.mass_log != []:
+            return self.mass_log[-1]
+        else:
+            return 0
 
     def simulate_mass(self,num_droplets,psi):
         # Reference points
         ref_droplets = 100
-        ref_psi_1 = 1.8
-        ref_mass_1 = 3
-        ref_psi_2 = 2.2
-        ref_mass_2 = 4
+        ref_points = np.array([
+            [1.8, 3],
+            [2.2, 4],
+        ])
 
-        # Calculate the mass per droplet for each reference point
-        mass_per_droplet_1 = ref_mass_1 / ref_droplets
-        mass_per_droplet_2 = ref_mass_2 / ref_droplets
-
-        # Interpolate the mass per droplet for the given pressure
-        mass_per_droplet = mass_per_droplet_1 + (mass_per_droplet_2 - mass_per_droplet_1) * ((psi - ref_psi_1) / (ref_psi_2 - ref_psi_1))
-
+        # Calculate the linear fit for the reference points
+        coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
+        print('Coefficients:',coefficients)
+        # Calculate the mass per droplet for the given pressure
+        mass_per_droplet = coefficients[0] * psi + coefficients[1]
+        for point in ref_points:
+            print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
         # Calculate the mass for the given number of droplets
         mass = mass_per_droplet * num_droplets
 
         return mass
     
-    def add_mass_to_log(self,mass):
-        self.mass_log.append(mass)
-        if len(self.mass_log) > 100:
-            self.mass_log.pop(0)
-        return
-    
-    def check_stability(self):
-        if len(self.mass_log) > 10:
-            if all(abs(self.mass_log[-1] - mass) < self.tolerance for mass in self.mass_log[-10:-1]):
-                self.stable_count += 1
-            else:
-                self.stable_count = 0
-            if self.stable_count > 10:
-                self.stable = True
-            else:
-                self.stable = False
-
-    def get_stable_mass(self):
-        if self.stable:
-            return self.current_mass
-        else:
-            return None
-                
-
+    def update_simulated_mass(self):
+        if self.machine.balance_droplets != []:
+            print('Balance droplets:',self.machine.balance_droplets)
+            [num_droplets,psi] = self.machine.balance_droplets.pop(0)
+            print('Found balance droplets',num_droplets,psi)
+            mass = self.simulate_mass(num_droplets,psi)
+            print('Simulated mass:',mass,self.current_mass,self.target_mass)
+            self.target_mass += mass
         
+        if self.current_mass < self.target_mass:
+            self.current_mass += 0.01
 
             
 
@@ -322,12 +313,13 @@ class ControlBoard():
             self.correct_pos = True
 
         if self.regulate_pressure:
-            if self.pressure < self.target_pressure:
-                self.pressure += 1
-            elif self.pressure > self.target_pressure:
-                self.pressure -= 1
-            else:
+            if abs(self.pressure - self.target_pressure) < 5:
+                self.pressure = self.target_pressure
                 self.correct_pressure = True
+            elif self.pressure < self.target_pressure:
+                self.pressure += 5
+            elif self.pressure > self.target_pressure:
+                self.pressure -= 5
         else:
             self.correct_pressure = True
 
@@ -339,7 +331,6 @@ class ControlBoard():
 
         if self.correct_pos and self.correct_pressure and self.correct_gripper:
             if self.current_droplets < self.target_droplets:
-                time.sleep(0.1)
                 self.current_droplets += 1
             else:
                 self.correct_droplets = True
@@ -548,6 +539,7 @@ class Machine(QtWidgets.QWidget):
         self.simulate_balance = True
         self.board = ControlBoard(self)
         self.balance = Balance(self)
+        self.balance_connected = False
         self.balance_droplets = []
 
         self.machine_connected = False
@@ -629,7 +621,9 @@ class Machine(QtWidgets.QWidget):
             self.machine_connected = True
         else:
             try:
-                self.board = serial.Serial(port, baudrate=115200)
+                self.board = serial.Serial(port, baudrate=115200,timeout=2)
+                if not self.board.is_open:  # Add this line
+                    raise serial.SerialException('Could not open port')  # Add this line
                 self.machine_connected = True
                 self.simulate = False
             except:
@@ -666,9 +660,11 @@ class Machine(QtWidgets.QWidget):
     
     def connect_balance(self,port):
         if self.balance.connect_balance(port):
-            self.balance.begin_reading()
+            # self.balance.begin_reading()
+            self.balance_connected = True
             return True
         else:
+            self.balance_connected = False
             return False
         
     def disconnect_balance(self):
@@ -990,6 +986,12 @@ class Machine(QtWidgets.QWidget):
 
     def wait_command(self):
         self.add_command_to_queue('WAIT',2000,0,0)
+
+    def calibrate_pressure_handler(self,num_droplets=100,psi=1.8):
+        self.balance_droplets.append([num_droplets,psi])
+
+    def print_calibration_droplets(self,num_droplets,pressure):
+        self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,kwargs={'num_droplets':num_droplets,'psi':pressure})
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None):
         if not self.regulating_pressure:

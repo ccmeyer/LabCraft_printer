@@ -75,6 +75,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("New Location", "Z","Z", lambda: self.machine.save_location(new=True)),
             Shortcut("Overwrite Location", "X","X", lambda: self.machine.save_location(new=False)),
             Shortcut("Reset Arrays", "R","R", lambda: self.reset_print_arrays()),
+            Shortcut("Home Motors", "H","H", lambda: self.home_motors()),
+            Shortcut("Reset Syringe", "{","{", lambda: self.reset_syringe()),
         ]
 
         self.read_settings_file()
@@ -139,6 +141,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connection_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self.connection_box.machine_connected.connect(self.set_machine_connected_status)
         self.connection_box.balance_connected.connect(self.set_balance_connected_status)
+        self.connection_box.set_machine_port(self.settings['MACHINE_PORT'])
+        self.connection_box.set_balance_port(self.settings['BALANCE_PORT'])
         left_layout.addWidget(self.connection_box)
 
         self.step_num = 4
@@ -195,6 +199,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box.reagent_confirmed.connect(self.confirm_reagent)
         self.rack_box.reagent_loaded.connect(self.transfer_reagent)
         self.rack_box.calibrate_rack.connect(self.calibrate_rack)
+        self.rack_box.calibrate_pressure.connect(self.calibrate_pressure)
         mid_layout.addWidget(self.rack_box)
 
         layout.addWidget(mid_panel)
@@ -228,6 +233,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.full_array['Added'] = False
             self.actual_array['Added'] = False
             self.plate_box.preview_array()
+    
+    def reset_syringe(self):
+        response = self.popup_yes_no('Reset','Are you sure you want to reset the syringe?')
+        if response == '&Yes':
+            self.machine.reset_syringe()
 
     
     def closeEvent(self, event):
@@ -330,7 +340,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def read_reagents_file(self):
         with open('./Pyside6_interface/Presets/Reagents.json', 'r') as f:
             reagents = json.load(f)
-        self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name']) for reagent in reagents]
+        self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name'],calibrations=reagent['calibrations']) for reagent in reagents]
+        # self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name'],calibrations=[]) for reagent in reagents]
     
     def write_reagents_file(self):
         reagents = [reagent.to_dict() for reagent in self.reagents]
@@ -519,6 +530,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(bool)
     def home_motors(self):
+        if not self.machine.motors_active:
+            self.popup_message('Error','Motors must be active to home')
+            return
         response = self.popup_yes_no('Home Motors','Are you sure you want to home the motors?')
         if response == '&Yes':
             self.machine.home_motors()
@@ -624,9 +638,7 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def calculate_plate_matrix(self):
         print('Calculating plate matrix')
-        print('Current Plate:',self.current_plate.to_dict())
         self.calibrations = self.current_plate.calibrations
-        print("Calibrations:",self.calibrations)
         self.corners = np.array([
             [self.get_coords(self.calibrations['top_left'])[0:2]],
             [self.get_coords(self.calibrations['top_right'])[0:2]],
@@ -708,7 +720,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create a DataFrame from the list
         well_positions_df = pd.DataFrame(well_positions)
-        print(well_positions_df.head(50))
         return well_positions_df
 
     def write_plates_file(self):
@@ -741,6 +752,50 @@ class MainWindow(QtWidgets.QMainWindow):
         self.write_plates_file()
         self.current_plate = updated_plate
         self.get_well_positions()
+
+    @QtCore.Slot()
+    def calibrate_pressure(self):
+        if not self.machine.motors_active or not self.machine.homed:
+            self.popup_message('Error','Motors must be active and homed to calibrate pressure')
+            return
+        if not self.machine.regulating_pressure:
+            self.popup_message('Error','Pressure regulation must be active to calibrate pressure')
+            return
+        if self.gripper_reagent.name == 'Empty':
+            self.popup_message('Error','Please load a reagent before calibrating the pressure')
+            return
+        if not self.machine.balance_connected:
+            self.popup_message('Error','Balance must be connected to calibrate pressure')
+            return
+        response = self.popup_yes_no('Begin pressure calibration',f'Would you like to calibrate the pressure for {self.gripper_reagent.name}?')
+        if response == '&No':
+            return
+        
+        self.target_pressure = self.machine.current_psi
+        pressure_calibration_dialog = PressureCalibrationDialog(self)
+        pressure_calibration_dialog.print_calibration_droplets.connect(self.print_calibration_droplets)
+        pressure_calibration_dialog.change_pressure.connect(self.calibration_pressure_change)
+        pressure_calibration_dialog.calibration_complete.connect(self.store_calibrations)
+        pressure_calibration_dialog.exec()
+        print('Calibrating pressure')
+
+    @QtCore.Slot(int)
+    def print_calibration_droplets(self,num_droplets):
+        print('Printing calibration droplets:',num_droplets,self.target_pressure)
+        self.machine.print_calibration_droplets(num_droplets,self.target_pressure)
+
+    @QtCore.Slot(float)
+    def calibration_pressure_change(self,pressure):
+        print('Pressure changed to:',pressure)
+        self.target_pressure = pressure
+        self.machine.set_absolute_pressure(pressure)
+
+    @QtCore.Slot(Reagent)
+    def store_calibrations(self,reagent):
+        print('Storing calibrations for:',reagent.name)
+        reagent_index = next((index for (index, r) in enumerate(self.reagents) if r.name == reagent.name), None)
+        self.reagents[reagent_index] = reagent
+        self.write_reagents_file()
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
