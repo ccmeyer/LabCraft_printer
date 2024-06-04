@@ -2,21 +2,21 @@
 #define PIN_ASSIGNMENTS_H
 #include <Arduino.h>
 
-const int ledPin = PA13;
+const int ledPin = PA13;    // Onboard LED
 
 //== FAN PINS ===========================================
-const int printPin = PA8;           // Fan0
-const int pumpValvePin1 = PE5;            // Fan1
-const int pumpValvePin2 = PD12;     // Fan2
-const int pumpPin = PD13;     // Fan3
-const int printValvePin = PD14;      // Fan4
-const int Fan5 = PD15;      // Fan5
+const int printPin = PA8;       // Fan0 - J50
+const int pumpValvePin1 = PE5;  // Fan1 - J51
+const int pumpValvePin2 = PD12; // Fan2 - J52
+const int pumpPin = PD13;       // Fan3 - J53
+const int printValvePin = PD14; // Fan4 - J54
+const int Fan5 = PD15;          // Fan5 - J55
 
 //== LIMIT SWITCH PINS ===========================================
-const int xstop = PG6;
-const int ystop = PG9;
-const int zstop = PG10;
-const int pstop = PG11;
+const int xstop = PG6;  // DIAG0 - J27
+const int ystop = PG9;  // DIAG1 - J29
+const int zstop = PG10; // DIAG2 - J31
+const int pstop = PG11; // DIAG3 - J33
 
 //==STEPPER MOTOR PINS ===========================================
 
@@ -41,6 +41,8 @@ const int Y_SW_TX = PD11;        // UART-SoftwareSerial receive pin - Attached t
 const int Y_SW_RX = Y_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the same pin as receive
 
 // --DRIVER 2-- Driver 2 has two ports: Motor2_1 and Motor2_2
+// Motor2_1 - X right side - Uses modified wiring green, black, blue, red
+// Motor2_2 - X left side - Uses standard wiring red, blue, green, black
 // Standard control modality
 const int X_EN_PIN = PG5;      // Enable - EN pin top left
 const int X_DIR_PIN = PG3;     // Direction - DIR pin bottom left
@@ -60,7 +62,13 @@ const int P_STEP_PIN = PG4;    // Step - STP pin second from bottom left
 const int P_SW_TX = PC7;        // UART-SoftwareSerial receive pin - Attached to the DRIVERX_CS pins of the motor
 const int P_SW_RX = P_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the same pin as receive
 
-
+// --I2C communication--
+// All I2C pins in J73
+// top to bottom: 3V3, GND, SCL, SDA
+// Two columns with duplicate pins
+// SCL - PB8
+// SDA - PB9
+// Wire color top to bottom: black, green, red, blue
 
 
 

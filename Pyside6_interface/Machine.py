@@ -1314,7 +1314,7 @@ class Machine(QtWidgets.QWidget):
         current_reagent = self.gripper_reagent.name
         print('Current reagent:',current_reagent)
         reagent_array = array[array['reagent'] == current_reagent].copy()
-
+        self.location = 'plate'
         for index,line in reagent_array.iterrows():
             if line['Added'] == True:
                 continue
@@ -1322,4 +1322,5 @@ class Machine(QtWidgets.QWidget):
             self.move_to_well(line['row'],line['column'])
             self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})
         self.reset_acceleration()
+        self.move_to_location('pause')
             
