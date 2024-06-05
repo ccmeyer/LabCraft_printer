@@ -434,6 +434,9 @@ class ControlBoard():
             self.target_y = 0
             self.target_z = 0
             self.target_p = 0
+        elif command.command_type == 'CHANGE_ACCEL':
+            print('Changing acceleration')
+
         else:
             print('Unknown command:',command.command_type)
         self.correct_pos = False
@@ -896,6 +899,12 @@ class Machine(QtWidgets.QWidget):
         print(f'Well {well_number} printed with {reagent}')
         self.main_window.mark_reagent_as_added(well_number,reagent)
 
+    def last_well_complete_handler(self, well_number=None,reagent=None):
+        print(f'Last Well {well_number} printed with {reagent}')
+        self.main_window.mark_reagent_as_added(well_number,reagent)
+        self.reset_acceleration()
+        self.move_to_location('pause')
+
     def pause_commands(self):
         print('Pausing commands')
         new_command = Command(0, command_type='PAUSE', param1=0, param2=0, param3=0)
@@ -966,13 +975,13 @@ class Machine(QtWidgets.QWidget):
         if self.homed:
             if self.x_pos - x < self.max_x:
                 self.main_window.popup_message('X-axis limit','Cannot move beyond X-axis limit')
-                x = self.max_x + self.x_pos
+                x = 0
             if self.y_pos + y > self.max_y:
                 self.main_window.popup_message('Y-axis limit','Cannot move beyond Y-axis limit')
-                y = self.max_y - self.y_pos
+                y = 0
             if self.z_pos - z < self.max_z:
                 self.main_window.popup_message('Z-axis limit','Cannot move beyond Z-axis limit')
-                z = self.max_z + self.z_pos
+                z = 0
             
         self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
         return
@@ -1188,10 +1197,14 @@ class Machine(QtWidgets.QWidget):
         if location not in available_locations:
             self.main_window.popup_message('Location not present','{} not present in calibration data'.format(location))
             return
-        
+        print('Moving to:',location,'from:',self.location)
+        print('Current:',self.x_pos,self.y_pos,self.z_pos)
+        print('Target:',self.calibration_data[location]['x'],self.calibration_data[location]['y'],self.calibration_data[location]['z'])
+        print("Direct:",direct,"Safe Y:",safe_y)
         if location == 'balance' or self.location == 'balance':
             safe_y = True
             direct = False
+        print("After-Direct:",direct,"Safe Y:",safe_y)
 
         target_coordinates = self.calibration_data[location].copy()
         
@@ -1209,30 +1222,38 @@ class Machine(QtWidgets.QWidget):
         x_limit = -5500
         if self.x_pos > x_limit and target_coordinates['x'] < x_limit or self.x_pos < x_limit and target_coordinates['x'] > x_limit:
             safe_y = True
+        print("X-limit-Direct:",direct,"Safe Y:",safe_y)
 
         if direct and not safe_y:
+            print('Moving directly')
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif not direct and not safe_y:
+            print('Not direct, not safe-y')
             self.set_absolute_coordinates(self.x_pos, self.y_pos, self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif not direct and safe_y:
+            print('Not direct, safe-y')
             self.set_absolute_coordinates(self.x_pos, self.y_pos, self.safe_height)
             self.set_absolute_coordinates(self.x_pos, self.safe_y, self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.safe_height)
             self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         elif direct and safe_y:
+            print('Direct, safe-y')
             if up_first:
+                print('up first')
                 self.set_absolute_coordinates(self.x_pos, self.safe_y, target_coordinates['z'])
                 self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, target_coordinates['z'])
                 self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
             else:
+                print('not up first')
                 self.set_absolute_coordinates(self.x_pos, self.safe_y, self.z_pos)
                 self.set_absolute_coordinates(target_coordinates['x'], self.safe_y, self.z_pos)
                 self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], self.z_pos)
                 self.set_absolute_coordinates(target_coordinates['x'], target_coordinates['y'], target_coordinates['z'])
         self.location = location
+        print('Moved to:',self.location)
         return
 
     def save_location(self, location=False, new=False, ask=True):
@@ -1316,12 +1337,19 @@ class Machine(QtWidgets.QWidget):
         print('Current reagent:',current_reagent)
         reagent_array = array[array['reagent'] == current_reagent].copy()
         self.location = 'plate'
-        for index,line in reagent_array.iterrows():
+        for i,(index, line) in enumerate(reagent_array.iterrows()):
             if line['Added'] == True:
                 continue
-            print('Printing:',line['row'],line['column'],line['amount'])
-            self.move_to_well(line['row'],line['column'])
-            self.print_droplets(int(line['amount']),handler=self.well_complete_handler,kwargs={'well_number':line['well_number'],'reagent':current_reagent})
-        self.reset_acceleration()
-        self.move_to_location('pause')
+            print('Printing:', line['row'], line['column'], line['amount'])
+            self.move_to_well(line['row'], line['column'])
+            
+            # Check if this is the last iteration
+            is_last_iteration = i == len(reagent_array) - 1
+            print('---Is last iteration:', is_last_iteration, i, len(reagent_array) - 1)
+            if is_last_iteration:
+                # Use a different handler for the last iteration
+                self.print_droplets(int(line['amount']), handler=self.last_well_complete_handler, kwargs={'well_number': line['well_number'], 'reagent': current_reagent})
+            else:
+                self.print_droplets(int(line['amount']), handler=self.well_complete_handler, kwargs={'well_number': line['well_number'], 'reagent': current_reagent})
+    
             
