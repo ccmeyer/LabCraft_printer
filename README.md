@@ -17,14 +17,13 @@ To get started with the LabCraft Printer project, follow these steps:
 1. Clone the Git repository to your local machine:
 
     ```bash
-    git clone https://github.com/your-username/LabCraft_printer.git
+    git clone https://github.com/ccmeyer/LabCraft_printer
     ```
 
 2. Open the project folder in VSCode:
 
     ```bash
     cd LabCraft_printer
-    code .
     ```
 
 3. Create a virtual environment for the project:
@@ -76,9 +75,9 @@ For more information, refer to the PlatformIO documentation and the documentatio
 
 ## Usage
 
-To run launch the user interface that connects and drives the machine use the following command
-'''bash
+To run launch the user interface that connects and drives the machine use the following command once the virtual environment is active:
+```bash
 python .\PySide6_interface\App.py
-'''
+```
 Inside of the `.\PySide6_interface\Presets` directory is the file `Settings.json`. This file set several predefined values such as the default COM ports, default plate setup, etc.
 
