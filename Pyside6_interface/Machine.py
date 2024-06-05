@@ -588,7 +588,7 @@ class Machine(QtWidgets.QWidget):
         self.com_open = True
         self.state = "Free"
 
-        self.calibration_file_path = './Pyside6_interface/Calibrations/default_positions.json'
+        self.calibration_file_path = '.\\Pyside6_interface\\Calibrations\\default_positions.json'
         self.calibration_data = {}
         self.load_positions_from_file()
         self.well_positions = pd.DataFrame()
@@ -657,12 +657,12 @@ class Machine(QtWidgets.QWidget):
                 self.disable_motors()
                 self.deregulate_pressure()
                 # self.clear_command_queue()
-
-            while self.incomplete_commands != []:
-                print('--Waiting', self.incomplete_commands)
-                self.execute_command_from_queue()
-                self.get_state_from_board()
-                time.sleep(0.1)
+            if not self.simulate:
+                while self.incomplete_commands != []:
+                    print('--Waiting', self.incomplete_commands)
+                    self.execute_command_from_queue()
+                    self.get_state_from_board()
+                    time.sleep(0.1)
 
             print('Disconnected from machine')
             self.stop_timers_signal.emit()
@@ -835,7 +835,7 @@ class Machine(QtWidgets.QWidget):
         self.last_added_command_number = int(state['Last_added'])
         self.current_command_number = int(state['Current_command'])
         self.last_completed_command_number = int(state['Last_completed'])
-        print('State:',self.state,self.last_added_command_number,self.current_command_number,self.last_completed_command_number)
+        # print('State:',self.state,self.last_added_command_number,self.current_command_number,self.last_completed_command_number)
         # print('--Com_open:',state['Com_open'],type(state['Com_open']))
         if state['Com_open'] == 'True' or state['Com_open'] == '1':
             self.com_open = True
@@ -955,6 +955,7 @@ class Machine(QtWidgets.QWidget):
         if handler is None:
             handler = self.disable_motors_handler
         self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0)
         return
 
     def set_absolute_coordinates(self,x,y,z):

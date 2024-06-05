@@ -303,7 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
     
     def read_settings_file(self):
-        with open('./Pyside6_interface/Presets/Settings.json', 'r') as f:
+        with open('.\\Pyside6_interface\\Presets\\Settings.json', 'r') as f:
             settings = json.load(f)
         self.settings = settings
         self.base = settings['BASE_PATH']
@@ -340,21 +340,21 @@ class MainWindow(QtWidgets.QMainWindow):
         return
     
     def read_reagents_file(self):
-        with open('./Pyside6_interface/Presets/Reagents.json', 'r') as f:
+        with open('.\\Pyside6_interface\\Presets\\Reagents.json', 'r') as f:
             reagents = json.load(f)
         self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name'],calibrations=reagent['calibrations']) for reagent in reagents]
         # self.reagents = [Reagent(reagent['name'],self.colors,reagent['color_name'],calibrations=[]) for reagent in reagents]
     
     def write_reagents_file(self):
         reagents = [reagent.to_dict() for reagent in self.reagents]
-        with open('./Pyside6_interface/Presets/Reagents.json', 'w') as f:
+        with open('.\\Pyside6_interface\\Presets\\Reagents.json', 'w') as f:
             json.dump(reagents, f)
 
     def select_experiment_directory(self):
         current_directory = os.getcwd()  # Get the current working directory
         dialog = QtWidgets.QFileDialog(self)
         dialog.setFileMode(QtWidgets.QFileDialog.Directory)
-        current_directory += '.\Pyside6_interface\Experiments'
+        current_directory += '.\\Pyside6_interface\\Experiments'
         dialog.setDirectory(current_directory)
         if dialog.exec():
             selected_directory = dialog.selectedFiles()[0]
@@ -365,9 +365,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def load_experiment(self):
         selected_directory = self.select_experiment_directory()
         if selected_directory:
+            print(selected_directory)
             self.experiment_name = selected_directory.split('/')[-1]
-            self.all_reactions = pd.read_csv(f"{selected_directory}/{self.experiment_name}_reactions.csv")
-            self.reaction_metadata = pd.read_csv(f"{selected_directory}/{self.experiment_name}_metadata.csv")
+            print(self.experiment_name)
+            self.all_reactions = pd.read_csv(f"{selected_directory}\\{self.experiment_name}_reactions.csv")
+            self.reaction_metadata = pd.read_csv(f"{selected_directory}\\{self.experiment_name}_metadata.csv")
             self.update_plate_box()
             self.set_cartridges()
         else:
@@ -384,7 +386,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.rack_box.reset_confirmation()
     
     def read_colors_file(self):
-        with open('./Pyside6_interface/Presets/Colors.json', 'r') as f:
+        with open('.\\Pyside6_interface\\Presets\\Colors.json', 'r') as f:
             self.colors = json.load(f)
 
     def keyPressEvent(self, event):
@@ -631,7 +633,7 @@ class MainWindow(QtWidgets.QMainWindow):
         print('Calibrating rack')
 
     def read_plates_file(self):
-        with open('./Pyside6_interface/Presets/Plates.json', 'r') as f:
+        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'r') as f:
             plates = json.load(f)
         self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default'],calibrations=plate['calibrations']) for plate in plates]
         self.current_plate = [plate for plate in self.plate_options if plate.default][0]
@@ -738,7 +740,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def write_plates_file(self):
         plates = [plate.to_dict() for plate in self.plate_options]
-        with open('./Pyside6_interface/Presets/Plates.json', 'w') as f:
+        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'w') as f:
             json.dump(plates, f)
 
     @QtCore.Slot()
@@ -814,7 +816,7 @@ class MainWindow(QtWidgets.QMainWindow):
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
     
-    with open("./Pyside6_interface/stylesheet.qss", "r") as f:
+    with open(".\\Pyside6_interface\\stylesheet.qss", "r") as f:
         app.setStyleSheet(f.read())
 
     window = MainWindow()

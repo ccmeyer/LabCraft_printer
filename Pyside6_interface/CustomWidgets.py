@@ -881,12 +881,12 @@ class PlateBox(QtWidgets.QGroupBox):
         self.experiment_name.setText(self.main_window.experiment_name)
     
     def read_plate_file(self):
-        with open('./Pyside6_interface/Presets/Plates.json', 'r') as f:
+        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'r') as f:
             plates = json.load(f)
         self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default'],calibrations=plate['calibrations']) for plate in plates]
     
     def write_plate_file(self):
-        with open('./Pyside6_interface/Presets/Plates.json', 'w') as f:
+        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'w') as f:
             json.dump([plate.__dict__ for plate in self.plate_options], f, indent=4)
 
     def create_plate(self,plate):
@@ -1324,14 +1324,14 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         replicates_df = replicates_df.set_index(['replicate_id','unique_id']).reset_index()
 
         experiment_name = self.experiment_name_input.text()
-        experiment_dir = f'./Pyside6_interface/Experiments/{experiment_name}'
+        experiment_dir = f'.\\Pyside6_interface\\Experiments\\{experiment_name}'
         os.makedirs(experiment_dir, exist_ok=True)
 
         # Write metadata to a CSV file
-        df.to_csv(f'{experiment_dir}/{experiment_name}_metadata.csv', index=False)
+        df.to_csv(f'{experiment_dir}\\{experiment_name}_metadata.csv', index=False)
 
         # Write replicates_df to a CSV file
-        replicates_df.to_csv(f'{experiment_dir}/{experiment_name}_reactions.csv', index=False)
+        replicates_df.to_csv(f'{experiment_dir}\\{experiment_name}_reactions.csv', index=False)
 
         self.all_reactions = replicates_df
     
