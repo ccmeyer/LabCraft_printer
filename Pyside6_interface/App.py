@@ -162,12 +162,6 @@ class MainWindow(QtWidgets.QMainWindow):
         left_layout.addWidget(self.pressure_box)
         layout.addWidget(left_panel)
 
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_coordinates)
-        self.update_timer.timeout.connect(self.update_pressure)
-
-        self.update_timer.start(100)  # Update every 100 ms
-        
         mid_panel = QtWidgets.QWidget()
         mid_panel.setStyleSheet(f"background-color: {self.colors['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
@@ -209,6 +203,10 @@ class MainWindow(QtWidgets.QMainWindow):
         right_panel.setStyleSheet(f"background-color: {self.colors['dark_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)  # Use a vertical box layout
 
+        self.board_status_box = BoardStatusBox("BOARD STATUS",self)
+        self.board_status_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        right_layout.addWidget(self.board_status_box)
+
         self.command_box = CommandTable(self,self.machine.get_command_log(),"COMMANDS")
         self.command_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.command_box)
@@ -224,10 +222,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         layout.addWidget(right_panel)
 
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_coordinates)
+        self.update_timer.timeout.connect(self.update_pressure)
+        self.update_timer.timeout.connect(self.update_board_status)
+
+        self.update_timer.start(100)  # Update every 100 ms
+        
+
         # Window dimensions
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
     
+    def update_board_status(self):
+        self.board_status_box.update_status()
+
     def reset_print_arrays(self):
         response = self.popup_yes_no('Reset','Are you sure you want to reset the print arrays?')
         if response == '&Yes':
@@ -380,9 +389,9 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def set_cartridges(self):
         reagents_to_print = self.get_printing_reagents()
-        for i,reagent in enumerate(reagents_to_print):
+        for i, reagent in enumerate(reagents_to_print):
             reagent_obj = next((r for r in self.reagents if r.name == reagent), None)
-            self.rack_box.change_reagent(i,reagent_obj)
+            self.rack_box.change_reagent(i, reagent_obj)
         self.rack_box.reset_confirmation()
     
     def read_colors_file(self):
@@ -410,6 +419,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             print('Clearing Queue')
             self.machine.clear_command_queue()
+            self.machine.reset_acceleration()
         
     def add_reagent(self):
         self.rack_box.add_reagent()

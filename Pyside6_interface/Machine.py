@@ -556,6 +556,8 @@ class Machine(QtWidgets.QWidget):
         self.coordinates = {'X': self.x_pos, 'Y': self.y_pos, 'Z': self.z_pos, 'P': self.p_pos}
         self.location = 'Unknown'
         self.homed = False
+        self.cycle_count = 0
+        self.max_cycle = 0
 
         self.target_x = 0
         self.target_y = 0
@@ -824,6 +826,9 @@ class Machine(QtWidgets.QWidget):
         if state == '':
             return {}
         # print('Received state:',state)
+        if 'DEBUG' in state:
+            # print('Received state:',state)
+            return {}
         state_dict = {}
         state_list = state.split(',')
         for item in state_list:
@@ -851,6 +856,9 @@ class Machine(QtWidgets.QWidget):
         self.current_pressure = float(state['Pressure'])
         self.current_psi = self.convert_to_psi(self.current_pressure)
         self.current_droplets = int(state['Droplets'])
+        self.max_cycle = int(state['Max_cycle'])
+        self.cycle_count = int(state['Cycle_count'])
+
         target_gripper_open = state['Gripper'] == 'True'
         if self.gripper_open != target_gripper_open:
             # The gripper state has changed
@@ -1085,6 +1093,12 @@ class Machine(QtWidgets.QWidget):
     def get_regulation_state(self):
         return self.regulating_pressure
     
+    def get_max_cycle(self):
+        return self.max_cycle
+    
+    def get_cycle_count(self):
+        return self.cycle_count
+    
     def set_gripper_reagent(self,reagent):
         self.gripper_reagent = reagent
         return
@@ -1275,6 +1289,7 @@ class Machine(QtWidgets.QWidget):
                 self.calibration_data.update({location:{'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}})
             else:
                 self.calibration_data[location] = {'x':self.x_pos,'y':self.y_pos,'z':self.z_pos}
+        self.location = location
         if ask:
             response = self.main_window.popup_yes_no('Save Location','Write location {} to file?'.format(location))
             if response == '&No':

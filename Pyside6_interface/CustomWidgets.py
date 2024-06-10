@@ -635,6 +635,7 @@ class RackCalibrationDialog(QtWidgets.QDialog):
             self.check_before_move()
         else:
             self.calculate_rack_positions()
+            self.machine.set_relative_coordinates(self.machine.rack_offset,0,0)
             self.main_window.popup_message("Calibration Complete","Rack calibration complete")
             self.close()
 
@@ -1410,7 +1411,7 @@ class SimpleCoordinateBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.step_size_label, 2, 3)
         self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
         self.step_size_input.setRange(2, 2000)
-        self.step_size_input.setValue(500)
+        self.step_size_input.setValue(self.main_window.step_size)
         self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
         self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
@@ -1423,6 +1424,59 @@ class SimpleCoordinateBox(QtWidgets.QGroupBox):
     def update_step_size(self,step_size):
         self.step_size_input.setValue(step_size)
 
+
+class BoardStatusBox(QtWidgets.QGroupBox):
+    """
+    A custom widget for displaying the status of the board.
+
+    Args:
+        title (str): The title of the group box.
+        main_window (QtWidgets.QMainWindow): The main window object.
+
+    Attributes:
+        main_window (QtWidgets.QMainWindow): The main window object.
+        layout (QtWidgets.QVBoxLayout): The layout of the group box.
+        status_label (QtWidgets.QLabel): The label for displaying the board status.
+        status_text (str): The text for the status label.
+
+    Methods:
+        update_status: Updates the status label.
+    """
+
+    def __init__(self, title, main_window):
+        """
+        Initialize the BoardStatusBox.
+
+        Args:
+            title (str): The title of the group box.
+            main_window (QtWidgets.QMainWindow): The main window object.
+
+        """
+        super().__init__(title)
+        self.main_window = main_window
+        self.machine = main_window.machine
+        self.layout = QtWidgets.QGridLayout(self)
+
+        self.max_cycle_label = QtWidgets.QLabel("Max Cycle:")
+        self.layout.addWidget(self.max_cycle_label, 0, 0)
+        self.max_cycle_value = QtWidgets.QLabel()
+        self.layout.addWidget(self.max_cycle_value, 0, 1)
+
+        self.cycle_count_label = QtWidgets.QLabel("Cycle Count:")
+        self.layout.addWidget(self.cycle_count_label, 1, 0)
+        self.cycle_count_value = QtWidgets.QLabel()
+        self.layout.addWidget(self.cycle_count_value, 1, 1)
+
+        self.update_status()
+
+    def update_status(self):
+        """
+        Update the status label.
+        """
+        self.max_cycle_value.setText(str(self.machine.get_max_cycle()))
+        self.cycle_count_value.setText(str(self.machine.get_cycle_count()))
+
+    
 
 class CoordinateBox(QtWidgets.QGroupBox):
     """

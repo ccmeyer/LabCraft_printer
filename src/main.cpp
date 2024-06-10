@@ -156,7 +156,9 @@ private:
     bool active;
     bool closed;
     bool pumpOn;
-    unsigned long lastExecution;
+    // unsigned long lastExecution;
+    unsigned long lastPumpActivation;
+    unsigned long lastRefreshTime;
     int pumpInterval;
     int refreshInterval;
 
@@ -169,27 +171,29 @@ public:
   // Constructor to initialize variables
   Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin, Task* refreshGripperTaskPtr)
     : active(false), closed(false), pumpOn(false),
-      lastExecution(0), pumpInterval(500),refreshInterval(5000),
+      lastPumpActivation(0), lastRefreshTime(0), pumpInterval(500),refreshInterval(5000),
       pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin), refreshGripperTaskPtr(refreshGripperTaskPtr) {}
 
   bool isActive() const { return active; }
   bool isClosed() const { return closed; }
   bool isOpen() const { return !closed; }
   bool isPumpOn() const { return pumpOn; }
-  unsigned long previousMillis() const { return lastExecution; }
+  unsigned long previousMillis() const { return lastPumpActivation; }
 
 
   void activatePump() {
+    Serial.println("DEBUG Activating pump");
     digitalWrite(pumpPin, HIGH);
     pumpOn = true;
-    lastExecution = millis();
+    lastPumpActivation = millis();
     if(refreshGripperTaskPtr != nullptr) { // Check if the pointer has been set
-        refreshGripperTaskPtr->lastExecutionTime = lastExecution;
+        refreshGripperTaskPtr->lastExecutionTime = lastPumpActivation + pumpInterval;
     }
   }
 
   void checkPump() {
-    if(pumpOn && millis() - lastExecution >= pumpInterval) {
+    Serial.println("DEBUG Checking pump");
+    if(pumpOn && millis() - lastPumpActivation >= pumpInterval) {
       digitalWrite(pumpPin, LOW);
       pumpOn = false;
     }
@@ -197,6 +201,7 @@ public:
   
   // Method to toggle the gripper state
   void closeGripper() {
+    Serial.println("DEBUG Closing gripper");
     if (!active) {
       active = true;
     }
@@ -204,10 +209,12 @@ public:
     digitalWrite(pumpValvePin2, LOW);
     closed = true;
     activatePump();
+    lastRefreshTime = millis(); // Reset the refresh time
   }
 
   // Method to toggle the gripper state
   void openGripper() {
+    Serial.println("DEBUG Opening gripper");
     if (!active) {
       active = true;
     }
@@ -215,6 +222,7 @@ public:
     digitalWrite(pumpValvePin2, HIGH);
     closed = false;
     activatePump();
+    lastRefreshTime = millis(); // Reset the refresh time
   }
 
   // Method to turn off the gripper
@@ -228,8 +236,9 @@ public:
 
   void refreshGripper() {
     if (active) {
-      if (millis() - lastExecution >= refreshInterval) {
+      if (millis() - lastRefreshTime >= refreshInterval) {
         activatePump();
+        lastRefreshTime = millis(); // Reset the refresh time
       }
     }
   }
@@ -386,8 +395,8 @@ struct HomingStage {
 // Array of homing stages for each motor
 HomingStage homingStages[] = {
     {1,2500, -200,maxSpeedXYZ,accelerationXYZ},   // Z homing
-    {1,1500, -100,maxSpeedXYZ,accelerationXYZ},   // X homing
-    {-1,1500, -100,maxSpeedXYZ,accelerationXYZ},  // Y homing
+    {1,1500, -25,maxSpeedXYZ,accelerationXYZ},   // X homing
+    {-1,1500, -25,maxSpeedXYZ,accelerationXYZ},  // Y homing
     {1,3000, -200,maxSpeedP,accelerationP},   // P homing
 };
 
