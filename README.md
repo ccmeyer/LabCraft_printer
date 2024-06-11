@@ -80,3 +80,5 @@ To run launch the user interface that connects and drives the machine use the fo
 python .\PySide6_interface\App.py
 ```
 Inside of the `.\PySide6_interface\Presets` directory is the file `Settings.json`. This file set several predefined values such as the default COM ports, default plate setup, etc.
+
+## ADDED THIS
