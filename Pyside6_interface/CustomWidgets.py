@@ -37,7 +37,8 @@ class Reagent():
         return {"name": self.name, "color_name": self.color_name, "calibrations": self.calibrations}
     
     def add_calibration(self,calibration):
-        self.calibrations.append(calibration)
+        # self.calibrations.append(calibration)
+        self.calibrations = calibration
 
     def get_calibrations(self):
         return self.calibrations
@@ -87,9 +88,9 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
         self.init_mass = None
         self.final_mass = None
         self.target_mass = 4  # Set your target mass here
-        self.max_pressure_step = 0.5  # Set your pressure step here
+        self.max_pressure_step = 1  # Set your pressure step here
         self.mass_tolerance = 0.05
-        self.min_pressure = 1.0
+        self.min_pressure = 1.2
 
         self.mass_log = []
         self.tolerance = 0.01
@@ -172,17 +173,20 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
         self.layout.addLayout(self.charts_layout)
         self.setLayout(self.layout)
         # List to store the mass and pressure values from each calibration pass
-        self.mass_pressure_data = self.reagent.get_calibrations()
+        previous_data = self.reagent.get_calibrations()
         # print(self.mass_pressure_data)
-        if len(self.mass_pressure_data) >= 2:
+        if len(previous_data) >= 2:
             response = self.main_window.popup_yes_no("Use previous calibration data","Would you like to use the previous calibration data?")
             if response == '&No':
                 self.mass_pressure_data = []
             elif response == '&Yes':
+                self.mass_pressure_data = previous_data
                 target_psi = self.calculate_pressure_from_fit(self.target_mass,self.mass_pressure_data)
                 self.main_window.machine.set_absolute_pressure(target_psi)
                 self.main_window.target_pressure = target_psi
                 self.update_mass_pressure_plot()
+        else:
+            self.mass_pressure_data = []
 
         self.get_mass_timer = QTimer()
         self.get_mass_timer.timeout.connect(self.get_recent_mass)
@@ -289,6 +293,7 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
         if abs(mass_change - self.target_mass) < self.mass_tolerance:  # If the droplet mass is close enough to the target
             self.label.setText("Calibration complete!")
             print("=== Calibration complete! ===")
+            self.reagent.add_calibration(self.mass_pressure_data)
             self.calibration_complete.emit(self.reagent)
             self.get_mass_timer.stop()
 

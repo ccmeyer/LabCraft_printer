@@ -171,7 +171,7 @@ public:
   // Constructor to initialize variables
   Gripper(int pumpValvePin1, int pumpValvePin2, int pumpPin, Task* refreshGripperTaskPtr)
     : active(false), closed(false), pumpOn(false),
-      lastPumpActivation(0), lastRefreshTime(0), pumpInterval(500),refreshInterval(5000),
+      lastPumpActivation(0), lastRefreshTime(0), pumpInterval(750),refreshInterval(2000),
       pumpValvePin1(pumpValvePin1), pumpValvePin2(pumpValvePin2), pumpPin(pumpPin), refreshGripperTaskPtr(refreshGripperTaskPtr) {}
 
   bool isActive() const { return active; }
