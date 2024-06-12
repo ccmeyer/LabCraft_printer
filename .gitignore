@@ -5,4 +5,5 @@
 .vscode/ipch
 __pycache__
 env/
-
+Pyside6_interface/Presets
+Pyside6_interface/Experiments
