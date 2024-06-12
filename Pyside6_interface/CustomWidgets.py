@@ -190,7 +190,7 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
 
         self.get_mass_timer = QTimer()
         self.get_mass_timer.timeout.connect(self.get_recent_mass)
-        self.get_mass_timer.start(50)  # Check balance every second
+        self.get_mass_timer.start(50)  # Check balance every 50 msec
 
         self.printing = False
         self.print_delay_timer = QTimer()
@@ -900,6 +900,7 @@ class PlateBox(QtWidgets.QGroupBox):
         self.current_plate = plate
         self.rows = plate.rows
         self.columns = plate.columns
+        self.start_well = self.main_window.start_well
         available_rows = range(self.rows)
         available_cols = range(self.columns)
 
@@ -911,7 +912,11 @@ class PlateBox(QtWidgets.QGroupBox):
         for i,well in self.wells_df.iterrows():
             cell = QtWidgets.QPushButton(f"")
             cell.setFocusPolicy(QtCore.Qt.NoFocus)
-            cell.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
+            if well['column'] < self.start_well:
+                cell.setStyleSheet("border: 0.5px solid black; border-radius: 4px; background-color: black;")
+            else:
+                cell.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
+            # cell.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
             self.grid.addWidget(cell, well['row'], well['column'])
             self.cells.update({well['well_number']:cell})
 
@@ -947,7 +952,9 @@ class PlateBox(QtWidgets.QGroupBox):
         return pd.concat(sorted_array)
 
     def assign_wells(self):
-        sorted_df = self.snake_df(self.main_window.wells_df)
+        well_selection = self.main_window.wells_df.copy()
+        well_selection = well_selection[well_selection['column'] >= self.main_window.start_well].copy()
+        sorted_df = self.snake_df(well_selection)
         reaction_df = self.main_window.all_reactions
         if len(sorted_df) < len(reaction_df):
             self.main_window.popup_message("Error","The number of wells in the plate is less than the number of reactions")
@@ -1172,20 +1179,30 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.volume_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
         self.grid_layout.addWidget(self.volume_input, 2, 1)
 
+        start_column_label = QtWidgets.QLabel("Start Column:")
+        self.grid_layout.addWidget(start_column_label, 3, 0)
+        self.start_column_input = QtWidgets.QComboBox()
+        current_plate = self.main_window.current_plate
+        max_columns = current_plate.columns
+        possible_columns = [str(i) for i in range(1,max_columns+1)]
+        self.start_column_input.addItems(possible_columns)
+        self.start_column_input.setCurrentText(str(self.main_window.start_well + 1))
+        self.grid_layout.addWidget(self.start_column_input, 3, 1)
+
         self.replicates_label = QtWidgets.QLabel("Number of replicates:")
-        self.grid_layout.addWidget(self.replicates_label, 3, 0)
+        self.grid_layout.addWidget(self.replicates_label, 4, 0)
 
         self.replicates_input = QtWidgets.QDoubleSpinBox()
         self.replicates_input.setRange(1, 100)  # Set a minimum and maximum value
         self.replicates_input.setDecimals(0)  # Set the number of decimal places
         self.replicates_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
         self.replicates_input.valueChanged.connect(self.update_combinations_label)
-        self.grid_layout.addWidget(self.replicates_input,3,1)
+        self.grid_layout.addWidget(self.replicates_input,4,1)
         
         self.combinations_label = QtWidgets.QLabel("Number of combinations:")
-        self.grid_layout.addWidget(self.combinations_label,4,0)
+        self.grid_layout.addWidget(self.combinations_label,5,0)
         self.combinations_value = QtWidgets.QLabel()
-        self.grid_layout.addWidget(self.combinations_value,4,1)
+        self.grid_layout.addWidget(self.combinations_value,5,1)
         
         self.layout.addLayout(self.grid_layout)
         # Prepopulate the table if reaction_metadata is not None
@@ -1287,7 +1304,6 @@ class ArrayDesignWindow(QtWidgets.QDialog):
             combo_box.blockSignals(False)  # Unblock signals
             currently_selected_reagents.append(combo_box.currentText())  # Append after updating the combo box
 
-    
     def delete_reagent_row(self, row):
         self.reagent_table.removeRow(row)
         self.update_combinations_label()
@@ -1372,6 +1388,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.main_window.all_reactions = self.all_reactions
         self.main_window.reaction_metadata = self.reaction_metadata
         self.main_window.experiment_name = self.experiment_name_input.text()
+        self.main_window.start_well = int(self.start_column_input.currentText()) - 1
         self.main_window.update_plate_box()
         self.main_window.set_cartridges()
         self.close()

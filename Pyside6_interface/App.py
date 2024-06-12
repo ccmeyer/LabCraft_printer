@@ -92,6 +92,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.all_reactions = pd.DataFrame()
         self.reaction_metadata = pd.DataFrame()
+        self.start_well = 0
         self.wells_df = pd.DataFrame()
         self.full_array = pd.DataFrame()
         self.actual_array = pd.DataFrame()
