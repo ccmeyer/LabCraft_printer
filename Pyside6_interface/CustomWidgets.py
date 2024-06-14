@@ -1174,7 +1174,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.grid_layout.addWidget(volume_label, 2, 0)
 
         self.volume_input = QtWidgets.QDoubleSpinBox()
-        self.volume_input.setRange(1, 50)  # Set a minimum and maximum value
+        self.volume_input.setRange(1, 500)  # Set a minimum and maximum value
         self.volume_input.setDecimals(0)  # Set the number of decimal places
         self.volume_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
         self.grid_layout.addWidget(self.volume_input, 2, 1)
@@ -1193,7 +1193,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.grid_layout.addWidget(self.replicates_label, 4, 0)
 
         self.replicates_input = QtWidgets.QDoubleSpinBox()
-        self.replicates_input.setRange(1, 100)  # Set a minimum and maximum value
+        self.replicates_input.setRange(1, 384)  # Set a minimum and maximum value
         self.replicates_input.setDecimals(0)  # Set the number of decimal places
         self.replicates_input.setAlignment(QtCore.Qt.AlignLeft)  # Align to the left
         self.replicates_input.valueChanged.connect(self.update_combinations_label)
