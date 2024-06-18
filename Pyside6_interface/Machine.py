@@ -1205,9 +1205,9 @@ class Machine(QtWidgets.QWidget):
         if not location:
             location = self.main_window.popup_options('Move to Location','Select location:',list(self.calibration_data.keys()))
 
-        if self.location == location:
-            print('Already in {} position'.format(location))
-            return
+        # if self.location == location:
+        #     print('Already in {} position'.format(location))
+        #     return
         available_locations = list(self.calibration_data.keys())
         if location not in available_locations:
             self.main_window.popup_message('Location not present','{} not present in calibration data'.format(location))
