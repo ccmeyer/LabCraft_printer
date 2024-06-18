@@ -54,6 +54,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.step_size,0)),
             Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.step_size)),
             Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.step_size)),
+            Shortcut("Set pressure to 2 psi", "0","0", lambda: self.machine.set_absolute_pressure(2)),
+            Shortcut("Set pressure to 0 psi", "5","5", lambda: self.machine.set_absolute_pressure(0)),
             Shortcut("Large Increase Pressure", "9","9", lambda: self.machine.set_relative_pressure(0.5)),
             Shortcut("Small Increase Pressure", "8","8", lambda: self.machine.set_relative_pressure(0.1)),
             Shortcut("Small Decrease Pressure", "7","7", lambda: self.machine.set_relative_pressure(-0.1)),
