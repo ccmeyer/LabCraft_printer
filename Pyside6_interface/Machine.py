@@ -1063,6 +1063,7 @@ class Machine(QtWidgets.QWidget):
     
     def home_motor_handler(self):
         self.homed = True
+        self.location = 'Home'
 
     def home_motors(self,handler=None,kwargs=None):
         if handler == None:
