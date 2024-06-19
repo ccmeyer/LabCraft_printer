@@ -1468,58 +1468,41 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.main_window.set_cartridges()
         self.close()
 
-class CustomSpinBox(QtWidgets.QDoubleSpinBox):
-    def __init__(self,possible_steps, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.values = possible_steps
-        self.setDecimals(0)
-
-    def stepBy(self, steps):
-        current_index = self.values.index(self.value())
-        new_index = max(0, min(current_index + steps, len(self.values) - 1))
-        self.setValue(self.values[new_index])
-
-class SimpleCoordinateBox(QtWidgets.QGroupBox):
-    def __init__(self, title, main_window):
-        super().__init__(title)
+class ConcentrationEditor(QtWidgets.QDialog):
+    def __init__(self, main_window, reagent_name, parent):
+        super().__init__()
         self.main_window = main_window
-        self.layout = QtWidgets.QGridLayout(self)
-        self.value_labels = []
+        self.reagent_name = reagent_name
+        self.parent = parent
+        self.setWindowTitle(f"Concentration Editor: {self.reagent_name}")
+        self.resize(800, 400)
 
-        labels = ["X", "Y", "Z", "P"]
-        self.entries = {}
-        self.target_entries = {}
+        self.layout = QtWidgets.QVBoxLayout(self)
 
-        for i, axis in enumerate(labels):
-            label = QtWidgets.QLabel(axis)
-            self.layout.addWidget(label, i, 0)
+        self.concentration_table = QtWidgets.QTableWidget(0, 4)
+        self.concentration_table.setHorizontalHeaderLabels(["Target Concentration", "Stock 1", "Resulting Concentration", "Delete"])
+        for i in range(self.concentration_table.columnCount()):
+            self.concentration_table.setColumnWidth(i, 150)
+        
+        self.layout.addWidget(self.concentration_table)
 
-            entry = QtWidgets.QLabel()
-            entry.setAlignment(QtCore.Qt.AlignCenter)
-            self.layout.addWidget(entry, i, 1)
-            self.entries[axis] = entry
+        self.add_stock_solution_row()
 
-            target_entry = QtWidgets.QLabel()
-            target_entry.setAlignment(QtCore.Qt.AlignCenter)
-            self.layout.addWidget(target_entry, i, 2)
-            self.target_entries[axis] = target_entry
-            
-        self.step_size_label = QtWidgets.QLabel("Step Size:")
-        self.layout.addWidget(self.step_size_label, 2, 3)
-        self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
-        self.step_size_input.setRange(2, 2000)
-        self.step_size_input.setValue(self.main_window.step_size)
-        self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-        self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
+        self.add_concentration_button = QtWidgets.QPushButton("Add Concentration")
+        self.add_concentration_button.clicked.connect(self.add_concentration_row)
+        self.layout.addWidget(self.add_concentration_button)
 
-    def update_coordinates(self, values,target_values):
-        for axis in values.keys():
-            self.entries[axis].setText(str(values[axis]))
-            self.target_entries[axis].setText(str(target_values[axis]))
+        self.add_stock_button = QtWidgets.QPushButton("Add Stock Solution")
+        self.add_stock_button.clicked.connect(self.add_stock_solution)
+        self.layout.addWidget(self.add_stock_button)
 
-    def update_step_size(self,step_size):
-        self.step_size_input.setValue(step_size)
+        self.save_button = QtWidgets.QPushButton("Save")
+        self.save_button.clicked.connect(self.save_concentrations)
+        self.layout.addWidget(self.save_button)
+
+        self.concentration_table.cellChanged.connect(self.update_resulting_concentrations)        
+        
+        self.load_data()
 
 
 class BoardStatusBox(QtWidgets.QGroupBox):
