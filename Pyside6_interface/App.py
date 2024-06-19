@@ -270,13 +270,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.step_num < len(self.possible_steps)-1:
             self.step_num += 1
             self.step_size = self.possible_steps[self.step_num]
-            self.coordinates_box.update_step_size(self.step_size)
+            self.update_step_size_display()
     
     def dec_step(self):
         if self.step_num > 0:
             self.step_num -= 1
             self.step_size = self.possible_steps[self.step_num]
-            self.coordinates_box.update_step_size(self.step_size)
+            self.update_step_size_display()
+
+    def update_step_size_display(self):
+        self.coordinates_box.update_step_size(self.step_size)
     
     def update_plate_box(self):
         self.plate_box.update_plate_box()

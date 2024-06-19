@@ -418,6 +418,62 @@ class Shortcut:
             self.key_name = key_name
             self.function = function
 
+class CustomSpinBox(QtWidgets.QDoubleSpinBox):
+    valueChangedByStep = QtCore.Signal(int)
+    def __init__(self,possible_steps, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.values = possible_steps
+        self.setDecimals(0)
+
+    def stepBy(self, steps):
+        current_index = self.values.index(self.value())
+        new_index = max(0, min(current_index + steps, len(self.values) - 1))
+        self.setValue(self.values[new_index])
+        self.valueChangedByStep.emit(steps)
+
+class SimpleCoordinateBox(QtWidgets.QGroupBox):
+    def __init__(self, title, main_window):
+        super().__init__(title)
+        self.main_window = main_window
+        self.layout = QtWidgets.QGridLayout(self)
+        self.value_labels = []
+
+        labels = ["X", "Y", "Z", "P"]
+        self.entries = {}
+        self.target_entries = {}
+
+        for i, axis in enumerate(labels):
+            label = QtWidgets.QLabel(axis)
+            self.layout.addWidget(label, i, 0)
+
+            entry = QtWidgets.QLabel()
+            entry.setAlignment(QtCore.Qt.AlignCenter)
+            self.layout.addWidget(entry, i, 1)
+            self.entries[axis] = entry
+
+            target_entry = QtWidgets.QLabel()
+            target_entry.setAlignment(QtCore.Qt.AlignCenter)
+            self.layout.addWidget(target_entry, i, 2)
+            self.target_entries[axis] = target_entry
+            
+        self.step_size_label = QtWidgets.QLabel("Step Size:")
+        self.layout.addWidget(self.step_size_label, 2, 3)
+        self.step_size_input = CustomSpinBox(self.main_window.possible_steps)
+        self.step_size_input.setRange(2, 2000)
+        self.step_size_input.setValue(self.main_window.step_size)
+        self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
+
+    def update_coordinates(self, values,target_values):
+        for axis in values.keys():
+            self.entries[axis].setText(str(values[axis]))
+            self.target_entries[axis].setText(str(target_values[axis]))
+
+    def update_step_size(self,step_size):
+        self.step_size_input.setValue(step_size)
+
+
 class PlateCalibrationDialog(QtWidgets.QDialog):
     plate_calibration_complete = QtCore.Signal(Plate)
     def __init__(self, main_window):
@@ -452,6 +508,7 @@ class PlateCalibrationDialog(QtWidgets.QDialog):
         self.simple_coord_box = SimpleCoordinateBox("Coordinates",self.main_window)
         self.simple_coord_box.setFixedWidth(400)
         self.box_layout.addWidget(self.simple_coord_box)
+        self.simple_coord_box.step_size_input.valueChangedByStep.connect(self.change_step)
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_plate_position()),
@@ -491,18 +548,27 @@ class PlateCalibrationDialog(QtWidgets.QDialog):
         target_coords = self.machine.get_target_coordinates()
         self.simple_coord_box.update_coordinates(current_coords,target_coords)
     
+    def change_step(self,steps):
+        if steps > 0:
+            self.inc_step()
+        
+        elif steps < 0:
+            self.dec_step()
+
     def inc_step(self):
         if self.main_window.step_num < len(self.main_window.possible_steps)-1:
             self.main_window.step_num += 1
             self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
             self.simple_coord_box.update_step_size(self.main_window.step_size)
-    
+            self.main_window.update_step_size_display()
+
     def dec_step(self):
         if self.main_window.step_num > 0:
             self.main_window.step_num -= 1
             self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
             self.simple_coord_box.update_step_size(self.main_window.step_size)
-    
+            self.main_window.update_step_size_display()
+            
     def update_instructions(self):
         self.instructions_label.setText(f"Calibrate the {self.current_calibration} corner of the plate")
     
@@ -565,6 +631,7 @@ class RackCalibrationDialog(QtWidgets.QDialog):
         self.simple_coord_box = SimpleCoordinateBox("Coordinates",self.main_window)
         self.simple_coord_box.setFixedWidth(400)
         self.box_layout.addWidget(self.simple_coord_box)
+        self.simple_coord_box.step_size_input.valueChangedByStep.connect(self.change_step)
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_position()),
@@ -604,17 +671,25 @@ class RackCalibrationDialog(QtWidgets.QDialog):
         target_coords = self.machine.get_target_coordinates()
         self.simple_coord_box.update_coordinates(current_coords,target_coords)
     
+    def change_step(self,steps):
+        if steps > 0:
+            self.inc_step()
+        elif steps < 0:
+            self.dec_step()
+
     def inc_step(self):
         if self.main_window.step_num < len(self.main_window.possible_steps)-1:
             self.main_window.step_num += 1
             self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
             self.simple_coord_box.update_step_size(self.main_window.step_size)
+            self.main_window.update_step_size_display()
     
     def dec_step(self):
         if self.main_window.step_num > 0:
             self.main_window.step_num -= 1
             self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
             self.simple_coord_box.update_step_size(self.main_window.step_size)
+            self.main_window.update_step_size_display()
 
     def check_before_move(self):
         if f'rack_position_{self.current_calibration}' in self.machine.calibration_data.keys():
