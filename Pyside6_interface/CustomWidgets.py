@@ -1621,8 +1621,15 @@ class CoordinateBox(QtWidgets.QGroupBox):
         self.step_size_input.setValue(500)
         self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
         self.step_size_input.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        self.step_size_input.valueChangedByStep.connect(self.change_step_size)
         self.layout.addWidget(self.step_size_input, 3, 3, 1, 1)
 
+    def change_step_size(self,steps):
+        if steps > 0:
+            self.main_window.inc_step()
+        elif steps < 0:
+            self.main_window.dec_step()
+        
     def update_step_size(self,step_size):
         self.step_size_input.setValue(step_size)
 
