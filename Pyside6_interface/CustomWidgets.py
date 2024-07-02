@@ -1200,14 +1200,16 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         super().__init__()
         self.main_window = main_window
         self.setWindowTitle("Reagent Input")
-        self.resize(800, 600)
+        self.resize(1000, 600)
         self.all_reactions = self.main_window.all_reactions
         self.reaction_metadata = self.main_window.reaction_metadata
 
-        self.layout = QtWidgets.QVBoxLayout(self)
+        self.full_layout = QtWidgets.QHBoxLayout(self)
+        self.layout = QtWidgets.QVBoxLayout()
+        self.full_layout.addLayout(self.layout)
 
         self.reagent_table = QtWidgets.QTableWidget(0, 5)  # 0 rows, 4 columns
-        self.reagent_table.setHorizontalHeaderLabels(["Reagent Name", "Min Concentration", "Max Concentration", "Number of Concentrations","Delete"])
+        self.reagent_table.setHorizontalHeaderLabels(["Reagent Name", "Concentrations", "Number of Concentrations","Edit","Delete"])
         self.layout.addWidget(self.reagent_table)
         # Set the width of the columns
         for i in range(self.reagent_table.columnCount()):
@@ -1280,6 +1282,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         self.grid_layout.addWidget(self.combinations_value,5,1)
         
         self.layout.addLayout(self.grid_layout)
+
         # Prepopulate the table if reaction_metadata is not None
         if not self.reaction_metadata.empty:
             for _, row in self.reaction_metadata.iterrows():
@@ -1291,15 +1294,47 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         else:
             self.add_reagent_row()
 
+        self.stock_layout = QtWidgets.QVBoxLayout()
+        self.stock_table = QtWidgets.QTableWidget(0, 2)
+        self.stock_table.setHorizontalHeaderLabels(["Reagent Name", "Concentration"])
+        self.stock_table.setMaximumWidth(200)
+        self.stock_layout.addWidget(self.stock_table)
+        # Set the width of the columns
+        for i in range(self.stock_table.columnCount()):
+            self.stock_table.setColumnWidth(i, 100)
+
+        self.full_layout.addLayout(self.stock_layout)
+        self.setLayout(self.full_layout)
+
         self.update_combinations_label()
+        self.update_stock_solutions()
+
+    def update_stock_solutions(self):
+        self.stock_table.setRowCount(0)
+        for i,row in self.main_window.stock_solutions.iterrows():
+            self.stock_table.insertRow(i)
+            reagent_name = QtWidgets.QTableWidgetItem(row['Reagent'])
+            concentration = QtWidgets.QTableWidgetItem(str(row['Concentration']))
+            self.stock_table.setItem(i,0,reagent_name)
+            self.stock_table.setItem(i,1,concentration)
 
     def calculate_combinations(self):
         combinations = 1
         for row in range(self.reagent_table.rowCount()):
-            num_concentrations = self.reagent_table.cellWidget(row, 3).value()
+            num_concentrations = int(self.reagent_table.cellWidget(row, 2).text())
             combinations *= num_concentrations
         combinations *= self.replicates_input.value()
         return int(combinations)
+
+    def update_reaget_concentrations(self,row):
+        reagent_name = self.reagent_table.cellWidget(row, 0).currentText()
+        editor_button = self.reagent_table.cellWidget(row, 3)
+        # reagent_editor = editor_button.concentration_editor
+        # target_concentrations = reagent_editor.get_target_concentrations()
+        # self.reagent_table.cellWidget(row, 1).setText(str(target_concentrations))
+        # num_concentrations = len(target_concentrations)
+        # self.reagent_table.cellWidget(row, 2).setText(str(num_concentrations))
+        self.update_combinations_label()
 
     def update_combinations_label(self):
         combinations = self.calculate_combinations()
@@ -1335,34 +1370,46 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         reagent_name_input.addItems(names)
         reagent_name_input.setEditable(False)  # The user must select one of the provided options
         reagent_name_input.currentIndexChanged.connect(self.update_all_reagent_combo_boxes)
-        min_concentration_input = QtWidgets.QDoubleSpinBox()
-        min_concentration_input.setRange(0, 100)  # Set a minimum and maximum value
-        min_concentration_input.setDecimals(2)  # Set the number of decimal places
-        
-        max_concentration_input = QtWidgets.QDoubleSpinBox()
-        max_concentration_input.setRange(0, 100)  # Set a minimum and maximum value
-        max_concentration_input.setDecimals(2)  # Set the number of decimal places
-        
-        num_concentrations_input = QtWidgets.QSpinBox()
-        num_concentrations_input.setRange(1, 100)  # Set a minimum and maximum value
-        num_concentrations_input.valueChanged.connect(self.update_combinations_label)
+
+        current_concentrations = []
+        concentrations_label = QtWidgets.QLabel(str(current_concentrations))
+        self.reagent_table.setCellWidget(row, 1, concentrations_label)
+
+        num_concentrations = len(current_concentrations)
+        num_concentrations_label = QtWidgets.QLabel(str(num_concentrations))
+        self.reagent_table.setCellWidget(row, 2, num_concentrations_label)
+
+        edit_button = QtWidgets.QPushButton("Edit Concentrations")
+        edit_button.concentration_editor = None  # Initialize with None
+        edit_button.clicked.connect(lambda: self.open_concentration_editor(reagent_name_input.currentText(),edit_button, concentrations_label, num_concentrations_label))
 
         self.reagent_table.setCellWidget(row, 0, reagent_name_input)
-        self.reagent_table.setCellWidget(row, 1, min_concentration_input)
-        self.reagent_table.setCellWidget(row, 2, max_concentration_input)
-        self.reagent_table.setCellWidget(row, 3, num_concentrations_input)
-
+        self.reagent_table.setCellWidget(row, 1, concentrations_label)
+        self.reagent_table.setCellWidget(row, 2, num_concentrations_label)
+        self.reagent_table.setCellWidget(row, 3, edit_button)
+        
         delete_button = QtWidgets.QPushButton("Delete")
         delete_button.clicked.connect(lambda: self.delete_reagent_row(row))
         self.reagent_table.setCellWidget(row, 4, delete_button)
         self.reagent_table.setRowHeight(row, delete_button.sizeHint().height())
+
         if row_data is not None and not self.reaction_metadata.empty and type(row_data) != bool:
             reagent_name_input.setCurrentText(row_data['Reagent'])
-            min_concentration_input.setValue(row_data['Min Concentration'])
-            max_concentration_input.setValue(row_data['Max Concentration'])
-            num_concentrations_input.setValue(row_data['Num Concentrations'])
+            current_concentrations = row_data['Target Concentrations']
+            concentrations_label.setText(str(current_concentrations))
+            num_concentrations = len(current_concentrations)
+            num_concentrations_label.setText(str(num_concentrations))
+            edit_button.concentration_editor.load_data(row_data)
         self.update_all_reagent_combo_boxes()
 
+    def open_concentration_editor(self, reagent_name,edit_button, concentrations_label, num_concentrations_label):
+        if edit_button.concentration_editor is None:
+            edit_button.concentration_editor = ConcentrationEditor(self.main_window, reagent_name, self)
+        edit_button.concentration_editor.exec()
+        target_concentrations = edit_button.concentration_editor.get_target_concentrations()
+        concentrations_label.setText(str(target_concentrations))
+        num_concentrations_label.setText(str(len(target_concentrations)))
+    
     def update_all_reagent_combo_boxes(self):
         currently_selected_reagents = [self.fill_reagent_input.currentText()]
 
@@ -1394,17 +1441,13 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         target_concentrations_list = []
         for row in range(self.reagent_table.rowCount()):
             reagent_name = self.reagent_table.cellWidget(row, 0).currentText()
-            min_concentration = self.reagent_table.cellWidget(row, 1).value()
-            max_concentration = self.reagent_table.cellWidget(row, 2).value()
-            num_concentrations = self.reagent_table.cellWidget(row, 3).value()
-            if num_concentrations == 1:
-                target_concentrations = [max_concentration]
-            else:
-                target_concentrations = np.linspace(min_concentration, max_concentration, num_concentrations).tolist()
-            data.append([reagent_name, min_concentration, max_concentration, num_concentrations, target_concentrations])
+            editor_button = self.reagent_table.cellWidget(row, 1)
+            reagent_editor = editor_button.reagent_editor
+            target_concentrations = reagent_editor.get_target_concentrations()
+            data.append([reagent_name, target_concentrations])
             target_concentrations_list.append(target_concentrations)
 
-        df = pd.DataFrame(data, columns=['Reagent', 'Min Concentration', 'Max Concentration', 'Num Concentrations', 'Target Concentrations'])
+        df = pd.DataFrame(data, columns=['Reagent','Target Concentrations'])
         df['Experiment_name'] = self.experiment_name_input.text()
         df['Fill_reagent'] = self.fill_reagent_input.currentText()
         df['Final_volume'] = self.volume_input.value()
@@ -1439,17 +1482,13 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         total_volume = self.volume_input.value()
         for row in range(self.reagent_table.rowCount()):
             reagent_name = self.reagent_table.cellWidget(row, 0).currentText()
-            min_concentration = self.reagent_table.cellWidget(row, 1).value()
-            max_concentration = self.reagent_table.cellWidget(row, 2).value()
-            num_concentrations = self.reagent_table.cellWidget(row, 3).value()
-            if min_concentration >= max_concentration:
-                self.main_window.popup_message("Error", f"Min concentration for {reagent_name} must be less than max concentration")
-                return False
-            target_concentrations = np.linspace(min_concentration, max_concentration, num_concentrations).tolist()
+            editor_button = self.reagent_table.cellWidget(row, 1)
+            reagent_editor = editor_button.reagent_editor
+            target_concentrations = reagent_editor.get_target_concentrations()
             if not all(concentration.is_integer() for concentration in target_concentrations):
                 self.main_window.popup_message("Error", f"Target concentrations for {reagent_name} must be whole numbers")
                 return False
-            total_volume -= max_concentration
+            total_volume -= sum(target_concentrations)
         if total_volume < 0:
             self.main_window.popup_message("Error", "Total volume must be greater than or equal to 0")
             return False
@@ -1503,6 +1542,118 @@ class ConcentrationEditor(QtWidgets.QDialog):
         self.concentration_table.cellChanged.connect(self.update_resulting_concentrations)        
         
         self.load_data()
+
+    def add_stock_solution_row(self):
+        row = self.concentration_table.rowCount()
+        self.concentration_table.insertRow(row)
+
+        for col in range(self.concentration_table.rowCount()):
+            self.concentration_table.setItem(row, col, QtWidgets.QTableWidgetItem(""))
+
+        stock_concentration_input = QtWidgets.QDoubleSpinBox()
+        stock_concentration_input.setRange(1, 1000)
+        stock_concentration_input.setDecimals(0)
+        stock_concentration_input.setAlignment(QtCore.Qt.AlignLeft)
+        stock_concentration_input.valueChanged.connect(self.update_resulting_concentrations)
+        stock_concentration_input.setFocusPolicy(QtCore.Qt.NoFocus)
+        stock_concentration_input.setValue(1)
+        self.concentration_table.setCellWidget(row, 1, stock_concentration_input)     
+    
+    def add_concentration_row(self):
+        row = self.concentration_table.rowCount()
+        self.concentration_table.insertRow(row)
+
+        target_concentration_input = QtWidgets.QDoubleSpinBox()
+        target_concentration_input.setRange(0, 1000)
+        target_concentration_input.setDecimals(0)
+        target_concentration_input.setAlignment(QtCore.Qt.AlignLeft)
+        target_concentration_input.valueChanged.connect(self.update_resulting_concentrations)
+        self.concentration_table.setCellWidget(row, 0, target_concentration_input)
+
+        for col in range(1, self.concentration_table.columnCount()):
+            if col == self.concentration_table.columnCount() - 2:
+                result_item = QtWidgets.QTableWidgetItem()
+                result_item.setFlags(QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
+                self.concentration_table.setItem(row, col, result_item)
+            elif col == self.concentration_table.columnCount() - 1:
+                delete_button = QtWidgets.QPushButton("Delete")
+                delete_button.clicked.connect(lambda: self.delete_row(row))
+                self.concentration_table.setCellWidget(row, col, delete_button)
+            else:
+                droplet_input = QtWidgets.QSpinBox()
+                droplet_input.setRange(0, 100)
+                droplet_input.setAlignment(QtCore.Qt.AlignLeft)
+                droplet_input.valueChanged.connect(self.update_resulting_concentrations)
+                self.concentration_table.setCellWidget(row, col, droplet_input)
+
+    def delete_row(self, row):
+        self.concentration_table.removeRow(row)
+
+    def add_stock_solution(self):
+        col = self.concentration_table.columnCount() - 2
+        self.concentration_table.insertColumn(col)
+
+        stock_concentration_input = QtWidgets.QDoubleSpinBox()
+        stock_concentration_input.setRange(0, 1000)
+        stock_concentration_input.setDecimals(0)
+        stock_concentration_input.setAlignment(QtCore.Qt.AlignLeft)
+        stock_concentration_input.valueChanged.connect(self.update_resulting_concentrations)
+        self.concentration_table.setCellWidget(0, col, stock_concentration_input)
+
+        for row in range(1, self.concentration_table.rowCount()):
+            droplet_input = QtWidgets.QSpinBox()
+            droplet_input.setRange(0, 100)
+            droplet_input.setAlignment(QtCore.Qt.AlignLeft)
+            droplet_input.valueChanged.connect(self.update_resulting_concentrations)
+            self.concentration_table.setCellWidget(row, col, droplet_input)
+
+        self.concentration_table.setHorizontalHeaderItem(col, QtWidgets.QTableWidgetItem(f"Stock {col}"))
+
+
+    def load_data(self,row_data=None):
+        if row_data is not None:
+            for i, concentration in enumerate(row_data['Target Concentrations']):
+                if i >= self.concentration_table.rowCount():
+                    self.concentration_table.insertRow(i)
+                self.concentration_table.setItem(i, 0, QtWidgets.QTableWidgetItem(str(concentration)))
+                self.concentration_table.setItem(i, 1, QtWidgets.QTableWidgetItem(str(1)))  # Dummy stock solution value
+
+    def get_target_concentrations(self):
+        target_concentrations = []
+        for row in range(1,self.concentration_table.rowCount()):
+            target_concentration = self.concentration_table.cellWidget(row, 0).value()
+            target_concentrations.append(target_concentration)
+        return target_concentrations
+
+    def update_resulting_concentrations(self):
+        for row in range(1, self.concentration_table.rowCount()):
+            total_concentration = 0
+            for col in range(1, self.concentration_table.columnCount() - 1):
+                droplet_input = self.concentration_table.cellWidget(row, col)
+                stock_concentration_input = self.concentration_table.cellWidget(0, col)
+                if droplet_input and stock_concentration_input:
+                    droplets = droplet_input.value()
+                    stock_concentration = stock_concentration_input.value()
+                    total_concentration += droplets * stock_concentration
+            result_item = self.concentration_table.item(row, self.concentration_table.columnCount() - 2)
+            if result_item:
+                result_item.setText(str(total_concentration))
+
+    def get_stock_solutions(self):
+        stock_solutions = []
+        for col in range(1, self.concentration_table.columnCount() - 2):
+            stock_concentration_input = self.concentration_table.cellWidget(0, col)
+            if stock_concentration_input:
+                stock_concentration = stock_concentration_input.value()
+                stock_solutions.append(stock_concentration)
+        return stock_solutions
+    
+    def save_concentrations(self):
+        self.parent.update_reaget_concentrations(self.parent.reagent_table.currentRow())
+        self.parent.update_combinations_label()
+        self.main_window.update_stock_solutions(self.reagent_name,self.get_stock_solutions())
+        self.parent.update_stock_solutions()
+        self.close()
 
 
 class BoardStatusBox(QtWidgets.QGroupBox):

@@ -94,6 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.all_reactions = pd.DataFrame()
         self.reaction_metadata = pd.DataFrame()
+        self.stock_solutions = pd.DataFrame(columns=['Reagent','Concentrations'])
         self.start_well = 0
         self.wells_df = pd.DataFrame()
         self.full_array = pd.DataFrame()
@@ -236,6 +237,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # Window dimensions
         geometry = self.screen().availableGeometry()
         self.setFixedSize(geometry.width() * 0.95, geometry.height() * 0.9)
+    
+    def update_stock_solutions(self,reagent,stock_solutions):
+        '''Takes in the stock solutions for a reagent, removes the previous stock solutions and adds the new ones'''
+        if self.stock_solutions.empty:
+            self.stock_solutions = pd.DataFrame(stock_solutions,columns=['Concentration'])
+            self.stock_solutions['Reagent'] = reagent
+            return
+        else:
+            self.stock_solutions = self.stock_solutions[self.stock_solutions['Reagent'] != reagent]
+            new_solutions = pd.DataFrame(stock_solutions,columns=['Concentration'])
+            new_solutions['Reagent'] = reagent
+            self.stock_solutions = pd.concat([self.stock_solutions,new_solutions])
     
     def update_board_status(self):
         self.board_status_box.update_status()
