@@ -79,6 +79,9 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Reset Arrays", "R","R", lambda: self.reset_print_arrays()),
             Shortcut("Home Motors", "H","H", lambda: self.home_motors()),
             Shortcut("Reset Syringe", "{","{", lambda: self.reset_syringe()),
+            Shortcut("Gate On", "F","F", lambda: self.machine.gate_on()),
+            Shortcut("Gate Off", "f","f", lambda: self.machine.gate_off()),
+            Shortcut("Flash LED", "E","E", lambda: self.machine.flash_led()),
         ]
 
         self.read_settings_file()

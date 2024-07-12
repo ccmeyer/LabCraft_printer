@@ -1076,6 +1076,15 @@ class Machine(QtWidgets.QWidget):
     def reset_acceleration(self):
         self.add_command_to_queue('RESET_ACCEL',0,0,0)
 
+    def gate_on(self):
+        self.add_command_to_queue('GATE_ON',0,0,0)
+    
+    def gate_off(self):
+        self.add_command_to_queue('GATE_OFF',0,0,0)
+    
+    def flash_led(self):
+        self.add_command_to_queue('FLASH_ON',3,5000,25)
+
     def get_coordinates(self):
         return self.coordinates
     

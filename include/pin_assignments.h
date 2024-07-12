@@ -10,13 +10,16 @@ const int pumpValvePin1 = PE5;  // Fan1 - J51
 const int pumpValvePin2 = PD12; // Fan2 - J52
 const int pumpPin = PD13;       // Fan3 - J53
 const int printValvePin = PD14; // Fan4 - J54
-const int Fan5 = PD15;          // Fan5 - J55
+const int gatePin = PD15;          // Fan5 - J55
 
 //== LIMIT SWITCH PINS ===========================================
 const int xstop = PG6;  // DIAG0 - J27
 const int ystop = PG9;  // DIAG1 - J29
 const int zstop = PG10; // DIAG2 - J31
 const int pstop = PG11; // DIAG3 - J33
+
+//== IMAGING PINS ===========================================
+const int flashPin = PB6; // Servo0 = J43
 
 //==STEPPER MOTOR PINS ===========================================
 

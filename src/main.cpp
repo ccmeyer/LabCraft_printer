@@ -676,6 +676,9 @@ enum CommandType {
     UNKNOWN,
     CHANGE_ACCEL,
     RESET_ACCEL,
+    GATE_ON,
+    GATE_OFF,
+    FLASH_ON,
     // Add more command types as needed
 };
 
@@ -763,6 +766,12 @@ CommandType mapCommandType(const char* commandName) {
         return CHANGE_ACCEL;
     } else if (strcmp(commandName, "RESET_ACCEL") == 0) {
         return RESET_ACCEL;
+    } else if (strcmp(commandName, "GATE_ON") == 0) {
+        return GATE_ON;
+    } else if (strcmp(commandName, "GATE_OFF") == 0) {
+        return GATE_OFF;
+    } else if (strcmp(commandName, "FLASH_ON") == 0) {
+        return FLASH_ON;
     } else {
         return UNKNOWN;
     }
@@ -902,6 +911,20 @@ void executeCommand(const Command& cmd) {
       break;
     case DEREGULATE_PRESSURE:
       regulatePressure = false;
+      break;
+    case GATE_ON:
+      digitalWrite(gatePin, HIGH);
+      break;
+    case GATE_OFF:
+      digitalWrite(gatePin, LOW);
+      break;
+    case FLASH_ON:
+      for (int i = 0; i < cmd.param1; i++){
+        digitalWrite(flashPin, HIGH);
+        delayMicroseconds(cmd.param2);
+        digitalWrite(flashPin, LOW);
+        delay(cmd.param3);
+      }
       break;
     case PAUSE:
       break;
@@ -1055,10 +1078,10 @@ std::vector<Task> tasks = {
 
 void setup() {
   SystemClock_Config();
+  setupPins();
+
 	Serial.begin(115200);
   while(!Serial);
-
-  setupPins();
 
   // driverX.begin();             // Initiate pins and registeries
   // driverX.rms_current(800);    // Set stepper current to 600mA. The command is the same as command TMC2130.setCurrent(600, 0.11, 0.5);

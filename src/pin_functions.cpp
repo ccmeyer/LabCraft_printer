@@ -21,6 +21,13 @@ void setupPins()
     pinMode(printValvePin, OUTPUT);
     digitalWrite(printValvePin,LOW);
 
+    pinMode(gatePin, OUTPUT);
+    digitalWrite(gatePin,LOW);
+
+    // Setup imaging pins
+    pinMode(flashPin, OUTPUT);
+    digitalWrite(flashPin,LOW);
+
     pinMode(xstop, INPUT);
     pinMode(ystop, INPUT);
     pinMode(zstop, INPUT);
