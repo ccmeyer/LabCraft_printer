@@ -46,11 +46,17 @@ import gpiod
 
 # Define the GPIO pin
 GPIO_PIN = 17
+WRITE_PIN = 27
 
 # Initialize GPIO
 chip = gpiod.Chip('gpiochip0')  # Use the correct gpiochip for your GPIO pin
-line = chip.get_line(GPIO_PIN)
-line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_IN)
+read = chip.get_line(GPIO_PIN)
+read.request(consumer="Read", type=gpiod.LINE_REQ_DIR_IN)
+write = chip.get_line(WRITE_PIN)
+write.request(consumer="Write", type=gpiod.LINE_REQ_DIR_OUT)
+write_value = 0
+write.set_value(write_value)
+counter = 0
 
 # Initialize the camera
 cap = cv2.VideoCapture(0)  # Use the first camera
@@ -72,11 +78,21 @@ def capture_and_show_image():
 try:
     while True:
         # Check the GPIO pin state
-        if line.get_value() == 1:
+        if counter == 10:
+            print("No HIGH signal detected for 10 seconds, resetting counter...")
+            counter = 0
+            if write_value == 1:
+                write_value = 0
+                write.set_value(write_value)
+            else:
+                write_value = 1
+                write.set_value(write_value)
+        if read.get_value() == 1:
             print("HIGH signal detected, capturing image...")
             capture_and_show_image()
         else:
             print("Waiting for HIGH signal...")
+            counter += 1
         
         # Sleep for a short period to avoid busy-waiting
         time.sleep(0.1)
@@ -84,5 +100,6 @@ except KeyboardInterrupt:
     print("Script terminated by user")
 finally:
     # Clean up
-    line.release()
+    read.release()
+    write.release()
     cap.release()
