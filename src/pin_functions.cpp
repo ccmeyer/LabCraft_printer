@@ -28,6 +28,9 @@ void setupPins()
     pinMode(flashPin, OUTPUT);
     digitalWrite(flashPin,LOW);
 
+    pinMode(cameraPin, OUTPUT);
+    digitalWrite(cameraPin,LOW);
+
     pinMode(xstop, INPUT);
     pinMode(ystop, INPUT);
     pinMode(zstop, INPUT);

@@ -679,6 +679,7 @@ enum CommandType {
     GATE_ON,
     GATE_OFF,
     FLASH_ON,
+    CAMERA_ON,
     // Add more command types as needed
 };
 
@@ -772,6 +773,8 @@ CommandType mapCommandType(const char* commandName) {
         return GATE_OFF;
     } else if (strcmp(commandName, "FLASH_ON") == 0) {
         return FLASH_ON;
+    } else if (strcmp(commandName, "CAMERA_ON") == 0) {
+        return CAMERA_ON;
     } else {
         return UNKNOWN;
     }
@@ -925,6 +928,11 @@ void executeCommand(const Command& cmd) {
         digitalWrite(flashPin, LOW);
         delay(cmd.param3);
       }
+      break;
+    case CAMERA_ON:
+      digitalWrite(cameraPin, HIGH);
+      delay(cmd.param1);
+      digitalWrite(cameraPin, LOW);
       break;
     case PAUSE:
       break;

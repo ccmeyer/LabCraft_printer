@@ -20,7 +20,7 @@ const int pstop = PG11; // DIAG3 - J33
 
 //== IMAGING PINS ===========================================
 const int flashPin = PB6; // Servo0 = J43
-
+const int cameraPin = PB7; // probe = J43
 //==STEPPER MOTOR PINS ===========================================
 
 // --DRIVER 0--

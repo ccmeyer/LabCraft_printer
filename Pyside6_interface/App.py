@@ -82,6 +82,7 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Gate On", "F","F", lambda: self.machine.gate_on()),
             Shortcut("Gate Off", "f","f", lambda: self.machine.gate_off()),
             Shortcut("Flash LED", "E","E", lambda: self.machine.flash_led()),
+            Shortcut("Take Image", "I","I", lambda: self.machine.take_image()),
         ]
 
         self.read_settings_file()
