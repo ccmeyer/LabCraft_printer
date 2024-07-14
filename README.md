@@ -81,4 +81,19 @@ python .\PySide6_interface\App.py
 ```
 Inside of the `.\PySide6_interface\Presets` directory is the file `Settings.json`. This file set several predefined values such as the default COM ports, default plate setup, etc.
 
-## ADDED THIS
+## Raspberry Pi setup
+```bash
+sudo apt-get update
+sudo apt-get upgrade
+
+sudo apt-get install libgpiod-dev libatlas-base-dev libavcodec-dev libavformat-dev libswscale-dev libcap-dev libcamera-dev libcamera-apps
+
+sudo apt-get install python3-venv python3-pip
+
+python3 -m venv venv
+source venv/bin/activate
+
+pip install numpy
+pip install picamera2
+pip install gpiod
+```
