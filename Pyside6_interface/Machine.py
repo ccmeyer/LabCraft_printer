@@ -1085,8 +1085,8 @@ class Machine(QtWidgets.QWidget):
     def flash_led(self):
         self.add_command_to_queue('FLASH_ON',3,5000,25)
 
-    def take_image(self):
-        self.add_command_to_queue('CAMERA_ON',200,0,0)
+    def take_image(self,flash_delay,flash_duration):
+        self.add_command_to_queue('CAMERA_ON',flash_delay,flash_duration,0)
 
     def get_coordinates(self):
         return self.coordinates

@@ -932,6 +932,11 @@ void executeCommand(const Command& cmd) {
     case CAMERA_ON:
       digitalWrite(cameraPin, HIGH);
       delay(cmd.param1);
+      digitalWrite(flashPin, HIGH);
+      delayMicroseconds(cmd.param2);
+      digitalWrite(flashPin, LOW);
+      // delay(cmd.param3);
+      // delay(cmd.param1);
       digitalWrite(cameraPin, LOW);
       break;
     case PAUSE:

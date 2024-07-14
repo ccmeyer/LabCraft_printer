@@ -9,6 +9,51 @@ import json
 import os
 from serial.tools.list_ports import comports
 
+class ImageCaptureDialog(QtWidgets.QDialog):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setWindowTitle("Image Capture")
+        self.resize(400, 400)
+
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        self.setting_grid = QtWidgets.QGridLayout()
+
+         # Flash Delay
+        self.flash_delay_label = QtWidgets.QLabel("Flash Delay:")
+        self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
+        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 1
+        self.flash_delay_spin_box.setMaximum(1000)  # Assuming a reasonable max value
+        self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
+        self.flash_delay_spin_box.setValue(1)  # Default value
+        self.setting_grid.addWidget(self.flash_delay_label, 0, 0)
+        self.setting_grid.addWidget(self.flash_delay_spin_box, 0, 1)
+
+        # Flash Duration
+        self.flash_duration_label = QtWidgets.QLabel("Flash Duration:")
+        self.flash_duration_spin_box = QtWidgets.QDoubleSpinBox()
+        self.flash_duration_spin_box.setMinimum(1)  # Minimum value set to 1
+        self.flash_duration_spin_box.setMaximum(10000)  # Assuming a reasonable max value
+        self.flash_duration_spin_box.setSingleStep(10)  # Step size of 1
+        self.flash_duration_spin_box.setValue(1000)  # Default value
+        self.setting_grid.addWidget(self.flash_duration_label, 1, 0)
+        self.setting_grid.addWidget(self.flash_duration_spin_box, 1, 1)
+
+        self.layout.addLayout(self.setting_grid)
+
+
+        self.capture_button = QtWidgets.QPushButton("Capture Image")
+        self.capture_button.clicked.connect(self.capture_image)
+        self.layout.addWidget(self.capture_button)
+
+    def capture_image(self):
+        flash_delay = self.flash_delay_spin_box.value()
+        flash_duration = self.flash_duration_spin_box.value()
+        self.main_window.machine.take_image(flash_delay, flash_duration)
+
+        
+
 class Reagent():
     """
     Represents a reagent with a name, color dictionary, color name, and hex color.
@@ -962,12 +1007,14 @@ class PlateBox(QtWidgets.QGroupBox):
         self.experiment_name.setText(self.main_window.experiment_name)
     
     def read_plate_file(self):
-        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'r') as f:
+        plates_path = os.path.join('Pyside6_interface','Presets','Plates.json')
+        with open(plates_path, 'r') as f:
             plates = json.load(f)
         self.plate_options = [Plate(plate['name'],rows=plate['rows'],columns=plate['columns'],spacing=plate['spacing'],default=plate['default'],calibrations=plate['calibrations']) for plate in plates]
     
     def write_plate_file(self):
-        with open('.\\Pyside6_interface\\Presets\\Plates.json', 'w') as f:
+        plates_path = os.path.join('Pyside6_interface','Presets','Plates.json')
+        with open(plates_path, 'w') as f:
             json.dump([plate.__dict__ for plate in self.plate_options], f, indent=4)
 
     def create_plate(self,plate):
@@ -1421,7 +1468,7 @@ class ArrayDesignWindow(QtWidgets.QDialog):
         replicates_df = replicates_df.set_index(['replicate_id','unique_id']).reset_index()
 
         experiment_name = self.experiment_name_input.text()
-        experiment_dir = f'.\\Pyside6_interface\\Experiments\\{experiment_name}'
+        experiment_dir = os.path.join('Pyside6_interface','Experiments',experiment_name)
         os.makedirs(experiment_dir, exist_ok=True)
 
         # Write metadata to a CSV file
@@ -1547,6 +1594,11 @@ class BoardStatusBox(QtWidgets.QGroupBox):
         self.cycle_count_value = QtWidgets.QLabel()
         self.layout.addWidget(self.cycle_count_value, 1, 1)
 
+        # Button to open ImageCaptureDialog
+        self.open_image_capture_dialog_button = QtWidgets.QPushButton("Open Image Capture Dialog")
+        self.layout.addWidget(self.open_image_capture_dialog_button, 2, 0, 1, 2)  # Spanning 2 columns
+        self.open_image_capture_dialog_button.clicked.connect(self.openImageCaptureDialog)
+
         self.update_status()
 
     def update_status(self):
@@ -1556,7 +1608,9 @@ class BoardStatusBox(QtWidgets.QGroupBox):
         self.max_cycle_value.setText(str(self.machine.get_max_cycle()))
         self.cycle_count_value.setText(str(self.machine.get_cycle_count()))
 
-    
+    def openImageCaptureDialog(self):
+        dialog = ImageCaptureDialog(self.main_window)
+        dialog.exec_()
 
 class CoordinateBox(QtWidgets.QGroupBox):
     """
