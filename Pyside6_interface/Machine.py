@@ -593,7 +593,7 @@ class Machine(QtWidgets.QWidget):
         self.com_open = True
         self.state = "Free"
 
-        self.calibration_file_path = '.\\Pyside6_interface\\Calibrations\\default_positions.json'
+        self.calibration_file_path = os.path.join('Pyside6_interface', 'Calibrations', 'default_positions.json')
         self.calibration_data = {}
         self.load_positions_from_file()
         self.well_positions = pd.DataFrame()
