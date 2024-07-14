@@ -2,6 +2,8 @@ from PySide6 import QtCore, QtWidgets, QtGui
 
 from PySide6 import QtCharts
 from PySide6.QtCore import QTimer, QPointF
+from PySide6.QtWidgets import QStyleFactory
+from PySide6.QtGui import QPalette, QColor
 import numpy as np
 from Machine import Machine,Command
 from CustomWidgets import *
@@ -839,11 +841,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reagents[reagent_index] = reagent
         self.write_reagents_file()
 
+def set_dark_theme(app):
+    app.setStyle(QStyleFactory.create("Fusion"))
+
+    dark_palette = QPalette()
+    
+    # Base color
+    dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
+    dark_palette.setColor(QPalette.WindowText, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
+    dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.ToolTipText, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.Text, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.Button, QColor(53, 53, 53))
+    dark_palette.setColor(QPalette.ButtonText, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.BrightText, QColor(255, 0, 0))  # red
+    
+    # Link colors
+    dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
+    dark_palette.setColor(QPalette.LinkVisited, QColor(42, 130, 218))
+    
+    # Highlight color
+    dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    dark_palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))  # black
+
+    app.setPalette(dark_palette)
+
 if __name__ == "__main__":
     app = QtWidgets.QApplication([])
-    style_path = os.path.join('Pyside6_interface','stylesheet.qss')
-    with open(style_path, "r") as f:
-        app.setStyleSheet(f.read())
+    set_dark_theme(app)
 
     window = MainWindow()
     window.show()
