@@ -2,6 +2,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 
 from PySide6 import QtCharts
 from PySide6.QtCore import QTimer, QPointF
+from Camera import Camera
 import numpy as np
 import pandas as pd
 import itertools
@@ -40,16 +41,38 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.setting_grid.addWidget(self.flash_duration_label, 1, 0)
         self.setting_grid.addWidget(self.flash_duration_spin_box, 1, 1)
 
+        # Exposure Time
+        self.exposure_time_label = QtWidgets.QLabel("Exposure Time:")
+        self.exposure_time_spin_box = QtWidgets.QDoubleSpinBox()
+        self.exposure_time_spin_box.setMinimum(1)  # Minimum value set to 1
+        self.exposure_time_spin_box.setMaximum(500000)
+        self.exposure_time_spin_box.setSingleStep(100)
+        self.exposure_time_spin_box.setValue(10000)
+        self.setting_grid.addWidget(self.exposure_time_label, 2, 0)
+        self.setting_grid.addWidget(self.exposure_time_spin_box, 2, 1)
+
         self.layout.addLayout(self.setting_grid)
 
+        self.initialize_camera_button = QtWidgets.QPushButton("Initialize Camera")
+        self.initialize_camera_button.clicked.connect(self.initialize_camera)
+        self.layout.addWidget(self.initialize_camera_button)
 
         self.capture_button = QtWidgets.QPushButton("Capture Image")
         self.capture_button.clicked.connect(self.capture_image)
         self.layout.addWidget(self.capture_button)
 
+        self.initialize_camera()
+
+    def initialize_camera(self):
+        self.camera = Camera()
+        exposure_time = self.exposure_time_spin_box.value()
+        self.camera.start_camera(exposure_time=exposure_time)
+        self.main_window.popup_message("Camera Initialized","Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
+    
     def capture_image(self):
         flash_delay = self.flash_delay_spin_box.value()
         flash_duration = self.flash_duration_spin_box.value()
+        self.camera.capture_image()
         self.main_window.machine.take_image(flash_delay, flash_duration)
 
         
