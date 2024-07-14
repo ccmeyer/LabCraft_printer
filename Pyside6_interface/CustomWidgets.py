@@ -1596,6 +1596,7 @@ class BoardStatusBox(QtWidgets.QGroupBox):
 
         # Button to open ImageCaptureDialog
         self.open_image_capture_dialog_button = QtWidgets.QPushButton("Open Image Capture Dialog")
+        self.open_image_capture_dialog_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.open_image_capture_dialog_button, 2, 0, 1, 2)  # Spanning 2 columns
         self.open_image_capture_dialog_button.clicked.connect(self.openImageCaptureDialog)
 
