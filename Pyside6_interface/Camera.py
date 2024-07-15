@@ -30,7 +30,7 @@ class Camera:
     #     image = self.picam2.capture_array()
     #     return image
     
-    def capture_image(self):
+    def capture_image(self,empty_arg):
         print("Starting image capture")
         self.capture_event.set()
         self.image = self.picam2.capture_array()
@@ -41,7 +41,7 @@ class Camera:
         self.capture_event = threading.Event()
 
         # Start the image capture in a separate thread
-        self.capture_thread = threading.Thread(target=self.capture_image, args=(self,))
+        self.capture_thread = threading.Thread(target=self.capture_image, args=(self,0))
         self.capture_thread.start()
 
         # Wait until the capture has started
