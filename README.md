@@ -86,14 +86,17 @@ Inside of the `.\PySide6_interface\Presets` directory is the file `Settings.json
 sudo apt-get update
 sudo apt-get upgrade
 
-sudo apt-get install libgpiod-dev libatlas-base-dev libavcodec-dev libavformat-dev libswscale-dev libcap-dev libcamera-dev libcamera-apps
+# Install libgpiod development headers
+sudo apt-get install libgpiod-dev
 
-sudo apt-get install python3-venv python3-pip
+# Install other dependencies for picamera2 and libcamera
+sudo apt-get install libatlas-base-dev libavcodec-dev libavformat-dev libswscale-dev libcap-dev libcamera-dev libcamera-apps
 
-python3 -m venv venv
-source venv/bin/activate
+# Install Python packages
+sudo apt-get install python3-pip
+pip3 install numpy
+pip3 install gpiod
 
-pip install numpy
-pip install picamera2
-pip install gpiod
+# Install picamera2
+pip3 install picamera2
 ```
