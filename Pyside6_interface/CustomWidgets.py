@@ -21,15 +21,15 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.setting_grid = QtWidgets.QGridLayout()
 
-         # Flash Delay
-        self.flash_delay_label = QtWidgets.QLabel("Flash Delay:")
-        self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
-        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 1
-        self.flash_delay_spin_box.setMaximum(1000)  # Assuming a reasonable max value
-        self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
-        self.flash_delay_spin_box.setValue(1)  # Default value
-        self.setting_grid.addWidget(self.flash_delay_label, 0, 0)
-        self.setting_grid.addWidget(self.flash_delay_spin_box, 0, 1)
+        # Flash Number
+        self.flash_number_label = QtWidgets.QLabel("Flash Number:")
+        self.flash_number_spin_box = QtWidgets.QSpinBox()
+        self.flash_number_spin_box.setMinimum(1)  # Minimum value set to 1
+        self.flash_number_spin_box.setMaximum(100)  # Assuming a reasonable max value
+        self.flash_number_spin_box.setSingleStep(1)  # Step size of 1
+        self.flash_number_spin_box.setValue(1)  # Default value
+        self.setting_grid.addWidget(self.flash_number_label, 0, 0)
+        self.setting_grid.addWidget(self.flash_number_spin_box, 0, 1)
 
         # Flash Duration
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration:")
@@ -40,6 +40,16 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_duration_spin_box.setValue(1000)  # Default value
         self.setting_grid.addWidget(self.flash_duration_label, 1, 0)
         self.setting_grid.addWidget(self.flash_duration_spin_box, 1, 1)
+        
+        # Inter-Flash Delay
+        self.flash_delay_label = QtWidgets.QLabel("Inter-lash Delay:")
+        self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
+        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 1
+        self.flash_delay_spin_box.setMaximum(1000)  # Assuming a reasonable max value
+        self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
+        self.flash_delay_spin_box.setValue(1)  # Default value
+        self.setting_grid.addWidget(self.flash_delay_label, 2, 0)
+        self.setting_grid.addWidget(self.flash_delay_spin_box, 2, 1)
 
         # Exposure Time
         self.exposure_time_label = QtWidgets.QLabel("Exposure Time:")
@@ -64,17 +74,16 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.initialize_camera()
 
     def initialize_camera(self):
-        self.camera = Camera()
+        self.camera = Camera(self.main_window)
         exposure_time = self.exposure_time_spin_box.value()
         self.camera.start_camera(exposure_time=exposure_time)
         self.main_window.popup_message("Camera Initialized","Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
     
     def capture_image(self):
-        flash_delay = self.flash_delay_spin_box.value()
+        num_flashes = self.flash_number_spin_box.value()
         flash_duration = self.flash_duration_spin_box.value()
-        self.camera.capture_image()
-        self.main_window.machine.take_image(flash_delay, flash_duration)
-
+        inter_flash_delay = self.flash_delay_spin_box.value()
+        self.camera.start_capture(num_flashes,flash_duration,inter_flash_delay)
         
 
 class Reagent():
