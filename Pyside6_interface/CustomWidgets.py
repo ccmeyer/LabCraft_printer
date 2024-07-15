@@ -83,7 +83,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         num_flashes = self.flash_number_spin_box.value()
         flash_duration = self.flash_duration_spin_box.value()
         inter_flash_delay = self.flash_delay_spin_box.value()
-        self.camera.start_capture(num_flashes,flash_duration,inter_flash_delay)
+        self.camera.start_capture_thread(num_flashes,flash_duration,inter_flash_delay)
         
 
 class Reagent():
