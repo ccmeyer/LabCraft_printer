@@ -41,7 +41,7 @@ class Camera:
         self.capture_event = threading.Event()
 
         # Start the image capture in a separate thread
-        self.capture_thread = threading.Thread(target=self.capture_image, args=(self))
+        self.capture_thread = threading.Thread(target=self.capture_image, args=(self,))
         self.capture_thread.start()
 
         # Wait until the capture has started
