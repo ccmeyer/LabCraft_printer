@@ -58,8 +58,8 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.exposure_time_spin_box.setMaximum(500000)
         self.exposure_time_spin_box.setSingleStep(100)
         self.exposure_time_spin_box.setValue(10000)
-        self.setting_grid.addWidget(self.exposure_time_label, 2, 0)
-        self.setting_grid.addWidget(self.exposure_time_spin_box, 2, 1)
+        self.setting_grid.addWidget(self.exposure_time_label, 3, 0)
+        self.setting_grid.addWidget(self.exposure_time_spin_box, 3, 1)
 
         self.layout.addLayout(self.setting_grid)
 
