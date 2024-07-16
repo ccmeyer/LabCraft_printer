@@ -21,6 +21,16 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.setting_grid = QtWidgets.QGridLayout()
 
+        # Start Delay
+        self.start_delay_label = QtWidgets.QLabel("Start Delay:")
+        self.start_delay_spin_box = QtWidgets.QDoubleSpinBox()
+        self.start_delay_spin_box.setMinimum(0)  # Minimum value set to 0
+        self.start_delay_spin_box.setMaximum(50000)  # Assuming a reasonable max value
+        self.start_delay_spin_box.setSingleStep(100)  # Step size of 1
+        self.start_delay_spin_box.setValue(0)  # Default value
+        self.setting_grid.addWidget(self.start_delay_label, 0, 0)
+        self.setting_grid.addWidget(self.start_delay_spin_box, 0, 1)
+
         # Flash Number
         self.flash_number_label = QtWidgets.QLabel("Flash Number:")
         self.flash_number_spin_box = QtWidgets.QSpinBox()
@@ -28,44 +38,48 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_number_spin_box.setMaximum(100)  # Assuming a reasonable max value
         self.flash_number_spin_box.setSingleStep(1)  # Step size of 1
         self.flash_number_spin_box.setValue(1)  # Default value
-        self.setting_grid.addWidget(self.flash_number_label, 0, 0)
-        self.setting_grid.addWidget(self.flash_number_spin_box, 0, 1)
+        self.setting_grid.addWidget(self.flash_number_label, 1, 0)
+        self.setting_grid.addWidget(self.flash_number_spin_box, 1, 1)
 
         # Flash Duration
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration:")
         self.flash_duration_spin_box = QtWidgets.QDoubleSpinBox()
         self.flash_duration_spin_box.setMinimum(1)  # Minimum value set to 1
         self.flash_duration_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.flash_duration_spin_box.setSingleStep(10)  # Step size of 1
-        self.flash_duration_spin_box.setValue(1000)  # Default value
-        self.setting_grid.addWidget(self.flash_duration_label, 1, 0)
-        self.setting_grid.addWidget(self.flash_duration_spin_box, 1, 1)
+        self.flash_duration_spin_box.setSingleStep(10)  # Step size of 10
+        self.flash_duration_spin_box.setValue(2000)  # Default value
+        self.setting_grid.addWidget(self.flash_duration_label, 2, 0)
+        self.setting_grid.addWidget(self.flash_duration_spin_box, 2, 1)
         
         # Inter-Flash Delay
-        self.flash_delay_label = QtWidgets.QLabel("Inter-lash Delay:")
+        self.flash_delay_label = QtWidgets.QLabel("Inter-Flash Delay:")
         self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
-        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 1
+        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 0
         self.flash_delay_spin_box.setMaximum(1000)  # Assuming a reasonable max value
         self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
-        self.flash_delay_spin_box.setValue(1)  # Default value
-        self.setting_grid.addWidget(self.flash_delay_label, 2, 0)
-        self.setting_grid.addWidget(self.flash_delay_spin_box, 2, 1)
+        self.flash_delay_spin_box.setValue(25)  # Default value
+        self.setting_grid.addWidget(self.flash_delay_label, 3, 0)
+        self.setting_grid.addWidget(self.flash_delay_spin_box, 3, 1)
 
         # Exposure Time
         self.exposure_time_label = QtWidgets.QLabel("Exposure Time:")
         self.exposure_time_spin_box = QtWidgets.QDoubleSpinBox()
         self.exposure_time_spin_box.setMinimum(1)  # Minimum value set to 1
-        self.exposure_time_spin_box.setMaximum(500000)
-        self.exposure_time_spin_box.setSingleStep(100)
-        self.exposure_time_spin_box.setValue(10000)
-        self.setting_grid.addWidget(self.exposure_time_label, 3, 0)
-        self.setting_grid.addWidget(self.exposure_time_spin_box, 3, 1)
+        self.exposure_time_spin_box.setMaximum(500000)  # Assuming a reasonable max value
+        self.exposure_time_spin_box.setSingleStep(100)  # Step size of 100
+        self.exposure_time_spin_box.setValue(50000)  # Default value
+        self.setting_grid.addWidget(self.exposure_time_label, 4, 0)
+        self.setting_grid.addWidget(self.exposure_time_spin_box, 4, 1)
 
         self.layout.addLayout(self.setting_grid)
 
-        self.initialize_camera_button = QtWidgets.QPushButton("Initialize Camera")
-        self.initialize_camera_button.clicked.connect(self.initialize_camera)
-        self.layout.addWidget(self.initialize_camera_button)
+        # self.initialize_camera_button = QtWidgets.QPushButton("Initialize Camera")
+        # self.initialize_camera_button.clicked.connect(self.initialize_camera)
+        # self.layout.addWidget(self.initialize_camera_button)
+
+        self.parameters_button = QtWidgets.QPushButton("Set Parameters")
+        self.parameters_button.clicked.connect(self.set_parameters)
+        self.layout.addWidget(self.parameters_button)
 
         self.capture_button = QtWidgets.QPushButton("Capture Image")
         self.capture_button.clicked.connect(self.capture_image)
@@ -77,13 +91,19 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.camera = Camera(self.main_window)
         exposure_time = self.exposure_time_spin_box.value()
         self.camera.start_camera(exposure_time=exposure_time)
-        self.main_window.popup_message("Camera Initialized","Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
+        self.main_window.popup_message("Camera Initialized",f"Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
     
-    def capture_image(self):
+    def set_parameters(self):
         num_flashes = self.flash_number_spin_box.value()
         flash_duration = self.flash_duration_spin_box.value()
         inter_flash_delay = self.flash_delay_spin_box.value()
-        self.camera.start_capture_thread(num_flashes,flash_duration,inter_flash_delay)
+        start_delay = self.start_delay_spin_box.value()
+        self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
+        self.main_window.machine.set_start_delay(start_delay)
+        self.initialize_camera()
+
+    def capture_image(self):
+        self.camera.start_capture_thread()
         
 
 class Reagent():

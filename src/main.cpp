@@ -74,6 +74,76 @@ extern "C" void SystemClock_Config(void)
 #include "PressureSensor.h"
 
 /**
+ * @class LED
+ * @brief Represents an LED object used for flashing samples to image them.
+ * 
+ * The LED class provides functionality to control an LED connected to a specific pin. It allows
+ * the user to flash the LED on and off for a specific duration at a specified interval to illuminate samples for imaging.
+ */
+class LED {
+private:
+    int triggerPin; // Pin number for the LED trigger
+    int signalPin; // Pin number for the LED signal
+    int startDelay; // Delay before the first flash in microseconds
+    int numFlashes; // Number of flashes
+    int duration; // Duration of the flash in microseconds
+    int interval; // Interval between flashes in milliseconds
+    unsigned long previousMillis; // Time of the previous flash
+    bool state; // Current state of the LED
+    bool triggered; // Flag to indicate if the LED is triggered
+
+public:
+    // Constructor to initialize the LED object
+    LED(int triggerPin, int signalPin, int startDelay, int duration, int interval, int numFlashes)
+        : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay),
+          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(false) {
+        // pinMode(triggerPin, OUTPUT);
+        // pinMode(signalPin, OUTPUT);
+        // digitalWrite(triggerPin, LOW);
+        // digitalWrite(signalPin, LOW);
+    }
+
+    void setNumFlashes(int flashes) {
+        numFlashes = flashes;
+    }
+    void setDuration(int dur) {
+        duration = dur;
+    }
+    void setInterval(int inter) {
+        interval = inter;
+    }
+    void setStartDelay(int delay) {
+        startDelay = delay;
+    }
+
+    // Method to check for signal
+    bool isSignaled() {
+        state = digitalRead(signalPin);
+        if (state == LOW) {
+            triggered = false;
+            return false;
+        } else if (state == HIGH && !triggered) {
+            triggered = true;
+            return true;
+        } else if (state == HIGH && triggered) {
+            return false;
+        } 
+    }
+
+    // Method to flash the LED
+    void flash() {
+      delayMicroseconds(startDelay);
+
+      for (int i = 0; i < numFlashes; i++) {
+        digitalWrite(triggerPin, HIGH);
+        delayMicroseconds(duration);
+        digitalWrite(triggerPin, LOW);
+        delay(interval);
+      }
+    }
+};
+
+/**
  * @class LimitSwitch
  * @brief Represents a limit switch for a specific axis.
  * 
@@ -327,6 +397,8 @@ LimitSwitch* limits[] = {&limitZ, &limitX, &limitY, &limitP};
 
 // Static variable to keep track of the current switch index
 static int currentSwitchIndex = 0;
+
+LED led = LED(flashPin,cameraPin,startDelay,flashDuration,flashInterval,numFlashes);
 
 /**
  * @enum HomingState
@@ -679,6 +751,8 @@ enum CommandType {
     GATE_ON,
     GATE_OFF,
     FLASH_ON,
+    SET_FLASH,
+    SET_DELAY,
     CAMERA_ON,
     // Add more command types as needed
 };
@@ -773,6 +847,10 @@ CommandType mapCommandType(const char* commandName) {
         return GATE_OFF;
     } else if (strcmp(commandName, "FLASH_ON") == 0) {
         return FLASH_ON;
+    } else if (strcmp(commandName, "SET_FLASH") == 0) {
+        return SET_FLASH;
+    } else if (strcmp(commandName, "SET_DELAY") == 0) {
+        return SET_DELAY;
     } else if (strcmp(commandName, "CAMERA_ON") == 0) {
         return CAMERA_ON;
     } else {
@@ -929,6 +1007,14 @@ void executeCommand(const Command& cmd) {
         delay(cmd.param3);
       }
       break;
+    case SET_FLASH:
+      led.setNumFlashes(cmd.param1);
+      led.setDuration(cmd.param2);
+      led.setInterval(cmd.param3);
+      break;
+    case SET_DELAY:
+      led.setStartDelay(cmd.param1);
+      break;
     case CAMERA_ON:
       digitalWrite(cameraPin, HIGH);
       delay(cmd.param1);
@@ -1069,6 +1155,12 @@ unsigned long average (unsigned long * array, int len)  // assuming array is int
   return  ((unsigned long) sum) / len ;  // average will be fractional, so float may be appropriate.
 }
 
+void checkCamera(){
+  if (led.isSignaled()){
+    led.flash();
+  }
+}
+
 // Initialize tasks: 
 // Order of tasks in the vector is used elsewhere:
 // Task 1: Check limit switches every 2 milliseconds
@@ -1086,6 +1178,7 @@ std::vector<Task> tasks = {
     {sendStatus, 50, 3},
     {getNewCommand, 10, 0},
     {executeNextCommand, 10, 5},
+    {checkCamera, 2, 1},
     // Add more tasks as needed
 };
 

@@ -6,16 +6,16 @@ from picamera2 import Picamera2
 import threading
 
 class Camera:
-    def __init__(self, main_window,gpio_pin=17, debounce_time=0.02):
+    def __init__(self, main_window,gpio_pin=17):
         self.main_window = main_window
         self.gpio_pin = gpio_pin
-        self.debounce_time = debounce_time
-        self.last_high_time = None
         self.picam2 = Picamera2()
+        self.initialized = False
         self.image = None
         self.chip = gpiod.Chip('gpiochip4')
         self.line = self.chip.get_line(self.gpio_pin)
-        self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_IN)
+        self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
+        self.line.set_value(0)
 
     def configure_camera(self, exposure_time):
         config = self.picam2.create_still_configuration()
@@ -24,6 +24,23 @@ class Camera:
             "ExposureTime": int(exposure_time),  # Set exposure time in microseconds
         }
         self.picam2.set_controls(controls)
+
+    def start_camera(self, exposure_time=100000):
+        if self.initialized:
+            self.stop_camera()
+            self.picam2 = Picamera2()
+        self.configure_camera(exposure_time)
+        self.picam2.start()
+        time.sleep(0.5)  # Allow some time for the camera to adjust
+
+    def stop_camera(self):
+        self.picam2.stop()
+
+    def start_flash(self):
+        self.line.set_value(1)
+    
+    def stop_flash(self):
+        self.line.set_value(0)
 
     # def capture_image(self):
     #     # Capture an image
@@ -37,7 +54,7 @@ class Camera:
         print("Image capture complete")
         return
     
-    def start_capture_thread(self,num_flashes,flash_duration,inter_flash_delay):
+    def start_capture_thread(self):
         self.capture_event = threading.Event()
 
         # Start the image capture in a separate thread
@@ -47,10 +64,11 @@ class Camera:
         # Wait until the capture has started
         self.capture_event.wait()
 
-        self.main_window.machine.flash_led(num_flashes,flash_duration,inter_flash_delay)
+        self.start_flash()
 
         # Wait for the capture thread to finish
         self.capture_thread.join()
+        self.stop_flash()
 
         self.show_image()
 
@@ -63,14 +81,6 @@ class Camera:
         cv2.waitKey(0)  # Wait indefinitely until a key is pressed
         cv2.destroyAllWindows()
         self.image = None
-
-    def start_camera(self, exposure_time=100000):
-        self.configure_camera(exposure_time)
-        self.picam2.start()
-        time.sleep(0.5)  # Allow some time for the camera to adjust
-
-    def stop_camera(self):
-        self.picam2.stop()
 
     def __del__(self):
         self.stop_camera()
