@@ -121,7 +121,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         inter_flash_delay = self.flash_delay_spin_box.value()
         start_delay = self.start_delay_spin_box.value()
         self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
-        self.main_window.machine.set_start_delay(start_delay)
+        self.main_window.machine.set_flash_delay(start_delay)
         self.initialize_camera()
 
     def capture_image(self):

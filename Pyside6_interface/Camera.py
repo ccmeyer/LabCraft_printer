@@ -18,7 +18,8 @@ class Camera:
         self.line.set_value(0)
 
     def configure_camera(self, exposure_time):
-        config = self.picam2.create_still_configuration()
+        # config = self.picam2.create_still_configuration()
+        config = self.picam2.create_preview_configuration()
         self.picam2.configure(config)
         controls = {
             "ExposureTime": int(exposure_time),  # Set exposure time in microseconds
@@ -42,11 +43,6 @@ class Camera:
     def stop_flash(self):
         self.line.set_value(0)
 
-    # def capture_image(self):
-    #     # Capture an image
-    #     image = self.picam2.capture_array()
-    #     return image
-    
     def capture_image(self):
         print("Starting image capture")
         self.capture_event.set()
