@@ -43,6 +43,7 @@ class Camera:
         self.configure_camera(exposure_time)
         self.picam2.start()
         print("-- Camera started,", self.picam2.capture_metadata()['ExposureTime'])
+        self.initialized = True
         time.sleep(2)  # Allow some time for the camera to adjust
 
     def stop_camera(self):
