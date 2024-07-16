@@ -86,6 +86,14 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.deactivate_led_button.clicked.connect(self.deactivate_led)
         self.layout.addWidget(self.deactivate_led_button)
 
+        self.set_high_button = QtWidgets.QPushButton("Set HIGH")
+        self.set_high_button.clicked.connect(self.set_high)
+        self.layout.addWidget(self.set_high_button)
+
+        self.set_low_button = QtWidgets.QPushButton("Set LOW")
+        self.set_low_button.clicked.connect(self.set_low)
+        self.layout.addWidget(self.set_low_button)
+
         self.parameters_button = QtWidgets.QPushButton("Set Parameters")
         self.parameters_button.clicked.connect(self.set_parameters)
         self.layout.addWidget(self.parameters_button)
@@ -118,6 +126,16 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
     def capture_image(self):
         self.camera.start_capture_thread()
+
+    def set_high(self):
+        self.camera.start_flash()
+
+    def set_low(self):
+        self.camera.stop_flash()
+
+    def closeEvent(self, event):
+        self.camera.stop_camera()
+        super().closeEvent(event)
         
 
 class Reagent():
