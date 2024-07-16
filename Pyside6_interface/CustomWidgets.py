@@ -78,6 +78,14 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         # self.initialize_camera_button.clicked.connect(self.initialize_camera)
         # self.layout.addWidget(self.initialize_camera_button)
 
+        self.activate_led_button = QtWidgets.QPushButton("Activate LED")
+        self.activate_led_button.clicked.connect(self.activate_led)
+        self.layout.addWidget(self.activate_led_button)
+
+        self.deactivate_led_button = QtWidgets.QPushButton("Deactivate LED")
+        self.deactivate_led_button.clicked.connect(self.deactivate_led)
+        self.layout.addWidget(self.deactivate_led_button)
+
         self.parameters_button = QtWidgets.QPushButton("Set Parameters")
         self.parameters_button.clicked.connect(self.set_parameters)
         self.layout.addWidget(self.parameters_button)
@@ -93,6 +101,12 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.camera.start_camera(exposure_time=exposure_time)
         # self.main_window.popup_message("Camera Initialized",f"Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
     
+    def activate_led(self):
+        self.main_window.machine.activate_led()
+    
+    def deactivate_led(self):
+        self.main_window.machine.deactivate_led()
+
     def set_parameters(self):
         num_flashes = self.flash_number_spin_box.value()
         flash_duration = self.flash_duration_spin_box.value()
@@ -1646,10 +1660,20 @@ class BoardStatusBox(QtWidgets.QGroupBox):
         self.cycle_count_value = QtWidgets.QLabel()
         self.layout.addWidget(self.cycle_count_value, 1, 1)
 
+        self.led_active_label = QtWidgets.QLabel("LED Active:")
+        self.layout.addWidget(self.led_active_label, 2, 0)
+        self.led_active_value = QtWidgets.QLabel()
+        self.layout.addWidget(self.led_active_value, 2, 1)
+
+        self.led_triggered_label = QtWidgets.QLabel("LED Triggered:")
+        self.layout.addWidget(self.led_triggered_label, 3, 0)
+        self.led_triggered_value = QtWidgets.QLabel()
+        self.layout.addWidget(self.led_triggered_value, 3, 1)
+
         # Button to open ImageCaptureDialog
         self.open_image_capture_dialog_button = QtWidgets.QPushButton("Open Image Capture Dialog")
         self.open_image_capture_dialog_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.open_image_capture_dialog_button, 2, 0, 1, 2)  # Spanning 2 columns
+        self.layout.addWidget(self.open_image_capture_dialog_button, 4, 0, 1, 2)  # Spanning 2 columns
         self.open_image_capture_dialog_button.clicked.connect(self.openImageCaptureDialog)
 
         self.update_status()
@@ -1660,6 +1684,8 @@ class BoardStatusBox(QtWidgets.QGroupBox):
         """
         self.max_cycle_value.setText(str(self.machine.get_max_cycle()))
         self.cycle_count_value.setText(str(self.machine.get_cycle_count()))
+        self.led_active_value.setText(str(self.machine.get_led_active()))
+        self.led_triggered_value.setText(str(self.machine.get_led_triggered()))
 
     def openImageCaptureDialog(self):
         dialog = ImageCaptureDialog(self.main_window)

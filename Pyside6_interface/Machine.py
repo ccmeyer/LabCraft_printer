@@ -583,6 +583,9 @@ class Machine(QtWidgets.QWidget):
 
         self.current_droplets = 0
 
+        self.led_active = False
+        self.led_triggered = False
+
         self.command_number = 0
         self.command_queue = []
         self.incomplete_commands = []
@@ -856,6 +859,10 @@ class Machine(QtWidgets.QWidget):
         self.current_pressure = float(state['Pressure'])
         self.current_psi = self.convert_to_psi(self.current_pressure)
         self.current_droplets = int(state['Droplets'])
+
+        self.led_active = state['LED_Active'] == 'True'
+        self.led_triggered = state['LED_Triggered'] == 'True'
+
         self.max_cycle = int(state['Max_cycle'])
         self.cycle_count = int(state['Cycle_count'])
 
@@ -1082,6 +1089,12 @@ class Machine(QtWidgets.QWidget):
     def gate_off(self):
         self.add_command_to_queue('GATE_OFF',0,0,0)
     
+    def activate_led(self):
+        self.add_command_to_queue('ACTIVATE_LED',0,0,0)
+
+    def deactivate_led(self):
+        self.add_command_to_queue('DEACTIVATE_LED',0,0,0)
+
     def set_flash_parameters(self,num_flashes,flash_duration,inter_flash_delay):
         self.add_command_to_queue('SET_FLASH',num_flashes,flash_duration,inter_flash_delay)
 
@@ -1117,6 +1130,12 @@ class Machine(QtWidgets.QWidget):
     
     def get_cycle_count(self):
         return self.cycle_count
+    
+    def get_led_active(self):
+        return self.led_active
+    
+    def get_led_triggered(self):
+        return self.led_triggered
     
     def set_gripper_reagent(self,reagent):
         self.gripper_reagent = reagent

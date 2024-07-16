@@ -89,6 +89,7 @@ private:
     int duration; // Duration of the flash in microseconds
     int interval; // Interval between flashes in milliseconds
     unsigned long previousMillis; // Time of the previous flash
+    bool active; // Flag to indicate if the LED is active
     bool state; // Current state of the LED
     bool triggered; // Flag to indicate if the LED is triggered
 
@@ -96,10 +97,10 @@ public:
     // Constructor to initialize the LED object
     LED(int triggerPin, int signalPin, int startDelay, int duration, int interval, int numFlashes)
         : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay),
-          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(false) {
-        // pinMode(triggerPin, OUTPUT);
-        // pinMode(signalPin, OUTPUT);
-        // digitalWrite(triggerPin, LOW);
+          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(false), active(false), triggered(false) {
+        pinMode(triggerPin, OUTPUT);
+        pinMode(signalPin, INPUT);
+        digitalWrite(triggerPin, LOW);
         // digitalWrite(signalPin, LOW);
     }
 
@@ -114,6 +115,16 @@ public:
     }
     void setStartDelay(int delay) {
         startDelay = delay;
+    }
+    void activate() {
+        active = true;
+    }
+    void deactivate() {
+        active = false;
+    }
+
+    bool isActive() {
+        return active;
     }
 
     // Method to check for signal
@@ -400,6 +411,8 @@ static int currentSwitchIndex = 0;
 
 LED led = LED(flashPin,cameraPin,startDelay,flashDuration,flashInterval,numFlashes);
 
+bool ledActive = false;
+bool ledTriggered = false;
 /**
  * @enum HomingState
  * @brief Represents the different states of the homing process.
@@ -751,6 +764,8 @@ enum CommandType {
     GATE_ON,
     GATE_OFF,
     FLASH_ON,
+    ACTIVATE_LED,
+    DEACTIVATE_LED,
     SET_FLASH,
     SET_DELAY,
     CAMERA_ON,
@@ -853,6 +868,10 @@ CommandType mapCommandType(const char* commandName) {
         return SET_DELAY;
     } else if (strcmp(commandName, "CAMERA_ON") == 0) {
         return CAMERA_ON;
+    } else if (strcmp(commandName, "ACTIVATE_LED") == 0) {
+        return ACTIVATE_LED;
+    } else if (strcmp(commandName, "DEACTIVATE_LED") == 0) {
+        return DEACTIVATE_LED;
     } else {
         return UNKNOWN;
     }
@@ -1007,6 +1026,12 @@ void executeCommand(const Command& cmd) {
         delay(cmd.param3);
       }
       break;
+    case ACTIVATE_LED:
+      led.activate();
+      break;
+    case DEACTIVATE_LED:
+      led.deactivate();
+      break;
     case SET_FLASH:
       led.setNumFlashes(cmd.param1);
       led.setDuration(cmd.param2);
@@ -1093,6 +1118,8 @@ void sendStatus() {
     lastCompletedCmdNum = currentCmdNum;
     state = "Free";
   }
+  ledActive = led.isActive();
+  ledTriggered = led.isSignaled();
   Serial.print("State:"); Serial.print(state);
   Serial.print(",Com_open:"); Serial.print(receivingNewData);
   Serial.print(",Last_completed:"); Serial.print(lastCompletedCmdNum);
@@ -1106,6 +1133,8 @@ void sendStatus() {
   Serial.print(",P:"); Serial.print(stepperP.currentPosition());
   Serial.print(",Droplets:"); Serial.print(currentDroplets);
   Serial.print(",Gripper:"); Serial.print(gripper.isOpen());
+  Serial.print(",LED_Active:"); Serial.print(ledActive);
+  Serial.print(",LED_Triggered:"); Serial.print(ledTriggered);
   Serial.print(",Pressure:"); Serial.println(currentPressure);
   numIterations = 0;
   maxCycle = 0;
@@ -1156,9 +1185,11 @@ unsigned long average (unsigned long * array, int len)  // assuming array is int
 }
 
 void checkCamera(){
-  if (led.isSignaled()){
-    led.flash();
-  }
+  if (led.isActive()){
+    if (led.isSignaled()){
+      led.flash();
+    }
+  } 
 }
 
 // Initialize tasks: 
