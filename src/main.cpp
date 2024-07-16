@@ -109,7 +109,7 @@ public:
     void setDuration(int dur) { duration = dur; }
     void setInterval(int inter) { interval = inter; }
     void setStartDelay(int delay) { startDelay = delay; }
-    
+
     void activate() { active = true; }
     void deactivate() { active = false; }
 
@@ -1008,12 +1008,13 @@ void executeCommand(const Command& cmd) {
       digitalWrite(gatePin, LOW);
       break;
     case FLASH_ON:
-      for (int i = 0; i < cmd.param1; i++){
-        digitalWrite(flashPin, HIGH);
-        delayMicroseconds(cmd.param2);
-        digitalWrite(flashPin, LOW);
-        delay(cmd.param3);
-      }
+      // for (int i = 0; i < cmd.param1; i++){
+      //   digitalWrite(flashPin, HIGH);
+      //   delayMicroseconds(cmd.param2);
+      //   digitalWrite(flashPin, LOW);
+      //   delay(cmd.param3);
+      // }
+      led.flash();
       break;
     case ACTIVATE_LED:
       led.activate();

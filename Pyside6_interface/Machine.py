@@ -1101,8 +1101,9 @@ class Machine(QtWidgets.QWidget):
     def set_flash_delay(self,start_delay):
         self.add_command_to_queue('SET_DELAY',start_delay,0,0)
 
-    def flash_led(self,num_flashes,flash_duration,inter_flash_delay):
-        self.add_command_to_queue('FLASH_ON',num_flashes,flash_duration,inter_flash_delay)
+    # def flash_led(self,num_flashes,flash_duration,inter_flash_delay):
+    def flash_led(self):
+        self.add_command_to_queue('FLASH_ON',0,0,0)
 
     def take_image(self,flash_delay,flash_duration):
         self.add_command_to_queue('CAMERA_ON',flash_delay,flash_duration,0)
