@@ -20,7 +20,7 @@ class Camera:
     def configure_camera(self, exposure_time):
         # config = self.picam2.create_still_configuration()
         print('--- Modes:\n', self.picam2.sensor_modes(),'\n\n')
-        config = self.picam2.create_still_configuration(main={'format':'RGB888', "size": (640, 480)})
+        config = self.picam2.create_still_configuration(main={"size": (640, 480)})
         self.picam2.configure(config)
         controls = {
             "ExposureTime": int(exposure_time),  # Set exposure time in microseconds
@@ -90,6 +90,23 @@ class Camera:
         cv2.waitKey(0)  # Wait indefinitely until a key is pressed
         cv2.destroyAllWindows()
         self.image = None
+
+    def live_preview(self):
+        """Displays a live preview of the camera feed, updating every second."""
+        self.picam2.stop()  # Stop the camera if it is already running  
+        try:
+            self.picam2.start_preview()  # Start the picamera2 preview functionality
+            print("Live preview started. Press 'q' to quit.")
+            while True:
+                time.sleep(1)  # Update the image every second
+                frame = self.picam2.capture_array()  # Capture the current frame
+                cv2.imshow("Live Preview", frame)  # Display the frame using OpenCV
+                if cv2.waitKey(1) & 0xFF == ord('q'):  # Break the loop if 'q' is pressed
+                    break
+        finally:
+            cv2.destroyAllWindows()  # Make sure to destroy all OpenCV windows
+            self.picam2.stop_preview()  # Stop the picamera2 preview functionality
+            print("Live preview stopped.")
 
     def __del__(self):
         self.stop_camera()

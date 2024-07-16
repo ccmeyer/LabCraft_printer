@@ -102,6 +102,10 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.capture_button.clicked.connect(self.capture_image)
         self.layout.addWidget(self.capture_button)
 
+        self.live_preview_button = QtWidgets.QPushButton("Live Preview")
+        self.live_preview_button.clicked.connect(self.start_live_preview)
+        self.layout.addWidget(self.live_preview_button)
+
         self.initialize_camera()
 
     def initialize_camera(self):
@@ -127,6 +131,9 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
     def capture_image(self):
         self.camera.start_capture_thread()
+
+    def start_live_preview(self):
+        self.camera.live_preview()
 
     def set_high(self):
         self.camera.start_flash()
