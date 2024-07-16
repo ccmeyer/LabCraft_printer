@@ -19,7 +19,8 @@ class Camera:
 
     def configure_camera(self, exposure_time):
         # config = self.picam2.create_still_configuration()
-        config = self.picam2.create_preview_configuration()
+        print('--- Modes:\n', self.picam2.sensor_modes(),'\n\n')
+        config = self.picam2.create_still_configuration(main={'format':'RGB888', "size": (640, 480)})
         self.picam2.configure(config)
         controls = {
             "ExposureTime": int(exposure_time),  # Set exposure time in microseconds
