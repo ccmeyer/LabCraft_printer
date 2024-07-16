@@ -14,6 +14,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self.camera = self.main_window.camera
         self.setWindowTitle("Image Capture")
         self.resize(400, 400)
 
@@ -88,10 +89,9 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.initialize_camera()
 
     def initialize_camera(self):
-        self.camera = Camera(self.main_window)
         exposure_time = self.exposure_time_spin_box.value()
         self.camera.start_camera(exposure_time=exposure_time)
-        self.main_window.popup_message("Camera Initialized",f"Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
+        # self.main_window.popup_message("Camera Initialized",f"Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
     
     def set_parameters(self):
         num_flashes = self.flash_number_spin_box.value()

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor
 import numpy as np
 from Machine import Machine,Command
+from Camera import Camera
 from CustomWidgets import *
 import json
 import pandas as pd
@@ -92,6 +93,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.read_colors_file()
         self.read_reagents_file()
         self.machine = Machine(self)
+        self.camera = Camera(self)
 
         self.read_plates_file()
 
