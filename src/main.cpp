@@ -90,42 +90,30 @@ private:
     int interval; // Interval between flashes in milliseconds
     unsigned long previousMillis; // Time of the previous flash
     bool active; // Flag to indicate if the LED is active
-    bool state; // Current state of the LED
+    int state; // Current state of the LED
     bool triggered; // Flag to indicate if the LED is triggered
 
 public:
     // Constructor to initialize the LED object
     LED(int triggerPin, int signalPin, int startDelay, int duration, int interval, int numFlashes)
         : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay),
-          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(false), active(false), triggered(false) {
+          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(0), active(false), triggered(false) {
         pinMode(triggerPin, OUTPUT);
-        pinMode(signalPin, INPUT);
         digitalWrite(triggerPin, LOW);
+
+        pinMode(signalPin, INPUT);
         // digitalWrite(signalPin, LOW);
     }
 
-    void setNumFlashes(int flashes) {
-        numFlashes = flashes;
-    }
-    void setDuration(int dur) {
-        duration = dur;
-    }
-    void setInterval(int inter) {
-        interval = inter;
-    }
-    void setStartDelay(int delay) {
-        startDelay = delay;
-    }
-    void activate() {
-        active = true;
-    }
-    void deactivate() {
-        active = false;
-    }
+    void setNumFlashes(int flashes) { numFlashes = flashes; }
+    void setDuration(int dur) { duration = dur; }
+    void setInterval(int inter) { interval = inter; }
+    void setStartDelay(int delay) { startDelay = delay; }
+    
+    void activate() { active = true; }
+    void deactivate() { active = false; }
 
-    bool isActive() {
-        return active;
-    }
+    bool isActive() const { return active; }
 
     // Method to check for signal
     bool isSignaled() {
@@ -138,7 +126,8 @@ public:
             return true;
         } else if (state == HIGH && triggered) {
             return false;
-        } 
+        }
+        return false; // Ensure all control paths return a value
     }
 
     // Method to flash the LED

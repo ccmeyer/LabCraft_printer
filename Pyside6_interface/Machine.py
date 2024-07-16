@@ -860,7 +860,7 @@ class Machine(QtWidgets.QWidget):
         self.current_psi = self.convert_to_psi(self.current_pressure)
         self.current_droplets = int(state['Droplets'])
 
-        self.led_active = state['LED_Active'] == 'True'
+        self.led_active = int(state['LED_Active'])
         self.led_triggered = state['LED_Triggered'] == 'True'
 
         self.max_cycle = int(state['Max_cycle'])
