@@ -26,13 +26,24 @@ class Camera:
         }
         self.picam2.set_controls(controls)
 
-    def start_camera(self, exposure_time=100000):
+    def set_exposure_time(self, exposure_time):
+        self.picam2.stop()
+        controls = {
+            "ExposureTime": int(exposure_time),  # Set exposure time in microseconds
+        }
+        self.picam2.set_controls(controls)
+        self.picam2.start()
+        print("-- Camera changed,", self.picam2.capture_metadata()['ExposureTime'])
+
+
+    def start_camera(self, exposure_time=1000000):
         if self.initialized:
             self.stop_camera()
             self.picam2 = Picamera2()
         self.configure_camera(exposure_time)
         self.picam2.start()
-        time.sleep(0.5)  # Allow some time for the camera to adjust
+        print("-- Camera started,", self.picam2.capture_metadata()['ExposureTime'])
+        time.sleep(2)  # Allow some time for the camera to adjust
 
     def stop_camera(self):
         self.picam2.stop()

@@ -66,9 +66,9 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.exposure_time_label = QtWidgets.QLabel("Exposure Time:")
         self.exposure_time_spin_box = QtWidgets.QDoubleSpinBox()
         self.exposure_time_spin_box.setMinimum(1)  # Minimum value set to 1
-        self.exposure_time_spin_box.setMaximum(500000)  # Assuming a reasonable max value
+        self.exposure_time_spin_box.setMaximum(5000000)  # Assuming a reasonable max value
         self.exposure_time_spin_box.setSingleStep(100)  # Step size of 100
-        self.exposure_time_spin_box.setValue(50000)  # Default value
+        self.exposure_time_spin_box.setValue(1000000)  # Default value
         self.setting_grid.addWidget(self.exposure_time_label, 4, 0)
         self.setting_grid.addWidget(self.exposure_time_spin_box, 4, 1)
 
@@ -122,7 +122,8 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         start_delay = self.start_delay_spin_box.value()
         self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
         self.main_window.machine.set_flash_delay(start_delay)
-        self.initialize_camera()
+        self.camera.set_exposure_time(self.exposure_time_spin_box.value())
+        # self.initialize_camera()
 
     def capture_image(self):
         self.camera.start_capture_thread()
