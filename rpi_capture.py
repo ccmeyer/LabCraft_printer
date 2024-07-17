@@ -17,7 +17,7 @@ class Camera:
     def live_preview(self):
         """Displays a live preview of the camera feed, updating every second."""
         try:
-            self.picam2.start_preview()  # Start the picamera2 preview functionality
+            self.picam2.start()  # Start the picamera2 preview functionality
             print("Live preview started. Press 'q' to quit.")
             while True:
                 time.sleep(1)  # Update the image every second
@@ -27,7 +27,7 @@ class Camera:
                     break
         finally:
             cv2.destroyAllWindows()  # Make sure to destroy all OpenCV windows
-            self.picam2.stop_preview()  # Stop the picamera2 preview functionality
+            self.picam2.stop()  # Stop the picamera2 preview functionality
             print("Live preview stopped.")
 
 if __name__ == "__main__":
