@@ -18,6 +18,18 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.setWindowTitle("Image Capture")
         self.resize(400, 400)
 
+        self.movement_shortcuts = [
+            Shortcut("Save Position", "s", "s", lambda: self.save_position()),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size)),
+            Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
+            Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
+        ]
+
         self.layout = QtWidgets.QVBoxLayout(self)
 
         self.setting_grid = QtWidgets.QGridLayout()
@@ -108,6 +120,42 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.initialize_camera()
 
+    def keyPressEvent(self, event):
+        for shortcut in self.movement_shortcuts:
+            if isinstance(shortcut.key, str):  # If the shortcut key is a string
+                if event.text() == shortcut.key:  # Convert the string to a key code
+                    shortcut.function()
+                    break
+            elif event.key() == shortcut.key:  # If the shortcut key is a key code
+                shortcut.function()
+                break
+        self.update_coordinates()
+
+    def update_coordinates(self):
+        current_coords = self.machine.get_coordinates()
+        target_coords = self.machine.get_target_coordinates()
+        self.simple_coord_box.update_coordinates(current_coords,target_coords)
+    
+    def change_step(self,steps):
+        if steps > 0:
+            self.inc_step()
+        elif steps < 0:
+            self.dec_step()
+
+    def inc_step(self):
+        if self.main_window.step_num < len(self.main_window.possible_steps)-1:
+            self.main_window.step_num += 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+            self.main_window.update_step_size_display()
+    
+    def dec_step(self):
+        if self.main_window.step_num > 0:
+            self.main_window.step_num -= 1
+            self.main_window.step_size = self.main_window.possible_steps[self.main_window.step_num]
+            self.simple_coord_box.update_step_size(self.main_window.step_size)
+            self.main_window.update_step_size_display()
+    
     def initialize_camera(self):
         exposure_time = self.exposure_time_spin_box.value()
         self.camera.start_camera(exposure_time=exposure_time)

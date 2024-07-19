@@ -19,7 +19,7 @@ class Camera:
 
     def configure_camera(self, exposure_time):
         # config = self.picam2.create_still_configuration()
-        print('--- Modes:\n', self.picam2.sensor_modes(),'\n\n')
+        # print('--- Modes:\n', self.picam2.sensor_modes(),'\n\n')
         config = self.picam2.create_still_configuration(main={"size": (640, 480)})
         self.picam2.configure(config)
         controls = {
