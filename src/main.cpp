@@ -94,6 +94,7 @@ class LED {
 private:
     int triggerPin; // Pin number for the LED trigger
     int signalPin; // Pin number for the LED signal
+    int pulseWidth; // Pulse width of the printing valve in microseconds
     int startDelay; // Delay before the first flash in microseconds
     int numFlashes; // Number of flashes
     int duration; // Duration of the flash in 100 nanosecond increments
@@ -106,7 +107,7 @@ private:
 public:
     // Constructor to initialize the LED object
     LED(int triggerPin, int signalPin, int startDelay, int duration, int interval, int numFlashes)
-        : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay),
+        : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay), pulseWidth(3000),
           duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(0), active(false), triggered(false) {
         pinMode(triggerPin, OUTPUT);
         digitalWrite(triggerPin, LOW);
@@ -119,6 +120,7 @@ public:
     void setDuration(int dur) { duration = dur; }
     void setInterval(int inter) { interval = inter; }
     void setStartDelay(int delay) { startDelay = delay; }
+    void setPulseWidth(int width) { pulseWidth = width; }
 
     void activate() { active = true; }
     void deactivate() { active = false; }
@@ -139,10 +141,10 @@ public:
         }
         return false; // Ensure all control paths return a value
     }
-    
+
     void printDroplet(){
       digitalWrite(printPin, HIGH);
-      delayMicroseconds(3000);
+      delayMicroseconds(pulseWidth);
       digitalWrite(printPin, LOW);
     }
 
@@ -1050,6 +1052,7 @@ void executeCommand(const Command& cmd) {
       break;
     case SET_DELAY:
       led.setStartDelay(cmd.param1);
+      led.setPulseWidth(cmd.param2);
       break;
     case CAMERA_ON:
       digitalWrite(cameraPin, HIGH);

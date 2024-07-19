@@ -1098,8 +1098,8 @@ class Machine(QtWidgets.QWidget):
     def set_flash_parameters(self,num_flashes,flash_duration,inter_flash_delay):
         self.add_command_to_queue('SET_FLASH',num_flashes,flash_duration,inter_flash_delay)
 
-    def set_flash_delay(self,start_delay):
-        self.add_command_to_queue('SET_DELAY',start_delay,0,0)
+    def set_flash_delay(self,start_delay,pulse_width):
+        self.add_command_to_queue('SET_DELAY',start_delay,pulse_width,0)
 
     # def flash_led(self,num_flashes,flash_duration,inter_flash_delay):
     def flash_led(self):

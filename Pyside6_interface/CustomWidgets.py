@@ -79,7 +79,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
         self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 0
         self.flash_delay_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
+        self.flash_delay_spin_box.setSingleStep(10)  # Step size of 1
         self.flash_delay_spin_box.setValue(100)  # Default value
         self.flash_delay_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.flash_delay_label, 3, 0)
@@ -90,11 +90,22 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.exposure_time_spin_box = QtWidgets.QDoubleSpinBox()
         self.exposure_time_spin_box.setMinimum(1)  # Minimum value set to 1
         self.exposure_time_spin_box.setMaximum(5000000)  # Assuming a reasonable max value
-        self.exposure_time_spin_box.setSingleStep(100)  # Step size of 100
+        self.exposure_time_spin_box.setSingleStep(1000)  # Step size of 100
         self.exposure_time_spin_box.setValue(1000000)  # Default value
         self.exposure_time_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.exposure_time_label, 4, 0)
         self.setting_grid.addWidget(self.exposure_time_spin_box, 4, 1)
+
+        # Pulse Width
+        self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
+        self.pulse_width_spin_box = QtWidgets.QDoubleSpinBox()
+        self.pulse_width_spin_box.setMinimum(100)  # Minimum value set to 1
+        self.pulse_width_spin_box.setMaximum(10000)  # Assuming a reasonable max value
+        self.pulse_width_spin_box.setSingleStep(100)  # Step size of 1
+        self.pulse_width_spin_box.setValue(3000)  # Default value
+        self.pulse_width_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.setting_grid.addWidget(self.pulse_width_label, 5, 0)
+        self.setting_grid.addWidget(self.pulse_width_spin_box, 5, 1)
 
         self.layout.addLayout(self.setting_grid)
 
@@ -132,10 +143,10 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.capture_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.capture_button)
 
-        self.live_preview_button = QtWidgets.QPushButton("Live Preview")
-        self.live_preview_button.clicked.connect(self.start_live_preview)
-        self.live_preview_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.live_preview_button)
+        # self.live_preview_button = QtWidgets.QPushButton("Live Preview")
+        # self.live_preview_button.clicked.connect(self.start_live_preview)
+        # self.live_preview_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.layout.addWidget(self.live_preview_button)
 
         self.initialize_camera()
 
@@ -191,16 +202,17 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         flash_duration = self.flash_duration_spin_box.value()
         inter_flash_delay = self.flash_delay_spin_box.value()
         start_delay = self.start_delay_spin_box.value()
+        pulse_width = self.pulse_width_spin_box.value()
         self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
-        self.main_window.machine.set_flash_delay(start_delay)
+        self.main_window.machine.set_flash_delay(start_delay,pulse_width)
         self.camera.set_exposure_time(self.exposure_time_spin_box.value())
         # self.initialize_camera()
 
     def capture_image(self):
         self.camera.start_capture_thread()
 
-    def start_live_preview(self):
-        self.camera.live_preview()
+    # def start_live_preview(self):
+    #     self.camera.live_preview()
 
     def set_high(self):
         self.camera.start_flash()
