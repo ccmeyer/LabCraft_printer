@@ -76,10 +76,10 @@ extern "C" void SystemClock_Config(void)
 // Assuming a clock frequency of 180MHz
 #define SYSTEM_CORE_CLOCK 180000000UL
 #define NOP_PER_NS (SYSTEM_CORE_CLOCK / 1000000000UL)
-#define NOP_COUNT_100NS ((NOP_PER_NS * 100) / 1000)
+#define NOP_COUNT_10NS ((NOP_PER_NS * 10) / 1000)
 
-void delay100Nanoseconds() {
-    for (unsigned int i = 0; i < NOP_COUNT_100NS; i++) {
+void delay10Nanoseconds() {
+    for (unsigned int i = 0; i < NOP_COUNT_10NS; i++) {
         __asm__("nop");
     }
 }
@@ -139,16 +139,23 @@ public:
         }
         return false; // Ensure all control paths return a value
     }
+    
+    void printDroplet(){
+      digitalWrite(printPin, HIGH);
+      delayMicroseconds(3000);
+      digitalWrite(printPin, LOW);
+    }
 
     // Method to flash the LED
     void flash() {
+      printDroplet();
       delayMicroseconds(startDelay);
 
       for (int i = 0; i < numFlashes; i++) {
         digitalWrite(triggerPin, HIGH);
         // delayMicroseconds(duration);
         for (int j = 0; j < duration; j++) {
-          delay100Nanoseconds();
+          delay10Nanoseconds();
         }
         digitalWrite(triggerPin, LOW);
         delayMicroseconds(interval);

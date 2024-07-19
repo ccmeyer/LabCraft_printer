@@ -40,7 +40,7 @@ class Camera:
     def start_camera(self, exposure_time=1000000):
         if self.initialized:
             self.stop_camera()
-            self.picam2 = Picamera2()
+            # self.picam2 = Picamera2()
         self.configure_camera(exposure_time)
         self.picam2.start()
         print("-- Camera started,", self.picam2.capture_metadata()['ExposureTime'])
