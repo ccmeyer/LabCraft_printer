@@ -15,6 +15,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         super().__init__()
         self.main_window = main_window
         self.camera = self.main_window.camera
+        self.machine = main_window.machine
         self.setWindowTitle("Image Capture")
         self.resize(800, 400)
 
