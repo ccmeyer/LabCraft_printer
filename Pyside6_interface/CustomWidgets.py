@@ -37,7 +37,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.simple_coord_box.step_size_input.valueChangedByStep.connect(self.change_step)
 
         self.layout = QtWidgets.QVBoxLayout(self)
-        self.layout.addLayout(self.horizontal_layout)
+        self.horizontal_layout.addLayout(self.layout)
         self.setting_grid = QtWidgets.QGridLayout()
 
         # Start Delay
