@@ -73,6 +73,16 @@ extern "C" void SystemClock_Config(void)
 #include "all_constants.h"
 #include "PressureSensor.h"
 
+// Assuming a clock frequency of 180MHz
+#define SYSTEM_CORE_CLOCK 180000000UL
+#define NOP_PER_NS (SYSTEM_CORE_CLOCK / 1000000000UL)
+#define NOP_COUNT_100NS ((NOP_PER_NS * 100) / 1000)
+
+void delay100Nanoseconds() {
+    for (unsigned int i = 0; i < NOP_COUNT_100NS; i++) {
+        __asm__("nop");
+    }
+}
 /**
  * @class LED
  * @brief Represents an LED object used for flashing samples to image them.
@@ -86,8 +96,8 @@ private:
     int signalPin; // Pin number for the LED signal
     int startDelay; // Delay before the first flash in microseconds
     int numFlashes; // Number of flashes
-    int duration; // Duration of the flash in microseconds
-    int interval; // Interval between flashes in milliseconds
+    int duration; // Duration of the flash in 100 nanosecond increments
+    int interval; // Interval between flashes in microseconds
     unsigned long previousMillis; // Time of the previous flash
     bool active; // Flag to indicate if the LED is active
     int state; // Current state of the LED
@@ -136,9 +146,12 @@ public:
 
       for (int i = 0; i < numFlashes; i++) {
         digitalWrite(triggerPin, HIGH);
-        delayMicroseconds(duration);
+        // delayMicroseconds(duration);
+        for (int j = 0; j < duration; j++) {
+          delay100Nanoseconds();
+        }
         digitalWrite(triggerPin, LOW);
-        delay(interval);
+        delayMicroseconds(interval);
       }
     }
 };
@@ -372,6 +385,7 @@ int frequency = 1000000;
 
 bool pressureCorrect = false;
 bool regulatePressure = false;
+
 
 // TMC2208Stepper driverX = TMC2208Stepper(X_SW_RX, X_SW_TX, R_SENSE); // Software serial
 // TMC2208Stepper driverY = TMC2208Stepper(Y_SW_RX, Y_SW_TX, R_SENSE); // Software serial

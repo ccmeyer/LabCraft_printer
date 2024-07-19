@@ -47,8 +47,8 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_duration_spin_box = QtWidgets.QDoubleSpinBox()
         self.flash_duration_spin_box.setMinimum(1)  # Minimum value set to 1
         self.flash_duration_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.flash_duration_spin_box.setSingleStep(10)  # Step size of 10
-        self.flash_duration_spin_box.setValue(2000)  # Default value
+        self.flash_duration_spin_box.setSingleStep(1)  # Step size of 10
+        self.flash_duration_spin_box.setValue(10)  # Default value
         self.setting_grid.addWidget(self.flash_duration_label, 2, 0)
         self.setting_grid.addWidget(self.flash_duration_spin_box, 2, 1)
         
@@ -56,9 +56,9 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_delay_label = QtWidgets.QLabel("Inter-Flash Delay:")
         self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
         self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 0
-        self.flash_delay_spin_box.setMaximum(1000)  # Assuming a reasonable max value
+        self.flash_delay_spin_box.setMaximum(10000)  # Assuming a reasonable max value
         self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
-        self.flash_delay_spin_box.setValue(25)  # Default value
+        self.flash_delay_spin_box.setValue(100)  # Default value
         self.setting_grid.addWidget(self.flash_delay_label, 3, 0)
         self.setting_grid.addWidget(self.flash_delay_spin_box, 3, 1)
 
