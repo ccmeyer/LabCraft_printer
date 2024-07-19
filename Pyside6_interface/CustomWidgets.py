@@ -48,6 +48,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.start_delay_spin_box.setMaximum(50000)  # Assuming a reasonable max value
         self.start_delay_spin_box.setSingleStep(100)  # Step size of 1
         self.start_delay_spin_box.setValue(0)  # Default value
+        self.start_delay_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.start_delay_label, 0, 0)
         self.setting_grid.addWidget(self.start_delay_spin_box, 0, 1)
 
@@ -58,6 +59,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_number_spin_box.setMaximum(100)  # Assuming a reasonable max value
         self.flash_number_spin_box.setSingleStep(1)  # Step size of 1
         self.flash_number_spin_box.setValue(1)  # Default value
+        self.flash_number_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.flash_number_label, 1, 0)
         self.setting_grid.addWidget(self.flash_number_spin_box, 1, 1)
 
@@ -68,6 +70,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_duration_spin_box.setMaximum(10000)  # Assuming a reasonable max value
         self.flash_duration_spin_box.setSingleStep(1)  # Step size of 10
         self.flash_duration_spin_box.setValue(10)  # Default value
+        self.flash_duration_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.flash_duration_label, 2, 0)
         self.setting_grid.addWidget(self.flash_duration_spin_box, 2, 1)
         
@@ -78,6 +81,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.flash_delay_spin_box.setMaximum(10000)  # Assuming a reasonable max value
         self.flash_delay_spin_box.setSingleStep(1)  # Step size of 1
         self.flash_delay_spin_box.setValue(100)  # Default value
+        self.flash_delay_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.flash_delay_label, 3, 0)
         self.setting_grid.addWidget(self.flash_delay_spin_box, 3, 1)
 
@@ -88,6 +92,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.exposure_time_spin_box.setMaximum(5000000)  # Assuming a reasonable max value
         self.exposure_time_spin_box.setSingleStep(100)  # Step size of 100
         self.exposure_time_spin_box.setValue(1000000)  # Default value
+        self.exposure_time_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.exposure_time_label, 4, 0)
         self.setting_grid.addWidget(self.exposure_time_spin_box, 4, 1)
 
@@ -99,30 +104,37 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.activate_led_button = QtWidgets.QPushButton("Activate LED")
         self.activate_led_button.clicked.connect(self.activate_led)
+        self.activate_led_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.activate_led_button)
 
         self.deactivate_led_button = QtWidgets.QPushButton("Deactivate LED")
         self.deactivate_led_button.clicked.connect(self.deactivate_led)
+        self.deactivate_led_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.deactivate_led_button)
 
         self.set_high_button = QtWidgets.QPushButton("Set HIGH")
         self.set_high_button.clicked.connect(self.set_high)
+        self.set_high_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.set_high_button)
 
         self.set_low_button = QtWidgets.QPushButton("Set LOW")
         self.set_low_button.clicked.connect(self.set_low)
+        self.set_low_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.set_low_button)
 
         self.parameters_button = QtWidgets.QPushButton("Set Parameters")
         self.parameters_button.clicked.connect(self.set_parameters)
+        self.parameters_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.parameters_button)
 
         self.capture_button = QtWidgets.QPushButton("Capture Image")
         self.capture_button.clicked.connect(self.capture_image)
+        self.capture_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.capture_button)
 
         self.live_preview_button = QtWidgets.QPushButton("Live Preview")
         self.live_preview_button.clicked.connect(self.start_live_preview)
+        self.live_preview_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.live_preview_button)
 
         self.initialize_camera()
