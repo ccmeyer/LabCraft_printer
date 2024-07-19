@@ -16,7 +16,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.main_window = main_window
         self.camera = self.main_window.camera
         self.setWindowTitle("Image Capture")
-        self.resize(400, 400)
+        self.resize(800, 400)
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_position()),
@@ -30,8 +30,14 @@ class ImageCaptureDialog(QtWidgets.QDialog):
             Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
         ]
 
-        self.layout = QtWidgets.QVBoxLayout(self)
+        self.horizontal_layout = QtWidgets.QHBoxLayout(self)
+        self.simple_coord_box = SimpleCoordinateBox("Coordinates",self.main_window)
+        self.simple_coord_box.setFixedWidth(400)
+        self.horizontal_layout.addWidget(self.simple_coord_box)
+        self.simple_coord_box.step_size_input.valueChangedByStep.connect(self.change_step)
 
+        self.layout = QtWidgets.QVBoxLayout(self)
+        self.layout.addLayout(self.horizontal_layout)
         self.setting_grid = QtWidgets.QGridLayout()
 
         # Start Delay
