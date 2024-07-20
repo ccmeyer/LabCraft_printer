@@ -15,6 +15,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         super().__init__()
         self.main_window = main_window
         self.camera = self.main_window.camera
+        self.save = False
         self.machine = main_window.machine
         self.setWindowTitle("Image Capture")
         self.resize(800, 400)
@@ -109,10 +110,6 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.layout.addLayout(self.setting_grid)
 
-        # self.initialize_camera_button = QtWidgets.QPushButton("Initialize Camera")
-        # self.initialize_camera_button.clicked.connect(self.initialize_camera)
-        # self.layout.addWidget(self.initialize_camera_button)
-
         self.activate_led_button = QtWidgets.QPushButton("Activate LED")
         self.activate_led_button.clicked.connect(self.activate_led)
         self.activate_led_button.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -143,12 +140,20 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.capture_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.capture_button)
 
-        # self.live_preview_button = QtWidgets.QPushButton("Live Preview")
-        # self.live_preview_button.clicked.connect(self.start_live_preview)
-        # self.live_preview_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.layout.addWidget(self.live_preview_button)
+        self.toggle_save_button = QtWidgets.QPushButton("Enable Save")
+        self.toggle_save_button.setCheckable(True)  # Make the button checkable
+        self.toggle_save_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.toggle_save_button.clicked.connect(self.toggle_save)
+        self.layout.addWidget(self.toggle_save_button)
 
         self.initialize_camera()
+
+    def toggle_save(self):
+        self.save = self.toggle_save_button.isChecked()  # Update the save variable based on the button's state
+        if self.save:
+            self.toggle_save_button.setText("Disable Save")  # Update button text to indicate saving is enabled
+        else:
+            self.toggle_save_button.setText("Enable Save")  # Update button text to indicate saving is disabled
 
     def keyPressEvent(self, event):
         for shortcut in self.movement_shortcuts:
@@ -209,10 +214,10 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         # self.initialize_camera()
 
     def capture_image(self):
-        self.camera.start_capture_thread()
-
-    # def start_live_preview(self):
-    #     self.camera.live_preview()
+        if self.save:
+            self.camera.start_capture_thread(save=True)
+        else:
+            self.camera.start_capture_thread(save=False)
 
     def set_high(self):
         self.camera.start_flash()

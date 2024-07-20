@@ -1,6 +1,8 @@
 import time
 import numpy as np
 import cv2
+from datetime import datetime
+import os
 import gpiod
 from picamera2 import Picamera2
 import threading
@@ -63,7 +65,7 @@ class Camera:
         print("Image capture complete")
         return
     
-    def start_capture_thread(self):
+    def start_capture_thread(self,save=False):
         self.capture_event = threading.Event()
 
         # Start the image capture in a separate thread
@@ -79,34 +81,33 @@ class Camera:
         self.capture_thread.join()
         self.stop_flash()
 
-        self.show_image()
+        self.show_image(save=save)
 
-    def show_image(self):
+    def show_image(self,save=False):
         # Display the captured image
         if self.image is None:
             print("No image to display")
             return
+    
+        if save:
+            # Specify the directory and filename
+            directory = "saved_images"
+            filename = f"captured_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            filepath = os.path.join(directory, filename)
+            
+            # Create the directory if it doesn't exist
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+        
+            # Save the image
+            cv2.imwrite(filepath, self.image)
+            print(f"Image saved to {filepath}")
+        
+
         cv2.imshow('Captured Image', self.image)
         cv2.waitKey(0)  # Wait indefinitely until a key is pressed
         cv2.destroyAllWindows()
         self.image = None
-
-    # def live_preview(self):
-    #     """Displays a live preview of the camera feed, updating every second."""
-    #     self.picam2.stop()  # Stop the camera if it is already running  
-    #     try:
-    #         self.picam2.start_preview()  # Start the picamera2 preview functionality
-    #         print("Live preview started. Press 'q' to quit.")
-    #         while True:
-    #             time.sleep(1)  # Update the image every second
-    #             frame = self.picam2.capture_array()  # Capture the current frame
-    #             cv2.imshow("Live Preview", frame)  # Display the frame using OpenCV
-    #             if cv2.waitKey(1) & 0xFF == ord('q'):  # Break the loop if 'q' is pressed
-    #                 break
-    #     finally:
-    #         cv2.destroyAllWindows()  # Make sure to destroy all OpenCV windows
-    #         self.picam2.stop_preview()  # Stop the picamera2 preview functionality
-    #         print("Live preview stopped.")
 
     def __del__(self):
         self.stop_camera()
