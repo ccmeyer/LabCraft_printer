@@ -351,6 +351,9 @@ int changeCurrent = 0;
 
 bool motorsActive = false;
 
+
+int pulseWidth = 3000;
+
 // BIDIRECTIONAL SERIAL COMMUNICATION VARIABLES
 
 const byte numChars = 64;
@@ -591,7 +594,7 @@ void checkMotors(){
 
 void printDroplet(){
   digitalWrite(printPin, HIGH);
-  delayMicroseconds(3000);
+  delayMicroseconds(pulseWidth);
   digitalWrite(printPin, LOW);
 }
 
@@ -1053,6 +1056,7 @@ void executeCommand(const Command& cmd) {
     case SET_DELAY:
       led.setStartDelay(cmd.param1);
       led.setPulseWidth(cmd.param2);
+      pulseWidth = cmd.param2;
       break;
     case CAMERA_ON:
       digitalWrite(cameraPin, HIGH);
