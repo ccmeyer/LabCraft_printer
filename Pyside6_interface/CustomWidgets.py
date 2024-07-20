@@ -102,7 +102,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.pulse_width_spin_box = QtWidgets.QDoubleSpinBox()
         self.pulse_width_spin_box.setMinimum(100)  # Minimum value set to 1
         self.pulse_width_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.pulse_width_spin_box.setSingleStep(100)  # Step size of 1
+        self.pulse_width_spin_box.setSingleStep(20)  # Step size of 1
         self.pulse_width_spin_box.setValue(3000)  # Default value
         self.pulse_width_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
         self.setting_grid.addWidget(self.pulse_width_label, 5, 0)
