@@ -143,7 +143,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
             self.main_window.update_step_size_display()
     
     def initialize_camera(self):
-        exposure_time = self.exposure_time_spin_box.value()
+        exposure_time = self.settings['exposure_time'].value()
         self.camera.start_camera(exposure_time=exposure_time)
         # self.main_window.popup_message("Camera Initialized",f"Camera has been initialized with the following settings:\nExposure Time: {exposure_time} microseconds")
     
@@ -165,7 +165,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
         self.main_window.machine.set_flash_delay(start_delay,pulse_width)
         self.main_window.machine.set_start_parameters(start_droplets,start_width,printing_interval)
-        self.camera.set_exposure_time(self.exposure_time_spin_box.value())
+        self.camera.set_exposure_time(self.settings['exposure_time'].value())
         # self.initialize_camera()
 
     def capture_image(self):
