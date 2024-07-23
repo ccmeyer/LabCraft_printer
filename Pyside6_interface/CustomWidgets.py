@@ -18,7 +18,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.save = False
         self.machine = main_window.machine
         self.setWindowTitle("Image Capture")
-        self.resize(800, 400)
+        self.resize(800, 800)
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_position()),
@@ -42,118 +42,69 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.horizontal_layout.addLayout(self.layout)
         self.setting_grid = QtWidgets.QGridLayout()
 
-        # Start Delay
-        self.start_delay_label = QtWidgets.QLabel("Start Delay:")
-        self.start_delay_spin_box = QtWidgets.QDoubleSpinBox()
-        self.start_delay_spin_box.setMinimum(0)  # Minimum value set to 0
-        self.start_delay_spin_box.setMaximum(50000)  # Assuming a reasonable max value
-        self.start_delay_spin_box.setSingleStep(100)  # Step size of 1
-        self.start_delay_spin_box.setValue(0)  # Default value
-        self.start_delay_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.start_delay_label, 0, 0)
-        self.setting_grid.addWidget(self.start_delay_spin_box, 0, 1)
-
-        # Flash Number
-        self.flash_number_label = QtWidgets.QLabel("Flash Number:")
-        self.flash_number_spin_box = QtWidgets.QSpinBox()
-        self.flash_number_spin_box.setMinimum(1)  # Minimum value set to 1
-        self.flash_number_spin_box.setMaximum(100)  # Assuming a reasonable max value
-        self.flash_number_spin_box.setSingleStep(1)  # Step size of 1
-        self.flash_number_spin_box.setValue(1)  # Default value
-        self.flash_number_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.flash_number_label, 1, 0)
-        self.setting_grid.addWidget(self.flash_number_spin_box, 1, 1)
-
-        # Flash Duration
-        self.flash_duration_label = QtWidgets.QLabel("Flash Duration:")
-        self.flash_duration_spin_box = QtWidgets.QDoubleSpinBox()
-        self.flash_duration_spin_box.setMinimum(1)  # Minimum value set to 1
-        self.flash_duration_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.flash_duration_spin_box.setSingleStep(1)  # Step size of 10
-        self.flash_duration_spin_box.setValue(10)  # Default value
-        self.flash_duration_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.flash_duration_label, 2, 0)
-        self.setting_grid.addWidget(self.flash_duration_spin_box, 2, 1)
-        
-        # Inter-Flash Delay
-        self.flash_delay_label = QtWidgets.QLabel("Inter-Flash Delay:")
-        self.flash_delay_spin_box = QtWidgets.QDoubleSpinBox()
-        self.flash_delay_spin_box.setMinimum(0)  # Minimum value set to 0
-        self.flash_delay_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.flash_delay_spin_box.setSingleStep(10)  # Step size of 1
-        self.flash_delay_spin_box.setValue(100)  # Default value
-        self.flash_delay_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.flash_delay_label, 3, 0)
-        self.setting_grid.addWidget(self.flash_delay_spin_box, 3, 1)
-
-        # Exposure Time
-        self.exposure_time_label = QtWidgets.QLabel("Exposure Time:")
-        self.exposure_time_spin_box = QtWidgets.QDoubleSpinBox()
-        self.exposure_time_spin_box.setMinimum(1)  # Minimum value set to 1
-        self.exposure_time_spin_box.setMaximum(5000000)  # Assuming a reasonable max value
-        self.exposure_time_spin_box.setSingleStep(1000)  # Step size of 100
-        self.exposure_time_spin_box.setValue(1000000)  # Default value
-        self.exposure_time_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.exposure_time_label, 4, 0)
-        self.setting_grid.addWidget(self.exposure_time_spin_box, 4, 1)
-
-        # Pulse Width
-        self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
-        self.pulse_width_spin_box = QtWidgets.QDoubleSpinBox()
-        self.pulse_width_spin_box.setMinimum(100)  # Minimum value set to 1
-        self.pulse_width_spin_box.setMaximum(10000)  # Assuming a reasonable max value
-        self.pulse_width_spin_box.setSingleStep(20)  # Step size of 1
-        self.pulse_width_spin_box.setValue(3000)  # Default value
-        self.pulse_width_spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.setting_grid.addWidget(self.pulse_width_label, 5, 0)
-        self.setting_grid.addWidget(self.pulse_width_spin_box, 5, 1)
+        self.settings = {}
+        # Create settings
+        self.create_setting('start_delay',"Start Delay:", 0, 50000, 100, 0, 0, 0)
+        self.create_setting('flash_number',"Flash Number:", 1, 100, 1, 1, 1, 0)
+        self.create_setting('flash_duration',"Flash Duration:", 1, 10000, 1, 10, 2, 0)
+        self.create_setting('inter_flash_delay',"Inter-Flash Delay:", 0, 10000, 10, 100, 3, 0)
+        self.create_setting('exposure_time',"Exposure Time:", 1, 5000000, 1000, 1000000, 4, 0)
+        self.create_setting('pulse_width',"Pulse Width:", 100, 10000, 20, 1400, 5, 0)
+        self.create_setting('initial_droplets','Starting Droplets:',0,100,1,0,6,0)
+        self.create_setting('initial width','Starting Width:',100,10000,1400,0,7,0)
+        self.create_setting('printing_interval','Printing Interval:',0,100000,1000,47000,8,0)
 
         self.layout.addLayout(self.setting_grid)
 
-        self.activate_led_button = QtWidgets.QPushButton("Activate LED")
-        self.activate_led_button.clicked.connect(self.activate_led)
-        self.activate_led_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.activate_led_button)
-
-        self.deactivate_led_button = QtWidgets.QPushButton("Deactivate LED")
-        self.deactivate_led_button.clicked.connect(self.deactivate_led)
-        self.deactivate_led_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.deactivate_led_button)
-
-        self.set_high_button = QtWidgets.QPushButton("Set HIGH")
-        self.set_high_button.clicked.connect(self.set_high)
-        self.set_high_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.set_high_button)
-
-        self.set_low_button = QtWidgets.QPushButton("Set LOW")
-        self.set_low_button.clicked.connect(self.set_low)
-        self.set_low_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.set_low_button)
-
-        self.parameters_button = QtWidgets.QPushButton("Set Parameters")
-        self.parameters_button.clicked.connect(self.set_parameters)
-        self.parameters_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.parameters_button)
-
-        self.capture_button = QtWidgets.QPushButton("Capture Image")
-        self.capture_button.clicked.connect(self.capture_image)
-        self.capture_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.capture_button)
-
-        self.toggle_save_button = QtWidgets.QPushButton("Enable Save")
-        self.toggle_save_button.setCheckable(True)  # Make the button checkable
-        self.toggle_save_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.toggle_save_button.clicked.connect(self.toggle_save)
-        self.layout.addWidget(self.toggle_save_button)
-
+        self.buttons = {}
+        # Create buttons
+        self.create_button('activate_led',"Activate LED", self.activate_led)
+        self.create_button('deactivate_led',"Deactivate LED", self.deactivate_led)
+        self.create_button('set_high',"Set HIGH", self.set_high)
+        self.create_button('set_low',"Set LOW", self.set_low)
+        self.create_button('set_parameters',"Set Parameters", self.set_parameters)
+        self.create_button('capture_image',"Capture Image", self.capture_image)
+        self.create_toggle_button('enable_save',"Enable Save", self.toggle_save)
+        
+        self.update_coordinates()
         self.initialize_camera()
 
+    def create_setting(self, dict_text, label_text, min_val, max_val, step, default_val, row, col):
+        label = QtWidgets.QLabel(label_text)
+        spin_box = QtWidgets.QSpinBox()
+        spin_box.setMinimum(min_val)
+        spin_box.setMaximum(max_val)
+        spin_box.setSingleStep(step)
+        spin_box.setValue(default_val)
+        spin_box.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # Store the spin box in the dictionary with label_text as the key
+        self.settings[dict_text] = spin_box
+
+        self.setting_grid.addWidget(label, row, col)
+        self.setting_grid.addWidget(spin_box, row, col + 1)
+
+    def create_button(self, dict_text,text, slot):
+        button = QtWidgets.QPushButton(text)
+        button.clicked.connect(slot)
+        button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.buttons[dict_text] = button
+        self.layout.addWidget(button)
+
+    def create_toggle_button(self, dict_text,text, slot):
+        button = QtWidgets.QPushButton(text)
+        button.setCheckable(True)
+        button.clicked.connect(slot)
+        button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.buttons[dict_text] = button
+        self.layout.addWidget(button)
+
     def toggle_save(self):
-        self.save = self.toggle_save_button.isChecked()  # Update the save variable based on the button's state
+        self.save = self.buttons['enable_save'].isChecked()  # Update the save variable based on the button's state 
         if self.save:
-            self.toggle_save_button.setText("Disable Save")  # Update button text to indicate saving is enabled
+            self.buttons['enable_save'].setText("Disable Save")  # Update button text to indicate saving is enabled
         else:
-            self.toggle_save_button.setText("Enable Save")  # Update button text to indicate saving is disabled
+            self.buttons['enable_save'].setText("Enable Save")  # Update button text to indicate saving is disabled
 
     def keyPressEvent(self, event):
         for shortcut in self.movement_shortcuts:
@@ -203,13 +154,17 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.main_window.machine.deactivate_led()
 
     def set_parameters(self):
-        num_flashes = self.flash_number_spin_box.value()
-        flash_duration = self.flash_duration_spin_box.value()
-        inter_flash_delay = self.flash_delay_spin_box.value()
-        start_delay = self.start_delay_spin_box.value()
-        pulse_width = self.pulse_width_spin_box.value()
+        num_flashes = self.settings['flash_number'].value()
+        flash_duration = self.settings['flash_duration'].value()
+        inter_flash_delay = self.settings['inter_flash_delay'].value()
+        start_delay = self.settings['start_delay'].value()
+        pulse_width = self.settings['pulse_width'].value()
+        start_droplets = self.settings['initial_droplets'].value()
+        start_width = self.settings['initial width'].value()
+        printing_interval = self.settings['printing_interval'].value()
         self.main_window.machine.set_flash_parameters(num_flashes,flash_duration,inter_flash_delay)
         self.main_window.machine.set_flash_delay(start_delay,pulse_width)
+        self.main_window.machine.set_start_parameters(start_droplets,start_width,printing_interval)
         self.camera.set_exposure_time(self.exposure_time_spin_box.value())
         # self.initialize_camera()
 

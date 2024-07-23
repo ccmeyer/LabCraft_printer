@@ -73,98 +73,6 @@ extern "C" void SystemClock_Config(void)
 #include "all_constants.h"
 #include "PressureSensor.h"
 
-// Assuming a clock frequency of 180MHz
-#define SYSTEM_CORE_CLOCK 180000000UL
-#define NOP_PER_NS (SYSTEM_CORE_CLOCK / 1000000000UL)
-#define NOP_COUNT_10NS ((NOP_PER_NS * 10) / 1000)
-
-void delay10Nanoseconds() {
-    for (unsigned int i = 0; i < NOP_COUNT_10NS; i++) {
-        __asm__("nop");
-    }
-}
-/**
- * @class LED
- * @brief Represents an LED object used for flashing samples to image them.
- * 
- * The LED class provides functionality to control an LED connected to a specific pin. It allows
- * the user to flash the LED on and off for a specific duration at a specified interval to illuminate samples for imaging.
- */
-class LED {
-private:
-    int triggerPin; // Pin number for the LED trigger
-    int signalPin; // Pin number for the LED signal
-    int pulseWidth; // Pulse width of the printing valve in microseconds
-    int startDelay; // Delay before the first flash in microseconds
-    int numFlashes; // Number of flashes
-    int duration; // Duration of the flash in 100 nanosecond increments
-    int interval; // Interval between flashes in microseconds
-    unsigned long previousMillis; // Time of the previous flash
-    bool active; // Flag to indicate if the LED is active
-    int state; // Current state of the LED
-    bool triggered; // Flag to indicate if the LED is triggered
-
-public:
-    // Constructor to initialize the LED object
-    LED(int triggerPin, int signalPin, int startDelay, int duration, int interval, int numFlashes)
-        : triggerPin(triggerPin), signalPin(signalPin), startDelay(startDelay), pulseWidth(3000),
-          duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), state(0), active(false), triggered(false) {
-        pinMode(triggerPin, OUTPUT);
-        digitalWrite(triggerPin, LOW);
-
-        pinMode(signalPin, INPUT);
-        // digitalWrite(signalPin, LOW);
-    }
-
-    void setNumFlashes(int flashes) { numFlashes = flashes; }
-    void setDuration(int dur) { duration = dur; }
-    void setInterval(int inter) { interval = inter; }
-    void setStartDelay(int delay) { startDelay = delay; }
-    void setPulseWidth(int width) { pulseWidth = width; }
-
-    void activate() { active = true; }
-    void deactivate() { active = false; }
-
-    bool isActive() const { return active; }
-
-    // Method to check for signal
-    bool isSignaled() {
-        state = digitalRead(signalPin);
-        if (state == LOW) {
-            triggered = false;
-            return false;
-        } else if (state == HIGH && !triggered) {
-            triggered = true;
-            return true;
-        } else if (state == HIGH && triggered) {
-            return false;
-        }
-        return false; // Ensure all control paths return a value
-    }
-
-    void printDroplet(){
-      digitalWrite(printPin, HIGH);
-      delayMicroseconds(pulseWidth);
-      digitalWrite(printPin, LOW);
-    }
-
-    // Method to flash the LED
-    void flash() {
-      printDroplet();
-      delayMicroseconds(startDelay);
-
-      for (int i = 0; i < numFlashes; i++) {
-        digitalWrite(triggerPin, HIGH);
-        // delayMicroseconds(duration);
-        for (int j = 0; j < duration; j++) {
-          delay10Nanoseconds();
-        }
-        digitalWrite(triggerPin, LOW);
-        delayMicroseconds(interval);
-      }
-    }
-};
-
 /**
  * @class LimitSwitch
  * @brief Represents a limit switch for a specific axis.
@@ -424,10 +332,7 @@ LimitSwitch* limits[] = {&limitZ, &limitX, &limitY, &limitP};
 // Static variable to keep track of the current switch index
 static int currentSwitchIndex = 0;
 
-LED led = LED(flashPin,cameraPin,startDelay,flashDuration,flashInterval,numFlashes);
 
-bool ledActive = false;
-bool ledTriggered = false;
 /**
  * @enum HomingState
  * @brief Represents the different states of the homing process.
@@ -689,6 +594,124 @@ void adjustPressure() {
   stepperP.runSpeed();
 }
 
+// Assuming a clock frequency of 180MHz
+#define SYSTEM_CORE_CLOCK 180000000UL
+#define NOP_PER_NS (SYSTEM_CORE_CLOCK / 1000000000UL)
+#define NOP_COUNT_10NS ((NOP_PER_NS * 10) / 1000)
+
+void delay10Nanoseconds() {
+    for (unsigned int i = 0; i < NOP_COUNT_10NS; i++) {
+        __asm__("nop");
+    }
+}
+/**
+ * @class LED
+ * @brief Represents an LED object used for flashing samples to image them.
+ * 
+ * The LED class provides functionality to control an LED connected to a specific pin. It allows
+ * the user to flash the LED on and off for a specific duration at a specified interval to illuminate samples for imaging.
+ */
+class LED {
+private:
+    int triggerPin; // Pin number for the LED trigger
+    int signalPin; // Pin number for the LED signal
+    int startDroplets; // Number of droplets to print before imaging
+    int startDropletWidth; // Pulse width of the starter droplet printing valve in microseconds
+    int printingInterval; // Interval between droplets in microseconds
+    int pulseWidth; // Pulse width of the printing valve in microseconds
+    int startDelay; // Delay before the first flash in microseconds
+    int numFlashes; // Number of flashes
+    int duration; // Duration of the flash in 100 nanosecond increments
+    int interval; // Interval between flashes in microseconds
+    unsigned long previousMillis; // Time of the previous flash
+    unsigned long currentMicros; // Current time in microseconds
+    unsigned long targetMicros; // Target time in microseconds
+    bool active; // Flag to indicate if the LED is active
+    int state; // Current state of the LED
+    bool triggered; // Flag to indicate if the LED is triggered
+
+public:
+    // Constructor to initialize the LED object
+    LED(int triggerPin, int signalPin, int startDroplets, int startDropletWidth, int printingInterval, int startDelay, int duration, int interval, int numFlashes)
+        : triggerPin(triggerPin), signalPin(signalPin), startDroplets(startDroplets),startDropletWidth(startDropletWidth),printingInterval(printingInterval),
+        startDelay(startDelay), pulseWidth(3000), duration(duration), interval(interval), numFlashes(numFlashes), previousMillis(0), currentMicros(0), targetMicros(0), 
+        state(0), active(false), triggered(false) {
+        pinMode(triggerPin, OUTPUT);
+        digitalWrite(triggerPin, LOW);
+
+        pinMode(signalPin, INPUT);
+    }
+
+    void setStartDroplets(int droplets) { startDroplets = droplets; }
+    void setStartDropletWidth(int width) { startDropletWidth = width; }
+    void setPrintingInterval(int inter) { printingInterval = inter; }
+    void setNumFlashes(int flashes) { numFlashes = flashes; }
+    void setDuration(int dur) { duration = dur; }
+    void setInterval(int inter) { interval = inter; }
+    void setStartDelay(int delay) { startDelay = delay; }
+    void setPulseWidth(int width) { pulseWidth = width; }
+
+    void activate() { active = true; }
+    void deactivate() { active = false; }
+
+    bool isActive() const { return active; }
+
+    // Method to check for signal
+    bool isSignaled() {
+        state = digitalRead(signalPin);
+        if (state == LOW) {
+            triggered = false;
+            return false;
+        } else if (state == HIGH && !triggered) {
+            triggered = true;
+            return true;
+        } else if (state == HIGH && triggered) {
+            return false;
+        }
+        return false; // Ensure all control paths return a value
+    }
+
+    void printDroplet(int width){
+      digitalWrite(printPin, HIGH);
+      delayMicroseconds(width);
+      digitalWrite(printPin, LOW);
+    }
+
+    // Method to flash the LED
+    void flash() {
+      for (int i = 0; i < startDroplets; i++) {
+        printDroplet(startDropletWidth);
+        currentMicros = micros();
+        targetMicros = currentMicros + printingInterval;
+        while (micros() < targetMicros) {
+          // Adjust pressure while waiting for the printing interval to pass
+          if (millis() - previousMillis > 5) {
+            checkPressure();
+            previousMillis = millis();
+          }
+          adjustPressure();
+      }
+      printDroplet(pulseWidth);
+      delayMicroseconds(startDelay);
+
+      for (int i = 0; i < numFlashes; i++) {
+        digitalWrite(triggerPin, HIGH);
+        // delayMicroseconds(duration);
+        for (int j = 0; j < duration; j++) {
+          delay10Nanoseconds();
+        }
+        digitalWrite(triggerPin, LOW);
+        delayMicroseconds(interval);
+      }
+    }
+  }
+};
+
+LED led = LED(flashPin,cameraPin,startDroplets,startDropletWidth,printingInterval,startDelay,flashDuration,flashInterval,numFlashes);
+
+bool ledActive = false;
+bool ledTriggered = false;
+
 // Refresh the vacuum in the gripper on a constant interval
 void refreshGripper(){
   if (gripper.isActive() == true) {
@@ -783,6 +806,7 @@ enum CommandType {
     DEACTIVATE_LED,
     SET_FLASH,
     SET_DELAY,
+    SET_START,
     CAMERA_ON,
     // Add more command types as needed
 };
@@ -881,6 +905,8 @@ CommandType mapCommandType(const char* commandName) {
         return SET_FLASH;
     } else if (strcmp(commandName, "SET_DELAY") == 0) {
         return SET_DELAY;
+    } else if (strcmp(commandName, "SET_START") == 0) {
+        return SET_START;
     } else if (strcmp(commandName, "CAMERA_ON") == 0) {
         return CAMERA_ON;
     } else if (strcmp(commandName, "ACTIVATE_LED") == 0) {
@@ -1057,6 +1083,11 @@ void executeCommand(const Command& cmd) {
       led.setStartDelay(cmd.param1);
       led.setPulseWidth(cmd.param2);
       pulseWidth = cmd.param2;
+      break;
+    case SET_START:
+      led.setStartDroplets(cmd.param1);
+      led.setStartDropletWidth(cmd.param2);
+      led.setPrintingInterval(cmd.param3);
       break;
     case CAMERA_ON:
       digitalWrite(cameraPin, HIGH);

@@ -48,6 +48,10 @@ int flashDuration = 2000;
 int flashInterval = 25;
 int numFlashes = 1;
 
+int startDroplets = 1;
+int startDropletWidth = 1300;
+int printingInterval = 50000;
+
 // Timing variables
 // unsigned long previousMillisWrite = 0;
 // unsigned long intervalWrite = 51;
