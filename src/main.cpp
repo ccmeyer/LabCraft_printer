@@ -690,6 +690,7 @@ public:
             previousMillis = millis();
           }
           adjustPressure();
+        }
       }
       printDroplet(pulseWidth);
       delayMicroseconds(startDelay);
@@ -704,7 +705,6 @@ public:
         delayMicroseconds(interval);
       }
     }
-  }
 };
 
 LED led = LED(flashPin,cameraPin,startDroplets,startDropletWidth,printingInterval,startDelay,flashDuration,flashInterval,numFlashes);
