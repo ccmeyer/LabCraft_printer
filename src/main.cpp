@@ -807,6 +807,8 @@ enum CommandType {
     SET_FLASH,
     SET_DELAY,
     SET_START,
+    INC_TOL,
+    DEC_TOL,
     CAMERA_ON,
     // Add more command types as needed
 };
@@ -913,6 +915,10 @@ CommandType mapCommandType(const char* commandName) {
         return ACTIVATE_LED;
     } else if (strcmp(commandName, "DEACTIVATE_LED") == 0) {
         return DEACTIVATE_LED;
+    } else if (strcmp(commandName, "INC_TOL") == 0) {
+        return INC_TOL;
+    } else if (strcmp(commandName, "DEC_TOL") == 0) {
+        return DEC_TOL;
     } else {
         return UNKNOWN;
     }
@@ -1098,6 +1104,14 @@ void executeCommand(const Command& cmd) {
       // delay(cmd.param3);
       // delay(cmd.param1);
       digitalWrite(cameraPin, LOW);
+      break;
+    case INC_TOL:
+      toleranceDroplet += cmd.param1;
+      break;
+    case DEC_TOL:
+      if (toleranceDroplet - cmd.param1 >= 0){
+        toleranceDroplet -= cmd.param1;
+      } 
       break;
     case PAUSE:
       break;

@@ -86,6 +86,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Gate Off", "f","f", lambda: self.machine.gate_off()),
             Shortcut("Flash LED", "E","E", lambda: self.machine.flash_led()),
             Shortcut("Take Image", "I","I", lambda: self.machine.take_image()),
+            Shortcut("Increase Tolerance", "4","4", lambda: self.machine.increase_tolerance(1)),
+            Shortcut("Decrease Tolerance", "3","3", lambda: self.machine.decrease_tolerance(1)),
         ]
 
         self.read_settings_file()

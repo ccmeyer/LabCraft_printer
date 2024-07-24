@@ -1110,6 +1110,12 @@ class Machine(QtWidgets.QWidget):
     def take_image(self,flash_delay,flash_duration):
         self.add_command_to_queue('CAMERA_ON',flash_delay,flash_duration,0)
 
+    def increase_tolerance(self,tolerance):
+        self.add_command_to_queue('INC_TOL',tolerance,0,0)
+    
+    def decrease_tolerance(self,tolerance):
+        self.add_command_to_queue('DEC_TOL',tolerance,0,0)
+    
     def get_coordinates(self):
         return self.coordinates
     
