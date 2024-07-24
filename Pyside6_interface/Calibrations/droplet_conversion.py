@@ -64,7 +64,7 @@ def process_image(image_path):
     # cv2.destroyAllWindows()
     return volume_nanoliters
 
-image_directory = 'to_analyze'
+image_directory = os.path.join('Pyside6_interface','Calibrations','to_analyze')
 volumes = []
 files = []
 for filename in os.listdir(image_directory):
