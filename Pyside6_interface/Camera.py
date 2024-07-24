@@ -102,12 +102,61 @@ class Camera:
             # Save the image
             cv2.imwrite(filepath, self.image)
             print(f"Image saved to {filepath}")
+            try:
+                volume = self.process_image(self.image)
+                print(f"Volume of the droplet: {volume:.2f} nanoliters")
+            except Exception as e:
+                print("Error processing image:", e)
         
-
         cv2.imshow('Captured Image', self.image)
         cv2.waitKey(0)  # Wait indefinitely until a key is pressed
         cv2.destroyAllWindows()
         self.image = None
+
+    # Function to calculate the volume of a sphere in cubic micrometers
+    def calculate_volume(self,diameter):
+        radius = diameter / 2
+        volume = (4/3) * np.pi * (radius ** 3)
+        return volume
+
+    # Function to convert cubic micrometers to nanoliters
+    def cubic_meters_to_nanoliters(self,volume_cubic_micrometers):
+        return volume_cubic_micrometers * 1e12
+
+    def process_image(self,image):
+
+        # Load the droplet image
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Apply a binary threshold to segment the droplet
+        _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+
+        # Find contours in the thresholded image
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Identify the largest contour as the droplet
+        droplet_contour = max(contours, key=cv2.contourArea)
+
+        # Calculate the bounding box of the droplet contour
+        x, y, w, h = cv2.boundingRect(droplet_contour)
+
+        # Calculate the diameter of the droplet (average of width and height)
+        diameter_pixels = (w + h) / 2
+
+        # Assume the previously calculated conversion factor (pixels_per_micrometer)
+        pixels_per_micrometer = 0.879  # Derived from calibration
+
+        # Convert diameter from pixels to micrometers
+        diameter_micrometers = diameter_pixels / pixels_per_micrometer
+        diameter_meters = diameter_micrometers * 1e-6
+
+        # Calculate the volume of the droplet in cubic micrometers
+        volume_cubic_meters = self.calculate_volume(diameter_meters)
+
+        # Convert the volume to nanoliters
+        volume_nanoliters = self.cubic_meters_to_nanoliters(volume_cubic_meters)
+
+        return volume_nanoliters
 
     def __del__(self):
         self.stop_camera()

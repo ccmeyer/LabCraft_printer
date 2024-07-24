@@ -44,7 +44,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
 
         self.settings = {}
         # Create settings
-        self.create_setting('start_delay',"Start Delay:", 0, 50000, 100, 0, 0, 0)
+        self.create_setting('start_delay',"Start Delay:", 0, 50000, 100, 2000, 0, 0)
         self.create_setting('flash_number',"Flash Number:", 1, 100, 1, 1, 1, 0)
         self.create_setting('flash_duration',"Flash Duration:", 1, 10000, 1, 10, 2, 0)
         self.create_setting('inter_flash_delay',"Inter-Flash Delay:", 0, 10000, 10, 100, 3, 0)
@@ -52,7 +52,7 @@ class ImageCaptureDialog(QtWidgets.QDialog):
         self.create_setting('pulse_width',"Pulse Width:", 100, 10000, 20, 1400, 5, 0)
         self.create_setting('initial_droplets','Starting Droplets:',0,100,1,0,6,0)
         self.create_setting('initial width','Starting Width:',100,10000,20,1400,7,0)
-        self.create_setting('printing_interval','Printing Interval:',0,100000,1000,47000,8,0)
+        self.create_setting('printing_interval','Printing Interval:',0,100000,1000,30000,8,0)
 
         self.layout.addLayout(self.setting_grid)
 
