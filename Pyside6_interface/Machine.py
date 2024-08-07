@@ -710,7 +710,8 @@ class Machine(QtWidgets.QWidget):
     def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None,manual=False):
         # If the command is a manual command, check that all previous commands have been executed, and if not, do not add the command to the queue
         if manual:
-            for i in range(self.current_command_number):
+            for i in range(len(self.command_queue)):
+                print(f'Checking command {i}: {self.command_queue[i].get_command()}, executed: {self.command_queue[i].executed}, completed: {self.command_queue[i].completed}')
                 if not self.command_queue[i].completed:
                     print(f'Cannot add manual command, {self.command_queue[i].get_command()} has not been completed')
                     return
@@ -893,6 +894,7 @@ class Machine(QtWidgets.QWidget):
                 if current_command.executed and not current_command.completed:
                     self.command_completed.emit(current_command)
                     current_command.complete()
+                    print(f'---Command {current_command.get_command()} completed')
                     self.last_successful_command_number = self.last_checked_command_number
                 self.last_checked_command_number += 1
 

@@ -60,8 +60,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("Small Increase Pressure", "8","8", lambda: self.machine.set_relative_pressure(0.1,manual=True)),
             Shortcut("Small Decrease Pressure", "7","7", lambda: self.machine.set_relative_pressure(-0.1,manual=True)),
             Shortcut("Large Decrease Pressure", "6","6", lambda: self.machine.set_relative_pressure(-0.5,manual=True)),
-            Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus,"+", lambda: self.machine.regulate_pressure,manual=True),
-            Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus,"-", lambda: self.machine.deregulate_pressure,manual=True),
+            Shortcut("Regulate Pressure", QtCore.Qt.Key_Plus,"+", lambda: self.machine.regulate_pressure(manual=True)),
+            Shortcut("Deregulate Pressure", QtCore.Qt.Key_Minus,"-", lambda: self.machine.deregulate_pressure(manual=True)),
             Shortcut("Add Reagent", "A","A", lambda: self.add_reagent()),
             Shortcut("Pick Up Reagent", "O","O", lambda: self.machine.pick_up_reagent()),
             Shortcut("Open Gripper", "G","G", lambda: self.manual_open_gripper()),
@@ -77,8 +77,8 @@ class MainWindow(QtWidgets.QMainWindow):
             Shortcut("New Location", "Z","Z", lambda: self.machine.save_location(new=True)),
             Shortcut("Overwrite Location", "X","X", lambda: self.machine.save_location(new=False)),
             Shortcut("Reset Arrays", "R","R", lambda: self.reset_print_arrays()),
-            Shortcut("Home Motors", "H","H", lambda: self.home_motors(),manual=True),
-            Shortcut("Reset Syringe", "{","{", lambda: self.reset_syringe(),manual=True),
+            Shortcut("Home Motors", "H","H", lambda: self.home_motors(manual=True)),
+            Shortcut("Reset Syringe", "{","{", lambda: self.reset_syringe(manual=True)),
         ]
 
         self.read_settings_file()
