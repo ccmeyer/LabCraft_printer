@@ -263,8 +263,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             event.ignore()
 
-    def print_droplets(self,num_droplets):
-        self.machine.print_droplets(num_droplets)
+    def print_droplets(self,num_droplets,manual=False):
+        self.machine.print_droplets(num_droplets,manual=manual)
     
     def inc_step(self):
         if self.step_num < len(self.possible_steps)-1:
