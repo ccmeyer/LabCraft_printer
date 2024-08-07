@@ -2149,6 +2149,7 @@ class RackBox(QtWidgets.QWidget):
         self.slot_buttons = []
         self.loading_buttons = []
         self.slots = slots
+        self.loading_button_states = [True] * len(slots)  # Initialize button states
         num_slots = len(slots)
         self.reagent_names = [reagent.name for reagent in reagents]
 
@@ -2241,11 +2242,27 @@ class RackBox(QtWidgets.QWidget):
 
     def emit_loading_signal(self, slot):
         def emit_loading_signal():
+            if not self.loading_button_states[slot]:
+                return  # If the button is already disabled, do nothing
+
+            # Disable the button and update the state
+            self.loading_buttons[slot].setEnabled(False)
+            self.loading_button_states[slot] = False
+
+            # Emit the signal
             target_name = self.current_reagents[slot].text()
             reagent = next((r for r in self.reagents if r.name == target_name), None)
             self.reagent_loaded.emit(Slot(slot, reagent))
+
+            # Re-enable the button and reset the state after a delay
+            QtCore.QTimer.singleShot(2000, lambda: self.enable_loading_button(slot))
+
         return emit_loading_signal
-    
+
+    def enable_loading_button(self, slot):
+        self.loading_buttons[slot].setEnabled(True)
+        self.loading_button_states[slot] = True
+
     def reset_confirmation(self):
         for slot in self.slots:
             slot.confirmed = False
