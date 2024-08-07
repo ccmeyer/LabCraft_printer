@@ -512,12 +512,12 @@ class PlateCalibrationDialog(QtWidgets.QDialog):
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_plate_position()),
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0)),
-            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size)),
-            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size)),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0,manual=True)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0,manual=True)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0,manual=True)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0,manual=True)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size,manual=True)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size,manual=True)),
             Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
             Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
         ]
@@ -635,12 +635,12 @@ class RackCalibrationDialog(QtWidgets.QDialog):
 
         self.movement_shortcuts = [
             Shortcut("Save Position", "s", "s", lambda: self.save_position()),
-            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0)),
-            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0)),
-            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0)),
-            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0)),
-            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size)),
-            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size)),
+            Shortcut("Move Forward",QtCore.Qt.Key_Up, "Up", lambda: self.machine.set_relative_coordinates(self.main_window.step_size,0,0,manual=True)),
+            Shortcut("Move Back",QtCore.Qt.Key_Down,"Down", lambda: self.machine.set_relative_coordinates(-self.main_window.step_size,0,0,manual=True)),
+            Shortcut("Move Left", QtCore.Qt.Key_Left,"Left", lambda: self.machine.set_relative_coordinates(0,-self.main_window.step_size,0,manual=True)),
+            Shortcut("Move Right",QtCore.Qt.Key_Right, "Right", lambda: self.machine.set_relative_coordinates(0,self.main_window.step_size,0,manual=True)),
+            Shortcut("Move Up", "k", "k", lambda: self.machine.set_relative_coordinates(0,0,self.main_window.step_size,manual=True)),
+            Shortcut("Move Down", "m","m", lambda: self.machine.set_relative_coordinates(0,0,-self.main_window.step_size,manual=True)),
             Shortcut("Inc Step", ";",";", lambda: self.inc_step()),
             Shortcut("Dec Step", ".",".", lambda: self.dec_step()),
         ]

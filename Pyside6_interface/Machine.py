@@ -340,7 +340,7 @@ class ControlBoard():
             self.last_completed_command_number = self.current_command_number
             self.execute_command_from_queue()
         
-    def add_command_to_queue(self, command):
+    def add_command_to_queue(self, command):            
         new_command = self.convert_command(command)
         if new_command.command_type == 'PAUSE':
             self.pause_commands()
@@ -589,6 +589,8 @@ class Machine(QtWidgets.QWidget):
         self.last_added_command_number = 0
         self.current_command_number = 0
         self.last_completed_command_number = 0
+        self.last_checked_command_number = 0
+        self.last_successful_command_number = 0
         self.sent_command = None
         self.com_open = True
         self.state = "Free"
@@ -705,7 +707,13 @@ class Machine(QtWidgets.QWidget):
     def is_balance_connected(self):
         return self.balance.connected
     
-    def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None):
+    def add_command_to_queue(self, command_type, param1, param2, param3,handler=None,kwargs=None,manual=False):
+        # If the command is a manual command, check that all previous commands have been executed, and if not, do not add the command to the queue
+        if manual:
+            for i in range(self.current_command_number):
+                if not self.command_queue[i].completed:
+                    print(f'Cannot add manual command, {self.command_queue[i].get_command()} has not been completed')
+                    return
         new_command = Command(self.command_number, command_type=command_type, param1=param1, param2=param2, param3=param3,handler=handler,kwargs=kwargs)
         self.command_queue.append(new_command)
         self.incomplete_commands.append(new_command)
@@ -878,27 +886,23 @@ class Machine(QtWidgets.QWidget):
         if len(self.pressure_log) > 100:
             self.pressure_log.pop(0)  # Remove the oldest reading
         
-        if self.command_queue != []:
-            if self.current_command_number == self.last_completed_command_number:
-                current_command = self.command_queue[self.current_command_number]
+        if self.command_queue:
+            self.last_checked_command_number = self.last_successful_command_number
+            while self.last_checked_command_number <= self.last_completed_command_number and self.last_checked_command_number < len(self.command_queue):
+                current_command = self.command_queue[self.last_checked_command_number]
                 if current_command.executed and not current_command.completed:
-                    self.command_completed.emit(self.command_queue[self.current_command_number])
+                    self.command_completed.emit(current_command)
                     current_command.complete()
-            else:
-                try:
-                    self.command_executed.emit(self.command_queue[self.current_command_number])
-                except IndexError:
-                    print('Index error:',self.current_command_number,len(self.command_queue),self.command_queue[0].get_number(),self.command_queue[0].get_command())
-                    self.current_command_number = self.command_queue[-1].get_number()
+                    self.last_successful_command_number = self.last_checked_command_number
+                self.last_checked_command_number += 1
 
-        if self.incomplete_commands != []:
-            for i,command in enumerate(self.incomplete_commands):
+        if self.incomplete_commands:
+            for i, command in enumerate(self.incomplete_commands):
                 if command.get_number() <= self.current_command_number:
                     if command.sent and not command.executed:
-                        completed_command = self.incomplete_commands.pop(i)
-                        completed_command.execute_handler()
-
-        self.main_window.update_machine_position()
+                        executed_command = self.incomplete_commands.pop(i)
+                        executed_command.execute_handler()
+                self.main_window.update_machine_position()
 
     def print_handler(self,message='Default message'):
         print(message)
@@ -962,24 +966,24 @@ class Machine(QtWidgets.QWidget):
         self.motors_active = False
         self.main_window.change_motor_activation(False)
 
-    def enable_motors(self,handler=None,kwargs=None):
+    def enable_motors(self,handler=None,kwargs=None,manual=False):
         if handler is None:
             handler = self.enable_motors_handler
-        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
-    def disable_motors(self,handler=None,kwargs=None):
+    def disable_motors(self,handler=None,kwargs=None,manual=False):
         if handler is None:
             handler = self.disable_motors_handler
-        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
         self.add_command_to_queue('GRIPPER_OFF',0,0,0)
         return
 
-    def set_absolute_coordinates(self,x,y,z):
-        self.add_command_to_queue('ABSOLUTE_XYZ',x,y,z)
+    def set_absolute_coordinates(self,x,y,z,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('ABSOLUTE_XYZ',x,y,z,handler=handler,kwargs=kwargs,manual=manual)
         return
     
-    def set_relative_coordinates(self,x,y,z):
+    def set_relative_coordinates(self,x,y,z,handler=None,kwargs=None,manual=False):
         if self.homed:
             if self.x_pos - x < self.max_x:
                 self.main_window.popup_message('X-axis limit','Cannot move beyond X-axis limit')
@@ -991,56 +995,56 @@ class Machine(QtWidgets.QWidget):
                 self.main_window.popup_message('Z-axis limit','Cannot move beyond Z-axis limit')
                 z = 0
             
-        self.add_command_to_queue('RELATIVE_XYZ',x,y,z)
+        self.add_command_to_queue('RELATIVE_XYZ',x,y,z,handler=handler,kwargs=kwargs,manual=manual)
         return
     
-    def set_absolute_pressure(self,psi):
+    def set_absolute_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
-        self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0)
+        self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
-    def set_relative_pressure(self,psi):
+    def set_relative_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
         print('Setting relative pressure:',pressure)
-        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0)
+        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
     def regulate_pressure_handler(self):
         self.regulating_pressure = True
         self.main_window.change_regulation_button()
 
-    def regulate_pressure(self,handler=None,kwargs=None):
+    def regulate_pressure(self,handler=None,kwargs=None,manual=False):
         if handler is None:
             handler = self.regulate_pressure_handler
-        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
     def deregulate_pressure_handler(self):
         self.regulating_pressure = False
         self.main_window.change_regulation_button()
 
-    def deregulate_pressure(self,handler=None,kwargs=None):
+    def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
         if handler is None:
             handler = self.deregulate_pressure_handler
-        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
-    def open_gripper(self,handler=None,kwargs=None):
-        self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=handler,kwargs=kwargs)
+    def open_gripper(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
 
-    def close_gripper(self,handler=None,kwargs=None):
-        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=handler,kwargs=kwargs)
+    def close_gripper(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
     
     def gripper_off_handler(self):
         self.gripper_active = False
     
-    def gripper_off(self,handler=None,kwargs=None):
+    def gripper_off(self,handler=None,kwargs=None,manual=False):
         if handler is None:
             handler = self.gripper_off_handler
-        self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
 
     def wait_command(self):
@@ -1052,29 +1056,29 @@ class Machine(QtWidgets.QWidget):
     def print_calibration_droplets(self,num_droplets,pressure):
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,kwargs={'num_droplets':num_droplets,'psi':pressure})
 
-    def print_droplets(self,droplet_count,handler=None,kwargs=None):
+    def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         if not self.regulating_pressure:
             self.main_window.popup_message('Pressure not regulated','Pressure must be regulated to print droplets')
             return
-        self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def reset_syringe(self):
-        self.add_command_to_queue('RESET_P',0,0,0)
+    def reset_syringe(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def home_motor_handler(self):
         self.homed = True
         self.location = 'Home'
 
-    def home_motors(self,handler=None,kwargs=None):
+    def home_motors(self,handler=None,kwargs=None,manual=False):
         if handler == None:
             handler = self.home_motor_handler
-        self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs)
+        self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def change_acceleration(self,acceleration):
-        self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0)
+    def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def reset_acceleration(self):
-        self.add_command_to_queue('RESET_ACCEL',0,0,0)
+    def reset_acceleration(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def get_coordinates(self):
         return self.coordinates
