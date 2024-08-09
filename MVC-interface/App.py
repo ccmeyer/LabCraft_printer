@@ -12,16 +12,14 @@ def main():
     machine = Machine()
     model = Model()
     controller = Controller(machine, model)
-    view = View(model)
+    controller.connect_to_machine()
+    view = View(model,controller)
 
     # Show the main window
     view.show()
 
-    # Simulate sending a command and requesting status updates
-    machine.send_command("Move X", {"x_steps": 100})
-    machine.request_status_update()
-
     sys.exit(app.exec())
+    controller.disconnect_from_machine()
 
 if __name__ == "__main__":
     main()

@@ -18,3 +18,19 @@ class Controller(QObject):
         """Handle errors from the machine."""
         print(f"Error occurred: {error_message}")
         # Here, you could also update the view to display the error message
+
+    def connect_to_machine(self):
+        """Connect to the machine."""
+        self.machine.connect_board()
+
+    def disconnect_from_machine(self):
+        """Disconnect from the machine."""
+        self.machine.disconnect_board()
+
+    def move_left(self):
+        """Move the machine to the left."""
+        self.machine.move_left(manual=True)
+
+    def move_right(self):
+        """Move the machine to the right."""
+        self.machine.move_right(manual=True)

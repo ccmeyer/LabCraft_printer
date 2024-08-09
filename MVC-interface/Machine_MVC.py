@@ -30,11 +30,17 @@ class BoardCommand():
         self.param3 = param3
         self.executed = False
 
-class VirtualMachine(QObject):
-    """
-    Represents a virtual machine that can receive commands, execute them and return responses.
-    """
-    def __init__(self, machine):
+class VirtualMachine():
+    def __init__(self,machine):
+        """
+        Initializes a ControlBoard object.
+
+        Attributes:
+            command_number: Current command number.
+            command_queue: List containing the command queue.
+            past_commands: List containing the executed commands.
+            state: Current state of the machine (Free or Busy).
+        """
         self.machine = machine
         self.command_queue = []
         self.current_command_number = 0
@@ -57,7 +63,7 @@ class VirtualMachine(QObject):
         self.board_update_timer.timeout.connect(self.update_states)
         self.board_update_timer.start(10)  # Update every 20 ms
 
-        self.motors_active = False
+        self.motors_active = True
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
@@ -88,7 +94,7 @@ class VirtualMachine(QObject):
         self.gripper_open = False
         self.target_gripper_open = False
         self.correct_gripper = True
-
+    
     def pause_commands(self):
         self.state = "Paused"
         self.pause = True
@@ -109,7 +115,6 @@ class VirtualMachine(QObject):
         self.target_x = self.x_pos
         self.target_y = self.y_pos
         self.target_z = self.z_pos
-        self.target_p = self.p_pos
         self.target_pressure = self.pressure
         self.target_gripper_open = self.gripper_open
         self.target_droplets = self.current_droplets
@@ -132,7 +137,6 @@ class VirtualMachine(QObject):
             f'Tar_Z:{self.target_z},'
             f'Tar_P:{self.target_p},'
             f'Pressure:{self.pressure},'
-            f'Tar_pressure:{self.target_pressure},'
             f'Gripper:{self.gripper_open},'
             f'Droplets:{self.current_droplets},'
             f'Max_cycle:{self.max_cycle},'
@@ -215,6 +219,7 @@ class VirtualMachine(QObject):
                 self.correct_droplets = True
 
         if self.correct_pos and self.correct_pressure and self.correct_gripper and self.correct_droplets:
+            # print(self.last_completed_command_number,self.current_command_number)
             self.state = "Free"
             self.last_completed_command_number = self.current_command_number
             self.execute_command_from_queue()
@@ -245,12 +250,13 @@ class VirtualMachine(QObject):
                     self.current_command_number = int(command.command_number)
                     self.execute_command(i)
                     self.command_queue[i].executed = True
+                    self.command_queue.pop(i)
                     self.state = "Busy"
                     break            
 
     def execute_command(self,command_index):
         command = self.command_queue[command_index]
-        print('Board Executing command:',command.command_type,command.param1,command.param2,command.param3)
+        print('Board Executing command:',command.command_number,command.command_type,command.param1,command.param2,command.param3,command.executed)
         if command.command_type == 'RELATIVE_XYZ':
             self.correct_pos = False
             self.correct_x = False
@@ -323,9 +329,8 @@ class VirtualMachine(QObject):
         self.correct_gripper = False
         # self.command_queue[command_index].executed = True
         self.state = "Busy"
-    
 
-class Command():
+class Command:
     """
     Represents a command to be sent to the machine.
     
@@ -337,18 +342,8 @@ class Command():
     param3: The third parameter of the command.
     handler (function, optional): The handler function for the command.
     kwargs (dict, optional): Additional keyword arguments for the handler function.
-    
-    Methods:
-    mark_as_sent(): Marks the command as sent.
-    mark_as_executing(): Marks the command as executing.
-    mark_as_completed(): Marks the command as completed and executes the handler function.
-    get_number(): Returns the command number.
-    get_command(): Returns the command signal.
-    get_timestamp(): Returns the timestamp of the command.
-    execute_handler(): Executes the handler function with the provided keyword arguments.
     """
-
-    def __init__(self, command_number,command_type,param1,param2,param3,handler=None,kwargs=None):
+    def __init__(self, command_number, command_type, param1, param2, param3, handler=None, kwargs=None):
         self.command_number = command_number
         self.command_type = command_type
         self.param1 = param1
@@ -372,73 +367,80 @@ class Command():
 
     def get_number(self):
         return self.command_number
-    
+
     def get_command(self):
         return self.signal
-    
+
     def get_timestamp(self):
         return self.timestamp
-    
+
     def execute_handler(self):
         if self.handler is not None:
             self.handler(**self.kwargs)
 
+
 class CommandQueue:
-    '''
+    """
     Represents a queue of commands to be sent to the machine.
     Uses deque to store the commands.
     Completed commands are transferred to the completed queue.
-    '''
+    """
     def __init__(self):
         self.queue = deque()
         self.completed = deque()
         self.command_number = 0
-        self.max_sent_commands = 3 # Maximum number of commands that can be sent to the machine at once
+        self.max_sent_commands = 3  # Maximum number of commands that can be sent to the machine at once
 
-    def add_command(self,command_type,param1,param2,param3,handler=None,kwargs=None):
-        '''Add a command to the queue.'''
+    def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None):
+        """Add a command to the queue."""
         self.command_number += 1
-        command = Command(self.command_number,command_type,param1,param2,param3,handler,kwargs)
+        command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
         self.queue.append(command)
         return command
-    
+
     def get_number_of_sent_commands(self):
-        '''Returns the number of commands that have been sent to the machine.'''
+        """Returns the number of commands that have been sent to the machine."""
         return len([command for command in self.queue if command.status == "Sent"])
-    
+
     def get_next_command(self):
         """Send the next command to the machine if the buffer allows."""
         if self.queue and self.get_number_of_sent_commands() < self.max_sent_commands:
-            command = self.queue[0]
-            command.mark_as_sent()
-            return command
+            for command in self.queue:
+                if command.status == "Added":
+                    command.mark_as_sent()
+                    return command
         return None
-    
+
     def update_command_status(self, current_executing_command, last_completed_command):
         """Update command statuses based on the machine's current state."""
+        if current_executing_command is None or last_completed_command is None:
+            print('No commands to update')
+            return
         for command in self.queue:
-            if command.status == "Sent" and command.name == current_executing_command:
+            if command.status == "Sent" and command.command_number == int(current_executing_command):
                 command.mark_as_executing()
-            if command.name == last_completed_command:
+            if command.command_number <= int(last_completed_command):
                 command.mark_as_completed()
 
         # Remove completed commands from the queue
         while self.queue and self.queue[0].status == "Completed":
             completed_command = self.queue.popleft()
-            print(f"Command '{completed_command.name}' completed and removed from queue.")
+            print(f"Command '{completed_command.command_type}' completed and removed from queue.")
             self.completed.append(completed_command)
+
 
     
 
 class Machine(QObject):
-    '''
+    """
     Class for the machine object. This class is responsible for 
     sending and receiving data from the machine and organizing
     the command queue.
-    '''
+    """
     status_updated = Signal(dict)  # Signal to emit status updates
     command_sent = Signal(dict)    # Signal to emit when a command is sent
     error_occurred = Signal(str)   # Signal to emit errors
+
     def __init__(self):
         super().__init__()
         self.command_queue = CommandQueue()
@@ -452,12 +454,12 @@ class Machine(QObject):
     def begin_communication_timer(self):
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
-        self.communication_timer.start(10)  # Update every 100 ms
-    
+        self.communication_timer.start(100)  # Update every 100 ms
+
     def begin_execution_timer(self):
         self.execution_timer = QTimer()
         self.execution_timer.timeout.connect(self.send_next_command)
-        self.execution_timer.start(90)  # Update every 100 ms
+        self.execution_timer.start(100)  # Update every 100 ms
 
     def stop_communication_timer(self):
         self.communication_timer.stop()
@@ -469,18 +471,18 @@ class Machine(QObject):
         if self.port == 'Virtual':
             self.board = VirtualMachine(self)
             self.simulate = True
-        
-        self.get_state_from_board()
+
+        self.request_status_update()
         self.begin_communication_timer()
         self.begin_execution_timer()
         return True
-    
-    def disconnect_board(self,error=False):
+
+    def disconnect_board(self, error=False):
         self.stop_communication_timer()
         self.stop_execution_timer()
         self.board = None
         return True
-    
+
     def request_status_update(self):
         """Send a request to the control board for a status update."""
         if self.board is not None:
@@ -488,6 +490,8 @@ class Machine(QObject):
                 status_string = self.board.get_complete_state()
             try:
                 status_dict = self.parse_status_string(status_string)
+                self.command_queue.update_command_status(status_dict.get('Current_command', None),
+                                                         status_dict.get('Last_completed', None))
                 self.status_updated.emit(status_dict)  # Emit the status update signal
             except ValueError as e:
                 self.error_occurred.emit(f"Error parsing status string: {str(e)}")
@@ -500,34 +504,53 @@ class Machine(QObject):
             raise ValueError("Status string is empty")
 
         status_dict = {}
-        for item in status_string.split(';'):
+        for item in status_string.split(','):
             try:
-                key, value = item.split('=')
+                key, value = item.split(':')
                 status_dict[key] = value
             except ValueError:
                 raise ValueError(f"Malformed item in status string: {item}")
-        
+
         return status_dict
-    
-    def add_command_to_queue(self,command_type,param1,param2,param3,handler=None,kwargs=None,manual=False):
-        '''Add a command to the queue.'''
+
+    def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False):
+        """Add a command to the queue."""
         if manual and self.command_queue.get_number_of_sent_commands() > 0:
             print('Cannot add manual command while commands are being sent.')
             return False
-        return self.command_queue.add_command(command_type,param1,param2,param3,handler,kwargs)
-    
+        return self.command_queue.add_command(command_type, param1, param2, param3, handler, kwargs)
+
     def send_next_command(self):
-        '''Send the next command to the machine.'''
+        """Send the next command to the machine."""
         command = self.command_queue.get_next_command()
         if command is not None:
             if self.simulate:
+                print(f'Sending command: {command.get_command()}')
                 self.sent_command = command
+                self.command_sent.emit({"command": command.get_command()})
             return True
         return False
-    
-    def update_state(self,state):
-        '''Update the machine state.'''
+
+    def update_state(self, state):
+        """Update the machine state."""
         self.status_updated.emit(state)
+
+    def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+        self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        return
+
+    def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+        self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        return
+
+    def move_left(self, handler=None, kwargs=None, manual=False):
+        self.add_command_to_queue('RELATIVE_XYZ', -1000, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        return
+
+    def move_right(self, handler=None, kwargs=None, manual=False):
+        self.add_command_to_queue('RELATIVE_XYZ', 1000, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        return
+
     
     
     
