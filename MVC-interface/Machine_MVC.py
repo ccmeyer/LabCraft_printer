@@ -341,8 +341,10 @@ class VirtualMachine():
             else:
                 self.correct_droplets = True
 
+        self.max_cycle += np.random.randint(-10,10)
+        self.cycle_count += np.random.randint(-10,10)
+
         if self.correct_pos and self.correct_pressure and self.correct_gripper and self.correct_droplets:
-            # print(self.last_completed_command_number,self.current_command_number)
             self.state = "Free"
             self.last_completed_command_number = self.current_command_number
             self.execute_command_from_queue()

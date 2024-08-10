@@ -72,9 +72,13 @@ class MainWindow(QMainWindow):
         right_panel = QtWidgets.QWidget()
         right_panel.setFixedWidth(300)
         right_panel.setStyleSheet(f"background-color: #4d4d4d;")
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
 
-        # self.board_status_box = BoardStatusBox(self.model, self.controller)
+        self.board_status_box = BoardStatusBox(self.model, self.controller)
+        self.board_status_box.setStyleSheet(f"background-color: #4d4d4d;")
+        self.board_status_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
+        right_layout.addWidget(self.board_status_box)
 
         self.layout.addWidget(right_panel)
 
@@ -632,14 +636,47 @@ class RackBox(QGroupBox):
             self.controller.transfer_to_gripper(slot_number)
 
 
-# class BoardStatusBox(QGroupBox):
-#     '''
-#     A widget to display the status of the machine board.
-#     '''
-#     def __init__(self, model, controller):
-#         super().__init__('Board Status')
-#         self.model = model
-#         self.controller = controller
+class BoardStatusBox(QGroupBox):
+    '''
+    A widget to display the status of the machine board.
+    Displays a grid with the label of the variable from the board and the value of the variable.
+    Includes the cycle count and max cycle time for the board.
+    '''
+    def __init__(self, model, controller):
+        super().__init__('Board Status')
+        self.model = model
+        self.controller = controller
 
-#         self.init_ui()
-#         self.model.machine_model.board_status_updated.connect(self.update_status)
+        self.init_ui()
+
+        # Connect model signals to the update methods
+        self.model.machine_state_updated.connect(self.update_status)
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        self.layout = QtWidgets.QGridLayout(self)
+
+        self.labels = {
+            'Cycle Count': QLabel('0'),
+            'Max Cycle Time': QLabel('0')
+        }
+
+        row = 0
+        for label, value in self.labels.items():
+            label_label = QLabel(label)
+            label_label.setAlignment(Qt.AlignCenter)
+            value.setAlignment(Qt.AlignCenter)
+            self.layout.addWidget(label_label, row, 0)
+            self.layout.addWidget(value, row, 1)
+            row += 1
+        
+        self.setLayout(self.layout)
+
+    def update_status(self):
+        """Update the labels with the current board status."""
+        self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
+        self.labels['Max Cycle Time'].setText(str(self.model.machine_model.max_cycle))
+
+
+        
+        

@@ -234,6 +234,7 @@ class MachineModel(QObject):
         self.machine_port = "Virtual"
         self.balance_port = "Virtual"
 
+        self.motors_enabled = False
         self.target_x = 0
         self.target_y = 0
         self.target_z = 0
@@ -244,22 +245,22 @@ class MachineModel(QObject):
         self.current_z = 0
         self.current_p = 0
 
-        self.current_pressure = 0
-        self.pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
-
-        self.target_pressure = 0
-
-        self.motors_enabled = False
-
         self.step_num = 4
         self.possible_steps = [2,10,50,250,500,1000,2000]
         self.step_size = self.possible_steps[self.step_num]
+
+        self.current_pressure = 0
+        self.pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
+        self.target_pressure = 0
 
         self.fss = 13107
         self.psi_offset = 1638
         self.psi_max = 15
 
         self.regulating_pressure = False
+
+        self.max_cycle = 0
+        self.cycle_count = 0
 
     def update_ports(self, ports):
         self.available_ports = ports
@@ -352,6 +353,14 @@ class MachineModel(QObject):
         self.pressure_readings[-1] = converted_pressure
         self.pressure_updated.emit(self.pressure_readings)
 
+    def update_cycle_count(self,cycle_count):
+        self.cycle_count = cycle_count
+
+    def update_max_cycle(self,max_cycle):
+        self.max_cycle = max_cycle
+
+    
+
 
 class Model(QObject):
     '''
@@ -379,4 +388,6 @@ class Model(QObject):
         self.machine_model.update_target_p_motor(status_dict.get('Tar_P', self.machine_model.target_p))
         self.machine_model.update_target_pressure(status_dict.get('Tar_pressure', self.machine_model.target_pressure))
         self.machine_model.update_pressure(status_dict.get('Pressure', self.machine_model.current_pressure))
+        self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
+        self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_state_updated.emit()
