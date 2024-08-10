@@ -63,7 +63,7 @@ class VirtualMachine():
         self.board_update_timer.timeout.connect(self.update_states)
         self.board_update_timer.start(10)  # Update every 20 ms
 
-        self.motors_active = True
+        self.motors_active = False
         self.x_pos = 0
         self.y_pos = 0
         self.z_pos = 0
@@ -137,6 +137,7 @@ class VirtualMachine():
             f'Tar_Z:{self.target_z},'
             f'Tar_P:{self.target_p},'
             f'Pressure:{self.pressure},'
+            f'Tar_pressure:{self.target_pressure},'
             f'Gripper:{self.gripper_open},'
             f'Droplets:{self.current_droplets},'
             f'Max_cycle:{self.max_cycle},'
@@ -451,6 +452,10 @@ class Machine(QObject):
         self.execution_timer = None
         self.sent_command = None
 
+        self.fss = 13107
+        self.psi_offset = 1638
+        self.psi_max = 15
+
     def begin_communication_timer(self):
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
@@ -535,6 +540,23 @@ class Machine(QObject):
         """Update the machine state."""
         self.status_updated.emit(state)
 
+    def enable_motors(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return
+    
+    def disable_motors(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0)
+        return
+    
+    def regulate_pressure(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return
+    
+    def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return
+
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         return
@@ -542,15 +564,28 @@ class Machine(QObject):
     def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         return
+    
+    def convert_to_psi(self,pressure):
+        return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
+    
+    def convert_to_raw_pressure(self,psi):
+        return int((psi / self.psi_max) * self.fss + self.psi_offset)
 
-    def move_left(self, handler=None, kwargs=None, manual=False):
-        self.add_command_to_queue('RELATIVE_XYZ', -1000, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    def set_relative_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        pressure -= self.psi_offset
+        print('Setting relative pressure:',pressure)
+        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
 
-    def move_right(self, handler=None, kwargs=None, manual=False):
-        self.add_command_to_queue('RELATIVE_XYZ', 1000, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
-        return
+    def home_motor_handler(self):
+        self.homed = True
+        self.location = 'Home'
 
+    def home_motors(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            handler = self.home_motor_handler
+        self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     
     
