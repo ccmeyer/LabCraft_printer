@@ -716,11 +716,9 @@ class ShortcutTableWidget(QGroupBox):
     def load_shortcuts(self):
         """Load shortcuts from the manager into the table."""
         shortcuts = self.shortcut_manager.get_shortcuts()
-        print(shortcuts)
         self.table.setRowCount(len(shortcuts))
 
         for row, (key_sequence, description) in enumerate(shortcuts):
-            print(row)
             key_item = QTableWidgetItem(key_sequence)
             description_item = QTableWidgetItem(description)
             key_item.setTextAlignment(Qt.AlignCenter)
