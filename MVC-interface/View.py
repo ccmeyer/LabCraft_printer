@@ -135,7 +135,10 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('1','Add reagent to slot 1', lambda: self.controller.add_reagent_to_slot(0))
         self.shortcut_manager.add_shortcut('2','Add reagent to slot 2', lambda: self.controller.add_reagent_to_slot(1))
         self.shortcut_manager.add_shortcut('3','Add reagent to slot 3', lambda: self.controller.add_reagent_to_slot(2))
-        self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3)) 
+        self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3))
+        self.shortcut_manager.add_shortcut('s','Save location 1', lambda: self.controller.save_location('location-1'))
+        self.shortcut_manager.add_shortcut('d','Save location 2', lambda: self.controller.save_location('location-2'))
+        self.shortcut_manager.add_shortcut('l','Print locations', lambda: self.controller.print_locations())
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)

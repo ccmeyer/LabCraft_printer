@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
+import json
 
 class PrinterHead:
     """
@@ -200,7 +201,67 @@ class RackModel(QObject):
                 "color": self.gripper_printer_head.color
             }
         return None
-        
+
+class LocationModel(QObject):
+    """
+    Model for managing location data, including reading and writing to a JSON file.
+
+    Attributes:
+    - locations: A dictionary of location names and their XYZ coordinates.
+    """
+
+    locations_updated = Signal()  # Signal to notify when locations are updated
+
+    def __init__(self, json_file_path="locations.json"):
+        super().__init__()
+        self.json_file_path = json_file_path
+        self.locations = {}  # Dictionary to hold location data
+
+    def load_locations(self):
+        """Load locations from a JSON file."""
+        try:
+            with open(self.json_file_path, "r") as file:
+                self.locations = json.load(file)
+            self.locations_updated.emit()
+            print(f"Locations loaded from {self.json_file_path}")
+        except FileNotFoundError:
+            print(f"{self.json_file_path} not found. Starting with an empty locations dictionary.")
+            self.locations = {}
+        except json.JSONDecodeError:
+            print(f"Error decoding JSON from {self.json_file_path}. Starting with an empty locations dictionary.")
+            self.locations = {}
+
+    def save_locations(self):
+        """Save locations to a JSON file."""
+        try:
+            with open(self.json_file_path, "w") as file:
+                json.dump(self.locations, file, indent=4)
+            print(f"Locations saved to {self.json_file_path}")
+        except Exception as e:
+            print(f"Failed to save locations: {e}")
+
+    def add_location(self, name, x, y, z):
+        """Add a new location or update an existing one."""
+        self.locations[name] = {"x": x, "y": y, "z": z}
+        self.locations_updated.emit()
+        print(f"Location '{name}' added/updated.")
+
+    def remove_location(self, name):
+        """Remove a location by name."""
+        if name in self.locations:
+            del self.locations[name]
+            self.locations_updated.emit()
+            print(f"Location '{name}' removed.")
+        else:
+            print(f"Location '{name}' not found.")
+
+    def get_location(self, name):
+        """Get a location's coordinates by name."""
+        return self.locations.get(name)
+
+    def get_all_locations(self):
+        """Get all locations."""
+        return self.locations   
 
 class MachineModel(QObject):
     '''
@@ -375,6 +436,8 @@ class Model(QObject):
         self.machine_model = MachineModel()
         self.num_slots = 5
         self.rack_model = RackModel(self.num_slots)
+        self.location_model = LocationModel()
+        self.location_model.load_locations()  # Load locations at startup
 
     def update_state(self, status_dict):
         '''

@@ -107,3 +107,11 @@ class Controller(QObject):
     def transfer_to_gripper(self, slot):
         """Transfer a reagent from a slot to the gripper."""
         self.model.rack_model.transfer_to_gripper(slot)
+
+    def save_location(self,name):
+        """Save the current location information."""
+        self.model.location_model.add_location(name,*self.model.machine_model.get_current_position())
+
+    def print_locations(self):
+        """Print the saved locations."""
+        print(self.model.location_model.get_all_locations())
