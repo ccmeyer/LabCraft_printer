@@ -3,6 +3,205 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
 
+class PrinterHead:
+    """
+    Represents a printer head in a system.
+    reagent (str): The reagent in the printer head.
+    concentration (float): The concentration of the reagent.
+    color (str): The color of the printer head.
+    Methods:
+    change_reagent(new_reagent): Changes the reagent in the printer head.
+    change_concentration(new_concentration): Changes the concentration of the reagent.
+    change_color(new_color): Changes the color of the printer head.
+    """
+
+    def __init__(self, reagent,concentration,color):
+        self.reagent = reagent
+        self.concentration = concentration
+        self.color = color
+        self.confirmed = False
+    
+    def change_reagent(self, new_reagent):
+        self.reagent = new_reagent
+
+    def change_concentration(self, new_concentration):
+        self.concentration = new_concentration
+    
+    def change_color(self, new_color):
+        self.color = new_color
+
+class Slot:
+    """
+    Represents a slot in a system.
+
+    Attributes:
+        number (int): The slot number.
+        printer_head (PrinterHead): The printer head in the slot.
+        confirmed (bool): Indicates if the slot has been confirmed.
+    """
+
+    def __init__(self, number, printer_head):
+        self.number = number
+        self.printer_head = printer_head
+        self.confirmed = False
+    
+    def change_printer_head(self, new_printer_head):
+        self.printer_head = new_printer_head
+    
+    def confirm(self):
+        """
+        Confirms the slot.
+        """
+        self.confirmed = True
+
+class RackModel(QObject):
+    """
+    Model for all data related to the rack state.
+
+    Attributes:
+    - slots (list of Slot): List of slots in the rack.
+    - gripper_printer_head (PrinterHead): The printer head currently held by the gripper.
+    - gripper_slot_number (int): The original slot number from which the printer head was loaded.
+
+    Signals:
+    - slot_updated: Emitted when a slot is updated.
+    - slot_confirmed: Emitted when a slot is confirmed.
+    - gripper_updated: Emitted when the gripper state changes.
+    - error_occurred: Emitted when an invalid operation is attempted.
+    """
+
+    slot_updated = Signal(int)
+    slot_confirmed = Signal(int)
+    gripper_updated = Signal()
+    error_occurred = Signal(str)
+
+    def __init__(self, num_slots):
+        super().__init__()
+        self.slots = [Slot(i, None) for i in range(num_slots)]
+        self.gripper_printer_head = None
+        self.gripper_slot_number = None
+
+    def update_slot_with_printer_head(self, slot_number, printer_head):
+        """
+        Update a slot with a new printer head.
+
+        Args:
+        - slot_number (int): The slot number to update.
+        - printer_head (PrinterHead): The printer head to place in the slot.
+        """
+        if 0 <= slot_number < len(self.slots):
+            self.slots[slot_number].change_printer_head(printer_head)
+            self.slot_updated.emit(slot_number)
+            print(f"Slot {slot_number} updated with printer head: {printer_head.reagent}, {printer_head.concentration}, {printer_head.color}")
+
+    def confirm_slot(self, slot_number):
+        """
+        Confirm a slot.
+
+        Args:
+        - slot_number (int): The slot number to confirm.
+        """
+        if 0 <= slot_number < len(self.slots):
+            if self.slots[slot_number].printer_head is not None:
+                self.slots[slot_number].confirm()
+                self.slot_confirmed.emit(slot_number)
+                self.gripper_updated.emit()
+                print(f"Slot {slot_number} confirmed.")
+            else:
+                error_msg = f"Slot {slot_number} has no printer head to confirm."
+                self.error_occurred.emit(error_msg)
+                print(error_msg)
+
+    def transfer_to_gripper(self, slot_number):
+        """
+        Transfer the printer head from a slot to the gripper.
+
+        Args:
+        - slot_number (int): The slot number to transfer from.
+        """
+        if 0 <= slot_number < len(self.slots):
+            slot = self.slots[slot_number]
+            if slot.printer_head is not None and slot.confirmed:
+                if self.gripper_printer_head is None:
+                    self.gripper_printer_head = slot.printer_head
+                    self.gripper_slot_number = slot_number
+                    slot.change_printer_head(None)
+                    self.slot_updated.emit(slot_number)
+                    self.gripper_updated.emit()
+                    print(f"Printer head from slot {slot_number} transferred to gripper.")
+                else:
+                    error_msg = "Gripper is already holding a printer head."
+                    self.error_occurred.emit(error_msg)
+                    print(error_msg)
+            else:
+                error_msg = f"Slot {slot_number} is not confirmed or empty."
+                self.error_occurred.emit(error_msg)
+                print(error_msg)
+
+    def transfer_from_gripper(self, slot_number):
+        """
+        Transfer the printer head from the gripper to a slot.
+
+        Args:
+        - slot_number (int): The slot number to transfer to.
+        """
+        if 0 <= slot_number < len(self.slots):
+            slot = self.slots[slot_number]
+            if slot_number == self.gripper_slot_number:
+                if slot.printer_head is None and self.gripper_printer_head is not None:
+                    slot.change_printer_head(self.gripper_printer_head)
+                    self.gripper_printer_head = None
+                    self.gripper_slot_number = None
+                    self.slot_updated.emit(slot_number)
+                    self.gripper_updated.emit()
+                    print(f"Printer head transferred from gripper to slot {slot_number}.")
+            else:
+                error_msg = f"Printer head can only be unloaded to its original slot {self.gripper_slot_number}."
+                self.error_occurred.emit(error_msg)
+                print(error_msg)
+
+    def get_slot_info(self, slot_number):
+        """
+        Get information about a slot.
+
+        Args:
+        - slot_number (int): The slot number to get information from.
+
+        Returns:
+        - dict: A dictionary containing the slot's information.
+        """
+        if 0 <= slot_number < len(self.slots):
+            slot = self.slots[slot_number]
+            printer_head_info = None
+            if slot.printer_head is not None:
+                printer_head_info = {
+                    "reagent": slot.printer_head.reagent,
+                    "concentration": slot.printer_head.concentration,
+                    "color": slot.printer_head.color
+                }
+            return {
+                "slot_number": slot.number,
+                "confirmed": slot.confirmed,
+                "printer_head": printer_head_info
+            }
+        return None
+
+    def get_gripper_info(self):
+        """
+        Get information about the printer head in the gripper.
+
+        Returns:
+        - dict: A dictionary containing the printer head's information or None if empty.
+        """
+        if self.gripper_printer_head is not None:
+            return {
+                "reagent": self.gripper_printer_head.reagent,
+                "concentration": self.gripper_printer_head.concentration,
+                "color": self.gripper_printer_head.color
+            }
+        return None
+        
+
 class MachineModel(QObject):
     '''
     Model for all data related to the machine state
@@ -162,7 +361,8 @@ class Model(QObject):
     def __init__(self):
         super().__init__()
         self.machine_model = MachineModel()
-
+        self.num_slots = 5
+        self.rack_model = RackModel(self.num_slots)
 
     def update_state(self, status_dict):
         '''

@@ -1,5 +1,6 @@
 from PySide6.QtCore import QObject
 from serial.tools.list_ports import comports
+from Model import Model,PrinterHead,Slot
 
 
 class Controller(QObject):
@@ -82,3 +83,27 @@ class Controller(QObject):
         else:
             self.machine.regulate_pressure()  # Assuming method exists
         self.model.machine_model.toggle_regulation_state()  # Update the model state
+
+    def add_reagent_to_slot(self, slot):
+        """Add a reagent to a slot."""
+        if slot == 0:
+            new_printer_head = PrinterHead('Water',1,'Blue')
+        elif slot == 1:
+            new_printer_head = PrinterHead('Ethanol',2,'Green')
+        elif slot == 2:
+            new_printer_head = PrinterHead('Acetone',3,'Red')
+        elif slot == 3:
+            new_printer_head = PrinterHead('Methanol',4,'Yellow')
+        self.model.rack_model.update_slot_with_printer_head(slot, new_printer_head)
+
+    def confirm_slot(self, slot):
+        """Confirm that a reagent is present in a slot."""
+        self.model.rack_model.confirm_slot(slot)
+    
+    def transfer_from_gripper(self, slot):
+        """Transfer a reagent from the gripper to a slot."""
+        self.model.rack_model.transfer_from_gripper(slot)
+
+    def transfer_to_gripper(self, slot):
+        """Transfer a reagent from a slot to the gripper."""
+        self.model.rack_model.transfer_to_gripper(slot)

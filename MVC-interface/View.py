@@ -1,5 +1,5 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
-from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy, QSpacerItem
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt
 
@@ -56,11 +56,27 @@ class MainWindow(QMainWindow):
 
         self.layout.addWidget(left_panel)
 
+        mid_panel = QtWidgets.QWidget()
+        mid_panel.setFixedWidth(800)
+        mid_panel.setStyleSheet(f"background-color: #2c2c2c;")
+        mid_layout = QtWidgets.QVBoxLayout(mid_panel)
+
+        self.rack_box = RackBox(self.model.rack_model,self.controller)
+        self.rack_box.setFixedHeight(200)
+        self.rack_box.setStyleSheet(f"background-color: #4d4d4d;")
+        mid_layout.addWidget(self.rack_box)
+
+        self.layout.addWidget(mid_panel)
+
         # Add other widgets to the right panel as needed
-        self.right_panel = QWidget()
-        self.right_panel_layout = QVBoxLayout(self.right_panel)
-        self.right_panel_layout.addWidget(QLabel("Other content here"))
-        self.layout.addWidget(self.right_panel)
+        right_panel = QtWidgets.QWidget()
+        right_panel.setFixedWidth(300)
+        right_panel.setStyleSheet(f"background-color: #4d4d4d;")
+
+        # self.board_status_box = BoardStatusBox(self.model, self.controller)
+
+
+        self.layout.addWidget(right_panel)
 
         # Set the size of the main window to be 90% of the screen size
         screen_geometry = QApplication.primaryScreen().geometry()
@@ -89,7 +105,11 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('6','Large pressure decrease', lambda: self.controller.set_relative_pressure(-1,manual=True))
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
-        self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))    
+        self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True)) 
+        self.shortcut_manager.add_shortcut('1','Add reagent to slot 1', lambda: self.controller.add_reagent_to_slot(0))
+        self.shortcut_manager.add_shortcut('2','Add reagent to slot 2', lambda: self.controller.add_reagent_to_slot(1))
+        self.shortcut_manager.add_shortcut('3','Add reagent to slot 3', lambda: self.controller.add_reagent_to_slot(2))
+        self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3)) 
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
@@ -482,3 +502,144 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet("background-color: #275fb8; color: white;")
+
+class RackBox(QGroupBox):
+    """
+    A widget to display the reagent rack and the gripper.
+
+    Each slot can contain 0 or 1 printer head. The reagent loaded in the printer head is displayed as a label, and the color of the slot changes to match the printer head color.
+    - There is a button below the label to confirm the correct printer head is loaded.
+    - There is a button to load the printer head into the gripper of the machine.
+    - If the gripper is loaded, the button will unload the gripper to the empty slot.
+    - The gripper section shows the printer head currently held by the gripper.
+    """
+
+    def __init__(self, rack_model, controller):
+        super().__init__("Reagent Rack")
+        self.rack_model = rack_model
+        self.controller = controller
+
+        self.init_ui()
+
+        # Connect model signals to the update methods
+        self.rack_model.slot_updated.connect(self.update_slot)
+        self.rack_model.slot_confirmed.connect(self.confirm_slot)
+        self.rack_model.gripper_updated.connect(self.update_gripper)
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        main_layout = QHBoxLayout(self)
+        self.setLayout(main_layout)
+
+        # Gripper section
+        gripper_widget = QWidget()
+        gripper_layout = QVBoxLayout(gripper_widget)
+        self.gripper_label = QLabel("Gripper Empty")
+        self.gripper_label.setAlignment(Qt.AlignCenter)
+        gripper_layout.addWidget(self.gripper_label)
+
+         # Add a spacer to separate slots and gripper visually
+        spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+
+        self.slot_widgets = []
+
+        # Create UI for each slot in the rack
+        slots_layout = QHBoxLayout()
+        for slot in self.rack_model.slots:
+            slot_widget = QGroupBox(f'Slot {slot.number+1}')
+            slot_layout = QVBoxLayout(slot_widget)
+            slot_label = QLabel("Empty")
+            slot_label.setAlignment(Qt.AlignCenter)
+
+            confirm_button = QPushButton("Confirm")
+            confirm_button.clicked.connect(self.create_confirm_slot_callback(slot.number))
+
+            load_button = QPushButton("Load")
+            load_button.clicked.connect(self.create_toggle_load_callback(slot.number))
+
+            slot_layout.addWidget(slot_label)
+            slot_layout.addWidget(confirm_button)
+            slot_layout.addWidget(load_button)
+
+            slots_layout.addWidget(slot_widget)
+            self.slot_widgets.append((slot_label, confirm_button, load_button))
+
+        # Add slots, spacer, and gripper to the main layout
+        main_layout.addWidget(gripper_widget)
+        main_layout.addItem(spacer)
+        main_layout.addLayout(slots_layout)
+
+    def create_confirm_slot_callback(self, slot_number):
+        """Create a callback function for confirming a slot."""
+        return lambda: self.controller.confirm_slot(slot_number)
+
+    def create_toggle_load_callback(self, slot_number):
+        """Create a callback function for toggling load/unload."""
+        return lambda: self.toggle_load(slot_number)
+
+    def update_slot(self, slot_number):
+        """Update the UI for a specific slot."""
+        slot = self.rack_model.slots[slot_number]
+        label, confirm_button, load_button = self.slot_widgets[slot_number]
+
+        if slot.printer_head:
+            printer_head = slot.printer_head
+            label.setText(f"{printer_head.reagent}\n{printer_head.concentration} M")
+            label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
+            load_button.setText("Load")
+            confirm_button.setEnabled(not slot.confirmed)
+        else:
+            label.setText("Empty")
+            label.setStyleSheet("background-color: none; color: white;")
+            load_button.setText("Load")
+            confirm_button.setEnabled(False)
+
+    def confirm_slot(self, slot_number):
+        """Update the UI when a slot is confirmed."""
+        _, confirm_button, _ = self.slot_widgets[slot_number]
+        confirm_button.setText("Confirmed")
+        confirm_button.setEnabled(False)
+
+    def update_gripper(self):
+        """Update the UI when the gripper state changes."""
+        if self.rack_model.gripper_printer_head:
+            printer_head = self.rack_model.gripper_printer_head
+            self.gripper_label.setText(f"{printer_head.reagent}\n{printer_head.concentration} M")
+            self.gripper_label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
+        else:
+            self.gripper_label.setText("Gripper Empty")
+            self.gripper_label.setStyleSheet("background-color: none; color: white;")
+
+        # Update load buttons based on gripper state and original slot
+        for slot_number, (label, _, load_button) in enumerate(self.slot_widgets):
+            slot = self.rack_model.slots[slot_number]
+            if self.rack_model.gripper_printer_head:
+                if slot_number == self.rack_model.gripper_slot_number:
+                    load_button.setText("Unload")
+                    load_button.setEnabled(True)
+                else:
+                    load_button.setEnabled(False)
+            else:
+                load_button.setText("Load")
+                load_button.setEnabled(slot.confirmed and slot.printer_head is not None)
+
+    def toggle_load(self, slot_number):
+        """Toggle loading/unloading between the slot and gripper."""
+        slot = self.rack_model.slots[slot_number]
+        if slot.printer_head is None and self.rack_model.gripper_printer_head:
+            self.controller.transfer_from_gripper(slot_number)
+        elif slot.printer_head and self.rack_model.gripper_printer_head is None:
+            self.controller.transfer_to_gripper(slot_number)
+
+
+# class BoardStatusBox(QGroupBox):
+#     '''
+#     A widget to display the status of the machine board.
+#     '''
+#     def __init__(self, model, controller):
+#         super().__init__('Board Status')
+#         self.model = model
+#         self.controller = controller
+
+#         self.init_ui()
+#         self.model.machine_model.board_status_updated.connect(self.update_status)
