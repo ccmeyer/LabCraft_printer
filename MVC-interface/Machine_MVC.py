@@ -586,12 +586,12 @@ class Machine(QObject):
     def begin_communication_timer(self):
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
-        self.communication_timer.start(100)  # Update every 100 ms
+        self.communication_timer.start(10)  # Update every 100 ms
 
     def begin_execution_timer(self):
         self.execution_timer = QTimer()
         self.execution_timer.timeout.connect(self.send_next_command)
-        self.execution_timer.start(100)  # Update every 100 ms
+        self.execution_timer.start(90)  # Update every 100 ms
 
     def stop_communication_timer(self):
         self.communication_timer.stop()

@@ -2,6 +2,10 @@ from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy, QSpacerItem
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import numpy as np
 
 class ShortcutManager:
     """Manage application shortcuts and their descriptions."""
@@ -61,6 +65,14 @@ class MainWindow(QMainWindow):
         mid_panel.setFixedWidth(800)
         mid_panel.setStyleSheet(f"background-color: #2c2c2c;")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
+
+        tab_widget = QtWidgets.QTabWidget()
+        tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.movement_box = MovementBox(self.model, self.controller)
+        self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        tab_widget.addTab(self.movement_box, "Movement")
+        mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self.model.rack_model,self.controller)
         self.rack_box.setFixedHeight(200)
@@ -516,6 +528,123 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet("background-color: #275fb8; color: white;")
+
+class MovementBox(QtWidgets.QGroupBox):
+    """
+    A widget to display the movement of the machine in 2D (XY) and 1D (Z).
+
+    The 2D plot shows the XY movement, and the 1D plot shows the Z movement over time.
+    """
+
+    def __init__(self, model, controller):
+        super().__init__("Machine Movement")
+        self.model = model
+        self.controller = controller
+
+        self.init_ui()
+        self.layout = QtWidgets.QHBoxLayout(self)
+
+        self.x_min = -15000
+        self.x_max = 0
+        self.y_min = 0
+        self.y_max = 10000
+        self.z_min = -35000
+        self.z_max = 0
+
+        # Connect the model's state_updated signal to the update_plots method
+        self.model.machine_state_updated.connect(self.update_machine_position)
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        self.layout = QtWidgets.QHBoxLayout(self)
+
+        self.x_min = -15000
+        self.x_max = 0
+        self.y_min = 0
+        self.y_max = 10000
+        self.z_min = -35000
+        self.z_max = 0
+
+        # Create a chart, a chart view and a line series for X and Y coordinates
+        self.xy_chart = QtCharts.QChart()
+        self.xy_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.xy_chart.setBackgroundBrush(QtGui.QBrush('#4d4d4d'))  # Set the background color to grey
+        self.xy_chart_view = QtCharts.QChartView(self.xy_chart)
+        self.xy_series = QtCharts.QLineSeries()
+        self.xy_position_series = QtCharts.QScatterSeries()
+
+        # Add the series to the XY chart
+        self.xy_chart.addSeries(self.xy_series)
+        self.xy_chart.addSeries(self.xy_position_series)
+
+        # Create a chart, a chart view and a line series for Z coordinate
+        self.z_chart = QtCharts.QChart()
+        self.z_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.z_chart.setBackgroundBrush(QtGui.QBrush('#4d4d4d'))  # Set the background color to grey
+        self.z_chart_view = QtCharts.QChartView(self.z_chart)
+        self.z_series = QtCharts.QLineSeries()
+        self.z_position_series = QtCharts.QScatterSeries()
+
+        # Add the series to the Z chart
+        self.z_chart.addSeries(self.z_series)
+        self.z_chart.addSeries(self.z_position_series)
+
+        # Set the chart views to render using OpenGL (for better performance)
+        self.xy_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.z_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        # Prevent the chart views from taking focus
+        self.xy_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.z_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.xy_chart.legend().hide()  # Hide the legend
+        self.z_chart.legend().hide()  # Hide the legend
+
+
+        # Add the chart views to the layout
+        self.layout.addWidget(self.xy_chart_view,3)
+        self.layout.addWidget(self.z_chart_view,1)
+
+        # Set the layout for the widget
+        self.setLayout(self.layout)
+
+        # Create axes, add them to the charts and attach them to the series
+        self.xy_chart.createDefaultAxes()
+        self.xy_chart.axisY().setRange(self.x_min, self.x_max)
+        self.xy_chart.axisX().setRange(self.y_min, self.y_max)
+
+        self.z_chart.createDefaultAxes()
+        self.z_chart.axisX().setRange(-1, 1)
+        self.z_chart.axisX().setLabelsVisible(False)
+        self.z_chart.axisY().setRange(self.z_min, self.z_max)
+
+    def plot_movements(self):
+        # Clear the series
+        self.xy_series.clear()
+        self.z_series.clear()
+
+        # Get the target coordinates from the machine
+        target_coordinates = self.model.machine_model.get_target_coordinates()
+
+        # Add the coordinates to the series
+        for coord in target_coordinates:
+            self.xy_series.append(coord[0], coord[1])
+            self.z_series.append(coord[2], 0)
+
+    def update_machine_position(self):
+        # Clear the position series
+        self.xy_position_series.clear()
+        self.z_position_series.clear()
+
+        # Get the current position from the machine
+        x_pos = self.model.machine_model.current_x
+        y_pos = self.model.machine_model.current_y
+        z_pos = self.model.machine_model.current_z
+
+        # Add the current position to the position series
+        self.xy_position_series.append(y_pos, x_pos)
+        self.z_position_series.append(0,z_pos)
+
 
 class RackBox(QGroupBox):
     """

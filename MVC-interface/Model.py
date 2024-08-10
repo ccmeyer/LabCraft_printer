@@ -327,20 +327,20 @@ class MachineModel(QObject):
         print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
 
     def update_target_position(self, x, y, z):
-        self.target_x = x
-        self.target_y = y
-        self.target_z = z
+        self.target_x = int(x)
+        self.target_y = int(y)
+        self.target_z = int(z)
 
     def update_target_p_motor(self, p):
-        self.target_p = p
+        self.target_p = int(p)
 
     def update_current_position(self, x, y, z):
-        self.current_x = x
-        self.current_y = y
-        self.current_z = z
+        self.current_x = int(x)
+        self.current_y = int(y)
+        self.current_z = int(z)
 
     def update_current_p_motor(self, p):
-        self.current_p = p
+        self.current_p = int(p)
     
     def update_target_pressure(self, pressure):
         self.target_pressure = self.convert_to_psi(pressure)
@@ -358,6 +358,9 @@ class MachineModel(QObject):
 
     def update_max_cycle(self,max_cycle):
         self.max_cycle = max_cycle
+
+    def get_current_position(self):
+        return [self.current_x, self.current_y, self.current_z]
 
     
 
