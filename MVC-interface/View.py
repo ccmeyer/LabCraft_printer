@@ -25,6 +25,7 @@ class MainWindow(QMainWindow):
         self.model = model
         self.controller = controller
         self.shortcut_manager = ShortcutManager(self)
+        self.setup_shortcuts()
 
         self.setWindowTitle("Machine Status")
         self.init_ui()
@@ -80,6 +81,11 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.board_status_box)
 
+        self.shortcut_box = ShortcutTableWidget(self.shortcut_manager)
+        self.shortcut_box.setStyleSheet(f"background-color: #4d4d4d;")
+        self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        right_layout.addWidget(self.shortcut_box)
+
         self.layout.addWidget(right_panel)
 
         # Set the size of the main window to be 90% of the screen size
@@ -87,7 +93,7 @@ class MainWindow(QMainWindow):
         width = int(screen_geometry.width() * 0.9)
         height = int(screen_geometry.height() * 0.9)
         self.resize(width, height)
-        self.setup_shortcuts()
+        
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -677,6 +683,50 @@ class BoardStatusBox(QGroupBox):
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Max Cycle Time'].setText(str(self.model.machine_model.max_cycle))
 
+class ShortcutTableWidget(QGroupBox):
+    """
+    A widget to display all keyboard shortcuts in a table format.
 
+    The table has two columns: one for the key sequence and one for the description.
+    """
+    def __init__(self, shortcut_manager):
+        super().__init__("Keyboard Shortcuts")
+        self.shortcut_manager = shortcut_manager
+
+        self.init_ui()
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        layout = QVBoxLayout(self)
+
+        # Create the table widget
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)  # Two columns: Key Sequence, Description
+        self.table.setHorizontalHeaderLabels(["Key Sequence", "Description"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)  # Stretch columns to fill the width
+        self.table.verticalHeader().setVisible(False)  # Hide row numbers
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)  # Make cells read-only
+
+        # Add shortcuts to the table
+        self.load_shortcuts()
+
+        # Add the table to the layout
+        layout.addWidget(self.table)
+
+    def load_shortcuts(self):
+        """Load shortcuts from the manager into the table."""
+        shortcuts = self.shortcut_manager.get_shortcuts()
+        print(shortcuts)
+        self.table.setRowCount(len(shortcuts))
+
+        for row, (key_sequence, description) in enumerate(shortcuts):
+            print(row)
+            key_item = QTableWidgetItem(key_sequence)
+            description_item = QTableWidgetItem(description)
+            key_item.setTextAlignment(Qt.AlignCenter)
+            description_item.setTextAlignment(Qt.AlignLeft)
+
+            self.table.setItem(row, 0, key_item)
+            self.table.setItem(row, 1, description_item)
         
         
