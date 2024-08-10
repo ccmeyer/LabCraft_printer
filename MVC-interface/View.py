@@ -1,5 +1,5 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
-from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox
+from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt
 
@@ -41,6 +41,10 @@ class MainWindow(QMainWindow):
         left_panel.setFixedWidth(400)
         left_panel.setStyleSheet(f"background-color: #2c2c2c;")
         left_layout = QtWidgets.QVBoxLayout(left_panel)
+        
+        # Add ConnectionWidget
+        self.connection_widget = ConnectionWidget(self.model, self.controller)
+        left_layout.addWidget(self.connection_widget)
 
         self.coordinates_box = MotorPositionWidget(self.model, self.controller)
         self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
@@ -86,6 +90,135 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))    
+
+class ConnectionWidget(QGroupBox):
+    connect_machine_requested = QtCore.Signal(str)
+    connect_balance_requested = QtCore.Signal(str)
+    refresh_ports_requested = QtCore.Signal()
+
+    def __init__(self, model,controller):
+        super().__init__("Connection Setup")
+        self.model = model
+        self.controller = controller
+
+        self.init_ui()
+
+        # Connect signals from the model to update the view
+        self.model.machine_model.ports_updated.connect(self.update_ports)
+        self.model.machine_model.machine_state_updated.connect(self.update_machine_connect_button)
+        self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
+
+
+        # Connect signals from the view to the controller
+        self.connect_machine_requested.connect(self.controller.connect_machine)
+        self.connect_balance_requested.connect(self.controller.connect_balance)
+        self.refresh_ports_requested.connect(self.controller.update_available_ports)
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        self.setLayout(QGridLayout())
+
+        # Labels
+        self.layout().addWidget(QLabel("Device"), 0, 0)
+        self.layout().addWidget(QLabel("COM Port"), 0, 1)
+        self.layout().addWidget(QLabel("Connect"), 0, 2)
+
+        # Machine row
+        self.machine_label = QLabel("Machine")
+        self.machine_port_combobox = QComboBox()
+        self.machine_connect_button = QPushButton("Connect")
+        self.machine_connect_button.setCheckable(True)
+        self.machine_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.machine_connect_button.clicked.connect(self.request_machine_connect_change)
+        self.update_machine_connect_button(self.model.machine_model.machine_connected)
+
+        self.layout().addWidget(self.machine_label, 1, 0)
+        self.layout().addWidget(self.machine_port_combobox, 1, 1)
+        self.layout().addWidget(self.machine_connect_button, 1, 2)
+        
+        # Balance row
+        self.balance_label = QLabel("Balance")
+        self.balance_port_combobox = QComboBox()
+        self.balance_connect_button = QPushButton("Connect")
+        self.balance_connect_button.setCheckable(True)
+        self.balance_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.balance_connect_button.clicked.connect(self.request_balance_connect_change)
+        self.update_balance_connect_button(self.model.machine_model.balance_connected)
+
+        self.layout().addWidget(self.balance_label, 2, 0)
+        self.layout().addWidget(self.balance_port_combobox, 2, 1)
+        self.layout().addWidget(self.balance_connect_button, 2, 2)
+
+        # Refresh button
+        self.refresh_button = QPushButton("Refresh Ports")
+        self.refresh_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.refresh_button.clicked.connect(self.refresh_ports)
+        self.layout().addWidget(self.refresh_button, 3, 1, 1, 2)
+
+        # Populate ports initially
+        self.update_ports(self.model.machine_model.available_ports)
+
+    def update_ports(self, ports):
+        """Update the COM port selections."""
+        ports_with_virtual = ports + ["Virtual","COM1"]
+        
+        self.machine_port_combobox.clear()
+        self.balance_port_combobox.clear()
+        
+        self.machine_port_combobox.addItems(ports_with_virtual)
+        self.balance_port_combobox.addItems(ports_with_virtual)
+
+        # Set the default selected port
+        self.machine_port_combobox.setCurrentText(self.model.machine_model.machine_port)
+        self.balance_port_combobox.setCurrentText(self.model.machine_model.balance_port)
+
+    def request_machine_connect_change(self):
+        """Handle machine connection request."""
+        if self.model.machine_model.machine_connected:
+            self.controller.disconnect_machine()
+        else:
+            self.connect_machine()
+
+    def connect_machine(self):
+        """Handle machine connection request."""
+        port = self.machine_port_combobox.currentText()
+        self.connect_machine_requested.emit(port)
+
+    def request_balance_connect_change(self):
+        """Handle balance connection request."""
+        if self.model.machine_model.balance_connected:
+            self.controller.disconnect_balance()
+        else:
+            self.connect_balance()
+
+    def connect_balance(self):
+        """Handle balance connection request."""
+        port = self.balance_port_combobox.currentText()
+        self.connect_balance_requested.emit(port)
+
+    def refresh_ports(self):
+        """Handle refresh ports request."""
+        self.refresh_ports_requested.emit()
+
+    def update_machine_connect_button(self, machine_connected):
+        """Update the machine connect button text and color based on the connection state."""
+        if machine_connected:
+            self.machine_connect_button.setText("Disconnect")
+            self.machine_connect_button.setStyleSheet("background-color: #063f99; color: white;")
+        else:
+            self.machine_connect_button.setText("Connect")
+            self.machine_connect_button.setStyleSheet("background-color: #275fb8; color: white;")
+
+    def update_balance_connect_button(self, balance_connected):
+        """Update the balance connect button text and color based on the connection state."""
+        if balance_connected:
+            self.balance_connect_button.setText("Disconnect")
+            self.balance_connect_button.setStyleSheet("background-color: #063f99; color: white;")
+        else:
+            self.balance_connect_button.setText("Connect")
+            self.balance_connect_button.setStyleSheet("background-color: #275fb8; color: white;")
+
+
 
 class CustomSpinBox(QtWidgets.QDoubleSpinBox):
     valueChangedByStep = QtCore.Signal(int)
@@ -169,6 +302,8 @@ class MotorPositionWidget(QGroupBox):
 
         # Add Toggle Motors button
         self.toggle_motor_button = QtWidgets.QPushButton("Enable Motors")
+        self.toggle_motor_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.toggle_motor_button.setCheckable(True)
         self.toggle_motor_button.clicked.connect(self.request_toggle_motors)
         self.toggle_motor_button.setFixedWidth(fixed_width)  # Set fixed width
         self.toggle_motor_button.setFixedHeight(fixed_height)  # Set a fixed height
@@ -235,10 +370,10 @@ class MotorPositionWidget(QGroupBox):
         """Update the motor button text and color based on the motor state."""
         if motors_enabled:
             self.toggle_motor_button.setText("Disable Motors")
-            self.toggle_motor_button.setStyleSheet("background-color: red; color: white;")
+            self.toggle_motor_button.setStyleSheet("background-color: #063f99; color: white;")
         else:
             self.toggle_motor_button.setText("Enable Motors")
-            self.toggle_motor_button.setStyleSheet("background-color: blue; color: white;")
+            self.toggle_motor_button.setStyleSheet("background-color: #275fb8; color: white;")
 
 
 class PressurePlotBox(QtWidgets.QGroupBox):
@@ -269,19 +404,12 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.target_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
         self.layout.addWidget(self.target_pressure_value, 0, 3)  # Add the QLabel to the layout at position (1, 1)
 
-        # Add Toggle Motors button
-        self.pressure_regulation_button = QtWidgets.QPushButton("Enable Motors")
-        self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
-        self.pressure_regulation_button.setFixedWidth(100)  # Set fixed width
-        self.pressure_regulation_button.setFixedHeight(30)  # Set a fixed height
-        self.update_regulation_button(self.model.machine_model.regulating_pressure)
-
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.pressure_regulation_button.setStyleSheet(f"background-color: blue")
-        self.regulating = False
+        self.pressure_regulation_button.setCheckable(True)
         self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
         self.layout.addWidget(self.pressure_regulation_button, 1, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
+        self.update_regulation_button(self.model.machine_model.regulating_pressure)
 
         self.chart = QtCharts.QChart()
         self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
@@ -350,7 +478,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Update the motor button text and color based on the motor state."""
         if regulating_pressure:
             self.pressure_regulation_button.setText("Deregulate Pressure")
-            self.pressure_regulation_button.setStyleSheet("background-color: red; color: white;")
+            self.pressure_regulation_button.setStyleSheet("background-color: #063f99; color: white;")
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
-            self.pressure_regulation_button.setStyleSheet("background-color: blue; color: white;")
+            self.pressure_regulation_button.setStyleSheet("background-color: #275fb8; color: white;")

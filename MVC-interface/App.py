@@ -3,7 +3,7 @@ from PySide6.QtWidgets import QApplication
 from Machine_MVC import Machine
 from Model import Model
 from Controller import Controller
-from View import View
+from View import MainWindow
 from PySide6.QtCore import QTimer, QPointF
 from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor
@@ -42,10 +42,9 @@ def main():
     machine = Machine()
     model = Model()
     controller = Controller(machine, model)
-    controller.connect_to_machine()
 
     set_dark_theme(app)
-    view = View(model,controller)
+    view = MainWindow(model,controller)
 
     # Show the main window
     view.show()

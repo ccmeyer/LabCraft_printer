@@ -1,4 +1,6 @@
 from PySide6.QtCore import QObject
+from serial.tools.list_ports import comports
+
 
 class Controller(QObject):
     def __init__(self, machine, model):
@@ -19,23 +21,46 @@ class Controller(QObject):
         print(f"Error occurred: {error_message}")
         # Here, you could also update the view to display the error message
 
-    def connect_to_machine(self):
-        """Connect to the machine."""
-        self.machine.connect_board()
+    def update_available_ports(self):
+        # Get a list of all connected COM ports
+        ports = comports()
+        port_names = [port.device for port in ports]
+        self.model.machine_model.update_ports(port_names)
 
-    def disconnect_from_machine(self):
+    def connect_machine(self, port):
+        """Connect to the machine."""
+        if self.machine.connect_board(port):
+            # Update the model state
+            self.model.machine_model.connect_machine(port)
+        else:
+            print("Failed to connect to machine.")
+
+    def disconnect_machine(self):
         """Disconnect from the machine."""
         self.machine.disconnect_board()
+        self.model.machine_model.disconnect_machine()
+
+
+    def connect_balance(self, port):
+        """Connect to the microbalance."""
+        if self.machine.connect_balance(port):
+            # Update the model state
+            self.model.machine_model.connect_balance(port)
+    
+    def disconnect_balance(self):
+        """Disconnect from the balance."""
+        self.machine.disconnect_balance()
+        self.model.machine_model.disconnect_balance()
 
     def set_relative_coordinates(self, x, y, z,manual=False):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         self.machine.set_relative_coordinates(x, y, z,manual=manual)
 
-    def set_relative_pressure(self, pressure):
+    def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
         print(f"Setting relative pressure: {pressure}")
-        self.machine.set_relative_pressure(pressure)
+        self.machine.set_relative_pressure(pressure,manual=manual)
 
     def home_machine(self):
         """Home the machine."""

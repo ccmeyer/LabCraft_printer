@@ -19,12 +19,22 @@ class MachineModel(QObject):
     - Update target pressure
     '''
     step_size_changed = QtCore.Signal(int)  # Signal to notify when step size changes
+    machine_state_updated = QtCore.Signal(bool)  # Signal to notify when machine state changes
+    balance_state_updated = QtCore.Signal(bool)  # Signal to notify when balance state changes
     motor_state_changed = QtCore.Signal(bool)  # Signal to notify when motor state changes
     regulation_state_changed = QtCore.Signal(bool)  # Signal to notify when pressure regulation state changes
     pressure_updated = Signal(np.ndarray)  # Signal to emit when pressure readings are updated
+    ports_updated = Signal(list)  # Signal to notify view of available ports update
+    connection_requested = Signal(str, str)  # Signal to request connection
 
     def __init__(self):
         super().__init__()
+        self.available_ports = []
+        self.machine_connected = False
+        self.balance_connected = False
+        self.machine_port = "Virtual"
+        self.balance_port = "Virtual"
+
         self.target_x = 0
         self.target_y = 0
         self.target_z = 0
@@ -52,12 +62,33 @@ class MachineModel(QObject):
 
         self.regulating_pressure = False
 
+    def update_ports(self, ports):
+        self.available_ports = ports
+        self.ports_updated.emit(self.available_ports)
+
+    def connect_machine(self, port):
+        self.machine_port = port
+        self.machine_connected = True
+        self.machine_state_updated.emit(self.machine_connected)
+
+    def disconnect_machine(self):
+        self.machine_connected = False
+        self.machine_state_updated.emit(self.machine_connected)
+
+    def connect_balance(self, port):
+        self.balance_port = port
+        self.balance_connected = True
+        self.balance_state_updated.emit(self.balance_connected)
+
+    def disconnect_balance(self):
+        self.balance_connected = False
+        self.balance_state_updated.emit(self.balance_connected)
+
     def convert_to_psi(self,pressure):
         return round(((int(pressure) - self.psi_offset) / self.fss) * self.psi_max,4)
     
     def convert_to_raw_pressure(self,psi):
         return int((float(psi) / self.psi_max) * self.fss + self.psi_offset)
-
 
     def set_step_size(self, new_step_size):
         """Set the step size and emit a signal if it changes."""

@@ -8,6 +8,128 @@ import serial
 import re
 import json
 import cv2
+import numpy as np
+
+class Balance():
+    def __init__(self,machine):
+        self.machine = machine
+        self.connected = False
+        self.port = None
+        self.simulate = True
+        self.error_count = 0
+        self.current_mass = 0
+        self.target_mass = 0
+        self.mass_update_timer = None
+        self.mass_log = []
+
+    def is_connected(self):
+        return self.connected
+
+    def connect_balance(self,port):
+        if port == 'Virtual':
+            self.connected = True
+            self.simulate = True
+            self.mass_update_timer = QtCore.QTimer()
+            self.mass_update_timer.timeout.connect(self.update_simulated_mass)
+            self.mass_update_timer.start(25)
+            self.show_connection()
+            self.begin_reading()
+            return True
+        try:
+            self.port = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
+            if not self.port.is_open:  # Add this line
+                raise serial.SerialException('Could not open port')  # Add this line
+            self.connected = True
+            self.simulate = False
+            self.show_connection()
+            self.begin_reading()
+            return True
+        except:
+            self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
+            self.connected = False
+            return False
+        
+    def close_connection(self):
+        if not self.simulate:
+            self.port.close()
+        else:
+            self.mass_update_timer.stop()
+        if self.mass_update_timer is not None:
+            self.mass_update_timer.stop()
+        self.connected = False
+        return
+
+    def show_connection(self):
+        print('Balance connected')
+
+    def get_mass(self):
+        if not self.simulate:
+            if self.port.in_waiting > 0:
+                data = self.port.readline()
+                try:
+                    data = data.decode("ASCII")
+                    # print('Data:',data)
+                    [sign,mass] = re.findall(r'(-?) *([0-9]+\.[0-9]+) [a-zA-Z]*',data)[0]
+                    mass = float(''.join([sign,mass]))
+                    self.current_mass = mass
+                    self.add_to_log(self.current_mass)
+                except Exception as e:
+                    print(f'--Error {e} reading from balance')
+                    self.error_count += 1
+                    if self.error_count > 100:
+                        self.close_connection()
+                        self.main_window.popup_message('Connection error','Lost connection to balance')
+                    
+        else:
+            self.add_to_log(self.current_mass)
+        
+    def begin_reading(self):
+        self.mass_update_timer = QtCore.QTimer()
+        self.mass_update_timer.timeout.connect(self.get_mass)
+        self.mass_update_timer.start(10)
+
+    def add_to_log(self,mass):
+        self.mass_log.append(mass)
+        if len(self.mass_log) > 100:
+            self.mass_log.pop(0)
+
+    def get_recent_mass(self):
+        if self.mass_log != []:
+            return self.mass_log[-1]
+        else:
+            return 0
+
+    def simulate_mass(self,num_droplets,psi):
+        # Reference points
+        ref_droplets = 100
+        ref_points = np.array([
+            [1.8, 3],
+            [2.2, 4],
+        ])
+
+        # Calculate the linear fit for the reference points
+        coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
+        print('Coefficients:',coefficients)
+        # Calculate the mass per droplet for the given pressure
+        mass_per_droplet = coefficients[0] * psi + coefficients[1]
+        for point in ref_points:
+            print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
+        # Calculate the mass for the given number of droplets
+        mass = mass_per_droplet * num_droplets
+
+        return mass
+    
+    def update_simulated_mass(self):
+        if self.machine.balance_droplets != []:
+            print('Balance droplets:',self.machine.balance_droplets)
+            [num_droplets,psi] = self.machine.balance_droplets.pop(0)
+            print('Found balance droplets',num_droplets,psi)
+            mass = self.simulate_mass(num_droplets,psi)
+            print('Simulated mass:',mass,self.current_mass,self.target_mass)
+            self.target_mass += mass
+        
+        if self.current_mass < self.target_mass:
+            self.current_mass += 0.01
 
 class BoardCommand():
     """
@@ -472,8 +594,8 @@ class Machine(QObject):
     def stop_execution_timer(self):
         self.execution_timer.stop()
 
-    def connect_board(self):
-        if self.port == 'Virtual':
+    def connect_board(self,port):
+        if port == 'Virtual':
             self.board = VirtualMachine(self)
             self.simulate = True
 
@@ -486,6 +608,15 @@ class Machine(QObject):
         self.stop_communication_timer()
         self.stop_execution_timer()
         self.board = None
+        return True
+    
+    def connect_balance(self,port):
+        self.balance = Balance(self)
+        self.balance.connect_balance(port)
+        return True
+    
+    def disconnect_balance(self):
+        self.balance.close_connection()
         return True
 
     def request_status_update(self):
