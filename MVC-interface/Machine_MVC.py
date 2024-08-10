@@ -504,13 +504,16 @@ class Command:
             self.handler(**self.kwargs)
 
 
-class CommandQueue:
+class CommandQueue(QObject):
     """
     Represents a queue of commands to be sent to the machine.
     Uses deque to store the commands.
     Completed commands are transferred to the completed queue.
     """
+    queue_updated = Signal()  # Signal to emit when the queue is updated
+
     def __init__(self):
+        super().__init__()  # Initialize the QObject
         self.queue = deque()
         self.completed = deque()
         self.command_number = 0
@@ -553,7 +556,7 @@ class CommandQueue:
             print(f"Command '{completed_command.command_type}' completed and removed from queue.")
             self.completed.append(completed_command)
 
-
+        self.queue_updated.emit()
     
 
 class Machine(QObject):

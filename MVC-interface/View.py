@@ -71,7 +71,7 @@ class MainWindow(QMainWindow):
 
         # Add other widgets to the right panel as needed
         right_panel = QtWidgets.QWidget()
-        right_panel.setFixedWidth(300)
+        right_panel.setFixedWidth(400)
         right_panel.setStyleSheet(f"background-color: #4d4d4d;")
         right_layout = QtWidgets.QVBoxLayout(right_panel)
 
@@ -85,6 +85,10 @@ class MainWindow(QMainWindow):
         self.shortcut_box.setStyleSheet(f"background-color: #4d4d4d;")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.shortcut_box)
+
+        # Add the command queue table to the right panel
+        self.command_queue_widget = CommandQueueWidget(self.controller.machine)
+        right_layout.addWidget(self.command_queue_widget)
 
         self.layout.addWidget(right_panel)
 
@@ -727,4 +731,78 @@ class ShortcutTableWidget(QGroupBox):
             self.table.setItem(row, 0, key_item)
             self.table.setItem(row, 1, description_item)
         
+class CommandQueueWidget(QGroupBox):
+    """
+    A widget to display the command queue with a scrollable table.
+
+    The table has two columns: one for the command number and one for the command signal.
+    The row color changes based on the status of the command:
+    - Added: Dark grey
+    - Sent: Lighter grey
+    - Executing: Red
+    - Completed: Black
+    """
+
+    def __init__(self, machine):
+        super().__init__("Command Queue")
+        self.machine = machine
+        self.init_ui()
+
+        # Connect the queue_updated signal to the update_commands method
+        self.machine.command_queue.queue_updated.connect(self.update_commands)
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        self.setLayout(QVBoxLayout())
+
+        # Create a table to display the commands
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Command ID", "Command Signal"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        # Hide the vertical index column
+        self.table.verticalHeader().setVisible(False)
+
+        # Set the table to be read-only
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        # Add the table to the layout
+        self.layout().addWidget(self.table)
+
+        # Initial update to populate the table
+        self.update_commands()
+
+    def update_commands(self):
+        """Update the table with the current commands in the queue."""
+        self.table.setRowCount(0)  # Clear the table
+
+        # Get the commands from both the active queue and the completed queue
+        all_commands = list(self.machine.command_queue.queue) + list(self.machine.command_queue.completed)
         
+        # Sort commands by command number in descending order
+        all_commands.sort(key=lambda cmd: cmd.get_number(), reverse=True)
+
+        for command in all_commands:
+            row_position = self.table.rowCount()
+            self.table.insertRow(row_position)
+
+            # Add the command number and signal to the table
+            command_num_label = QTableWidgetItem(str(command.get_number()))
+            command_num_label.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row_position, 0, command_num_label)
+            self.table.setItem(row_position, 1, QTableWidgetItem(command.get_command()))
+
+            # Set the row color based on the command status
+            if command.status == "Added":
+                self.set_row_color(row_position, "#4d4d4d")  # Dark grey
+            elif command.status == "Sent":
+                self.set_row_color(row_position, "#A9A9A9")  # Light grey
+            elif command.status == "Executing":
+                self.set_row_color(row_position, "#FF0000")  # Red
+            elif command.status == "Completed":
+                self.set_row_color(row_position, "#000000")  # Black
+
+    def set_row_color(self, row, color):
+        """Set the background color for a row."""
+        for column in range(self.table.columnCount()):
+            self.table.item(row, column).setBackground(QtGui.QColor(color))
