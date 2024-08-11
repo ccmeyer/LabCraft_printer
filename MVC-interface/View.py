@@ -474,7 +474,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.axisX = QtCharts.QValueAxis()
         self.axisX.setTickCount(3)
-        self.axisX.setRange(0, 100)
+        self.axisX.setRange(0, len(self.model.machine_model.pressure_readings))
         self.axisY = QtCharts.QValueAxis()
         self.axisY.setTitleText("Pressure (psi)")
 
