@@ -7,6 +7,40 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
 
+class OptionsDialog(QtWidgets.QDialog):
+    def __init__(self, title, message, options):
+        super().__init__()
+
+        self.setWindowTitle(title)
+        self.layout = QtWidgets.QVBoxLayout(self)
+
+        self.message_label = QtWidgets.QLabel(message)
+        self.layout.addWidget(self.message_label)
+
+        self.buttons_layout = QtWidgets.QGridLayout()
+        self.layout.addLayout(self.buttons_layout)
+
+        self.buttons = []
+        for i, option in enumerate(options):
+            button = QtWidgets.QPushButton(option)
+            button.clicked.connect(lambda _, option=option: self.button_clicked(option))
+            self.buttons_layout.addWidget(button, i // 5, i % 5)  # Change 5 to the number of buttons per row
+            self.buttons.append(button)
+
+        self.quit_button = QtWidgets.QPushButton("Quit")
+        self.quit_button.clicked.connect(self.reject)
+        self.layout.addWidget(self.quit_button)
+
+        self.clicked_option = None
+
+    def button_clicked(self, option):
+        self.clicked_option = option
+        self.accept()
+
+    def exec(self):
+        super().exec()
+        return self.clicked_option
+
 class ShortcutManager:
     """Manage application shortcuts and their descriptions."""
     def __init__(self, parent):
@@ -31,13 +65,15 @@ class MainWindow(QMainWindow):
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
 
-        self.setWindowTitle("Machine Status")
+        self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
 
     def init_ui(self):
         """Initialize the main user interface."""
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
+        transparent_icon = self.make_transparent_icon()
+        self.setWindowIcon(transparent_icon)
 
         self.layout = QHBoxLayout(self.central_widget)
 
@@ -113,10 +149,10 @@ class MainWindow(QMainWindow):
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0,manual=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0,manual=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0,manual=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size,0 , 0,manual=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size,0, 0,manual=True))
         self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size,manual=True))
         self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size,manual=True))
         
@@ -136,9 +172,85 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('2','Add reagent to slot 2', lambda: self.controller.add_reagent_to_slot(1))
         self.shortcut_manager.add_shortcut('3','Add reagent to slot 3', lambda: self.controller.add_reagent_to_slot(2))
         self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3))
-        self.shortcut_manager.add_shortcut('s','Save location 1', lambda: self.controller.save_location('location-1'))
-        self.shortcut_manager.add_shortcut('d','Save location 2', lambda: self.controller.save_location('location-2'))
-        self.shortcut_manager.add_shortcut('l','Print locations', lambda: self.controller.print_locations())
+        self.shortcut_manager.add_shortcut('s','Save new location', lambda: self.add_new_location())
+        self.shortcut_manager.add_shortcut('d','Modify location', lambda: self.modify_location())
+        self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location())
+        self.shortcut_manager.add_shortcut('Shift+n','Popup message', lambda: self.popup_message('Title','Message'))
+        self.shortcut_manager.add_shortcut('Shift+o','Popup options', lambda: self.popup_options('Title','Message',['Option 1','Option 2','Option 3']))
+        self.shortcut_manager.add_shortcut('Shift+y','Popup yes/no', lambda: self.popup_yes_no('Title','Message'))
+        self.shortcut_manager.add_shortcut('Shift+i','Popup input', lambda: self.popup_input('Title','Message'))
+
+    def make_transparent_icon(self):
+        transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
+        transparent_image.fill(QtCore.Qt.transparent)
+        transparent_pixmap = QtGui.QPixmap.fromImage(transparent_image)
+        transparent_icon = QtGui.QIcon(transparent_pixmap)
+        return transparent_icon
+
+    def popup_message(self, title, message):
+        """Display a popup message with a title and message."""
+        print(f"Popup message: {title} - {message}")
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        msg.exec()
+
+    def popup_options(self, title, message, options):
+        dialog = OptionsDialog(title, message, options)
+        clicked_option = dialog.exec()
+        return clicked_option
+    
+    def popup_yes_no(self,title, message):
+        msg = QtWidgets.QMessageBox()
+        msg.setWindowTitle(title)
+        msg.setText(message)
+        msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        transparent_icon = self.make_transparent_icon()
+        msg.setWindowIcon(transparent_icon)
+        msg.exec()
+        return msg.clickedButton().text()
+    
+    def popup_input(self,title, message):
+        text, ok = QtWidgets.QInputDialog.getText(self, title, message)
+        if ok:
+            return text
+        else:
+            return None
+        
+    def add_new_location(self):
+        """Save the current location information."""
+        name = self.popup_input("Save Location","Enter the name of the location")
+        if name is not None:
+            self.controller.add_new_location(name)
+        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
+        if ansewer == "&Yes":
+            self.controller.save_locations()
+
+    def modify_location(self):
+        """Modify a saved location."""
+        name = self.popup_options("Modify Location","Select a location to modify",self.model.location_model.get_location_names())
+        if name is not None:
+            self.controller.modify_location(name)
+        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
+        if ansewer == "&Yes":
+            self.controller.save_locations()
+
+    def move_to_location(self,location=False,direct=True,safe_y=False):
+        """Move the machine to a saved location."""
+        if len(self.model.location_model.get_location_names()) == 0:
+            self.popup_message("No Locations","There are no saved locations")
+            return
+        if self.model.machine_model.motors_enabled == False or self.model.machine_model.motors_homed == False:
+            self.popup_message("Motors Not Enabled","Please enable and home the motors before moving to a location")
+            return
+        if not location:
+            name = self.popup_options("Move to Location","Select a location to move to",self.model.location_model.get_location_names())
+        else:
+            name = location
+        if name is not None:
+            self.controller.move_to_location(name,direct=direct,safe_y=safe_y)
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
@@ -545,7 +657,6 @@ class MovementBox(QtWidgets.QGroupBox):
         self.controller = controller
 
         self.init_ui()
-        self.layout = QtWidgets.QHBoxLayout(self)
 
         self.x_min = -15000
         self.x_max = 0
@@ -799,6 +910,8 @@ class BoardStatusBox(QGroupBox):
         self.layout = QtWidgets.QGridLayout(self)
 
         self.labels = {
+            'Homed': QLabel('False'),
+            'Location': QLabel('Unknown'),
             'Cycle Count': QLabel('0'),
             'Max Cycle Time': QLabel('0')
         }
@@ -816,6 +929,8 @@ class BoardStatusBox(QGroupBox):
 
     def update_status(self):
         """Update the labels with the current board status."""
+        self.labels['Location'].setText(self.model.machine_model.current_location)
+        self.labels['Homed'].setText(str(self.model.machine_model.motors_homed))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Max Cycle Time'].setText(str(self.model.machine_model.max_cycle))
 

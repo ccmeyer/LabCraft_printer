@@ -3,6 +3,9 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
 import json
+import heapq
+import os
+
 
 class PrinterHead:
     """
@@ -214,7 +217,10 @@ class LocationModel(QObject):
 
     def __init__(self, json_file_path="locations.json"):
         super().__init__()
-        self.json_file_path = json_file_path
+        # Get the directory of the current script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Construct the full file path
+        self.json_file_path = os.path.join(script_dir, json_file_path)        
         self.locations = {}  # Dictionary to hold location data
 
     def load_locations(self):
@@ -230,6 +236,8 @@ class LocationModel(QObject):
         except json.JSONDecodeError:
             print(f"Error decoding JSON from {self.json_file_path}. Starting with an empty locations dictionary.")
             self.locations = {}
+        except Exception as e:
+            print(f"Failed to load locations: {e}")
 
     def save_locations(self):
         """Save locations to a JSON file."""
@@ -246,6 +254,15 @@ class LocationModel(QObject):
         self.locations_updated.emit()
         print(f"Location '{name}' added/updated.")
 
+    def update_location(self, name, x, y, z):
+        """Update an existing location by name."""
+        if name in self.locations:
+            self.locations[name] = {"x": x, "y": y, "z": z}
+            self.locations_updated.emit()
+            print(f"Location '{name}' updated.")
+        else:
+            print(f"Location '{name}' not found.")
+
     def remove_location(self, name):
         """Remove a location by name."""
         if name in self.locations:
@@ -256,12 +273,26 @@ class LocationModel(QObject):
             print(f"Location '{name}' not found.")
 
     def get_location(self, name):
-        """Get a location's coordinates by name."""
-        return self.locations.get(name)
-
+        """Get a location's coordinates by name in an array [x,y,z]."""
+        if name in self.locations:
+            return [self.locations[name]["x"], self.locations[name]["y"], self.locations[name]["z"]]
+        else:
+            return None
+    
+    def get_location_dict(self, name):
+        """Get a location's coordinates by name in a dictionary."""
+        if name in self.locations:
+            return self.locations[name]
+        else:
+            return None
+        
     def get_all_locations(self):
         """Get all locations."""
-        return self.locations   
+        return self.locations
+
+    def get_location_names(self):
+        """Get a list of all location names."""
+        return list(self.locations.keys())
 
 class MachineModel(QObject):
     '''
@@ -305,6 +336,9 @@ class MachineModel(QObject):
         self.current_y = 0
         self.current_z = 0
         self.current_p = 0
+
+        self.motors_homed = False
+        self.current_location = "Unknown"
 
         self.step_num = 4
         self.possible_steps = [2,10,50,250,500,1000,2000]
@@ -423,7 +457,17 @@ class MachineModel(QObject):
     def get_current_position(self):
         return [self.current_x, self.current_y, self.current_z]
 
-    
+    def get_current_position_dict(self):
+        return {"x": self.current_x, "y": self.current_y, "z": self.current_z}
+
+    def handle_home_complete(self):
+        self.motors_homed = True
+        self.current_location = "Home"
+        
+        print("Motors homed.")
+
+    def update_current_location(self, location):
+        self.current_location = location
 
 
 class Model(QObject):
@@ -457,3 +501,11 @@ class Model(QObject):
         self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_state_updated.emit()
+
+    def move_to_location(self, name,direct=True,safe_y=False):
+        """
+        Move to a location by name.
+        Apply several checks before moving to the location.
+        Returns a list of the target coordinates that define the safe path to the location.
+        """
+        

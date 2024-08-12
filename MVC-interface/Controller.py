@@ -12,6 +12,7 @@ class Controller(QObject):
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
         self.machine.error_occurred.connect(self.handle_error)
+        self.machine.homing_completed.connect(self.home_complete_handler)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -57,6 +58,11 @@ class Controller(QObject):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         self.machine.set_relative_coordinates(x, y, z,manual=manual)
+
+    def set_absolute_coordinates(self, x, y, z,manual=False):
+        """Set the absolute coordinates for the machine."""
+        print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
+        self.machine.set_absolute_coordinates(x, y, z,manual=manual)
 
     def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -108,10 +114,71 @@ class Controller(QObject):
         """Transfer a reagent from a slot to the gripper."""
         self.model.rack_model.transfer_to_gripper(slot)
 
-    def save_location(self,name):
+    def add_new_location(self,name):
         """Save the current location information."""
         self.model.location_model.add_location(name,*self.model.machine_model.get_current_position())
+
+    def modify_location(self,name):
+        """Modify the location information."""
+        self.model.location_model.update_location(name,*self.model.machine_model.get_current_position())
 
     def print_locations(self):
         """Print the saved locations."""
         print(self.model.location_model.get_all_locations())
+
+    def save_locations(self):
+        """Save the locations to a file."""
+        self.model.location_model.save_locations()
+
+    def home_complete_handler(self):
+        """Handle the home complete signal."""
+        self.model.machine_model.handle_home_complete()
+    
+    def update_location_handler(self,name):
+        """Update the current location."""
+        self.model.machine_model.update_current_location(name)
+
+    def move_to_location(self,name,direct=False,safe_y=False):
+        """Move to the saved location."""
+        if name == 'balance' or self.model.machine_model.current_location == 'balance':
+            safe_y = True
+            direct = False
+        current = self.model.machine_model.get_current_position_dict()
+        target = self.model.location_model.get_location_dict(name)
+        if 'rack_position' in name:
+            print('Moving to rack position:',name,'Applying X offset')
+            target['x'] += -2500
+        else:
+            print('Moving to location:',name)
+
+        up_first = False
+        if direct and current['z'] < target['z']:
+            up_first = True
+            self.machine.set_absolute_coordinates(current['x'],current['y'],target['z'])
+
+        x_limit = -5500
+        safe_height = -3000
+        safe_y_value = 3500
+        if current['x'] > x_limit and target['x'] < x_limit or current['x'] < x_limit and target['x'] > x_limit:
+            safe_y = True
+            print('Crossing x limit, moving to safe y first')
+        
+        if not direct and not safe_y:
+            print('Not direct, not safe-y')
+            self.machine.set_absolute_coordinates(current['x'], current['y'], safe_height)
+            self.machine.set_absolute_coordinates(target['x'], target['y'], safe_height)
+        elif not direct and safe_y:
+            print('Not direct, safe-y')
+            self.machine.set_absolute_coordinates(current['x'], current['y'], safe_height)
+            self.machine.set_absolute_coordinates(current['x'], safe_y_value, safe_height)
+            self.machine.set_absolute_coordinates(target['x'], safe_y_value, safe_height)
+            self.machine.set_absolute_coordinates(target['x'], target['y'], safe_height)
+        elif direct and safe_y:
+            if up_first:
+                self.machine.machine.set_absolute_coordinates(current['x'],safe_y_value,target['z'])
+                self.machine.machine.set_absolute_coordinates(target['x'],safe_y_value,target['z'])
+            else:
+                self.machine.set_absolute_coordinates(current['x'],safe_y_value,current['z'])
+                self.machine.set_absolute_coordinates(target['x'],safe_y_value,current['z'])
+                self.machine.set_absolute_coordinates(target['x'],target['y'],current['z'])
+        self.machine.set_absolute_coordinates(target['x'],target['y'],target['z'],handler=lambda: self.update_location_handler(name))

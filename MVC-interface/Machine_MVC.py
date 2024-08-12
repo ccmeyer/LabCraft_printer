@@ -568,6 +568,7 @@ class Machine(QObject):
     status_updated = Signal(dict)  # Signal to emit status updates
     command_sent = Signal(dict)    # Signal to emit when a command is sent
     error_occurred = Signal(str)   # Signal to emit errors
+    homing_completed = Signal()    # Signal to emit when homing is completed
 
     def __init__(self):
         super().__init__()
@@ -717,12 +718,11 @@ class Machine(QObject):
     def home_motor_handler(self):
         self.homed = True
         self.location = 'Home'
+        self.homing_completed.emit()
 
     def home_motors(self,handler=None,kwargs=None,manual=False):
         if handler == None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-    
-    
     
 
