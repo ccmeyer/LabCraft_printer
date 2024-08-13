@@ -85,6 +85,9 @@ class RackModel(QObject):
         self.gripper_printer_head = None
         self.gripper_slot_number = None
 
+    def get_num_slots(self):
+        return len(self.slots)
+
     def update_slot_with_printer_head(self, slot_number, printer_head):
         """
         Update a slot with a new printer head.
@@ -116,53 +119,91 @@ class RackModel(QObject):
                 self.error_occurred.emit(error_msg)
                 print(error_msg)
 
-    def transfer_to_gripper(self, slot_number):
+    def verify_transfer_to_gripper(self, slot_number):
         """
-        Transfer the printer head from a slot to the gripper.
+        Verify if the transfer of the printer head from a slot to the gripper is valid.
 
         Args:
         - slot_number (int): The slot number to transfer from.
+
+        Returns:
+        - bool: True if the transfer is valid, False otherwise.
+        - str: Error message if the transfer is not valid, empty string otherwise.
         """
         if 0 <= slot_number < len(self.slots):
             slot = self.slots[slot_number]
             if slot.printer_head is not None and slot.confirmed:
                 if self.gripper_printer_head is None:
-                    self.gripper_printer_head = slot.printer_head
-                    self.gripper_slot_number = slot_number
-                    slot.change_printer_head(None)
-                    self.slot_updated.emit(slot_number)
-                    self.gripper_updated.emit()
-                    print(f"Printer head from slot {slot_number} transferred to gripper.")
+                    return True, ""
                 else:
-                    error_msg = "Gripper is already holding a printer head."
-                    self.error_occurred.emit(error_msg)
-                    print(error_msg)
+                    return False, "Gripper is already holding a printer head."
             else:
-                error_msg = f"Slot {slot_number} is not confirmed or empty."
-                self.error_occurred.emit(error_msg)
-                print(error_msg)
+                return False, f"Slot {slot_number} is not confirmed or empty."
+        else:
+            return False, f"Slot number {slot_number} is out of range."
 
-    def transfer_from_gripper(self, slot_number):
+    def transfer_to_gripper(self, slot_number):
         """
-        Transfer the printer head from the gripper to a slot.
+        Transfer the printer head from a slot to the gripper if the transfer is valid.
+
+        Args:
+        - slot_number (int): The slot number to transfer from.
+        """
+        is_valid, error_msg = self.verify_transfer_to_gripper(slot_number)
+        if is_valid:
+            slot = self.slots[slot_number]
+            self.gripper_printer_head = slot.printer_head
+            self.gripper_slot_number = slot_number
+            slot.change_printer_head(None)
+            self.slot_updated.emit(slot_number)
+            self.gripper_updated.emit()
+            print(f"Printer head from slot {slot_number} transferred to gripper.")
+        else:
+            self.error_occurred.emit(error_msg)
+            print(error_msg)
+
+    def verify_transfer_from_gripper(self, slot_number):
+        """
+        Verify if the transfer of the printer head from the gripper to a slot is valid.
 
         Args:
         - slot_number (int): The slot number to transfer to.
+
+        Returns:
+        - bool: True if the transfer is valid, False otherwise.
+        - str: Error message if the transfer is not valid, empty string otherwise.
         """
         if 0 <= slot_number < len(self.slots):
             slot = self.slots[slot_number]
             if slot_number == self.gripper_slot_number:
                 if slot.printer_head is None and self.gripper_printer_head is not None:
-                    slot.change_printer_head(self.gripper_printer_head)
-                    self.gripper_printer_head = None
-                    self.gripper_slot_number = None
-                    self.slot_updated.emit(slot_number)
-                    self.gripper_updated.emit()
-                    print(f"Printer head transferred from gripper to slot {slot_number}.")
+                    return True, ""
+                else:
+                    return False, "Slot is already occupied or gripper is empty."
             else:
-                error_msg = f"Printer head can only be unloaded to its original slot {self.gripper_slot_number}."
-                self.error_occurred.emit(error_msg)
-                print(error_msg)
+                return False, f"Printer head can only be unloaded to its original slot {self.gripper_slot_number}."
+        else:
+            return False, f"Slot number {slot_number} is out of range."
+
+    def transfer_from_gripper(self, slot_number):
+        """
+        Transfer the printer head from the gripper to a slot if the transfer is valid.
+
+        Args:
+        - slot_number (int): The slot number to transfer to.
+        """
+        is_valid, error_msg = self.verify_transfer_from_gripper(slot_number)
+        if is_valid:
+            slot = self.slots[slot_number]
+            slot.change_printer_head(self.gripper_printer_head)
+            self.gripper_printer_head = None
+            self.gripper_slot_number = None
+            self.slot_updated.emit(slot_number)
+            self.gripper_updated.emit()
+            print(f"Printer head transferred from gripper to slot {slot_number}.")
+        else:
+            self.error_occurred.emit(error_msg)
+            print(error_msg)
 
     def get_slot_info(self, slot_number):
         """
@@ -317,6 +358,8 @@ class MachineModel(QObject):
     pressure_updated = Signal(np.ndarray)  # Signal to emit when pressure readings are updated
     ports_updated = Signal(list)  # Signal to notify view of available ports update
     connection_requested = Signal(str, str)  # Signal to request connection
+    gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
+
 
     def __init__(self):
         super().__init__()
@@ -339,6 +382,9 @@ class MachineModel(QObject):
 
         self.motors_homed = False
         self.current_location = "Unknown"
+
+        self.gripper_open = False
+        self.gripper_active = False
 
         self.step_num = 4
         self.possible_steps = [2,10,50,250,500,1000,2000]
@@ -379,6 +425,19 @@ class MachineModel(QObject):
         self.balance_connected = False
         self.balance_state_updated.emit(self.balance_connected)
 
+    def open_gripper(self):
+        self.gripper_open = True
+        self.gripper_active = True
+        self.gripper_state_changed.emit(self.gripper_open)
+    
+    def close_gripper(self):
+        self.gripper_open = False
+        self.gripper_active = True
+        self.gripper_state_changed.emit(self.gripper_open)
+
+    def gripper_off(self):
+        self.gripper_active = False
+    
     def convert_to_psi(self,pressure):
         return round(((int(pressure) - self.psi_offset) / self.fss) * self.psi_max,4)
     
@@ -501,11 +560,3 @@ class Model(QObject):
         self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_state_updated.emit()
-
-    def move_to_location(self, name,direct=True,safe_y=False):
-        """
-        Move to a location by name.
-        Apply several checks before moving to the location.
-        Returns a list of the target coordinates that define the safe path to the location.
-        """
-        

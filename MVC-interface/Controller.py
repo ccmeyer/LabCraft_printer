@@ -8,11 +8,14 @@ class Controller(QObject):
         super().__init__()
         self.machine = machine
         self.model = model
+        self.expected_position = self.model.machine_model.get_current_position_dict()
 
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
         self.machine.error_occurred.connect(self.handle_error)
         self.machine.homing_completed.connect(self.home_complete_handler)
+        self.machine.gripper_open.connect(self.model.machine_model.open_gripper)
+        self.machine.gripper_closed.connect(self.model.machine_model.close_gripper)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -105,14 +108,6 @@ class Controller(QObject):
     def confirm_slot(self, slot):
         """Confirm that a reagent is present in a slot."""
         self.model.rack_model.confirm_slot(slot)
-    
-    def transfer_from_gripper(self, slot):
-        """Transfer a reagent from the gripper to a slot."""
-        self.model.rack_model.transfer_from_gripper(slot)
-
-    def transfer_to_gripper(self, slot):
-        """Transfer a reagent from a slot to the gripper."""
-        self.model.rack_model.transfer_to_gripper(slot)
 
     def add_new_location(self,name):
         """Save the current location information."""
@@ -133,52 +128,152 @@ class Controller(QObject):
     def home_complete_handler(self):
         """Handle the home complete signal."""
         self.model.machine_model.handle_home_complete()
+
+    def update_expected_position(self, x=None, y=None, z=None):
+        """Update the expected position after a move."""
+        if x is not None:
+            self.expected_position['x'] = x
+        if y is not None:
+            self.expected_position['y'] = y
+        if z is not None:
+            self.expected_position['z'] = z
     
     def update_location_handler(self,name):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
-    def move_to_location(self,name,direct=False,safe_y=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False):
         """Move to the saved location."""
-        if name == 'balance' or self.model.machine_model.current_location == 'balance':
-            safe_y = True
-            direct = False
-        current = self.model.machine_model.get_current_position_dict()
-        target = self.model.location_model.get_location_dict(name)
-        if 'rack_position' in name:
-            print('Moving to rack position:',name,'Applying X offset')
+        original_target = self.model.location_model.get_location_dict(name)
+        target = original_target.copy()
+        if x_offset:
+            print(f'Applying X offset:{target["x"]} -> {target["x"] - 2500}')
             target['x'] += -2500
-        else:
-            print('Moving to location:',name)
+
+        # Use expected position instead of current position from the model
+        current = self.expected_position
 
         up_first = False
         if direct and current['z'] < target['z']:
             up_first = True
-            self.machine.set_absolute_coordinates(current['x'],current['y'],target['z'])
+            self.machine.set_absolute_coordinates(
+                current['x'], current['y'], target['z'],
+                handler=lambda: self.update_expected_position(z=target['z'])
+            )
 
         x_limit = -5500
         safe_height = -3000
         safe_y_value = 3500
-        if current['x'] > x_limit and target['x'] < x_limit or current['x'] < x_limit and target['x'] > x_limit:
+        if (current['x'] > x_limit and target['x'] < x_limit) or (current['x'] < x_limit and target['x'] > x_limit):
+            print(f'Crossing x limit: {current["x"]} -> {target["x"]}')
             safe_y = True
-            print('Crossing x limit, moving to safe y first')
-        
+
         if not direct and not safe_y:
             print('Not direct, not safe-y')
-            self.machine.set_absolute_coordinates(current['x'], current['y'], safe_height)
-            self.machine.set_absolute_coordinates(target['x'], target['y'], safe_height)
+            self.machine.set_absolute_coordinates(
+                current['x'], current['y'], safe_height,
+                handler=lambda: self.update_expected_position(z=safe_height)
+            )
+            self.machine.set_absolute_coordinates(
+                target['x'], target['y'], safe_height,
+                handler=lambda: self.update_expected_position(x=target['x'], y=target['y'])
+            )
         elif not direct and safe_y:
             print('Not direct, safe-y')
-            self.machine.set_absolute_coordinates(current['x'], current['y'], safe_height)
-            self.machine.set_absolute_coordinates(current['x'], safe_y_value, safe_height)
-            self.machine.set_absolute_coordinates(target['x'], safe_y_value, safe_height)
-            self.machine.set_absolute_coordinates(target['x'], target['y'], safe_height)
+            self.machine.set_absolute_coordinates(
+                current['x'], current['y'], safe_height,
+                handler=lambda: self.update_expected_position(z=safe_height)
+            )
+            self.machine.set_absolute_coordinates(
+                current['x'], safe_y_value, safe_height,
+                handler=lambda: self.update_expected_position(y=safe_y_value)
+            )
+            self.machine.set_absolute_coordinates(
+                target['x'], safe_y_value, safe_height,
+                handler=lambda: self.update_expected_position(x=target['x'])
+            )
+            self.machine.set_absolute_coordinates(
+                target['x'], target['y'], safe_height,
+                handler=lambda: self.update_expected_position(y=target['y'])
+            )
         elif direct and safe_y:
             if up_first:
-                self.machine.machine.set_absolute_coordinates(current['x'],safe_y_value,target['z'])
-                self.machine.machine.set_absolute_coordinates(target['x'],safe_y_value,target['z'])
+                self.machine.set_absolute_coordinates(
+                    current['x'], safe_y_value, target['z'],
+                    handler=lambda: self.update_expected_position(y=safe_y_value, z=target['z'])
+                )
+                self.machine.set_absolute_coordinates(
+                    target['x'], safe_y_value, target['z'],
+                    handler=lambda: self.update_expected_position(x=target['x'])
+                )
             else:
-                self.machine.set_absolute_coordinates(current['x'],safe_y_value,current['z'])
-                self.machine.set_absolute_coordinates(target['x'],safe_y_value,current['z'])
-                self.machine.set_absolute_coordinates(target['x'],target['y'],current['z'])
-        self.machine.set_absolute_coordinates(target['x'],target['y'],target['z'],handler=lambda: self.update_location_handler(name))
+                self.machine.set_absolute_coordinates(
+                    current['x'], safe_y_value, current['z'],
+                    handler=lambda: self.update_expected_position(y=safe_y_value)
+                )
+                self.machine.set_absolute_coordinates(
+                    target['x'], safe_y_value, current['z'],
+                    handler=lambda: self.update_expected_position(x=target['x'])
+                )
+                self.machine.set_absolute_coordinates(
+                    target['x'], target['y'], current['z'],
+                    handler=lambda: self.update_expected_position(y=target['y'])
+                )
+
+        self.machine.set_absolute_coordinates(
+            target['x'], target['y'], target['z'],
+            handler=lambda: self.update_location_handler(name)
+        )
+        self.update_expected_position(x=target['x'], y=target['y'], z=target['z'])
+    def open_gripper(self,handler=None):
+        """Open the gripper."""
+        self.machine.open_gripper(handler=handler)
+
+    def close_gripper(self,handler=None):
+        """Close the gripper."""
+        self.machine.close_gripper(handler=handler)
+
+    def wait_command(self):
+        """Tells the machine to wait a specified amount of time."""
+        self.machine.wait_command()
+    
+    def pick_up_handler(self,slot):
+        """Handle the pick up signal from the rack."""
+        self.model.rack_model.transfer_to_gripper(slot)
+
+    def pick_up_printer_head(self,slot):
+        """Pick up a printer head from the rack."""
+        is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
+        if is_valid:
+            self.open_gripper()
+            self.wait_command()
+            print(f'Picking up printer head from slot {slot}')
+            location = f'rack_position_{slot+1}_{self.model.rack_model.get_num_slots()}'
+            self.move_to_location(location,x_offset=True)
+            self.move_to_location(location)
+            self.close_gripper(handler=lambda: self.pick_up_handler(slot))
+            self.wait_command()
+            self.move_to_location(location,x_offset=True)
+        else:
+            print(f'Error: {error_msg}')
+
+    def drop_off_handler(self,slot):
+        """Handle the drop off signal from the rack."""
+        self.model.rack_model.transfer_from_gripper(slot)
+
+    def drop_off_printer_head(self,slot):
+        """Drop off a printer head to the rack."""
+        is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot)
+        if is_valid:
+            print(f'Dropping off printer head to slot {slot}')
+            location = f'rack_position_{slot+1}_{self.model.rack_model.get_num_slots()}'
+            self.move_to_location(location,x_offset=True)
+            self.move_to_location(location)
+            self.open_gripper(handler=lambda: self.drop_off_handler(slot))
+            self.wait_command()
+            self.move_to_location(location,x_offset=True)
+            self.close_gripper()
+            self.wait_command()
+        else:
+            print(f'Error: {error_msg}')
+

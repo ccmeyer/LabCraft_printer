@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
         tab_widget.addTab(self.movement_box, "Movement")
         mid_layout.addWidget(tab_widget)
 
-        self.rack_box = RackBox(self.model.rack_model,self.controller)
+        self.rack_box = RackBox(self.model,self.controller)
         self.rack_box.setFixedHeight(200)
         self.rack_box.setStyleSheet(f"background-color: #4d4d4d;")
         mid_layout.addWidget(self.rack_box)
@@ -179,6 +179,8 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+o','Popup options', lambda: self.popup_options('Title','Message',['Option 1','Option 2','Option 3']))
         self.shortcut_manager.add_shortcut('Shift+y','Popup yes/no', lambda: self.popup_yes_no('Title','Message'))
         self.shortcut_manager.add_shortcut('Shift+i','Popup input', lambda: self.popup_input('Title','Message'))
+        self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
+        self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -268,7 +270,6 @@ class ConnectionWidget(QGroupBox):
         self.model.machine_model.ports_updated.connect(self.update_ports)
         self.model.machine_model.machine_state_updated.connect(self.update_machine_connect_button)
         self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
-
 
         # Connect signals from the view to the controller
         self.connect_machine_requested.connect(self.controller.connect_machine)
@@ -771,9 +772,10 @@ class RackBox(QGroupBox):
     - The gripper section shows the printer head currently held by the gripper.
     """
 
-    def __init__(self, rack_model, controller):
+    def __init__(self, model, controller):
         super().__init__("Reagent Rack")
-        self.rack_model = rack_model
+        self.model = model
+        self.rack_model = model.rack_model
         self.controller = controller
 
         self.init_ui()
@@ -782,6 +784,8 @@ class RackBox(QGroupBox):
         self.rack_model.slot_updated.connect(self.update_slot)
         self.rack_model.slot_confirmed.connect(self.confirm_slot)
         self.rack_model.gripper_updated.connect(self.update_gripper)
+        self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
+
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -794,6 +798,11 @@ class RackBox(QGroupBox):
         self.gripper_label = QLabel("Gripper Empty")
         self.gripper_label.setAlignment(Qt.AlignCenter)
         gripper_layout.addWidget(self.gripper_label)
+
+        self.gripper_state = QLabel("Closed")
+        self.gripper_state.setAlignment(Qt.AlignCenter)
+        self.gripper_state.setStyleSheet("background-color: grey; color: white;")
+        gripper_layout.addWidget(self.gripper_state)
 
          # Add a spacer to separate slots and gripper visually
         spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
@@ -884,9 +893,18 @@ class RackBox(QGroupBox):
         """Toggle loading/unloading between the slot and gripper."""
         slot = self.rack_model.slots[slot_number]
         if slot.printer_head is None and self.rack_model.gripper_printer_head:
-            self.controller.transfer_from_gripper(slot_number)
+            self.controller.drop_off_printer_head(slot_number)
         elif slot.printer_head and self.rack_model.gripper_printer_head is None:
-            self.controller.transfer_to_gripper(slot_number)
+            self.controller.pick_up_printer_head(slot_number)
+
+    def update_gripper_state(self, gripper_state):
+        """Update the gripper state label."""
+        if gripper_state == True:
+            self.gripper_state.setText("Open")
+            self.gripper_state.setStyleSheet("background-color: red; color: white;")
+        else:
+            self.gripper_state.setText("Closed")
+            self.gripper_state.setStyleSheet("background-color: grey; color: white;")
 
 
 class BoardStatusBox(QGroupBox):

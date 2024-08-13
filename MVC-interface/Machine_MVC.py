@@ -569,6 +569,10 @@ class Machine(QObject):
     command_sent = Signal(dict)    # Signal to emit when a command is sent
     error_occurred = Signal(str)   # Signal to emit errors
     homing_completed = Signal()    # Signal to emit when homing is completed
+    gripper_open = Signal()      # Signal to emit when the gripper is opened
+    gripper_closed = Signal()    # Signal to emit when the gripper is closed
+    gripper_on = Signal()        # Signal to emit when the gripper is turned on
+    gripper_off = Signal()       # Signal to emit when the gripper is turned off
 
     def __init__(self):
         super().__init__()
@@ -725,4 +729,41 @@ class Machine(QObject):
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
+    def open_gripper_handler(self,additional_handler=None):
+        if additional_handler is not None:
+            additional_handler()
+        self.gripper_open.emit()
 
+    def open_gripper(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            new_handler = self.open_gripper_handler
+        else:
+            new_handler = lambda: self.open_gripper_handler(handler)
+        self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
+        return
+    
+    def close_gripper_handler(self,additional_handler=None):
+        if additional_handler is not None:
+            additional_handler()
+        self.gripper_closed.emit()
+
+    def close_gripper(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            new_handler = self.close_gripper_handler
+        else:
+            new_handler = lambda: self.close_gripper_handler(handler)
+        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
+        return
+    
+    def gripper_off_handler(self):
+        self.gripper_off.emit()
+
+    def gripper_off(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            handler = self.gripper_off_handler
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return
+    
+    def wait_command(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('WAIT',2000,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return
