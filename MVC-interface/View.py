@@ -106,17 +106,17 @@ class MainWindow(QMainWindow):
         tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
 
         self.well_plate_widget = WellPlateWidget(self.model, self.controller)
-        self.well_plate_widget.setStyleSheet(f"background-color: #4d4d4d;")
+        self.well_plate_widget.setStyleSheet(f"background-color: #2c2c2c;")
         tab_widget.addTab(self.well_plate_widget, "Well Plate")
 
         self.movement_box = MovementBox(self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        tab_widget.addTab(self.movement_box, "Movement")
+        tab_widget.addTab(self.movement_box, "MOVEMENT")
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self.model,self.controller)
         self.rack_box.setFixedHeight(200)
-        self.rack_box.setStyleSheet(f"background-color: #4d4d4d;")
+        self.rack_box.setStyleSheet(f"background-color: #2c2c2c;")
         mid_layout.addWidget(self.rack_box)
 
         self.layout.addWidget(mid_panel)
@@ -124,17 +124,17 @@ class MainWindow(QMainWindow):
         # Add other widgets to the right panel as needed
         right_panel = QtWidgets.QWidget()
         right_panel.setFixedWidth(400)
-        right_panel.setStyleSheet(f"background-color: #4d4d4d;")
+        right_panel.setStyleSheet(f"background-color: #2c2c2c;")
         right_layout = QtWidgets.QVBoxLayout(right_panel)
 
         self.board_status_box = BoardStatusBox(self.model, self.controller)
-        self.board_status_box.setStyleSheet(f"background-color: #4d4d4d;")
+        self.board_status_box.setStyleSheet(f"background-color: #2c2c2c;")
         self.board_status_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
         right_layout.addWidget(self.board_status_box)
 
         self.shortcut_box = ShortcutTableWidget(self.shortcut_manager)
-        self.shortcut_box.setStyleSheet(f"background-color: #4d4d4d;")
+        self.shortcut_box.setStyleSheet(f"background-color: #2c2c2c;")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.shortcut_box)
 
@@ -264,7 +264,7 @@ class ConnectionWidget(QGroupBox):
     refresh_ports_requested = QtCore.Signal()
 
     def __init__(self, model,controller):
-        super().__init__("Connection Setup")
+        super().__init__("CONNECTION")
         self.model = model
         self.controller = controller
 
@@ -404,7 +404,7 @@ class MotorPositionWidget(QGroupBox):
     toggle_motor_requested = QtCore.Signal()  # Signal to toggle motor state
 
     def __init__(self, model, controller):
-        super().__init__('Motor Positions')
+        super().__init__('POSITIONS')
         self.model = model
         self.controller = controller
 
@@ -549,7 +549,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     toggle_regulation_requested = QtCore.Signal()
 
     def __init__(self, model,controller):
-        super().__init__('Pressure Plot')
+        super().__init__('PRESSURE')
         self.model = model
         self.controller = controller
         self.init_ui()
@@ -579,7 +579,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.chart = QtCharts.QChart()
         self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.chart.setBackgroundBrush(QtGui.QBrush('#4d4d4d'))  # Set the background color to grey
+        self.chart.setBackgroundBrush(QtGui.QBrush('#2c2c2c'))  # Set the background color to grey
         self.chart_view = QtCharts.QChartView(self.chart)
         self.series = QtCharts.QLineSeries()
         self.series.setColor(QtCore.Qt.white)
@@ -775,7 +775,7 @@ class MovementBox(QtWidgets.QGroupBox):
     """
 
     def __init__(self, model, controller):
-        super().__init__("Machine Movement")
+        super().__init__("MOVEMENT")
         self.model = model
         self.controller = controller
 
@@ -848,12 +848,17 @@ class MovementBox(QtWidgets.QGroupBox):
         # Create axes, add them to the charts and attach them to the series
         self.xy_chart.createDefaultAxes()
         self.xy_chart.axisY().setRange(self.x_min, self.x_max)
+        self.xy_chart.axisY().setLabelFormat("%d")  # Set label format to integer
         self.xy_chart.axisX().setRange(self.y_min, self.y_max)
+        self.xy_chart.axisX().setLabelFormat("%d")  # Set label format to integer
 
         self.z_chart.createDefaultAxes()
         self.z_chart.axisX().setRange(-1, 1)
         self.z_chart.axisX().setLabelsVisible(False)
+        self.z_chart.axisX().setTickCount(3)
         self.z_chart.axisY().setRange(self.z_min, self.z_max)
+        self.z_chart.axisY().setLabelFormat("%d")  # Set label format to integer
+        self.z_chart.axisY().setTickCount(1)
 
     def plot_movements(self):
         # Clear the series
@@ -895,7 +900,7 @@ class RackBox(QGroupBox):
     """
 
     def __init__(self, model, controller):
-        super().__init__("Reagent Rack")
+        super().__init__("RACK")
         self.model = model
         self.rack_model = model.rack_model
         self.controller = controller
@@ -1036,7 +1041,7 @@ class BoardStatusBox(QGroupBox):
     Includes the cycle count and max cycle time for the board.
     '''
     def __init__(self, model, controller):
-        super().__init__('Board Status')
+        super().__init__('STATUS')
         self.model = model
         self.controller = controller
 
@@ -1081,7 +1086,7 @@ class ShortcutTableWidget(QGroupBox):
     The table has two columns: one for the key sequence and one for the description.
     """
     def __init__(self, shortcut_manager):
-        super().__init__("Keyboard Shortcuts")
+        super().__init__("SHORTCUTS")
         self.shortcut_manager = shortcut_manager
 
         self.init_ui()
@@ -1131,7 +1136,7 @@ class CommandQueueWidget(QGroupBox):
     """
 
     def __init__(self, machine):
-        super().__init__("Command Queue")
+        super().__init__("QUEUE")
         self.machine = machine
         self.init_ui()
 
