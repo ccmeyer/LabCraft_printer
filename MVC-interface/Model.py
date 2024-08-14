@@ -70,6 +70,7 @@ class ReactionComposition:
 
     def get_concentration(self, reagent_name):
         """Get the target concentration of a reagent in this reaction."""
+        print(self.reagents)
         return self.reagents.get(reagent_name, None)
 
     def get_all_reagents(self):
@@ -113,6 +114,13 @@ class ReactionCollection:
     def get_all_reactions(self):
         """Get all reactions in the collection."""
         return list(self.reactions.values())
+    
+    def get_all_reagent_names(self):
+        """Get a list of all reagent names across all reactions."""
+        reagent_names = set()
+        for reaction in self.get_all_reactions():
+            reagent_names.update(reaction.get_all_reagents())
+        return list(reagent_names)
 
     def find_duplicate(self, reaction):
         """Check if a similar reaction already exists in the collection."""
@@ -121,10 +129,31 @@ class ReactionCollection:
                 return True
         return False
     
+    def get_max_concentration(self, reagent_name):
+        """Get the maximum concentration of a specific reagent across all reactions."""
+        max_concentration = None
+        for reaction in self.get_all_reactions():
+            concentration = reaction.get_concentration(reagent_name)
+            if concentration is not None:
+                if max_concentration is None or concentration > max_concentration:
+                    max_concentration = concentration
+        return max_concentration
+    
+    def get_min_concentration(self, reagent_name):
+        """Get the minimum concentration of a specific reagent across all reactions."""
+        min_concentration = None
+        for reaction in self.get_all_reactions():
+            concentration = reaction.get_concentration(reagent_name)
+            if concentration is not None:
+                if min_concentration is None or concentration < min_concentration:
+                    min_concentration = concentration
+        return min_concentration
+    
 class Well:
     def __init__(self, well_id):
         self.well_id = well_id  # Unique identifier for the well (e.g., "A1", "B2")
         self.row = well_id[0]  # Row of the well (e.g., "A", "B")
+        self.row_num = ord(self.row) - 65  # Row number (0-indexed, A=0, B=1)
         self.col = int(well_id[1:])  # Column of the well (e.g., 1, 2)
         self.assigned_reaction = None  # The reaction assigned to this well
         self.printed_droplets = {}  # Track the number of droplets printed for each reagent
@@ -243,7 +272,7 @@ class WellPlate:
     
     def get_all_wells(self):
         """Get a list of all wells."""
-        return list(self.wells.values())
+        return list(self.wells)
 
     def clear_all_wells(self):
         """Clear all wells and reset their status."""
@@ -273,7 +302,7 @@ class WellPlate:
 
         if len(reactions) > len(available_wells):
             raise ValueError("Not enough available wells to assign all reactions.")
-
+        print(f"Assigning {len(reactions)} reactions to {len(available_wells)} available wells.")
         for i, reaction in enumerate(reactions):
             well = available_wells[i]
             well.assign_reaction(reaction)
@@ -809,6 +838,8 @@ class Model(QObject):
     Model class for the MVC architecture
     '''
     machine_state_updated = Signal()  # Signal to notify the view of state changes
+    experiment_loaded = Signal()  # Signal to notify the view of an experiment being loaded
+
     def __init__(self):
         super().__init__()
         self.machine_model = MachineModel()
@@ -816,6 +847,8 @@ class Model(QObject):
         self.rack_model = RackModel(self.num_slots)
         self.location_model = LocationModel()
         self.location_model.load_locations()  # Load locations at startup
+        self.well_plate = WellPlate("384")
+        self.reaction_collection = ReactionCollection()
 
     def update_state(self, status_dict):
         '''
@@ -836,7 +869,7 @@ class Model(QObject):
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_state_updated.emit()
 
-    def load_reactions_from_csv(csv_file_path):
+    def load_reactions_from_csv(self,csv_file_path):
         """
         Load reactions from a CSV file and return a ReactionCollection.
         
@@ -856,3 +889,22 @@ class Model(QObject):
             reaction_collection.add_reaction(reaction)
 
         return reaction_collection
+    
+    def load_experiment_from_file(self, file_path):
+        """Load an experiment from a CSV file. Remove any existing experiment data."""
+        if not file_path.endswith('.csv'):
+            raise ValueError("Invalid file format. Please load a CSV file.")
+        if len(self.reaction_collection.get_all_reactions()) > 0:
+            self.reaction_collection = ReactionCollection()
+            self.well_plate.clear_all_wells()
+        self.reaction_collection = self.load_reactions_from_csv(file_path)
+        self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+        self.experiment_loaded.emit()
+
+    def update_well_plate(self,plate_format):
+        self.well_plate = WellPlate(plate_format)
+        if self.reaction_collection is not None:
+            self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+            self.experiment_loaded.emit()
+        else:
+            print("No experiment data loaded.")

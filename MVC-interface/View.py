@@ -1,5 +1,5 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
-from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy, QSpacerItem
+from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy, QSpacerItem, QFileDialog, QInputDialog
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -104,6 +104,10 @@ class MainWindow(QMainWindow):
 
         tab_widget = QtWidgets.QTabWidget()
         tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.well_plate_widget = WellPlateWidget(self.model, self.controller)
+        self.well_plate_widget.setStyleSheet(f"background-color: #4d4d4d;")
+        tab_widget.addTab(self.well_plate_widget, "Well Plate")
 
         self.movement_box = MovementBox(self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -644,6 +648,124 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet("background-color: #275fb8; color: white;")
+
+class WellPlateWidget(QtWidgets.QGroupBox):
+    def __init__(self, model, controller):
+        super().__init__('PLATE')
+        self.model = model
+        self.controller = controller
+        self.grid_layout = QGridLayout()
+        self.well_labels = []
+        # Set the max height of the widget
+        self.setMaximumHeight(800)
+
+        self.model.experiment_loaded.connect(self.on_experiment_loaded)
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.layout = QVBoxLayout()
+        self.top_layout = QHBoxLayout()
+        self.plate_selection_label = QLabel("Plate Format:")
+        self.plate_selection_label.setStyleSheet("color: white;")
+        self.plate_selection_label.setAlignment(Qt.AlignRight)
+        self.top_layout.addWidget(self.plate_selection_label)
+        self.plate_selection = QComboBox()
+        self.plate_selection.addItems(['96', '384', '1536'])
+        # Set the current index to match the model's plate format
+        self.plate_selection.setCurrentIndex(self.plate_selection.findText(str(self.model.well_plate.plate_format)))
+        self.plate_selection.currentIndexChanged.connect(self.on_plate_selection_changed)
+        self.top_layout.addWidget(self.plate_selection)
+
+        self.bottom_layout = QHBoxLayout()
+        self.experiment_button = QPushButton("Load Experiment")
+        self.experiment_button.clicked.connect(self.on_load_experiment)
+        self.bottom_layout.addWidget(self.experiment_button)
+
+        self.reagent_selection = QComboBox()
+        self.reagent_selection.addItems(self.model.reaction_collection.get_all_reagent_names())
+        self.reagent_selection.currentIndexChanged.connect(self.update_well_colors)
+        self.bottom_layout.addWidget(self.reagent_selection)
+
+        self.layout.addLayout(self.top_layout)
+        self.layout.addLayout(self.grid_layout)
+        self.layout.addLayout(self.bottom_layout)
+
+        self.setLayout(self.layout)
+        self.update_grid(self.model.well_plate.plate_format)
+
+    def update_grid(self, plate_format):
+        """Update the grid layout to match the selected plate format."""
+        self.grid_layout.setSpacing(1)
+        self.clear_grid()
+
+        rows, cols = self.model.well_plate._get_plate_dimensions(plate_format)
+        self.well_labels = [[QLabel() for _ in range(cols)] for _ in range(rows)]
+
+        for row in range(rows):
+            for col in range(cols):
+                label = QLabel()
+                # label.setFixedSize(20, 20)
+                label.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
+                label.setAlignment(Qt.AlignCenter)
+                self.grid_layout.addWidget(label, row, col)
+                self.well_labels[row][col] = label
+
+    def update_well_colors(self):
+        """Update the colors of the wells based on the selected reagent's concentration."""
+        if self.model.reaction_collection is None:
+            return
+        # Get the current reagent selection
+        reagent_index = self.reagent_selection.currentIndex()
+        reagent_name = self.reagent_selection.itemText(reagent_index)
+        print(f"Reagent selected: {reagent_name}")
+        max_concentration = self.model.reaction_collection.get_max_concentration(reagent_name)
+        for well in self.model.well_plate.get_all_wells():
+            if well.assigned_reaction:
+                concentration = well.assigned_reaction.get_concentration(reagent_name)
+                if concentration is not None:
+                    if max_concentration == 0:
+                        opacity = 0
+                    else:
+                        opacity = concentration / max_concentration
+                    color = QtGui.QColor(0, 0, 255)
+                    color.setAlphaF(opacity)
+                    rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
+                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid black;")
+                else:
+                    print(f'No concentration for {reagent_name} in well {well.row_num}{well.col}')
+                    self.well_labels[well.row_num][well.col-1].setStyleSheet("background-color: grey; border: 1px solid black;")
+
+    def clear_grid(self):
+        """Clear the existing grid."""
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def on_plate_selection_changed(self):
+        """Handle plate selection changes."""
+        plate_format = self.plate_selection.currentText()
+        self.update_grid(plate_format)
+        self.model.update_well_plate(plate_format)
+
+    def on_load_experiment(self):
+        """Load an experiment CSV file."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Experiment CSV", "", "CSV Files (*.csv)")
+        if file_path:
+            self.model.load_experiment_from_file(file_path)
+
+    def on_experiment_loaded(self):
+        """Handle the experiment loaded signal."""
+        # Update the options in the reagent selection combobox
+        self.reagent_selection.clear()
+        self.reagent_selection.addItems(self.model.reaction_collection.get_all_reagent_names())
+        self.reagent_selection.setCurrentIndex(0)
+
+        self.update_well_colors()  # Update with a default reagent on load
+        print('Completed experiment load')
+
 
 class MovementBox(QtWidgets.QGroupBox):
     """
