@@ -1,52 +1,6 @@
 from PySide6 import QtCore
 import pandas as pd
 
-class Reagent:
-    def __init__(self, name):
-        self.name = name
-        self.concentrations = {}
-
-    def add_concentration(self, concentration, volume):
-        """Add a specific concentration of the reagent with its available volume."""
-        self.concentrations[concentration] = volume
-
-    def get_volume(self, concentration):
-        """Return the available volume for a specific concentration."""
-        return self.concentrations.get(concentration, 0)
-
-    def use_volume(self, concentration, volume_used):
-        """Use a specific volume of a concentration, reducing its available amount."""
-        if concentration in self.concentrations:
-            if self.concentrations[concentration] >= volume_used:
-                self.concentrations[concentration] -= volume_used
-            else:
-                raise ValueError("Not enough volume available")
-        else:
-            raise ValueError("Concentration not available")
-        
-class ConcentrationManager:
-    def __init__(self):
-        self.reagents = {}
-
-    def add_reagent(self, name):
-        """Add a new reagent to the manager."""
-        if name not in self.reagents:
-            self.reagents[name] = Reagent(name)
-
-    def add_concentration(self, reagent_name, concentration, volume):
-        """Add a concentration and volume to a specific reagent."""
-        if reagent_name in self.reagents:
-            self.reagents[reagent_name].add_concentration(concentration, volume)
-        else:
-            raise ValueError("Reagent not found")
-
-    def use_reagent(self, reagent_name, concentration, volume_used):
-        """Use a specific volume of a reagent's concentration."""
-        if reagent_name in self.reagents:
-            self.reagents[reagent_name].use_volume(concentration, volume_used)
-        else:
-            raise ValueError("Reagent not found")
-        
 class ReactionComposition:
     def __init__(self, name):
         self.name = name

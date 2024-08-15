@@ -1,6 +1,7 @@
 from PySide6.QtCore import QObject
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
+import time
 
 
 class Controller(QObject):
@@ -276,4 +277,51 @@ class Controller(QObject):
             self.wait_command()
         else:
             print(f'Error: {error_msg}')
+
+    def print_droplets(self,droplets,handler=None,kwargs=None,manual=False):
+        """Print a specified number of droplets."""
+        self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+
+    def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
+        self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
+        print(f'Printing complete for well {well_id}')
+
+    def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
+        self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
+        print('---Printing complete---')
+
+    def print_array(self):
+        '''
+        Iterates through all wells with an assigned reaction and prints the 
+        required number of droplets for the currently loaded printer head.
+        '''
+        if self.model.rack_model.get_gripper_info() == None:
+            print('Cannot print: No printer head is loaded')
+            return
+        
+        current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
+        print(f'Current stock:{current_stock_id}')
+        starting_coords = self.model.machine_model.get_current_position_dict().copy()
+        reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
+        
+        for i,well in enumerate(reaction_wells):
+            target_droplets = well.get_remaining_droplets(current_stock_id)
+            if target_droplets == 0:
+                print(f'No droplets required for well {well.well_id}')
+                continue
+            row = well.row_num
+            col = well.col
+            well_coords = starting_coords.copy()
+            well_coords['x'] += col * 300
+            well_coords['y'] += row * 300
+            self.set_absolute_coordinates(well_coords['x'],well_coords['y'],well_coords['z'])
+            print(f'Printing {target_droplets} droplets to well {well.well_id}')
+            is_last_iteration = i == len(reaction_wells) - 1
+            if not is_last_iteration:
+                self.print_droplets(target_droplets, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
+            else:
+                self.print_droplets(target_droplets, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
+            
+            
+        
 

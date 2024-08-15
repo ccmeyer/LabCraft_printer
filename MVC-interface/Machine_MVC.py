@@ -767,3 +767,6 @@ class Machine(QObject):
     def wait_command(self,handler=None,kwargs=None,manual=False):
         self.add_command_to_queue('WAIT',2000,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return
+
+    def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)

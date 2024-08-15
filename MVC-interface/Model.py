@@ -5,90 +5,146 @@ from PySide6.QtCore import QObject, Signal, Slot, QTimer
 import json
 import heapq
 import os
+import csv
 
-class Reagent:
-    def __init__(self, name):
-        self.name = name
-        self.concentrations = {}
+class StockSolution(QObject):
+    '''
+    Represents a specific instance of a reagent at a certain concentration
+    Each stock solution can be assigned to a printer head.
+    '''
+    def __init__(self, stock_id, reagent_name,concentration):
+        super().__init__()
+        self.stock_id = stock_id
+        self.reagent_name = reagent_name
+        self.concentration = concentration
 
-    def add_concentration(self, concentration, volume):
-        """Add a specific concentration of the reagent with its available volume."""
-        self.concentrations[concentration] = volume
+    def get_stock_id(self):
+        return self.stock_id
+    
+    def get_reagent_name(self):
+        return self.reagent_name
+    
+    def get_stock_concentration(self):
+        return self.concentration
 
-    def get_volume(self, concentration):
-        """Return the available volume for a specific concentration."""
-        return self.concentrations.get(concentration, 0)
+class Reagent(QObject):
+    '''
+    Represents an amount of a stock solution that should be added to a specific reaction
+    A reaction composition is comprised of one or more Reagents that when mixed together creates the target composition
+    Contains the stock solution, the number of droplets needed and tracks how much of the reagent has been added
+    '''
+    def __init__(self, stock_solution, droplets):
+        super().__init__()
+        self.stock_solution = stock_solution
+        self.target_droplets = droplets     # Number of droplets to be added to the reaction
+        self.added_droplets = 0             # Number of droplets that have already been added
+        self.completed = False              # States whether all required droplets have been added
 
-    def use_volume(self, concentration, volume_used):
-        """Use a specific volume of a concentration, reducing its available amount."""
-        if concentration in self.concentrations:
-            if self.concentrations[concentration] >= volume_used:
-                self.concentrations[concentration] -= volume_used
-            else:
-                raise ValueError("Not enough volume available")
+    def get_target_droplets(self):
+        return self.target_droplets
+    
+    def get_remaining_droplets(self):
+        return self.target_droplets - self.added_droplets
+    
+    def add_droplets(self, droplets):
+        self.added_droplets += droplets
+
+    def is_complete(self):
+        if self.added_droplets == self.target_droplets:
+            self.completed = True
+            return True
         else:
-            raise ValueError("Concentration not available")
-        
-class ConcentrationManager:
+            self.completed = False
+            return False
+    
+class StockSolutionManager(QObject):
+    '''
+    Manages all the stock solutions that are included in the experiment
+    When a new stock solution is to be added, it creates a new instance of the StockSolution class and assigns it a unique id
+    This class is mostly used to coordinate which stock solutions go to which printer head
+    '''
     def __init__(self):
-        self.reagents = {}
+        super().__init__()
+        self.stock_solutions = {}
 
-    def add_reagent(self, name):
-        """Add a new reagent to the manager."""
-        if name not in self.reagents:
-            self.reagents[name] = Reagent(name)
+    def add_all_stock_solutions(self,stock_solution_list):
+        for stock_id in stock_solution_list:
+            reagent_name, concentration_str = stock_id.split('_')
+            concentration = float(concentration_str[:])  # Remove 'M' and convert to float
+            if stock_id in self.stock_solutions.keys():
+                print('Duplicate stock solution found:',stock_id)
+            else:
+                self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration)})
 
-    def add_concentration(self, reagent_name, concentration, volume):
-        """Add a concentration and volume to a specific reagent."""
-        if reagent_name in self.reagents:
-            self.reagents[reagent_name].add_concentration(concentration, volume)
-        else:
-            raise ValueError("Reagent not found")
+    def add_stock_solution(self, reagent_name, concentration):
+        # Generates a unique identifier for the reagent/concentration pair
+        stock_id = '_'.join([reagent_name,str(concentration)])
+        self.stock_solutions.update({stock_id:StockSolution(reagent_name,concentration)})
 
-    def use_reagent(self, reagent_name, concentration, volume_used):
-        """Use a specific volume of a reagent's concentration."""
-        if reagent_name in self.reagents:
-            self.reagents[reagent_name].use_volume(concentration, volume_used)
-        else:
-            raise ValueError("Reagent not found")
+    def get_stock_solution(self, reagent_name, concentration):
+        """Retrieve a reagent-concentration pair."""
+        unique_id = '_'.join([reagent_name,str(concentration)])
+        return self.stock_solutions.get(unique_id)
         
-class ReactionComposition:
+    def get_stock_by_id(self, stock_id):
+        return self.stock_solutions[stock_id]
+    
+    def get_all_stock_solutions(self):
+        return self.stock_solutions.values()
+
+    
+    def get_stock_solution_names(self):
+        return self.stock_solutions.keys()
+
+class ReactionComposition(QObject):
+    '''
+    Represents a reaction composition which will be assigned to a well
+    It is comprised of multiple Reagent objects which represent how many droplets of each stock solution need to be added to the reaction
+    Each reaction composition should only have one Reagent instance per stock solution
+    '''
     def __init__(self, name):
+        super().__init__()
         self.name = name
-        self.reagents = {}  # Dictionary to hold reagent name and its target concentration
-
-    def add_reagent(self, reagent_name, concentration):
-        """Add a reagent and its target concentration to the reaction."""
-        self.reagents[reagent_name] = concentration
-
-    def remove_reagent(self, reagent_name):
-        """Remove a reagent from the reaction."""
-        if reagent_name in self.reagents:
-            del self.reagents[reagent_name]
-        else:
-            raise ValueError(f"Reagent '{reagent_name}' not found in this reaction.")
-
-    def get_concentration(self, reagent_name):
-        """Get the target concentration of a reagent in this reaction."""
-        print(self.reagents)
-        return self.reagents.get(reagent_name, None)
-
+        self.reagents = {}  # Dictionary to hold Reagent objects with the required number of droplets
+    
+    def add_reagent(self, stock_solution,droplets):
+        """
+        Create an instance of the Reagent class using a StockSolution instance and the target number of droplets.
+        Reagents are stored in a dictionary using the stock id to reference them
+        """
+        self.reagents.update({stock_solution.stock_id:Reagent(stock_solution,droplets)})
+    
     def get_all_reagents(self):
         """Get all reagents and their concentrations in this reaction."""
         return self.reagents
+    
+    def get_target_droplets_for_stock(self,stock_id):
+        return self.reagents[stock_id].get_target_droplets()
+    
+    def get_remaining_droplets_for_stock(self,stock_id):
+        return self.reagents[stock_id].get_remaining_droplets()
+    
+    def record_stock_print(self,stock_id,droplets):
+        self.reagents[stock_id].add_droplets(droplets)
 
-    def __eq__(self, other):
-        """Equality check to ensure unique reactions."""
-        if not isinstance(other, ReactionComposition):
-            return False
-        return self.reagents == other.reagents
+    def check_stock_complete(self,stock_id):
+        return self.reagents[stock_id].is_complete()
+    
+    def check_all_complete(self):
+        for reagent in self.reagents.values():
+            if not reagent.is_complete():
+                return False
+        else:
+            return True
 
-    def __hash__(self):
-        """Hash function to allow use in sets and dictionaries."""
-        return hash(frozenset(self.reagents.items()))
-
-class ReactionCollection:
+class ReactionCollection(QObject):
+    '''
+    Represents the collection of all reactions that make up an experiment.
+    The reaction collection contains all the specific reaction composition objects.
+    It also allows for general information to be extracted from the pool of reactions.
+    '''
     def __init__(self):
+        super().__init__()
         self.reactions = {}  # Dictionary to hold ReactionComposition objects by name
 
     def add_reaction(self, reaction):
@@ -115,49 +171,30 @@ class ReactionCollection:
         """Get all reactions in the collection."""
         return list(self.reactions.values())
     
-    def get_all_reagent_names(self):
-        """Get a list of all reagent names across all reactions."""
-        reagent_names = set()
-        for reaction in self.get_all_reactions():
-            reagent_names.update(reaction.get_all_reagents())
-        return list(reagent_names)
-
-    def find_duplicate(self, reaction):
-        """Check if a similar reaction already exists in the collection."""
-        for existing_reaction in self.reactions.values():
-            if existing_reaction == reaction:
-                return True
-        return False
-    
-    def get_max_concentration(self, reagent_name):
+    def get_max_droplets(self, stock_id):
         """Get the maximum concentration of a specific reagent across all reactions."""
-        max_concentration = None
+        max_droplets = None
         for reaction in self.get_all_reactions():
-            concentration = reaction.get_concentration(reagent_name)
-            if concentration is not None:
-                if max_concentration is None or concentration > max_concentration:
-                    max_concentration = concentration
-        return max_concentration
+            droplets = reaction.get_target_droplets_for_stock(stock_id)
+            if droplets is not None:
+                if max_droplets is None or droplets > max_droplets:
+                    max_droplets = droplets
+        return max_droplets
     
-    def get_min_concentration(self, reagent_name):
-        """Get the minimum concentration of a specific reagent across all reactions."""
-        min_concentration = None
-        for reaction in self.get_all_reactions():
-            concentration = reaction.get_concentration(reagent_name)
-            if concentration is not None:
-                if min_concentration is None or concentration < min_concentration:
-                    min_concentration = concentration
-        return min_concentration
-    
-class Well:
+class Well(QObject):
+    '''
+    Represents a single well in a well plate.
+    The object is instantiated with an identifier such as "A1" or "B2".
+    Each well can only be assigned a single reaction composition.
+    '''
+    state_changed = Signal(str)  # Signal to notify when the state of the well changes, sending the well ID
     def __init__(self, well_id):
+        super().__init__()
         self.well_id = well_id  # Unique identifier for the well (e.g., "A1", "B2")
         self.row = well_id[0]  # Row of the well (e.g., "A", "B")
         self.row_num = ord(self.row) - 65  # Row number (0-indexed, A=0, B=1)
         self.col = int(well_id[1:])  # Column of the well (e.g., 1, 2)
         self.assigned_reaction = None  # The reaction assigned to this well
-        self.printed_droplets = {}  # Track the number of droplets printed for each reagent
-        self.timestamp = None  # Timestamp when the well was last printed
 
     def assign_reaction(self, reaction):
         """Assign a reaction to the well."""
@@ -165,37 +202,35 @@ class Well:
             raise ValueError("Must assign a ReactionComposition object.")
         self.assigned_reaction = reaction
 
-    def record_droplet(self, reagent_name, count):
-        """Record the number of droplets printed for a specific reagent."""
-        if reagent_name in self.printed_droplets:
-            self.printed_droplets[reagent_name] += count
-        else:
-            self.printed_droplets[reagent_name] = count
-        self.timestamp = QtCore.QDateTime.currentDateTime().toString(QtCore.Qt.ISODate)
+    def get_target_droplets(self,stock_id):
+        return self.assigned_reaction.get_target_droplets_for_stock(stock_id)
 
-    def get_status(self):
-        """Get the status of the well."""
-        return {
-            "reaction": self.assigned_reaction.name if self.assigned_reaction else None,
-            "printed_droplets": self.printed_droplets,
-            "timestamp": self.timestamp,
-        }
+    def get_remaining_droplets(self,stock_id):
+        return self.assigned_reaction.get_remaining_droplets_for_stock(stock_id)
+    
+    def record_stock_print(self,stock_id,droplets):
+        self.assigned_reaction.record_stock_print(stock_id,droplets)
+        print('emitting state changed',self.well_id)
+        self.state_changed.emit(self.well_id)
 
-    def clear(self):
-        """Clear the well's assigned reaction and status."""
-        self.assigned_reaction = None
-        self.printed_droplets.clear()
-        self.timestamp = None
+    def check_stock_complete(self,stock_id):
+        return self.assigned_reaction.check_stock_complete(stock_id)
 
-class WellPlate:
+    def check_all_complete(self):
+        return self.assign_reaction.check_all_complete()
+
+class WellPlate(QObject):
+    well_state_changed_signal = Signal(str)  # Signal to notify when the state of a well changes, sending the well ID
     def __init__(self, plate_format):
+        super().__init__()
         self.plate_format = plate_format  # '96', '384', '1536'
         self.wells = self.create_wells()
         self.excluded_wells = set()
+        self.rows, self.cols = self._get_plate_dimensions(self.plate_format)
 
     def create_wells(self):
         """Create wells based on the plate format."""
-        wells = []
+        wells = {}
         if self.plate_format == '96':
             rows = 'ABCDEFGH'
             cols = range(1, 13)
@@ -211,7 +246,9 @@ class WellPlate:
         for row in rows:
             for col in cols:
                 well_id = f"{row}{col}"
-                wells.append(Well(well_id))
+                well = Well(well_id)
+                well.state_changed.connect(self.well_state_changed)
+                wells[well_id] = well
 
         return wells
 
@@ -226,6 +263,14 @@ class WellPlate:
         else:
             raise ValueError("Unsupported plate format. Use '96', '384', or '1536'.")
 
+    def get_num_rows(self):
+        """Get the number of rows in the plate."""
+        return self.rows
+    
+    def get_num_cols(self):
+        """Get the number of columns in the plate."""
+        return self.cols
+
     def exclude_well(self, well_id):
         """Exclude a well from being used."""
         if well_id in self.wells:
@@ -237,20 +282,37 @@ class WellPlate:
         """Include an excluded well back into use."""
         self.excluded_wells.discard(well_id)
 
-    def assign_reaction_to_well(self, well_id, reaction):
-        """Assign a reaction to a specific well."""
-        if well_id in self.wells and well_id not in self.excluded_wells:
-            self.wells[well_id].assign_reaction(reaction)
-        else:
-            raise ValueError(f"Cannot assign reaction to well '{well_id}'. It may be excluded or does not exist.")
-
     def get_well(self, well_id):
         """Retrieve a specific well by its ID."""
         return self.wells.get(well_id, None)
 
-    def get_available_wells(self, fill_by="rows"):
+    def zigzag_order(self,wells, fill_by="columns"):
         """
-        Get a list of available wells, sorted by rows or columns.
+        Return wells ordered in a zigzag pattern.
+
+        Args:
+            wells (list of Well): The list of wells to be ordered.
+            fill_by (str): Whether to fill wells by "rows" or "columns".
+
+        Returns:
+            list of Well: The list of wells ordered in a zigzag pattern.
+        """
+        def row_to_num(row):
+            """Convert the row letter to a number (e.g., 'A' -> 0, 'B' -> 1)."""
+            return ord(row) - ord('A')
+
+        if fill_by == "rows":
+            # Sort by row first (converted to number), and by column within each row, alternating the column order
+            wells.sort(key=lambda w: (row_to_num(w.row), w.col if row_to_num(w.row) % 2 == 0 else -w.col))
+        else:  # fill_by == "columns"
+            # Sort by column first, and by row (converted to number) within each column, starting with A1
+            wells.sort(key=lambda w: (w.col, -row_to_num(w.row) if w.col % 2 == 0 else row_to_num(w.row)))
+
+        return wells
+
+    def get_available_wells(self, fill_by="columns"):
+        """
+        Get a list of available wells, sorted by rows or columns in a zigzag pattern.
 
         Args:
             fill_by (str): Whether to fill wells by "rows" or "columns".
@@ -261,23 +323,19 @@ class WellPlate:
         if fill_by not in ["rows", "columns"]:
             raise ValueError("fill_by must be 'rows' or 'columns'.")
 
-        available_wells = [well for well in self.wells if well not in self.excluded_wells and well.assigned_reaction is None]
+        available_wells = [well for well in self.wells.values() if well not in self.excluded_wells and well.assigned_reaction is None]
 
-        if fill_by == "rows":
-            available_wells.sort(key=lambda w: (w.row, w.col))
-        else:  # fill_by == "columns"
-            available_wells.sort(key=lambda w: (w.col, w.row))
-
-        return available_wells
+        return self.zigzag_order(available_wells, fill_by=fill_by)
     
     def get_all_wells(self):
         """Get a list of all wells."""
-        return list(self.wells)
+        return list(self.wells.values())
 
     def clear_all_wells(self):
         """Clear all wells and reset their status."""
-        for well in self.wells:
-            well.clear()
+        self.wells = {}
+        self.exclude_wells = set()
+        self.wells = self.create_wells()
 
     def get_plate_status(self):
         """Get the status of the entire well plate."""
@@ -310,8 +368,26 @@ class WellPlate:
             print(f"Assigned reaction '{reaction.name}' to well '{well.well_id}'.")
 
         return reaction_assignment
+    
+    def get_all_wells_with_reactions(self, fill_by="columns"):
+        """
+        Get all wells that have been assigned a reaction, sorted in a zigzag pattern.
 
-class PrinterHead:
+        Args:
+            fill_by (str): Whether to fill wells by "rows" or "columns".
+
+        Returns:
+            list of Well: Sorted list of wells with assigned reactions.
+        """
+        wells_with_reactions = [well for well in self.wells.values() if well.assigned_reaction is not None]
+
+        return self.zigzag_order(wells_with_reactions, fill_by=fill_by)
+    
+    def well_state_changed(self, well_id):
+        """Handle changes in the state of a well."""
+        self.well_state_changed_signal.emit(well_id)
+
+class PrinterHead(QObject):
     """
     Represents a printer head in a system.
     reagent (str): The reagent in the printer head.
@@ -323,22 +399,148 @@ class PrinterHead:
     change_color(new_color): Changes the color of the printer head.
     """
 
-    def __init__(self, reagent,concentration,color):
-        self.reagent = reagent
-        self.concentration = concentration
+    def __init__(self, stock_solution,color='Blue'):
+        super().__init__()
+        self.stock_solution = stock_solution
         self.color = color
         self.confirmed = False
-    
-    def change_reagent(self, new_reagent):
-        self.reagent = new_reagent
 
-    def change_concentration(self, new_concentration):
-        self.concentration = new_concentration
+    def get_stock_solution(self):
+        return self.stock_solution
+
+    def get_stock_id(self):
+        return self.stock_solution.get_stock_id()
+    
+    def get_reagent_name(self):
+        return self.stock_solution.get_reagent_name()
+    
+    def get_stock_concentration(self):
+        return self.stock_solution.get_stock_concentration()
+    
+    def change_stock_solution(self, stock_solution):
+        self.stock_solution = stock_solution
     
     def change_color(self, new_color):
         self.color = new_color
 
-class Slot:
+class PrinterHeadManager(QObject):
+    """
+    Manages all printer heads in the system, including tracking, assignment, and swapping.
+
+    Attributes:
+    - printer_heads (list): List of all printer heads created from the reaction collection.
+    - assigned_printer_heads (dict): Mapping of slot numbers to assigned printer heads.
+    - unassigned_printer_heads (list): List of printer heads that have not yet been assigned to any slot.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.printer_heads = []
+        self.assigned_printer_heads = {}
+        self.unassigned_printer_heads = []
+
+    def create_printer_heads(self, stock_solutions_manager):
+        """
+        Create printer heads based on the reagents and concentrations in the reaction collection.
+        
+        Args:
+        - reaction_collection (ReactionCollection): The collection of reactions from which to create printer heads.
+        """
+        stock_solutions = stock_solutions_manager.get_all_stock_solutions()
+        for stock_solution in stock_solutions:
+            printer_head = PrinterHead(stock_solution, color=self.generate_color())
+            self.printer_heads.append(printer_head)
+            self.unassigned_printer_heads.append(printer_head)
+        print(f"Created {len(self.printer_heads)} printer heads.")
+
+    def assign_printer_head_to_slot(self, slot_number, rack_model):
+        """
+        Assign an available printer head to a specified slot in the rack.
+
+        Args:
+        - slot_number (int): The slot number where the printer head should be assigned.
+        - rack_model (RackModel): The rack model where the slot is located.
+        
+        Returns:
+        - bool: True if a printer head was successfully assigned, False if no more unassigned printer heads are available.
+        """
+        if self.unassigned_printer_heads:
+            printer_head = self.unassigned_printer_heads.pop(0)
+            rack_model.update_slot_with_printer_head(slot_number, printer_head)
+            rack_model.confirm_slot(slot_number)
+            self.assigned_printer_heads[slot_number] = printer_head
+            print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
+            return True
+        else:
+            print("No more unassigned printer heads available.")
+            return False
+
+    def swap_printer_head(self, slot_number, rack_model):
+        """
+        Swap the printer head in the specified slot with the next unassigned printer head.
+
+        Args:
+        - slot_number (int): The slot number where the swap should occur.
+        - rack_model (RackModel): The rack model where the slot is located.
+        
+        Returns:
+        - bool: True if a swap was successfully performed, False if no unassigned printer heads are available.
+        """
+        if self.unassigned_printer_heads:
+            old_printer_head = self.assigned_printer_heads.get(slot_number)
+            if old_printer_head:
+                new_printer_head = self.unassigned_printer_heads.pop(0)
+                self.unassigned_printer_heads.append(old_printer_head)
+                rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
+                rack_model.confirm_slot(slot_number)
+                self.assigned_printer_heads[slot_number] = new_printer_head
+                print(f"Swapped out printer head '{old_printer_head.reagent}' with '{new_printer_head.reagent}' in slot {slot_number}.")
+                return True
+            else:
+                print(f"No printer head currently assigned to slot {slot_number}.")
+                return False
+        else:
+            print("No more unassigned printer heads available for swapping.")
+            return False
+
+    def generate_color(self):
+        """
+        Generate a color for the printer head. This is a placeholder function.
+        
+        Returns:
+        - str: The color code or name.
+        """
+        colors = ["red", "green", "blue", "yellow", "purple", "orange"]
+        return colors[len(self.printer_heads) % len(colors)]
+
+    def get_all_printer_heads(self):
+        """
+        Get all printer heads managed by this class.
+
+        Returns:
+        - list: List of all printer heads.
+        """
+        return self.printer_heads
+
+    def get_unassigned_printer_heads(self):
+        """
+        Get all unassigned printer heads.
+
+        Returns:
+        - list: List of unassigned printer heads.
+        """
+        return self.unassigned_printer_heads
+
+    def get_assigned_printer_heads(self):
+        """
+        Get all assigned printer heads.
+
+        Returns:
+        - dict: Dictionary mapping slot numbers to assigned printer heads.
+        """
+        return self.assigned_printer_heads
+
+class Slot(QObject):
     """
     Represents a slot in a system.
 
@@ -349,6 +551,7 @@ class Slot:
     """
 
     def __init__(self, number, printer_head):
+        super().__init__()
         self.number = number
         self.printer_head = printer_head
         self.confirmed = False
@@ -403,7 +606,7 @@ class RackModel(QObject):
         if 0 <= slot_number < len(self.slots):
             self.slots[slot_number].change_printer_head(printer_head)
             self.slot_updated.emit(slot_number)
-            print(f"Slot {slot_number} updated with printer head: {printer_head.reagent}, {printer_head.concentration}, {printer_head.color}")
+            print(f"Slot {slot_number} updated with printer head: {printer_head.get_stock_id()}, {printer_head.color}")
 
     def confirm_slot(self, slot_number):
         """
@@ -544,11 +747,36 @@ class RackModel(QObject):
         """
         if self.gripper_printer_head is not None:
             return {
-                "reagent": self.gripper_printer_head.reagent,
-                "concentration": self.gripper_printer_head.concentration,
+                "reagent": self.gripper_printer_head.get_reagent_name(),
+                "concentration": self.gripper_printer_head.get_stock_concentration(),
                 "color": self.gripper_printer_head.color
             }
         return None
+    
+    def assign_reagents_to_printer_heads(self, reaction_collection):
+        """
+        Assigns reagents from the reaction collection to printer heads and places them in available slots.
+        """
+        slot_index = 0
+        for reagent_name,concentration in reaction_collection.get_unique_reagent_conc_pairs():
+            if slot_index >= len(self.slots):
+                raise ValueError("Not enough slots to assign all reagents.")
+            
+            # Create a PrinterHead for this reagent and concentration
+            printer_head = PrinterHead(reagent=reagent_name, concentration=concentration, color=self.generate_color(slot_index))
+            
+            # Assign the PrinterHead to the current slot and confirm the slot
+            self.update_slot_with_printer_head(slot_index, printer_head)
+            self.confirm_slot(slot_index)
+            
+            slot_index += 1
+
+    def generate_color(self, slot_index):
+        """
+        Generate a color for the printer head based on the slot index. This is a placeholder function.
+        """
+        colors = ["red", "green", "blue", "yellow", "purple", "orange"]
+        return colors[slot_index % len(colors)]
 
 class LocationModel(QObject):
     """
@@ -848,7 +1076,9 @@ class Model(QObject):
         self.location_model = LocationModel()
         self.location_model.load_locations()  # Load locations at startup
         self.well_plate = WellPlate("384")
+        self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
+        self.printer_head_manager = PrinterHeadManager()
 
     def update_state(self, status_dict):
         '''
@@ -868,7 +1098,7 @@ class Model(QObject):
         self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_state_updated.emit()
-
+    
     def load_reactions_from_csv(self,csv_file_path):
         """
         Load reactions from a CSV file and return a ReactionCollection.
@@ -876,29 +1106,37 @@ class Model(QObject):
         The CSV should have a 'reaction_id' column followed by columns for each reagent with target concentrations.
         """
         df = pd.read_csv(csv_file_path)
+        stock_solutions = StockSolutionManager()
+        stock_names = [c for c in df.columns if c != 'reaction_id']
+        stock_solutions.add_all_stock_solutions(stock_names)
+        
         reaction_collection = ReactionCollection()
 
         for _, row in df.iterrows():
             reaction_name = row['reaction_id']
             reaction = ReactionComposition(reaction_name)
 
-            for reagent_name, concentration in row.items():
-                if reagent_name != 'reaction_id':  # Skip the 'reaction_id' column
-                    reaction.add_reagent(reagent_name, concentration)
+            for stock_id, droplets in row.items():
+                if stock_id != 'reaction_id':  # Skip the 'reaction_id' column
+                    current_stock = stock_solutions.get_stock_by_id(stock_id)
+                    reaction.add_reagent(current_stock, droplets)
             
             reaction_collection.add_reaction(reaction)
 
-        return reaction_collection
+        return stock_solutions,reaction_collection
     
     def load_experiment_from_file(self, file_path):
         """Load an experiment from a CSV file. Remove any existing experiment data."""
         if not file_path.endswith('.csv'):
             raise ValueError("Invalid file format. Please load a CSV file.")
         if len(self.reaction_collection.get_all_reactions()) > 0:
+            self.stock_solutions = StockSolutionManager()
             self.reaction_collection = ReactionCollection()
             self.well_plate.clear_all_wells()
-        self.reaction_collection = self.load_reactions_from_csv(file_path)
+        self.stock_solutions, self.reaction_collection = self.load_reactions_from_csv(file_path)
+        print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
         self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+        self.assign_printer_heads()
         self.experiment_loaded.emit()
 
     def update_well_plate(self,plate_format):
@@ -908,3 +1146,16 @@ class Model(QObject):
             self.experiment_loaded.emit()
         else:
             print("No experiment data loaded.")
+
+    def assign_printer_heads(self):
+        """Assign printer heads to the slots in the rack."""
+        # Create and assign printer heads for each unique pair
+        self.printer_head_manager.create_printer_heads(self.stock_solutions)
+        for i in range(self.rack_model.get_num_slots()):
+            if not self.printer_head_manager.assign_printer_head_to_slot(i, self.rack_model):
+                break  # Stop assigning if there are no more unassigned printer heads
+
+
+if __name__ == "__main__":
+    model = Model()
+    model.load_experiment_from_file('mock_reaction_compositions.csv')

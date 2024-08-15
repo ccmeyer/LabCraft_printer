@@ -185,6 +185,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+i','Popup input', lambda: self.popup_input('Title','Message'))
         self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
         self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
+        self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.controller.print_array())
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -660,7 +661,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.setMaximumHeight(800)
 
         self.model.experiment_loaded.connect(self.on_experiment_loaded)
-
+        self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
         self.init_ui()
 
     def init_ui(self):
@@ -683,7 +684,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.bottom_layout.addWidget(self.experiment_button)
 
         self.reagent_selection = QComboBox()
-        self.reagent_selection.addItems(self.model.reaction_collection.get_all_reagent_names())
+        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names())
         self.reagent_selection.currentIndexChanged.connect(self.update_well_colors)
         self.bottom_layout.addWidget(self.reagent_selection)
 
@@ -710,19 +711,28 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 label.setAlignment(Qt.AlignCenter)
                 self.grid_layout.addWidget(label, row, col)
                 self.well_labels[row][col] = label
-
+    
     def update_well_colors(self):
         """Update the colors of the wells based on the selected reagent's concentration."""
         if self.model.reaction_collection is None:
             return
+        self.update_grid(self.model.well_plate.plate_format)
         # Get the current reagent selection
-        reagent_index = self.reagent_selection.currentIndex()
-        reagent_name = self.reagent_selection.itemText(reagent_index)
-        print(f"Reagent selected: {reagent_name}")
-        max_concentration = self.model.reaction_collection.get_max_concentration(reagent_name)
+        stock_index = self.reagent_selection.currentIndex()
+        stock_id = self.reagent_selection.itemText(stock_index)
+        if stock_id == '':
+            print('No reagent selected')
+        print(f"Stock selected: {stock_id}")
+        max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
         for well in self.model.well_plate.get_all_wells():
             if well.assigned_reaction:
-                concentration = well.assigned_reaction.get_concentration(reagent_name)
+                concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
+                state = well.assigned_reaction.check_stock_complete(stock_id)
+                print(f'well{well.row_num}{well.col} state: {state}')
+                if state:
+                    outline = 'white'
+                else:
+                    outline = 'black'
                 if concentration is not None:
                     if max_concentration == 0:
                         opacity = 0
@@ -731,10 +741,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     color = QtGui.QColor(0, 0, 255)
                     color.setAlphaF(opacity)
                     rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
-                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid black;")
+                    print(f'well: {well.row_num}, color: {rgba_color}, outline: {outline}')
+                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
                 else:
-                    print(f'No concentration for {reagent_name} in well {well.row_num}{well.col}')
-                    self.well_labels[well.row_num][well.col-1].setStyleSheet("background-color: grey; border: 1px solid black;")
+                    print(f'No concentration for {stock_id} in well {well.row_num}{well.col}')
+                    self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
+        # Process events to force the UI to update
+        QApplication.processEvents()
 
     def clear_grid(self):
         """Clear the existing grid."""
@@ -760,7 +773,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
         self.reagent_selection.clear()
-        self.reagent_selection.addItems(self.model.reaction_collection.get_all_reagent_names())
+        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names())
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
@@ -912,7 +925,7 @@ class RackBox(QGroupBox):
         self.rack_model.slot_confirmed.connect(self.confirm_slot)
         self.rack_model.gripper_updated.connect(self.update_gripper)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
-
+        self.model.experiment_loaded.connect(self.update_all_slots)
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -977,7 +990,7 @@ class RackBox(QGroupBox):
 
         if slot.printer_head:
             printer_head = slot.printer_head
-            label.setText(f"{printer_head.reagent}\n{printer_head.concentration} M")
+            label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
             label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
             load_button.setText("Load")
             confirm_button.setEnabled(not slot.confirmed)
@@ -997,7 +1010,7 @@ class RackBox(QGroupBox):
         """Update the UI when the gripper state changes."""
         if self.rack_model.gripper_printer_head:
             printer_head = self.rack_model.gripper_printer_head
-            self.gripper_label.setText(f"{printer_head.reagent}\n{printer_head.concentration} M")
+            self.gripper_label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
             self.gripper_label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
         else:
             self.gripper_label.setText("Gripper Empty")
@@ -1032,6 +1045,13 @@ class RackBox(QGroupBox):
         else:
             self.gripper_state.setText("Closed")
             self.gripper_state.setStyleSheet("background-color: grey; color: white;")
+
+    def update_all_slots(self):
+        """Update all slots in the rack."""
+        for slot_number in range(len(self.rack_model.slots)):
+            self.update_slot(slot_number)
+
+        self.update_gripper()
 
 
 class BoardStatusBox(QGroupBox):
