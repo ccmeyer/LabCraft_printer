@@ -722,13 +722,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         stock_id = self.reagent_selection.itemText(stock_index)
         if stock_id == '':
             print('No reagent selected')
-        print(f"Stock selected: {stock_id}")
         max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
         for well in self.model.well_plate.get_all_wells():
             if well.assigned_reaction:
                 concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
                 state = well.assigned_reaction.check_stock_complete(stock_id)
-                print(f'well{well.row_num}{well.col} state: {state}')
                 if state:
                     outline = 'white'
                 else:
@@ -741,10 +739,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     color = QtGui.QColor(0, 0, 255)
                     color.setAlphaF(opacity)
                     rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
-                    print(f'well: {well.row_num}, color: {rgba_color}, outline: {outline}')
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
                 else:
-                    print(f'No concentration for {stock_id} in well {well.row_num}{well.col}')
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
         # Process events to force the UI to update
         QApplication.processEvents()
@@ -993,11 +989,13 @@ class RackBox(QGroupBox):
             label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
             label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
             load_button.setText("Load")
+            load_button.setStyleSheet("background-color: grey; color: white;")
             confirm_button.setEnabled(not slot.confirmed)
         else:
             label.setText("Empty")
             label.setStyleSheet("background-color: none; color: white;")
             load_button.setText("Load")
+            load_button.setStyleSheet("background-color: black; color: white;")
             confirm_button.setEnabled(False)
 
     def confirm_slot(self, slot_number):

@@ -467,7 +467,6 @@ class PrinterHeadManager(QObject):
         if self.unassigned_printer_heads:
             printer_head = self.unassigned_printer_heads.pop(0)
             rack_model.update_slot_with_printer_head(slot_number, printer_head)
-            rack_model.confirm_slot(slot_number)
             self.assigned_printer_heads[slot_number] = printer_head
             print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
             return True
@@ -767,7 +766,6 @@ class RackModel(QObject):
             
             # Assign the PrinterHead to the current slot and confirm the slot
             self.update_slot_with_printer_head(slot_index, printer_head)
-            self.confirm_slot(slot_index)
             
             slot_index += 1
 
