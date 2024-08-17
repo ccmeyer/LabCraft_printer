@@ -186,6 +186,8 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
         self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
         self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.controller.print_array())
+        self.shortcut_manager.add_shortcut('Shift+r','Reset Array', lambda: self.controller.reset_array())
+        self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -226,6 +228,19 @@ class MainWindow(QMainWindow):
         else:
             return None
         
+    def pause_machine(self):
+        """Pause the machine."""
+        self.controller.pause_commands()
+        response = self.popup_yes_no('Pause','Execution paused. Do you want to resume?')
+        if response == '&Yes':
+            print('Resuming execution')
+            self.controller.resume_commands()
+            return
+        else:
+            print('Clearing Queue')
+            self.controller.clear_command_queue()
+            # self.controller.reset_acceleration()
+
     def add_new_location(self):
         """Save the current location information."""
         name = self.popup_input("Save Location","Enter the name of the location")
@@ -1067,6 +1082,7 @@ class BoardStatusBox(QGroupBox):
 
         # Connect model signals to the update methods
         self.model.machine_state_updated.connect(self.update_status)
+        self.model.machine_model.machine_paused.connect(self.update_status)
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -1074,6 +1090,7 @@ class BoardStatusBox(QGroupBox):
 
         self.labels = {
             'Homed': QLabel('False'),
+            'Paused': QLabel('False'),
             'Location': QLabel('Unknown'),
             'Cycle Count': QLabel('0'),
             'Max Cycle Time': QLabel('0')
@@ -1094,6 +1111,7 @@ class BoardStatusBox(QGroupBox):
         """Update the labels with the current board status."""
         self.labels['Location'].setText(self.model.machine_model.current_location)
         self.labels['Homed'].setText(str(self.model.machine_model.motors_homed))
+        self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Max Cycle Time'].setText(str(self.model.machine_model.max_cycle))
 

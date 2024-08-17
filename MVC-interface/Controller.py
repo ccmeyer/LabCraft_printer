@@ -58,6 +58,21 @@ class Controller(QObject):
         self.machine.disconnect_balance()
         self.model.machine_model.disconnect_balance()
 
+    def pause_commands(self):
+        """Pause the machine."""
+        self.machine.pause_commands()
+        self.model.machine_model.pause_commands()
+
+    def resume_commands(self):
+        """Resume the machine commands."""
+        self.machine.resume_commands()
+        self.model.machine_model.resume_commands()
+
+    def clear_command_queue(self):
+        """Clear the command queue."""
+        self.machine.clear_command_queue()
+        self.model.machine_model.clear_command_queue()
+
     def set_relative_coordinates(self, x, y, z,manual=False):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
@@ -226,6 +241,7 @@ class Controller(QObject):
             handler=lambda: self.update_location_handler(name)
         )
         self.update_expected_position(x=target['x'], y=target['y'], z=target['z'])
+    
     def open_gripper(self,handler=None):
         """Open the gripper."""
         self.machine.open_gripper(handler=handler)

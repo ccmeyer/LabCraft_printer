@@ -557,6 +557,12 @@ class CommandQueue(QObject):
             self.completed.append(completed_command)
 
         self.queue_updated.emit()
+
+    def clear_queue(self):
+        """Clear the command queue."""
+        self.queue.clear()
+        self.completed.clear()
+        self.queue_updated.emit()
     
 
 class Machine(QObject):
@@ -666,16 +672,49 @@ class Machine(QObject):
             return False
         return self.command_queue.add_command(command_type, param1, param2, param3, handler, kwargs)
 
-    def send_next_command(self):
-        """Send the next command to the machine."""
-        command = self.command_queue.get_next_command()
-        if command is not None:
+    def send_command_to_board(self, command):
+        """Send a command to the board."""
+        if self.board is not None:
             if self.simulate:
                 print(f'Sending command: {command.get_command()}')
                 self.sent_command = command
                 self.command_sent.emit({"command": command.get_command()})
-            return True
+                return True
+        else:
+            print('No board connected')
         return False
+
+    def send_next_command(self):
+        """Send the next command to the machine."""
+        command = self.command_queue.get_next_command()
+        if command is not None:
+            self.send_command_to_board(command)
+        return False
+    
+    def pause_commands(self):
+        print('Pausing commands')
+        new_command = Command(0, 'PAUSE', 0, 0, 0)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending pause command')
+        self.send_command_to_board(new_command)
+
+    def resume_commands(self):
+        print('Resuming commands')
+        new_command = Command(0, 'RESUME', 0, 0, 0)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending resume command')
+        self.send_command_to_board(new_command)
+
+    def clear_command_queue(self):
+        print('Clearing command queue')
+        new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending clear command')
+        self.send_command_to_board(new_command)
+        self.command_queue.clear_queue()
 
     def update_state(self, state):
         """Update the machine state."""

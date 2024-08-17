@@ -889,7 +889,7 @@ class MachineModel(QObject):
     ports_updated = Signal(list)  # Signal to notify view of available ports update
     connection_requested = Signal(str, str)  # Signal to request connection
     gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
-
+    machine_paused = Signal()  # Signal to notify when machine is paused
 
     def __init__(self):
         super().__init__()
@@ -912,6 +912,7 @@ class MachineModel(QObject):
 
         self.motors_homed = False
         self.current_location = "Unknown"
+        self.paused = False
 
         self.gripper_open = False
         self.gripper_active = False
@@ -954,6 +955,18 @@ class MachineModel(QObject):
     def disconnect_balance(self):
         self.balance_connected = False
         self.balance_state_updated.emit(self.balance_connected)
+
+    def pause_commands(self):
+        self.paused = True
+        self.machine_paused.emit()
+
+    def resume_commands(self):
+        self.paused = False
+        self.machine_paused.emit()
+
+    def clear_command_queue(self):
+        self.paused = False
+        self.machine_paused.emit()
 
     def open_gripper(self):
         self.gripper_open = True
