@@ -1001,6 +1001,16 @@ class MachineModel(QObject):
     def disconnect_machine(self):
         self.machine_connected = False
         self.machine_state_updated.emit(self.machine_connected)
+        self.motors_enabled = False
+        self.motor_state_changed.emit(self.motors_enabled)
+        self.regulating_pressure = False
+        self.regulation_state_changed.emit(self.regulating_pressure)
+
+    def is_connected(self):
+        return self.machine_connected
+    
+    def motors_are_enabled(self):
+        return self.motors_enabled
 
     def connect_balance(self, port):
         self.balance_port = port
@@ -1069,6 +1079,9 @@ class MachineModel(QObject):
     def toggle_motor_state(self):
         """Toggle the motor state and emit a signal."""
         self.motors_enabled = not self.motors_enabled
+        if not self.motors_enabled:
+            self.regulating_pressure = False
+            self.regulation_state_changed.emit(self.regulating_pressure)
         self.motor_state_changed.emit(self.motors_enabled)
         print(f"Motors {'enabled' if self.motors_enabled else 'disabled'}")
 

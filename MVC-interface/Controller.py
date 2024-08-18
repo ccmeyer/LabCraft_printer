@@ -46,7 +46,6 @@ class Controller(QObject):
         self.machine.disconnect_board()
         self.model.machine_model.disconnect_machine()
 
-
     def connect_balance(self, port):
         """Connect to the microbalance."""
         if self.machine.connect_balance(port):
@@ -96,18 +95,20 @@ class Controller(QObject):
     def toggle_motors(self):
         """Slot to toggle the motor state."""
         if self.model.machine_model.motors_enabled:
-            self.machine.disable_motors()  # Assuming method exists
+            success = self.machine.disable_motors()  # Assuming method exists
         else:
-            self.machine.enable_motors()  # Assuming method exists
-        self.model.machine_model.toggle_motor_state()  # Update the model state
+            success = self.machine.enable_motors()  # Assuming method exists
+        if success:
+            self.model.machine_model.toggle_motor_state()  # Update the model state
 
     def toggle_regulation(self):
         """Slot to toggle the motor state."""
         if self.model.machine_model.regulating_pressure:
-            self.machine.deregulate_pressure()  # Assuming method exists
+            success = self.machine.deregulate_pressure()  # Assuming method exists
         else:
-            self.machine.regulate_pressure()  # Assuming method exists
-        self.model.machine_model.toggle_regulation_state()  # Update the model state
+            success = self.machine.regulate_pressure()  # Assuming method exists
+        if success:
+            self.model.machine_model.toggle_regulation_state()  # Update the model state
 
     def add_reagent_to_slot(self, slot):
         """Add a reagent to a slot."""

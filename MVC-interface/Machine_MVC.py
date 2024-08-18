@@ -675,7 +675,7 @@ class Machine(QObject):
         """Add a command to the queue."""
         if self.board is None:
             print('No board connected')
-            return
+            return False
         if manual:
             completed = self.check_if_all_completed()
             if not completed:
@@ -732,29 +732,29 @@ class Machine(QObject):
         self.status_updated.emit(state)
 
     def enable_motors(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
     
     def disable_motors(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
+        outcome = self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
         self.add_command_to_queue('GRIPPER_OFF',0,0,0)
-        return
+        return outcome
     
     def regulate_pressure(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
     
     def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
 
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
-        return
+        return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        
 
     def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
-        return
+        return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        
     
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
@@ -766,8 +766,8 @@ class Machine(QObject):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
         print('Setting relative pressure:',pressure)
-        self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
 
     def home_motor_handler(self):
         self.homed = True
@@ -777,7 +777,7 @@ class Machine(QObject):
     def home_motors(self,handler=None,kwargs=None,manual=False):
         if handler == None:
             handler = self.home_motor_handler
-        self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def open_gripper_handler(self,additional_handler=None):
         if additional_handler is not None:
@@ -789,8 +789,7 @@ class Machine(QObject):
             new_handler = self.open_gripper_handler
         else:
             new_handler = lambda: self.open_gripper_handler(handler)
-        self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
     
     def close_gripper_handler(self,additional_handler=None):
         if additional_handler is not None:
@@ -802,21 +801,18 @@ class Machine(QObject):
             new_handler = self.close_gripper_handler
         else:
             new_handler = lambda: self.close_gripper_handler(handler)
-        self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
-        return
-    
+        return self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
+        
     def gripper_off_handler(self):
         self.gripper_off.emit()
 
     def gripper_off(self,handler=None,kwargs=None,manual=False):
         if handler == None:
             handler = self.gripper_off_handler
-        self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def wait_command(self,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('WAIT',2000,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        return
+        return self.add_command_to_queue('WAIT',2000,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)

@@ -91,7 +91,7 @@ class MainWindow(QMainWindow):
         self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         left_layout.addWidget(self.coordinates_box)
 
-        self.pressure_box = PressurePlotBox(self.model, self.controller)
+        self.pressure_box = PressurePlotBox(self, self.model, self.controller)
         self.pressure_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         left_layout.addWidget(self.pressure_box)
 
@@ -430,10 +430,12 @@ class MotorPositionWidget(QGroupBox):
         self.model.machine_state_updated.connect(self.update_labels)
         self.model.machine_model.step_size_changed.connect(self.update_step_size)
         self.model.machine_model.motor_state_changed.connect(self.update_motor_button)
+        self.model.machine_model.machine_state_updated.connect(self.update_motor_button_state)
 
         # Connect the signals to the controller's slots
         self.home_requested.connect(self.controller.home_machine)  # Connect the signal to the controller's slot
         self.toggle_motor_requested.connect(self.controller.toggle_motors)
+
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -485,12 +487,11 @@ class MotorPositionWidget(QGroupBox):
         # Add Toggle Motors button
         self.toggle_motor_button = QtWidgets.QPushButton("Enable Motors")
         self.toggle_motor_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.toggle_motor_button.setCheckable(True)
+        # self.toggle_motor_button.setCheckable(True)
         self.toggle_motor_button.clicked.connect(self.request_toggle_motors)
         self.toggle_motor_button.setFixedWidth(fixed_width)  # Set fixed width
         self.toggle_motor_button.setFixedHeight(fixed_height)  # Set a fixed height
         button_layout.addWidget(self.toggle_motor_button, alignment=Qt.AlignRight)
-        self.update_motor_button(self.model.machine_model.motors_enabled)
 
         # Add Home button
         self.home_button = QtWidgets.QPushButton("Home")
@@ -519,6 +520,10 @@ class MotorPositionWidget(QGroupBox):
         main_layout.addLayout(button_layout)
 
         self.setLayout(main_layout)
+        
+        self.update_motor_button(self.model.machine_model.motors_enabled)
+        self.update_motor_button_state(self.model.machine_model.is_connected())
+
 
     def update_labels(self):
         """Update the labels with the current motor positions."""
@@ -548,14 +553,21 @@ class MotorPositionWidget(QGroupBox):
         """Emit a signal to request toggling the motors."""
         self.toggle_motor_requested.emit()
 
+    def update_motor_button_state(self,machine_connected):
+        self.toggle_motor_button.setEnabled(machine_connected)
+        if not machine_connected:
+            self.home_button.setEnabled(False)
+
     def update_motor_button(self, motors_enabled):
         """Update the motor button text and color based on the motor state."""
         if motors_enabled:
             self.toggle_motor_button.setText("Disable Motors")
             self.toggle_motor_button.setStyleSheet("background-color: #063f99; color: white;")
+            self.home_button.setEnabled(True)
         else:
             self.toggle_motor_button.setText("Enable Motors")
             self.toggle_motor_button.setStyleSheet("background-color: #275fb8; color: white;")
+            self.home_button.setEnabled(False)
 
 
 class PressurePlotBox(QtWidgets.QGroupBox):
@@ -563,14 +575,20 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     A widget to display the pressure readings and target
     """
     toggle_regulation_requested = QtCore.Signal()
+    popup_message_signal = QtCore.Signal(str,str)
 
-    def __init__(self, model,controller):
+    def __init__(self, main_window, model,controller):
         super().__init__('PRESSURE')
+        self.main_window = main_window
         self.model = model
         self.controller = controller
         self.init_ui()
+        self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
         self.toggle_regulation_requested.connect(self.controller.toggle_regulation)
+
+        self.update_regulation_button_state(self.model.machine_model.is_connected())
+        self.popup_message_signal.connect(self.main_window.popup_message)
 
     def init_ui(self):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -588,7 +606,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.pressure_regulation_button.setCheckable(True)
+        # self.pressure_regulation_button.setCheckable(True)
         self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
         self.layout.addWidget(self.pressure_regulation_button, 1, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
         self.update_regulation_button(self.model.machine_model.regulating_pressure)
@@ -654,7 +672,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
-        self.toggle_regulation_requested.emit()
+        if self.model.machine_model.motors_are_enabled():
+            self.toggle_regulation_requested.emit()
+        else:
+            self.popup_message_signal.emit("Motors Not Enabled","Please enable and home the motors before regulating pressure")
+
+    def update_regulation_button_state(self,machine_connected):
+        self.pressure_regulation_button.setEnabled(machine_connected)
 
     def update_regulation_button(self, regulating_pressure):
         """Update the motor button text and color based on the motor state."""
@@ -721,7 +745,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         for row in range(rows):
             for col in range(cols):
                 label = QLabel()
-                # label.setFixedSize(20, 20)
                 label.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
                 label.setAlignment(Qt.AlignCenter)
                 self.grid_layout.addWidget(label, row, col)
@@ -731,7 +754,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Update the colors of the wells based on the selected reagent's concentration."""
         if self.model.reaction_collection is None:
             return
-        # self.update_grid(self.model.well_plate.plate_format)
         # Get the current reagent selection
         stock_index = self.reagent_selection.currentIndex()
         stock_id = self.reagent_selection.itemText(stock_index)
@@ -757,8 +779,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
                 else:
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
-        # Process events to force the UI to update
-        # QApplication.processEvents()
+
 
     def clear_grid(self):
         """Clear the existing grid."""
@@ -933,8 +954,11 @@ class RackBox(QGroupBox):
         # Connect model signals to the update methods
         self.rack_model.slot_updated.connect(self.update_all_slots)
         self.rack_model.gripper_updated.connect(self.update_gripper)
+        self.model.machine_model.machine_state_updated.connect(self.update_button_states)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
+
+        self.update_button_states(self.model.machine_model.is_connected())
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -1006,6 +1030,11 @@ class RackBox(QGroupBox):
 
         # Initial population of unassigned printer heads
         self.update_unassigned_printer_heads()
+    
+    def update_button_states(self, machine_connected):
+        """Update the button states based on the machine connection state."""
+        for _, combined_button, _ in self.slot_widgets:
+            combined_button.setEnabled(machine_connected)
 
     def create_combined_button_callback(self, slot_number):
         """Create a callback function for the combined Confirm/Load/Unload button."""
@@ -1126,18 +1155,6 @@ class RackBox(QGroupBox):
         
         dropdown.blockSignals(False)
 
-    # def confirm_slot(self, slot_number):
-    #     """Update the UI when a slot is confirmed."""
-    #     _, confirm_button, _, _ = self.slot_widgets[slot_number]
-    #     confirm_button.setText("Confirmed")
-    #     confirm_button.setEnabled(False)
-
-    # def unconfirm_slot(self, slot_number):
-    #     """Update the UI when a slot is unconfirmed."""
-    #     _, confirm_button, _, _ = self.slot_widgets[slot_number]
-    #     confirm_button.setText("Confirm")
-    #     confirm_button.setEnabled(True)
-
     def update_gripper(self):
         """Update the UI when the gripper state changes."""
         if self.rack_model.gripper_printer_head:
@@ -1147,19 +1164,6 @@ class RackBox(QGroupBox):
         else:
             self.gripper_label.setText("Gripper Empty")
             self.gripper_label.setStyleSheet("background-color: none; color: white;")
-
-        # Update load buttons based on gripper state and original slot
-        # for slot_number, (label, _, load_button,_) in enumerate(self.slot_widgets):
-        #     slot = self.rack_model.slots[slot_number]
-        #     if self.rack_model.gripper_printer_head:
-        #         if slot_number == self.rack_model.gripper_slot_number:
-        #             load_button.setText("Unload")
-        #             load_button.setEnabled(True)
-        #         else:
-        #             load_button.setEnabled(False)
-        #     else:
-        #         load_button.setText("Load")
-        #         load_button.setEnabled(slot.confirmed and slot.printer_head is not None)
 
     def update_unassigned_printer_heads(self):
         """Update the table with unassigned printer heads."""
