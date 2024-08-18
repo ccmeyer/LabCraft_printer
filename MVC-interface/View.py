@@ -932,7 +932,6 @@ class RackBox(QGroupBox):
 
         # Connect model signals to the update methods
         self.rack_model.slot_updated.connect(self.update_all_slots)
-        # self.rack_model.slot_confirmed.connect(self.confirm_slot)
         self.rack_model.gripper_updated.connect(self.update_gripper)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
@@ -947,11 +946,14 @@ class RackBox(QGroupBox):
         gripper_layout = QVBoxLayout(gripper_widget)
         self.gripper_label = QLabel("Gripper Empty")
         self.gripper_label.setAlignment(Qt.AlignCenter)
+        self.gripper_label.setMinimumWidth(100)
+
         gripper_layout.addWidget(self.gripper_label)
 
         self.gripper_state = QLabel("Closed")
         self.gripper_state.setAlignment(Qt.AlignCenter)
         self.gripper_state.setStyleSheet("background-color: grey; color: white;")
+        self.gripper_state.setMaximumHeight(20)
         gripper_layout.addWidget(self.gripper_state)
 
          # Add a spacer to separate slots and gripper visually
@@ -969,12 +971,6 @@ class RackBox(QGroupBox):
 
             combined_button = QPushButton("Confirm")
             combined_button.clicked.connect(self.create_combined_button_callback(slot.number))
-
-            # confirm_button = QPushButton("Confirm")
-            # confirm_button.clicked.connect(self.create_confirm_slot_callback(slot.number))
-
-            # load_button = QPushButton("Load")
-            # load_button.clicked.connect(self.create_toggle_load_callback(slot.number))
 
             swap_combobox = QComboBox()
             swap_combobox.addItem("Swap")
@@ -1010,14 +1006,6 @@ class RackBox(QGroupBox):
 
         # Initial population of unassigned printer heads
         self.update_unassigned_printer_heads()
-
-    # def create_confirm_slot_callback(self, slot_number):
-    #     """Create a callback function for confirming a slot."""
-    #     return lambda: self.controller.confirm_slot(slot_number)
-
-    # def create_toggle_load_callback(self, slot_number):
-    #     """Create a callback function for toggling load/unload."""
-    #     return lambda: self.toggle_load(slot_number)
 
     def create_combined_button_callback(self, slot_number):
         """Create a callback function for the combined Confirm/Load/Unload button."""
