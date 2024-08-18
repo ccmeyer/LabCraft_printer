@@ -116,7 +116,7 @@ class MainWindow(QMainWindow):
         tab_widget.addTab(self.movement_box, "MOVEMENT")
         mid_layout.addWidget(tab_widget)
 
-        self.rack_box = RackBox(self.model,self.controller)
+        self.rack_box = RackBox(self,self.model,self.controller)
         self.rack_box.setFixedHeight(200)
         self.rack_box.setStyleSheet(f"background-color: #2c2c2c;")
         mid_layout.addWidget(self.rack_box)
@@ -702,6 +702,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.setMaximumHeight(800)
 
         self.model.experiment_loaded.connect(self.on_experiment_loaded)
+        self.model.rack_model.gripper_updated.connect(self.gripper_update_handler)
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
         self.init_ui()
 
@@ -751,6 +752,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 label.setAlignment(Qt.AlignCenter)
                 self.grid_layout.addWidget(label, row, col)
                 self.well_labels[row][col] = label
+
+    def gripper_update_handler(self):
+        """Handle when the gripper picks up a new printer head."""
+        if self.model.rack_model.gripper_printer_head is not None:
+            printer_head = self.model.rack_model.gripper_printer_head
+            stock_id = printer_head.get_stock_id()
+            self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_id))
+            self.update_well_colors()            
     
     def update_well_colors(self):
         """Update the colors of the wells based on the selected reagent's concentration."""
@@ -762,6 +771,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if stock_id == '':
             print('No reagent selected')
         max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
+        printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
+        color = printer_head.get_color()
+        
         for well in self.model.well_plate.get_all_wells():
             if well.assigned_reaction:
                 concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
@@ -775,7 +787,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                         opacity = 0
                     else:
                         opacity = concentration / max_concentration
-                    color = QtGui.QColor(0, 0, 255)
+                    color = QtGui.QColor(color)
                     color.setAlphaF(opacity)
                     rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
@@ -945,9 +957,10 @@ class RackBox(QGroupBox):
     - If the gripper is loaded, the button will unload the gripper to the empty slot.
     - The gripper section shows the printer head currently held by the gripper.
     """
-
-    def __init__(self, model, controller):
+    popup_message_signal = QtCore.Signal(str,str)
+    def __init__(self,main_window, model, controller):
         super().__init__("RACK")
+        self.main_window = main_window
         self.model = model
         self.rack_model = model.rack_model
         self.controller = controller
@@ -959,6 +972,8 @@ class RackBox(QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_button_states)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
+
+        self.popup_message_signal.connect(self.main_window.popup_message)
 
         self.update_button_states(self.model.machine_model.is_connected())
 
@@ -1024,6 +1039,7 @@ class RackBox(QGroupBox):
         self.unassigned_table.setFocusPolicy(Qt.NoFocus)  # Remove focus from the table
         self.unassigned_table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # Disable editing
         self.unassigned_table.setSelectionMode(QAbstractItemView.NoSelection)  # Disable selection
+        
         # Add slots, spacer, and gripper to the main layout
         main_layout.addWidget(gripper_widget)
         main_layout.addItem(spacer)
@@ -1033,6 +1049,7 @@ class RackBox(QGroupBox):
 
         # Initial population of unassigned printer heads
         self.update_unassigned_printer_heads()
+        self.update_all_slots()
     
     def update_button_states(self, machine_connected):
         """Update the button states based on the machine connection state."""
@@ -1042,6 +1059,12 @@ class RackBox(QGroupBox):
     def create_combined_button_callback(self, slot_number):
         """Create a callback function for the combined Confirm/Load/Unload button."""
         def combined_button_action():
+            if not self.model.machine_model.motors_are_enabled():
+                self.popup_message_signal.emit("Motors Not Enabled","Please enable and home the motors before picking up printer heads")
+                return
+            elif not self.model.machine_model.motors_are_homed():
+                self.popup_message_signal.emit("Motors Not Homed","Please home the motors before picking up printer heads")
+                return
             slot = self.rack_model.slots[slot_number]
             if not slot.confirmed:
                 # Confirm the slot
@@ -1129,7 +1152,7 @@ class RackBox(QGroupBox):
                 combined_button.setStyleSheet("background-color: red; color: white;")
             else:
                 combined_button.setText("Confirm")
-                combined_button.setStyleSheet("background-color: black; color: white;")
+                combined_button.setStyleSheet("background-color: none; color: white;")
 
         # Update dropdown options
         self.update_dropdown(slot_number, swap_combobox)

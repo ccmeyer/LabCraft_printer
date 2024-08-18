@@ -417,6 +417,9 @@ class PrinterHead(QObject):
     def get_stock_concentration(self):
         return self.stock_solution.get_stock_concentration()
     
+    def get_color(self):
+        return self.color
+
     def change_stock_solution(self, stock_solution):
         self.stock_solution = stock_solution
     
@@ -474,30 +477,6 @@ class PrinterHeadManager(QObject):
             print("No more unassigned printer heads available.")
             return False
 
-    # def swap_printer_head(self, slot_number, rack_model):
-    #     """
-    #     Swap the printer head in the specified slot with the next unassigned printer head.
-
-    #     Args:
-    #     - slot_number (int): The slot number where the swap should occur.
-    #     - rack_model (RackModel): The rack model where the slot is located.
-        
-    #     Returns:
-    #     - bool: True if a swap was successfully performed, False if no unassigned printer heads are available.
-    #     """
-    #     old_printer_head = self.assigned_printer_heads.get(slot_number)
-    #     if old_printer_head:
-    #         new_printer_head = self.unassigned_printer_heads.pop(0)
-    #         self.unassigned_printer_heads.append(old_printer_head)
-    #         rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
-    #         rack_model.confirm_slot(slot_number)
-    #         self.assigned_printer_heads[slot_number] = new_printer_head
-    #         print(f"Swapped out printer head '{old_printer_head.reagent}' with '{new_printer_head.reagent}' in slot {slot_number}.")
-    #         return True
-    #     else:
-    #         print(f"No printer head currently assigned to slot {slot_number}.")
-    #         return False
-
     def swap_printer_head(self, slot_number, new_printer_head, rack_model):
         """
         Swap the printer head in the specified slot with the provided unassigned printer head.
@@ -547,6 +526,12 @@ class PrinterHeadManager(QObject):
         - dict: Dictionary mapping slot numbers to assigned printer heads.
         """
         return self.assigned_printer_heads
+    
+    def get_printer_head_by_id(self, stock_id):
+        for printer_head in self.printer_heads:
+            if printer_head.get_stock_id() == stock_id:
+                return printer_head
+        return None
 
 class Slot(QObject):
     """
@@ -1011,6 +996,9 @@ class MachineModel(QObject):
     
     def motors_are_enabled(self):
         return self.motors_enabled
+    
+    def motors_are_homed(self):
+        return self.motors_homed
 
     def connect_balance(self, port):
         self.balance_port = port
