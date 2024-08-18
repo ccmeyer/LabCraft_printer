@@ -26,6 +26,9 @@ class StockSolution(QObject):
     
     def get_stock_concentration(self):
         return self.concentration
+    
+    def get_stock_name(self):
+        return f"{self.reagent_name} - {self.concentration}M"
 
 class Reagent(QObject):
     '''
@@ -92,16 +95,19 @@ class StockSolutionManager(QObject):
     def get_all_stock_solutions(self):
         return self.stock_solutions.values()
 
-    
     def get_stock_solution_names(self):
         return self.stock_solutions.keys()
     
+    def get_formatted_from_stock_id(self,stock_id):
+        stock = self.get_stock_by_id(stock_id)
+        return stock.get_stock_name()
+
     def get_stock_solution_names_formated(self):
-        return [f"{stock.reagent_name} - {stock.concentration}M" for stock_id,stock in self.stock_solutions.items()]
+        return [stock.get_stock_name() for stock_id,stock in self.stock_solutions.items()]
     
     def get_stock_id_from_formatted(self,formatted_name):
         for stock_id,stock in self.stock_solutions.items():
-            if formatted_name == f"{stock.reagent_name} - {stock.concentration}M":
+            if formatted_name == stock.get_stock_name():
                 return stock_id
         return None
 
@@ -413,6 +419,7 @@ class PrinterHead(QObject):
         self.stock_solution = stock_solution
         self.color = color
         self.confirmed = False
+        self.completed = False
 
     def get_stock_solution(self):
         return self.stock_solution
@@ -426,6 +433,9 @@ class PrinterHead(QObject):
     def get_stock_concentration(self):
         return self.stock_solution.get_stock_concentration()
     
+    def get_stock_name(self):
+        return self.stock_solution.get_stock_name()
+
     def get_color(self):
         return self.color
 
@@ -434,6 +444,23 @@ class PrinterHead(QObject):
     
     def change_color(self, new_color):
         self.color = new_color
+
+    def mark_complete(self):
+        self.completed = True
+
+    def mark_incomplete(self):
+        self.completed = False
+
+    def check_complete(self,well_plate):
+        '''Check the stock solution to see if all droplets have been added'''
+        stock_id = self.get_stock_id()
+        for well in well_plate.get_all_wells():
+            if well.assigned_reaction is not None:
+                if not well.check_stock_complete(stock_id):
+                    self.mark_incomplete()
+                    return False
+        self.mark_complete()
+        return True
 
 class PrinterHeadManager(QObject):
     """

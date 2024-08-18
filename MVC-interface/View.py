@@ -770,8 +770,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle when the gripper picks up a new printer head."""
         if self.model.rack_model.gripper_printer_head is not None:
             printer_head = self.model.rack_model.gripper_printer_head
-            stock_id = printer_head.get_stock_id()
-            self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_id))
+            stock_name = printer_head.get_stock_name()
+            self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_name))
             self.update_well_colors()            
     
     def update_well_colors(self):
@@ -990,6 +990,7 @@ class RackBox(QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_button_states)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
+        self.controller.array_complete.connect(self.update_all_slots)
 
         self.popup_message_signal.connect(self.main_window.popup_message)
 
@@ -1150,11 +1151,17 @@ class RackBox(QGroupBox):
 
         if slot.printer_head:
             printer_head = slot.printer_head
+            complete = printer_head.check_complete(self.model.well_plate)
             label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
             color = QtGui.QColor(printer_head.color)
             color.setAlphaF(0.7)
             rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
-            label.setStyleSheet(f"background-color: {rgba_color}; color: white;")
+            if complete:
+                border_color = 'white'
+                label.setStyleSheet(f"background-color: {rgba_color}; border: 2px solid {border_color}; color: white;")
+            else:
+                label.setStyleSheet(f"background-color: {rgba_color}; color: white;")
+
             print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
             if slot.confirmed and not slot.locked:
                 combined_button.setText("Load")
@@ -1220,14 +1227,25 @@ class RackBox(QGroupBox):
         for row, printer_head in enumerate(unassigned_printer_heads):
             reagent_name = printer_head.get_reagent_name()
             concencentration = printer_head.get_stock_concentration()
+            complete = printer_head.check_complete(self.model.well_plate)
             color = printer_head.get_color()
             color = QtGui.QColor(color)
             color.setAlphaF(0.5)
-            # rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
 
             text_name = f"{reagent_name} - {concencentration} M"
             reagent_item = QTableWidgetItem(text_name)
             reagent_item.setTextAlignment(Qt.AlignCenter)
+            if complete:
+                font_color = self.color_dict['light_gray']
+                font = reagent_item.font()
+                font.setBold(False)  # Make the text bold
+                reagent_item.setFont(font)  # Set the font
+            else:
+                font_color = self.color_dict['white']
+                font = reagent_item.font()
+                font.setBold(True)  # Make the text bold
+                reagent_item.setFont(font)  # Set the font
+            reagent_item.setForeground(QtGui.QBrush(QtGui.QColor(font_color)))  # Set the text color
             reagent_item.setBackground(QtGui.QBrush(QtGui.QColor(color)))
 
             self.unassigned_table.setItem(row, 0, reagent_item)

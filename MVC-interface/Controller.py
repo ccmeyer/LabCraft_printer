@@ -1,10 +1,12 @@
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
 import time
 
 
 class Controller(QObject):
+    """Controller class for the application."""
+    array_complete = Signal()
     def __init__(self, machine, model):
         super().__init__()
         self.machine = machine
@@ -335,6 +337,7 @@ class Controller(QObject):
 
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
         self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
+        self.array_complete.emit()
         print('---Printing complete---')
 
     def print_array(self):
