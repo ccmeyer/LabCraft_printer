@@ -110,6 +110,9 @@ class StockSolutionManager(QObject):
             if formatted_name == stock.get_stock_name():
                 return stock_id
         return None
+    
+    def clear_all_stock_solutions(self):
+        self.stock_solutions = {}
 
 class ReactionComposition(QObject):
     '''
@@ -151,6 +154,20 @@ class ReactionComposition(QObject):
                 return False
         else:
             return True
+        
+    def reset_all_reagents(self):
+        for reagent in self.reagents.values():
+            reagent.added_droplets = 0
+            reagent.completed = False
+
+    def reset_reagent_by_id(self,stock_id):
+        self.reagents[stock_id].added_droplets = 0
+        self.reagents[stock_id].completed = False
+
+    def get_reagent_by_id(self,stock_id):
+        return self.reagents[stock_id]
+    
+
 
 class ReactionCollection(QObject):
     '''
@@ -178,6 +195,10 @@ class ReactionCollection(QObject):
         else:
             raise ValueError(f"Reaction '{name}' not found in the collection.")
 
+    def is_empty(self):
+        """Check if the collection is empty."""
+        return len(self.reactions) == 0
+
     def get_reaction(self, name):
         """Get a reaction by its name."""
         return self.reactions.get(name, None)
@@ -195,6 +216,10 @@ class ReactionCollection(QObject):
                 if max_droplets is None or droplets > max_droplets:
                     max_droplets = droplets
         return max_droplets
+
+    def clear_all_reactions(self):
+        """Clear all reactions from the collection."""
+        self.reactions = {}
     
 class Well(QObject):
     '''
@@ -236,6 +261,7 @@ class Well(QObject):
 
 class WellPlate(QObject):
     well_state_changed_signal = Signal(str)  # Signal to notify when the state of a well changes, sending the well ID
+    clear_all_wells_signal = Signal()  # Signal to notify when all wells are cleared
     def __init__(self, plate_format):
         super().__init__()
         self.plate_format = plate_format  # '96', '384', '1536'
@@ -351,6 +377,19 @@ class WellPlate(QObject):
         self.wells = {}
         self.exclude_wells = set()
         self.wells = self.create_wells()
+        self.clear_all_wells_signal.emit()
+
+    def reset_all_wells_for_stock(self,stock_id):
+        for well in self.wells.values():
+            if well.assigned_reaction is not None:
+                well.assigned_reaction.reset_reagent_by_id(stock_id)
+                well.state_changed.emit(well.well_id)
+
+    def reset_all_wells(self):
+        for well in self.wells.values():
+            if well.assigned_reaction is not None:
+                well.assigned_reaction.reset_all_reagents()
+                well.state_changed.emit(well.well_id)
 
     def get_plate_status(self):
         """Get the status of the entire well plate."""
@@ -569,6 +608,14 @@ class PrinterHeadManager(QObject):
             if printer_head.get_stock_id() == stock_id:
                 return printer_head
         return None
+    
+    def clear_all_printer_heads(self):
+        """
+        Clear all printer heads and reset the assignment status.
+        """
+        self.printer_heads = []
+        self.assigned_printer_heads = {}
+        self.unassigned_printer_heads = []
 
 class Slot(QObject):
     """
@@ -689,6 +736,19 @@ class RackModel(QObject):
                 self.error_occurred.emit(error_msg)
                 print(error_msg)
 
+    def clear_all_slots(self):
+        """
+        Clear all slots in the rack.
+        """
+        for slot in self.slots:
+            slot.change_printer_head(None)
+            slot.unconfirm()
+        self.gripper_printer_head = None
+        self.gripper_slot_number = None
+        self.slot_updated.emit()
+        self.gripper_updated.emit()
+        print("All slots cleared.")
+    
     def verify_transfer_to_gripper(self, slot_number):
         """
         Verify if the transfer of the printer head from a slot to the gripper is valid.
@@ -828,6 +888,9 @@ class RackModel(QObject):
                 "color": self.gripper_printer_head.color
             }
         return None
+    
+    def get_gripper_printer_head(self):
+        return self.gripper_printer_head
     
     def assign_reagents_to_printer_heads(self, reaction_collection):
         """
@@ -1255,6 +1318,15 @@ class Model(QObject):
             self.experiment_loaded.emit()
         else:
             print("No experiment data loaded.")
+
+    def clear_experiment(self):
+        """Clear all experiment data and reset the well plate."""
+        self.stock_solutions.clear_all_stock_solutions()
+        self.reaction_collection.clear_all_reactions()
+        self.well_plate.clear_all_wells()
+        self.printer_head_manager.clear_all_printer_heads()
+        self.rack_model.clear_all_slots()
+        self.experiment_loaded.emit()
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""

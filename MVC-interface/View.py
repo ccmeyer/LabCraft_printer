@@ -194,7 +194,8 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
         self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
         self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.controller.print_array())
-        self.shortcut_manager.add_shortcut('Shift+r','Reset Array', lambda: self.controller.reset_array())
+        self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
+        self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
     def make_transparent_icon(self):
@@ -236,6 +237,23 @@ class MainWindow(QMainWindow):
         else:
             return None
         
+    def reset_single_array(self):
+        """Reset a single array."""
+        active_printer_head = self.model.rack_model.get_gripper_printer_head()
+        if active_printer_head == None:
+            self.popup_message('Cannot reset:','Only resets the array for the loaded printer head')
+            return
+        else:
+            response = self.popup_yes_no('Reset Array','Are you sure you want to reset the current array?')
+            if response == '&Yes':
+                self.controller.reset_single_array()
+
+    def reset_all_arrays(self):
+        """Reset all arrays."""
+        response = self.popup_yes_no('Reset All Arrays','Are you sure you want to reset all arrays?')
+        if response == '&Yes':
+            self.controller.reset_all_arrays()
+    
     def pause_machine(self):
         """Pause the machine."""
         self.controller.pause_commands()
@@ -717,6 +735,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.experiment_loaded.connect(self.on_experiment_loaded)
         self.model.rack_model.gripper_updated.connect(self.gripper_update_handler)
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
+        self.model.well_plate.clear_all_wells_signal.connect(self.update_well_colors)
+        
         self.init_ui()
 
     def init_ui(self):
@@ -776,18 +796,20 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     
     def update_well_colors(self):
         """Update the colors of the wells based on the selected reagent's concentration."""
-        if self.model.reaction_collection is None:
-            return
-        # Get the current reagent selection
-        stock_index = self.reagent_selection.currentIndex()
-        stock_formatted = self.reagent_selection.itemText(stock_index)
-        stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
-        print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
-        if stock_id == None:
-            print('No reagent selected')
-        max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
-        printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
-        color = printer_head.get_color()
+        if not self.model.reaction_collection.is_empty():
+            # Get the current reagent selection
+            stock_index = self.reagent_selection.currentIndex()
+            stock_formatted = self.reagent_selection.itemText(stock_index)
+            stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
+            print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
+            if stock_id == None:
+                print('No reagent selected')
+            max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
+            printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
+            color = printer_head.get_color()
+        else:
+            max_concentration = 0
+            color = 'grey'
         
         for well in self.model.well_plate.get_all_wells():
             if well.assigned_reaction:
@@ -808,6 +830,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
                 else:
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
+            else:
+                self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: none; border: 1px solid black;")
 
 
     def clear_grid(self):
@@ -826,6 +850,17 @@ class WellPlateWidget(QtWidgets.QGroupBox):
 
     def on_load_experiment(self):
         """Load an experiment CSV file."""
+        # Check if a printer head is picked up
+        if self.model.rack_model.gripper_printer_head is not None:
+            self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before loading an experiment.")
+            return
+        # Check if an experiment is already loaded
+        if not self.model.reaction_collection.is_empty():
+            response = self.main_window.popup_yes_no("Load Experiment", "An experiment is already loaded. Do you want to clear it and load a new one?")
+            if response == "&No":
+                return
+            else:
+                self.model.clear_experiment()
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Experiment CSV", "", "CSV Files (*.csv)")
         if file_path:
             self.model.load_experiment_from_file(file_path)
@@ -991,6 +1026,7 @@ class RackBox(QGroupBox):
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
         self.controller.array_complete.connect(self.update_all_slots)
+        self.controller.update_slots_signal.connect(self.update_all_slots)
 
         self.popup_message_signal.connect(self.main_window.popup_message)
 

@@ -7,6 +7,7 @@ import time
 class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
+    update_slots_signal = Signal()
     def __init__(self, machine, model):
         super().__init__()
         self.machine = machine
@@ -340,6 +341,16 @@ class Controller(QObject):
         self.array_complete.emit()
         print('---Printing complete---')
 
+    def reset_single_array(self):
+        """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
+        active_printer_head = self.model.rack_model.get_gripper_printer_head()
+        self.model.well_plate.reset_all_wells_for_stock(active_printer_head.get_stock_id())
+
+    def reset_all_arrays(self):
+        """Resets the droplet count for all wells in the well plate for all stock solutions."""
+        self.model.well_plate.reset_all_wells()
+        self.update_slots_signal.emit()
+    
     def print_array(self):
         '''
         Iterates through all wells with an assigned reaction and prints the 
