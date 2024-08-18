@@ -739,7 +739,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.bottom_layout.addWidget(self.experiment_button)
 
         self.reagent_selection = QComboBox()
-        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names())
+        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names_formated())
         self.reagent_selection.currentIndexChanged.connect(self.update_well_colors)
         self.bottom_layout.addWidget(self.reagent_selection)
 
@@ -780,8 +780,10 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             return
         # Get the current reagent selection
         stock_index = self.reagent_selection.currentIndex()
-        stock_id = self.reagent_selection.itemText(stock_index)
-        if stock_id == '':
+        stock_formatted = self.reagent_selection.itemText(stock_index)
+        stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
+        print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
+        if stock_id == None:
             print('No reagent selected')
         max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
         printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
@@ -832,7 +834,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
         self.reagent_selection.clear()
-        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names())
+        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names_formated())
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
@@ -1149,7 +1151,10 @@ class RackBox(QGroupBox):
         if slot.printer_head:
             printer_head = slot.printer_head
             label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
-            label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
+            color = QtGui.QColor(printer_head.color)
+            color.setAlphaF(0.7)
+            rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
+            label.setStyleSheet(f"background-color: {rgba_color}; color: white;")
             print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
             if slot.confirmed and not slot.locked:
                 combined_button.setText("Load")
@@ -1215,9 +1220,16 @@ class RackBox(QGroupBox):
         for row, printer_head in enumerate(unassigned_printer_heads):
             reagent_name = printer_head.get_reagent_name()
             concencentration = printer_head.get_stock_concentration()
+            color = printer_head.get_color()
+            color = QtGui.QColor(color)
+            color.setAlphaF(0.5)
+            # rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
+
             text_name = f"{reagent_name} - {concencentration} M"
             reagent_item = QTableWidgetItem(text_name)
             reagent_item.setTextAlignment(Qt.AlignCenter)
+            reagent_item.setBackground(QtGui.QBrush(QtGui.QColor(color)))
+
             self.unassigned_table.setItem(row, 0, reagent_item)
     
     def toggle_load(self, slot_number):

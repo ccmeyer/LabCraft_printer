@@ -95,6 +95,15 @@ class StockSolutionManager(QObject):
     
     def get_stock_solution_names(self):
         return self.stock_solutions.keys()
+    
+    def get_stock_solution_names_formated(self):
+        return [f"{stock.reagent_name} - {stock.concentration}M" for stock_id,stock in self.stock_solutions.items()]
+    
+    def get_stock_id_from_formatted(self,formatted_name):
+        for stock_id,stock in self.stock_solutions.items():
+            if formatted_name == f"{stock.reagent_name} - {stock.concentration}M":
+                return stock_id
+        return None
 
 class ReactionComposition(QObject):
     '''
