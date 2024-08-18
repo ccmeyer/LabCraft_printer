@@ -178,7 +178,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3))
         self.shortcut_manager.add_shortcut('s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('d','Modify location', lambda: self.modify_location())
-        self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location())
+        self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location(manual=True))
         self.shortcut_manager.add_shortcut('Shift+n','Popup message', lambda: self.popup_message('Title','Message'))
         self.shortcut_manager.add_shortcut('Shift+o','Popup options', lambda: self.popup_options('Title','Message',['Option 1','Option 2','Option 3']))
         self.shortcut_manager.add_shortcut('Shift+y','Popup yes/no', lambda: self.popup_yes_no('Title','Message'))
@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         if ansewer == "&Yes":
             self.controller.save_locations()
 
-    def move_to_location(self,location=False,direct=True,safe_y=False):
+    def move_to_location(self,location=False,direct=True,safe_y=False,manual=False):
         """Move the machine to a saved location."""
         if len(self.model.location_model.get_location_names()) == 0:
             self.popup_message("No Locations","There are no saved locations")
@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
         else:
             name = location
         if name is not None:
-            self.controller.move_to_location(name,direct=direct,safe_y=safe_y)
+            self.controller.move_to_location(name,direct=direct,safe_y=safe_y,manual=manual)
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
@@ -1016,10 +1016,10 @@ class RackBox(QGroupBox):
                 self.controller.confirm_slot(slot_number)
             elif slot.locked:
                 # Unload the printer head
-                self.controller.drop_off_printer_head(slot_number)
+                self.controller.drop_off_printer_head(slot_number,manual=True)
             else:
                 # Load the printer head
-                self.controller.pick_up_printer_head(slot_number)
+                self.controller.pick_up_printer_head(slot_number,manual=True)
             self.update_all_slots()
         return combined_button_action
     

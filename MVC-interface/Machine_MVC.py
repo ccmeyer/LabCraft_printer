@@ -665,11 +665,22 @@ class Machine(QObject):
 
         return status_dict
 
+    def check_if_all_completed(self):
+        """Check if all commands have been completed."""
+        if len(self.command_queue.queue) == 0:
+            return True
+        return False
+    
     def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False):
         """Add a command to the queue."""
-        if manual and self.command_queue.get_number_of_sent_commands() > 0:
-            print('Cannot add manual command while commands are being sent.')
-            return False
+        if self.board is None:
+            print('No board connected')
+            return
+        if manual:
+            completed = self.check_if_all_completed()
+            if not completed:
+                print('Cannot add manual command while commands are in queue')
+                return False
         return self.command_queue.add_command(command_type, param1, param2, param3, handler, kwargs)
 
     def send_command_to_board(self, command):

@@ -606,7 +606,6 @@ class RackModel(QObject):
     """
 
     slot_updated = Signal()
-    # slot_confirmed = Signal(int)
     gripper_updated = Signal()
     error_occurred = Signal(str)
 

@@ -158,8 +158,14 @@ class Controller(QObject):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False):
         """Move to the saved location."""
+        if manual == True:
+            status = self.machine.check_if_all_completed()
+            if status == False:
+                print('Cannot move: Commands are still running')
+                return
+            
         original_target = self.model.location_model.get_location_dict(name)
         target = original_target.copy()
         if x_offset:
@@ -258,8 +264,13 @@ class Controller(QObject):
         """Handle the pick up signal from the rack."""
         self.model.rack_model.transfer_to_gripper(slot)
 
-    def pick_up_printer_head(self,slot):
+    def pick_up_printer_head(self,slot,manual=False):
         """Pick up a printer head from the rack."""
+        if manual == True:
+            status = self.machine.check_if_all_completed()
+            if status == False:
+                print('Cannot pick up: Commands are still running')
+                return
         is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
         if is_valid:
             self.open_gripper()
@@ -278,8 +289,13 @@ class Controller(QObject):
         """Handle the drop off signal from the rack."""
         self.model.rack_model.transfer_from_gripper(slot)
 
-    def drop_off_printer_head(self,slot):
+    def drop_off_printer_head(self,slot,manual=False):
         """Drop off a printer head to the rack."""
+        if manual == True:
+            status = self.machine.check_if_all_completed()
+            if status == False:
+                print('Cannot drop off: Commands are still running')
+                return
         is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot)
         if is_valid:
             print(f'Dropping off printer head to slot {slot}')
