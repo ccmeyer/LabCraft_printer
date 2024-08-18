@@ -731,7 +731,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Update the colors of the wells based on the selected reagent's concentration."""
         if self.model.reaction_collection is None:
             return
-        self.update_grid(self.model.well_plate.plate_format)
+        # self.update_grid(self.model.well_plate.plate_format)
         # Get the current reagent selection
         stock_index = self.reagent_selection.currentIndex()
         stock_id = self.reagent_selection.itemText(stock_index)
@@ -758,7 +758,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 else:
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
         # Process events to force the UI to update
-        QApplication.processEvents()
+        # QApplication.processEvents()
 
     def clear_grid(self):
         """Clear the existing grid."""
@@ -928,12 +928,11 @@ class RackBox(QGroupBox):
         self.model = model
         self.rack_model = model.rack_model
         self.controller = controller
-
         self.init_ui()
 
         # Connect model signals to the update methods
-        self.rack_model.slot_updated.connect(self.update_slot)
-        self.rack_model.slot_confirmed.connect(self.confirm_slot)
+        self.rack_model.slot_updated.connect(self.update_all_slots)
+        # self.rack_model.slot_confirmed.connect(self.confirm_slot)
         self.rack_model.gripper_updated.connect(self.update_gripper)
         self.model.machine_model.gripper_state_changed.connect(self.update_gripper_state)
         self.model.experiment_loaded.connect(self.update_all_slots)
@@ -968,56 +967,188 @@ class RackBox(QGroupBox):
             slot_label = QLabel("Empty")
             slot_label.setAlignment(Qt.AlignCenter)
 
-            confirm_button = QPushButton("Confirm")
-            confirm_button.clicked.connect(self.create_confirm_slot_callback(slot.number))
+            combined_button = QPushButton("Confirm")
+            combined_button.clicked.connect(self.create_combined_button_callback(slot.number))
 
-            load_button = QPushButton("Load")
-            load_button.clicked.connect(self.create_toggle_load_callback(slot.number))
+            # confirm_button = QPushButton("Confirm")
+            # confirm_button.clicked.connect(self.create_confirm_slot_callback(slot.number))
+
+            # load_button = QPushButton("Load")
+            # load_button.clicked.connect(self.create_toggle_load_callback(slot.number))
+
+            swap_combobox = QComboBox()
+            swap_combobox.addItem("Swap")
+            swap_combobox.currentIndexChanged.connect(self.create_swap_callback(slot.number, swap_combobox))
 
             slot_layout.addWidget(slot_label)
-            slot_layout.addWidget(confirm_button)
-            slot_layout.addWidget(load_button)
+            slot_layout.addWidget(combined_button)
+            # slot_layout.addWidget(confirm_button)
+            # slot_layout.addWidget(load_button)
+            slot_layout.addWidget(swap_combobox)
 
             slots_layout.addWidget(slot_widget)
-            self.slot_widgets.append((slot_label, confirm_button, load_button))
+            # self.slot_widgets.append((slot_label, confirm_button, load_button, swap_combobox))
+            self.slot_widgets.append((slot_label, combined_button, swap_combobox))
+
+         # Add a spacer to separate slots and table visually
+        spacer_right = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
+
+        # Table for unassigned printer heads
+        self.unassigned_table = QTableWidget()
+        self.unassigned_table.setColumnCount(1)
+        self.unassigned_table.setHorizontalHeaderLabels(["Stock"])
+        self.unassigned_table.verticalHeader().setVisible(False)  # Hide the index column
+        self.unassigned_table.setMinimumWidth(100)
+        self.unassigned_table.setFocusPolicy(Qt.NoFocus)  # Remove focus from the table
 
         # Add slots, spacer, and gripper to the main layout
         main_layout.addWidget(gripper_widget)
         main_layout.addItem(spacer)
         main_layout.addLayout(slots_layout)
+        main_layout.addItem(spacer_right)
+        main_layout.addWidget(self.unassigned_table)
 
-    def create_confirm_slot_callback(self, slot_number):
-        """Create a callback function for confirming a slot."""
-        return lambda: self.controller.confirm_slot(slot_number)
+        # Initial population of unassigned printer heads
+        self.update_unassigned_printer_heads()
 
-    def create_toggle_load_callback(self, slot_number):
-        """Create a callback function for toggling load/unload."""
-        return lambda: self.toggle_load(slot_number)
+    # def create_confirm_slot_callback(self, slot_number):
+    #     """Create a callback function for confirming a slot."""
+    #     return lambda: self.controller.confirm_slot(slot_number)
+
+    # def create_toggle_load_callback(self, slot_number):
+    #     """Create a callback function for toggling load/unload."""
+    #     return lambda: self.toggle_load(slot_number)
+
+    def create_combined_button_callback(self, slot_number):
+        """Create a callback function for the combined Confirm/Load/Unload button."""
+        def combined_button_action():
+            slot = self.rack_model.slots[slot_number]
+            if not slot.confirmed:
+                # Confirm the slot
+                self.controller.confirm_slot(slot_number)
+            elif slot.locked:
+                # Unload the printer head
+                self.controller.drop_off_printer_head(slot_number)
+            else:
+                # Load the printer head
+                self.controller.pick_up_printer_head(slot_number)
+            self.update_all_slots()
+        return combined_button_action
+    
+    def create_dropdown_change_callback(self, slot_number):
+        """Create a callback function for handling dropdown changes."""
+        return lambda: self.on_dropdown_change(slot_number)
+    
+    def on_dropdown_change(self, slot_number):
+        """Handle changes in the dropdown menu."""
+        dropdown = self.slot_widgets[slot_number][2]
+        selected_text = dropdown.currentText()
+        if selected_text:
+            other_slot_number = self.find_slot_by_printer_head_text(selected_text)
+            if other_slot_number is not None:
+                self.controller.swap_printer_heads_between_slots(slot_number, other_slot_number)
+
+    
+    def create_swap_callback(self, slot_number, combobox):
+        """Create a callback function for swapping a slot."""
+        def swap_printer_head():
+            selected_text = combobox.currentText()
+            if selected_text != "Swap":
+                printer_head_manager = self.model.printer_head_manager
+                # Check if the selected printer head is unassigned
+                for printer_head in printer_head_manager.get_unassigned_printer_heads():
+                    if selected_text == f"{printer_head.get_reagent_name()} ({printer_head.get_stock_concentration()} M)":
+                        self.controller.swap_printer_head(slot_number, printer_head)
+                        self.update_all_slots()  # Update all dropdowns after swapping
+                        self.update_unassigned_printer_heads()  # Update the table to reflect the change
+                        return
+
+                # Check if the selected printer head is in another slot
+                for i, slot in enumerate(self.rack_model.slots):
+                    if i != slot_number and slot.printer_head:
+                        slot_text = f"Slot {i+1}: {slot.printer_head.get_reagent_name()} ({slot.printer_head.get_stock_concentration()} M)"
+                        if selected_text == slot_text:
+                            self.controller.swap_printer_heads_between_slots(slot_number, i)
+                            self.update_all_slots()  # Update all dropdowns after swapping
+                            self.update_unassigned_printer_heads()  # Update the table to reflect the change
+                            return
+        return swap_printer_head
+
+    def update_all_slots(self):
+        """Update all slots in the rack."""
+        for slot_number in range(len(self.rack_model.slots)):
+            self.update_slot(slot_number)
+
+        self.update_gripper()
+        self.update_unassigned_printer_heads()
 
     def update_slot(self, slot_number):
         """Update the UI for a specific slot."""
         slot = self.rack_model.slots[slot_number]
-        label, confirm_button, load_button = self.slot_widgets[slot_number]
+        label, combined_button, swap_combobox = self.slot_widgets[slot_number]
 
         if slot.printer_head:
             printer_head = slot.printer_head
             label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
             label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
-            load_button.setText("Load")
-            load_button.setStyleSheet("background-color: grey; color: white;")
-            confirm_button.setEnabled(not slot.confirmed)
+            print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
+            if slot.confirmed and not slot.locked:
+                combined_button.setText("Load")
+                combined_button.setStyleSheet("background-color: green; color: white;")
+            elif slot.locked:
+                combined_button.setText("Unload")
+                combined_button.setStyleSheet("background-color: red; color: white;")
+            else:
+                combined_button.setText("Confirm")
+                combined_button.setStyleSheet("background-color: blue; color: white;")
         else:
             label.setText("Empty")
             label.setStyleSheet("background-color: none; color: white;")
-            load_button.setText("Load")
-            load_button.setStyleSheet("background-color: black; color: white;")
-            confirm_button.setEnabled(False)
+            if slot.locked:
+                combined_button.setText("Unload")
+                combined_button.setStyleSheet("background-color: red; color: white;")
+            else:
+                combined_button.setText("Confirm")
+                combined_button.setStyleSheet("background-color: black; color: white;")
 
-    def confirm_slot(self, slot_number):
-        """Update the UI when a slot is confirmed."""
-        _, confirm_button, _ = self.slot_widgets[slot_number]
-        confirm_button.setText("Confirmed")
-        confirm_button.setEnabled(False)
+        # Update dropdown options
+        self.update_dropdown(slot_number, swap_combobox)
+        swap_combobox.setEnabled(not slot.is_locked())
+        
+        # Update the button's functionality
+        combined_button.clicked.disconnect()
+        combined_button.clicked.connect(self.create_combined_button_callback(slot_number))
+
+    def update_dropdown(self, slot_number, dropdown):
+        """
+        Update the dropdown for a specific slot with all available printer heads.
+        """
+        dropdown.blockSignals(True)
+        dropdown.clear()
+        dropdown.addItem("Swap")
+
+        # Add all unassigned printer heads
+        for printer_head in self.model.printer_head_manager.get_unassigned_printer_heads():
+            dropdown.addItem(f"{printer_head.get_reagent_name()} ({printer_head.get_stock_concentration()} M)")
+
+        # Add all printer heads in other slots
+        for i, slot in enumerate(self.rack_model.slots):
+            if i != slot_number and slot.printer_head:
+                dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_reagent_name()} ({slot.printer_head.get_stock_concentration()} M)")
+        
+        dropdown.blockSignals(False)
+
+    # def confirm_slot(self, slot_number):
+    #     """Update the UI when a slot is confirmed."""
+    #     _, confirm_button, _, _ = self.slot_widgets[slot_number]
+    #     confirm_button.setText("Confirmed")
+    #     confirm_button.setEnabled(False)
+
+    # def unconfirm_slot(self, slot_number):
+    #     """Update the UI when a slot is unconfirmed."""
+    #     _, confirm_button, _, _ = self.slot_widgets[slot_number]
+    #     confirm_button.setText("Confirm")
+    #     confirm_button.setEnabled(True)
 
     def update_gripper(self):
         """Update the UI when the gripper state changes."""
@@ -1030,18 +1161,31 @@ class RackBox(QGroupBox):
             self.gripper_label.setStyleSheet("background-color: none; color: white;")
 
         # Update load buttons based on gripper state and original slot
-        for slot_number, (label, _, load_button) in enumerate(self.slot_widgets):
-            slot = self.rack_model.slots[slot_number]
-            if self.rack_model.gripper_printer_head:
-                if slot_number == self.rack_model.gripper_slot_number:
-                    load_button.setText("Unload")
-                    load_button.setEnabled(True)
-                else:
-                    load_button.setEnabled(False)
-            else:
-                load_button.setText("Load")
-                load_button.setEnabled(slot.confirmed and slot.printer_head is not None)
+        # for slot_number, (label, _, load_button,_) in enumerate(self.slot_widgets):
+        #     slot = self.rack_model.slots[slot_number]
+        #     if self.rack_model.gripper_printer_head:
+        #         if slot_number == self.rack_model.gripper_slot_number:
+        #             load_button.setText("Unload")
+        #             load_button.setEnabled(True)
+        #         else:
+        #             load_button.setEnabled(False)
+        #     else:
+        #         load_button.setText("Load")
+        #         load_button.setEnabled(slot.confirmed and slot.printer_head is not None)
 
+    def update_unassigned_printer_heads(self):
+        """Update the table with unassigned printer heads."""
+        unassigned_printer_heads = self.model.printer_head_manager.get_unassigned_printer_heads()
+        self.unassigned_table.setRowCount(len(unassigned_printer_heads))
+
+        for row, printer_head in enumerate(unassigned_printer_heads):
+            reagent_name = printer_head.get_reagent_name()
+            concencentration = printer_head.get_stock_concentration()
+            text_name = f"{reagent_name} - {concencentration} M"
+            reagent_item = QTableWidgetItem(text_name)
+            reagent_item.setTextAlignment(Qt.AlignCenter)
+            self.unassigned_table.setItem(row, 0, reagent_item)
+    
     def toggle_load(self, slot_number):
         """Toggle loading/unloading between the slot and gripper."""
         slot = self.rack_model.slots[slot_number]
@@ -1058,13 +1202,6 @@ class RackBox(QGroupBox):
         else:
             self.gripper_state.setText("Closed")
             self.gripper_state.setStyleSheet("background-color: grey; color: white;")
-
-    def update_all_slots(self):
-        """Update all slots in the rack."""
-        for slot_number in range(len(self.rack_model.slots)):
-            self.update_slot(slot_number)
-
-        self.update_gripper()
 
 
 class BoardStatusBox(QGroupBox):

@@ -294,6 +294,20 @@ class Controller(QObject):
         else:
             print(f'Error: {error_msg}')
 
+    def swap_printer_head(self, slot_number, new_printer_head):
+        """Handle swapping of printer heads."""
+        self.model.printer_head_manager.swap_printer_head(slot_number, new_printer_head, self.model.rack_model)
+
+    def swap_printer_heads_between_slots(self, slot_number_1, slot_number_2):
+        """
+        Swap printer heads between two slots in the rack.
+
+        Args:
+            slot_number_1 (int): The first slot number.
+            slot_number_2 (int): The second slot number.
+        """
+        self.model.rack_model.swap_printer_heads_between_slots(slot_number_1, slot_number_2)
+
     def print_droplets(self,droplets,handler=None,kwargs=None,manual=False):
         """Print a specified number of droplets."""
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)

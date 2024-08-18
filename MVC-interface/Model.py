@@ -474,33 +474,42 @@ class PrinterHeadManager(QObject):
             print("No more unassigned printer heads available.")
             return False
 
-    def swap_printer_head(self, slot_number, rack_model):
-        """
-        Swap the printer head in the specified slot with the next unassigned printer head.
+    # def swap_printer_head(self, slot_number, rack_model):
+    #     """
+    #     Swap the printer head in the specified slot with the next unassigned printer head.
 
-        Args:
-        - slot_number (int): The slot number where the swap should occur.
-        - rack_model (RackModel): The rack model where the slot is located.
+    #     Args:
+    #     - slot_number (int): The slot number where the swap should occur.
+    #     - rack_model (RackModel): The rack model where the slot is located.
         
-        Returns:
-        - bool: True if a swap was successfully performed, False if no unassigned printer heads are available.
+    #     Returns:
+    #     - bool: True if a swap was successfully performed, False if no unassigned printer heads are available.
+    #     """
+    #     old_printer_head = self.assigned_printer_heads.get(slot_number)
+    #     if old_printer_head:
+    #         new_printer_head = self.unassigned_printer_heads.pop(0)
+    #         self.unassigned_printer_heads.append(old_printer_head)
+    #         rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
+    #         rack_model.confirm_slot(slot_number)
+    #         self.assigned_printer_heads[slot_number] = new_printer_head
+    #         print(f"Swapped out printer head '{old_printer_head.reagent}' with '{new_printer_head.reagent}' in slot {slot_number}.")
+    #         return True
+    #     else:
+    #         print(f"No printer head currently assigned to slot {slot_number}.")
+    #         return False
+
+    def swap_printer_head(self, slot_number, new_printer_head, rack_model):
         """
-        if self.unassigned_printer_heads:
-            old_printer_head = self.assigned_printer_heads.get(slot_number)
-            if old_printer_head:
-                new_printer_head = self.unassigned_printer_heads.pop(0)
-                self.unassigned_printer_heads.append(old_printer_head)
-                rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
-                rack_model.confirm_slot(slot_number)
-                self.assigned_printer_heads[slot_number] = new_printer_head
-                print(f"Swapped out printer head '{old_printer_head.reagent}' with '{new_printer_head.reagent}' in slot {slot_number}.")
-                return True
-            else:
-                print(f"No printer head currently assigned to slot {slot_number}.")
-                return False
-        else:
-            print("No more unassigned printer heads available for swapping.")
-            return False
+        Swap the printer head in the specified slot with the provided unassigned printer head.
+        """
+        old_printer_head = rack_model.slots[slot_number].printer_head
+        if old_printer_head:
+            self.unassigned_printer_heads.append(old_printer_head)
+            self.unassigned_printer_heads.remove(new_printer_head)
+            rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
+            self.assigned_printer_heads[slot_number] = new_printer_head
+            print(f"Swapped printer head in slot {slot_number} with '{new_printer_head.get_stock_id()}'.")
+
 
     def generate_color(self):
         """
@@ -554,15 +563,31 @@ class Slot(QObject):
         self.number = number
         self.printer_head = printer_head
         self.confirmed = False
+        self.locked = False
+
+    def set_locked(self, locked):
+        self.locked = locked
+
+    def is_locked(self):
+        return self.locked
     
-    def change_printer_head(self, new_printer_head):
+    def change_printer_head(self, new_printer_head,returned=False):
         self.printer_head = new_printer_head
+        if not returned:
+            self.unconfirm()
     
     def confirm(self):
         """
         Confirms the slot.
         """
         self.confirmed = True
+
+    def unconfirm(self):
+        """
+        Unconfirms the slot.
+        """
+        self.confirmed = False
+
 
 class RackModel(QObject):
     """
@@ -580,8 +605,8 @@ class RackModel(QObject):
     - error_occurred: Emitted when an invalid operation is attempted.
     """
 
-    slot_updated = Signal(int)
-    slot_confirmed = Signal(int)
+    slot_updated = Signal()
+    # slot_confirmed = Signal(int)
     gripper_updated = Signal()
     error_occurred = Signal(str)
 
@@ -603,10 +628,28 @@ class RackModel(QObject):
         - printer_head (PrinterHead): The printer head to place in the slot.
         """
         if 0 <= slot_number < len(self.slots):
-            self.slots[slot_number].change_printer_head(printer_head)
-            self.slot_updated.emit(slot_number)
+            slot = self.slots[slot_number]
+            slot.change_printer_head(printer_head)
+            slot.set_locked(False)
+            self.slot_updated.emit()
             print(f"Slot {slot_number} updated with printer head: {printer_head.get_stock_id()}, {printer_head.color}")
 
+    def lock_slot(self, slot_number):
+        """
+        Lock a slot when its printer head is in the gripper.
+        """
+        slot = self.slots[slot_number]
+        slot.set_locked(True)
+        self.slot_updated.emit()
+
+    def unlock_slot(self, slot_number):
+        """
+        Unlock a slot when its printer head is returned from the gripper.
+        """
+        slot = self.slots[slot_number]
+        slot.set_locked(False)
+        self.slot_updated.emit()
+    
     def confirm_slot(self, slot_number):
         """
         Confirm a slot.
@@ -617,7 +660,7 @@ class RackModel(QObject):
         if 0 <= slot_number < len(self.slots):
             if self.slots[slot_number].printer_head is not None:
                 self.slots[slot_number].confirm()
-                self.slot_confirmed.emit(slot_number)
+                self.slot_updated.emit()
                 self.gripper_updated.emit()
                 print(f"Slot {slot_number} confirmed.")
             else:
@@ -660,8 +703,9 @@ class RackModel(QObject):
             slot = self.slots[slot_number]
             self.gripper_printer_head = slot.printer_head
             self.gripper_slot_number = slot_number
-            slot.change_printer_head(None)
-            self.slot_updated.emit(slot_number)
+            slot.change_printer_head(None,returned=True)
+            self.lock_slot(slot_number)
+            self.slot_updated.emit()
             self.gripper_updated.emit()
             print(f"Printer head from slot {slot_number} transferred to gripper.")
         else:
@@ -701,15 +745,27 @@ class RackModel(QObject):
         is_valid, error_msg = self.verify_transfer_from_gripper(slot_number)
         if is_valid:
             slot = self.slots[slot_number]
-            slot.change_printer_head(self.gripper_printer_head)
+            slot.change_printer_head(self.gripper_printer_head,returned=True)
+            self.unlock_slot(slot_number)
             self.gripper_printer_head = None
             self.gripper_slot_number = None
-            self.slot_updated.emit(slot_number)
+            self.slot_updated.emit()
             self.gripper_updated.emit()
             print(f"Printer head transferred from gripper to slot {slot_number}.")
         else:
             self.error_occurred.emit(error_msg)
             print(error_msg)
+
+    def swap_printer_heads_between_slots(self, slot_number_1, slot_number_2):
+        """
+        Swap the printer heads between two slots and emit signals.
+        """
+        slot_1 = self.slots[slot_number_1]
+        slot_2 = self.slots[slot_number_2]
+        origial_slot_1_printer_head = slot_1.printer_head
+        slot_1.change_printer_head(slot_2.printer_head)
+        slot_2.change_printer_head(origial_slot_1_printer_head)
+        self.slot_updated.emit()
 
     def get_slot_info(self, slot_number):
         """
