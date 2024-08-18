@@ -1,5 +1,7 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
-from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy, QSpacerItem, QFileDialog, QInputDialog
+from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,\
+        QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,\
+        QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView
 from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -1020,7 +1022,8 @@ class RackBox(QGroupBox):
         self.unassigned_table.verticalHeader().setVisible(False)  # Hide the index column
         self.unassigned_table.setMinimumWidth(100)
         self.unassigned_table.setFocusPolicy(Qt.NoFocus)  # Remove focus from the table
-
+        self.unassigned_table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # Disable editing
+        self.unassigned_table.setSelectionMode(QAbstractItemView.NoSelection)  # Disable selection
         # Add slots, spacer, and gripper to the main layout
         main_layout.addWidget(gripper_widget)
         main_layout.addItem(spacer)
@@ -1266,7 +1269,8 @@ class ShortcutTableWidget(QGroupBox):
         self.table.setHorizontalHeaderLabels(["Key Sequence", "Description"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)  # Stretch columns to fill the width
         self.table.verticalHeader().setVisible(False)  # Hide row numbers
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)  # Make cells read-only
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # Make cells read-only
 
         # Add shortcuts to the table
         self.load_shortcuts()
@@ -1322,6 +1326,8 @@ class CommandQueueWidget(QGroupBox):
 
         # Set the table to be read-only
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setSelectionMode(QTableWidget.NoSelection)
 
         # Add the table to the layout
         self.layout().addWidget(self.table)

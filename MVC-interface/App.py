@@ -30,10 +30,16 @@ def set_dark_theme(app):
     dark_palette.setColor(QPalette.LinkVisited, QColor(42, 130, 218))
     
     # Highlight color
-    dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    dark_palette.setColor(QPalette.HighlightedText, QColor(0, 0, 0))  # black
+    dark_palette.setColor(QPalette.Highlight, QColor(50, 50, 50))
+    dark_palette.setColor(QPalette.HighlightedText, QColor(150, 150, 150))
 
     app.setPalette(dark_palette)
+
+    app.setStyleSheet("""
+        QLabel {
+            border-radius: 5px;  /* Rounded corners for QLabel */
+        }
+    """)
 
 def main():
     app = QApplication(sys.argv)
