@@ -436,8 +436,9 @@ class PrinterHeadManager(QObject):
     - unassigned_printer_heads (list): List of printer heads that have not yet been assigned to any slot.
     """
 
-    def __init__(self):
+    def __init__(self,color_dict):
         super().__init__()
+        self.print_head_colors = color_dict
         self.printer_heads = []
         self.assigned_printer_heads = {}
         self.unassigned_printer_heads = []
@@ -497,7 +498,7 @@ class PrinterHeadManager(QObject):
         Returns:
         - str: The color code or name.
         """
-        colors = ["red", "green", "blue", "yellow", "purple", "orange"]
+        colors = list(self.print_head_colors.values())
         return colors[len(self.printer_heads) % len(colors)]
 
     def get_all_printer_heads(self):
@@ -1137,6 +1138,7 @@ class Model(QObject):
 
     def __init__(self):
         super().__init__()
+        self.printer_head_colors = self.load_colors('.\\MVC-interface\\Presets\\Printer_head_colors.json')
         self.machine_model = MachineModel()
         self.num_slots = 5
         self.rack_model = RackModel(self.num_slots)
@@ -1145,7 +1147,11 @@ class Model(QObject):
         self.well_plate = WellPlate("384")
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
-        self.printer_head_manager = PrinterHeadManager()
+        self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
+
+    def load_colors(self, file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
 
     def update_state(self, status_dict):
         '''

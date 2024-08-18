@@ -8,6 +8,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
+import json
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -66,9 +67,14 @@ class MainWindow(QMainWindow):
         self.controller = controller
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
+        self.color_dict = self.load_colors('.\\MVC-interface\\Presets\\Colors.json')
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
+
+    def load_colors(self, file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
 
     def init_ui(self):
         """Initialize the main user interface."""
@@ -82,14 +88,14 @@ class MainWindow(QMainWindow):
         # Create the left panel with the motor positions
         left_panel = QtWidgets.QWidget()
         left_panel.setFixedWidth(400)
-        left_panel.setStyleSheet(f"background-color: #2c2c2c;")
+        left_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         
         # Add ConnectionWidget
-        self.connection_widget = ConnectionWidget(self.model, self.controller)
+        self.connection_widget = ConnectionWidget(self,self.model, self.controller)
         left_layout.addWidget(self.connection_widget)
 
-        self.coordinates_box = MotorPositionWidget(self.model, self.controller)
+        self.coordinates_box = MotorPositionWidget(self,self.model, self.controller)
         self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         left_layout.addWidget(self.coordinates_box)
 
@@ -101,24 +107,24 @@ class MainWindow(QMainWindow):
 
         mid_panel = QtWidgets.QWidget()
         mid_panel.setFixedWidth(800)
-        mid_panel.setStyleSheet(f"background-color: #2c2c2c;")
+        mid_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
         tab_widget = QtWidgets.QTabWidget()
         tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
 
-        self.well_plate_widget = WellPlateWidget(self.model, self.controller)
-        self.well_plate_widget.setStyleSheet(f"background-color: #2c2c2c;")
+        self.well_plate_widget = WellPlateWidget(self,self.model, self.controller)
+        self.well_plate_widget.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         tab_widget.addTab(self.well_plate_widget, "Well Plate")
 
-        self.movement_box = MovementBox(self.model, self.controller)
+        self.movement_box = MovementBox(self, self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         tab_widget.addTab(self.movement_box, "MOVEMENT")
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
         self.rack_box.setFixedHeight(200)
-        self.rack_box.setStyleSheet(f"background-color: #2c2c2c;")
+        self.rack_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         mid_layout.addWidget(self.rack_box)
 
         self.layout.addWidget(mid_panel)
@@ -126,22 +132,22 @@ class MainWindow(QMainWindow):
         # Add other widgets to the right panel as needed
         right_panel = QtWidgets.QWidget()
         right_panel.setFixedWidth(400)
-        right_panel.setStyleSheet(f"background-color: #2c2c2c;")
+        right_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)
 
-        self.board_status_box = BoardStatusBox(self.model, self.controller)
-        self.board_status_box.setStyleSheet(f"background-color: #2c2c2c;")
+        self.board_status_box = BoardStatusBox(self, self.model, self.controller)
+        self.board_status_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         self.board_status_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
 
         right_layout.addWidget(self.board_status_box)
 
-        self.shortcut_box = ShortcutTableWidget(self.shortcut_manager)
-        self.shortcut_box.setStyleSheet(f"background-color: #2c2c2c;")
+        self.shortcut_box = ShortcutTableWidget(self,self.shortcut_manager)
+        self.shortcut_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         right_layout.addWidget(self.shortcut_box)
 
         # Add the command queue table to the right panel
-        self.command_queue_widget = CommandQueueWidget(self.controller.machine)
+        self.command_queue_widget = CommandQueueWidget(self,self.controller.machine)
         right_layout.addWidget(self.command_queue_widget)
 
         self.layout.addWidget(right_panel)
@@ -281,8 +287,10 @@ class ConnectionWidget(QGroupBox):
     connect_balance_requested = QtCore.Signal(str)
     refresh_ports_requested = QtCore.Signal()
 
-    def __init__(self, model,controller):
+    def __init__(self, main_window,model,controller):
         super().__init__("CONNECTION")
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
 
@@ -388,19 +396,19 @@ class ConnectionWidget(QGroupBox):
         """Update the machine connect button text and color based on the connection state."""
         if machine_connected:
             self.machine_connect_button.setText("Disconnect")
-            self.machine_connect_button.setStyleSheet("background-color: #063f99; color: white;")
+            self.machine_connect_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         else:
             self.machine_connect_button.setText("Connect")
-            self.machine_connect_button.setStyleSheet("background-color: #275fb8; color: white;")
+            self.machine_connect_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
     def update_balance_connect_button(self, balance_connected):
         """Update the balance connect button text and color based on the connection state."""
         if balance_connected:
             self.balance_connect_button.setText("Disconnect")
-            self.balance_connect_button.setStyleSheet("background-color: #063f99; color: white;")
+            self.balance_connect_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         else:
             self.balance_connect_button.setText("Connect")
-            self.balance_connect_button.setStyleSheet("background-color: #275fb8; color: white;")
+            self.balance_connect_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
 
 
@@ -421,8 +429,10 @@ class MotorPositionWidget(QGroupBox):
     home_requested = QtCore.Signal()  # Signal to request homing
     toggle_motor_requested = QtCore.Signal()  # Signal to toggle motor state
 
-    def __init__(self, model, controller):
+    def __init__(self, main_window, model, controller):
         super().__init__('POSITIONS')
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
 
@@ -498,7 +508,7 @@ class MotorPositionWidget(QGroupBox):
         # Add Home button
         self.home_button = QtWidgets.QPushButton("Home")
         self.home_button.clicked.connect(self.request_homing)
-        self.home_button.setStyleSheet("background-color: green; color: white;")
+        self.home_button.setStyleSheet(f"background-color: {self.color_dict['green']}; color: white;")
         self.home_button.setFixedWidth(fixed_width)  # Set fixed width
         self.home_button.setFixedHeight(fixed_height)  # Set a fixed height
         button_layout.addWidget(self.home_button, alignment=Qt.AlignRight)
@@ -564,11 +574,11 @@ class MotorPositionWidget(QGroupBox):
         """Update the motor button text and color based on the motor state."""
         if motors_enabled:
             self.toggle_motor_button.setText("Disable Motors")
-            self.toggle_motor_button.setStyleSheet("background-color: #063f99; color: white;")
+            self.toggle_motor_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
             self.home_button.setEnabled(True)
         else:
             self.toggle_motor_button.setText("Enable Motors")
-            self.toggle_motor_button.setStyleSheet("background-color: #275fb8; color: white;")
+            self.toggle_motor_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
             self.home_button.setEnabled(False)
 
 
@@ -582,6 +592,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def __init__(self, main_window, model,controller):
         super().__init__('PRESSURE')
         self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
         self.init_ui()
@@ -615,7 +626,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.chart = QtCharts.QChart()
         self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.chart.setBackgroundBrush(QtGui.QBrush('#2c2c2c'))  # Set the background color to grey
+        self.chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['darker_gray']))  # Set the background color to grey
         self.chart_view = QtCharts.QChartView(self.chart)
         self.series = QtCharts.QLineSeries()
         self.series.setColor(QtCore.Qt.white)
@@ -686,14 +697,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Update the motor button text and color based on the motor state."""
         if regulating_pressure:
             self.pressure_regulation_button.setText("Deregulate Pressure")
-            self.pressure_regulation_button.setStyleSheet("background-color: #063f99; color: white;")
+            self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         else:
             self.pressure_regulation_button.setText("Regulate Pressure")
-            self.pressure_regulation_button.setStyleSheet("background-color: #275fb8; color: white;")
+            self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
 class WellPlateWidget(QtWidgets.QGroupBox):
-    def __init__(self, model, controller):
+    def __init__(self, main_window, model, controller):
         super().__init__('PLATE')
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
         self.grid_layout = QGridLayout()
@@ -833,8 +846,10 @@ class MovementBox(QtWidgets.QGroupBox):
     The 2D plot shows the XY movement, and the 1D plot shows the Z movement over time.
     """
 
-    def __init__(self, model, controller):
+    def __init__(self, main_window,model, controller):
         super().__init__("MOVEMENT")
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
 
@@ -864,7 +879,7 @@ class MovementBox(QtWidgets.QGroupBox):
         # Create a chart, a chart view and a line series for X and Y coordinates
         self.xy_chart = QtCharts.QChart()
         self.xy_chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.xy_chart.setBackgroundBrush(QtGui.QBrush('#4d4d4d'))  # Set the background color to grey
+        self.xy_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
         self.xy_chart_view = QtCharts.QChartView(self.xy_chart)
         self.xy_series = QtCharts.QLineSeries()
         self.xy_position_series = QtCharts.QScatterSeries()
@@ -876,7 +891,7 @@ class MovementBox(QtWidgets.QGroupBox):
         # Create a chart, a chart view and a line series for Z coordinate
         self.z_chart = QtCharts.QChart()
         self.z_chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.z_chart.setBackgroundBrush(QtGui.QBrush('#4d4d4d'))  # Set the background color to grey
+        self.z_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
         self.z_chart_view = QtCharts.QChartView(self.z_chart)
         self.z_series = QtCharts.QLineSeries()
         self.z_position_series = QtCharts.QScatterSeries()
@@ -961,6 +976,7 @@ class RackBox(QGroupBox):
     def __init__(self,main_window, model, controller):
         super().__init__("RACK")
         self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.rack_model = model.rack_model
         self.controller = controller
@@ -993,7 +1009,7 @@ class RackBox(QGroupBox):
 
         self.gripper_state = QLabel("Closed")
         self.gripper_state.setAlignment(Qt.AlignCenter)
-        self.gripper_state.setStyleSheet("background-color: grey; color: white;")
+        self.gripper_state.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
         self.gripper_state.setMaximumHeight(20)
         gripper_layout.addWidget(self.gripper_state)
 
@@ -1137,22 +1153,22 @@ class RackBox(QGroupBox):
             print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
             if slot.confirmed and not slot.locked:
                 combined_button.setText("Load")
-                combined_button.setStyleSheet("background-color: green; color: white;")
+                combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
             elif slot.locked:
                 combined_button.setText("Unload")
-                combined_button.setStyleSheet("background-color: red; color: white;")
+                combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
             else:
                 combined_button.setText("Confirm")
-                combined_button.setStyleSheet("background-color: blue; color: white;")
+                combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white;")
         else:
             label.setText("Empty")
-            label.setStyleSheet("background-color: none; color: white;")
+            label.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white;")
             if slot.locked:
                 combined_button.setText("Unload")
-                combined_button.setStyleSheet("background-color: red; color: white;")
+                combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
             else:
                 combined_button.setText("Confirm")
-                combined_button.setStyleSheet("background-color: none; color: white;")
+                combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white;")
 
         # Update dropdown options
         self.update_dropdown(slot_number, swap_combobox)
@@ -1216,10 +1232,10 @@ class RackBox(QGroupBox):
         """Update the gripper state label."""
         if gripper_state == True:
             self.gripper_state.setText("Open")
-            self.gripper_state.setStyleSheet("background-color: red; color: white;")
+            self.gripper_state.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
         else:
             self.gripper_state.setText("Closed")
-            self.gripper_state.setStyleSheet("background-color: grey; color: white;")
+            self.gripper_state.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
 
 
 class BoardStatusBox(QGroupBox):
@@ -1228,8 +1244,10 @@ class BoardStatusBox(QGroupBox):
     Displays a grid with the label of the variable from the board and the value of the variable.
     Includes the cycle count and max cycle time for the board.
     '''
-    def __init__(self, model, controller):
+    def __init__(self, main_window, model, controller):
         super().__init__('STATUS')
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
 
@@ -1276,8 +1294,10 @@ class ShortcutTableWidget(QGroupBox):
 
     The table has two columns: one for the key sequence and one for the description.
     """
-    def __init__(self, shortcut_manager):
+    def __init__(self, main_window, shortcut_manager):
         super().__init__("SHORTCUTS")
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.shortcut_manager = shortcut_manager
 
         self.init_ui()
@@ -1327,8 +1347,10 @@ class CommandQueueWidget(QGroupBox):
     - Completed: Black
     """
 
-    def __init__(self, machine):
+    def __init__(self,main_window, machine):
         super().__init__("QUEUE")
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
         self.machine = machine
         self.init_ui()
 
@@ -1380,13 +1402,13 @@ class CommandQueueWidget(QGroupBox):
 
             # Set the row color based on the command status
             if command.status == "Added":
-                self.set_row_color(row_position, "#4d4d4d")  # Dark grey
+                self.set_row_color(row_position, self.color_dict['darker_gray'])  # Dark grey
             elif command.status == "Sent":
-                self.set_row_color(row_position, "#A9A9A9")  # Light grey
+                self.set_row_color(row_position, self.color_dict['mid_gray'])  # Light grey
             elif command.status == "Executing":
-                self.set_row_color(row_position, "#FF0000")  # Red
+                self.set_row_color(row_position, self.color_dict['dark_red'])  # Red
             elif command.status == "Completed":
-                self.set_row_color(row_position, "#000000")  # Black
+                self.set_row_color(row_position, self.color_dict['darker_gray'])  # Black
 
     def set_row_color(self, row, color):
         """Set the background color for a row."""
