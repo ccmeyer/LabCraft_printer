@@ -577,9 +577,11 @@ class Machine(QObject):
     homing_completed = Signal()    # Signal to emit when homing is completed
     gripper_open = Signal()      # Signal to emit when the gripper is opened
     gripper_closed = Signal()    # Signal to emit when the gripper is closed
-    gripper_on = Signal()        # Signal to emit when the gripper is turned on
-    gripper_off = Signal()       # Signal to emit when the gripper is turned off
-
+    gripper_on_signal = Signal()        # Signal to emit when the gripper is turned on
+    gripper_off_signal = Signal()       # Signal to emit when the gripper is turned off
+    disconnect_complete_signal = Signal()  # Signal to stop timers
+    machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
+    
     def __init__(self):
         super().__init__()
         self.command_queue = CommandQueue()
@@ -610,21 +612,61 @@ class Machine(QObject):
     def stop_execution_timer(self):
         self.execution_timer.stop()
 
+    def reset_board(self):
+        self.board = None
+        self.port = None
+        self.command_queue.clear_queue()
+        self.stop_communication_timer()
+        self.stop_execution_timer()
+
     def connect_board(self,port):
         if port == 'Virtual':
             self.board = VirtualMachine(self)
+            self.machine_connected_signal.emit(True)
             self.simulate = True
-
+            self.port = port
+        else:
+            try:
+                self.board = serial.Serial(port, baudrate=115200,timeout=2)
+                if not self.board.is_open:  # Add this line
+                    self.error_occurred.emit('Could not open port')
+                    raise serial.SerialException('Could not open port')  # Add this line
+                self.machine_connected_signal.emit(True)
+                self.simulate = False
+                self.port = port
+            except Exception as e:
+                self.error_occurred.emit(f'Could not connect to machine at port {port}\nError: {e}')
+                self.machine_connected_signal.emit(False)
+                self.port = None
+                return False
         self.request_status_update()
         self.begin_communication_timer()
         self.begin_execution_timer()
         return True
+    
+    def disconnect_handler(self):
+        if not self.simulate:
+            self.board.close()
+        self.reset_board()
+        self.disconnect_complete_signal.emit()
 
     def disconnect_board(self, error=False):
-        self.stop_communication_timer()
-        self.stop_execution_timer()
-        self.board = None
+        '''
+        Creates a thread to disconnect from the machine. This is necessary
+        because several should be executed before the machine is disconnected.
+        '''
+        # def disconnect():
+        print('--------Disconnecting from machine---------')
+        if not error:
+            self.gripper_off()
+            self.disable_motors()
+            self.deregulate_pressure(handler=self.disconnect_handler)
+        else:
+            self.disconnect_handler()
         return True
+    
+    def get_machine_port(self):
+        return self.port
     
     def connect_balance(self,port):
         self.balance = Balance(self)
@@ -640,15 +682,24 @@ class Machine(QObject):
         if self.board is not None:
             if self.simulate:
                 status_string = self.board.get_complete_state()
+            else:
+                try:
+                    if self.board.in_waiting > 0:
+                        status_string = self.board.readline().decode('utf-8').strip()
+                except Exception as e:
+                    status_string = ''
+                    self.error_occurred.emit(f'Error reading from machine\n Error: {e}')
             try:
                 status_dict = self.parse_status_string(status_string)
                 self.command_queue.update_command_status(status_dict.get('Current_command', None),
-                                                         status_dict.get('Last_completed', None))
+                                                            status_dict.get('Last_completed', None))
                 self.status_updated.emit(status_dict)  # Emit the status update signal
             except ValueError as e:
                 self.error_occurred.emit(f"Error parsing status string: {str(e)}")
             except Exception as e:
                 self.error_occurred.emit(f"Unexpected error: {str(e)}")
+                print('------- Automatic disconnect -------')
+                self.disconnect_board(error=True)
 
     def parse_status_string(self, status_string):
         """Convert status string into a dictionary."""
@@ -670,6 +721,9 @@ class Machine(QObject):
         if len(self.command_queue.queue) == 0:
             return True
         return False
+    
+    def get_remaining_commands(self):
+        return len(self.command_queue.queue)
     
     def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False):
         """Add a command to the queue."""
@@ -767,7 +821,6 @@ class Machine(QObject):
         pressure -= self.psi_offset
         print('Setting relative pressure:',pressure)
         return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        
 
     def home_motor_handler(self):
         self.homed = True
@@ -804,7 +857,7 @@ class Machine(QObject):
         return self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
         
     def gripper_off_handler(self):
-        self.gripper_off.emit()
+        self.gripper_off_signal.emit()
 
     def gripper_off(self,handler=None,kwargs=None,manual=False):
         if handler == None:

@@ -8,6 +8,7 @@ class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
     update_slots_signal = Signal()
+    error_occurred_signal = Signal(str,str)
     def __init__(self, machine, model):
         super().__init__()
         self.machine = machine
@@ -20,6 +21,9 @@ class Controller(QObject):
         self.machine.homing_completed.connect(self.home_complete_handler)
         self.machine.gripper_open.connect(self.model.machine_model.open_gripper)
         self.machine.gripper_closed.connect(self.model.machine_model.close_gripper)
+        
+        self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
+        self.machine.disconnect_complete_signal.connect(self.reset_board)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -28,8 +32,13 @@ class Controller(QObject):
     def handle_error(self, error_message):
         """Handle errors from the machine."""
         print(f"Error occurred: {error_message}")
-        # Here, you could also update the view to display the error message
+        # self.error_occurred_signal.emit('Error Occurred',error_message)
 
+    def reset_board(self):
+        """Reset the machine board."""
+        self.machine.reset_board()
+        self.model.machine_model.disconnect_machine()
+    
     def update_available_ports(self):
         # Get a list of all connected COM ports
         ports = comports()
@@ -38,16 +47,22 @@ class Controller(QObject):
 
     def connect_machine(self, port):
         """Connect to the machine."""
-        if self.machine.connect_board(port):
-            # Update the model state
-            self.model.machine_model.connect_machine(port)
-        else:
-            print("Failed to connect to machine.")
+        self.machine.connect_board(port)
 
     def disconnect_machine(self):
         """Disconnect from the machine."""
         self.machine.disconnect_board()
-        self.model.machine_model.disconnect_machine()
+
+    def update_machine_connection_status(self, status):
+        """Update the machine connection status."""
+        if status:
+            self.model.machine_model.connect_machine()
+        else:
+            self.model.machine_model.disconnect_machine()
+
+    def get_machine_port(self):
+        """Get the currently connected machine port."""
+        return self.machine.get_machine_port()
 
     def connect_balance(self, port):
         """Connect to the microbalance."""

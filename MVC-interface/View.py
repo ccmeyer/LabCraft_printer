@@ -72,6 +72,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
 
+        self.controller.error_occurred_signal.connect(self.popup_message)
+
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
@@ -379,7 +381,7 @@ class ConnectionWidget(QGroupBox):
         self.balance_port_combobox.addItems(ports_with_virtual)
 
         # Set the default selected port
-        self.machine_port_combobox.setCurrentText(self.model.machine_model.machine_port)
+        self.machine_port_combobox.setCurrentText(self.controller.get_machine_port())
         self.balance_port_combobox.setCurrentText(self.model.machine_model.balance_port)
 
     def request_machine_connect_change(self):
@@ -1027,7 +1029,6 @@ class RackBox(QGroupBox):
         self.model.experiment_loaded.connect(self.update_all_slots)
         self.controller.array_complete.connect(self.update_all_slots)
         self.controller.update_slots_signal.connect(self.update_all_slots)
-
         self.popup_message_signal.connect(self.main_window.popup_message)
 
         self.update_button_states(self.model.machine_model.is_connected())
