@@ -446,7 +446,8 @@ class VirtualMachine():
             self.target_p = 0
         elif command.command_type == 'CHANGE_ACCEL':
             print('Changing acceleration')
-
+        elif command.command_type == 'RESET_ACCEL':
+            print('Resetting acceleration')
         else:
             print('Unknown command:',command.command_type)
         self.correct_pos = False
@@ -591,6 +592,7 @@ class Machine(QObject):
         self.communication_timer = None
         self.execution_timer = None
         self.sent_command = None
+        self.error_count = 0
 
         self.fss = 13107
         self.psi_offset = 1638
@@ -689,17 +691,20 @@ class Machine(QObject):
                 except Exception as e:
                     status_string = ''
                     self.error_occurred.emit(f'Error reading from machine\n Error: {e}')
-            try:
-                status_dict = self.parse_status_string(status_string)
-                self.command_queue.update_command_status(status_dict.get('Current_command', None),
-                                                            status_dict.get('Last_completed', None))
-                self.status_updated.emit(status_dict)  # Emit the status update signal
-            except ValueError as e:
-                self.error_occurred.emit(f"Error parsing status string: {str(e)}")
-            except Exception as e:
-                self.error_occurred.emit(f"Unexpected error: {str(e)}")
-                print('------- Automatic disconnect -------')
-                self.disconnect_board(error=True)
+            # try:
+            status_dict = self.parse_status_string(status_string)
+            self.command_queue.update_command_status(status_dict.get('Current_command', None),
+                                                        status_dict.get('Last_completed', None))
+            self.status_updated.emit(status_dict)  # Emit the status update signal
+            self.error_count = 0
+            # except ValueError as e:
+            #     self.error_occurred.emit(f"Error parsing status string: {str(e)}")
+            # except Exception as e:
+            #     self.error_occurred.emit(f"Unexpected error: {str(e)}")
+            #     self.error_count += 1
+            #     if self.error_count > 100:
+            #         print('------- Automatic disconnect -------')
+            #         self.disconnect_board(error=True)
 
     def parse_status_string(self, status_string):
         """Convert status string into a dictionary."""
@@ -792,17 +797,21 @@ class Machine(QObject):
 
     def enable_motors(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        
     
     def disable_motors(self,handler=None,kwargs=None,manual=False):
         outcome = self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
         self.add_command_to_queue('GRIPPER_OFF',0,0,0)
         return outcome
     
+    def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def reset_acceleration(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
     def regulate_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
-    
     def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         

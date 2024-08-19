@@ -1,4 +1,5 @@
 from PySide6.QtCore import QObject, Signal
+from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
 import time
@@ -352,9 +353,18 @@ class Controller(QObject):
         print(f'Printing complete for well {well_id}')
 
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
-        self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
-        self.array_complete.emit()
-        print('---Printing complete---')
+        # Reset acceleration and move to pause after the queue is processed
+        def finalize_printing():
+            self.machine.reset_acceleration()
+            print(f'Moving to pause location')
+            self.move_to_location('pause')
+            print('-----Moved to pause location-----')
+            self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
+            self.array_complete.emit()
+            print('---Printing complete---')
+        
+        # Ensure that this is done after the command queue has been fully processed
+        QtCore.QTimer.singleShot(0, finalize_printing)
 
     def reset_single_array(self):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
@@ -374,10 +384,15 @@ class Controller(QObject):
         if self.model.rack_model.get_gripper_info() == None:
             print('Cannot print: No printer head is loaded')
             return
-        
+        self.close_gripper()
+        self.wait_command()
+
+        self.move_to_location('pause')
+        self.machine.change_acceleration(8000)
+
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')
-        starting_coords = self.model.machine_model.get_current_position_dict().copy()
+        starting_coords = self.expected_position
         reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
         
         for i,well in enumerate(reaction_wells):

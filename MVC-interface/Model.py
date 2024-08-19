@@ -1080,7 +1080,6 @@ class MachineModel(QObject):
         self.ports_updated.emit(self.available_ports)
 
     def connect_machine(self):
-        # self.machine_port = port
         self.machine_connected = True
         self.machine_state_updated.emit(self.machine_connected)
 
