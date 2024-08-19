@@ -738,7 +738,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.rack_model.gripper_updated.connect(self.gripper_update_handler)
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
         self.model.well_plate.clear_all_wells_signal.connect(self.update_well_colors)
-        
+        self.model.well_plate.plate_format_changed_signal.connect(self.update_grid)
         self.init_ui()
 
     def init_ui(self):
@@ -749,9 +749,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.plate_selection_label.setAlignment(Qt.AlignRight)
         self.top_layout.addWidget(self.plate_selection_label)
         self.plate_selection = QComboBox()
-        self.plate_selection.addItems(['96', '384', '1536'])
+        all_plate_names = self.model.well_plate.get_all_plate_names()
+        self.plate_selection.addItems(all_plate_names)
+
         # Set the current index to match the model's plate format
-        self.plate_selection.setCurrentIndex(self.plate_selection.findText(str(self.model.well_plate.plate_format)))
+        current_plate_name = self.model.well_plate.get_current_plate_name()
+        self.plate_selection.setCurrentIndex(self.plate_selection.findText(current_plate_name))
         self.plate_selection.currentIndexChanged.connect(self.on_plate_selection_changed)
         self.top_layout.addWidget(self.plate_selection)
 
@@ -770,14 +773,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.layout.addLayout(self.bottom_layout)
 
         self.setLayout(self.layout)
-        self.update_grid(self.model.well_plate.plate_format)
+        self.update_grid()
 
-    def update_grid(self, plate_format):
+    def update_grid(self):
         """Update the grid layout to match the selected plate format."""
         self.grid_layout.setSpacing(1)
         self.clear_grid()
 
-        rows, cols = self.model.well_plate._get_plate_dimensions(plate_format)
+        rows, cols = self.model.well_plate.get_plate_dimensions()
         self.well_labels = [[QLabel() for _ in range(cols)] for _ in range(rows)]
 
         for row in range(rows):
@@ -806,6 +809,10 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
             if stock_id == None:
                 print('No reagent selected')
+                stock_id = self.model.stock_solutions.get_stock_solution_names()[0]
+                stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
+                self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_formatted))
+                print(f'---Using default reagent: {stock_id}---')
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
             printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
             color = printer_head.get_color()
@@ -847,9 +854,16 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     def on_plate_selection_changed(self):
         """Handle plate selection changes."""
         plate_format = self.plate_selection.currentText()
-        self.update_grid(plate_format)
-        self.model.update_well_plate(plate_format)
-
+        if not self.model.reaction_collection.is_empty():
+            response = self.main_window.popup_message("Plate Selection", "Changing the plate format will clear the current experiment. Are you sure you want to continue?")
+            if response == "&No":
+                return
+            else:
+                self.model.clear_experiment()
+                self.model.reload_experiment(plate_name=plate_format)
+        else:
+            self.model.well_plate.set_plate_format(plate_format)
+    
     def on_load_experiment(self):
         """Load an experiment CSV file."""
         # Check if a printer head is picked up

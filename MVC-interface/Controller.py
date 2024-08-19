@@ -356,9 +356,7 @@ class Controller(QObject):
         # Reset acceleration and move to pause after the queue is processed
         def finalize_printing():
             self.machine.reset_acceleration()
-            print(f'Moving to pause location')
             self.move_to_location('pause')
-            print('-----Moved to pause location-----')
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
             self.array_complete.emit()
             print('---Printing complete---')

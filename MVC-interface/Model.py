@@ -6,6 +6,7 @@ import json
 import heapq
 import os
 import csv
+import cv2
 
 class StockSolution(QObject):
     '''
@@ -96,7 +97,7 @@ class StockSolutionManager(QObject):
         return self.stock_solutions.values()
 
     def get_stock_solution_names(self):
-        return self.stock_solutions.keys()
+        return list(self.stock_solutions.keys())
     
     def get_formatted_from_stock_id(self,stock_id):
         stock = self.get_stock_by_id(stock_id)
@@ -235,12 +236,17 @@ class Well(QObject):
         self.row_num = ord(self.row) - 65  # Row number (0-indexed, A=0, B=1)
         self.col = int(well_id[1:])  # Column of the well (e.g., 1, 2)
         self.assigned_reaction = None  # The reaction assigned to this well
+        self.coordinates = None  # The x, y, and z coordinates of the well on the plate
 
     def assign_reaction(self, reaction):
         """Assign a reaction to the well."""
         if not isinstance(reaction, ReactionComposition):
             raise ValueError("Must assign a ReactionComposition object.")
         self.assigned_reaction = reaction
+
+    def assign_coordinates(self, x, y,z):
+        """Assign coordinates to the well."""
+        self.coordinates = (x, y,z)
 
     def get_target_droplets(self,stock_id):
         return self.assigned_reaction.get_target_droplets_for_stock(stock_id)
@@ -262,48 +268,85 @@ class Well(QObject):
 class WellPlate(QObject):
     well_state_changed_signal = Signal(str)  # Signal to notify when the state of a well changes, sending the well ID
     clear_all_wells_signal = Signal()  # Signal to notify when all wells are cleared
-    def __init__(self, plate_format):
+    plate_format_changed_signal = Signal()  # Signal to notify when the well plate is updated
+
+    def __init__(self, all_plate_data):
         super().__init__()
-        self.plate_format = plate_format  # '96', '384', '1536'
+        self.all_plate_data = all_plate_data
+        self.current_plate_data = self.get_default_plate_data()
+        self.rows = self.current_plate_data['rows']
+        self.cols = self.current_plate_data['columns']
         self.wells = self.create_wells()
         self.excluded_wells = set()
-        self.rows, self.cols = self._get_plate_dimensions(self.plate_format)
+        self.calibrations = {}  # Dictionary to hold calibration data for the 4 corners of the plate
+        self.transform_matrix = None  # Matrix to hold the transformation matrix to apply calibration data
 
+    def get_default_plate_data(self):
+        """Get the data for the plate set to default"""
+        for plate_data in self.all_plate_data:
+            if plate_data['default']:
+                return plate_data
+
+    def get_all_plate_names(self):
+        return [plate_data['name'] for plate_data in self.all_plate_data]
+    
+    def get_current_plate_name(self):
+        return self.current_plate_data['name']
+    
     def create_wells(self):
         """Create wells based on the plate format."""
         wells = {}
-        if self.plate_format == '96':
-            rows = 'ABCDEFGH'
-            cols = range(1, 13)
-        elif self.plate_format == '384':
-            rows = [chr(i) for i in range(65, 81)]  # A-P
-            cols = range(1, 25)
-        elif self.plate_format == '1536':
-            rows = [chr(i) for i in range(65, 81)]  # A-P
-            cols = range(1, 49)
-        else:
-            raise ValueError("Invalid plate format")
-
-        for row in rows:
-            for col in cols:
-                well_id = f"{row}{col}"
+        for row in range(self.rows):
+            for col in range(self.cols):
+                well_id = f"{chr(row + 65)}{col + 1}"
                 well = Well(well_id)
                 well.state_changed.connect(self.well_state_changed)
                 wells[well_id] = well
-
+        self.plate_format_changed_signal.emit()
         return wells
+    
+    def set_plate_format(self, plate_name):
+        """Set the plate format based on the selected name."""
+        for plate_data in self.all_plate_data:
+            if plate_data['name'] == plate_name:
+                self.current_plate_data = plate_data
+                self.rows = plate_data['rows']
+                self.cols = plate_data['columns']
+                self.wells = self.create_wells()
+                self.plate_format_changed_signal.emit()
+                return
+        raise ValueError(f"Plate format '{plate_name}' not found.")
+    
+    def get_plate_dimensions(self):
+        return self.rows,self.cols
 
-    def _get_plate_dimensions(self, format):
-        """Return the dimensions (rows, cols) based on the plate format."""
-        if format == "96":
-            return 8, 12
-        elif format == "384":
-            return 16, 24
-        elif format == "1536":
-            return 32, 48
-        else:
-            raise ValueError("Unsupported plate format. Use '96', '384', or '1536'.")
+    def incorporate_calibration_data(self, calibration_data):
+        """Incorporate calibration data for the plate."""
+        self.calibrations = calibration_data
 
+    def calculate_plate_matrix(self):
+        """Calculate the transformation matrix for the plate."""
+        if len(self.calibrations) < 4:
+            raise ValueError("Not enough calibration data points to calculate the transformation matrix.")
+        # Define the corners of the plate in the machine coordinate system
+
+            
+
+    def generate_transformation_matrix(self):
+        '''
+        Performs a 4-point transformation of the coordinate plane using the
+        experimentally derived plate corners. This takes the machine coordinates
+        and finds the matrix required to convert them into the coordinate plane
+        that matches the defined geometry of the plate. This matrix can then be
+        reversed and used to take the positions where wells should be and
+        convert them into the corresponding dobot coordinates.
+
+        This transformation accounts for the deviations in the machine coordinate
+        system but only applies to the X and Y dimensions.
+        '''
+        self.transform_matrix = cv2.getPerspectiveTransform(self.corners, self.plate_dimensions)
+        self.inv_trans_matrix = np.linalg.pinv(self.transform_matrix)
+    
     def get_num_rows(self):
         """Get the number of rows in the plate."""
         return self.rows
@@ -1249,14 +1292,24 @@ class Model(QObject):
         self.rack_model = RackModel(self.num_slots)
         self.location_model = LocationModel()
         self.location_model.load_locations()  # Load locations at startup
-        self.well_plate = WellPlate("384")
+        self.all_plate_data = self.load_all_plate_data('.\\MVC-interface\\Presets\\Plates.json')
+        self.well_plate = WellPlate(self.all_plate_data)
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
 
+        self.experiment_file_path = None
+
+        self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
+
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
+        
+    def load_all_plate_data(self,file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+
 
     def update_state(self, status_dict):
         '''
@@ -1303,7 +1356,7 @@ class Model(QObject):
 
         return stock_solutions,reaction_collection
     
-    def load_experiment_from_file(self, file_path):
+    def load_experiment_from_file(self, file_path, plate_name=None):
         """Load an experiment from a CSV file. Remove any existing experiment data."""
         if not file_path.endswith('.csv'):
             raise ValueError("Invalid file format. Please load a CSV file.")
@@ -1311,14 +1364,23 @@ class Model(QObject):
             self.stock_solutions = StockSolutionManager()
             self.reaction_collection = ReactionCollection()
             self.well_plate.clear_all_wells()
+        if plate_name is not None:
+            self.well_plate.set_plate_format(plate_name)
         self.stock_solutions, self.reaction_collection = self.load_reactions_from_csv(file_path)
         print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
         self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
         self.assign_printer_heads()
         self.experiment_loaded.emit()
+        self.experiment_file_path = file_path
 
-    def update_well_plate(self,plate_format):
-        self.well_plate = WellPlate(plate_format)
+    def reload_experiment(self, plate_name=None):
+        """Reload the experiment from the last loaded file."""
+        if self.experiment_file_path is not None:
+            self.load_experiment_from_file(self.experiment_file_path,plate_name=plate_name)
+        else:
+            print("No experiment file path found. Please load an experiment file.")
+
+    def update_well_plate(self):
         if self.reaction_collection is not None:
             self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
             self.experiment_loaded.emit()
