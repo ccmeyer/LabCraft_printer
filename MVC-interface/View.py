@@ -1,8 +1,9 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,\
         QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,\
-        QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView
-from PySide6.QtGui import QShortcut, QKeySequence
+        QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
+from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush
 from PySide6.QtCore import Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -757,7 +758,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.plate_selection.setCurrentIndex(self.plate_selection.findText(current_plate_name))
         self.plate_selection.currentIndexChanged.connect(self.on_plate_selection_changed)
         self.top_layout.addWidget(self.plate_selection)
-
+        
+        # Create a calibration button
+        self.calibration_button = QPushButton("Calibrate Plate", self)
+        self.calibration_button.clicked.connect(self.open_calibration_dialog)
+        self.top_layout.addWidget(self.calibration_button)
+        
         self.bottom_layout = QHBoxLayout()
         self.experiment_button = QPushButton("Load Experiment")
         self.experiment_button.clicked.connect(self.on_load_experiment)
@@ -900,6 +906,387 @@ class WellPlateWidget(QtWidgets.QGroupBox):
 
         self.update_well_colors()  # Update with a default reagent on load
         print('Completed experiment load')
+
+    def open_calibration_dialog(self):
+        """
+        Function to open the well plate calibration dialog.
+        This function will be triggered when the calibration button is pressed.
+        """
+        # Create an instance of the CalibrationDialog
+        if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
+            self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
+            return
+        plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
+        
+        # Execute the dialog and check if the user completes the calibration
+        if plate_calibration_dialog.exec() == QDialog.Accepted:
+            print("Calibration completed successfully.")
+            self.model.well_plate.update_calibration_data()
+        else:
+            print("Calibration was canceled or failed.")
+            self.model.well_plate.discard_temp_calibrations()
+
+class SimplePositionWidget(QGroupBox):
+    home_requested = QtCore.Signal()  # Signal to request homing
+    toggle_motor_requested = QtCore.Signal()  # Signal to toggle motor state
+
+    def __init__(self, main_window, model, controller):
+        super().__init__('POSITIONS')
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+        self.model = model
+        self.controller = controller
+
+        self.init_ui()
+
+        # Connect the model's state_updated signal to the update_labels method
+        self.model.machine_state_updated.connect(self.update_labels)
+        self.model.machine_model.step_size_changed.connect(self.update_step_size)
+
+
+    def init_ui(self):
+        """Initialize the user interface."""
+        main_layout = QHBoxLayout()  # Main horizontal layout
+
+        # Create a grid layout for motor positions
+        grid_layout = QGridLayout()
+
+        # Add column headers
+        motor_label = QLabel('Motor')
+        current_label = QLabel('Current')
+        target_label = QLabel('Target')
+        motor_label.setAlignment(Qt.AlignCenter)
+        current_label.setAlignment(Qt.AlignCenter)
+        target_label.setAlignment(Qt.AlignCenter)
+
+        grid_layout.addWidget(motor_label, 0, 0)
+        grid_layout.addWidget(current_label, 0, 1)
+        grid_layout.addWidget(target_label, 0, 2)
+
+        # Labels to display motor positions
+        self.labels = {
+            'X': {'current': QLabel('0'), 'target': QLabel('0')},
+            'Y': {'current': QLabel('0'), 'target': QLabel('0')},
+            'Z': {'current': QLabel('0'), 'target': QLabel('0')},
+            'P': {'current': QLabel('0'), 'target': QLabel('0')}
+        }
+
+        row = 1
+        for motor, positions in self.labels.items():
+            motor_label = QLabel(motor)
+            motor_label.setAlignment(Qt.AlignCenter)
+            motor_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            grid_layout.addWidget(motor_label, row, 0)
+            grid_layout.addWidget(positions['current'], row, 1)
+            grid_layout.addWidget(positions['target'], row, 2)
+            positions['current'].setAlignment(Qt.AlignCenter)
+            positions['current'].setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            positions['target'].setAlignment(Qt.AlignCenter)
+            positions['target'].setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+            row += 1
+
+        # Create a vertical layout for buttons and spin box
+        button_layout = QVBoxLayout()
+
+        fixed_width = 100  # Desired fixed width for the buttons
+        fixed_height = 30  # Desired fixed height for the buttons
+
+        # Add Step Size label and spin box
+        self.step_size_label = QtWidgets.QLabel("Step Size:")
+        self.step_size_label.setFixedHeight(fixed_height)  # Set a fixed height
+        self.step_size_label.setFixedWidth(fixed_width)  # Set fixed width
+        button_layout.addWidget(self.step_size_label, alignment=Qt.AlignRight)
+        self.step_size_input = CustomSpinBox(self.model.machine_model.possible_steps)
+        self.step_size_input.setRange(min(self.model.machine_model.possible_steps), max(self.model.machine_model.possible_steps))
+        self.step_size_input.setValue(self.model.machine_model.step_size)
+        self.step_size_input.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.step_size_input.setFixedWidth(fixed_width)  # Set fixed width
+        self.step_size_input.setFixedHeight(fixed_height)  # Set a fixed height
+        self.step_size_input.valueChangedByStep.connect(self.change_step_size)
+        button_layout.addWidget(self.step_size_input, alignment=Qt.AlignRight)
+
+        # Add grid layout and button layout to the main horizontal layout
+        main_layout.addLayout(grid_layout)
+        main_layout.addLayout(button_layout)
+
+        self.setLayout(main_layout)
+
+    def update_labels(self):
+        """Update the labels with the current motor positions."""
+        self.labels['X']['current'].setText(str(self.model.machine_model.current_x))
+        self.labels['X']['target'].setText(str(self.model.machine_model.target_x))
+        self.labels['Y']['current'].setText(str(self.model.machine_model.current_y))
+        self.labels['Y']['target'].setText(str(self.model.machine_model.target_y))
+        self.labels['Z']['current'].setText(str(self.model.machine_model.current_z))
+        self.labels['Z']['target'].setText(str(self.model.machine_model.target_z))
+        self.labels['P']['current'].setText(str(self.model.machine_model.current_p))
+        self.labels['P']['target'].setText(str(self.model.machine_model.target_p))
+
+    def update_step_size(self, new_step_size):
+        """Update the spin box with the new step size."""
+        self.step_size_input.setValue(new_step_size)
+
+    def change_step_size(self, steps):
+        """Update the model's step size when the spin box value changes."""
+        new_step_size = int(self.step_size_input.value())
+        self.model.machine_model.set_step_size(new_step_size)
+
+class PlateCalibrationDialog(QDialog):
+    def __init__(self, main_window,model,controller):
+        super().__init__()
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+        self.model = model
+        self.controller = controller
+        self.shortcut_manager = ShortcutManager(self)
+        self.setup_shortcuts()
+        self.initial_calibrations = self.model.well_plate.get_all_current_plate_calibrations()
+
+        self.setWindowTitle("Well Plate Calibration")
+        self.setFixedSize(1200, 600)  # Updated size
+        
+        # List of calibration steps
+        self.steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+        self.corner_dict = {
+            "Top-Left": "top_left",
+            "Top-Right": "top_right",
+            "Bottom-Right": "bottom_right",
+            "Bottom-Left": "bottom_left"
+        }
+        self.current_step = 0
+        
+        # Layouts
+        self.main_layout = QHBoxLayout(self)
+        self.left_layout = QVBoxLayout()
+        
+        self.coordinates_box = SimplePositionWidget(self.main_window,self.model, self.controller)
+        self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.left_layout.addWidget(self.coordinates_box)
+
+        self.mid_layout = QVBoxLayout()
+        self.right_layout = QVBoxLayout()
+        self.shortcut_box = ShortcutTableWidget(self,self.shortcut_manager)
+        self.shortcut_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        self.right_layout.addWidget(self.shortcut_box)
+
+        self.bottom_layout = QHBoxLayout()
+        self.steps_layout = QVBoxLayout()
+        self.instructions_label = QLabel("Move to the top-left well and confirm the position.", self)
+        self.next_button = QPushButton("Confirm Position", self)
+        self.next_button.clicked.connect(self.next_step)
+        self.back_button = QPushButton("Back", self)
+        self.back_button.clicked.connect(self.previous_step)
+        self.back_button.setEnabled(False)  # Initially disable the back button
+        self.submit_button = QPushButton("Submit", self)
+        self.submit_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        self.submit_button.clicked.connect(self.submit_calibration)
+        self.submit_button.setEnabled(False)
+
+        # Create step indicators
+        self.step_labels = []
+        for step in self.steps:
+            label = QLabel(step, self)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("padding: 5px; border: 1px solid black;")
+            self.steps_layout.addWidget(label)
+            self.step_labels.append(label)
+        
+        self.bottom_layout.addLayout(self.steps_layout)
+
+        # Vertical layout for buttons
+        self.button_layout = QVBoxLayout()
+        self.button_layout.addWidget(self.next_button)
+        self.button_layout.addWidget(self.back_button)
+        self.button_layout.addWidget(self.submit_button)
+        self.bottom_layout.addLayout(self.button_layout)
+
+        # Visual Aid (Graphics View for well plate illustration)
+        self.visual_aid_view = QGraphicsView(self)
+        self.visual_aid_scene = QGraphicsScene(self)
+        self.visual_aid_view.setScene(self.visual_aid_scene)
+        self.update_visual_aid()  # Update the visual aid for the initial step
+
+        # Add widgets to the main layout
+        self.mid_layout.addWidget(self.instructions_label)
+        self.mid_layout.addWidget(self.visual_aid_view)  # Add the visual aid to the main layout
+        self.mid_layout.addLayout(self.bottom_layout)
+
+        self.main_layout.addLayout(self.left_layout)
+        self.main_layout.addLayout(self.mid_layout)
+        self.main_layout.addLayout(self.right_layout)
+        
+        # Update the UI to reflect the initial state
+        self.update_step_labels()
+
+        self.move_to_initial_position()
+
+    def setup_shortcuts(self):
+        """Set up keyboard shortcuts using the shortcut manager."""
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0,manual=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0,manual=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size,0 , 0,manual=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size,0, 0,manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+    
+    def update_step_labels(self):
+        for i, label in enumerate(self.step_labels):
+            if i < self.current_step:
+                label.setStyleSheet("background-color: blue; color: white; padding: 5px; border: 1px solid black;")
+            elif i == self.current_step:
+                label.setStyleSheet("background-color: red; color: white; padding: 5px; border: 1px solid black;")
+            else:
+                label.setStyleSheet("background-color: lightgrey; color: black; padding: 5px; border: 1px solid black;")
+    
+    def update_visual_aid(self):
+        """Update the visual aid based on the current step."""
+        # Clear the scene
+        self.visual_aid_scene.clear()
+
+        # Draw the outline of the well plate
+        height = 250
+        width = 400
+        padding = 50
+        offset_x = 100
+        offset_y = 50
+        well_plate_outline = QGraphicsRectItem(offset_x, offset_y, width, height)
+        well_plate_outline.setPen(QPen(Qt.darkGray, 2))
+        self.visual_aid_scene.addItem(well_plate_outline)
+
+        # Define the positions of the wells on the well plate
+        # Adjusted to center the wells based on their radius
+        well_radius = 15  # Radius of the well (half of the diameter)
+        well_position = {
+            "Top-Left": (offset_x + padding - well_radius, offset_y + padding - well_radius),
+            "Top-Right": (offset_x + width - padding - well_radius, offset_y + padding - well_radius),
+            "Bottom-Right": (offset_x + width - padding - well_radius, offset_y + height - padding - well_radius),
+            "Bottom-Left": (offset_x + padding - well_radius, offset_y + height - padding - well_radius)
+        }
+
+        # Draw all four wells as circles
+        for i, step in enumerate(self.steps):
+            pos = well_position[step]
+            if i < self.current_step:
+                pen = QPen(QColor("blue"), 1)
+                brush = QBrush(Qt.NoBrush)
+            elif i == self.current_step:
+                pen = QPen(QColor("red"), 3)
+                brush = QBrush(Qt.NoBrush)
+            else:
+                pen = QPen(QColor("lightgrey"), 1)
+                brush = QBrush(Qt.NoBrush)
+
+            self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
+
+    def convert_dict_coords(self,coords):
+        return coords['X'],coords['Y'],coords['Z']
+    
+    def calculate_average_offset(self):
+        """Calculate the average offset based on saved temporary calibration positions."""
+        offsets = {'X': 0, 'Y': 0, 'Z': 0}
+        count = 0
+
+        for step in self.steps:
+            converted_step_name = self.corner_dict[step]
+            initial_coords = self.model.well_plate.get_calibration_by_name(converted_step_name)
+            temp_coords = self.model.well_plate.get_temp_calibration_by_name(converted_step_name)
+
+            if temp_coords and initial_coords:
+                for axis in offsets.keys():
+                    offsets[axis] += temp_coords[axis] - initial_coords[axis]
+                count += 1
+
+        if count > 0:
+            for axis in offsets.keys():
+                offsets[axis] /= count
+
+        return offsets
+    
+    def move_to_initial_position(self):
+        """Move the machine to the initial calibration position for the current step, if available."""
+        step_name = self.steps[self.current_step]
+        converted_step_name = self.corner_dict[step_name]
+        starting_coordinates = self.model.well_plate.get_calibration_by_name(converted_step_name)
+        temp_coordinates = self.model.well_plate.get_temp_calibration_by_name(converted_step_name)
+
+        if temp_coordinates:
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(temp_coordinates))
+            print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
+        elif starting_coordinates:
+            # Calculate the average offset based on the saved temporary positions
+            avg_offset = self.calculate_average_offset()
+            adjusted_coordinates = {
+                axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
+            }
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(adjusted_coordinates))
+            print(f"Offset: {avg_offset}")
+            print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
+        else:
+            print(f"No initial calibration data for {step_name}.")
+    
+    def next_step(self):
+        if self.current_step < len(self.steps):
+            # Save the current position as the calibration for this step
+            current_position = self.model.machine_model.get_current_position_dict_capital()
+            step_name = self.steps[self.current_step]
+            converted_step_name = self.corner_dict[step_name]
+            self.model.well_plate.set_calibration_position(converted_step_name, current_position)
+
+            print(f"Calibrating {self.steps[self.current_step]} position...")
+
+            # Move to the next step
+            self.current_step += 1
+
+            # Update instructions and step labels
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} well and confirm the position.")
+                self.move_to_initial_position()
+            else:
+                self.instructions_label.setText("Calibration complete.")
+                self.next_button.setEnabled(False)  # Disable the button when done
+                self.submit_button.setEnabled(True)
+                self.submit_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+            self.back_button.setEnabled(True)  # Enable the back button when not at the first step
+            
+            self.update_step_labels()
+            self.update_visual_aid()  # Update the visual aid
+
+    def previous_step(self):
+        if self.current_step > 0:
+            self.current_step -= 1
+
+            # Update instructions and step labels
+            self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} well and confirm the position.")
+            self.move_to_initial_position()
+            self.next_button.setEnabled(True)  # Enable the next button if we're going back
+            if self.current_step == 0:
+                self.back_button.setEnabled(False)  # Disable the back button when at the first step
+            
+            self.update_step_labels()
+            self.update_visual_aid()  # Update the visual aid
+
+    def submit_calibration(self):
+        """Submit the calibration data and close the dialog."""
+        print("Submitting calibration data...")
+        self.accept()
+
+    def closeEvent(self, event):
+        """Handle the window close event."""
+        reply = QMessageBox.question(
+            self,
+            "Incomplete Calibration",
+            "The calibration process is not complete. Are you sure you want to exit? All unsaved calibration data will be lost.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.model.well_plate.discard_temp_calibrations()  # Discard temporary data
+            event.accept()  # Close the dialog
+        else:
+            event.ignore()  # Keep the dialog open
 
 
 class MovementBox(QtWidgets.QGroupBox):

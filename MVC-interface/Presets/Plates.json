@@ -1,5 +1,89 @@
 [
-    {"name": "50well-5x10", "rows": 5, "columns": 10, "spacing": 10, "default": false, "calibrations": {}},
-    {"name": "96well-8x12", "rows": 8, "columns": 12, "spacing": 10, "default": false, "calibrations": {"top_left": {"X": -5265, "Y": 2901, "Z": -30060}, "top_right": {"X": -5255, "Y": 7041, "Z": -30050}, "bottom_right": {"X": -2565, "Y": 7051, "Z": -30150}, "bottom_left": {"X": -2575, "Y": 2911, "Z": -30100}}},
-    {"name": "shallow-384_well_plate", "rows": 16, "columns": 24, "spacing": 10, "default": true, "calibrations": {"top_left": {"X": -5265, "Y": 2901, "Z": -30060}, "top_right": {"X": -5255, "Y": 7041, "Z": -30050}, "bottom_right": {"X": -2565, "Y": 7051, "Z": -30150}, "bottom_left": {"X": -2575, "Y": 2911, "Z": -30100}}}
+    {
+        "name": "50well-5x10",
+        "rows": 5,
+        "columns": 10,
+        "spacing": 10,
+        "default": false,
+        "calibrations": {
+            "top_left": {
+                "X": -3805,
+                "Y": 2811,
+                "Z": -12210
+            },
+            "top_right": {
+                "X": -3805,
+                "Y": 6811,
+                "Z": -12210
+            },
+            "bottom_right": {
+                "X": -7805,
+                "Y": 6811,
+                "Z": -12210
+            },
+            "bottom_left": {
+                "X": -7805,
+                "Y": 2811,
+                "Z": -12210
+            }
+        }
+    },
+    {
+        "name": "96well-8x12",
+        "rows": 8,
+        "columns": 12,
+        "spacing": 10,
+        "default": false,
+        "calibrations": {
+            "top_left": {
+                "X": -5265,
+                "Y": 2911,
+                "Z": -30060
+            },
+            "top_right": {
+                "X": -5255,
+                "Y": 7041,
+                "Z": -30050
+            },
+            "bottom_right": {
+                "X": -2565,
+                "Y": 7051,
+                "Z": -30150
+            },
+            "bottom_left": {
+                "X": -2575,
+                "Y": 2911,
+                "Z": -30100
+            }
+        }
+    },
+    {
+        "name": "shallow-384_well_plate",
+        "rows": 16,
+        "columns": 24,
+        "spacing": 10,
+        "default": true,
+        "calibrations": {
+            "top_left": {
+                "X": -5265,
+                "Y": 2911,
+                "Z": -30060
+            },
+            "top_right": {
+                "X": -5255,
+                "Y": 7041,
+                "Z": -30050
+            },
+            "bottom_right": {
+                "X": -2565,
+                "Y": 7051,
+                "Z": -30150
+            },
+            "bottom_left": {
+                "X": -2575,
+                "Y": 2911,
+                "Z": -30100
+            }
+        }
+    }
 ]

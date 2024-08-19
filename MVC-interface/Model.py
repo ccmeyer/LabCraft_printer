@@ -283,12 +283,68 @@ class WellPlate(QObject):
         self.cols = self.current_plate_data['columns']
         self.wells = self.create_wells()
         self.excluded_wells = set()
+
         self.calibration_applied = False
+        self.temp_calibration_data = {}
     
         self.apply_calibration_data()
 
     def check_calibration_applied(self):
         return self.calibration_applied
+    
+    def get_current_plate_name(self):
+        return self.current_plate_data['name']
+    
+    def get_all_current_plate_calibrations(self):
+        return self.calibrations
+    
+    def get_calibration_by_name(self, name):
+        return self.calibrations.get(name, None)
+    
+    def get_temp_calibration_by_name(self, name):
+        return self.temp_calibration_data.get(name, None)
+    
+    def set_calibration_position(self, position_name, coordinates):
+        """Set a temporary calibration position."""
+        self.temp_calibration_data[position_name] = coordinates
+    
+    def update_calibration_data(self):
+        """Run the full update of all calibration data."""
+        self.store_calibrations()
+        self.save_calibrations_to_file()
+        self.apply_calibration_data()
+
+    def get_plate_data_by_name(self, plate_name):
+        for plate_data in self.all_plate_data:
+            if plate_data['name'] == plate_name:
+                return plate_data
+        raise ValueError(f"Plate format '{plate_name}' not found.")        
+
+    def store_calibrations(self):
+        """Save the temporary calibration data to the main calibration data."""
+        plate_name = self.get_current_plate_name()
+        for plate_data in self.all_plate_data:
+            print(plate_data['name'])
+            if plate_data['name'] == plate_name:
+                plate_data['calibrations'] = self.temp_calibration_data.copy()
+                self.calibrations = self.temp_calibration_data.copy()
+                # Clear the temporary data after saving
+                self.temp_calibration_data.clear()
+                return
+        raise ValueError(f"Plate format '{plate_name}' not found.")
+
+    def save_calibrations_to_file(self, file_path='.\\MVC-interface\\Presets\\Plates.json'):
+        """Save the current calibration data to a JSON file."""
+        try:
+            with open(file_path, 'w') as file:
+                json.dump(self.all_plate_data, file, indent=4)
+            print(f"Calibration data saved to {file_path}")
+        except Exception as e:
+            print(f"Error saving calibration data to file: {e}")
+
+    def discard_temp_calibrations(self):
+        """Discard the temporary calibration data."""
+        self.temp_calibration_data.clear()
 
     def get_default_plate_data(self):
         """Get the data for the plate set to default"""
@@ -337,8 +393,6 @@ class WellPlate(QObject):
     
     def calculate_plate_matrix(self):
         """Calculate the transformation matrix for the plate."""
-        # if len(self.calibrations) < 4:
-        #     raise ValueError("Not enough calibration data points to calculate the transformation matrix.")
         print(f'Calculating plate matrix - {self.calibrations}')
         self.corners = np.array([
             [self.get_coords(self.calibrations['top_left'])[0:2]],
@@ -1368,6 +1422,9 @@ class MachineModel(QObject):
 
     def get_current_position_dict(self):
         return {"x": self.current_x, "y": self.current_y, "z": self.current_z}
+
+    def get_current_position_dict_capital(self):
+        return {"X": self.current_x, "Y": self.current_y, "Z": self.current_z}
 
     def handle_home_complete(self):
         self.motors_homed = True

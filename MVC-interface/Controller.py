@@ -379,14 +379,16 @@ class Controller(QObject):
         Iterates through all wells with an assigned reaction and prints the 
         required number of droplets for the currently loaded printer head.
         '''
-        if self.model.rack_model.get_gripper_info() == None:
-            self.main_window.popup_message('Error','No printer head is loaded')
-            print('Cannot print: No printer head is loaded')
-            return
         if not self.model.well_plate.check_calibration_applied():
-            self.main_window.popup_message('Error','Calibration has not been applied to this plate')
+            self.error_occurred_signal.emit('Error','Calibration has not been applied to this plate')
             print('Cannot print: Calibration has not been applied')
             return
+        
+        if self.model.rack_model.get_gripper_info() == None:
+            self.error_occurred_signal.emit('Error','No printer head is loaded')
+            print('Cannot print: No printer head is loaded')
+            return
+        
         self.close_gripper()
         self.wait_command()
 
@@ -395,7 +397,6 @@ class Controller(QObject):
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')
-        starting_coords = self.expected_position
         reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
         
         for i,well in enumerate(reaction_wells):
