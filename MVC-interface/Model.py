@@ -1030,6 +1030,7 @@ class MachineModel(QObject):
     connection_requested = Signal(str, str)  # Signal to request connection
     gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
     machine_paused = Signal()  # Signal to notify when machine is paused
+    home_status_signal = Signal()
 
     def __init__(self):
         super().__init__()
@@ -1090,6 +1091,8 @@ class MachineModel(QObject):
         self.motor_state_changed.emit(self.motors_enabled)
         self.regulating_pressure = False
         self.regulation_state_changed.emit(self.regulating_pressure)
+        self.reset_home_status()
+        self.home_status_signal.emit()
     
     def is_connected(self):
         return self.machine_connected
@@ -1221,8 +1224,12 @@ class MachineModel(QObject):
     def handle_home_complete(self):
         self.motors_homed = True
         self.current_location = "Home"
-        
+        self.home_status_signal.emit()
         print("Motors homed.")
+
+    def reset_home_status(self):
+        self.motors_homed = False
+        self.current_location = "Unknown"
 
     def update_current_location(self, location):
         self.current_location = location

@@ -1323,7 +1323,8 @@ class BoardStatusBox(QGroupBox):
         # Connect model signals to the update methods
         self.model.machine_state_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
-
+        self.model.machine_model.home_status_signal.connect(self.update_status)
+    
     def init_ui(self):
         """Initialize the user interface."""
         self.layout = QtWidgets.QGridLayout(self)
