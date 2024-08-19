@@ -380,7 +380,12 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         if self.model.rack_model.get_gripper_info() == None:
+            self.main_window.popup_message('Error','No printer head is loaded')
             print('Cannot print: No printer head is loaded')
+            return
+        if not self.model.well_plate.check_calibration_applied():
+            self.main_window.popup_message('Error','Calibration has not been applied to this plate')
+            print('Cannot print: Calibration has not been applied')
             return
         self.close_gripper()
         self.wait_command()
@@ -398,12 +403,8 @@ class Controller(QObject):
             if target_droplets == 0:
                 print(f'No droplets required for well {well.well_id}')
                 continue
-            row = well.row_num
-            col = well.col
-            well_coords = starting_coords.copy()
-            well_coords['x'] += col * 300
-            well_coords['y'] += row * 300
-            self.set_absolute_coordinates(well_coords['x'],well_coords['y'],well_coords['z'])
+            well_coords = well.get_coordinates()
+            self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'])
             print(f'Printing {target_droplets} droplets to well {well.well_id}')
             is_last_iteration = i == len(reaction_wells) - 1
             if not is_last_iteration:

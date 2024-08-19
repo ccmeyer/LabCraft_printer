@@ -853,10 +853,20 @@ class WellPlateWidget(QtWidgets.QGroupBox):
 
     def on_plate_selection_changed(self):
         """Handle plate selection changes."""
+        previous_plate_format = self.model.well_plate.get_current_plate_name()
         plate_format = self.plate_selection.currentText()
+        if self.model.rack_model.gripper_printer_head is not None:
+            self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before changing out plates.")
+            self.plate_selection.blockSignals(True)  # Block signals temporarily
+            self.plate_selection.setCurrentIndex(self.plate_selection.findText(previous_plate_format))
+            self.plate_selection.blockSignals(False)  # Unblock signals
+            return
         if not self.model.reaction_collection.is_empty():
-            response = self.main_window.popup_message("Plate Selection", "Changing the plate format will clear the current experiment. Are you sure you want to continue?")
+            response = self.main_window.popup_yes_no("Plate Selection", "Changing the plate format will clear the current experiment. Are you sure you want to continue?")
             if response == "&No":
+                self.plate_selection.blockSignals(True)  # Block signals temporarily
+                self.plate_selection.setCurrentIndex(self.plate_selection.findText(previous_plate_format))
+                self.plate_selection.blockSignals(False)  # Unblock signals
                 return
             else:
                 self.model.clear_experiment()

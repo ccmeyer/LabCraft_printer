@@ -246,7 +246,11 @@ class Well(QObject):
 
     def assign_coordinates(self, x, y,z):
         """Assign coordinates to the well."""
-        self.coordinates = (x, y,z)
+        self.coordinates = {'X':x, 'Y':y, 'Z':z}
+
+    def get_coordinates(self):
+        """Get the coordinates of the well."""
+        return self.coordinates
 
     def get_target_droplets(self,stock_id):
         return self.assigned_reaction.get_target_droplets_for_stock(stock_id)
@@ -274,12 +278,17 @@ class WellPlate(QObject):
         super().__init__()
         self.all_plate_data = all_plate_data
         self.current_plate_data = self.get_default_plate_data()
+        self.calibrations = self.current_plate_data['calibrations']
         self.rows = self.current_plate_data['rows']
         self.cols = self.current_plate_data['columns']
         self.wells = self.create_wells()
         self.excluded_wells = set()
-        self.calibrations = {}  # Dictionary to hold calibration data for the 4 corners of the plate
-        self.transform_matrix = None  # Matrix to hold the transformation matrix to apply calibration data
+        self.calibration_applied = False
+    
+        self.apply_calibration_data()
+
+    def check_calibration_applied(self):
+        return self.calibration_applied
 
     def get_default_plate_data(self):
         """Get the data for the plate set to default"""
@@ -313,24 +322,50 @@ class WellPlate(QObject):
                 self.rows = plate_data['rows']
                 self.cols = plate_data['columns']
                 self.wells = self.create_wells()
+                self.calibrations = plate_data['calibrations']
+                self.calibration_applied = False
+                self.apply_calibration_data()
                 self.plate_format_changed_signal.emit()
                 return
         raise ValueError(f"Plate format '{plate_name}' not found.")
     
     def get_plate_dimensions(self):
         return self.rows,self.cols
-
-    def incorporate_calibration_data(self, calibration_data):
-        """Incorporate calibration data for the plate."""
-        self.calibrations = calibration_data
-
+    
+    def get_coords(self,coords):
+        return np.array(list(coords.values()))
+    
     def calculate_plate_matrix(self):
         """Calculate the transformation matrix for the plate."""
-        if len(self.calibrations) < 4:
-            raise ValueError("Not enough calibration data points to calculate the transformation matrix.")
-        # Define the corners of the plate in the machine coordinate system
+        # if len(self.calibrations) < 4:
+        #     raise ValueError("Not enough calibration data points to calculate the transformation matrix.")
+        print(f'Calculating plate matrix - {self.calibrations}')
+        self.corners = np.array([
+            [self.get_coords(self.calibrations['top_left'])[0:2]],
+            [self.get_coords(self.calibrations['top_right'])[0:2]],
+            [self.get_coords(self.calibrations['bottom_right'])[0:2]],
+            [self.get_coords(self.calibrations['bottom_left'])[0:2]]
+        ], dtype = "float32")
 
-            
+        self.max_columns = self.cols - 1
+        self.max_rows = self.rows - 1
+        self.plate_width = self.max_columns * self.current_plate_data['spacing']
+        self.plate_depth = self.max_rows * self.current_plate_data['spacing']
+
+        self.plate_dimensions = np.array([
+            [0, 0],
+            [0, self.plate_width],
+            [self.plate_width, self.plate_depth],
+            [self.plate_depth, 0]
+        ], dtype = "float32")
+
+        self.generate_transformation_matrix()
+
+        self.row_z_step = (self.calibrations['bottom_left']['Z'] - self.calibrations['top_left']['Z']) / (self.rows)
+        self.col_z_step =  (self.calibrations['top_right']['Z'] - self.calibrations['top_left']['Z']) / (self.cols)
+
+        well_coords_df = self.calculate_all_well_positions()
+        return well_coords_df
 
     def generate_transformation_matrix(self):
         '''
@@ -344,9 +379,80 @@ class WellPlate(QObject):
         This transformation accounts for the deviations in the machine coordinate
         system but only applies to the X and Y dimensions.
         '''
-        self.transform_matrix = cv2.getPerspectiveTransform(self.corners, self.plate_dimensions)
-        self.inv_trans_matrix = np.linalg.pinv(self.transform_matrix)
+        self.trans_matrix = cv2.getPerspectiveTransform(self.corners, self.plate_dimensions)
+        self.inv_trans_matrix = np.linalg.pinv(self.trans_matrix)
     
+    def correct_xy_coords(self,x,y):
+        '''
+        Uses the transformation matrix to correct the XY coordinates
+        '''
+        target = np.array([[x,y]], dtype = "float32")
+        target_transformed = cv2.perspectiveTransform(np.array(target[None,:,:]), self.inv_trans_matrix)
+        return target_transformed[0][0]
+
+    def get_well_coords(self,row,column):
+        '''
+        Uses the well indices to determine the dobot coordinates of the well
+        '''
+        x,y = self.correct_xy_coords(row*self.current_plate_data['spacing'],column*self.current_plate_data['spacing'])
+        z = self.calibrations['top_left']['Z'] + (row * self.row_z_step) + (column * self.col_z_step)
+        x = int(round(x,0))
+        y = int(round(y,0))
+        z = int(round(z,0))
+        return {'X':x, 'Y':y, 'Z':z}
+    
+    def calculate_all_well_positions(self):
+        # Create an empty list for the well positions
+        well_positions = []
+
+        # Iterate over all the rows and columns of the plate
+        for row in range(self.rows):
+            for column in range(self.cols):
+                # Calculate the corrected coordinates for the well
+                coords = self.get_well_coords(row, column)
+
+                # Add the well position to the list
+                well_positions.append({
+                    'row': row,
+                    'column': column,
+                    'X': coords['X'],
+                    'Y': coords['Y'],
+                    'Z': coords['Z']
+                })
+
+        # Create a DataFrame from the list
+        well_positions_df = pd.DataFrame(well_positions)
+        return well_positions_df
+    
+    def assign_well_coordinates(self, well_id, x, y,z):
+        """Assign coordinates to a specific well."""
+        well = self.wells.get(well_id)
+        if well is not None:
+            well.assign_coordinates(x,y,z)
+        else:
+            raise ValueError(f"Well '{well_id}' does not exist in the plate.")
+
+    def assign_well_coordinates_by_row_col(self, row, col, x, y,z):
+        """Assign coordinates to a well by its row and column."""
+        well_id = f"{chr(row + 65)}{col + 1}"
+        self.assign_well_coordinates(well_id, x, y,z)
+
+    def assign_all_well_coordinates(self, well_coords_df):
+        """Assign coordinates to all wells in the plate."""
+        for i,row in well_coords_df.iterrows():
+            well_id = f"{chr(row['row'] + 65)}{row['column'] + 1}"
+            self.assign_well_coordinates(well_id, row['X'], row['Y'],row['Z'])
+
+    def apply_calibration_data(self):
+        if len(list(self.calibrations)) < 4:
+            self.calibration_applied = False
+            print(f"Calibration is incomplete. Need at least 4 calibration points, but only {len(list(self.calibrations))} provided.")
+            return
+        else:
+            well_coords_df = self.calculate_plate_matrix()
+            self.assign_all_well_coordinates(well_coords_df)
+            self.calibration_applied = True
+
     def get_num_rows(self):
         """Get the number of rows in the plate."""
         return self.rows
