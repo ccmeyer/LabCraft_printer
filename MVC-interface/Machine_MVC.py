@@ -745,6 +745,11 @@ class Machine(QObject):
                 self.sent_command = command
                 self.command_sent.emit({"command": command.get_command()})
                 return True
+            else:
+                self.board.write(command.get_command().encode('utf-8'))
+                self.board.flush()
+                self.command_sent.emit({"command": command.get_command()})
+                return True
         else:
             print('No board connected')
         return False
