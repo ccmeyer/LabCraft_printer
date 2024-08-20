@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox, 
     QPushButton, QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, 
-    QAbstractItemView, QMessageBox, QMainWindow, QFileDialog, QApplication
+    QAbstractItemView, QMessageBox, QMainWindow, QFileDialog, QApplication,
+    QSplitter
 )
 from PySide6.QtCore import Qt
 import numpy as np
@@ -101,9 +102,10 @@ class ExperimentDesignDialog(QDialog):
         self.main_window = main_window
         self.model = model
         self.setWindowTitle("Experiment Design")
-        self.setFixedSize(1300, 400)
+        self.setFixedSize(1500, 600)
 
-        self.layout = QVBoxLayout(self)
+        # Main layout with a splitter to separate reagent table and stock solutions table
+        self.layout = QHBoxLayout(self)
         
         # Table to hold all reagent information
         self.reagent_table = QTableWidget(0, 10, self)
@@ -113,11 +115,23 @@ class ExperimentDesignDialog(QDialog):
             "Concentrations Preview", "Stock Solutions", "Delete"
         ])
         self.reagent_table.setColumnWidth(7, 200)
-        self.reagent_table.setColumnWidth(8, 200)
+        self.reagent_table.setColumnWidth(8, 100)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.layout.addWidget(self.reagent_table)
 
+        # Stock solutions table
+        self.stock_table = QTableWidget(0, 3, self)
+        self.stock_table.setHorizontalHeaderLabels([
+            "Reagent Name", "Concentration", "Total Droplets"
+        ])
+        self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stock_table.setFixedWidth(300)
+
+        self.left_layout = QVBoxLayout()
+        self.left_layout.addWidget(self.reagent_table)
         self.bottom_layout = QHBoxLayout()
+
+        self.right_layout = QVBoxLayout()
+        self.right_layout.addWidget(self.stock_table)
 
         # Label and spin box for total reactions and replicates
         self.info_layout = QVBoxLayout()
@@ -144,8 +158,8 @@ class ExperimentDesignDialog(QDialog):
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
         self.info_layout.addWidget(self.total_droplets_used_label)
         
-        self.button_layout = QVBoxLayout()
         # Button to add a new reagent
+        self.button_layout = QVBoxLayout()
         self.add_reagent_button = QPushButton("Add Reagent")
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
@@ -162,7 +176,10 @@ class ExperimentDesignDialog(QDialog):
 
         self.bottom_layout.addLayout(self.info_layout)
         self.bottom_layout.addLayout(self.button_layout)
-        self.layout.addLayout(self.bottom_layout)
+        self.left_layout.addLayout(self.bottom_layout)
+
+        self.layout.addLayout(self.left_layout)
+        self.layout.addLayout(self.right_layout)        
 
         self.populate_table_from_model()
 
@@ -239,6 +256,7 @@ class ExperimentDesignDialog(QDialog):
 
         self.reagent_table.removeRow(row)
         self.update_total_reactions()
+        self.update_stock_table()
 
     def populate_table_from_model(self):
         """Populate the reagent table based on the data in the model."""
@@ -296,7 +314,11 @@ class ExperimentDesignDialog(QDialog):
 
             # Calculate the maximum number of droplets used for this reagent
             if achievable_concentrations:
-                max_droplets_for_reagent = max([len(achievable_concentrations[tc]) for tc in concentrations])
+                droplet_counts = [len(achievable_concentrations[tc]) for tc in concentrations if tc in achievable_concentrations]
+                if droplet_counts:
+                    max_droplets_for_reagent = max(droplet_counts)
+                else:
+                    max_droplets_for_reagent = 0  # Set a default value if the list is empty
                 total_droplets_used += max_droplets_for_reagent
 
         self.total_droplets_used_label.setText(f"Total Droplets Used: {total_droplets_used}")
@@ -304,6 +326,7 @@ class ExperimentDesignDialog(QDialog):
             self.total_droplets_used_label.setStyleSheet("color: red;")
         else:
             self.total_droplets_used_label.setStyleSheet("color: white;")
+        
         self.update_total_reactions()  # Update total reactions whenever the preview changes
 
     def optimize_stock_solutions(self):
@@ -358,6 +381,40 @@ class ExperimentDesignDialog(QDialog):
         self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
         self.model.metadata["max_droplets"] = self.total_droplets_spinbox.value()
         self.model.metadata["replicates"] = self.replicate_spinbox.value()
+        self.update_stock_table()
+
+    def update_stock_table(self):
+        """Update the stock solutions table based on the current experiment setup."""
+        stock_data = {}
+
+        # Calculate the total droplets for each stock solution
+        for row in range(self.reagent_table.rowCount()):
+            reagent_name = self.reagent_table.item(row, 0).text()
+            stock_solutions = self.reagent_table.item(row, 8).text().split(", ")
+            concentrations = self.reagent_table.item(row, 7).text().split(", ")
+            max_droplets = self.reagent_table.cellWidget(row, 6).value()
+
+            for stock in stock_solutions:
+                try:
+                    stock = float(stock)
+                    if stock == 0:
+                        continue  # Skip if stock is zero to prevent division by zero
+                    total_droplets_for_stock = sum(int(float(c) / stock) for c in concentrations if float(c) % stock == 0)
+                    if (reagent_name, stock) not in stock_data:
+                        stock_data[(reagent_name, stock)] = 0
+                    stock_data[(reagent_name, stock)] += total_droplets_for_stock
+                except ValueError:
+                    continue  # Skip invalid stock values
+
+        # Populate the stock table
+        self.stock_table.setRowCount(0)  # Clear existing rows
+        for (reagent_name, stock), total_droplets in stock_data.items():
+            row_position = self.stock_table.rowCount()
+            self.stock_table.insertRow(row_position)
+            self.stock_table.setItem(row_position, 0, QTableWidgetItem(reagent_name))
+            self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock)))
+            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(total_droplets)))
+
 
     def generate_experiment(self):
         """Generate the experiment based on the table data."""
