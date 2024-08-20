@@ -101,15 +101,16 @@ class ExperimentDesignDialog(QDialog):
         self.main_window = main_window
         self.model = model
         self.setWindowTitle("Experiment Design")
-        self.setFixedSize(1200, 450)
+        self.setFixedSize(1300, 400)
 
         self.layout = QVBoxLayout(self)
         
         # Table to hold all reagent information
-        self.reagent_table = QTableWidget(0, 9, self)
+        self.reagent_table = QTableWidget(0, 10, self)
         self.reagent_table.setHorizontalHeaderLabels([
             "Reagent Name", "Min Conc", "Max Conc", "Steps", 
-            "Mode", "Manual Input", "Max Droplets", "Concentrations Preview", "Optimal Stock Solutions"
+            "Mode", "Manual Input", "Max Droplets",
+            "Concentrations Preview", "Stock Solutions", "Delete"
         ])
         self.reagent_table.setColumnWidth(7, 200)
         self.reagent_table.setColumnWidth(8, 200)
@@ -126,7 +127,7 @@ class ExperimentDesignDialog(QDialog):
         self.replica_label = QLabel("Replicates:", self)
         self.replicate_spinbox = QSpinBox(self)
         self.replicate_spinbox.setMinimum(1)
-        self.replicate_spinbox.setValue(1)
+        self.replicate_spinbox.setValue(self.model.metadata.get("replicates", 1))
         self.replicate_spinbox.valueChanged.connect(self.update_total_reactions)
         self.info_layout.addWidget(self.replica_label)
         self.info_layout.addWidget(self.replicate_spinbox)
@@ -135,7 +136,7 @@ class ExperimentDesignDialog(QDialog):
         self.total_droplets_spinbox = QSpinBox(self)
         self.total_droplets_spinbox.setMinimum(1)
         self.total_droplets_spinbox.setMaximum(100)
-        self.total_droplets_spinbox.setValue(10)
+        self.total_droplets_spinbox.setValue(self.model.metadata.get("max_droplets", 20))
         self.total_droplets_spinbox.valueChanged.connect(self.update_preview)
         self.info_layout.addWidget(self.total_droplets_label)
         self.info_layout.addWidget(self.total_droplets_spinbox)
@@ -222,8 +223,22 @@ class ExperimentDesignDialog(QDialog):
         stock_solutions_item = QTableWidgetItem(stock_solutions)
         stock_solutions_item.setTextAlignment(Qt.AlignCenter)
         self.reagent_table.setItem(row_position, 8, stock_solutions_item)
+
+        # Delete button
+        delete_button = QPushButton("Delete")
+        delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
+        self.reagent_table.setCellWidget(row_position, 9, delete_button)
         
         self.update_preview(row_position)
+
+    def delete_reagent(self, row):
+        """Delete a reagent row and remove it from the model."""
+        reagent_name = self.reagent_table.item(row, 0).text()
+        if reagent_name in self.model.reagents:
+            del self.model.reagents[reagent_name]
+
+        self.reagent_table.removeRow(row)
+        self.update_total_reactions()
 
     def populate_table_from_model(self):
         """Populate the reagent table based on the data in the model."""
@@ -289,7 +304,6 @@ class ExperimentDesignDialog(QDialog):
             self.total_droplets_used_label.setStyleSheet("color: red;")
         else:
             self.total_droplets_used_label.setStyleSheet("color: white;")
-
         self.update_total_reactions()  # Update total reactions whenever the preview changes
 
     def optimize_stock_solutions(self):
@@ -342,10 +356,14 @@ class ExperimentDesignDialog(QDialog):
         
         total_reactions *= self.replicate_spinbox.value()
         self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
+        self.model.metadata["max_droplets"] = self.total_droplets_spinbox.value()
+        self.model.metadata["replicates"] = self.replicate_spinbox.value()
 
     def generate_experiment(self):
         """Generate the experiment based on the table data."""
         self.model.reagents = {}  # Reset reagents in model
+        self.model.metadata["replicates"] = self.replicate_spinbox.value()
+        self.model.metadata["max_droplets"] = self.total_droplets_spinbox.value()
 
         for row in range(self.reagent_table.rowCount()):
             reagent_name = self.reagent_table.item(row, 0).text()
@@ -359,7 +377,16 @@ class ExperimentDesignDialog(QDialog):
             stock_solutions = list(map(float, self.reagent_table.item(row, 7).text().split(", ")))
 
             if reagent_name and concentrations:
-                self.model.add_reagent(reagent_name, concentrations, mode, min_conc, max_conc, steps, max_droplets, stock_solutions)
+                self.model.add_reagent(
+                    name=reagent_name, 
+                    concentrations=concentrations,
+                    mode=mode,
+                    min_conc=min_conc,
+                    max_conc=max_conc,
+                    steps=steps,
+                    max_droplets=max_droplets,
+                    stock_solutions=stock_solutions
+                )
 
         if self.model.reagents:
             experiment = self.model.generate_experiment()
@@ -371,48 +398,46 @@ class ExperimentDesignDialog(QDialog):
 class ExperimentModel:
     def __init__(self):
         self.reagents = {}
+        self.metadata = {
+            "replicates": 1,
+            "max_droplets": 20,
+        }
 
     def add_reagent(self, name, concentrations, mode, min_conc, max_conc, steps, max_droplets, stock_solutions):
         self.reagents[name] = {
-            'concentrations': concentrations,
-            'mode': mode,
-            'min_conc': min_conc,
-            'max_conc': max_conc,
-            'steps': steps,
-            'max_droplets': max_droplets,
-            'stock_solutions': stock_solutions
+            "concentrations": concentrations,
+            "mode": mode,
+            "min_conc": min_conc,
+            "max_conc": max_conc,
+            "steps": steps,
+            "max_droplets": max_droplets,
+            "stock_solutions": stock_solutions
         }
-
-    def to_dict(self):
-        """Convert the experiment model to a dictionary for saving or repopulating the dialogue."""
-        return {
-            'reagents': self.reagents
-        }
-
-    def from_dict(self, data):
-        """Load the experiment model from a dictionary."""
-        self.reagents = data['reagents']
-
-    def save_to_file(self, filename):
-        """Save the experiment design to a file."""
-        with open(filename, 'w') as file:
-            json.dump(self.to_dict(), file, indent=4)
-
-    def load_from_file(self, filename):
-        """Load the experiment design from a file."""
-        with open(filename, 'r') as file:
-            data = json.load(file)
-            self.from_dict(data)
 
     def generate_experiment(self):
-        """Generate combinatorial experiment array based on reagents and concentrations."""
         from itertools import product
         experiment = []
         reagent_names = list(self.reagents.keys())
-        concentration_combinations = product(*[self.reagents[name]['concentrations'] for name in reagent_names])
+        concentration_combinations = product(*[self.reagents[name]["concentrations"] for name in reagent_names])
         for combo in concentration_combinations:
             experiment.append(dict(zip(reagent_names, combo)))
         return experiment
+
+    def save_experiment(self, file_path):
+        """Save the experiment design to a file."""
+        data = {
+            "metadata": self.metadata,
+            "reagents": self.reagents
+        }
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    def load_experiment(self, file_path):
+        """Load the experiment design from a file."""
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+            self.metadata = data.get("metadata", {})
+            self.reagents = data.get("reagents", {})
 
 
 class MainWindow(QMainWindow):
@@ -451,13 +476,13 @@ class MainWindow(QMainWindow):
         """Save the current experiment design to a file."""
         filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment Design", "", "JSON Files (*.json)")
         if filename:
-            self.model.save_to_file(filename)
+            self.model.save_experiment(filename)
 
     def load_experiment_design(self):
         """Load an experiment design from a file."""
         filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment Design", "", "JSON Files (*.json)")
         if filename:
-            self.model.load_from_file(filename)
+            self.model.load_experiment(filename)
             self.open_experiment_design_dialog()
 
 
