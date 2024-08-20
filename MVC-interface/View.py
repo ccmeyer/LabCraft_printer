@@ -1031,8 +1031,8 @@ class SimplePositionWidget(QGroupBox):
         new_step_size = int(self.step_size_input.value())
         self.model.machine_model.set_step_size(new_step_size)
 
-class PlateCalibrationDialog(QDialog):
-    def __init__(self, main_window,model,controller):
+class BaseCalibrationDialog(QDialog):
+    def __init__(self, main_window, model, controller, title, steps, name_dict):
         super().__init__()
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
@@ -1040,39 +1040,32 @@ class PlateCalibrationDialog(QDialog):
         self.controller = controller
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
-        self.initial_calibrations = self.model.well_plate.get_all_current_plate_calibrations()
-
-        self.setWindowTitle("Well Plate Calibration")
-        self.setFixedSize(1200, 600)  # Updated size
-        
-        # List of calibration steps
-        self.steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
-        self.corner_dict = {
-            "Top-Left": "top_left",
-            "Top-Right": "top_right",
-            "Bottom-Right": "bottom_right",
-            "Bottom-Left": "bottom_left"
-        }
+        self.steps = steps
+        self.name_dict = name_dict
         self.current_step = 0
+        self.initial_calibrations = self.get_initial_calibrations()
+
+        self.setWindowTitle(title)
+        self.setFixedSize(1200, 600)
         
         # Layouts
         self.main_layout = QHBoxLayout(self)
         self.left_layout = QVBoxLayout()
         
-        self.coordinates_box = SimplePositionWidget(self.main_window,self.model, self.controller)
+        self.coordinates_box = SimplePositionWidget(self.main_window, self.model, self.controller)
         self.coordinates_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self.left_layout.addWidget(self.coordinates_box)
 
         self.mid_layout = QVBoxLayout()
         self.right_layout = QVBoxLayout()
-        self.shortcut_box = ShortcutTableWidget(self,self.shortcut_manager)
+        self.shortcut_box = ShortcutTableWidget(self, self.shortcut_manager)
         self.shortcut_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         self.shortcut_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         self.right_layout.addWidget(self.shortcut_box)
 
         self.bottom_layout = QHBoxLayout()
         self.steps_layout = QVBoxLayout()
-        self.instructions_label = QLabel("Move to the top-left well and confirm the position.", self)
+        self.instructions_label = QLabel(f"Move to the {self.steps[0]} position and confirm the location.", self)
         self.next_button = QPushButton("Confirm Position", self)
         self.next_button.clicked.connect(self.next_step)
         self.back_button = QPushButton("Back", self)
@@ -1101,7 +1094,7 @@ class PlateCalibrationDialog(QDialog):
         self.button_layout.addWidget(self.submit_button)
         self.bottom_layout.addLayout(self.button_layout)
 
-        # Visual Aid (Graphics View for well plate illustration)
+        # Visual Aid (Graphics View for the illustration)
         self.visual_aid_view = QGraphicsView(self)
         self.visual_aid_scene = QGraphicsScene(self)
         self.visual_aid_view.setScene(self.visual_aid_scene)
@@ -1123,15 +1116,15 @@ class PlateCalibrationDialog(QDialog):
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size,0 , 0,manual=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size,0, 0,manual=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size,manual=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True))
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
-    
+
     def update_step_labels(self):
         for i, label in enumerate(self.step_labels):
             if i < self.current_step:
@@ -1140,7 +1133,158 @@ class PlateCalibrationDialog(QDialog):
                 label.setStyleSheet("background-color: red; color: white; padding: 5px; border: 1px solid black;")
             else:
                 label.setStyleSheet("background-color: lightgrey; color: black; padding: 5px; border: 1px solid black;")
-    
+
+    def move_to_initial_position(self):
+        """Move the machine to the initial calibration position for the current step, if available."""
+        step_name = self.steps[self.current_step]
+        converted_step_name = self.name_dict[step_name]
+        starting_coordinates = self.get_calibration_by_name(converted_step_name)
+        temp_coordinates = self.get_temp_calibration_by_name(converted_step_name)
+
+        if temp_coordinates:
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(temp_coordinates))
+            print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
+        elif starting_coordinates:
+            avg_offset = self.calculate_average_offset()
+            adjusted_coordinates = {
+                axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
+            }
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(adjusted_coordinates))
+            print(f"Offset: {avg_offset}")
+            print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
+        else:
+            print(f"No initial calibration data for {step_name}.")
+
+    def next_step(self):
+        if self.current_step < len(self.steps):
+            # Save the current position as the calibration for this step
+            current_position = self.model.machine_model.get_current_position_dict_capital()
+            step_name = self.steps[self.current_step]
+            converted_step_name = self.name_dict[step_name]
+            self.set_calibration_position(converted_step_name, current_position)
+
+            print(f"Calibrating {self.steps[self.current_step]} position...")
+
+            # Move to the next step
+            self.current_step += 1
+
+            # Update instructions and step labels
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
+                self.move_to_initial_position()
+            else:
+                self.instructions_label.setText("Calibration complete.")
+                self.next_button.setEnabled(False)  # Disable the button when done
+                self.submit_button.setEnabled(True)
+                self.submit_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+            self.back_button.setEnabled(True)  # Enable the back button when not at the first step
+            
+            self.update_step_labels()
+            self.update_visual_aid()  # Update the visual aid
+
+    def previous_step(self):
+        if self.current_step > 0:
+            self.current_step -= 1
+
+            # Update instructions and step labels
+            self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
+            self.move_to_initial_position()
+            self.next_button.setEnabled(True)  # Enable the next button if we're going back
+            if self.current_step == 0:
+                self.back_button.setEnabled(False)  # Disable the back button when at the first step
+            
+            self.update_step_labels()
+            self.update_visual_aid()  # Update the visual aid
+
+    def submit_calibration(self):
+        """Submit the calibration data and close the dialog."""
+        print("Submitting calibration data...")
+        self.accept()
+
+    def closeEvent(self, event):
+        """Handle the window close event."""
+        reply = QMessageBox.question(
+            self,
+            "Incomplete Calibration",
+            "The calibration process is not complete. Are you sure you want to exit? All unsaved calibration data will be lost.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.discard_temp_calibrations()  # Discard temporary data
+            event.accept()  # Close the dialog
+        else:
+            event.ignore()  # Keep the dialog open
+
+    def calculate_average_offset(self):
+        """Calculate the average offset based on saved temporary calibration positions."""
+        offsets = {'X': 0, 'Y': 0, 'Z': 0}
+        count = 0
+
+        for step in self.steps:
+            converted_step_name = self.name_dict[step]
+            initial_coords = self.get_calibration_by_name(converted_step_name)
+            temp_coords = self.get_temp_calibration_by_name(converted_step_name)
+
+            if temp_coords and initial_coords:
+                for axis in offsets.keys():
+                    offsets[axis] += temp_coords[axis] - initial_coords[axis]
+                count += 1
+
+        if count > 0:
+            for axis in offsets.keys():
+                offsets[axis] /= count
+
+        return offsets
+
+    def convert_dict_coords(self, coords):
+        return coords['X'], coords['Y'], coords['Z']
+
+    # Methods that should be implemented in the subclass
+    def get_initial_calibrations(self):
+        raise NotImplementedError
+
+    def get_calibration_by_name(self, name):
+        raise NotImplementedError
+
+    def get_temp_calibration_by_name(self, name):
+        raise NotImplementedError
+
+    def set_calibration_position(self, name, position):
+        raise NotImplementedError
+
+    def discard_temp_calibrations(self):
+        raise NotImplementedError
+
+    def update_visual_aid(self):
+        raise NotImplementedError
+
+class PlateCalibrationDialog(BaseCalibrationDialog):
+    def __init__(self, main_window, model, controller):
+        steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+        name_dict = {
+            "Top-Left": "top_left",
+            "Top-Right": "top_right",
+            "Bottom-Right": "bottom_right",
+            "Bottom-Left": "bottom_left"
+        }
+        super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict)
+
+    def get_initial_calibrations(self):
+        return self.model.well_plate.get_all_current_plate_calibrations()
+
+    def get_calibration_by_name(self, name):
+        return self.model.well_plate.get_calibration_by_name(name)
+
+    def get_temp_calibration_by_name(self, name):
+        return self.model.well_plate.get_temp_calibration_by_name(name)
+
+    def set_calibration_position(self, name, position):
+        self.model.well_plate.set_calibration_position(name, position)
+
+    def discard_temp_calibrations(self):
+        self.model.well_plate.discard_temp_calibrations()
+
     def update_visual_aid(self):
         """Update the visual aid based on the current step."""
         # Clear the scene
@@ -1180,113 +1324,6 @@ class PlateCalibrationDialog(QDialog):
                 brush = QBrush(Qt.NoBrush)
 
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
-
-    def convert_dict_coords(self,coords):
-        return coords['X'],coords['Y'],coords['Z']
-    
-    def calculate_average_offset(self):
-        """Calculate the average offset based on saved temporary calibration positions."""
-        offsets = {'X': 0, 'Y': 0, 'Z': 0}
-        count = 0
-
-        for step in self.steps:
-            converted_step_name = self.corner_dict[step]
-            initial_coords = self.model.well_plate.get_calibration_by_name(converted_step_name)
-            temp_coords = self.model.well_plate.get_temp_calibration_by_name(converted_step_name)
-
-            if temp_coords and initial_coords:
-                for axis in offsets.keys():
-                    offsets[axis] += temp_coords[axis] - initial_coords[axis]
-                count += 1
-
-        if count > 0:
-            for axis in offsets.keys():
-                offsets[axis] /= count
-
-        return offsets
-    
-    def move_to_initial_position(self):
-        """Move the machine to the initial calibration position for the current step, if available."""
-        step_name = self.steps[self.current_step]
-        converted_step_name = self.corner_dict[step_name]
-        starting_coordinates = self.model.well_plate.get_calibration_by_name(converted_step_name)
-        temp_coordinates = self.model.well_plate.get_temp_calibration_by_name(converted_step_name)
-
-        if temp_coordinates:
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(temp_coordinates))
-            print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
-        elif starting_coordinates:
-            # Calculate the average offset based on the saved temporary positions
-            avg_offset = self.calculate_average_offset()
-            adjusted_coordinates = {
-                axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
-            }
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(adjusted_coordinates))
-            print(f"Offset: {avg_offset}")
-            print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
-        else:
-            print(f"No initial calibration data for {step_name}.")
-    
-    def next_step(self):
-        if self.current_step < len(self.steps):
-            # Save the current position as the calibration for this step
-            current_position = self.model.machine_model.get_current_position_dict_capital()
-            step_name = self.steps[self.current_step]
-            converted_step_name = self.corner_dict[step_name]
-            self.model.well_plate.set_calibration_position(converted_step_name, current_position)
-
-            print(f"Calibrating {self.steps[self.current_step]} position...")
-
-            # Move to the next step
-            self.current_step += 1
-
-            # Update instructions and step labels
-            if self.current_step < len(self.steps):
-                self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} well and confirm the position.")
-                self.move_to_initial_position()
-            else:
-                self.instructions_label.setText("Calibration complete.")
-                self.next_button.setEnabled(False)  # Disable the button when done
-                self.submit_button.setEnabled(True)
-                self.submit_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-            self.back_button.setEnabled(True)  # Enable the back button when not at the first step
-            
-            self.update_step_labels()
-            self.update_visual_aid()  # Update the visual aid
-
-    def previous_step(self):
-        if self.current_step > 0:
-            self.current_step -= 1
-
-            # Update instructions and step labels
-            self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} well and confirm the position.")
-            self.move_to_initial_position()
-            self.next_button.setEnabled(True)  # Enable the next button if we're going back
-            if self.current_step == 0:
-                self.back_button.setEnabled(False)  # Disable the back button when at the first step
-            
-            self.update_step_labels()
-            self.update_visual_aid()  # Update the visual aid
-
-    def submit_calibration(self):
-        """Submit the calibration data and close the dialog."""
-        print("Submitting calibration data...")
-        self.accept()
-
-    def closeEvent(self, event):
-        """Handle the window close event."""
-        reply = QMessageBox.question(
-            self,
-            "Incomplete Calibration",
-            "The calibration process is not complete. Are you sure you want to exit? All unsaved calibration data will be lost.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self.model.well_plate.discard_temp_calibrations()  # Discard temporary data
-            event.accept()  # Close the dialog
-        else:
-            event.ignore()  # Keep the dialog open
 
 
 class MovementBox(QtWidgets.QGroupBox):
