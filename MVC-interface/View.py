@@ -1044,7 +1044,7 @@ class SimplePositionWidget(QGroupBox):
         self.model.machine_model.set_step_size(new_step_size)
 
 class BaseCalibrationDialog(QDialog):
-    def __init__(self, main_window, model, controller, title, steps, name_dict):
+    def __init__(self, main_window, model, controller, title, steps, name_dict,offsets):
         super().__init__()
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
@@ -1056,6 +1056,8 @@ class BaseCalibrationDialog(QDialog):
         self.name_dict = name_dict
         self.current_step = 0
         self.initial_calibrations = self.get_initial_calibrations()
+
+        self.offsets = offsets
 
         self.setWindowTitle(title)
         self.setFixedSize(1200, 600)
@@ -1146,6 +1148,12 @@ class BaseCalibrationDialog(QDialog):
             else:
                 label.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white; padding: 5px; border: 1px solid black;")
 
+    def apply_offset(self, coords):
+        """Apply the calculated offset to the given coordinates."""
+        return {
+            axis: coords[axis] + self.offsets[axis] for axis in ['X', 'Y', 'Z'] 
+        }
+    
     def move_to_initial_position(self):
         """Move the machine to the initial calibration position for the current step, if available."""
         step_name = self.steps[self.current_step]
@@ -1154,18 +1162,33 @@ class BaseCalibrationDialog(QDialog):
         temp_coordinates = self.get_temp_calibration_by_name(converted_step_name)
 
         if temp_coordinates:
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(temp_coordinates))
+            target_coordinates = temp_coordinates.copy()
             print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
         elif starting_coordinates:
+            print(f'Starting coords: {starting_coordinates}')
             avg_offset = self.calculate_average_offset()
             adjusted_coordinates = {
                 axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
             }
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(adjusted_coordinates))
+            target_coordinates = adjusted_coordinates.copy()
             print(f"Offset: {avg_offset}")
             print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
         else:
+            target_coordinates = None
+
+        if target_coordinates is None:
             print(f"No initial calibration data for {step_name}.")
+            return
+        else:
+            intermediate_coords = self.apply_offset(target_coordinates)
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(intermediate_coords))
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(target_coordinates))
+
+    def move_to_offset_position(self):
+        """Move the machine to the offset position from the current position."""
+        current_position = self.model.machine_model.get_current_position_dict_capital().copy()
+        offset_position = self.apply_offset(current_position)
+        self.controller.set_absolute_coordinates(*self.convert_dict_coords(offset_position))
 
     def next_step(self):
         # Check if the machine has completed all commands in the queue
@@ -1181,7 +1204,8 @@ class BaseCalibrationDialog(QDialog):
             self.set_calibration_position(converted_step_name, current_position)
 
             print(f"Calibrating {self.steps[self.current_step]} position...")
-
+            print(f'Applying offset: {self.offsets}')
+            self.move_to_offset_position()
             # Move to the next step
             self.current_step += 1
 
@@ -1285,7 +1309,12 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
             "Bottom-Right": "bottom_right",
             "Bottom-Left": "bottom_left"
         }
-        super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict)
+        offsets = {
+            'X': 0,
+            'Y': 0,
+            'Z': 50
+        }
+        super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict,offsets)
 
     def get_initial_calibrations(self):
         return self.model.well_plate.get_all_current_plate_calibrations()
@@ -1344,69 +1373,70 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
 
 class RackCalibrationDialog(BaseCalibrationDialog):
     def __init__(self, main_window, model, controller):
-        steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+        steps = ["Left","Right"]
         name_dict = {
-            "Top-Left": "top_left",
-            "Top-Right": "top_right",
-            "Bottom-Right": "bottom_right",
-            "Bottom-Left": "bottom_left"
+            "Left": "rack_position_Left",
+            "Right": "rack_position_Right"
         }
-        super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict)
+        offsets = {
+            'X': -2500,
+            'Y': 0,
+            'Z': 0
+        }
+        super().__init__(main_window, model, controller, "Rack Calibration", steps, name_dict,offsets)
 
     def get_initial_calibrations(self):
-        return self.model.well_plate.get_all_current_plate_calibrations()
+        return self.model.rack_model.get_all_current_rack_calibrations()
 
     def get_calibration_by_name(self, name):
-        return self.model.well_plate.get_calibration_by_name(name)
+        return self.model.rack_model.get_calibration_by_name(name)
 
     def get_temp_calibration_by_name(self, name):
-        return self.model.well_plate.get_temp_calibration_by_name(name)
+        return self.model.rack_model.get_temp_calibration_by_name(name)
 
     def set_calibration_position(self, name, position):
-        self.model.well_plate.set_calibration_position(name, position)
+        self.model.rack_model.set_calibration_position(name, position)
 
     def discard_temp_calibrations(self):
-        self.model.well_plate.discard_temp_calibrations()
+        self.model.rack_model.discard_temp_calibrations()
 
     def update_visual_aid(self):
-        """Update the visual aid based on the current step."""
+        """Update the visual aid for the rack position calibration."""
         # Clear the scene
         self.visual_aid_scene.clear()
 
-        # Draw the outline of the well plate
-        height = 250
+        # Draw the outline of the rack
+        height = 150  # Adjusted for rack dimensions
         width = 400
         padding = 50
         offset_x = 100
-        offset_y = 50
-        well_plate_outline = QGraphicsRectItem(offset_x, offset_y, width, height)
-        well_plate_outline.setPen(QPen(Qt.darkGray, 2))
-        self.visual_aid_scene.addItem(well_plate_outline)
+        offset_y = 100  # Adjusted vertical positioning
+        rack_outline = QGraphicsRectItem(offset_x, offset_y, width, height)
+        rack_outline.setPen(QPen(Qt.darkGray, 2))
+        self.visual_aid_scene.addItem(rack_outline)
 
-        # Define the positions of the wells on the well plate
-        # Adjusted to center the wells based on their radius
-        well_radius = 15  # Radius of the well (half of the diameter)
-        well_position = {
-            "Top-Left": (offset_x + padding - well_radius, offset_y + padding - well_radius),
-            "Top-Right": (offset_x + width - padding - well_radius, offset_y + padding - well_radius),
-            "Bottom-Right": (offset_x + width - padding - well_radius, offset_y + height - padding - well_radius),
-            "Bottom-Left": (offset_x + padding - well_radius, offset_y + height - padding - well_radius)
+        # Define the positions of the left and right points on the rack
+        well_radius = 20  # Radius of the position marker
+        position_coordinates = {
+            "Left": (offset_x + padding - well_radius, offset_y + height / 2 - well_radius),
+            "Right": (offset_x + width - padding - well_radius, offset_y + height / 2 - well_radius)
         }
 
-        # Draw all four wells as circles
+        # Draw the left and right positions as circles
         for i, step in enumerate(self.steps):
-            pos = well_position[step]
+            pos = position_coordinates[step]
             if i < self.current_step:
-                pen = QPen(QColor("blue"), 1)
+                pen = QPen(QColor(self.color_dict['dark_blue']), 2)
                 brush = QBrush(Qt.NoBrush)
             elif i == self.current_step:
-                pen = QPen(QColor("red"), 3)
+                pen = QPen(QColor(self.color_dict['dark_red']), 4)
                 brush = QBrush(Qt.NoBrush)
             else:
-                pen = QPen(QColor("lightgrey"), 1)
+                pen = QPen(QColor(self.color_dict['dark_gray']), 2)
                 brush = QBrush(Qt.NoBrush)
 
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
+
 
 class MovementBox(QtWidgets.QGroupBox):
     """
@@ -1583,6 +1613,11 @@ class RackBox(QGroupBox):
         self.gripper_state.setMaximumHeight(20)
         gripper_layout.addWidget(self.gripper_state)
 
+        # Add a button to trigger the rack calibration
+        calibrate_button = QPushButton("Calibrate Rack")
+        calibrate_button.clicked.connect(self.open_rack_calibration_dialog)
+        gripper_layout.addWidget(calibrate_button)
+
          # Add a spacer to separate slots and gripper visually
         spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
 
@@ -1637,6 +1672,22 @@ class RackBox(QGroupBox):
         self.update_unassigned_printer_heads()
         self.update_all_slots()
     
+    def open_rack_calibration_dialog(self):
+        """Open the rack calibration dialog."""
+        if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
+            self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
+            return
+        rack_calibration_dialog = RackCalibrationDialog(self.main_window,self.model,self.controller)
+        
+        # Execute the dialog and check if the user completes the calibration
+        if rack_calibration_dialog.exec() == QDialog.Accepted:
+            print("Calibration completed successfully.")
+            self.model.rack_model.update_calibration_data()
+        else:
+            print("Calibration was canceled or failed.")
+            self.model.rack_model.discard_temp_calibrations()
+            # self.model.well_plate.discard_temp_calibrations()
+
     def update_button_states(self, machine_connected):
         """Update the button states based on the machine connection state."""
         for _, combined_button, _ in self.slot_widgets:

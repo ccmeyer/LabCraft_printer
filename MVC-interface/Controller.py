@@ -168,105 +168,106 @@ class Controller(QObject):
     def update_expected_position(self, x=None, y=None, z=None):
         """Update the expected position after a move."""
         if x is not None:
-            self.expected_position['x'] = x
+            self.expected_position['X'] = x
         if y is not None:
-            self.expected_position['y'] = y
+            self.expected_position['Y'] = y
         if z is not None:
-            self.expected_position['z'] = z
+            self.expected_position['Z'] = z
     
     def update_location_handler(self,name):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False,coords=None):
         """Move to the saved location."""
         if manual == True:
             status = self.machine.check_if_all_completed()
             if status == False:
                 print('Cannot move: Commands are still running')
                 return
-            
-        original_target = self.model.location_model.get_location_dict(name)
-        target = original_target.copy()
+        if coords != None:
+            target = coords.copy()
+        else:
+            original_target = self.model.location_model.get_location_dict(name)
+            target = original_target.copy()
         if x_offset:
-            print(f'Applying X offset:{target["x"]} -> {target["x"] - 2500}')
-            target['x'] += -2500
-
+            print(f'Applying X offset:{target['X']} -> {target['X'] - 2500}')
+            target['X'] += -2500
         # Use expected position instead of current position from the model
         current = self.expected_position
 
         up_first = False
-        if direct and current['z'] < target['z']:
+        if direct and current['Z'] < target['Z']:
             up_first = True
             self.machine.set_absolute_coordinates(
-                current['x'], current['y'], target['z'],
-                handler=lambda: self.update_expected_position(z=target['z'])
+                current['X'], current['Y'], target['Z'],
+                handler=lambda: self.update_expected_position(z=target['Z'])
             )
 
         x_limit = -5500
         safe_height = -3000
         safe_y_value = 3500
-        if (current['x'] > x_limit and target['x'] < x_limit) or (current['x'] < x_limit and target['x'] > x_limit):
-            print(f'Crossing x limit: {current["x"]} -> {target["x"]}')
+        if (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
+            print(f'Crossing x limit: {current['X']} -> {target['X']}')
             safe_y = True
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
             self.machine.set_absolute_coordinates(
-                current['x'], current['y'], safe_height,
+                current['X'], current['Y'], safe_height,
                 handler=lambda: self.update_expected_position(z=safe_height)
             )
             self.machine.set_absolute_coordinates(
-                target['x'], target['y'], safe_height,
-                handler=lambda: self.update_expected_position(x=target['x'], y=target['y'])
+                target['X'], target['Y'], safe_height,
+                handler=lambda: self.update_expected_position(x=target['X'], y=target['Y'])
             )
         elif not direct and safe_y:
             print('Not direct, safe-y')
             self.machine.set_absolute_coordinates(
-                current['x'], current['y'], safe_height,
+                current['X'], current['Y'], safe_height,
                 handler=lambda: self.update_expected_position(z=safe_height)
             )
             self.machine.set_absolute_coordinates(
-                current['x'], safe_y_value, safe_height,
+                current['X'], safe_y_value, safe_height,
                 handler=lambda: self.update_expected_position(y=safe_y_value)
             )
             self.machine.set_absolute_coordinates(
-                target['x'], safe_y_value, safe_height,
-                handler=lambda: self.update_expected_position(x=target['x'])
+                target['X'], safe_y_value, safe_height,
+                handler=lambda: self.update_expected_position(x=target['X'])
             )
             self.machine.set_absolute_coordinates(
-                target['x'], target['y'], safe_height,
-                handler=lambda: self.update_expected_position(y=target['y'])
+                target['X'], target['Y'], safe_height,
+                handler=lambda: self.update_expected_position(y=target['Y'])
             )
         elif direct and safe_y:
             if up_first:
                 self.machine.set_absolute_coordinates(
-                    current['x'], safe_y_value, target['z'],
-                    handler=lambda: self.update_expected_position(y=safe_y_value, z=target['z'])
+                    current['X'], safe_y_value, target['Z'],
+                    handler=lambda: self.update_expected_position(y=safe_y_value, z=target['Z'])
                 )
                 self.machine.set_absolute_coordinates(
-                    target['x'], safe_y_value, target['z'],
-                    handler=lambda: self.update_expected_position(x=target['x'])
+                    target['X'], safe_y_value, target['Z'],
+                    handler=lambda: self.update_expected_position(x=target['X'])
                 )
             else:
                 self.machine.set_absolute_coordinates(
-                    current['x'], safe_y_value, current['z'],
+                    current['X'], safe_y_value, current['Z'],
                     handler=lambda: self.update_expected_position(y=safe_y_value)
                 )
                 self.machine.set_absolute_coordinates(
-                    target['x'], safe_y_value, current['z'],
-                    handler=lambda: self.update_expected_position(x=target['x'])
+                    target['X'], safe_y_value, current['Z'],
+                    handler=lambda: self.update_expected_position(x=target['X'])
                 )
                 self.machine.set_absolute_coordinates(
-                    target['x'], target['y'], current['z'],
-                    handler=lambda: self.update_expected_position(y=target['y'])
+                    target['X'], target['Y'], current['Z'],
+                    handler=lambda: self.update_expected_position(y=target['Y'])
                 )
 
         self.machine.set_absolute_coordinates(
-            target['x'], target['y'], target['z'],
+            target['X'], target['Y'], target['Z'],
             handler=lambda: self.update_location_handler(name)
         )
-        self.update_expected_position(x=target['x'], y=target['y'], z=target['z'])
+        self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
     
     def open_gripper(self,handler=None):
         """Open the gripper."""
@@ -296,12 +297,14 @@ class Controller(QObject):
             self.open_gripper()
             self.wait_command()
             print(f'Picking up printer head from slot {slot}')
-            location = f'rack_position_{slot+1}_{self.model.rack_model.get_num_slots()}'
-            self.move_to_location(location,x_offset=True)
-            self.move_to_location(location)
+            coords = self.model.rack_model.get_slot_coordinates(slot)
+            name = 'Slot-'+str(slot)
+            self.move_to_location(name,x_offset=True,coords=coords)
+
+            self.move_to_location(name,coords=coords)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
             self.wait_command()
-            self.move_to_location(location,x_offset=True)
+            self.move_to_location(name,x_offset=True,coords=coords)
         else:
             print(f'Error: {error_msg}')
 
@@ -319,12 +322,13 @@ class Controller(QObject):
         is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot)
         if is_valid:
             print(f'Dropping off printer head to slot {slot}')
-            location = f'rack_position_{slot+1}_{self.model.rack_model.get_num_slots()}'
-            self.move_to_location(location,x_offset=True)
-            self.move_to_location(location)
+            coords = self.model.rack_model.get_slot_coordinates(slot)
+            name = 'Slot-'+str(slot)
+            self.move_to_location(name,x_offset=True,coords=coords)
+            self.move_to_location(name,coords=coords)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
             self.wait_command()
-            self.move_to_location(location,x_offset=True)
+            self.move_to_location(name,x_offset=True,coords=coords)
             self.close_gripper()
             self.wait_command()
         else:

@@ -1200,12 +1200,21 @@ class Slot(QObject):
         self.printer_head = printer_head
         self.confirmed = False
         self.locked = False
+        self.coordinates = None
 
     def set_locked(self, locked):
         self.locked = locked
 
     def is_locked(self):
         return self.locked
+    
+    def assign_coordinates(self, x, y,z):
+        """Assign coordinates to the slot."""
+        self.coordinates = {'X':x, 'Y':y, 'Z':z}
+
+    def get_coordinates(self):
+        """Get the coordinates of the slot."""
+        return self.coordinates
     
     def change_printer_head(self, new_printer_head,returned=False):
         self.printer_head = new_printer_head
@@ -1244,12 +1253,103 @@ class RackModel(QObject):
     slot_updated = Signal()
     gripper_updated = Signal()
     error_occurred = Signal(str)
+    rack_calibration_updated_signal = Signal()
 
-    def __init__(self, num_slots):
+    def __init__(self, num_slots,location_data=None):
         super().__init__()
         self.slots = [Slot(i, None) for i in range(num_slots)]
         self.gripper_printer_head = None
         self.gripper_slot_number = None
+        self.calibrations = {}
+        if location_data is not None:
+            self.process_location_data(location_data)
+
+        self.calibration_applied = False
+        self.temp_calibration_data = {}
+    
+        self.apply_calibration_data()
+
+    def apply_calibration_data(self):
+        if len(list(self.calibrations)) < 2:
+            self.calibration_applied = False
+            print(f"Calibration is incomplete. Need at least 2 calibration points, but only {len(list(self.calibrations))} provided.")
+            return
+        else:
+            slot_positions = self.calculate_slot_positions()
+            self.assign_slot_positions(slot_positions)
+            self.calibration_applied = True
+        
+    def calculate_slot_positions(self):
+        '''
+        Calculate the positions of the slots based on the calibration data
+        '''
+        slot_positions = []
+        left_calibration = self.calibrations['rack_position_Left']
+        right_calibration = self.calibrations['rack_position_Right']
+
+        x_diff = right_calibration['X'] - left_calibration['X']
+        y_diff = right_calibration['Y'] - left_calibration['Y']
+        z_diff = right_calibration['Z'] - left_calibration['Z']
+        num_slots = self.get_num_slots()
+
+        slot_depth = x_diff / (num_slots + 1)
+        slot_width = y_diff / (num_slots + 1)
+        slot_height = z_diff / (num_slots + 1)
+        for i in range(1,num_slots+1):
+            slot_positions.append({
+                'X': int(round(left_calibration['X'] + (i * slot_depth),0)),
+                'Y': int(round(left_calibration['Y'] + (i * slot_width),0)),
+                'Z': int(round(left_calibration['Z'] + (i * slot_height),0))
+            })
+        return slot_positions
+    
+    def assign_slot_positions(self,slot_positions):
+        for i,slot in enumerate(self.slots):
+            slot.assign_coordinates(slot_positions[i]['X'],slot_positions[i]['Y'],slot_positions[i]['Z'])
+
+    def process_location_data(self,location_data):
+        if location_data.get('rack_position_Right',None) is not None:
+            self.calibrations['rack_position_Right'] = location_data['rack_position_Right']
+        if location_data.get('rack_position_Left',None) is not None:
+            self.calibrations['rack_position_Left'] = location_data['rack_position_Left']
+
+    def get_all_current_rack_calibrations(self):
+        return self.calibrations
+    
+    def get_calibration_by_name(self, name):
+        return self.calibrations.get(name, None)
+    
+    def get_temp_calibration_by_name(self, name):
+        return self.temp_calibration_data.get(name, None)
+    
+    def set_calibration_position(self, position_name, coordinates):
+        """Set a temporary calibration position."""
+        self.temp_calibration_data[position_name] = coordinates
+
+    def store_calibrations(self):
+        """Save the temporary calibration data to the main calibration data."""
+        for position_name, coords in self.temp_calibration_data.items():
+            self.calibrations[position_name] = coords
+        self.temp_calibration_data.clear()
+
+    def discard_temp_calibrations(self):
+        """Discard the temporary calibration data."""
+        self.temp_calibration_data.clear()
+
+    def update_calibration_data(self):
+        """Run the full update of all calibration data."""
+        self.store_calibrations()
+        self.save_calibrations_to_file()
+        self.apply_calibration_data()
+
+    def save_calibrations_to_file(self):
+        self.rack_calibration_updated_signal.emit()
+
+    def check_calibration_applied(self):
+        return self.calibration_applied
+    
+    def get_slot_coordinates(self,slot_number):
+        return self.slots[slot_number].get_coordinates()
 
     def get_num_slots(self):
         return len(self.slots)
@@ -1493,12 +1593,13 @@ class LocationModel(QObject):
 
     locations_updated = Signal()  # Signal to notify when locations are updated
 
-    def __init__(self, json_file_path="locations.json"):
+    def __init__(self, json_file_path='Presets\\Locations.json'):
         super().__init__()
         # Get the directory of the current script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # script_dir = os.path.dirname(os.path.abspath(__file__))
         # Construct the full file path
-        self.json_file_path = os.path.join(script_dir, json_file_path)        
+        # self.json_file_path = os.path.join(script_dir, json_file_path)     
+        self.json_file_path = json_file_path   
         self.locations = {}  # Dictionary to hold location data
 
     def load_locations(self):
@@ -1528,14 +1629,23 @@ class LocationModel(QObject):
 
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
-        self.locations[name] = {"x": x, "y": y, "z": z}
+        self.locations[name] = {'X': x, 'Y': y, 'Z': z}
         self.locations_updated.emit()
         print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
         """Update an existing location by name."""
         if name in self.locations:
-            self.locations[name] = {"x": x, "y": y, "z": z}
+            self.locations[name] = {'X': x, 'Y': y, 'Z': z}
+            self.locations_updated.emit()
+            print(f"Location '{name}' updated.")
+        else:
+            print(f"Location '{name}' not found.")
+
+    def update_location_coords(self, name, coords):
+        """Update an existing location by name."""
+        if name in self.locations:
+            self.locations[name] = coords
             self.locations_updated.emit()
             print(f"Location '{name}' updated.")
         else:
@@ -1553,7 +1663,7 @@ class LocationModel(QObject):
     def get_location(self, name):
         """Get a location's coordinates by name in an array [x,y,z]."""
         if name in self.locations:
-            return [self.locations[name]["x"], self.locations[name]["y"], self.locations[name]["z"]]
+            return [self.locations[name]['X'], self.locations[name]['Y'], self.locations[name]['Z']]
         else:
             return None
     
@@ -1787,7 +1897,7 @@ class MachineModel(QObject):
         return [self.current_x, self.current_y, self.current_z]
 
     def get_current_position_dict(self):
-        return {"x": self.current_x, "y": self.current_y, "z": self.current_z}
+        return {"X": self.current_x, "Y": self.current_y, "Z": self.current_z}
 
     def get_current_position_dict_capital(self):
         return {"X": self.current_x, "Y": self.current_y, "Z": self.current_z}
@@ -1819,13 +1929,20 @@ class Model(QObject):
 
     def __init__(self):
         super().__init__()
-        self.printer_head_colors = self.load_colors('.\\MVC-interface\\Presets\\Printer_head_colors.json')
+
+        self.locations_path = '.\\MVC-interface\\Presets\\Locations.json'
+        self.plates_path = '.\\MVC-interface\\Presets\\Plates.json'
+        self.colors_path = '.\\MVC-interface\\Presets\\Printer_head_colors.json'
+
+
+        self.printer_head_colors = self.load_colors(self.colors_path)
         self.machine_model = MachineModel()
         self.num_slots = 5
-        self.rack_model = RackModel(self.num_slots)
-        self.location_model = LocationModel()
+        self.location_data = self.load_all_location_data(self.locations_path)
+        self.rack_model = RackModel(self.num_slots,location_data=self.location_data)
+        self.location_model = LocationModel(json_file_path=self.locations_path)
         self.location_model.load_locations()  # Load locations at startup
-        self.all_plate_data = self.load_all_plate_data('.\\MVC-interface\\Presets\\Plates.json')
+        self.all_plate_data = self.load_all_plate_data(self.plates_path)
         self.well_plate = WellPlate(self.all_plate_data)
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
@@ -1834,6 +1951,7 @@ class Model(QObject):
         self.experiment_file_path = None
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
+        self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -1842,6 +1960,16 @@ class Model(QObject):
     def load_all_plate_data(self,file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
+        
+    def load_all_location_data(self,file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+        
+    def update_rack_calibration(self):
+        print('\n---Updating rack calibration')
+        self.location_model.update_location_coords('rack_position_Left',self.rack_model.get_calibration_by_name('rack_position_Left'))
+        self.location_model.update_location_coords('rack_position_Right',self.rack_model.get_calibration_by_name('rack_position_Right'))
+        self.location_model.save_locations()
 
     def update_state(self, status_dict):
         '''

@@ -522,7 +522,11 @@ class CommandQueue(QObject):
 
     def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None):
         """Add a command to the queue."""
+        
+        
         self.command_number += 1
+        print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
+        print(f'Adding command: {command_type} {param1} {param2} {param3}')
         command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
         self.queue.append(command)
         return command
