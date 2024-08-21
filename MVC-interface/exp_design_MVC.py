@@ -124,7 +124,7 @@ class ExperimentDesignDialog(QDialog):
             "Reagent Name", "Concentration", "Total Droplets", "Total Volume (uL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.stock_table.setFixedWidth(350)
+        self.stock_table.setFixedWidth(400)
 
         self.left_layout = QVBoxLayout()
         self.left_layout.addWidget(self.reagent_table)
@@ -153,10 +153,11 @@ class ExperimentDesignDialog(QDialog):
         self.total_droplets_spinbox.setMaximum(100)
         self.total_droplets_spinbox.setValue(self.model.metadata.get("max_droplets", 20))
         self.total_droplets_spinbox.valueChanged.connect(self.update_model_metadata)
-        self.info_layout.addWidget(self.total_droplets_label)
-        self.info_layout.addWidget(self.total_droplets_spinbox)
 
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
+
+        self.info_layout.addWidget(self.total_droplets_label)
+        self.info_layout.addWidget(self.total_droplets_spinbox)
         self.info_layout.addWidget(self.total_droplets_used_label)
 
         self.button_layout = QVBoxLayout()
@@ -338,9 +339,17 @@ class ExperimentDesignDialog(QDialog):
         """Generate the experiment by asking the model to calculate it."""
         self.model.generate_experiment()
 
-    def update_total_reactions(self, total_reactions):
+    def update_total_reactions(self, total_reactions, total_droplets_used):
         """Update the total number of reactions displayed."""
+        print(f"Updating total reactions: {total_reactions}, total droplets used: {total_droplets_used}")
         self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
+        
+        self.total_droplets_used_label.setText(f"Total Droplets Used: {total_droplets_used}")
+        if total_droplets_used > self.total_droplets_spinbox.value():
+            self.total_droplets_used_label.setStyleSheet("color: red;")
+        else:
+            self.total_droplets_used_label.setStyleSheet("color: white;")
+        
 
 import pandas as pd
 import itertools
@@ -348,7 +357,7 @@ import itertools
 class ExperimentModel(QObject):
     data_updated = Signal(int)  # Signal to notify when reagent data is updated, passing the row index
     stock_updated = Signal()
-    experiment_generated = Signal(int)  # Signal to notify when the experiment is generated, passing the total number of reactions
+    experiment_generated = Signal(int,int)  # Signal to notify when the experiment is generated, passing the total number of reactions
     # update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
     def __init__(self):
         super().__init__()
@@ -526,12 +535,15 @@ class ExperimentModel(QObject):
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
 
         self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
-        # self.all_droplet_df = comb_df[['reagent_name','stock_solution','droplet_count']].groupby(['reagent_name','stock_solution']).sum().reset_index()
+        max_droplet_df = self.all_droplet_df[['unique_id','droplet_count']].groupby(['unique_id']).sum().reset_index()
+        print(f'Max droplet df: {max_droplet_df}')
+        droplet_count = max_droplet_df['droplet_count'].max()
+        print(f'Max droplet count: {droplet_count}')
         self.add_total_droplet_count_to_stock()
         self.stock_updated.emit()
 
         # Emit signal to notify that the experiment has been generated
-        self.experiment_generated.emit(len(self.experiment_df))
+        self.experiment_generated.emit(len(self.experiment_df),droplet_count)
 
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
