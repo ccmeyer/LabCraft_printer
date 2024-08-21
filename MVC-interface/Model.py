@@ -755,7 +755,6 @@ class WellPlate(QObject):
     
     def calculate_plate_matrix(self):
         """Calculate the transformation matrix for the plate."""
-        print(f'Calculating plate matrix - {self.calibrations}')
         self.corners = np.array([
             [self.get_coords(self.calibrations['top_left'])[0:2]],
             [self.get_coords(self.calibrations['top_right'])[0:2]],
@@ -948,13 +947,16 @@ class WellPlate(QObject):
         for well in self.wells.values():
             if well.assigned_reaction is not None:
                 well.assigned_reaction.reset_reagent_by_id(stock_id)
-                well.state_changed.emit(well.well_id)
+                # well.state_changed.emit(well.well_id)
+        self.well_state_changed_signal.emit('all')
+        
 
     def reset_all_wells(self):
         for well in self.wells.values():
             if well.assigned_reaction is not None:
                 well.assigned_reaction.reset_all_reagents()
-                well.state_changed.emit(well.well_id)
+                # well.state_changed.emit(well.well_id)
+        self.well_state_changed_signal.emit('all')
 
     def get_plate_status(self):
         """Get the status of the entire well plate."""
