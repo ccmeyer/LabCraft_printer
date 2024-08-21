@@ -354,6 +354,8 @@ class ExperimentModel(QObject):
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
+        self.complete_lookup_table = pd.DataFrame()
+        self.all_droplet_df = pd.DataFrame()
 
     def add_reagent(self, name, min_conc, max_conc, steps, mode, manual_input,max_droplets):
         reagent = {
@@ -430,15 +432,13 @@ class ExperimentModel(QObject):
         self.generate_experiment()
 
     def calculate_stock_solutions(self, index):
-        print('Starting stock solution calculation')
         reagent = self.reagents[index]
         stock_solutions, achievable_concentrations = find_minimal_stock_solutions_backtracking(reagent['concentrations'], reagent['max_droplets'])
         reagent['stock_solutions'] = stock_solutions
-        print(f"Calculated stock solutions for {reagent['name']}: {reagent['stock_solutions']}")
-        print(f"Achievable concentrations: {achievable_concentrations}")
+        print(reagent)
+        reagent_lookup_table = self.create_lookup_table(reagent['name'],achievable_concentrations,stock_solutions)
+        self.add_lookup_table(reagent['name'],reagent_lookup_table)
         self.add_new_stock_solutions_for_reagent(reagent['name'], stock_solutions)
-
-        print(f'Stock solution calculation complete: {self.get_all_stock_solutions()}')
         self.stock_updated.emit()
 
     def add_new_stock_solutions_for_reagent(self, reagent_name, concentrations):
@@ -450,6 +450,36 @@ class ExperimentModel(QObject):
                 "reagent_name": reagent_name,
                 "concentration": concentration
             })
+
+    def create_lookup_table(self,reagent_name,achievable_concentrations, stock_solutions):
+        # Initialize a DataFrame with target concentrations as index and stock solutions as columns
+        lookup_table = pd.DataFrame(index=achievable_concentrations.keys(), columns=stock_solutions)
+        # Iterate over the achievable concentrations and populate the lookup table
+        for concentration, droplets in achievable_concentrations.items():
+            droplet_counts = {stock: 0 for stock in stock_solutions}  # Initialize droplet counts
+            for droplet in droplets:
+                droplet_counts[droplet] += 1  # Count how many droplets of each stock solution are used
+            lookup_table.loc[concentration] = pd.Series(droplet_counts)
+        
+        # Replace NaN values with 0 (indicating no droplets of that stock solution are used)
+        lookup_table = lookup_table.fillna(0).astype(int)
+        lookup_table['reagent_name'] = reagent_name
+        lookup_table = lookup_table.reset_index().rename(columns={'index': 'target_concentration'})
+        lookup_table = lookup_table.set_index(['reagent_name','target_concentration']).stack().reset_index().rename(columns={0: 'droplet_count', 'level_2': 'stock_solution'})
+        print(f'Lookup table:\n{lookup_table}')
+        
+        return lookup_table
+    
+    def add_lookup_table(self,reagent_name,lookup_table):
+        if self.complete_lookup_table.empty:
+            self.complete_lookup_table = lookup_table
+            return
+        # Remove any existing rows with the same reagent name
+        self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
+        # Append the new lookup table
+        self.complete_lookup_table = pd.concat([self.complete_lookup_table, lookup_table], ignore_index=True)
+        print(f'Complete lookup table:\n{self.complete_lookup_table}')
+
 
     def get_reagent(self, index):
         return self.reagents[index]
@@ -467,10 +497,14 @@ class ExperimentModel(QObject):
         concentration_combinations = list(itertools.product(*concentrations))
         self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
         print(f"Generated experiment with {len(self.experiment_df)} reactions.")
-        # print(self.experiment_df)
+        self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
+        
         # Apply replicates
         self.experiment_df = pd.concat([self.experiment_df]*self.metadata["replicates"], ignore_index=True)
         print(f"Applied {self.metadata['replicates']} replicates. Total reactions: {len(self.experiment_df)}")
+
+        comb_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
+        print(comb_df)
         # Emit signal to notify that the experiment has been generated
         self.experiment_generated.emit(len(self.experiment_df))
 
