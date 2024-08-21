@@ -2080,6 +2080,11 @@ class ExperimentDesignDialog(QDialog):
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
 
+        # Button to update the table
+        self.update_table_button = QPushButton("Update Table")
+        self.update_table_button.clicked.connect(self.update_all_model_reagents)
+        self.button_layout.addWidget(self.update_table_button)
+
         # Button to optimize stock solutions
         self.optimize_button = QPushButton("Optimize Stock Solutions")
         self.optimize_button.clicked.connect(self.optimize_stock_solutions)
@@ -2209,6 +2214,11 @@ class ExperimentDesignDialog(QDialog):
 
         self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, max_droplets=max_droplets)
 
+    def update_all_model_reagents(self):
+        """Update all reagents in the model based on the current row values."""
+        for row in range(self.reagent_table.rowCount()):
+            self.update_model_reagent(row)
+
     def update_model_metadata(self):
         """Update the metadata in the model based on the current values."""
         replicates = self.replicate_spinbox.value()
@@ -2252,6 +2262,7 @@ class ExperimentDesignDialog(QDialog):
 
     def save_experiment(self):
         """Save the current experiment setup to a file."""
+        self.update_all_model_reagents()
         filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", "", "JSON Files (*.json)")
         if filename:
             self.experiment_model.save_experiment(filename)
@@ -2328,4 +2339,10 @@ class ExperimentDesignDialog(QDialog):
             self.total_droplets_used_label.setStyleSheet("color: red;")
         else:
             self.total_droplets_used_label.setStyleSheet("color: white;")
+
+    def closeEvent(self, event):
+        """Handle the window close event."""
+        self.update_all_model_reagents()  # Update all reagents before closing
+        event.accept()  # Close the dialog
+
         
