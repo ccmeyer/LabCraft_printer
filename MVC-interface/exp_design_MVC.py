@@ -165,16 +165,17 @@ class ExperimentDesignDialog(QDialog):
         self.add_reagent_button = QPushButton("Add Reagent")
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
-        
-        # # Button to optimize stock solutions
-        # self.optimize_button = QPushButton("Optimize Stock Solutions")
-        # self.optimize_button.clicked.connect(self.optimize_stock_solutions)
-        # self.button_layout.addWidget(self.optimize_button)
-        
-        # Button to generate the experiment
-        self.generate_experiment_button = QPushButton("Generate Experiment")
-        self.generate_experiment_button.clicked.connect(self.generate_experiment)
-        self.button_layout.addWidget(self.generate_experiment_button)
+
+        # Button to load an experiment
+        self.load_experiment_button = QPushButton("Load Experiment")
+        self.load_experiment_button.clicked.connect(self.load_experiment)
+        self.button_layout.addWidget(self.load_experiment_button)
+
+        # Button to save the experiment
+        self.save_experiment_button = QPushButton("Save Experiment")
+        self.save_experiment_button.setStyleSheet("background-color: #4CAF50; color: white;")
+        self.save_experiment_button.clicked.connect(self.save_experiment)
+        self.button_layout.addWidget(self.save_experiment_button)
 
         self.bottom_layout.addLayout(self.info_layout)
         self.bottom_layout.addLayout(self.button_layout)
@@ -189,7 +190,7 @@ class ExperimentDesignDialog(QDialog):
         self.model.experiment_generated.connect(self.update_total_reactions)
         # self.model.update_max_droplets_signal.connect(self.update_max_droplets)
 
-    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions=""):
+    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions="",view_only=False):
         """Add a new reagent row to the table and model."""
         row_position = self.reagent_table.rowCount()
         self.reagent_table.insertRow(row_position)
@@ -246,16 +247,17 @@ class ExperimentDesignDialog(QDialog):
         delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
         self.reagent_table.setCellWidget(row_position, 9, delete_button)
 
-        # Add reagent to model
-        self.model.add_reagent(
-            name=default_name,
-            min_conc=min_conc,
-            max_conc=max_conc,
-            steps=steps,
-            mode=mode,
-            manual_input=manual_input,
-            max_droplets=max_droplets
-        )
+        if not view_only:
+            # Add reagent to model
+            self.model.add_reagent(
+                name=default_name,
+                min_conc=min_conc,
+                max_conc=max_conc,
+                steps=steps,
+                mode=mode,
+                manual_input=manual_input,
+                max_droplets=max_droplets
+            )
 
         # Connect signals after initializing the row to avoid 'NoneType' errors
         min_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
@@ -265,7 +267,7 @@ class ExperimentDesignDialog(QDialog):
         mode_item.currentIndexChanged.connect(lambda: self.toggle_manual_entry(row_position))
         manual_conc_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         max_droplets_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
-        
+        # if not view_only:
         self.update_model_reagent(row_position)
 
     def delete_reagent(self, row):
@@ -291,8 +293,53 @@ class ExperimentDesignDialog(QDialog):
         max_droplets = self.total_droplets_spinbox.value()
         self.model.update_metadata(replicates, max_droplets)
 
-    # def optimize_stock_solutions(self):
-    #     self.model.optimize_stock_solutions()
+    def load_experiment_to_view(self):
+        """Load reagents, stock solutions, and metadata from the model to the view."""
+        self.reagent_table.setRowCount(0)  # Clear the table first
+        print("Loading experiment to view")
+        original_reagents = self.model.get_all_reagents().copy()
+        print(f"Original reagents: {original_reagents}")
+
+        for i, reagent in enumerate(original_reagents):
+            print(f"-=-=-Adding reagent: {reagent}-{i}")
+
+            self.add_reagent(
+                name=reagent["name"],
+                min_conc=reagent["min_conc"],
+                max_conc=reagent["max_conc"],
+                steps=reagent["steps"],
+                mode=reagent["mode"],
+                manual_input=reagent["manual_input"],
+                max_droplets=reagent["max_droplets"],
+                stock_solutions=", ".join(map(str, reagent["stock_solutions"])),
+                view_only=True
+            )
+            self.model.calculate_concentrations(i,calc_experiment=False)
+
+        # Temporarily disconnect the signals
+        self.total_droplets_spinbox.blockSignals(True)
+        self.replicate_spinbox.blockSignals(True)
+
+        self.total_droplets_spinbox.setValue(self.model.metadata.get("max_droplets", 20))
+        self.replicate_spinbox.setValue(self.model.metadata.get("replicates", 1))
+        
+        # Reconnect the signals
+        self.total_droplets_spinbox.blockSignals(False)
+        self.replicate_spinbox.blockSignals(False)
+
+    def save_experiment(self):
+        """Save the current experiment setup to a file."""
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", "", "JSON Files (*.json)")
+        if filename:
+            self.model.save_experiment(filename)
+
+    def load_experiment(self):
+        """Load a saved experiment setup from a file."""
+        filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment", "", "JSON Files (*.json)")
+        if filename:
+            self.model.load_experiment(filename)
+            print("\n----Finished model loading----\n")
+            self.load_experiment_to_view()
     
     def toggle_manual_entry(self, row):
         """Enable or disable the manual entry field based on mode selection."""
@@ -307,19 +354,15 @@ class ExperimentDesignDialog(QDialog):
 
         preview_text = ", ".join(map(str, reagent["concentrations"]))
         preview_item = self.reagent_table.item(row, 7)
-        preview_item.setText(preview_text)
-        preview_item.setTextAlignment(Qt.AlignCenter)
+        if type(preview_item) != type(None):
+            preview_item.setText(preview_text)
+            preview_item.setTextAlignment(Qt.AlignCenter)
 
         stock_solution_text = ", ".join(map(str, reagent["stock_solutions"]))
         stock_solution_item = self.reagent_table.item(row, 8)
-        stock_solution_item.setText(stock_solution_text)
-        stock_solution_item.setTextAlignment(Qt.AlignCenter)
-
-    # def update_max_droplets(self,row):
-    #     print(f"Updating max droplets for row {row}")
-    #     reagent = self.model.get_reagent(row)  
-    #     max_droplets_item = self.reagent_table.item(row, 6)
-    #     max_droplets_item.setValue(reagent["max_droplets"])       
+        if type(stock_solution_item) != type(None):
+            stock_solution_item.setText(stock_solution_text)
+            stock_solution_item.setTextAlignment(Qt.AlignCenter)
 
     def update_stock_table(self):
         # Populate the stock table
@@ -416,22 +459,7 @@ class ExperimentModel(QObject):
         self.metadata["max_droplets"] = max_droplets
         self.generate_experiment()
 
-    # def optimize_stock_solutions(self):
-    #     """Optimize the stock solutions using multi-reagent optimization."""
-    #     # Extract the concentrations and max droplets for each reagent
-    #     print("Optimizing stock solutions")
-    #     reagents_data = [(reagent["concentrations"], reagent["max_droplets"]) for reagent in self.reagents]
-    #     optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, self.metadata["max_droplets"])
-    #     print(f'Optimized solutions: {optimized_solutions}')
-    #     print(f'Max droplets per reagent: {max_droplets_per_reagent}')
-    #     for i, reagent in enumerate(self.reagents):
-    #         print(f'Updating reagent {reagent["name"]} with optimized solutions')
-    #         reagent['max_droplets'] = max_droplets_per_reagent[i]
-    #         self.update_max_droplets_signal.emit(i)
-    #         self.calculate_stock_solutions(i)
-    #     self.generate_experiment()
-
-    def calculate_concentrations(self, index):
+    def calculate_concentrations(self, index,calc_experiment=True):
         reagent = self.reagents[index]
         mode = reagent["mode"]
         if mode == "Manual":
@@ -459,7 +487,12 @@ class ExperimentModel(QObject):
         
         # Emit signal to update the view
         self.data_updated.emit(index)
-        self.generate_experiment()
+        if calc_experiment:
+            self.generate_experiment()
+
+    def calculate_all_concentrations(self):
+        for i in range(len(self.reagents)):
+            self.calculate_concentrations(i)
 
     def calculate_stock_solutions(self, index):
         reagent = self.reagents[index]
@@ -553,6 +586,49 @@ class ExperimentModel(QObject):
     def get_experiment_dataframe(self):
         """Return the experiment DataFrame."""
         return self.experiment_df
+    
+    def save_experiment(self, filename):
+        """Save all information required to repopulate the model to a JSON file."""
+        data_to_save = {
+            "reagents": self.reagents,
+            "metadata": self.metadata,
+        }
+        with open(filename, 'w') as file:
+            json.dump(data_to_save, file, indent=4)
+        print(f"Experiment data saved to {filename}")
+    
+    def load_experiment(self, filename):
+        """Load all information required to repopulate the model from a JSON file."""
+        with open(filename, 'r') as file:
+            loaded_data = json.load(file)
+
+        # Clear current data to avoid duplications or issues
+        self.reagents = []
+        self.metadata = {
+            "replicates": 1,
+            "max_droplets": 20,
+            'droplet_volume': 0.03
+        }
+        self.stock_solutions = []
+        self.experiment_df = pd.DataFrame()
+        self.complete_lookup_table = pd.DataFrame()
+        self.all_droplet_df = pd.DataFrame()
+
+        # Load data from the JSON file
+        self.reagents = loaded_data["reagents"]
+        self.metadata = loaded_data["metadata"]
+
+        # Recalculate any necessary information and emit signals to update the view
+        for i in range(len(self.reagents)):
+
+            self.data_updated.emit(i)
+            self.calculate_concentrations(i,calc_experiment=True)
+            print(f'finished conc for {i}\n{self.experiment_df}')
+
+        # self.generate_experiment()  # Regenerate experiment to ensure everything is correctly updated
+
+        print(f"Experiment data loaded from {filename}")
+        
 
 
 class MainWindow(QMainWindow):
