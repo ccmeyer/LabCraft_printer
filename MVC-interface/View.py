@@ -1,7 +1,9 @@
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
-from PySide6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,\
-        QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,\
-        QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,
+    QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,
+    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox
+)
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush
 from PySide6.QtCore import Qt
@@ -765,6 +767,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.top_layout.addWidget(self.calibration_button)
         
         self.bottom_layout = QHBoxLayout()
+
+        self.design_experiment_button = QPushButton("Design Experiment")
+        self.design_experiment_button.clicked.connect(self.open_experiment_designer)
+        self.bottom_layout.addWidget(self.design_experiment_button)
+
         self.experiment_button = QPushButton("Load Experiment")
         self.experiment_button.clicked.connect(self.on_load_experiment)
         self.bottom_layout.addWidget(self.experiment_button)
@@ -925,6 +932,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         else:
             print("Calibration was canceled or failed.")
             self.model.well_plate.discard_temp_calibrations()
+
+    def open_experiment_designer(self):
+        dialog = ExperimentDesignDialog(self, self.model)
+        if dialog.exec():
+            print("Experiment file generated and loaded.")
 
 class SimplePositionWidget(QGroupBox):
     home_requested = QtCore.Signal()  # Signal to request homing
@@ -1325,6 +1337,71 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
 
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
 
+class RackCalibrationDialog(BaseCalibrationDialog):
+    def __init__(self, main_window, model, controller):
+        steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
+        name_dict = {
+            "Top-Left": "top_left",
+            "Top-Right": "top_right",
+            "Bottom-Right": "bottom_right",
+            "Bottom-Left": "bottom_left"
+        }
+        super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict)
+
+    def get_initial_calibrations(self):
+        return self.model.well_plate.get_all_current_plate_calibrations()
+
+    def get_calibration_by_name(self, name):
+        return self.model.well_plate.get_calibration_by_name(name)
+
+    def get_temp_calibration_by_name(self, name):
+        return self.model.well_plate.get_temp_calibration_by_name(name)
+
+    def set_calibration_position(self, name, position):
+        self.model.well_plate.set_calibration_position(name, position)
+
+    def discard_temp_calibrations(self):
+        self.model.well_plate.discard_temp_calibrations()
+
+    def update_visual_aid(self):
+        """Update the visual aid based on the current step."""
+        # Clear the scene
+        self.visual_aid_scene.clear()
+
+        # Draw the outline of the well plate
+        height = 250
+        width = 400
+        padding = 50
+        offset_x = 100
+        offset_y = 50
+        well_plate_outline = QGraphicsRectItem(offset_x, offset_y, width, height)
+        well_plate_outline.setPen(QPen(Qt.darkGray, 2))
+        self.visual_aid_scene.addItem(well_plate_outline)
+
+        # Define the positions of the wells on the well plate
+        # Adjusted to center the wells based on their radius
+        well_radius = 15  # Radius of the well (half of the diameter)
+        well_position = {
+            "Top-Left": (offset_x + padding - well_radius, offset_y + padding - well_radius),
+            "Top-Right": (offset_x + width - padding - well_radius, offset_y + padding - well_radius),
+            "Bottom-Right": (offset_x + width - padding - well_radius, offset_y + height - padding - well_radius),
+            "Bottom-Left": (offset_x + padding - well_radius, offset_y + height - padding - well_radius)
+        }
+
+        # Draw all four wells as circles
+        for i, step in enumerate(self.steps):
+            pos = well_position[step]
+            if i < self.current_step:
+                pen = QPen(QColor("blue"), 1)
+                brush = QBrush(Qt.NoBrush)
+            elif i == self.current_step:
+                pen = QPen(QColor("red"), 3)
+                brush = QBrush(Qt.NoBrush)
+            else:
+                pen = QPen(QColor("lightgrey"), 1)
+                brush = QBrush(Qt.NoBrush)
+
+            self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
 
 class MovementBox(QtWidgets.QGroupBox):
     """
@@ -1930,3 +2007,325 @@ class CommandQueueWidget(QGroupBox):
         """Set the background color for a row."""
         for column in range(self.table.columnCount()):
             self.table.item(row, column).setBackground(QtGui.QColor(color))
+
+
+class ExperimentDesignDialog(QDialog):
+    def __init__(self, main_window, model):
+        super().__init__()
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+        self.model = model
+        self.experiment_model = self.model.experiment_model
+        self.setWindowTitle("Experiment Design")
+        self.setFixedSize(1600, 400)
+
+        self.layout = QHBoxLayout(self)
+        
+        # Table to hold all reagent information
+        self.reagent_table = QTableWidget(0, 10, self)
+        self.reagent_table.setHorizontalHeaderLabels([
+            "Reagent Name", "Min Conc", "Max Conc", "Steps", 
+            "Mode", "Manual Input", "Max Droplets",
+            "Concentrations Preview", "Stock Solutions", "Delete"
+        ])
+        self.reagent_table.setColumnWidth(7, 200)
+        self.reagent_table.setColumnWidth(8, 100)
+        self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
+
+        # Stock solutions table
+        self.stock_table = QTableWidget(0, 4, self)
+        self.stock_table.setHorizontalHeaderLabels([
+            "Reagent Name", "Concentration", "Total Droplets", "Total Volume (uL)"
+        ])
+        self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stock_table.setFixedWidth(400)
+
+        self.left_layout = QVBoxLayout()
+        self.left_layout.addWidget(self.reagent_table)
+        self.bottom_layout = QHBoxLayout()
+
+        self.right_layout = QVBoxLayout()
+        self.right_layout.addWidget(self.stock_table)
+
+        self.bottom_layout = QHBoxLayout()
+        # Label and spin box for total reactions and replicates
+        self.info_layout = QVBoxLayout()
+        self.total_reactions_label = QLabel("Total Reactions: 0", self)
+        self.info_layout.addWidget(self.total_reactions_label)
+
+        self.replica_label = QLabel("Replicates:", self)
+        self.replicate_spinbox = QSpinBox(self)
+        self.replicate_spinbox.setMinimum(1)
+        self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
+        self.replicate_spinbox.valueChanged.connect(self.update_model_metadata)
+        self.info_layout.addWidget(self.replica_label)
+        self.info_layout.addWidget(self.replicate_spinbox)
+
+        self.total_droplets_label = QLabel("Total Droplets Available:", self)
+        self.total_droplets_spinbox = QSpinBox(self)
+        self.total_droplets_spinbox.setMinimum(1)
+        self.total_droplets_spinbox.setMaximum(1000)
+        self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
+        self.total_droplets_spinbox.valueChanged.connect(self.update_model_metadata)
+
+        self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
+
+        self.info_layout.addWidget(self.total_droplets_label)
+        self.info_layout.addWidget(self.total_droplets_spinbox)
+        self.info_layout.addWidget(self.total_droplets_used_label)
+
+        self.button_layout = QVBoxLayout()
+        # Button to add a new reagent
+        self.add_reagent_button = QPushButton("Add Reagent")
+        self.add_reagent_button.clicked.connect(self.add_reagent)
+        self.button_layout.addWidget(self.add_reagent_button)
+
+        # Button to optimize stock solutions
+        self.optimize_button = QPushButton("Optimize Stock Solutions")
+        self.optimize_button.clicked.connect(self.optimize_stock_solutions)
+        self.button_layout.addWidget(self.optimize_button)
+        
+        # Button to load an experiment
+        self.load_experiment_button = QPushButton("Load Experiment")
+        self.load_experiment_button.clicked.connect(self.load_experiment)
+        self.button_layout.addWidget(self.load_experiment_button)
+
+        # Button to save the experiment
+        self.save_experiment_button = QPushButton("Save Experiment")
+        self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+        self.save_experiment_button.clicked.connect(self.save_experiment)
+        self.button_layout.addWidget(self.save_experiment_button)
+
+        self.bottom_layout.addLayout(self.info_layout)
+        self.bottom_layout.addLayout(self.button_layout)
+        self.left_layout.addLayout(self.bottom_layout)
+
+        self.layout.addLayout(self.left_layout)
+        self.layout.addLayout(self.right_layout)
+
+        # Connect model signals
+        self.experiment_model.data_updated.connect(self.update_preview)
+        self.experiment_model.stock_updated.connect(self.update_stock_table)
+        self.experiment_model.experiment_generated.connect(self.update_total_reactions)
+        self.experiment_model.update_max_droplets_signal.connect(self.update_max_droplets)
+
+        self.load_experiment_to_view()
+
+    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions="",view_only=False):
+        """Add a new reagent row to the table and model."""
+        row_position = self.reagent_table.rowCount()
+        self.reagent_table.insertRow(row_position)
+
+        # Generate a default name for the reagent
+        if name == "":
+            name = f"reagent-{row_position + 1}"
+        print(f'---name: {name}---')
+        # Add cells for reagent name, min/max concentrations, steps, and mode
+        reagent_name_item = QTableWidgetItem(name)
+        reagent_name_item.setFlags(reagent_name_item.flags() | Qt.ItemIsEditable)
+        self.reagent_table.setItem(row_position, 0, reagent_name_item)
+
+        min_conc_item = QDoubleSpinBox()
+        min_conc_item.setMinimum(0.0)
+        min_conc_item.setValue(min_conc)
+        self.reagent_table.setCellWidget(row_position, 1, min_conc_item)
+
+        max_conc_item = QDoubleSpinBox()
+        max_conc_item.setMinimum(0.0)
+        max_conc_item.setMaximum(1000.0)
+        max_conc_item.setValue(max_conc)
+        self.reagent_table.setCellWidget(row_position, 2, max_conc_item)
+
+        steps_item = QSpinBox()
+        steps_item.setMinimum(2)
+        steps_item.setValue(steps)
+        self.reagent_table.setCellWidget(row_position, 3, steps_item)
+
+        mode_item = QComboBox()
+        mode_item.addItems(["Linear", "Quadratic", "Logarithmic", "Manual"])
+        mode_item.setCurrentText(mode)
+        self.reagent_table.setCellWidget(row_position, 4, mode_item)
+
+        manual_conc_item = QLineEdit(manual_input)
+        manual_conc_item.setPlaceholderText("e.g., 0.1, 0.5, 1.0")
+        manual_conc_item.setEnabled(mode == "Manual")  # Enabled only if mode is "Manual"
+        self.reagent_table.setCellWidget(row_position, 5, manual_conc_item)
+
+        max_droplets_item = QSpinBox()
+        max_droplets_item.setMinimum(1)
+        max_droplets_item.setValue(max_droplets)
+        self.reagent_table.setCellWidget(row_position, 6, max_droplets_item)
+
+        preview_item = QTableWidgetItem()
+        preview_item.setTextAlignment(Qt.AlignCenter)
+        self.reagent_table.setItem(row_position, 7, preview_item)
+
+        stock_solutions_item = QTableWidgetItem(stock_solutions)
+        stock_solutions_item.setTextAlignment(Qt.AlignCenter)
+        self.reagent_table.setItem(row_position, 8, stock_solutions_item)
+
+        # Delete button
+        delete_button = QPushButton("Delete")
+        delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
+        self.reagent_table.setCellWidget(row_position, 9, delete_button)
+
+        if not view_only:
+            # Add reagent to model
+            self.experiment_model.add_reagent(
+                name=name,
+                min_conc=min_conc,
+                max_conc=max_conc,
+                steps=steps,
+                mode=mode,
+                manual_input=manual_input,
+                max_droplets=max_droplets
+            )
+
+        # Connect signals after initializing the row to avoid 'NoneType' errors
+        min_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
+        max_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
+        steps_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
+        mode_item.currentIndexChanged.connect(lambda: self.update_model_reagent(row_position))
+        mode_item.currentIndexChanged.connect(lambda: self.toggle_manual_entry(row_position))
+        manual_conc_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
+        max_droplets_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
+        # if not view_only:
+        self.update_model_reagent(row_position)
+
+    def delete_reagent(self, row):
+        reagent_name = self.reagent_table.item(row, 0).text()
+        self.experiment_model.delete_reagent(reagent_name)
+        self.reagent_table.removeRow(row)
+
+    def update_model_reagent(self, row):
+        """Update the reagent in the model based on the current row values."""
+        name = self.reagent_table.item(row, 0).text()
+        min_conc = self.reagent_table.cellWidget(row, 1).value()
+        max_conc = self.reagent_table.cellWidget(row, 2).value()
+        steps = self.reagent_table.cellWidget(row, 3).value()
+        mode = self.reagent_table.cellWidget(row, 4).currentText()
+        manual_input = self.reagent_table.cellWidget(row, 5).text()
+        max_droplets = self.reagent_table.cellWidget(row, 6).value()
+
+        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, max_droplets=max_droplets)
+
+    def update_model_metadata(self):
+        """Update the metadata in the model based on the current values."""
+        replicates = self.replicate_spinbox.value()
+        max_droplets = self.total_droplets_spinbox.value()
+        self.experiment_model.update_metadata(replicates, max_droplets)
+
+    def load_experiment_to_view(self):
+        """Load reagents, stock solutions, and metadata from the model to the view."""
+        self.reagent_table.setRowCount(0)  # Clear the table first
+        print("Loading experiment to view")
+
+        # Temporarily disconnect the signals
+        self.total_droplets_spinbox.blockSignals(True)
+        self.replicate_spinbox.blockSignals(True)
+
+        self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
+        self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
+        
+        # Reconnect the signals
+        self.total_droplets_spinbox.blockSignals(False)
+        self.replicate_spinbox.blockSignals(False)
+        
+        original_reagents = self.experiment_model.get_all_reagents().copy()
+        print(f"Original reagents: {original_reagents}")
+
+        for i, reagent in enumerate(original_reagents):
+            print(f"-=-=-Adding reagent: {reagent}-{i}")
+
+            self.add_reagent(
+                name=reagent["name"],
+                min_conc=reagent["min_conc"],
+                max_conc=reagent["max_conc"],
+                steps=reagent["steps"],
+                mode=reagent["mode"],
+                manual_input=reagent["manual_input"],
+                max_droplets=reagent["max_droplets"],
+                stock_solutions=", ".join(map(str, reagent["stock_solutions"])),
+                view_only=True
+            )
+            self.experiment_model.calculate_concentrations(i,calc_experiment=False)
+
+    def save_experiment(self):
+        """Save the current experiment setup to a file."""
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", "", "JSON Files (*.json)")
+        if filename:
+            self.experiment_model.save_experiment(filename)
+
+    def load_experiment(self):
+        """Load a saved experiment setup from a file."""
+        filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment", "", "JSON Files (*.json)")
+        if filename:
+            self.experiment_model.load_experiment(filename)
+            print("\n----Finished model loading----\n")
+            self.load_experiment_to_view()
+    
+    def optimize_stock_solutions(self):
+        self.experiment_model.optimize_stock_solutions()
+    
+    def update_max_droplets(self, row):
+        """Update the maximum droplets for a reagent based on the total droplets available."""
+        print(f"\n-------Updating max droplets for row {row}\n")
+        max_droplets = self.experiment_model.get_reagent(row)["max_droplets"]
+        max_droplets_item = self.reagent_table.cellWidget(row, 6)
+        max_droplets_item.blockSignals(True)
+        max_droplets_item.setValue(max_droplets)
+        max_droplets_item.blockSignals(False)
+        self.update_model_reagent(row)
+
+    def toggle_manual_entry(self, row):
+        """Enable or disable the manual entry field based on mode selection."""
+        mode = self.reagent_table.cellWidget(row, 4).currentText()
+        manual_conc_item = self.reagent_table.cellWidget(row, 5)
+        manual_conc_item.setEnabled(mode == "Manual")
+        self.update_model_reagent(row)
+
+    def update_preview(self, row):
+        """Update the concentrations preview in the table based on the model."""
+        reagent = self.experiment_model.get_reagent(row)   
+
+        preview_text = ", ".join(map(str, reagent["concentrations"]))
+        preview_item = self.reagent_table.item(row, 7)
+        if type(preview_item) != type(None):
+            preview_item.setText(preview_text)
+            preview_item.setTextAlignment(Qt.AlignCenter)
+
+        stock_solution_text = ", ".join(map(str, reagent["stock_solutions"]))
+        stock_solution_item = self.reagent_table.item(row, 8)
+        if type(stock_solution_item) != type(None):
+            stock_solution_item.setText(stock_solution_text)
+            stock_solution_item.setTextAlignment(Qt.AlignCenter)
+
+    def update_stock_table(self):
+        # Populate the stock table
+        print("Updating stock table")
+        self.stock_table.setRowCount(0)  # Clear existing rows
+        for stock_solution in self.experiment_model.get_all_stock_solutions():
+            print(f"---Adding stock solution: {stock_solution}")
+            row_position = self.stock_table.rowCount()
+            self.stock_table.insertRow(row_position)
+            self.stock_table.setItem(row_position, 0, QTableWidgetItem(stock_solution['reagent_name']))
+            self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock_solution['concentration'])))
+            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['total_droplets'])))
+            self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_volume'])))
+
+
+    def generate_experiment(self):
+        """Generate the experiment by asking the model to calculate it."""
+        self.experiment_model.generate_experiment()
+
+    def update_total_reactions(self, total_reactions, total_droplets_used):
+        """Update the total number of reactions displayed."""
+        print(f"Updating total reactions: {total_reactions}, total droplets used: {total_droplets_used}")
+        self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
+        
+        self.total_droplets_used_label.setText(f"Total Droplets Used: {total_droplets_used}")
+        if total_droplets_used > self.total_droplets_spinbox.value():
+            self.total_droplets_used_label.setStyleSheet("color: red;")
+        else:
+            self.total_droplets_used_label.setStyleSheet("color: white;")
+        
