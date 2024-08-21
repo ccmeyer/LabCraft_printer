@@ -294,8 +294,13 @@ class ExperimentModel(QObject):
         self.stock_updated.emit()
 
         # Emit signal to notify that the experiment has been generated
-        self.experiment_generated.emit(max(self.all_droplet_df['unique_id'])+1,droplet_count)
+        self.experiment_generated.emit(self.get_number_of_reactions(),droplet_count)
 
+    def get_number_of_reactions(self):
+        if self.all_droplet_df.empty:
+            return 0
+        return len(self.all_droplet_df['unique_id'].unique())
+    
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
             stock_solution['total_droplets'] = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
@@ -369,11 +374,12 @@ class StockSolution(QObject):
     Represents a specific instance of a reagent at a certain concentration
     Each stock solution can be assigned to a printer head.
     '''
-    def __init__(self, stock_id, reagent_name,concentration):
+    def __init__(self, stock_id, reagent_name,concentration,required_volume=None):
         super().__init__()
         self.stock_id = stock_id
         self.reagent_name = reagent_name
         self.concentration = concentration
+        self.required_volume = required_volume
 
     def get_stock_id(self):
         return self.stock_id
@@ -436,10 +442,10 @@ class StockSolutionManager(QObject):
             else:
                 self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration)})
 
-    def add_stock_solution(self, reagent_name, concentration):
+    def add_stock_solution(self, reagent_name, concentration,required_volume=None):
         # Generates a unique identifier for the reagent/concentration pair
         stock_id = '_'.join([reagent_name,str(concentration)])
-        self.stock_solutions.update({stock_id:StockSolution(reagent_name,concentration)})
+        self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,required_volume=required_volume)})
 
     def get_stock_solution(self, reagent_name, concentration):
         """Retrieve a reagent-concentration pair."""
@@ -477,9 +483,9 @@ class ReactionComposition(QObject):
     It is comprised of multiple Reagent objects which represent how many droplets of each stock solution need to be added to the reaction
     Each reaction composition should only have one Reagent instance per stock solution
     '''
-    def __init__(self, name):
+    def __init__(self, unique_id):
         super().__init__()
-        self.name = name
+        self.unique_id = unique_id
         self.reagents = {}  # Dictionary to hold Reagent objects with the required number of droplets
     
     def add_reagent(self, stock_solution,droplets):
@@ -540,8 +546,8 @@ class ReactionCollection(QObject):
         """Add a unique reaction to the collection."""
         if not isinstance(reaction, ReactionComposition):
             raise ValueError("Must add a ReactionComposition object.")
-        if reaction.name not in self.reactions:
-            self.reactions[reaction.name] = reaction
+        if reaction.unique_id not in self.reactions:
+            self.reactions[reaction.unique_id] = reaction
         else:
             raise ValueError(f"Reaction '{reaction.name}' already exists in the collection.")
 
@@ -977,8 +983,8 @@ class WellPlate(QObject):
         for i, reaction in enumerate(reactions):
             well = available_wells[i]
             well.assign_reaction(reaction)
-            reaction_assignment[reaction.name] = well.well_id
-            print(f"Assigned reaction '{reaction.name}' to well '{well.well_id}'.")
+            reaction_assignment[reaction.unique_id] = well.well_id
+            print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
 
         return reaction_assignment
     
@@ -1891,6 +1897,37 @@ class Model(QObject):
         self.assign_printer_heads()
         self.experiment_loaded.emit()
         self.experiment_file_path = file_path
+
+    def load_reactions_from_model(self):
+        stock_solutions = StockSolutionManager()
+        for stock in self.experiment_model.get_all_stock_solutions():
+            stock_solutions.add_stock_solution(stock['reagent_name'],stock['concentration'],required_volume=stock['total_volume'])
+        
+        reaction_collection = ReactionCollection()
+        for unique_id, reaction_df in self.experiment_model.all_droplet_df.groupby('unique_id'):
+            reaction = ReactionComposition(unique_id)
+            for _, row in reaction_df.iterrows():
+                current_stock = stock_solutions.get_stock_solution(row['reagent_name'],row['stock_solution'])
+                reaction.add_reagent(current_stock, row['droplet_count'])
+            
+            reaction_collection.add_reaction(reaction)
+        return stock_solutions,reaction_collection
+
+    def load_experiment_from_model(self,plate_name=None):
+        if self.experiment_model.get_number_of_reactions() == 0:
+            print("No reactions in the experiment model.")
+            return
+        if len(self.reaction_collection.get_all_reactions()) > 0:
+            self.clear_experiment()
+        if plate_name is not None:
+            self.well_plate.set_plate_format(plate_name)
+        
+        self.stock_solutions, self.reaction_collection = self.load_reactions_from_model()
+        print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
+        self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+        self.well_plate.apply_calibration_data()
+        self.assign_printer_heads()
+        self.experiment_loaded.emit()
 
     def reload_experiment(self, plate_name=None):
         """Reload the experiment from the last loaded file."""

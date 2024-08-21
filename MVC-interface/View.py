@@ -2122,7 +2122,7 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.insertRow(row_position)
 
         # Generate a default name for the reagent
-        if name == "":
+        if not name:
             name = f"reagent-{row_position + 1}"
         print(f'---name: {name}---')
         # Add cells for reagent name, min/max concentrations, steps, and mode
@@ -2142,7 +2142,7 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setCellWidget(row_position, 2, max_conc_item)
 
         steps_item = QSpinBox()
-        steps_item.setMinimum(2)
+        steps_item.setMinimum(1)
         steps_item.setValue(steps)
         self.reagent_table.setCellWidget(row_position, 3, steps_item)
 
@@ -2343,6 +2343,7 @@ class ExperimentDesignDialog(QDialog):
     def closeEvent(self, event):
         """Handle the window close event."""
         self.update_all_model_reagents()  # Update all reagents before closing
+        self.model.load_experiment_from_model()
         event.accept()  # Close the dialog
 
         
