@@ -153,6 +153,7 @@ class ExperimentModel(QObject):
 
     def delete_reagent(self, name):
         self.reagents = [reagent for reagent in self.reagents if reagent["name"] != name]
+        self.remove_stock_solutions_for_unused_reagents()
         self.generate_experiment()
 
     def update_metadata(self, replicates, max_droplets):
@@ -176,8 +177,11 @@ class ExperimentModel(QObject):
             if min_conc >= max_conc:
                 reagent["concentrations"] = []
                 return
-
-            if mode == "Linear":
+            
+            if steps == 1:
+                reagent["concentrations"] = [round(max_conc, 2)]
+                print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
+            elif mode == "Linear":
                 reagent["concentrations"] = [round(x, 2) for x in np.linspace(min_conc, max_conc, steps).tolist()]
             elif mode == "Quadratic":
                 reagent["concentrations"] = [round(x, 2) for x in (np.linspace(np.sqrt(min_conc), np.sqrt(max_conc), steps)**2).tolist()]
@@ -283,13 +287,14 @@ class ExperimentModel(QObject):
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
 
         self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
+        print(f'Generated experiment\n{self.all_droplet_df}')
         max_droplet_df = self.all_droplet_df[['unique_id','droplet_count']].groupby(['unique_id']).sum().reset_index()
         droplet_count = max_droplet_df['droplet_count'].max()
         self.add_total_droplet_count_to_stock()
         self.stock_updated.emit()
 
         # Emit signal to notify that the experiment has been generated
-        self.experiment_generated.emit(len(self.experiment_df),droplet_count)
+        self.experiment_generated.emit(max(self.all_droplet_df['unique_id'])+1,droplet_count)
 
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
