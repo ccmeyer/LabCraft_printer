@@ -166,6 +166,11 @@ class ExperimentDesignDialog(QDialog):
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
 
+        # Button to optimize stock solutions
+        self.optimize_button = QPushButton("Optimize Stock Solutions")
+        self.optimize_button.clicked.connect(self.optimize_stock_solutions)
+        self.button_layout.addWidget(self.optimize_button)
+        
         # Button to load an experiment
         self.load_experiment_button = QPushButton("Load Experiment")
         self.load_experiment_button.clicked.connect(self.load_experiment)
@@ -188,7 +193,9 @@ class ExperimentDesignDialog(QDialog):
         self.model.data_updated.connect(self.update_preview)
         self.model.stock_updated.connect(self.update_stock_table)
         self.model.experiment_generated.connect(self.update_total_reactions)
-        # self.model.update_max_droplets_signal.connect(self.update_max_droplets)
+        self.model.update_max_droplets_signal.connect(self.update_max_droplets)
+
+        self.load_experiment_to_view()
 
     def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions="",view_only=False):
         """Add a new reagent row to the table and model."""
@@ -341,6 +348,19 @@ class ExperimentDesignDialog(QDialog):
             print("\n----Finished model loading----\n")
             self.load_experiment_to_view()
     
+    def optimize_stock_solutions(self):
+        self.model.optimize_stock_solutions()
+    
+    def update_max_droplets(self, row):
+        """Update the maximum droplets for a reagent based on the total droplets available."""
+        print(f"\n-------Updating max droplets for row {row}\n")
+        max_droplets = self.model.get_reagent(row)["max_droplets"]
+        max_droplets_item = self.reagent_table.cellWidget(row, 6)
+        max_droplets_item.blockSignals(True)
+        max_droplets_item.setValue(max_droplets)
+        max_droplets_item.blockSignals(False)
+        self.update_model_reagent(row)
+
     def toggle_manual_entry(self, row):
         """Enable or disable the manual entry field based on mode selection."""
         mode = self.reagent_table.cellWidget(row, 4).currentText()
@@ -401,7 +421,8 @@ class ExperimentModel(QObject):
     data_updated = Signal(int)  # Signal to notify when reagent data is updated, passing the row index
     stock_updated = Signal()
     experiment_generated = Signal(int,int)  # Signal to notify when the experiment is generated, passing the total number of reactions
-    # update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
+    update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
+    
     def __init__(self):
         super().__init__()
         self.reagents = []
@@ -569,9 +590,7 @@ class ExperimentModel(QObject):
 
         self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
         max_droplet_df = self.all_droplet_df[['unique_id','droplet_count']].groupby(['unique_id']).sum().reset_index()
-        print(f'Max droplet df: {max_droplet_df}')
         droplet_count = max_droplet_df['droplet_count'].max()
-        print(f'Max droplet count: {droplet_count}')
         self.add_total_droplet_count_to_stock()
         self.stock_updated.emit()
 
@@ -583,6 +602,23 @@ class ExperimentModel(QObject):
             stock_solution['total_droplets'] = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
             stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
 
+    def optimize_stock_solutions(self):
+        reagents_data = []
+        for reagent in self.reagents:
+            max_reag_droplets = reagent['max_droplets']
+            if max_reag_droplets < 10:
+                max_reag_droplets = 10  # Ensure a minimum of 10 droplets
+            reagents_data.append((reagent['concentrations'], max_reag_droplets))
+
+        max_total_droplets = self.metadata['max_droplets']
+        optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, max_total_droplets)
+        print(f"Optimized stock solutions: {optimized_solutions}")
+        print(f"Max droplets per reagent: {max_droplets_per_reagent}")
+        for i in range(len(max_droplets_per_reagent)):
+            self.reagents[i]['max_droplets'] = max_droplets_per_reagent[i]
+
+            self.update_max_droplets_signal.emit(i)
+    
     def get_experiment_dataframe(self):
         """Return the experiment DataFrame."""
         return self.experiment_df
@@ -624,8 +660,6 @@ class ExperimentModel(QObject):
             self.data_updated.emit(i)
             self.calculate_concentrations(i,calc_experiment=True)
             print(f'finished conc for {i}\n{self.experiment_df}')
-
-        # self.generate_experiment()  # Regenerate experiment to ensure everything is correctly updated
 
         print(f"Experiment data loaded from {filename}")
         
