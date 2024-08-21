@@ -68,7 +68,7 @@ def multi_reagent_optimization(reagents_data, max_total_droplets):
     min_stock_count = float('inf')
     min_concentration_sum = float('inf')
 
-    for combination in product(*reagent_solutions):
+    for combination in itertools.product(*reagent_solutions):
         stock_solution_set = set()
         total_droplets = 0
         max_droplets_per_reagent = []
@@ -304,6 +304,18 @@ class ExperimentDesignDialog(QDialog):
         """Load reagents, stock solutions, and metadata from the model to the view."""
         self.reagent_table.setRowCount(0)  # Clear the table first
         print("Loading experiment to view")
+
+        # Temporarily disconnect the signals
+        self.total_droplets_spinbox.blockSignals(True)
+        self.replicate_spinbox.blockSignals(True)
+
+        self.total_droplets_spinbox.setValue(self.model.metadata.get("max_droplets", 20))
+        self.replicate_spinbox.setValue(self.model.metadata.get("replicates", 1))
+        
+        # Reconnect the signals
+        self.total_droplets_spinbox.blockSignals(False)
+        self.replicate_spinbox.blockSignals(False)
+        
         original_reagents = self.model.get_all_reagents().copy()
         print(f"Original reagents: {original_reagents}")
 
@@ -322,17 +334,6 @@ class ExperimentDesignDialog(QDialog):
                 view_only=True
             )
             self.model.calculate_concentrations(i,calc_experiment=False)
-
-        # Temporarily disconnect the signals
-        self.total_droplets_spinbox.blockSignals(True)
-        self.replicate_spinbox.blockSignals(True)
-
-        self.total_droplets_spinbox.setValue(self.model.metadata.get("max_droplets", 20))
-        self.replicate_spinbox.setValue(self.model.metadata.get("replicates", 1))
-        
-        # Reconnect the signals
-        self.total_droplets_spinbox.blockSignals(False)
-        self.replicate_spinbox.blockSignals(False)
 
     def save_experiment(self):
         """Save the current experiment setup to a file."""
