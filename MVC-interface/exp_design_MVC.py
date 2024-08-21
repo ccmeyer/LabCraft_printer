@@ -96,16 +96,6 @@ def multi_reagent_optimization(reagents_data, max_total_droplets):
 
     return final_stock_solutions, max_droplets_per_reagent
 
-class EditableTableWidgetItem(QTableWidgetItem):
-    def __init__(self, text=""):
-        super().__init__(text)
-        self.setFlags(self.flags() | Qt.ItemIsEditable)
-
-    def event(self, event):
-        if event.type() == QEvent.FocusOut or (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Return):
-            # Emit custom signal or directly trigger model update
-            self.tableWidget().parent().update_model_reagent(self.row())
-        return super().event(event)
 
 class ExperimentDesignDialog(QDialog):
     def __init__(self, main_window, model):
@@ -129,9 +119,9 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
 
         # Stock solutions table
-        self.stock_table = QTableWidget(0, 3, self)
+        self.stock_table = QTableWidget(0, 4, self)
         self.stock_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Concentration", "Total Droplets"
+            "Reagent Name", "Concentration", "Total Droplets", "Total Volume (uL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.setFixedWidth(350)
@@ -175,6 +165,11 @@ class ExperimentDesignDialog(QDialog):
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
         
+        # # Button to optimize stock solutions
+        # self.optimize_button = QPushButton("Optimize Stock Solutions")
+        # self.optimize_button.clicked.connect(self.optimize_stock_solutions)
+        # self.button_layout.addWidget(self.optimize_button)
+        
         # Button to generate the experiment
         self.generate_experiment_button = QPushButton("Generate Experiment")
         self.generate_experiment_button.clicked.connect(self.generate_experiment)
@@ -191,6 +186,7 @@ class ExperimentDesignDialog(QDialog):
         self.model.data_updated.connect(self.update_preview)
         self.model.stock_updated.connect(self.update_stock_table)
         self.model.experiment_generated.connect(self.update_total_reactions)
+        # self.model.update_max_droplets_signal.connect(self.update_max_droplets)
 
     def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions=""):
         """Add a new reagent row to the table and model."""
@@ -293,6 +289,9 @@ class ExperimentDesignDialog(QDialog):
         replicates = self.replicate_spinbox.value()
         max_droplets = self.total_droplets_spinbox.value()
         self.model.update_metadata(replicates, max_droplets)
+
+    # def optimize_stock_solutions(self):
+    #     self.model.optimize_stock_solutions()
     
     def toggle_manual_entry(self, row):
         """Enable or disable the manual entry field based on mode selection."""
@@ -303,7 +302,8 @@ class ExperimentDesignDialog(QDialog):
 
     def update_preview(self, row):
         """Update the concentrations preview in the table based on the model."""
-        reagent = self.model.get_reagent(row)
+        reagent = self.model.get_reagent(row)   
+
         preview_text = ", ".join(map(str, reagent["concentrations"]))
         preview_item = self.reagent_table.item(row, 7)
         preview_item.setText(preview_text)
@@ -314,7 +314,11 @@ class ExperimentDesignDialog(QDialog):
         stock_solution_item.setText(stock_solution_text)
         stock_solution_item.setTextAlignment(Qt.AlignCenter)
 
-        # self.update_stock_table()
+    # def update_max_droplets(self,row):
+    #     print(f"Updating max droplets for row {row}")
+    #     reagent = self.model.get_reagent(row)  
+    #     max_droplets_item = self.reagent_table.item(row, 6)
+    #     max_droplets_item.setValue(reagent["max_droplets"])       
 
     def update_stock_table(self):
         # Populate the stock table
@@ -326,7 +330,8 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.insertRow(row_position)
             self.stock_table.setItem(row_position, 0, QTableWidgetItem(stock_solution['reagent_name']))
             self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock_solution['concentration'])))
-            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(0)))
+            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['total_droplets'])))
+            self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_volume'])))
 
 
     def generate_experiment(self):
@@ -344,13 +349,14 @@ class ExperimentModel(QObject):
     data_updated = Signal(int)  # Signal to notify when reagent data is updated, passing the row index
     stock_updated = Signal()
     experiment_generated = Signal(int)  # Signal to notify when the experiment is generated, passing the total number of reactions
-
+    # update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
     def __init__(self):
         super().__init__()
         self.reagents = []
         self.metadata = {
             "replicates": 1,
             "max_droplets": 20,
+            'droplet_volume': 0.03
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
@@ -401,6 +407,21 @@ class ExperimentModel(QObject):
         self.metadata["max_droplets"] = max_droplets
         self.generate_experiment()
 
+    # def optimize_stock_solutions(self):
+    #     """Optimize the stock solutions using multi-reagent optimization."""
+    #     # Extract the concentrations and max droplets for each reagent
+    #     print("Optimizing stock solutions")
+    #     reagents_data = [(reagent["concentrations"], reagent["max_droplets"]) for reagent in self.reagents]
+    #     optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, self.metadata["max_droplets"])
+    #     print(f'Optimized solutions: {optimized_solutions}')
+    #     print(f'Max droplets per reagent: {max_droplets_per_reagent}')
+    #     for i, reagent in enumerate(self.reagents):
+    #         print(f'Updating reagent {reagent["name"]} with optimized solutions')
+    #         reagent['max_droplets'] = max_droplets_per_reagent[i]
+    #         self.update_max_droplets_signal.emit(i)
+    #         self.calculate_stock_solutions(i)
+    #     self.generate_experiment()
+
     def calculate_concentrations(self, index):
         reagent = self.reagents[index]
         mode = reagent["mode"]
@@ -435,11 +456,9 @@ class ExperimentModel(QObject):
         reagent = self.reagents[index]
         stock_solutions, achievable_concentrations = find_minimal_stock_solutions_backtracking(reagent['concentrations'], reagent['max_droplets'])
         reagent['stock_solutions'] = stock_solutions
-        print(reagent)
         reagent_lookup_table = self.create_lookup_table(reagent['name'],achievable_concentrations,stock_solutions)
         self.add_lookup_table(reagent['name'],reagent_lookup_table)
         self.add_new_stock_solutions_for_reagent(reagent['name'], stock_solutions)
-        self.stock_updated.emit()
 
     def add_new_stock_solutions_for_reagent(self, reagent_name, concentrations):
         # Remove any existing stock solutions for this reagent
@@ -448,7 +467,9 @@ class ExperimentModel(QObject):
         for concentration in concentrations:
             self.stock_solutions.append({
                 "reagent_name": reagent_name,
-                "concentration": concentration
+                "concentration": concentration,
+                "total_droplets": 0,
+                'total_volume': 0
             })
 
     def create_lookup_table(self,reagent_name,achievable_concentrations, stock_solutions):
@@ -462,11 +483,9 @@ class ExperimentModel(QObject):
             lookup_table.loc[concentration] = pd.Series(droplet_counts)
         
         # Replace NaN values with 0 (indicating no droplets of that stock solution are used)
-        lookup_table = lookup_table.fillna(0).astype(int)
         lookup_table['reagent_name'] = reagent_name
         lookup_table = lookup_table.reset_index().rename(columns={'index': 'target_concentration'})
         lookup_table = lookup_table.set_index(['reagent_name','target_concentration']).stack().reset_index().rename(columns={0: 'droplet_count', 'level_2': 'stock_solution'})
-        print(f'Lookup table:\n{lookup_table}')
         
         return lookup_table
     
@@ -478,8 +497,6 @@ class ExperimentModel(QObject):
         self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
         # Append the new lookup table
         self.complete_lookup_table = pd.concat([self.complete_lookup_table, lookup_table], ignore_index=True)
-        print(f'Complete lookup table:\n{self.complete_lookup_table}')
-
 
     def get_reagent(self, index):
         return self.reagents[index]
@@ -496,17 +513,30 @@ class ExperimentModel(QObject):
         concentrations = [reagent['concentrations'] for reagent in self.reagents]
         concentration_combinations = list(itertools.product(*concentrations))
         self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
-        print(f"Generated experiment with {len(self.experiment_df)} reactions.")
         self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
         
         # Apply replicates
-        self.experiment_df = pd.concat([self.experiment_df]*self.metadata["replicates"], ignore_index=True)
-        print(f"Applied {self.metadata['replicates']} replicates. Total reactions: {len(self.experiment_df)}")
+        all_dfs = []
+        for i in range(self.metadata["replicates"]):
+            temp_df = self.experiment_df.copy()
+            if not temp_df.empty:
+                temp_df['replicate'] = i
+                temp_df['unique_id'] = temp_df['reaction_id'] + (temp_df['replicate']*(max(temp_df['reaction_id'])+1))
+            all_dfs.append(temp_df)
+        self.experiment_df = pd.concat(all_dfs, ignore_index=True)
 
-        comb_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
-        print(comb_df)
+        self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
+        # self.all_droplet_df = comb_df[['reagent_name','stock_solution','droplet_count']].groupby(['reagent_name','stock_solution']).sum().reset_index()
+        self.add_total_droplet_count_to_stock()
+        self.stock_updated.emit()
+
         # Emit signal to notify that the experiment has been generated
         self.experiment_generated.emit(len(self.experiment_df))
+
+    def add_total_droplet_count_to_stock(self):
+        for stock_solution in self.stock_solutions:
+            stock_solution['total_droplets'] = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
+            stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
 
     def get_experiment_dataframe(self):
         """Return the experiment DataFrame."""
