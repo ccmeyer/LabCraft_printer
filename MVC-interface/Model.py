@@ -1621,6 +1621,8 @@ class MachineModel(QObject):
         self.motors_homed = False
         self.current_location = "Unknown"
         self.paused = False
+        self.machine_free = True
+
 
         self.gripper_open = False
         self.gripper_active = False
@@ -1803,6 +1805,10 @@ class MachineModel(QObject):
     def update_current_location(self, location):
         self.current_location = location
 
+    def is_busy(self):
+        return not self.machine_free
+
+
 
 class Model(QObject):
     '''
@@ -1837,7 +1843,6 @@ class Model(QObject):
         with open(file_path, 'r') as file:
             return json.load(file)
 
-
     def update_state(self, status_dict):
         '''
         Update the state of the machine model
@@ -1855,6 +1860,10 @@ class Model(QObject):
         self.machine_model.update_pressure(status_dict.get('Pressure', self.machine_model.current_pressure))
         self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
+        if status_dict['Last_completed'] != status_dict['Current_command']:
+            self.machine_model.machine_free = False
+        else:
+            self.machine_model.machine_free = True
         self.machine_state_updated.emit()
     
     def load_reactions_from_csv(self,csv_file_path):

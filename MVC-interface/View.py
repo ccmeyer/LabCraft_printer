@@ -1140,11 +1140,11 @@ class BaseCalibrationDialog(QDialog):
     def update_step_labels(self):
         for i, label in enumerate(self.step_labels):
             if i < self.current_step:
-                label.setStyleSheet("background-color: blue; color: white; padding: 5px; border: 1px solid black;")
+                label.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white; padding: 5px; border: 1px solid black;")
             elif i == self.current_step:
-                label.setStyleSheet("background-color: red; color: white; padding: 5px; border: 1px solid black;")
+                label.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white; padding: 5px; border: 1px solid black;")
             else:
-                label.setStyleSheet("background-color: lightgrey; color: black; padding: 5px; border: 1px solid black;")
+                label.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white; padding: 5px; border: 1px solid black;")
 
     def move_to_initial_position(self):
         """Move the machine to the initial calibration position for the current step, if available."""
@@ -1168,6 +1168,11 @@ class BaseCalibrationDialog(QDialog):
             print(f"No initial calibration data for {step_name}.")
 
     def next_step(self):
+        # Check if the machine has completed all commands in the queue
+        if self.model.machine_model.is_busy():
+            self.main_window.popup_message("Machine Busy", "The machine is currently executing a command. Please wait for it to complete.")
+            return
+
         if self.current_step < len(self.steps):
             # Save the current position as the calibration for this step
             current_position = self.model.machine_model.get_current_position_dict_capital()
@@ -1326,13 +1331,13 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
         for i, step in enumerate(self.steps):
             pos = well_position[step]
             if i < self.current_step:
-                pen = QPen(QColor("blue"), 1)
+                pen = QPen(QColor(self.color_dict['dark_blue']), 2)
                 brush = QBrush(Qt.NoBrush)
             elif i == self.current_step:
-                pen = QPen(QColor("red"), 3)
+                pen = QPen(QColor(self.color_dict['dark_red']), 4)
                 brush = QBrush(Qt.NoBrush)
             else:
-                pen = QPen(QColor("lightgrey"), 1)
+                pen = QPen(QColor(self.color_dict['dark_gray']), 2)
                 brush = QBrush(Qt.NoBrush)
 
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
