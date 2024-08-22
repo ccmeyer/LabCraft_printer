@@ -10,6 +10,17 @@ import cv2
 import itertools
 from itertools import combinations_with_replacement
 
+
+# class PressureCalibrationModel(QObject):
+#     calibration_data_updated = Signal()  # Signal to notify when the calibration data is updated
+#     def __init__(self):
+#         super().__init__()
+#         self.calibration_data = {}
+#         self.calibration_data['positions'] = {}
+#         self.calibration_data['calibrations'] = {}
+
+
+
 def find_minimal_stock_solutions_backtracking(target_concentrations, max_droplets):
     target_concentrations.sort()
 
@@ -1058,6 +1069,7 @@ class PrinterHead(QObject):
         self.color = color
         self.confirmed = False
         self.completed = False
+        self.calibrations = []
 
     def get_stock_solution(self):
         return self.stock_solution
@@ -1099,6 +1111,12 @@ class PrinterHead(QObject):
                     return False
         self.mark_complete()
         return True
+    
+    def add_calibration(self,calibration):
+        self.calibrations.append(calibration)
+
+    def get_calibrations(self):
+        return self.calibrations
 
 class PrinterHeadManager(QObject):
     """
@@ -1915,9 +1933,13 @@ class MachineModel(QObject):
         """Update the pressure readings with a new value."""
         # Shift the existing readings and add the new reading
         converted_pressure = self.convert_to_psi(new_pressure)
+        self.current_pressure = converted_pressure
         self.pressure_readings = np.roll(self.pressure_readings, -1)
         self.pressure_readings[-1] = converted_pressure
         self.pressure_updated.emit(self.pressure_readings)
+
+    def get_current_pressure(self):
+        return self.current_pressure
 
     def update_cycle_count(self,cycle_count):
         self.cycle_count = cycle_count

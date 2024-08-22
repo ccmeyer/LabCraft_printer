@@ -27,11 +27,12 @@ class Balance():
 
     def connect_balance(self,port):
         if port == 'Virtual':
+            print('Connecting to virtual balance')
             self.connected = True
             self.simulate = True
-            self.mass_update_timer = QtCore.QTimer()
-            self.mass_update_timer.timeout.connect(self.update_simulated_mass)
-            self.mass_update_timer.start(25)
+            self.mass_simulate_timer = QtCore.QTimer()
+            self.mass_simulate_timer.timeout.connect(self.update_simulated_mass)
+            self.mass_simulate_timer.start(10)
             self.show_connection()
             self.begin_reading()
             return True
@@ -53,7 +54,7 @@ class Balance():
         if not self.simulate:
             self.port.close()
         else:
-            self.mass_update_timer.stop()
+            self.mass_simulate_timer.stop()
         if self.mass_update_timer is not None:
             self.mass_update_timer.stop()
         self.connected = False
@@ -84,11 +85,13 @@ class Balance():
             self.add_to_log(self.current_mass)
         
     def begin_reading(self):
+        print('\n---Begin reading balance---\n')
         self.mass_update_timer = QtCore.QTimer()
         self.mass_update_timer.timeout.connect(self.get_mass)
-        self.mass_update_timer.start(10)
+        self.mass_update_timer.start(20)
 
     def add_to_log(self,mass):
+        # print('Adding to log:',mass)
         self.mass_log.append(mass)
         if len(self.mass_log) > 100:
             self.mass_log.pop(0)
@@ -100,6 +103,7 @@ class Balance():
             return 0
 
     def simulate_mass(self,num_droplets,psi):
+        print('Simulating mass')
         # Reference points
         ref_droplets = 100
         ref_points = np.array([
@@ -109,23 +113,24 @@ class Balance():
 
         # Calculate the linear fit for the reference points
         coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
-        print('Coefficients:',coefficients)
+        # print('Coefficients:',coefficients)
         # Calculate the mass per droplet for the given pressure
         mass_per_droplet = coefficients[0] * psi + coefficients[1]
-        for point in ref_points:
-            print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
+        # for point in ref_points:
+        #     print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
         # Calculate the mass for the given number of droplets
         mass = mass_per_droplet * num_droplets
 
         return mass
     
     def update_simulated_mass(self):
+        # print('Updating simulated mass')
         if self.machine.balance_droplets != []:
-            print('Balance droplets:',self.machine.balance_droplets)
+            # print('Balance droplets:',self.machine.balance_droplets)
             [num_droplets,psi] = self.machine.balance_droplets.pop(0)
-            print('Found balance droplets',num_droplets,psi)
+            # print('Found balance droplets',num_droplets,psi)
             mass = self.simulate_mass(num_droplets,psi)
-            print('Simulated mass:',mass,self.current_mass,self.target_mass)
+            # print('Simulated mass:',mass,self.current_mass,self.target_mass)
             self.target_mass += mass
         
         if self.current_mass < self.target_mass:
@@ -602,6 +607,11 @@ class Machine(QObject):
         self.psi_offset = 1638
         self.psi_max = 15
 
+        self.simulate_balance = True
+        self.balance = Balance(self)
+        self.balance_connected = False
+        self.balance_droplets = []
+
     def begin_communication_timer(self):
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
@@ -675,13 +685,20 @@ class Machine(QObject):
         return self.port
     
     def connect_balance(self,port):
-        self.balance = Balance(self)
-        self.balance.connect_balance(port)
-        return True
+        if self.balance.connect_balance(port):
+            self.balance_connected = True
+            return True
+        else:
+            self.balance_connected = False
+            return False
     
     def disconnect_balance(self):
         self.balance.close_connection()
-        return True
+        self.balance_connected = False
+        return
+    
+    def is_balance_connected(self):
+        return self.balance_connected
 
     def request_status_update(self):
         """Send a request to the control board for a status update."""
@@ -840,6 +857,11 @@ class Machine(QObject):
         print('Setting relative pressure:',pressure)
         return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
+    def set_absolute_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        print('Setting absolute pressure:',pressure)
+        return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
     def home_motor_handler(self):
         self.homed = True
         self.location = 'Home'
@@ -887,3 +909,9 @@ class Machine(QObject):
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def calibrate_pressure_handler(self,num_droplets=100,psi=1.8):
+        self.balance_droplets.append([num_droplets,psi])
+
+    def print_calibration_droplets(self,num_droplets,pressure,manual=False):
+        self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,kwargs={'num_droplets':num_droplets,'psi':pressure},manual=manual)

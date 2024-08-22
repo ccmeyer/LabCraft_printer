@@ -106,6 +106,11 @@ class Controller(QObject):
         print(f"Setting relative pressure: {pressure}")
         self.machine.set_relative_pressure(pressure,manual=manual)
 
+    def set_absolute_pressure(self, pressure,manual=False):
+        """Set the absolute pressure for the machine."""
+        print(f"Setting absolute pressure: {pressure}")
+        self.machine.set_absolute_pressure(pressure,manual=manual)
+
     def home_machine(self):
         """Home the machine."""
         print("Homing machine...")
@@ -351,6 +356,10 @@ class Controller(QObject):
     def print_droplets(self,droplets,handler=None,kwargs=None,manual=False):
         """Print a specified number of droplets."""
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+
+    def print_calibration_droplets(self,droplets,pressure,manual=False):
+        """Print a specified number of droplets for calibration."""
+        self.machine.print_calibration_droplets(droplets,pressure,manual=manual)
 
     def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
         self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)

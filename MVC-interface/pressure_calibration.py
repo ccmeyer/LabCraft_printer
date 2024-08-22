@@ -1,12 +1,136 @@
 import numpy as np
 from scipy import stats
 import sys
+import re
+import serial
+
+class Balance():
+    def __init__(self,machine):
+        self.machine = machine
+        self.connected = False
+        self.port = None
+        self.simulate = True
+        self.error_count = 0
+        self.current_mass = 0
+        self.target_mass = 0
+        self.mass_update_timer = None
+        self.mass_log = []
+
+    def is_connected(self):
+        return self.connected
+
+    def connect_balance(self,port):
+        if port == 'Virtual':
+            self.connected = True
+            self.simulate = True
+            self.mass_update_timer = QTimer()
+            self.mass_update_timer.timeout.connect(self.update_simulated_mass)
+            self.mass_update_timer.start(25)
+            self.show_connection()
+            self.begin_reading()
+            return True
+        try:
+            self.port = serial.Serial(port, baudrate=9600, bytesize=8, timeout=2, stopbits=serial.STOPBITS_ONE)
+            if not self.port.is_open:  # Add this line
+                raise serial.SerialException('Could not open port')  # Add this line
+            self.connected = True
+            self.simulate = False
+            self.show_connection()
+            self.begin_reading()
+            return True
+        except:
+            self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
+            self.connected = False
+            return False
+        
+    def close_connection(self):
+        if not self.simulate:
+            self.port.close()
+        else:
+            self.mass_update_timer.stop()
+        if self.mass_update_timer is not None:
+            self.mass_update_timer.stop()
+        self.connected = False
+        return
+
+    def show_connection(self):
+        print('Balance connected')
+
+    def get_mass(self):
+        if not self.simulate:
+            if self.port.in_waiting > 0:
+                data = self.port.readline()
+                try:
+                    data = data.decode("ASCII")
+                    # print('Data:',data)
+                    [sign,mass] = re.findall(r'(-?) *([0-9]+\.[0-9]+) [a-zA-Z]*',data)[0]
+                    mass = float(''.join([sign,mass]))
+                    self.current_mass = mass
+                    self.add_to_log(self.current_mass)
+                except Exception as e:
+                    print(f'--Error {e} reading from balance')
+                    self.error_count += 1
+                    if self.error_count > 100:
+                        self.close_connection()
+                        self.main_window.popup_message('Connection error','Lost connection to balance')
+                    
+        else:
+            self.add_to_log(self.current_mass)
+        
+    def begin_reading(self):
+        self.mass_update_timer = QTimer()
+        self.mass_update_timer.timeout.connect(self.get_mass)
+        self.mass_update_timer.start(10)
+
+    def add_to_log(self,mass):
+        self.mass_log.append(mass)
+        if len(self.mass_log) > 100:
+            self.mass_log.pop(0)
+
+    def get_recent_mass(self):
+        if self.mass_log != []:
+            return self.mass_log[-1]
+        else:
+            return 0
+
+    def simulate_mass(self,num_droplets,psi):
+        # Reference points
+        ref_droplets = 100
+        ref_points = np.array([
+            [1.8, 3],
+            [2.2, 4],
+        ])
+
+        # Calculate the linear fit for the reference points
+        coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
+        print('Coefficients:',coefficients)
+        # Calculate the mass per droplet for the given pressure
+        mass_per_droplet = coefficients[0] * psi + coefficients[1]
+        for point in ref_points:
+            print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
+        # Calculate the mass for the given number of droplets
+        mass = mass_per_droplet * num_droplets
+
+        return mass
+    
+    def update_simulated_mass(self):
+        if self.machine.balance_droplets != []:
+            print('Balance droplets:',self.machine.balance_droplets)
+            [num_droplets,psi] = self.machine.balance_droplets.pop(0)
+            print('Found balance droplets',num_droplets,psi)
+            mass = self.simulate_mass(num_droplets,psi)
+            print('Simulated mass:',mass,self.current_mass,self.target_mass)
+            self.target_mass += mass
+        
+        if self.current_mass < self.target_mass:
+            self.current_mass += 0.01
 
 class CalibrationModel:
     def __init__(self, target_volume=30.0):
         self.target_volume = target_volume  # Target droplet volume in nanoliters
         self.calibration_data = []  # Store tuples of (pressure, measured_volume)
         self.current_pressure = None
+        self.simulating = True
 
     def start_calibration(self, initial_pressure):
         """Start a new calibration process."""
@@ -22,7 +146,6 @@ class CalibrationModel:
     def update_calibration(self, measured_volume_nl):
         """Update calibration data with the new measured volume."""
         if self.current_pressure is not None:
-            # self.calibration_data.append((self.current_pressure, measured_volume_nl))
             print(f"Added data point: Pressure={self.current_pressure} Pa, Measured Volume={measured_volume_nl} nL")
             print(f'Calibration data: {self.calibration_data}')
             # Calculate next pressure
@@ -144,8 +267,7 @@ class CalibrationDialog(QDialog):
         if self.mass_data:
             measured_mass = self.mass_data[-1]  # Last recorded mass
             measured_volume = self.calibration_model.calculate_droplet_volume(measured_mass)
-            self.calibration_model.add_calibration_point(self.calibration_model.current_pressure, measured_volume)
-            self.update_calibration_plot()
+            # self.calibration_model.add_calibration_point(self.calibration_model.current_pressure, measured_volume)
             self.measured_volume_value.setText(f"{measured_volume:.2f}")
             next_pressure = self.calibration_model.get_next_pressure()
             self.current_pressure_value.setText(f"{next_pressure:.2f}")
@@ -156,6 +278,14 @@ class CalibrationDialog(QDialog):
     def stop_calibration(self):
         """Stop the calibration process."""
         self.timer.stop()
+        if self.mass_data:
+            measured_mass = self.mass_data[-1]  # Last recorded mass
+            measured_volume = self.calibration_model.calculate_droplet_volume(measured_mass)
+            self.calibration_model.add_calibration_point(self.calibration_model.current_pressure, measured_volume)
+            self.update_calibration_plot()
+            self.measured_volume_value.setText(f"{measured_volume:.2f}")
+            next_pressure = self.calibration_model.get_next_pressure()
+            self.current_pressure_value.setText(f"{next_pressure:.2f}")
 
     def simulate_mass_reading(self):
         """Simulate real-time mass reading (replace with actual microbalance logic)."""
@@ -171,7 +301,7 @@ class CalibrationDialog(QDialog):
         
         self.mass_plot.update_plot(self.mass_data)
 
-    def simulate_mass(self,num_droplets,psi):
+    def simulate_mass(self, num_droplets, psi):
         # Reference points
         ref_droplets = 100
         ref_points = np.array([
@@ -181,11 +311,11 @@ class CalibrationDialog(QDialog):
 
         # Calculate the linear fit for the reference points
         coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
-        print('Coefficients:',coefficients)
+        # print('Coefficients:', coefficients)
         # Calculate the mass per droplet for the given pressure
         mass_per_droplet = coefficients[0] * psi + coefficients[1]
-        for point in ref_points:
-            print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
+        # for point in ref_points:
+        #     print('Point:', point[0], point[1], coefficients[0] * point[0] + coefficients[1])
         # Calculate the mass for the given number of droplets
         mass = mass_per_droplet * num_droplets
 
@@ -196,29 +326,44 @@ class CalibrationDialog(QDialog):
         calibration_data = self.calibration_model.get_calibration_data()
         pressures = [d['pressure'] for d in calibration_data]
         volumes = [d['measured_volume'] for d in calibration_data]
+
+        # Plot scatter data
         self.calibration_plot.update_scatter_plot(pressures, volumes)
+
+        # Plot linear fit line
+        if len(calibration_data) > 1:
+            slope, intercept, _, _, _ = stats.linregress(pressures, volumes)
+            fit_line = [slope * p + intercept for p in pressures]
+            self.calibration_plot.update_fit_line(pressures, fit_line)
 
 
 class PlotCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100, title="", xlabel="", ylabel=""):
-        fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = fig.add_subplot(111)
-        self.axes.set_title(title)
-        self.axes.set_xlabel(xlabel)
-        self.axes.set_ylabel(ylabel)
+        fig = Figure(figsize=(width, height), dpi=dpi, facecolor='black')
+        self.axes = fig.add_subplot(111, facecolor='black')
+        self.axes.set_title(title, color='white')
+        self.axes.set_xlabel(xlabel, color='white')
+        self.axes.set_ylabel(ylabel, color='white')
+        self.axes.tick_params(axis='x', colors='white')
+        self.axes.tick_params(axis='y', colors='white')
         super().__init__(fig)
         self.setParent(parent)
 
     def update_plot(self, data):
         """Update plot with new data."""
         self.axes.cla()
-        self.axes.plot(data, 'b-')
+        self.axes.plot(data, 'cyan')
         self.axes.figure.canvas.draw()
 
     def update_scatter_plot(self, x_data, y_data):
         """Update scatter plot with new data points."""
         self.axes.cla()
-        self.axes.scatter(x_data, y_data, c='r')
+        self.axes.scatter(x_data, y_data, c='red')
+        self.axes.figure.canvas.draw()
+
+    def update_fit_line(self, x_data, y_data):
+        """Update plot with a linear fit line."""
+        self.axes.plot(x_data, y_data, 'r--')
         self.axes.figure.canvas.draw()
 
     def clear(self):
