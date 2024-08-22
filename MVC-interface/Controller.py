@@ -298,7 +298,7 @@ class Controller(QObject):
             self.wait_command()
             print(f'Picking up printer head from slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
-            name = 'Slot-'+str(slot)
+            name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
 
             self.move_to_location(name,coords=coords)
@@ -323,7 +323,7 @@ class Controller(QObject):
         if is_valid:
             print(f'Dropping off printer head to slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
-            name = 'Slot-'+str(slot)
+            name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
             self.move_to_location(name,coords=coords)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))

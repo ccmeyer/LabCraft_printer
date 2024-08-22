@@ -109,12 +109,15 @@ class ExperimentModel(QObject):
         self.metadata = {
             "replicates": 1,
             "max_droplets": 20,
-            'droplet_volume': 0.03
+            'droplet_volume': 0.03,
+            'fill_reagent': 'Water'
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
         self.complete_lookup_table = pd.DataFrame()
         self.all_droplet_df = pd.DataFrame()
+
+        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0])
 
     def add_reagent(self, name, min_conc, max_conc, steps, mode, manual_input,max_droplets):
         reagent = {
@@ -159,6 +162,12 @@ class ExperimentModel(QObject):
     def update_metadata(self, replicates, max_droplets):
         self.metadata["replicates"] = replicates
         self.metadata["max_droplets"] = max_droplets
+        self.generate_experiment()
+
+    def update_fill_reagent_name(self,fill_reagent):
+        self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != self.metadata['fill_reagent']]
+        self.metadata['fill_reagent'] = fill_reagent
+        self.add_new_stock_solutions_for_reagent(fill_reagent,[1.0])
         self.generate_experiment()
 
     def calculate_concentrations(self, index,calc_experiment=True):
@@ -222,6 +231,7 @@ class ExperimentModel(QObject):
 
     def remove_stock_solutions_for_unused_reagents(self):
         used_reagents = [reagent['name'] for reagent in self.reagents]
+        used_reagents.append(self.metadata['fill_reagent'])
         self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] in used_reagents]
         # Update the stock solutions in the experiment DataFrame
         if not self.all_droplet_df.empty:
@@ -288,13 +298,30 @@ class ExperimentModel(QObject):
 
         self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
         print(f'Generated experiment\n{self.all_droplet_df}')
-        max_droplet_df = self.all_droplet_df[['unique_id','droplet_count']].groupby(['unique_id']).sum().reset_index()
+        max_droplet_df = self.all_droplet_df[['reaction_id','unique_id','replicate','droplet_count']].groupby(['reaction_id','unique_id','replicate']).sum().reset_index()
+        print(f'Max droplet df\n{max_droplet_df}')
+        fill_reagent_df = max_droplet_df.copy()
+        fill_reagent_df['reagent_name'] = self.metadata['fill_reagent']
+        fill_reagent_df['stock_solution'] = 1
+        fill_reagent_df['droplet_count'] = self.metadata['max_droplets'] - fill_reagent_df['droplet_count']
+        fill_reagent_df['target_concentration'] = 0
+        print(f'\nFill reagent df\n{fill_reagent_df}')
+        self.all_droplet_df = pd.concat([self.all_droplet_df,fill_reagent_df],ignore_index=True)
+        print(f'\nAll droplet df\n{self.all_droplet_df}')
+        # self.update_fill_reagent()
+        
         droplet_count = max_droplet_df['droplet_count'].max()
         self.add_total_droplet_count_to_stock()
         self.stock_updated.emit()
 
         # Emit signal to notify that the experiment has been generated
         self.experiment_generated.emit(self.get_number_of_reactions(),droplet_count)
+
+    # def update_fill_reagent(self):
+    #     '''Updates the stock solution for the fill reagent'''
+    #     for stock_solution in self.stock_solutions:
+    #         if stock_solution['reagent_name'] == self.metadata['fill_reagent']:
+    #             break
 
     def get_number_of_reactions(self):
         if self.all_droplet_df.empty:
@@ -303,7 +330,10 @@ class ExperimentModel(QObject):
     
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
-            stock_solution['total_droplets'] = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
+            print(f'Stock solution: {stock_solution}')
+            total_droplets = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
+            print(f'Total droplets: {total_droplets}')
+            stock_solution['total_droplets'] = total_droplets
             stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
 
     def optimize_stock_solutions(self):
@@ -347,7 +377,8 @@ class ExperimentModel(QObject):
         self.metadata = {
             "replicates": 1,
             "max_droplets": 20,
-            'droplet_volume': 0.03
+            'droplet_volume': 0.03,
+            'fill_reagent': 'Water'
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
@@ -449,7 +480,8 @@ class StockSolutionManager(QObject):
 
     def get_stock_solution(self, reagent_name, concentration):
         """Retrieve a reagent-concentration pair."""
-        unique_id = '_'.join([reagent_name,str(concentration)])
+        unique_id = '_'.join([reagent_name,str(float(concentration))])
+        print('Getting stock solution:',unique_id)
         return self.stock_solutions.get(unique_id)
         
     def get_stock_by_id(self, stock_id):
@@ -2041,11 +2073,14 @@ class Model(QObject):
         stock_solutions = StockSolutionManager()
         for stock in self.experiment_model.get_all_stock_solutions():
             stock_solutions.add_stock_solution(stock['reagent_name'],stock['concentration'],required_volume=stock['total_volume'])
-        
+        print(f'All stock solutions:\n{stock_solutions.get_stock_solution_names()}')
+        print(f'Stock formated:\n{stock_solutions.get_stock_solution_names_formated()}')
         reaction_collection = ReactionCollection()
         for unique_id, reaction_df in self.experiment_model.all_droplet_df.groupby('unique_id'):
             reaction = ReactionComposition(unique_id)
             for _, row in reaction_df.iterrows():
+                print(f'Row:{row}')
+                print(f'Stock Solution:{row["reagent_name"]},{row["stock_solution"]}')
                 current_stock = stock_solutions.get_stock_solution(row['reagent_name'],row['stock_solution'])
                 reaction.add_reagent(current_stock, row['droplet_count'])
             

@@ -1312,7 +1312,7 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
         offsets = {
             'X': 0,
             'Y': 0,
-            'Z': 50
+            'Z': 500
         }
         super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict,offsets)
 
@@ -2106,8 +2106,6 @@ class ExperimentDesignDialog(QDialog):
         self.bottom_layout = QHBoxLayout()
         # Label and spin box for total reactions and replicates
         self.info_layout = QVBoxLayout()
-        self.total_reactions_label = QLabel("Total Reactions: 0", self)
-        self.info_layout.addWidget(self.total_reactions_label)
 
         self.replica_label = QLabel("Replicates:", self)
         self.replicate_spinbox = QSpinBox(self)
@@ -2124,11 +2122,23 @@ class ExperimentDesignDialog(QDialog):
         self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
         self.total_droplets_spinbox.valueChanged.connect(self.update_model_metadata)
 
+        # Add the fill reagent label and input field
+        self.fill_reagent_label = QLabel("Fill Reagent:", self)
+        self.fill_reagent_input = QLineEdit(self)
+        self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))  # Set default value
+        self.fill_reagent_input.textChanged.connect(self.update_fill_reagent)
+
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
+
+        self.total_reactions_label = QLabel("Total Reactions: 0", self)
 
         self.info_layout.addWidget(self.total_droplets_label)
         self.info_layout.addWidget(self.total_droplets_spinbox)
+        self.info_layout.addWidget(self.fill_reagent_label)
+        self.info_layout.addWidget(self.fill_reagent_input)
         self.info_layout.addWidget(self.total_droplets_used_label)
+        self.info_layout.addWidget(self.total_reactions_label)
+
 
         self.button_layout = QVBoxLayout()
         # Button to add a new reagent
@@ -2281,6 +2291,11 @@ class ExperimentDesignDialog(QDialog):
         max_droplets = self.total_droplets_spinbox.value()
         self.experiment_model.update_metadata(replicates, max_droplets)
 
+    def update_fill_reagent(self):
+        """Update the fill reagent in the model based on the current value."""
+        fill_reagent = self.fill_reagent_input.text()
+        self.experiment_model.update_fill_reagent_name(fill_reagent)
+
     def load_experiment_to_view(self):
         """Load reagents, stock solutions, and metadata from the model to the view."""
         self.reagent_table.setRowCount(0)  # Clear the table first
@@ -2292,6 +2307,7 @@ class ExperimentDesignDialog(QDialog):
 
         self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
         self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
+        self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))
         
         # Reconnect the signals
         self.total_droplets_spinbox.blockSignals(False)
