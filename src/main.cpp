@@ -182,7 +182,7 @@ public:
 
 
   void activatePump() {
-    Serial.println("DEBUG Activating pump");
+    // Serial.println("DEBUG Activating pump");
     digitalWrite(pumpPin, HIGH);
     pumpOn = true;
     lastPumpActivation = millis();
@@ -192,7 +192,7 @@ public:
   }
 
   void checkPump() {
-    Serial.println("DEBUG Checking pump");
+    // Serial.println("DEBUG Checking pump");
     if(pumpOn && millis() - lastPumpActivation >= pumpInterval) {
       digitalWrite(pumpPin, LOW);
       pumpOn = false;
@@ -201,7 +201,7 @@ public:
   
   // Method to toggle the gripper state
   void closeGripper() {
-    Serial.println("DEBUG Closing gripper");
+    // Serial.println("DEBUG Closing gripper");
     if (!active) {
       active = true;
     }
@@ -214,7 +214,7 @@ public:
 
   // Method to toggle the gripper state
   void openGripper() {
-    Serial.println("DEBUG Opening gripper");
+    // Serial.println("DEBUG Opening gripper");
     if (!active) {
       active = true;
     }
@@ -982,9 +982,14 @@ void sendStatus() {
   Serial.print(",Y:"); Serial.print(stepperY.currentPosition());
   Serial.print(",Z:"); Serial.print(stepperZ.currentPosition());
   Serial.print(",P:"); Serial.print(stepperP.currentPosition());
+  Serial.print(",Tar_X:"); Serial.print(stepperX.targetPosition());
+  Serial.print(",Tar_Y:"); Serial.print(stepperY.targetPosition());
+  Serial.print(",Tar_Z:"); Serial.print(stepperZ.targetPosition());
+  Serial.print(",Tar_P:"); Serial.print(stepperP.targetPosition());
   Serial.print(",Droplets:"); Serial.print(currentDroplets);
   Serial.print(",Gripper:"); Serial.print(gripper.isOpen());
-  Serial.print(",Pressure:"); Serial.println(currentPressure);
+  Serial.print(",Pressure:"); Serial.print(currentPressure);
+  Serial.print(",Tar_pressure:"); Serial.println(targetPressureP);
   numIterations = 0;
   maxCycle = 0;
 }

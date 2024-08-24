@@ -308,18 +308,13 @@ class ExperimentModel(QObject):
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
 
         self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
-        print(f'Generated experiment\n{self.all_droplet_df}')
         max_droplet_df = self.all_droplet_df[['reaction_id','unique_id','replicate','droplet_count']].groupby(['reaction_id','unique_id','replicate']).sum().reset_index()
-        print(f'Max droplet df\n{max_droplet_df}')
         fill_reagent_df = max_droplet_df.copy()
         fill_reagent_df['reagent_name'] = self.metadata['fill_reagent']
         fill_reagent_df['stock_solution'] = 1
         fill_reagent_df['droplet_count'] = self.metadata['max_droplets'] - fill_reagent_df['droplet_count']
         fill_reagent_df['target_concentration'] = 0
-        print(f'\nFill reagent df\n{fill_reagent_df}')
         self.all_droplet_df = pd.concat([self.all_droplet_df,fill_reagent_df],ignore_index=True)
-        print(f'\nAll droplet df\n{self.all_droplet_df}')
-        # self.update_fill_reagent()
         
         droplet_count = max_droplet_df['droplet_count'].max()
         self.add_total_droplet_count_to_stock()
@@ -327,12 +322,6 @@ class ExperimentModel(QObject):
 
         # Emit signal to notify that the experiment has been generated
         self.experiment_generated.emit(self.get_number_of_reactions(),droplet_count)
-
-    # def update_fill_reagent(self):
-    #     '''Updates the stock solution for the fill reagent'''
-    #     for stock_solution in self.stock_solutions:
-    #         if stock_solution['reagent_name'] == self.metadata['fill_reagent']:
-    #             break
 
     def get_number_of_reactions(self):
         if self.all_droplet_df.empty:
@@ -813,7 +802,7 @@ class WellPlate(QObject):
         self.plate_dimensions = np.array([
             [0, 0],
             [0, self.plate_width],
-            [self.plate_width, self.plate_depth],
+            [self.plate_depth, self.plate_width],
             [self.plate_depth, 0]
         ], dtype = "float32")
 
@@ -1320,7 +1309,7 @@ class RackModel(QObject):
         self.apply_calibration_data()
 
     def apply_calibration_data(self):
-        if len(list(self.calibrations)) < 2:
+        if self.calibrations['rack_position_Left'] == {} or self.calibrations['rack_position_Right'] == {}:
             self.calibration_applied = False
             print(f"Calibration is incomplete. Need at least 2 calibration points, but only {len(list(self.calibrations))} provided.")
             return
@@ -1360,8 +1349,12 @@ class RackModel(QObject):
     def process_location_data(self,location_data):
         if location_data.get('rack_position_Right',None) is not None:
             self.calibrations['rack_position_Right'] = location_data['rack_position_Right']
+        else:
+            self.calibrations['rack_position_Right'] = {}
         if location_data.get('rack_position_Left',None) is not None:
             self.calibrations['rack_position_Left'] = location_data['rack_position_Left']
+        else:
+            self.calibrations['rack_position_Left'] = {}
 
     def get_all_current_rack_calibrations(self):
         return self.calibrations
@@ -1866,7 +1859,7 @@ class MachineModel(QObject):
         self.gripper_active = False
     
     def convert_to_psi(self,pressure):
-        return round(((int(pressure) - self.psi_offset) / self.fss) * self.psi_max,4)
+        return round(((float(pressure) - self.psi_offset) / self.fss) * self.psi_max,4)
     
     def convert_to_raw_pressure(self,psi):
         return int((float(psi) / self.psi_max) * self.fss + self.psi_offset)
@@ -1942,10 +1935,10 @@ class MachineModel(QObject):
         return self.current_pressure
 
     def update_cycle_count(self,cycle_count):
-        self.cycle_count = cycle_count
+        self.cycle_count = int(cycle_count)
 
     def update_max_cycle(self,max_cycle):
-        self.max_cycle = max_cycle
+        self.max_cycle = int(max_cycle)
 
     def get_current_position(self):
         return [self.current_x, self.current_y, self.current_z]

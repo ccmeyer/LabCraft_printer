@@ -202,6 +202,9 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
         self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
+        self.shortcut_manager.add_shortcut('c','Print 5 droplets', lambda: self.controller.print_droplets(5))
+        self.shortcut_manager.add_shortcut('v','Print 20 droplets', lambda: self.controller.print_droplets(20))
+        self.shortcut_manager.add_shortcut('b','Print 100 droplets', lambda: self.controller.print_droplets(100))
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -371,11 +374,12 @@ class ConnectionWidget(QGroupBox):
         self.layout().addWidget(self.refresh_button, 3, 1, 1, 2)
 
         # Populate ports initially
+        self.refresh_ports()
         self.update_ports(self.model.machine_model.available_ports)
 
     def update_ports(self, ports):
         """Update the COM port selections."""
-        ports_with_virtual = ports + ["Virtual","COM1"]
+        ports_with_virtual = ports + ["Virtual"]
         
         self.machine_port_combobox.clear()
         self.balance_port_combobox.clear()

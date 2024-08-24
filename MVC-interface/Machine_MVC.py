@@ -709,28 +709,39 @@ class Machine(QObject):
                 try:
                     if self.board.in_waiting > 0:
                         status_string = self.board.readline().decode('utf-8').strip()
+                    else:
+                        status_string = ''
                 except Exception as e:
                     status_string = ''
                     self.error_occurred.emit(f'Error reading from machine\n Error: {e}')
-            # try:
-            status_dict = self.parse_status_string(status_string)
-            self.command_queue.update_command_status(status_dict.get('Current_command', None),
-                                                        status_dict.get('Last_completed', None))
-            self.status_updated.emit(status_dict)  # Emit the status update signal
-            self.error_count = 0
-            # except ValueError as e:
-            #     self.error_occurred.emit(f"Error parsing status string: {str(e)}")
-            # except Exception as e:
-            #     self.error_occurred.emit(f"Unexpected error: {str(e)}")
-            #     self.error_count += 1
-            #     if self.error_count > 100:
-            #         print('------- Automatic disconnect -------')
-            #         self.disconnect_board(error=True)
+            try:
+                if status_string == '':
+                    # print('No status string received')
+                    return
+                status_dict = self.parse_status_string(status_string)
+                if status_dict == {}:
+                    return
+                self.command_queue.update_command_status(status_dict.get('Current_command', None),
+                                                            status_dict.get('Last_completed', None))
+                self.status_updated.emit(status_dict)  # Emit the status update signal
+                self.error_count = 0
+            except ValueError as e:
+                self.error_occurred.emit(f"Error parsing status string: {str(e)}")
+            except Exception as e:
+                self.error_occurred.emit(f"Unexpected error: {str(e)}")
+                self.error_count += 1
+                if self.error_count > 100:
+                    print('------- Automatic disconnect -------')
+                    self.disconnect_board(error=True)
 
     def parse_status_string(self, status_string):
         """Convert status string into a dictionary."""
         if not status_string:
             raise ValueError("Status string is empty")
+        
+        if "DEBUG" in status_string:
+            # print('Status string:',status_string)
+            return {}
 
         status_dict = {}
         for item in status_string.split(','):
