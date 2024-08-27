@@ -5,16 +5,23 @@
 Gripper::Gripper(int pumpPin, int valveOpenPin, int valveClosePin, TaskQueue& taskQueue)
     : pumpPin(pumpPin), valveOpenPin(valveOpenPin), valveClosePin(valveClosePin), taskQueue(taskQueue), pumpActive(false), gripperOpen(false), lastPumpActivationTime(0),
       pumpOffTask([this]() { this->turnOffPump(); }, 0), refreshVacuumTask([this]() { this->refreshVacuum(); }, 0) {
-    pinMode(pumpPin, OUTPUT);
-    pinMode(valveOpenPin, OUTPUT);
-    pinMode(valveClosePin, OUTPUT);
+    // pinMode(pumpPin, OUTPUT);
+    // pinMode(valveOpenPin, OUTPUT);
+    // pinMode(valveClosePin, OUTPUT);
 }
 
 // Method to turn on the pump for a specified duration
 void Gripper::turnOnPump(int duration) {
-    digitalWrite(pumpPin, HIGH);
-    pumpActive = true;
+    // digitalWrite(pumpPin, HIGH);
+    if (!pumpActive){
+        Serial.println("Starting vacuum refresh");
+        pumpActive = true;
+        lastPumpActivationTime = millis();
+        refreshVacuumTask.nextExecutionTime = lastPumpActivationTime + refreshInterval;
+        taskQueue.addTask(refreshVacuumTask);
+    }
     lastPumpActivationTime = millis();
+    Serial.println("Turning on pump");
 
     // Update the next execution time for the pumpOffTask
     pumpOffTask.nextExecutionTime = millis() + duration;
@@ -23,25 +30,31 @@ void Gripper::turnOnPump(int duration) {
 
 // Method to turn off the pump
 void Gripper::turnOffPump() {
-    digitalWrite(pumpPin, LOW);
-    pumpActive = false;
+    // digitalWrite(pumpPin, LOW);
+    Serial.println("Turning off pump");
+    // pumpActive = false;
 }
 
 // Method to open the gripper
 void Gripper::openGripper() {
-    digitalWrite(valveOpenPin, HIGH);
+    // digitalWrite(valveOpenPin, HIGH);
+    Serial.println("Opening gripper");
+    turnOnPump(500);  // Turn on the pump for 500ms to ensure full opening
     gripperOpen = true;
 }
 
 // Method to close the gripper
 void Gripper::closeGripper() {
-    digitalWrite(valveClosePin, HIGH);
+    // digitalWrite(valveClosePin, HIGH);
+    Serial.println("Closing gripper");
+    turnOnPump(500);  // Turn on the pump for 500ms to ensure full closing
     gripperOpen = false;
 }
 
 // Method to refresh the vacuum periodically
 void Gripper::refreshVacuum() {
     if (pumpActive && (millis() - lastPumpActivationTime >= refreshInterval)) {
+        Serial.println("Refreshing vacuum");
         turnOnPump(500);  // Turn on the pump for 500ms to refresh the vacuum
 
         // Update the next execution time for the refreshVacuumTask
@@ -52,6 +65,12 @@ void Gripper::refreshVacuum() {
         refreshVacuumTask.nextExecutionTime = lastPumpActivationTime + refreshInterval;
         taskQueue.addTask(refreshVacuumTask);
     } 
+}
+
+// Method to stop the vacuum refresh
+void Gripper::stopVacuumRefresh() {
+    Serial.println("Stopping vacuum refresh");
+    pumpActive = false;
 }
 
 

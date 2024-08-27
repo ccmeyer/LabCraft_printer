@@ -12,6 +12,7 @@ public:
     void openGripper();
     void closeGripper();
     void refreshVacuum();
+    void stopVacuumRefresh();
 
 private:
     int pumpPin;
@@ -20,7 +21,7 @@ private:
     unsigned long lastPumpActivationTime;
     bool pumpActive;
     bool gripperOpen;
-    int refreshInterval = 60000; // Default refresh interval of 60 seconds
+    int refreshInterval = 10000; // Default refresh interval of 60 seconds
 
     TaskQueue& taskQueue;  // Reference to the global TaskQueue
 

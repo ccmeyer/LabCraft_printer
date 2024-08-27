@@ -2,10 +2,11 @@
 #include <Arduino.h>
 
 // Constructor
-Communication::Communication(TaskQueue& taskQueue, int baudRate)
-    : taskQueue(taskQueue), baudRate(baudRate), 
+Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, int baudRate)
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
-    sendStatusTask([this]() { this->sendStatus(); }, 0) {}
+    sendStatusTask([this]() { this->sendStatus(); }, 0),
+    executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
 
 // Method to initialize the serial communication
 void Communication::beginSerial() {
@@ -14,6 +15,7 @@ void Communication::beginSerial() {
     sendStatusTask.nextExecutionTime = millis() + sendInterval;
     taskQueue.addTask(receiveCommandTask);
     taskQueue.addTask(sendStatusTask);
+    taskQueue.addTask(executeCmdTask);
 }
 
 // Method to send the status message
@@ -32,6 +34,7 @@ void Communication::receiveCommand() {
     readSerial();
     if (newData) {
         receivedCounter++;
+        parseAndAddCommand();
         newData = false;
     }
     receiveCommandTask.nextExecutionTime = millis() + receiveInterval;
@@ -75,87 +78,41 @@ void Communication::readSerial(){
     }
 }
 
-// Command convertCommand() {
-//   strcpy(tempChars, receivedChars);
-//   char * strtokIndx; // this is used by strtok() as an index
-  
-//   strtokIndx = strtok(tempChars,",");      // get the first part - the command ID
-//   if (strtokIndx == NULL) {
-//     // Handle missing commandNum
-//     Command newCommand(0, UNKNOWN, 0, 0, 0);
-//     return newCommand;
-//   }
-//   commandNum = atoi(strtokIndx); 
+// Method to parse the received command and add it to the command queue
+void Communication::parseAndAddCommand() {
+    Command newCommand = convertCommand(receivedChars);
+    commandQueue.addCommand(newCommand);
+}
 
-  
-//   strtokIndx = strtok(NULL, ",");
-//   if (strtokIndx == NULL) {
-//     // Handle missing commandName
-//     Command newCommand(0, UNKNOWN, 0, 0, 0);
-//     return newCommand;
-//   }
-//   strcpy(commandName, strtokIndx); // copy it to messageFromPC
-//   // commandName = String(commandText);
+// Task to execute the next command from the command queue
+void Communication::executeCommandTask() {
+    if (!commandQueue.isEmpty()) {
+        Command nextCmd = commandQueue.getNextCommand();
+        executeCommand(nextCmd);
+        commandQueue.removeCommand(); // Remove the command after execution
+    }
+    
+    // Reinsert the task into the queue to execute the next command
+    executeCmdTask.nextExecutionTime = millis() + commandExecutionInterval;
+    taskQueue.addTask(executeCmdTask);
+}
 
-//   strtokIndx = strtok(NULL, ",");
-//   if (strtokIndx == NULL) {
-//     // Handle missing param1
-//     Command newCommand(0, UNKNOWN, 0, 0, 0);
-//     return newCommand;
-//   }
-//   param1 = atol(strtokIndx);
-
-//   strtokIndx = strtok(NULL, ",");
-//   if (strtokIndx == NULL) {
-//     // Handle missing param2
-//     Command newCommand(0, UNKNOWN, 0, 0, 0);
-//     return newCommand;
-//   }
-//   param2 = atol(strtokIndx);
-
-//   strtokIndx = strtok(NULL, ",");
-//   if (strtokIndx == NULL) {
-//     // Handle missing param3
-//     Command newCommand(0, UNKNOWN, 0, 0, 0);
-//     return newCommand;
-//   }
-//   param3 = atol(strtokIndx);
-//   commandType = mapCommandType(commandName);
-//   Command newCommand(commandNum, commandType, param1, param2, param3);
-//   return newCommand;
-// }
-
-// void updateCommandQueue(Command& newCommand) {
-//   lastAddedCmdNum = newCommand.commandNum;
-//   commandQueue.push(newCommand);
-// }
-
-// /**
-//  * Executes the given command.
-//  *
-//  * @param cmd The command to be executed.
-//  */
-// void executeCommand(const Command& cmd) {
-//   // Perform actions based on the command type
-//   currentCmdNum = cmd.commandNum;
-//   switch (cmd.type) {
-//     case RELATIVE_XYZ:
-//       break;
-//     default:
-//       currentState = FREE;
-//   }
-// }
-
-// /**
-//  * Executes the next command in the command queue if the queue is not empty and the current state is FREE.
-//  */
-// void executeNextCommand(){
-//   if (!commandQueue.empty() && currentState == FREE) {
-//     // Dequeue the next command
-//     Command nextCmd = commandQueue.front();
-//     commandQueue.pop();
-
-//     // Execute the command
-//     executeCommand(nextCmd);
-//   }
-// }
+// Method to execute the command
+// Method to execute the command
+void Communication::executeCommand(const Command& cmd) {
+    switch (cmd.type) {
+        case OPEN_GRIPPER:
+            gripper.openGripper();
+            break;
+        case CLOSE_GRIPPER:
+            gripper.closeGripper();
+            break;
+        case GRIPPER_OFF:
+            gripper.stopVacuumRefresh();
+            break;
+        // Add more cases for other command types
+        default:
+            // Handle unknown command
+            break;
+    }
+}

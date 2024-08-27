@@ -58,7 +58,9 @@ extern "C" void SystemClock_Config(void)
 #include "Communication.h"
 
 TaskQueue taskQueue;
-Communication comm(taskQueue, 115200);
+CommandQueue commandQueue;
+Gripper gripper(2, 3, 4, taskQueue);
+Communication comm(taskQueue, commandQueue, gripper, 115200);
 
 
 void setup() {
