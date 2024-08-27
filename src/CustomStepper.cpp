@@ -2,8 +2,8 @@
 #include <Arduino.h>
 
 // Constructor
-CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool enable)
-    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false),
+CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool invertDir)
+    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false), invertDir(invertDir), homingComplete(false), homingStage(HOMING_COMPLETE), busy(false),
       stepTask([this]() { this->stepMotor(); }, 0),
       homingTask([this]() { this->continueHoming(); }, 0) {
     pinMode(limitSwitchPin, INPUT);
@@ -24,13 +24,18 @@ void CustomStepper::updateStepInterval() {
     computeNewSpeed();  // Update the step interval using AccelStepper's method
 }
 
+// Method to check if the motor is busy
+bool CustomStepper::isBusy() {
+    return busy;
+}
+
 // Method to set up the motor
 void CustomStepper::setupMotor() {
     Serial.println("Setting up motor");
     setMaxSpeed(4000);  // Set a reasonable speed for the motor
     setAcceleration(4000);  // Set a reasonable acceleration for the motor
     setEnablePin(enablePin);
-    setPinsInverted(true, false, true);
+    setPinsInverted(invertDir, false, true);
     disableOutputs();
 }
 
@@ -50,6 +55,7 @@ void CustomStepper::setTargetPosition(long position) {
     Serial.print("Setting target position: ");
     Serial.println(position);
     moveTo(position);
+    busy = true;
     stepTask.nextExecutionTime = micros();
     taskQueue.addTask(stepTask);
 }
@@ -59,6 +65,7 @@ void CustomStepper::moveRelative(long distance) {
     Serial.print("Moving by relative distance: ");
     Serial.println(distance);
     move(distance);
+    busy = true;
     stepTask.nextExecutionTime = micros();
     taskQueue.addTask(stepTask);
 }
@@ -68,8 +75,10 @@ void CustomStepper::stepMotor() {
     if (distanceToGo() == 0) {
         Serial.println("Target position reached");
         stop();
+        busy = false;
     } else if (limitPressed && !movingForward()) {
         safeStop();
+        busy = false;
         limitPressed = false;
     } else if (runSpeed()) {
         updateStepInterval();
@@ -106,6 +115,7 @@ void CustomStepper::checkLimitSwitch() {
 void CustomStepper::beginHoming() {
     homingComplete = false;
     homingStage = HOMING_START;
+    busy = true;
     homingTask.nextExecutionTime = micros();
     taskQueue.addTask(homingTask);
 }
@@ -161,6 +171,7 @@ void CustomStepper::continueHoming() {
                 updateStepInterval();
                 homingStage = HOMING_COMPLETE;
                 homingComplete = true;
+                busy = false;
             } else {
                 runSpeed();
                 updateStepInterval();

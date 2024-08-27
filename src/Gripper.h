@@ -6,7 +6,8 @@
 class Gripper {
 public:
     Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue);
-
+    
+    bool isBusy();
     void turnOnPump(int duration);
     void turnOffPump();
     void openGripper();
@@ -20,6 +21,7 @@ private:
     int valvePin2;
     unsigned long lastPumpActivationTime;
     bool pumpActive;
+    bool busy;
     bool gripperOpen;
     int pumpOnDuration = 800000; // Default pump on duration of 500ms
     int refreshInterval = 10000000; // Default refresh interval of 60 seconds

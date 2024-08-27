@@ -99,6 +99,16 @@ CommandType mapCommandType(const char* commandName) {
         return ENABLE_X;
     } else if (strcmp(commandName, "DISABLE_X") == 0) {
         return DISABLE_X;
+    } else if (strcmp(commandName, "RELATIVE_Y") == 0) {
+        return RELATIVE_Y;
+    } else if (strcmp(commandName, "ABSOLUTE_Y") == 0) {
+        return ABSOLUTE_Y;
+    } else if (strcmp(commandName, "HOME_Y") == 0) {
+        return HOME_Y;
+    } else if (strcmp(commandName, "ENABLE_Y") == 0) {
+        return ENABLE_Y;
+    } else if (strcmp(commandName, "DISABLE_Y") == 0) {
+        return DISABLE_Y;
     } else {
         return UNKNOWN;
     }

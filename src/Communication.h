@@ -8,7 +8,8 @@
 
 class Communication {
 public:
-    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, CustomStepper& stepperX, int baudRate);
+    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+    CustomStepper& stepperX, CustomStepper& stepperY, int baudRate);
 
     void beginSerial();
     void sendStatus();
@@ -16,6 +17,7 @@ public:
     void receiveCommand();
     void parseAndAddCommand();
     void executeCommandTask();
+    bool checkIfFree();
     void IncrementCycleCounter();
 
 private:
@@ -23,6 +25,7 @@ private:
     CommandQueue& commandQueue;
     Gripper& gripper;  // Reference to the Gripper object
     CustomStepper& stepperX;  // Reference to the CustomStepper object
+    CustomStepper& stepperY;  // Reference to the CustomStepper object
 
     int baudRate;
     bool receivingNewData = true;

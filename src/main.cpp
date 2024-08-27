@@ -63,15 +63,18 @@ extern "C" void SystemClock_Config(void)
 TaskQueue taskQueue;
 CommandQueue commandQueue;
 Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
-CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue);
+CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
+CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, 115200);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, 115200);
 
 
 void setup() {
     SystemClock_Config();
     stepperX.setupMotor();
     stepperX.enableMotor();
+    stepperY.setupMotor();
+    stepperY.enableMotor();
     comm.beginSerial();
 }
 

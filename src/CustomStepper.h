@@ -14,8 +14,9 @@ enum HomingStage {
 
 class CustomStepper : public AccelStepper {
 public:
-    CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool enable = true);
+    CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool invertDir);
 
+    bool isBusy();               // Method to check if the motor is busy
     void setupMotor();           // Method to set up the motor
     void enableMotor();           // Method to enable the motor
     void disableMotor();          // Method to disable the motor
@@ -31,6 +32,8 @@ public:
 
 
 private:
+    bool busy;
+    bool invertDir;              // Flag to indicate if the direction is inverted
     int limitSwitchPin;          // Pin for the limit switch
     int enablePin;               // Pin for the enable signal
     bool limitPressed;           // Flag to indicate if the limit switch is pressed

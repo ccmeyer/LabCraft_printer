@@ -3,7 +3,7 @@
 
 // Constructor
 Gripper::Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue)
-    : pumpPin(pumpPin), valvePin1(valvePin1), valvePin2(valvePin2), taskQueue(taskQueue), pumpActive(false), gripperOpen(false), lastPumpActivationTime(0),
+    : pumpPin(pumpPin), valvePin1(valvePin1), valvePin2(valvePin2), taskQueue(taskQueue), pumpActive(false), gripperOpen(false), lastPumpActivationTime(0), busy(false),
       pumpOffTask([this]() { this->turnOffPump(); }, 0), 
       refreshVacuumTask([this]() { this->refreshVacuum(); }, 0) {
     pinMode(pumpPin, OUTPUT);
@@ -12,6 +12,11 @@ Gripper::Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue
     digitalWrite(pumpPin, LOW);
     digitalWrite(valvePin1, LOW);
     digitalWrite(valvePin2, LOW);
+}
+
+// Method to check if the gripper is busy
+bool Gripper::isBusy() {
+    return busy;
 }
 
 // Method to turn on the pump for a specified duration
@@ -26,6 +31,7 @@ void Gripper::turnOnPump(int duration) {
     digitalWrite(pumpPin, HIGH);
     lastPumpActivationTime = micros();
     Serial.println("Turning on pump");
+    busy = true;
 
     // Update the next execution time for the pumpOffTask
     pumpOffTask.nextExecutionTime = micros() + duration;
@@ -35,6 +41,7 @@ void Gripper::turnOnPump(int duration) {
 // Method to turn off the pump
 void Gripper::turnOffPump() {
     digitalWrite(pumpPin, LOW);
+    busy = false;
     Serial.println("Turning off pump");
 }
 

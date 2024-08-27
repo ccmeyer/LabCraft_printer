@@ -2,8 +2,9 @@
 #include <Arduino.h>
 
 // Constructor
-Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, CustomStepper& stepperX, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), baudRate(baudRate), 
+Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+CustomStepper& stepperX, CustomStepper& stepperY, int baudRate)
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
@@ -87,14 +88,25 @@ void Communication::parseAndAddCommand() {
 // Task to execute the next command from the command queue
 void Communication::executeCommandTask() {
     if (!commandQueue.isEmpty()) {
-        Command nextCmd = commandQueue.getNextCommand();
-        executeCommand(nextCmd);
-        commandQueue.removeCommand(); // Remove the command after execution
+        if (checkIfFree()) {
+            Command nextCmd = commandQueue.getNextCommand();
+            executeCommand(nextCmd);
+            commandQueue.removeCommand(); // Remove the command after execution
+        }
     }
     
     // Reinsert the task into the queue to execute the next command
     executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
     taskQueue.addTask(executeCmdTask);
+}
+
+// Method to check if the system is free to execute a new command
+bool Communication::checkIfFree() {
+    if (stepperX.isBusy() || stepperY.isBusy() || gripper.isBusy()) {
+        return false;
+    } else {
+        return true;
+    }
 }
 
 // Method to execute the command
@@ -123,6 +135,21 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case HOME_X:
             stepperX.beginHoming();
+            break;
+        case ENABLE_Y:
+            stepperY.enableMotor();
+            break;
+        case DISABLE_Y:
+            stepperY.disableMotor();
+            break;
+        case RELATIVE_Y:
+            stepperY.moveRelative(cmd.param1);
+            break;
+        case ABSOLUTE_Y:
+            stepperY.setTargetPosition(cmd.param1);
+            break;
+        case HOME_Y:
+            stepperY.beginHoming();
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");
