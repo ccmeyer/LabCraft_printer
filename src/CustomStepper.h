@@ -18,6 +18,7 @@ public:
 
     bool isBusy();               // Method to check if the motor is busy
     void setupMotor();           // Method to set up the motor
+    void setProperties(int newSpeed, int newAcceleration);  // Method to set the motor properties
     void enableMotor();           // Method to enable the motor
     void disableMotor();          // Method to disable the motor
     void safeStop();              // Method to safely stop the motor
@@ -37,6 +38,9 @@ private:
     int limitSwitchPin;          // Pin for the limit switch
     int enablePin;               // Pin for the enable signal
     bool limitPressed;           // Flag to indicate if the limit switch is pressed
+    int maxSpeed = 4000;         // Maximum speed for the motor
+    int maxAcceleration = 4000;     // Acceleration for the motor
+    
     bool homingComplete;         // Flag to indicate if homing is complete
     HomingStage homingStage;     // Current stage of the homing process
 

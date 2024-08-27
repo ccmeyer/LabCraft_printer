@@ -3,8 +3,8 @@
 
 // Constructor
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
-CustomStepper& stepperX, CustomStepper& stepperY, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), baudRate(baudRate), 
+CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, int baudRate)
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
@@ -150,6 +150,21 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case HOME_Y:
             stepperY.beginHoming();
+            break;
+        case ENABLE_Z:
+            stepperZ.enableMotor();
+            break;
+        case DISABLE_Z:
+            stepperZ.disableMotor();
+            break;
+        case RELATIVE_Z:
+            stepperZ.moveRelative(cmd.param1);
+            break;
+        case ABSOLUTE_Z:
+            stepperZ.setTargetPosition(cmd.param1);
+            break;
+        case HOME_Z:
+            stepperZ.beginHoming();
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");

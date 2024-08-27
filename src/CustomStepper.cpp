@@ -32,12 +32,21 @@ bool CustomStepper::isBusy() {
 // Method to set up the motor
 void CustomStepper::setupMotor() {
     Serial.println("Setting up motor");
-    setMaxSpeed(4000);  // Set a reasonable speed for the motor
-    setAcceleration(4000);  // Set a reasonable acceleration for the motor
+    setMaxSpeed(maxSpeed);  // Set a reasonable speed for the motor
+    setAcceleration(maxAcceleration);  // Set a reasonable acceleration for the motor
     setEnablePin(enablePin);
     setPinsInverted(invertDir, false, true);
     disableOutputs();
 }
+
+// Method to set the motor properties
+void CustomStepper::setProperties(int newSpeed, int newAcceleration) {
+    maxSpeed = newSpeed;
+    maxAcceleration = newAcceleration;
+    setMaxSpeed(maxSpeed);
+    setAcceleration(maxAcceleration);
+}   
+
 
 // Method to enable the motor
 void CustomStepper::enableMotor() {
@@ -78,6 +87,7 @@ void CustomStepper::stepMotor() {
         busy = false;
     } else if (limitPressed && !movingForward()) {
         safeStop();
+        setAcceleration(maxAcceleration);
         busy = false;
         limitPressed = false;
     } else if (runSpeed()) {
@@ -125,9 +135,9 @@ void CustomStepper::continueHoming() {
     switch (homingStage) {
         case HOMING_START:
             Serial.println("Starting homing process");
-            setMaxSpeed(1500);
-            setAcceleration(2000);
-            move(-30000);
+            setMaxSpeed(maxSpeed / 2.5);
+            setAcceleration(maxAcceleration / 4);
+            move(-50000);
             updateStepInterval();
             homingStage = TOWARD_SWITCH;
             break;
@@ -135,8 +145,8 @@ void CustomStepper::continueHoming() {
             if (limitPressed) {
                 Serial.println("Limit switch pressed");
                 safeStop();
-                setMaxSpeed(50);
-                setAcceleration(200);
+                setMaxSpeed(maxSpeed / 10);
+                setAcceleration(maxAcceleration / 10);
                 move(10000);
                 updateStepInterval();
                 homingStage = AWAY_FROM_SWITCH;
@@ -151,8 +161,8 @@ void CustomStepper::continueHoming() {
                 Serial.println("Limit switch not pressed");
                 setCurrentPosition(0);
                 safeStop();
-                setMaxSpeed(2000);
-                setAcceleration(2000);
+                setMaxSpeed(maxSpeed / 2.5);
+                setAcceleration(maxAcceleration / 2.5);
                 moveTo(500);
                 updateStepInterval();
                 homingStage = RESET_POS;
@@ -166,8 +176,8 @@ void CustomStepper::continueHoming() {
             if (distanceToGo() == 0) {
                 Serial.println("Position reset");
                 safeStop();
-                setMaxSpeed(4000);
-                setAcceleration(4000);
+                setMaxSpeed(maxSpeed);
+                setAcceleration(maxAcceleration);
                 updateStepInterval();
                 homingStage = HOMING_COMPLETE;
                 homingComplete = true;

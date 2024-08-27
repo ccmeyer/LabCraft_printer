@@ -22,6 +22,7 @@ const int pstop = PG11; // DIAG3 - J33
 
 // --DRIVER 0--
 // Standard control modality
+const bool Z_INV_DIR = true; // Invert direction for Motor0_1
 const int Z_EN_PIN = PF14;      // Enable - EN pin top left
 const int Z_DIR_PIN = PF12;     // Direction - DIR pin bottom left
 const int Z_STEP_PIN = PF13;    // Step - STP pin second from bottom left

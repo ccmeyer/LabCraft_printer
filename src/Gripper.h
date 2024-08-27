@@ -24,7 +24,7 @@ private:
     bool busy;
     bool gripperOpen;
     int pumpOnDuration = 800000; // Default pump on duration of 500ms
-    int refreshInterval = 10000000; // Default refresh interval of 60 seconds
+    int refreshInterval = 60000000; // Default refresh interval of 60 seconds
 
     TaskQueue& taskQueue;  // Reference to the global TaskQueue
 

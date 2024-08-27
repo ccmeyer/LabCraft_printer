@@ -59,14 +59,16 @@ extern "C" void SystemClock_Config(void)
 #include "Gripper.h"
 #include "CustomStepper.h"
 #include "pin_assignments.h"
+#include "all_constants.h"
 
 TaskQueue taskQueue;
 CommandQueue commandQueue;
 Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
 CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
+CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, taskQueue,Z_INV_DIR);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, 115200);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY,stepperZ, 115200);
 
 
 void setup() {
@@ -75,6 +77,9 @@ void setup() {
     stepperX.enableMotor();
     stepperY.setupMotor();
     stepperY.enableMotor();
+    stepperZ.setupMotor();
+    stepperZ.enableMotor();
+    stepperZ.setProperties(6000, 6000);
     comm.beginSerial();
 }
 

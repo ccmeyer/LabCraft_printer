@@ -9,7 +9,7 @@
 class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
-    CustomStepper& stepperX, CustomStepper& stepperY, int baudRate);
+    CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, int baudRate);
 
     void beginSerial();
     void sendStatus();
@@ -26,6 +26,7 @@ private:
     Gripper& gripper;  // Reference to the Gripper object
     CustomStepper& stepperX;  // Reference to the CustomStepper object
     CustomStepper& stepperY;  // Reference to the CustomStepper object
+    CustomStepper& stepperZ;  // Reference to the CustomStepper object
 
     int baudRate;
     bool receivingNewData = true;

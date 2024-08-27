@@ -46,8 +46,13 @@ enum CommandType {
     DISABLE_Y,
     RELATIVE_Y,
     ABSOLUTE_Y,
+    ENABLE_Z,
+    DISABLE_Z,
+    RELATIVE_Z,
+    ABSOLUTE_Z,
     HOME_X,
     HOME_Y,
+    HOME_Z,
     UNKNOWN
     // Add more command types as needed
 };
