@@ -91,6 +91,10 @@ CommandType mapCommandType(const char* commandName) {
         return GRIPPER_OFF;
     } else if (strcmp(commandName, "RELATIVE_X") == 0) {
         return RELATIVE_X;
+    } else if (strcmp(commandName, "ABSOLUTE_X") == 0) {
+        return ABSOLUTE_X;
+    } else if (strcmp(commandName, "HOME_X") == 0) {
+        return HOME_X;
     } else if (strcmp(commandName, "ENABLE_X") == 0) {
         return ENABLE_X;
     } else if (strcmp(commandName, "DISABLE_X") == 0) {

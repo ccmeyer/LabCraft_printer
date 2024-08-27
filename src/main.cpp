@@ -62,8 +62,8 @@ extern "C" void SystemClock_Config(void)
 
 TaskQueue taskQueue;
 CommandQueue commandQueue;
-Gripper gripper(2, 3, 4, taskQueue);
-CustomStepper stepperX(stepperX.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, xstop, taskQueue);
+Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
+CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue);
 
 Communication comm(taskQueue, commandQueue, gripper, stepperX, 115200);
 

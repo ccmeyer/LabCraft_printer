@@ -4,14 +4,19 @@
 // Constructor
 CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool enable)
     : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false),
-      stepTask([this]() { this->stepMotor(); }, 0) {
-    //   homingTask([this]() { this->continueHoming(); }, 0) 
+      stepTask([this]() { this->stepMotor(); }, 0),
+      homingTask([this]() { this->continueHoming(); }, 0) {
     pinMode(limitSwitchPin, INPUT);
 }
 
 // Method to access the _stepInterval variable
 unsigned long CustomStepper::getStepInterval() {
     return _stepInterval;  // Accessing protected member from AccelStepper
+}
+
+// Method to check if the motor is moving forward
+bool CustomStepper::movingForward() {
+    return _direction == DIRECTION_CW;  // Check the direction of the motor
 }
 
 // Method to use computeNewSpeed function
@@ -23,9 +28,9 @@ void CustomStepper::updateStepInterval() {
 void CustomStepper::setupMotor() {
     Serial.println("Setting up motor");
     setMaxSpeed(4000);  // Set a reasonable speed for the motor
-    setAcceleration(8000);  // Set a reasonable acceleration for the motor
+    setAcceleration(4000);  // Set a reasonable acceleration for the motor
     setEnablePin(enablePin);
-    setPinsInverted(false, false, true);
+    setPinsInverted(true, false, true);
     disableOutputs();
 }
 
@@ -49,12 +54,21 @@ void CustomStepper::setTargetPosition(long position) {
     taskQueue.addTask(stepTask);
 }
 
+// Method to move the motor by a relative distance
+void CustomStepper::moveRelative(long distance) {
+    Serial.print("Moving by relative distance: ");
+    Serial.println(distance);
+    move(distance);
+    stepTask.nextExecutionTime = micros();
+    taskQueue.addTask(stepTask);
+}
+
 // Method to perform a single step
 void CustomStepper::stepMotor() {
     if (distanceToGo() == 0) {
         Serial.println("Target position reached");
         stop();
-    } else if (limitPressed) {
+    } else if (limitPressed && !movingForward()) {
         safeStop();
         limitPressed = false;
     } else if (runSpeed()) {
@@ -71,6 +85,7 @@ void CustomStepper::stepMotor() {
 // Method to safely stop the motor
 void CustomStepper::safeStop() {
     Serial.println("Starting safe stop");
+    setAcceleration(30000);
     stop();
     runToPosition();
 }
@@ -79,56 +94,84 @@ void CustomStepper::safeStop() {
 void CustomStepper::checkLimitSwitch() {
     if (digitalRead(limitSwitchPin) == HIGH) {
         limitPressed = true;
-        Serial.println("Limit switch pressed");
+        if (!movingForward()) {
+            Serial.println("Limit switch pressed");
+        }
     } else {
         limitPressed = false;
     }
 }
 
-// // Method to step the motor and check the limit switch
-// void CustomStepper::stepWithLimitCheck() {
-//     if (isAtLimit()) {
-//         stop();  // Stop the motor if the limit switch is triggered
-//     } else {
-//         runSpeed();  // Step the motor at the current speed
-//         stepTask.nextExecutionTime = micros() + getStepInterval();
-//         taskQueue.addTask(stepTask);  // Reinsert the task into the queue
-//     }
-// }
+// Method to start the homing process
+void CustomStepper::beginHoming() {
+    homingComplete = false;
+    homingStage = HOMING_START;
+    homingTask.nextExecutionTime = micros();
+    taskQueue.addTask(homingTask);
+}
 
-// // Method to start the homing process
-// void CustomStepper::initiateHoming() {
-//     setMaxSpeed(1000);  // Set a reasonable speed for homing
-//     setAcceleration(1000);  // Set a reasonable acceleration for homing
-//     homingTask.nextExecutionTime = micros();
-//     taskQueue.addTask(homingTask);
-// }
-
-// // Method to continue the homing process after each step
-// void CustomStepper::continueHoming() {
-//     if (isAtLimit()) {
-//         stop();  // Stop the motor if the limit switch is triggered
-//         setCurrentPosition(0);  // Set the current position as 0 (home)
-//         move(500);  // Move away from the limit switch to complete homing
-//         homingTask.nextExecutionTime = micros() + 100;  // Delay before moving away
-//         taskQueue.addTask(homingTask);  // Reinsert the task to move away
-//     } else {
-//         move(-1);  // Continue moving towards the limit switch
-//         runSpeed();  // Perform a step
-//         homingTask.nextExecutionTime = micros() + getStepInterval();
-//         taskQueue.addTask(homingTask);  // Reinsert the task for the next step
-//     }
-// }
-
-// // Method to check if the limit switch is triggered
-// bool CustomStepper::isAtLimit() const {
-//     return digitalRead(limitSwitchPin) == LOW;
-// }
-
-// // Method to set a new target position and start moving
-// void CustomStepper::setTargetPosition(long position) {
-//     moveTo(position);
-//     stepTask.nextExecutionTime = micros();
-//     taskQueue.addTask(stepTask);  // Start stepping towards the target position
-// }
-
+// Method to continue the homing process
+void CustomStepper::continueHoming() {
+    switch (homingStage) {
+        case HOMING_START:
+            Serial.println("Starting homing process");
+            setMaxSpeed(1500);
+            setAcceleration(2000);
+            move(-30000);
+            updateStepInterval();
+            homingStage = TOWARD_SWITCH;
+            break;
+        case TOWARD_SWITCH:
+            if (limitPressed) {
+                Serial.println("Limit switch pressed");
+                safeStop();
+                setMaxSpeed(50);
+                setAcceleration(200);
+                move(10000);
+                updateStepInterval();
+                homingStage = AWAY_FROM_SWITCH;
+            } else {
+                runSpeed();
+                updateStepInterval();
+                checkLimitSwitch();
+            }
+            break;
+        case AWAY_FROM_SWITCH:
+            if (!limitPressed) {
+                Serial.println("Limit switch not pressed");
+                setCurrentPosition(0);
+                safeStop();
+                setMaxSpeed(2000);
+                setAcceleration(2000);
+                moveTo(500);
+                updateStepInterval();
+                homingStage = RESET_POS;
+            } else {
+                runSpeed();
+                updateStepInterval();
+                checkLimitSwitch();
+            }
+            break;
+        case RESET_POS:
+            if (distanceToGo() == 0) {
+                Serial.println("Position reset");
+                safeStop();
+                setMaxSpeed(4000);
+                setAcceleration(4000);
+                updateStepInterval();
+                homingStage = HOMING_COMPLETE;
+                homingComplete = true;
+            } else {
+                runSpeed();
+                updateStepInterval();
+                checkLimitSwitch();
+            }
+            break;
+        default:
+            break;
+    }
+    if (!homingComplete) {
+        homingTask.nextExecutionTime = micros() + 10;
+        taskQueue.addTask(homingTask);
+    }
+}

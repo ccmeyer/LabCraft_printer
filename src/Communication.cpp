@@ -116,7 +116,13 @@ void Communication::executeCommand(const Command& cmd) {
             stepperX.disableMotor();
             break;
         case RELATIVE_X:
+            stepperX.moveRelative(cmd.param1);
+            break;
+        case ABSOLUTE_X:
             stepperX.setTargetPosition(cmd.param1);
+            break;
+        case HOME_X:
+            stepperX.beginHoming();
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");
