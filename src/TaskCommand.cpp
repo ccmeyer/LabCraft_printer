@@ -10,7 +10,7 @@ void TaskQueue::addTask(const Task& task) {
 void TaskQueue::executeNextTask() {
     if (!taskQueue.empty()) {
         Task currentTask = taskQueue.top();
-        unsigned long currentMillis = millis();
+        unsigned long currentMillis = micros();
 
         if (currentMillis >= currentTask.nextExecutionTime) {
             taskQueue.pop();
@@ -52,50 +52,9 @@ void CommandQueue::removeCommand() {
     }
 }
 
-// // Execute the next command in the command queue
-// void CommandQueue::executeNextCommand() {
-//     if (!commandQueue.empty()) {
-//         Command currentCommand = commandQueue.front();
-//         commandQueue.pop();
-
-//         // Handle the command based on its type
-//         switch (currentCommand.type) {
-//             case OPEN_GRIPPER:
-//                 Serial.println("Executing OPEN_GRIPPER");
-//                 // Add logic to open the gripper
-//                 break;
-//             case CLOSE_GRIPPER:
-//                 Serial.println("Executing CLOSE_GRIPPER");
-//                 // Add logic to close the gripper
-//                 break;
-//             case GRIPPER_OFF:
-//                 Serial.println("Executing GRIPPER_OFF");
-//                 // Add logic to turn the gripper off
-//                 break;
-//             case UNKNOWN:
-//             default:
-//                 Serial.println("Unknown Command");
-//                 break;
-//         }
-//     }
-// }
-
 // Check if the command queue is empty
 bool CommandQueue::isEmpty() const {
     return commandQueue.empty();
-}
-
-// Function to map command names to command types
-CommandType mapCommandType(const char* commandName) {
-    if (strcmp(commandName, "OPEN_GRIPPER") == 0) {
-        return OPEN_GRIPPER;
-    } else if (strcmp(commandName, "CLOSE_GRIPPER") == 0) {
-        return CLOSE_GRIPPER;
-    } else if (strcmp(commandName, "GRIPPER_OFF") == 0) {
-        return GRIPPER_OFF;
-    } else {
-        return UNKNOWN;
-    }
 }
 
 // Function to convert received serial data into a Command object
@@ -120,4 +79,23 @@ Command convertCommand(const char* receivedChars) {
     long param3 = strtokIndx != NULL ? atol(strtokIndx) : 0;
 
     return Command(commandNum, commandType, param1, param2, param3);
+}
+
+// Function to map command names to command types
+CommandType mapCommandType(const char* commandName) {
+    if (strcmp(commandName, "OPEN_GRIPPER") == 0) {
+        return OPEN_GRIPPER;
+    } else if (strcmp(commandName, "CLOSE_GRIPPER") == 0) {
+        return CLOSE_GRIPPER;
+    } else if (strcmp(commandName, "GRIPPER_OFF") == 0) {
+        return GRIPPER_OFF;
+    } else if (strcmp(commandName, "RELATIVE_X") == 0) {
+        return RELATIVE_X;
+    } else if (strcmp(commandName, "ENABLE_X") == 0) {
+        return ENABLE_X;
+    } else if (strcmp(commandName, "DISABLE_X") == 0) {
+        return DISABLE_X;
+    } else {
+        return UNKNOWN;
+    }
 }

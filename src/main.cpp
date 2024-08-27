@@ -56,20 +56,26 @@ extern "C" void SystemClock_Config(void)
 
 #include "TaskCommand.h"
 #include "Communication.h"
+#include "Gripper.h"
+#include "CustomStepper.h"
+#include "pin_assignments.h"
 
 TaskQueue taskQueue;
 CommandQueue commandQueue;
 Gripper gripper(2, 3, 4, taskQueue);
-Communication comm(taskQueue, commandQueue, gripper, 115200);
+CustomStepper stepperX(stepperX.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, xstop, taskQueue);
+
+Communication comm(taskQueue, commandQueue, gripper, stepperX, 115200);
 
 
 void setup() {
+    SystemClock_Config();
+    stepperX.setupMotor();
+    stepperX.enableMotor();
     comm.beginSerial();
 }
 
 void loop() {
     taskQueue.executeNextTask();
     comm.IncrementCycleCounter();
-    // // Add a small delay to avoid overloading the loop
-    // delayMicroseconds(1000);
 }

@@ -3,11 +3,12 @@
 
 #include "TaskCommand.h"
 #include "Gripper.h"
+#include "CustomStepper.h"
 #include <Arduino.h>
 
 class Communication {
 public:
-    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, int baudRate);
+    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, CustomStepper& stepperX, int baudRate);
 
     void beginSerial();
     void sendStatus();
@@ -21,14 +22,16 @@ private:
     TaskQueue& taskQueue;
     CommandQueue& commandQueue;
     Gripper& gripper;  // Reference to the Gripper object
+    CustomStepper& stepperX;  // Reference to the CustomStepper object
+
     int baudRate;
     bool receivingNewData = true;
     bool newData = false;
     static const byte numChars = 64;
     char receivedChars[64];
-    int receiveInterval = 10; // Default receive interval of 50 msec
-    int sendInterval = 100;  // Default send interval of 10 msec
-    int commandExecutionInterval = 20;  // Interval for executing commands
+    int receiveInterval = 10000; // Default receive interval of 50 msec
+    int sendInterval = 100000;  // Default send interval of 10 msec
+    int commandExecutionInterval = 20000;  // Interval for executing commands
     int receivedCounter = 0;
     int cycleCounter = 0;
 

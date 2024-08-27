@@ -2,8 +2,8 @@
 #include <Arduino.h>
 
 // Constructor
-Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), baudRate(baudRate), 
+Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, CustomStepper& stepperX, int baudRate)
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
@@ -11,8 +11,8 @@ Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, G
 // Method to initialize the serial communication
 void Communication::beginSerial() {
     Serial.begin(baudRate);
-    receiveCommandTask.nextExecutionTime = millis() + receiveInterval;
-    sendStatusTask.nextExecutionTime = millis() + sendInterval;
+    receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
+    sendStatusTask.nextExecutionTime = micros() + sendInterval;
     taskQueue.addTask(receiveCommandTask);
     taskQueue.addTask(sendStatusTask);
     taskQueue.addTask(executeCmdTask);
@@ -25,7 +25,7 @@ void Communication::sendStatus() {
         Serial.println(cycleCounter);
         cycleCounter = 0;
     }
-    sendStatusTask.nextExecutionTime = millis() + sendInterval;
+    sendStatusTask.nextExecutionTime = micros() + sendInterval;
     taskQueue.addTask(sendStatusTask);
 }
 
@@ -37,7 +37,7 @@ void Communication::receiveCommand() {
         parseAndAddCommand();
         newData = false;
     }
-    receiveCommandTask.nextExecutionTime = millis() + receiveInterval;
+    receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
     taskQueue.addTask(receiveCommandTask);
 }
 
@@ -93,11 +93,10 @@ void Communication::executeCommandTask() {
     }
     
     // Reinsert the task into the queue to execute the next command
-    executeCmdTask.nextExecutionTime = millis() + commandExecutionInterval;
+    executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
     taskQueue.addTask(executeCmdTask);
 }
 
-// Method to execute the command
 // Method to execute the command
 void Communication::executeCommand(const Command& cmd) {
     switch (cmd.type) {
@@ -109,6 +108,19 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case GRIPPER_OFF:
             gripper.stopVacuumRefresh();
+            break;
+        case ENABLE_X:
+            stepperX.enableMotor();
+            break;
+        case DISABLE_X:
+            stepperX.disableMotor();
+            break;
+        case RELATIVE_X:
+            stepperX.setTargetPosition(cmd.param1);
+            break;
+        case UNKNOWN:
+            Serial.println("Unknown command type");
+            // Handle unknown command
             break;
         // Add more cases for other command types
         default:

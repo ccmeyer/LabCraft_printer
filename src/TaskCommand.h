@@ -38,6 +38,9 @@ enum CommandType {
     OPEN_GRIPPER,
     CLOSE_GRIPPER,
     GRIPPER_OFF,
+    ENABLE_X,
+    DISABLE_X,
+    RELATIVE_X,
     UNKNOWN
     // Add more command types as needed
 };
