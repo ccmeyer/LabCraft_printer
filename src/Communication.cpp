@@ -152,6 +152,10 @@ void Communication::executeCommandTask() {
             currentCmdNum = nextCmd.commandNum;
             commandQueue.removeCommand(); // Remove the command after execution
         }
+    } else {
+        if (checkIfFree()) {
+            lastCompletedCmdNum = currentCmdNum;
+        }
     }
     
     // Reinsert the task into the queue to execute the next command
@@ -218,7 +222,7 @@ void Communication::executeCommand(const Command& cmd) {
             stepperZ.beginHoming();
             break;
         case UNKNOWN:
-            Serial.println("Unknown command type");
+            // Serial.println("Unknown command type");
             // Handle unknown command
             break;
         // Add more cases for other command types

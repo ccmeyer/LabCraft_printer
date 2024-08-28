@@ -50,7 +50,7 @@ private:
     char receivedChars[64];
     int receiveInterval = 10000; // Default receive interval of 50 msec
     int sendInterval = 10000;  // Default send interval of 10 msec
-    int commandExecutionInterval = 20000;  // Interval for executing commands
+    int commandExecutionInterval = 10000;  // Interval for executing commands
     int receivedCounter = 0;
     int cycleCounter = 0;
     int currentCmdNum = 0;

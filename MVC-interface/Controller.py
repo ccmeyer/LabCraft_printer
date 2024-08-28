@@ -25,6 +25,7 @@ class Controller(QObject):
         
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
+        self.model.machine_model.command_numbers_updated.connect(self.machine.update_command_numbers)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -91,15 +92,59 @@ class Controller(QObject):
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
 
-    def set_relative_coordinates(self, x, y, z,manual=False):
+    def set_relative_X(self, x,manual=False):
+        """Set the relative X coordinate for the machine."""
+        print(f"Setting relative X: {x}")
+        self.machine.set_relative_X(x,manual=manual)
+
+    def set_relative_Y(self, y,manual=False):
+        """Set the relative Y coordinate for the machine."""
+        print(f"Setting relative Y: {y}")
+        self.machine.set_relative_Y(y,manual=manual)
+
+    def set_relative_Z(self, z,manual=False):
+        """Set the relative Z coordinate for the machine."""
+        print(f"Setting relative Z: {z}")
+        self.machine.set_relative_Z(z,manual=manual)
+
+    def set_absolute_X(self, x,manual=False):
+        """Set the absolute X coordinate for the machine."""
+        print(f"Setting absolute X: {x}")
+        self.machine.set_absolute_X(x,manual=manual)
+
+    def set_absolute_Y(self, y,manual=False):
+        """Set the absolute Y coordinate for the machine."""
+        print(f"Setting absolute Y: {y}")
+        self.machine.set_absolute_Y(y,manual=manual)
+    
+    def set_absolute_Z(self, z,manual=False):
+        """Set the absolute Z coordinate for the machine."""
+        print(f"Setting absolute Z: {z}")
+        self.machine.set_absolute_Z(z,manual=manual)
+    
+    def set_relative_coordinates(self, x, y, z,manual=False,handler=None):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
-        self.machine.set_relative_coordinates(x, y, z,manual=manual)
+        if z < 0:
+            self.machine.set_relative_Y(y,manual=manual)
+            self.machine.set_relative_X(x,manual=manual)
+            self.machine.set_relative_Z(z,manual=manual,handler=handler)
+        else:
+            self.machine.set_relative_Z(z,manual=manual)
+            self.machine.set_relative_Y(y,manual=manual)
+            self.machine.set_relative_X(x,manual=manual,handler=handler)
 
-    def set_absolute_coordinates(self, x, y, z,manual=False):
+    def set_absolute_coordinates(self, x, y, z,manual=False,handler=None):
         """Set the absolute coordinates for the machine."""
         print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
-        self.machine.set_absolute_coordinates(x, y, z,manual=manual)
+        if self.expected_position['Z'] > z:
+            self.machine.set_absolute_Y(y,manual=manual)
+            self.machine.set_absolute_X(x,manual=manual)
+            self.machine.set_absolute_Z(z,manual=manual,handler=handler)
+        else:
+            self.machine.set_absolute_Z(z,manual=manual)
+            self.machine.set_absolute_Y(y,manual=manual)
+            self.machine.set_absolute_X(x,manual=manual,handler=handler)
 
     def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -196,21 +241,21 @@ class Controller(QObject):
             original_target = self.model.location_model.get_location_dict(name)
             target = original_target.copy()
         if x_offset:
-            print(f'Applying X offset:{target['X']} -> {target['X'] - 2500}')
-            target['X'] += -2500
+            print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
+            target['X'] += 2500
         # Use expected position instead of current position from the model
         current = self.expected_position
 
         up_first = False
         if direct and current['Z'] < target['Z']:
             up_first = True
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 current['X'], current['Y'], target['Z'],
                 handler=lambda: self.update_expected_position(z=target['Z'])
             )
 
-        x_limit = -5500
-        safe_height = -3000
+        x_limit = 5500
+        safe_height = 3000
         safe_y_value = 3500
         if (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
             print(f'Crossing x limit: {current['X']} -> {target['X']}')
@@ -218,57 +263,57 @@ class Controller(QObject):
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 current['X'], current['Y'], safe_height,
                 handler=lambda: self.update_expected_position(z=safe_height)
             )
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 target['X'], target['Y'], safe_height,
                 handler=lambda: self.update_expected_position(x=target['X'], y=target['Y'])
             )
         elif not direct and safe_y:
             print('Not direct, safe-y')
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 current['X'], current['Y'], safe_height,
                 handler=lambda: self.update_expected_position(z=safe_height)
             )
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 current['X'], safe_y_value, safe_height,
                 handler=lambda: self.update_expected_position(y=safe_y_value)
             )
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 target['X'], safe_y_value, safe_height,
                 handler=lambda: self.update_expected_position(x=target['X'])
             )
-            self.machine.set_absolute_coordinates(
+            self.set_absolute_coordinates(
                 target['X'], target['Y'], safe_height,
                 handler=lambda: self.update_expected_position(y=target['Y'])
             )
         elif direct and safe_y:
             if up_first:
-                self.machine.set_absolute_coordinates(
+                self.set_absolute_coordinates(
                     current['X'], safe_y_value, target['Z'],
                     handler=lambda: self.update_expected_position(y=safe_y_value, z=target['Z'])
                 )
-                self.machine.set_absolute_coordinates(
+                self.set_absolute_coordinates(
                     target['X'], safe_y_value, target['Z'],
                     handler=lambda: self.update_expected_position(x=target['X'])
                 )
             else:
-                self.machine.set_absolute_coordinates(
+                self.set_absolute_coordinates(
                     current['X'], safe_y_value, current['Z'],
                     handler=lambda: self.update_expected_position(y=safe_y_value)
                 )
-                self.machine.set_absolute_coordinates(
+                self.set_absolute_coordinates(
                     target['X'], safe_y_value, current['Z'],
                     handler=lambda: self.update_expected_position(x=target['X'])
                 )
-                self.machine.set_absolute_coordinates(
+                self.set_absolute_coordinates(
                     target['X'], target['Y'], current['Z'],
                     handler=lambda: self.update_expected_position(y=target['Y'])
                 )
 
-        self.machine.set_absolute_coordinates(
+        self.set_absolute_coordinates(
             target['X'], target['Y'], target['Z'],
             handler=lambda: self.update_location_handler(name)
         )

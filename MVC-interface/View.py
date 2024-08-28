@@ -166,12 +166,12 @@ class MainWindow(QMainWindow):
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0,manual=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size,0 , 0,manual=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size,0, 0,manual=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size,manual=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_Y(-self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_Y(self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_X(self.model.machine_model.step_size, manual=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_X(-self.model.machine_model.step_size, manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_Z(-self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_Z(self.model.machine_model.step_size,manual=True))
         
         self.shortcut_manager.add_shortcut(
             'Ctrl+Up', 'Increase step size', 

@@ -699,6 +699,9 @@ class Machine(QObject):
     
     def is_balance_connected(self):
         return self.balance_connected
+    
+    def update_command_numbers(self,current_command,last_completed):
+        self.command_queue.update_command_status(current_command,last_completed)
 
     def request_status_update(self):
         """Send a request to the control board for a status update."""
@@ -847,15 +850,30 @@ class Machine(QObject):
     def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
-
+    def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('RELATIVE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('ABSOLUTE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('RELATIVE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_Y(self, y, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('ABSOLUTE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('RELATIVE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('ABSOLUTE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         
-
     def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         
-    
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
     
@@ -881,7 +899,10 @@ class Machine(QObject):
     def home_motors(self,handler=None,kwargs=None,manual=False):
         if handler == None:
             handler = self.home_motor_handler
-        return self.add_command_to_queue('HOME_ALL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_Z',0,0,0,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_X',0,0,0,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_Y',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return True
     
     def open_gripper_handler(self,additional_handler=None):
         if additional_handler is not None:

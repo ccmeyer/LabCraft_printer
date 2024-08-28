@@ -31,7 +31,7 @@ bool CustomStepper::isBusy() {
 
 // Method to set up the motor
 void CustomStepper::setupMotor() {
-    Serial.println("Setting up motor");
+    // Serial.println("Setting up motor");
     setMaxSpeed(maxSpeed);  // Set a reasonable speed for the motor
     setAcceleration(maxAcceleration);  // Set a reasonable acceleration for the motor
     setEnablePin(enablePin);
@@ -50,18 +50,18 @@ void CustomStepper::setProperties(int newSpeed, int newAcceleration) {
 
 // Method to enable the motor
 void CustomStepper::enableMotor() {
-    Serial.println("Enabling motor");
+    // Serial.println("Enabling motor");
     enableOutputs();
 }
 
 void CustomStepper::disableMotor() {
-    Serial.println("Disabling motor");
+    // Serial.println("Disabling motor");
     disableOutputs();
 }
 
 // Method to set the target position
 void CustomStepper::setTargetPosition(long position) {
-    Serial.print("Setting target position: ");
+    // Serial.print("Setting target position: ");
     Serial.println(position);
     moveTo(position);
     busy = true;
@@ -71,7 +71,7 @@ void CustomStepper::setTargetPosition(long position) {
 
 // Method to move the motor by a relative distance
 void CustomStepper::moveRelative(long distance) {
-    Serial.print("Moving by relative distance: ");
+    // Serial.print("Moving by relative distance: ");
     Serial.println(distance);
     move(distance);
     busy = true;
@@ -82,7 +82,7 @@ void CustomStepper::moveRelative(long distance) {
 // Method to perform a single step
 void CustomStepper::stepMotor() {
     if (distanceToGo() == 0) {
-        Serial.println("Target position reached");
+        // Serial.println("Target position reached");
         stop();
         busy = false;
     } else if (limitPressed && !movingForward()) {
@@ -92,7 +92,7 @@ void CustomStepper::stepMotor() {
         limitPressed = false;
     } else if (runSpeed()) {
         updateStepInterval();
-        stepTask.nextExecutionTime = micros() + getStepInterval();
+        stepTask.nextExecutionTime = micros() + getStepInterval()-100;
         taskQueue.addTask(stepTask);
         checkLimitSwitch();
     } else {
@@ -103,7 +103,7 @@ void CustomStepper::stepMotor() {
 
 // Method to safely stop the motor
 void CustomStepper::safeStop() {
-    Serial.println("Starting safe stop");
+    // Serial.println("Starting safe stop");
     setAcceleration(30000);
     stop();
     runToPosition();
@@ -113,9 +113,9 @@ void CustomStepper::safeStop() {
 void CustomStepper::checkLimitSwitch() {
     if (digitalRead(limitSwitchPin) == HIGH) {
         limitPressed = true;
-        if (!movingForward()) {
-            Serial.println("Limit switch pressed");
-        }
+        // if (!movingForward()) {
+            // Serial.println("Limit switch pressed");
+        // }
     } else {
         limitPressed = false;
     }
@@ -134,7 +134,7 @@ void CustomStepper::beginHoming() {
 void CustomStepper::continueHoming() {
     switch (homingStage) {
         case HOMING_START:
-            Serial.println("Starting homing process");
+            // Serial.println("Starting homing process");
             setMaxSpeed(maxSpeed / 2.5);
             setAcceleration(maxAcceleration / 4);
             move(-50000);
@@ -143,7 +143,7 @@ void CustomStepper::continueHoming() {
             break;
         case TOWARD_SWITCH:
             if (limitPressed) {
-                Serial.println("Limit switch pressed");
+                // Serial.println("Limit switch pressed");
                 safeStop();
                 setMaxSpeed(maxSpeed / 10);
                 setAcceleration(maxAcceleration / 10);
@@ -158,7 +158,7 @@ void CustomStepper::continueHoming() {
             break;
         case AWAY_FROM_SWITCH:
             if (!limitPressed) {
-                Serial.println("Limit switch not pressed");
+                // Serial.println("Limit switch not pressed");
                 setCurrentPosition(0);
                 safeStop();
                 setMaxSpeed(maxSpeed / 2.5);
@@ -174,7 +174,7 @@ void CustomStepper::continueHoming() {
             break;
         case RESET_POS:
             if (distanceToGo() == 0) {
-                Serial.println("Position reset");
+                // Serial.println("Position reset");
                 safeStop();
                 setMaxSpeed(maxSpeed);
                 setAcceleration(maxAcceleration);

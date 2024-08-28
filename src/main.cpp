@@ -74,11 +74,11 @@ Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY,stepperZ
 void setup() {
     SystemClock_Config();
     stepperX.setupMotor();
-    stepperX.enableMotor();
+    // stepperX.enableMotor();
     stepperY.setupMotor();
-    stepperY.enableMotor();
+    // stepperY.enableMotor();
     stepperZ.setupMotor();
-    stepperZ.enableMotor();
+    // stepperZ.enableMotor();
     stepperZ.setProperties(6000, 6000);
     comm.beginSerial();
 }

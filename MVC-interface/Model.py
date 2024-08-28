@@ -1751,6 +1751,7 @@ class MachineModel(QObject):
     gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
     machine_paused = Signal()  # Signal to notify when machine is paused
     home_status_signal = Signal()
+    command_numbers_updated = Signal(int,int)
 
     def __init__(self):
         super().__init__()
@@ -1775,7 +1776,8 @@ class MachineModel(QObject):
         self.current_location = "Unknown"
         self.paused = False
         self.machine_free = True
-
+        self.current_command_num = 0
+        self.last_completed_command_num = 0
 
         self.gripper_open = False
         self.gripper_active = False
@@ -1903,6 +1905,15 @@ class MachineModel(QObject):
         self.regulation_state_changed.emit(self.regulating_pressure)
         print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
 
+    def update_command_numbers(self, current_command_num, last_completed_command_num):
+        self.current_command_num = current_command_num
+        self.last_completed_command_num = last_completed_command_num
+        if self.last_completed_command_num != self.current_command_num:
+            self.machine_free = False
+        else:
+            self.machine_free = True
+        self.command_numbers_updated.emit(self.current_command_num,self.last_completed_command_num)
+    
     def update_target_position(self, x, y, z):
         self.target_x = int(x)
         self.target_y = int(y)
@@ -2035,10 +2046,8 @@ class Model(QObject):
         self.machine_model.update_pressure(status_dict.get('Pressure', self.machine_model.current_pressure))
         self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
         self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
-        if status_dict['Last_completed'] != status_dict['Current_command']:
-            self.machine_model.machine_free = False
-        else:
-            self.machine_model.machine_free = True
+        self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
+                                                    status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
         self.machine_state_updated.emit()
     
     def load_reactions_from_csv(self,csv_file_path):
