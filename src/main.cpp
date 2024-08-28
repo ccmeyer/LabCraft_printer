@@ -74,11 +74,8 @@ Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY,stepperZ
 void setup() {
     SystemClock_Config();
     stepperX.setupMotor();
-    // stepperX.enableMotor();
     stepperY.setupMotor();
-    // stepperY.enableMotor();
     stepperZ.setupMotor();
-    // stepperZ.enableMotor();
     stepperZ.setProperties(6000, 24000);
     comm.beginSerial();
 }
