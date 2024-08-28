@@ -89,36 +89,28 @@ CommandType mapCommandType(const char* commandName) {
         return CLOSE_GRIPPER;
     } else if (strcmp(commandName, "GRIPPER_OFF") == 0) {
         return GRIPPER_OFF;
+    } else if (strcmp(commandName, "ENABLE_MOTORS") == 0) {
+        return ENABLE_MOTORS;
+    } else if (strcmp(commandName, "DISABLE_MOTORS") == 0) {
+        return DISABLE_MOTORS;
     } else if (strcmp(commandName, "RELATIVE_X") == 0) {
         return RELATIVE_X;
     } else if (strcmp(commandName, "ABSOLUTE_X") == 0) {
         return ABSOLUTE_X;
     } else if (strcmp(commandName, "HOME_X") == 0) {
         return HOME_X;
-    } else if (strcmp(commandName, "ENABLE_X") == 0) {
-        return ENABLE_X;
-    } else if (strcmp(commandName, "DISABLE_X") == 0) {
-        return DISABLE_X;
     } else if (strcmp(commandName, "RELATIVE_Y") == 0) {
         return RELATIVE_Y;
     } else if (strcmp(commandName, "ABSOLUTE_Y") == 0) {
         return ABSOLUTE_Y;
     } else if (strcmp(commandName, "HOME_Y") == 0) {
         return HOME_Y;
-    } else if (strcmp(commandName, "ENABLE_Y") == 0) {
-        return ENABLE_Y;
-    } else if (strcmp(commandName, "DISABLE_Y") == 0) {
-        return DISABLE_Y;
     } else if (strcmp(commandName, "RELATIVE_Z") == 0) {
         return RELATIVE_Z;
     } else if (strcmp(commandName, "ABSOLUTE_Z") == 0) {
         return ABSOLUTE_Z;
     } else if (strcmp(commandName, "HOME_Z") == 0) {
         return HOME_Z;
-    } else if (strcmp(commandName, "ENABLE_Z") == 0) {
-        return ENABLE_Z;
-    } else if (strcmp(commandName, "DISABLE_Z") == 0) {
-        return DISABLE_Z;
     } else {
         return UNKNOWN;
     }

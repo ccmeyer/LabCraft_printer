@@ -6,6 +6,20 @@
 #include "CustomStepper.h"
 #include <Arduino.h>
 
+enum StatusStep {
+    CYCLE_COUNT,
+    LAST_COMPLETED_CMD,
+    LAST_ADDED_CMD,
+    CURRENT_CMD,
+    X,
+    Y,
+    Z,
+    TARGET_X,
+    TARGET_Y,
+    TARGET_Z,
+    GRIPPER
+};
+
 class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
@@ -27,6 +41,7 @@ private:
     CustomStepper& stepperX;  // Reference to the CustomStepper object
     CustomStepper& stepperY;  // Reference to the CustomStepper object
     CustomStepper& stepperZ;  // Reference to the CustomStepper object
+    StatusStep statusStep = CYCLE_COUNT;
 
     int baudRate;
     bool receivingNewData = true;
@@ -34,10 +49,14 @@ private:
     static const byte numChars = 64;
     char receivedChars[64];
     int receiveInterval = 10000; // Default receive interval of 50 msec
-    int sendInterval = 100000;  // Default send interval of 10 msec
+    int sendInterval = 10000;  // Default send interval of 10 msec
     int commandExecutionInterval = 20000;  // Interval for executing commands
     int receivedCounter = 0;
     int cycleCounter = 0;
+    int currentCmdNum = 0;
+    int lastCompletedCmdNum = 0;
+    int lastAddedCmdNum = 0;
+
 
     Task receiveCommandTask;       // Task to read serial data
     Task sendStatusTask;          // Task to send status

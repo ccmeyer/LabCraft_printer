@@ -8,6 +8,7 @@ public:
     Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue);
     
     bool isBusy();
+    bool isOpen();
     void turnOnPump(int duration);
     void turnOffPump();
     void openGripper();

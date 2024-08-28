@@ -22,10 +22,66 @@ void Communication::beginSerial() {
 // Method to send the status message
 void Communication::sendStatus() {
     if (Serial.availableForWrite() >= 20) { // Check if serial buffer is not full
-        Serial.print("Status message:"); 
-        Serial.println(cycleCounter);
-        cycleCounter = 0;
+        switch (statusStep) {
+            case CYCLE_COUNT:
+                Serial.print("Cycle_count:");
+                Serial.print(cycleCounter);
+                statusStep = LAST_COMPLETED_CMD;
+                break;
+            case LAST_COMPLETED_CMD:
+                Serial.print(",Last_completed:");
+                Serial.print(lastCompletedCmdNum);
+                statusStep = LAST_ADDED_CMD;
+                break;
+            case LAST_ADDED_CMD:    
+                Serial.print(",Last_added:");
+                Serial.print(lastAddedCmdNum);
+                statusStep = CURRENT_CMD;
+                break;
+            case CURRENT_CMD:
+                Serial.print(",Current_command:");
+                Serial.print(currentCmdNum);
+                statusStep = X;
+                break;
+            case X:
+                Serial.print(",X:");
+                Serial.print(stepperX.currentPosition());
+                statusStep = Y;
+                break;
+            case Y:
+                Serial.print(",Y:");
+                Serial.print(stepperY.currentPosition());
+                statusStep = Z;
+                break;
+            case Z:
+                Serial.print(",Z:");
+                Serial.print(stepperZ.currentPosition());
+                statusStep = TARGET_X;
+                break;
+            case TARGET_X:
+                Serial.print(",Tar_X:");
+                Serial.print(stepperX.targetPosition());
+                statusStep = TARGET_Y;
+                break;
+            case TARGET_Y:
+                Serial.print(",Tar_Y:");
+                Serial.print(stepperY.targetPosition());
+                statusStep = TARGET_Z;
+                break;
+            case TARGET_Z:
+                Serial.print(",Tar_Z:");
+                Serial.print(stepperZ.targetPosition());
+                statusStep = GRIPPER;
+                break;
+            case GRIPPER:
+                Serial.print(",Gripper:");
+                Serial.print(gripper.isOpen());
+                Serial.println();
+                statusStep = CYCLE_COUNT;
+                break;
+        }
     }
+    cycleCounter = 0;
     sendStatusTask.nextExecutionTime = micros() + sendInterval;
     taskQueue.addTask(sendStatusTask);
 }
@@ -82,6 +138,7 @@ void Communication::readSerial(){
 // Method to parse the received command and add it to the command queue
 void Communication::parseAndAddCommand() {
     Command newCommand = convertCommand(receivedChars);
+    lastAddedCmdNum = newCommand.commandNum;
     commandQueue.addCommand(newCommand);
 }
 
@@ -89,8 +146,10 @@ void Communication::parseAndAddCommand() {
 void Communication::executeCommandTask() {
     if (!commandQueue.isEmpty()) {
         if (checkIfFree()) {
+            lastCompletedCmdNum = currentCmdNum;
             Command nextCmd = commandQueue.getNextCommand();
             executeCommand(nextCmd);
+            currentCmdNum = nextCmd.commandNum;
             commandQueue.removeCommand(); // Remove the command after execution
         }
     }
@@ -102,7 +161,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() {
-    if (stepperX.isBusy() || stepperY.isBusy() || gripper.isBusy()) {
+    if (stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy()) {
         return false;
     } else {
         return true;
@@ -121,11 +180,15 @@ void Communication::executeCommand(const Command& cmd) {
         case GRIPPER_OFF:
             gripper.stopVacuumRefresh();
             break;
-        case ENABLE_X:
+        case ENABLE_MOTORS:
             stepperX.enableMotor();
+            stepperY.enableMotor();
+            stepperZ.enableMotor();
             break;
-        case DISABLE_X:
+        case DISABLE_MOTORS:
             stepperX.disableMotor();
+            stepperY.disableMotor();
+            stepperZ.disableMotor();
             break;
         case RELATIVE_X:
             stepperX.moveRelative(cmd.param1);
@@ -136,12 +199,6 @@ void Communication::executeCommand(const Command& cmd) {
         case HOME_X:
             stepperX.beginHoming();
             break;
-        case ENABLE_Y:
-            stepperY.enableMotor();
-            break;
-        case DISABLE_Y:
-            stepperY.disableMotor();
-            break;
         case RELATIVE_Y:
             stepperY.moveRelative(cmd.param1);
             break;
@@ -150,12 +207,6 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case HOME_Y:
             stepperY.beginHoming();
-            break;
-        case ENABLE_Z:
-            stepperZ.enableMotor();
-            break;
-        case DISABLE_Z:
-            stepperZ.disableMotor();
             break;
         case RELATIVE_Z:
             stepperZ.moveRelative(cmd.param1);

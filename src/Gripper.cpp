@@ -19,6 +19,10 @@ bool Gripper::isBusy() {
     return busy;
 }
 
+bool Gripper::isOpen() {
+    return gripperOpen;
+}
+
 // Method to turn on the pump for a specified duration
 void Gripper::turnOnPump(int duration) {
     if (!pumpActive){
