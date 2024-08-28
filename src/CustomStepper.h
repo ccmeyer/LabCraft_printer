@@ -30,6 +30,7 @@ public:
     unsigned long getStepInterval();       // Method to access _stepInterval
     bool movingForward();                   // Method to check if the motor direction is forward
     void updateStepInterval();             // Method to use computeNewSpeed
+    void stepMotor();            // Perform a single step
 
 
 private:
@@ -48,7 +49,6 @@ private:
     Task stepTask;               // Task to manage motor stepping
     Task homingTask;             // Task to manage homing process
 
-    void stepMotor();            // Perform a single step
     void continueHoming();       // Continue the homing process
 };
 
