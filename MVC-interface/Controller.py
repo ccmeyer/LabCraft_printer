@@ -92,40 +92,40 @@ class Controller(QObject):
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
 
-    def set_relative_X(self, x,manual=False):
+    def set_relative_X(self, x,manual=False,handler=None):
         """Set the relative X coordinate for the machine."""
         print(f"Setting relative X: {x}")
-        self.machine.set_relative_X(x,manual=manual)
+        self.machine.set_relative_X(x,manual=manual,handler=handler)
 
-    def set_relative_Y(self, y,manual=False):
+    def set_relative_Y(self, y,manual=False,handler=None):
         """Set the relative Y coordinate for the machine."""
         print(f"Setting relative Y: {y}")
-        self.machine.set_relative_Y(y,manual=manual)
+        self.machine.set_relative_Y(y,manual=manual,handler=handler)
 
-    def set_relative_Z(self, z,manual=False):
+    def set_relative_Z(self, z,manual=False,handler=None):
         """Set the relative Z coordinate for the machine."""
         print(f"Setting relative Z: {z}")
-        self.machine.set_relative_Z(z,manual=manual)
+        self.machine.set_relative_Z(z,manual=manual,handler=handler)
 
-    def set_absolute_X(self, x,manual=False):
+    def set_absolute_X(self, x,manual=False,handler=None):
         """Set the absolute X coordinate for the machine."""
         print(f"Setting absolute X: {x}")
-        self.machine.set_absolute_X(x,manual=manual)
+        self.machine.set_absolute_X(x,manual=manual,handler=handler)
 
-    def set_absolute_Y(self, y,manual=False):
+    def set_absolute_Y(self, y,manual=False,handler=None):
         """Set the absolute Y coordinate for the machine."""
         print(f"Setting absolute Y: {y}")
-        self.machine.set_absolute_Y(y,manual=manual)
+        self.machine.set_absolute_Y(y,manual=manual,handler=handler)
     
-    def set_absolute_Z(self, z,manual=False):
+    def set_absolute_Z(self, z,manual=False,handler=None):
         """Set the absolute Z coordinate for the machine."""
         print(f"Setting absolute Z: {z}")
-        self.machine.set_absolute_Z(z,manual=manual)
+        self.machine.set_absolute_Z(z,manual=manual,handler=handler)
     
     def set_relative_coordinates(self, x, y, z,manual=False,handler=None):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
-        if z < 0:
+        if z > 0:
             self.machine.set_relative_Y(y,manual=manual)
             self.machine.set_relative_X(x,manual=manual)
             self.machine.set_relative_Z(z,manual=manual,handler=handler)
@@ -137,7 +137,7 @@ class Controller(QObject):
     def set_absolute_coordinates(self, x, y, z,manual=False,handler=None):
         """Set the absolute coordinates for the machine."""
         print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
-        if self.expected_position['Z'] > z:
+        if self.expected_position['Z'] < z:
             self.machine.set_absolute_Y(y,manual=manual)
             self.machine.set_absolute_X(x,manual=manual)
             self.machine.set_absolute_Z(z,manual=manual,handler=handler)
@@ -247,10 +247,9 @@ class Controller(QObject):
         current = self.expected_position
 
         up_first = False
-        if direct and current['Z'] < target['Z']:
+        if direct and current['Z'] > target['Z']:
             up_first = True
-            self.set_absolute_coordinates(
-                current['X'], current['Y'], target['Z'],
+            self.set_absolute_Z(target['Z'],
                 handler=lambda: self.update_expected_position(z=target['Z'])
             )
 
@@ -263,56 +262,38 @@ class Controller(QObject):
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
-            self.set_absolute_coordinates(
-                current['X'], current['Y'], safe_height,
-                handler=lambda: self.update_expected_position(z=safe_height)
-            )
-            self.set_absolute_coordinates(
-                target['X'], target['Y'], safe_height,
-                handler=lambda: self.update_expected_position(x=target['X'], y=target['Y'])
-            )
+            self.set_absolute_Z(safe_height,handler=lambda: self.update_expected_position(z=safe_height))
+            self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+            self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+
         elif not direct and safe_y:
             print('Not direct, safe-y')
-            self.set_absolute_coordinates(
-                current['X'], current['Y'], safe_height,
-                handler=lambda: self.update_expected_position(z=safe_height)
-            )
-            self.set_absolute_coordinates(
-                current['X'], safe_y_value, safe_height,
-                handler=lambda: self.update_expected_position(y=safe_y_value)
-            )
-            self.set_absolute_coordinates(
-                target['X'], safe_y_value, safe_height,
-                handler=lambda: self.update_expected_position(x=target['X'])
-            )
-            self.set_absolute_coordinates(
-                target['X'], target['Y'], safe_height,
-                handler=lambda: self.update_expected_position(y=target['Y'])
-            )
+            self.set_absolute_Z(safe_height,handler=lambda: self.update_expected_position(z=safe_height))
+            self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
+            self.set_absolute_X(current['X'],handler=lambda: self.update_expected_position(x=current['X']))
+            self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
         elif direct and safe_y:
             if up_first:
-                self.set_absolute_coordinates(
-                    current['X'], safe_y_value, target['Z'],
-                    handler=lambda: self.update_expected_position(y=safe_y_value, z=target['Z'])
-                )
-                self.set_absolute_coordinates(
-                    target['X'], safe_y_value, target['Z'],
-                    handler=lambda: self.update_expected_position(x=target['X'])
-                )
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+                self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
+                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
             else:
-                self.set_absolute_coordinates(
-                    current['X'], safe_y_value, current['Z'],
-                    handler=lambda: self.update_expected_position(y=safe_y_value)
-                )
-                self.set_absolute_coordinates(
-                    target['X'], safe_y_value, current['Z'],
-                    handler=lambda: self.update_expected_position(x=target['X'])
-                )
-                self.set_absolute_coordinates(
-                    target['X'], target['Y'], current['Z'],
-                    handler=lambda: self.update_expected_position(y=target['Y'])
-                )
-
+                self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
+                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+        else:
+            if up_first:
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+            else:
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
         self.set_absolute_coordinates(
             target['X'], target['Y'], target['Z'],
             handler=lambda: self.update_location_handler(name)

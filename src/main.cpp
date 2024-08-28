@@ -79,7 +79,7 @@ void setup() {
     // stepperY.enableMotor();
     stepperZ.setupMotor();
     // stepperZ.enableMotor();
-    stepperZ.setProperties(6000, 6000);
+    stepperZ.setProperties(6000, 24000);
     comm.beginSerial();
 }
 
