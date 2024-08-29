@@ -111,6 +111,18 @@ CommandType mapCommandType(const char* commandName) {
         return ABSOLUTE_Z;
     } else if (strcmp(commandName, "HOME_Z") == 0) {
         return HOME_Z;
+    } else if (strcmp(commandName, "CHANGE_ACCEL") == 0) {
+        return CHANGE_ACCEL;
+    } else if (strcmp(commandName, "RESET_ACCEL") == 0) {
+        return RESET_ACCEL;
+    } else if (strcmp(commandName, "REGULATE_PRESSURE") == 0) {
+        return REGULATE_PRESSURE;
+    } else if (strcmp(commandName, "DEREGULATE_PRESSURE") == 0) {
+        return DEREGULATE_PRESSURE;
+    } else if (strcmp(commandName, "RELATIVE_PRESSURE") == 0) {
+        return RELATIVE_PRESSURE;
+    } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
+        return ABSOLUTE_PRESSURE;
     } else {
         return UNKNOWN;
     }

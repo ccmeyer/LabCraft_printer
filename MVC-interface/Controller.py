@@ -25,7 +25,7 @@ class Controller(QObject):
         
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
-        self.model.machine_model.command_numbers_updated.connect(self.machine.update_command_numbers)
+        self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -35,6 +35,10 @@ class Controller(QObject):
         """Handle errors from the machine."""
         print(f"Error occurred: {error_message}")
         # self.error_occurred_signal.emit('Error Occurred',error_message)
+
+    def update_command_numbers(self):
+        """Pass the current command and last completed command to the command queue"""
+        self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
 
     def reset_board(self):
         """Reset the machine board."""

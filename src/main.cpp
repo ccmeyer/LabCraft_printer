@@ -58,6 +58,8 @@ extern "C" void SystemClock_Config(void)
 #include "Communication.h"
 #include "Gripper.h"
 #include "CustomStepper.h"
+#include "PressureSensor.h"
+#include "PressureRegulator.h"
 #include "pin_assignments.h"
 #include "all_constants.h"
 
@@ -67,8 +69,11 @@ Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
 CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
 CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, taskQueue,Z_INV_DIR);
+CustomStepper stepperP(stepperP.DRIVER,P_EN_PIN, P_STEP_PIN, P_DIR_PIN, pstop, taskQueue,P_INV_DIR);
+PressureSensor pressureSensor(sensorAddress,taskQueue);
+PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY,stepperZ, 115200);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, 115200);
 
 
 void setup() {
@@ -77,7 +82,11 @@ void setup() {
     stepperY.setupMotor();
     stepperZ.setupMotor();
     stepperZ.setProperties(6000, 24000);
+    pressureSensor.beginCommunication(sdaPin,sclPin,wireFrequency);
+    pressureSensor.startReading();
+    regulator.setupRegulator();
     comm.beginSerial();
+
 }
 
 void loop() {

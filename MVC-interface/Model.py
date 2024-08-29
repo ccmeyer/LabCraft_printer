@@ -1751,7 +1751,7 @@ class MachineModel(QObject):
     gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
     machine_paused = Signal()  # Signal to notify when machine is paused
     home_status_signal = Signal()
-    command_numbers_updated = Signal(int,int)
+    command_numbers_updated = Signal()
 
     def __init__(self):
         super().__init__()
@@ -1910,9 +1910,14 @@ class MachineModel(QObject):
         self.last_completed_command_num = last_completed_command_num
         if self.last_completed_command_num != self.current_command_num:
             self.machine_free = False
+            # print(f"Machine busy. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
         else:
             self.machine_free = True
-        self.command_numbers_updated.emit(self.current_command_num,self.last_completed_command_num)
+            # print(f"Machine free. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
+        self.command_numbers_updated.emit()
+
+    def get_command_numbers(self):
+        return self.current_command_num, self.last_completed_command_num
     
     def update_target_position(self, x, y, z):
         self.target_x = int(x)
@@ -1937,6 +1942,7 @@ class MachineModel(QObject):
         """Update the pressure readings with a new value."""
         # Shift the existing readings and add the new reading
         converted_pressure = self.convert_to_psi(new_pressure)
+        # print(f"Pressure: {converted_pressure} psi")
         self.current_pressure = converted_pressure
         self.pressure_readings = np.roll(self.pressure_readings, -1)
         self.pressure_readings[-1] = converted_pressure
@@ -2033,6 +2039,7 @@ class Model(QObject):
         '''
         Update the state of the machine model
         '''
+        status_keys = status_dict.keys()
         self.machine_model.update_current_position(status_dict.get('X', self.machine_model.current_x),
                                                    status_dict.get('Y', self.machine_model.current_y),
                                                    status_dict.get('Z', self.machine_model.current_z))
@@ -2042,10 +2049,18 @@ class Model(QObject):
                                                   status_dict.get('Tar_Y', self.machine_model.target_y),
                                                   status_dict.get('Tar_Z', self.machine_model.target_z))
         self.machine_model.update_target_p_motor(status_dict.get('Tar_P', self.machine_model.target_p))
-        self.machine_model.update_target_pressure(status_dict.get('Tar_pressure', self.machine_model.target_pressure))
-        self.machine_model.update_pressure(status_dict.get('Pressure', self.machine_model.current_pressure))
-        self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
-        self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
+        if 'Pressure' in status_keys:
+            self.machine_model.update_pressure(status_dict['Pressure'])
+        if 'Tar_pressure' in status_keys:
+            self.machine_model.update_target_pressure(status_dict['Tar_pressure'])
+        if 'Cycle_count' in status_keys:
+            self.machine_model.update_cycle_count(status_dict['Cycle_count'])
+        if 'Max_cycle' in status_keys:
+            self.machine_model.update_max_cycle(status_dict['Max_cycle'])
+        # self.machine_model.update_target_pressure(status_dict.get('Tar_pressure', None))
+        # self.machine_model.update_pressure(status_dict.get('Pressure', None))
+        # self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
+        # self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
         self.machine_state_updated.emit()

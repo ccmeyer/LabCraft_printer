@@ -6,8 +6,9 @@ PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sen
     : stepper(stepper), sensor(sensor), taskQueue(taskQueue), 
       adjustPressureTask([this]() { this->adjustPressure(); }, 0), 
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
-      regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1639), 
-      tolerance(3), cutoff(200), currentPressure(1639), pressureDifference(0), syringeSpeed(0), adjustInterval(100) {
+      regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1638), 
+      tolerance(3), cutoff(200), currentPressure(1638), previousPressure(1638), pressureDifference(0), syringeSpeed(0), 
+      adjustInterval(5000), resetInterval(5000) {
         pinMode(valvePin, OUTPUT);
         digitalWrite(valvePin, LOW);
       }
@@ -22,17 +23,26 @@ void PressureRegulator::enableRegulator() {
     stepper.enableMotor();
 }
 
+// Method to disable the pressure regulator
+void PressureRegulator::disableRegulator() {
+    stepper.disableMotor();
+}
+
 // Method to begin pressure regulation
-void PressureRegulator::beginRegulation(int targetPressure) {
-    this->targetPressure = targetPressure;
+void PressureRegulator::beginRegulation() {
     regulatingPressure = true;
     adjustPressureTask.nextExecutionTime = micros();
     taskQueue.addTask(adjustPressureTask);
 }
 
 // Method to set the target pressure
-void PressureRegulator::setTargetPressure(int targetPressure) {
+void PressureRegulator::setTargetPressureAbsolute(int targetPressure) {
     this->targetPressure = targetPressure;
+}
+
+// Method to set the target pressure relative to the current target pressure
+void PressureRegulator::setTargetPressureRelative(int targetPressure) {
+    this->targetPressure += targetPressure;
 }
 
 // Method to get the target pressure
@@ -40,9 +50,14 @@ float PressureRegulator::getTargetPressure() {
     return targetPressure;
 }
 
-// Method to get the current pressure
-float PressureRegulator::getCurrentPressure() {
-    return sensor.getPressure();
+// Method to get the current position of the syringe
+long PressureRegulator::getCurrentPosition() {
+    return stepper.currentPosition();
+}
+
+// Method to get the target position of the syringe
+long PressureRegulator::getTargetPosition() {
+    return stepper.targetPosition();
 }
 
 // Method to stop pressure regulation
@@ -62,7 +77,7 @@ void PressureRegulator::resetSyringe() {
     } 
     else if (stepper.isBusy()) { // Continue resetting
         // stepper.stepMotor(); // Continue stepping if not done
-        resetSyringeTask.nextExecutionTime = micros() + 1000;
+        resetSyringeTask.nextExecutionTime = micros() + resetInterval;
         taskQueue.addTask(resetSyringeTask);
     } 
     else {                            // Flag reset complete
@@ -84,28 +99,30 @@ void PressureRegulator::adjustPressure() {
     // Get the current pressure from the sensor
     currentPressure = sensor.getPressure();
 
-    // Calculate the difference between current pressure and target pressure
-    pressureDifference = currentPressure - targetPressure;
+    if (previousPressure != currentPressure){
+        // Calculate the difference between current pressure and target pressure
+        pressureDifference = currentPressure - targetPressure;
 
-    // Determine the speed based on the difference
-    syringeSpeed = 0;
-    if (pressureDifference > cutoff) {
-        syringeSpeed = 1500;  // Move quickly when far above target pressure
-    } else if (pressureDifference < -cutoff) {
-        syringeSpeed = -1500; // Move quickly when far below target pressure
-    } else if (abs(pressureDifference) <= tolerance) {
-        syringeSpeed = 0;          // Stop moving when within tolerance range
-    } else {
-        // Map the absolute value of pressure difference to a speed between the min and max speed
-        syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 300, 1500);
-        // Apply the sign of the pressure difference to the speed
-        syringeSpeed *= (pressureDifference < 0) ? -1 : 1;
+        // Determine the speed based on the difference
+        syringeSpeed = 0;
+        if (pressureDifference > cutoff) {
+            syringeSpeed = 1500;  // Move quickly when far above target pressure
+        } else if (pressureDifference < -cutoff) {
+            syringeSpeed = -1500; // Move quickly when far below target pressure
+        } else if (abs(pressureDifference) <= tolerance) {
+            syringeSpeed = 0;          // Stop moving when within tolerance range
+        } else {
+            // Map the absolute value of pressure difference to a speed between the min and max speed
+            syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 100, 1500);
+            // Apply the sign of the pressure difference to the speed
+            syringeSpeed *= (pressureDifference < 0) ? -1 : 1;
+        }
+
+        // Set the speed of the stepper motor and move
+        stepper.setSpeed(syringeSpeed);
+        stepper.moveRelative(syringeSpeed);
+        previousPressure = currentPressure;
     }
-
-    // Set the speed of the stepper motor and move
-    stepper.setSpeed(syringeSpeed);
-    stepper.moveRelative(syringeSpeed);
-    stepper.runSpeed();
 
     // Check if the syringe needs to be reset
     if (stepper.currentPosition() < -300 || stepper.currentPosition() > 25000) {

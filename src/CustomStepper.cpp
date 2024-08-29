@@ -3,7 +3,8 @@
 
 // Constructor
 CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool invertDir)
-    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false), invertDir(invertDir), homingComplete(false), homingStage(HOMING_COMPLETE), busy(false),
+    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false), invertDir(invertDir), 
+      homingComplete(false), homingStage(HOMING_COMPLETE), busy(false),maxSpeed(4000), maxAcceleration(24000), originalSpeed(4000), originalAcceleration(24000),
       stepTask([this]() { this->stepMotor(); }, 0),
       homingTask([this]() { this->continueHoming(); }, 0) {
     pinMode(limitSwitchPin, INPUT);
@@ -31,7 +32,6 @@ bool CustomStepper::isBusy() {
 
 // Method to set up the motor
 void CustomStepper::setupMotor() {
-    // Serial.println("Setting up motor");
     setMaxSpeed(maxSpeed);  // Set a reasonable speed for the motor
     setAcceleration(maxAcceleration);  // Set a reasonable acceleration for the motor
     setEnablePin(enablePin);
@@ -43,26 +43,28 @@ void CustomStepper::setupMotor() {
 void CustomStepper::setProperties(int newSpeed, int newAcceleration) {
     maxSpeed = newSpeed;
     maxAcceleration = newAcceleration;
+    originalSpeed = newSpeed;
+    originalAcceleration = newAcceleration;
     setMaxSpeed(maxSpeed);
     setAcceleration(maxAcceleration);
 }   
 
+// Method to reset the acceleration
+void CustomStepper::resetProperties() {
+    setProperties(originalSpeed, originalAcceleration);
+}
 
 // Method to enable the motor
 void CustomStepper::enableMotor() {
-    // Serial.println("Enabling motor");
     enableOutputs();
 }
 
 void CustomStepper::disableMotor() {
-    // Serial.println("Disabling motor");
     disableOutputs();
 }
 
 // Method to set the target position
 void CustomStepper::setTargetPosition(long position) {
-    // Serial.print("Setting target position: ");
-    Serial.println(position);
     moveTo(position);
     busy = true;
     stepTask.nextExecutionTime = micros();
@@ -71,8 +73,6 @@ void CustomStepper::setTargetPosition(long position) {
 
 // Method to move the motor by a relative distance
 void CustomStepper::moveRelative(long distance) {
-    // Serial.print("Moving by relative distance: ");
-    Serial.println(distance);
     move(distance);
     busy = true;
     stepTask.nextExecutionTime = micros();
@@ -82,7 +82,6 @@ void CustomStepper::moveRelative(long distance) {
 // Method to perform a single step
 void CustomStepper::stepMotor() {
     if (distanceToGo() == 0) {
-        // Serial.println("Target position reached");
         stop();
         busy = false;
     } else if (limitPressed && !movingForward()) {
@@ -103,7 +102,6 @@ void CustomStepper::stepMotor() {
 
 // Method to safely stop the motor
 void CustomStepper::safeStop() {
-    // Serial.println("Starting safe stop");
     setAcceleration(30000);
     stop();
     runToPosition();
@@ -113,9 +111,6 @@ void CustomStepper::safeStop() {
 void CustomStepper::checkLimitSwitch() {
     if (digitalRead(limitSwitchPin) == HIGH) {
         limitPressed = true;
-        // if (!movingForward()) {
-            // Serial.println("Limit switch pressed");
-        // }
     } else {
         limitPressed = false;
     }

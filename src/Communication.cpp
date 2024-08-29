@@ -3,8 +3,9 @@
 
 // Constructor
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
-CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), baudRate(baudRate), 
+CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor, PressureRegulator& regulator, int baudRate)
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
+    pressureSensor(pressureSensor), regulator(regulator), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
@@ -14,6 +15,7 @@ void Communication::beginSerial() {
     Serial.begin(baudRate);
     receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
     sendStatusTask.nextExecutionTime = micros() + sendInterval;
+    executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
     taskQueue.addTask(receiveCommandTask);
     taskQueue.addTask(sendStatusTask);
     taskQueue.addTask(executeCmdTask);
@@ -25,58 +27,78 @@ void Communication::sendStatus() {
         switch (statusStep) {
             case CYCLE_COUNT:
                 Serial.print("Cycle_count:");
-                Serial.print(cycleCounter);
+                Serial.println(cycleCounter);
                 statusStep = LAST_COMPLETED_CMD;
                 break;
             case LAST_COMPLETED_CMD:
-                Serial.print(",Last_completed:");
-                Serial.print(lastCompletedCmdNum);
+                Serial.print("Last_completed:");
+                Serial.println(lastCompletedCmdNum);
                 statusStep = LAST_ADDED_CMD;
                 break;
             case LAST_ADDED_CMD:    
-                Serial.print(",Last_added:");
-                Serial.print(lastAddedCmdNum);
+                Serial.print("Last_added:");
+                Serial.println(lastAddedCmdNum);
                 statusStep = CURRENT_CMD;
                 break;
             case CURRENT_CMD:
-                Serial.print(",Current_command:");
-                Serial.print(currentCmdNum);
+                Serial.print("Current_command:");
+                Serial.println(currentCmdNum);
                 statusStep = X;
                 break;
             case X:
-                Serial.print(",X:");
-                Serial.print(stepperX.currentPosition());
+                Serial.print("X:");
+                Serial.println(stepperX.currentPosition());
                 statusStep = Y;
                 break;
             case Y:
-                Serial.print(",Y:");
-                Serial.print(stepperY.currentPosition());
+                Serial.print("Y:");
+                Serial.println(stepperY.currentPosition());
                 statusStep = Z;
                 break;
             case Z:
-                Serial.print(",Z:");
-                Serial.print(stepperZ.currentPosition());
+                Serial.print("Z:");
+                Serial.println(stepperZ.currentPosition());
+                statusStep = P;
+                break;
+            case P:
+                Serial.print("P:");
+                Serial.println(regulator.getCurrentPosition());
                 statusStep = TARGET_X;
                 break;
             case TARGET_X:
-                Serial.print(",Tar_X:");
-                Serial.print(stepperX.targetPosition());
+                Serial.print("Tar_X:");
+                Serial.println(stepperX.targetPosition());
                 statusStep = TARGET_Y;
                 break;
             case TARGET_Y:
-                Serial.print(",Tar_Y:");
-                Serial.print(stepperY.targetPosition());
+                Serial.print("Tar_Y:");
+                Serial.println(stepperY.targetPosition());
                 statusStep = TARGET_Z;
                 break;
             case TARGET_Z:
-                Serial.print(",Tar_Z:");
-                Serial.print(stepperZ.targetPosition());
+                Serial.print("Tar_Z:");
+                Serial.println(stepperZ.targetPosition());
+                statusStep = TARGET_P;
+                break;
+            case TARGET_P:
+                Serial.print("Tar_P:");
+                Serial.println(regulator.getTargetPosition());
                 statusStep = GRIPPER;
                 break;
             case GRIPPER:
-                Serial.print(",Gripper:");
-                Serial.print(gripper.isOpen());
-                Serial.println();
+                Serial.print("Gripper:");
+                Serial.println(gripper.isOpen());
+                statusStep = PRESSURE;
+                break;
+            case PRESSURE:
+                Serial.print("Pressure:");
+                Serial.println(round(pressureSensor.getPressure()));
+                statusStep = TARGET_PRESSURE;
+                break;
+            case TARGET_PRESSURE:
+                Serial.print("Tar_pressure:");
+                Serial.println(round(regulator.getTargetPressure()));
+                // Serial.println();
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -188,11 +210,13 @@ void Communication::executeCommand(const Command& cmd) {
             stepperX.enableMotor();
             stepperY.enableMotor();
             stepperZ.enableMotor();
+            regulator.enableRegulator();
             break;
         case DISABLE_MOTORS:
             stepperX.disableMotor();
             stepperY.disableMotor();
             stepperZ.disableMotor();
+            regulator.disableRegulator();
             break;
         case RELATIVE_X:
             stepperX.moveRelative(cmd.param1);
@@ -220,6 +244,29 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case HOME_Z:
             stepperZ.beginHoming();
+            break;
+        case CHANGE_ACCEL:
+            stepperX.setAcceleration(cmd.param1);
+            stepperY.setAcceleration(cmd.param1);
+            stepperZ.setAcceleration(cmd.param1);
+            break;
+        case RESET_ACCEL:
+            stepperX.resetProperties();
+            stepperY.resetProperties();
+            stepperZ.resetProperties();
+            break;
+        case REGULATE_PRESSURE:
+            regulator.beginRegulation();
+            regulator.setTargetPressureAbsolute(1638);
+            break;
+        case DEREGULATE_PRESSURE:
+            regulator.stopRegulation();
+            break;
+        case RELATIVE_PRESSURE:
+            regulator.setTargetPressureRelative(cmd.param1);
+            break;
+        case ABSOLUTE_PRESSURE:
+            regulator.setTargetPressureAbsolute(cmd.param1);
             break;
         case UNKNOWN:
             // Serial.println("Unknown command type");

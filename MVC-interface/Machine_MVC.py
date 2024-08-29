@@ -555,6 +555,8 @@ class CommandQueue(QObject):
             print('No commands to update')
             return
         for command in self.queue:
+            print(f'Checking command: {command.command_number} {command.command_type} {command.status}')
+            print(f'Current command: {current_executing_command} Last completed: {last_completed_command}')
             if command.status == "Sent" and command.command_number == int(current_executing_command):
                 command.mark_as_executing()
             if command.command_number <= int(last_completed_command):
@@ -615,7 +617,7 @@ class Machine(QObject):
     def begin_communication_timer(self):
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
-        self.communication_timer.start(10)  # Update every 100 ms
+        self.communication_timer.start(5)  # Update every 100 ms
 
     def begin_execution_timer(self):
         self.execution_timer = QTimer()
@@ -712,6 +714,7 @@ class Machine(QObject):
                 try:
                     if self.board.in_waiting > 0:
                         status_string = self.board.readline().decode('utf-8').strip()
+                        # print('Status string:',status_string)
                     else:
                         status_string = ''
                 except Exception as e:
@@ -724,14 +727,14 @@ class Machine(QObject):
                 status_dict = self.parse_status_string(status_string)
                 if status_dict == {}:
                     return
-                self.command_queue.update_command_status(status_dict.get('Current_command', None),
-                                                            status_dict.get('Last_completed', None))
+                # self.command_queue.update_command_status(status_dict.get('Current_command', None),
+                #                                             status_dict.get('Last_completed', None))
                 self.status_updated.emit(status_dict)  # Emit the status update signal
                 self.error_count = 0
             except ValueError as e:
-                self.error_occurred.emit(f"Error parsing status string: {str(e)}")
+                self.error_occurred.emit(f"Error parsing status string: {str(e)}-{status_string}")
             except Exception as e:
-                self.error_occurred.emit(f"Unexpected error: {str(e)}")
+                self.error_occurred.emit(f"Unexpected error: {str(e)}-{status_string}")
                 self.error_count += 1
                 if self.error_count > 100:
                     print('------- Automatic disconnect -------')
@@ -747,12 +750,12 @@ class Machine(QObject):
             return {}
 
         status_dict = {}
-        for item in status_string.split(','):
-            try:
-                key, value = item.split(':')
-                status_dict[key] = value
-            except ValueError:
-                raise ValueError(f"Malformed item in status string: {item}")
+        # for item in status_string.split(','):
+        try:
+            key, value = status_string.split(':')
+            status_dict[key] = value
+        except ValueError:
+            raise ValueError(f"Malformed item in status string: {status_string}")
 
         return status_dict
 

@@ -57,6 +57,7 @@ const int X_SW_RX = X_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the s
 
 // --DRIVER 3--
 // Standard control modality
+const bool P_INV_DIR = false; // Invert direction for Motor3_1
 const int P_EN_PIN = PA0;      // Enable - EN pin top left
 const int P_DIR_PIN = PC1;     // Direction - DIR pin bottom left
 const int P_STEP_PIN = PG4;    // Step - STP pin second from bottom left

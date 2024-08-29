@@ -12,6 +12,7 @@ void PressureSensor::beginCommunication(int sdaPin, int sclPin, int frequency) {
     Wire.setSCL(sclPin);
     Wire.begin();        // Join I2C bus
     Wire.setClock(frequency);
+    // Serial.println("Pressure sensor initialized");
 }
 
 // Method to reset the pressure readings
@@ -68,7 +69,7 @@ void PressureSensor::smoothPressure() {
     currentPressure = average;
 
     // Reschedule the task to run again
-    readPressureTask.nextExecutionTime = millis() + readInterval;  // Adjust interval as needed
+    readPressureTask.nextExecutionTime = micros() + readInterval;  // Adjust interval as needed
     taskQueue.addTask(readPressureTask);
 }
 
@@ -80,7 +81,7 @@ void PressureSensor::setReadInterval(int interval) {
 // Method to start periodic pressure reading
 void PressureSensor::startReading() {
     reading = true;
-    readPressureTask.nextExecutionTime = millis() + readInterval;
+    readPressureTask.nextExecutionTime = micros() + readInterval;
     taskQueue.addTask(readPressureTask);
 }
 

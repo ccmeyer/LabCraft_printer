@@ -49,6 +49,12 @@ enum CommandType {
     HOME_X,
     HOME_Y,
     HOME_Z,
+    CHANGE_ACCEL,
+    RESET_ACCEL,
+    REGULATE_PRESSURE,
+    DEREGULATE_PRESSURE,
+    RELATIVE_PRESSURE,
+    ABSOLUTE_PRESSURE,
     UNKNOWN
     // Add more command types as needed
 };

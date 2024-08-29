@@ -4,6 +4,8 @@
 #include "TaskCommand.h"
 #include "Gripper.h"
 #include "CustomStepper.h"
+#include "PressureSensor.h"
+#include "PressureRegulator.h"
 #include <Arduino.h>
 
 enum StatusStep {
@@ -14,16 +16,21 @@ enum StatusStep {
     X,
     Y,
     Z,
+    P,
     TARGET_X,
     TARGET_Y,
     TARGET_Z,
-    GRIPPER
+    TARGET_P,
+    GRIPPER,
+    PRESSURE,
+    TARGET_PRESSURE
 };
 
 class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
-    CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, int baudRate);
+    CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
+    PressureSensor& pressureSensor, PressureRegulator& regulator, int baudRate);
 
     void beginSerial();
     void sendStatus();
@@ -41,6 +48,8 @@ private:
     CustomStepper& stepperX;  // Reference to the CustomStepper object
     CustomStepper& stepperY;  // Reference to the CustomStepper object
     CustomStepper& stepperZ;  // Reference to the CustomStepper object
+    PressureSensor& pressureSensor;  // Reference to the PressureSensor object
+    PressureRegulator& regulator;  // Reference to the PressureRegulator object
     StatusStep statusStep = CYCLE_COUNT;
 
     int baudRate;
@@ -48,7 +57,7 @@ private:
     bool newData = false;
     static const byte numChars = 64;
     char receivedChars[64];
-    int receiveInterval = 10000; // Default receive interval of 50 msec
+    int receiveInterval = 20000; // Default receive interval of 50 msec
     int sendInterval = 10000;  // Default send interval of 10 msec
     int commandExecutionInterval = 10000;  // Interval for executing commands
     int receivedCounter = 0;
@@ -56,7 +65,6 @@ private:
     int currentCmdNum = 0;
     int lastCompletedCmdNum = 0;
     int lastAddedCmdNum = 0;
-
 
     Task receiveCommandTask;       // Task to read serial data
     Task sendStatusTask;          // Task to send status

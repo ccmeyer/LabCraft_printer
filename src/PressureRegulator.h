@@ -11,10 +11,13 @@ public:
 
     void setupRegulator();
     void enableRegulator();
-    void beginRegulation(int targetPressure);
-    void setTargetPressure(int targetPressure);
+    void disableRegulator();
+    void beginRegulation();
+    void setTargetPressureAbsolute(int targetPressure);
+    void setTargetPressureRelative(int targetPressure);
     float getTargetPressure();
-    float getCurrentPressure();
+    long getCurrentPosition();
+    long getTargetPosition();
     void stopRegulation();
     void resetSyringe();
 
@@ -32,9 +35,11 @@ private:
     int tolerance;                // Tolerance range for pressure regulation
     int cutoff;                   // Cutoff value for pressure regulation
     float currentPressure;          // Current pressure reading
-    int pressureDifference;       // Difference between target and current pressure
+    float previousPressure;         // Previous pressure reading
+    float pressureDifference;       // Difference between target and current pressure
     int syringeSpeed;             // Speed of the syringe motor
     int adjustInterval;   // Interval for adjusting pressure
+    int resetInterval;    // Interval for resetting the syringe
 
     void adjustPressure();        // Method to adjust the pressure based on current readings
 };

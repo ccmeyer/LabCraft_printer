@@ -19,6 +19,7 @@ int sensorAddress = 40;
 float currentPressure;
 const int sdaPin = PB9;
 const int sclPin = PB8;
+const int wireFrequency = 1000000;
 
 const int syringeMaxSpeed = 1500;      // Maximum speed when far from target pressure
 const int syringeMinSpeed = 300;       // Minimum speed when close to target pressure
