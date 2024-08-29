@@ -1,4 +1,5 @@
 #include "CustomStepper.h"
+#include "GlobalState.h"
 #include <Arduino.h>
 
 // Constructor
@@ -81,6 +82,12 @@ void CustomStepper::moveRelative(long distance) {
 
 // Method to perform a single step
 void CustomStepper::stepMotor() {
+    if (currentState == PAUSED) {
+        stepTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(stepTask);
+        return;
+    }
+    
     if (distanceToGo() == 0) {
         stop();
         busy = false;
@@ -105,6 +112,24 @@ void CustomStepper::safeStop() {
     setAcceleration(30000);
     stop();
     runToPosition();
+}
+
+// Method to stop the motor and reset the busy flag
+void CustomStepper::completeStop() {
+    stop();
+    busy = false;
+}
+
+// Method to reset the state of the motor
+void CustomStepper::resetState() {
+    setSpeed(0);
+    stop();
+    busy = false;
+    limitPressed = false;
+    homingStage = HOMING_COMPLETE;
+    resetProperties();
+    moveTo(currentPosition());
+    updateStepInterval();
 }
 
 // Method to check the limit switch
@@ -132,6 +157,11 @@ void CustomStepper::beginHoming() {
 
 // Method to continue the homing process
 void CustomStepper::continueHoming() {
+    if (currentState == PAUSED) {
+        homingTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(homingTask);
+        return;
+    }
     switch (homingStage) {
         case HOMING_START:
             // Serial.println("Starting homing process");

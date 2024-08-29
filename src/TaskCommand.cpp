@@ -10,9 +10,9 @@ void TaskQueue::addTask(const Task& task) {
 void TaskQueue::executeNextTask() {
     if (!taskQueue.empty()) {
         Task currentTask = taskQueue.top();
-        unsigned long currentMillis = micros();
+        unsigned long currentMicros = micros();
 
-        if (currentMillis >= currentTask.nextExecutionTime) {
+        if (currentMicros >= currentTask.nextExecutionTime) {
             taskQueue.pop();
             currentTask.function();  // Execute the task
         }
@@ -129,6 +129,12 @@ CommandType mapCommandType(const char* commandName) {
         return PRINT;
     } else if (strcmp(commandName, "RESET_P") == 0) {
         return RESET_P;
+    } else if (strcmp(commandName, "PAUSE") == 0) {
+        return PAUSE;
+    } else if (strcmp(commandName, "RESUME") == 0) {
+        return RESUME;
+    } else if (strcmp(commandName, "CLEAR_QUEUE") == 0) {
+        return CLEAR_QUEUE;
     } else {
         return UNKNOWN;
     }

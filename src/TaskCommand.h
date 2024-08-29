@@ -58,6 +58,9 @@ enum CommandType {
     ABSOLUTE_PRESSURE,
     PRINT,
     RESET_P,
+    PAUSE,
+    RESUME,
+    CLEAR_QUEUE,
     UNKNOWN
     // Add more command types as needed
 };

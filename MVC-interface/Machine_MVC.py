@@ -574,6 +574,7 @@ class CommandQueue(QObject):
         """Clear the command queue."""
         self.queue.clear()
         self.completed.clear()
+        self.command_number = 0
         self.queue_updated.emit()
     
 

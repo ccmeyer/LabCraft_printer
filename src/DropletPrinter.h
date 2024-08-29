@@ -14,6 +14,7 @@ public:
     void startPrinting(int numberOfDroplets);
     bool isPrintingComplete() const;
     bool isBusy();
+    void resetDropletCounts();
 
 private:
     int valvePin;

@@ -34,6 +34,7 @@ public:
     PressureSensor& pressureSensor, PressureRegulator& regulator, DropletPrinter& printer, int baudRate);
 
     void beginSerial();
+    void startTasks();
     void sendStatus();
     void readSerial();
     void receiveCommand();

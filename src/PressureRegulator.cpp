@@ -1,4 +1,5 @@
 #include "PressureRegulator.h"
+#include "GlobalState.h"
 #include <Arduino.h>
 
 // Constructor
@@ -42,6 +43,11 @@ void PressureRegulator::homeSyringe() {
 
 // Method to check if the syringe is homed
 void PressureRegulator::homeSyringeCheck() {
+    if (currentState == PAUSED) {
+        homeSyringeTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(homeSyringeTask);
+        return;
+    }
     if (stepper.isHomingComplete()) {
         digitalWrite(valvePin, LOW);
         homing = false;
@@ -61,6 +67,14 @@ void PressureRegulator::beginRegulation() {
     regulatingPressure = true;
     adjustPressureTask.nextExecutionTime = micros();
     taskQueue.addTask(adjustPressureTask);
+}
+
+// Method to restart pressure regulation task if already regulating
+void PressureRegulator::restartRegulation() {
+    if (regulatingPressure) {
+        adjustPressureTask.nextExecutionTime = micros();
+        taskQueue.addTask(adjustPressureTask);
+    }
 }
 
 // Method to set the target pressure
@@ -106,9 +120,26 @@ bool PressureRegulator::isBusy() {
         return false;
     }
 }
+
+// Method to reset the state of the regulator
+void PressureRegulator::resetState() {
+    resetInProgress = false;
+    homing = false;
+    syringeSpeed = 0;
+    targetReached = true;
+    stepperTaskActive = false;
+    targetPressure = sensor.getPressure();
+    stepper.resetState();
+    digitalWrite(valvePin, LOW);
+}
     
 // Method to reset the syringe
 void PressureRegulator::resetSyringe() {
+    if (currentState == PAUSED) {
+        resetSyringeTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(resetSyringeTask);
+        return;
+    }
     if (!resetInProgress) {    // Initiate the reset process
         stepper.stop();
         resetInProgress = true;
@@ -134,6 +165,11 @@ void PressureRegulator::resetSyringe() {
 
 // Method to adjust the pressure based on current readings
 void PressureRegulator::adjustPressure() {
+    if (currentState == PAUSED) {
+        adjustPressureTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(adjustPressureTask);
+        return;
+    }
     if (!regulatingPressure || resetInProgress || homing) return;
 
     currentPressure = sensor.getPressure();
@@ -167,7 +203,16 @@ void PressureRegulator::adjustPressure() {
 }
 
 void PressureRegulator::stepMotorDirectly() {
-    if (stepper.currentPosition() < lowerBound || stepper.currentPosition() > upperBound) {
+    if (currentState == PAUSED) {
+        stepTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(stepTask);
+        return;
+    }
+    if (stepper.currentPosition() > upperBound) {
+        resetSyringe();
+        return;
+    } else if (stepper.currentPosition() < lowerBound) {
+        setTargetPressureAbsolute(1638);
         resetSyringe();
         return;
     }

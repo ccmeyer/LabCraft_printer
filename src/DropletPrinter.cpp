@@ -1,4 +1,5 @@
 #include "DropletPrinter.h"
+#include "GlobalState.h"
 
 // Constructor
 DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int valvePin)
@@ -38,8 +39,20 @@ bool DropletPrinter::isBusy() {
     return !printingComplete;
 }
 
+// Method to reset the droplet counts
+void DropletPrinter::resetDropletCounts() {
+    targetDroplets = 0;
+    printedDroplets = 0;
+    printingComplete = true;
+}
+
 // Method to handle printing a single droplet
 void DropletPrinter::printDroplet() {
+    if (currentState == PAUSED) {
+        printDropletTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(printDropletTask);
+        return;
+    }
     if (printedDroplets >= targetDroplets) {
         printingComplete = true;
         return;

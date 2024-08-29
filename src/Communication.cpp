@@ -1,4 +1,5 @@
 #include "Communication.h"
+#include "GlobalState.h"
 #include <Arduino.h>
 
 // Constructor
@@ -14,6 +15,11 @@ PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
 // Method to initialize the serial communication
 void Communication::beginSerial() {
     Serial.begin(baudRate);
+    startTasks();
+}
+
+// Method to start the communication tasks
+void Communication::startTasks() {
     receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
     sendStatusTask.nextExecutionTime = micros() + sendInterval;
     executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
@@ -160,8 +166,39 @@ void Communication::readSerial(){
 // Method to parse the received command and add it to the command queue
 void Communication::parseAndAddCommand() {
     Command newCommand = convertCommand(receivedChars);
-    lastAddedCmdNum = newCommand.commandNum;
-    commandQueue.addCommand(newCommand);
+    if (newCommand.type == PAUSE) {
+        currentState = PAUSED;
+    } else if (newCommand.type == RESUME) {
+        currentState = RUNNING;
+    } else if (newCommand.type == CLEAR_QUEUE) {
+        Serial.println("--Clearing");
+        while (!commandQueue.isEmpty()) {
+            commandQueue.removeCommand();
+        }
+        while (!taskQueue.isEmpty()) {
+            taskQueue.removeTask();
+        }
+        Serial.println("Queue cleared");
+        stepperX.resetState();
+        stepperY.resetState();
+        stepperZ.resetState();
+        printer.resetDropletCounts();
+        regulator.resetState();
+        currentCmdNum = 0;
+        lastCompletedCmdNum = 0;
+        lastAddedCmdNum = 0;
+        currentState = RUNNING;
+        Serial.println("--Reset");
+        startTasks();
+        pressureSensor.startReading();
+        regulator.restartRegulation();
+        Serial.println("--Restarted tasks");
+    } else {
+        Serial.print("Adding command: ");
+        Serial.println(newCommand.type);
+        lastAddedCmdNum = newCommand.commandNum;
+        commandQueue.addCommand(newCommand);
+    } 
 }
 
 // Task to execute the next command from the command queue
@@ -187,7 +224,8 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() {
-    if (stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+        Serial.println("---Busy");
         return false;
     } else {
         return true;
@@ -276,6 +314,12 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case RESET_P:
             regulator.resetSyringe();
+            break;
+        case PAUSE:
+            currentState = PAUSED;
+            break;
+        case RESUME:
+            currentState = RUNNING;
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");

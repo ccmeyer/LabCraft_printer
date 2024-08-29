@@ -23,6 +23,8 @@ public:
     void enableMotor();           // Method to enable the motor
     void disableMotor();          // Method to disable the motor
     void safeStop();              // Method to safely stop the motor
+    void completeStop();          // Method to stop the motor and reset busy flag
+    void resetState();            // Method to reset the state of the motor
     void checkLimitSwitch();      // Method to check the limit switch
     void beginHoming();           // Method to start the homing process
     bool isHomingComplete();      // Method to check if homing is complete

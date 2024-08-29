@@ -63,6 +63,9 @@ extern "C" void SystemClock_Config(void)
 #include "DropletPrinter.h"
 #include "pin_assignments.h"
 #include "all_constants.h"
+#include "GlobalState.h"
+
+SystemState currentState = RUNNING; // Define the global state
 
 TaskQueue taskQueue;
 CommandQueue commandQueue;

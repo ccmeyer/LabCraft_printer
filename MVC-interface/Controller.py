@@ -126,29 +126,41 @@ class Controller(QObject):
         print(f"Setting absolute Z: {z}")
         self.machine.set_absolute_Z(z,manual=manual,handler=handler)
     
-    def set_relative_coordinates(self, x, y, z,manual=False,handler=None):
+    def set_relative_coordinates(self, x, y, z, manual=False, handler=None):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         if z > 0:
-            self.machine.set_relative_Y(y,manual=manual)
-            self.machine.set_relative_X(x,manual=manual)
-            self.machine.set_relative_Z(z,manual=manual,handler=handler)
+            if y != 0:
+                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+            if x != 0:
+                self.machine.set_relative_X(x, manual=manual, handler=handler)
+            if z != 0:
+                self.machine.set_relative_Z(z, manual=manual, handler=handler)
         else:
-            self.machine.set_relative_Z(z,manual=manual)
-            self.machine.set_relative_Y(y,manual=manual)
-            self.machine.set_relative_X(x,manual=manual,handler=handler)
+            if y != 0:
+                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+            if x != 0:
+                self.machine.set_relative_X(x, manual=manual, handler=handler)
+            if z != 0:
+                self.machine.set_relative_Z(z, manual=manual, handler=handler)
 
-    def set_absolute_coordinates(self, x, y, z,manual=False,handler=None):
+    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None):
         """Set the absolute coordinates for the machine."""
         print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
-        if self.expected_position['Z'] < z:
-            self.machine.set_absolute_Y(y,manual=manual)
-            self.machine.set_absolute_X(x,manual=manual)
-            self.machine.set_absolute_Z(z,manual=manual,handler=handler)
+        if self.expected_position['Z'] != z:
+            if z > self.expected_position['Z']:
+                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
+            else:
+                if self.expected_position['Y'] != y:
+                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
+                if self.expected_position['X'] != x:
+                    self.machine.set_absolute_X(x, manual=manual, handler=handler)
+                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
         else:
-            self.machine.set_absolute_Z(z,manual=manual)
-            self.machine.set_absolute_Y(y,manual=manual)
-            self.machine.set_absolute_X(x,manual=manual,handler=handler)
+            if self.expected_position['Y'] != y:
+                self.machine.set_absolute_Y(y, manual=manual, handler=handler)
+            if self.expected_position['X'] != x:
+                self.machine.set_absolute_X(x, manual=manual, handler=handler)
 
     def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -163,6 +175,10 @@ class Controller(QObject):
     def reset_syringe(self):
         """Reset the syringe."""
         self.machine.reset_syringe()
+
+    def pause_machine(self):
+        """Pause the machine."""
+        self.machine.pause_machine()
 
     def home_machine(self):
         """Home the machine."""
