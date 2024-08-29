@@ -245,6 +245,9 @@ void Communication::executeCommand(const Command& cmd) {
         case HOME_Z:
             stepperZ.beginHoming();
             break;
+        case HOME_P:
+            regulator.homeSyringe();
+            break;
         case CHANGE_ACCEL:
             stepperX.setAcceleration(cmd.param1);
             stepperY.setAcceleration(cmd.param1);
@@ -270,6 +273,9 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case PRINT:
             printer.startPrinting(cmd.param1);
+            break;
+        case RESET_P:
+            regulator.resetSyringe();
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");

@@ -111,6 +111,8 @@ CommandType mapCommandType(const char* commandName) {
         return ABSOLUTE_Z;
     } else if (strcmp(commandName, "HOME_Z") == 0) {
         return HOME_Z;
+    } else if (strcmp(commandName, "HOME_P") == 0) {
+        return HOME_P;
     } else if (strcmp(commandName, "CHANGE_ACCEL") == 0) {
         return CHANGE_ACCEL;
     } else if (strcmp(commandName, "RESET_ACCEL") == 0) {
@@ -124,8 +126,9 @@ CommandType mapCommandType(const char* commandName) {
     } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
         return ABSOLUTE_PRESSURE;
     } else if (strcmp(commandName, "PRINT") == 0) {
-        Serial.println("PRINT");
         return PRINT;
+    } else if (strcmp(commandName, "RESET_P") == 0) {
+        return RESET_P;
     } else {
         return UNKNOWN;
     }

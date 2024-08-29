@@ -852,6 +852,9 @@ class Machine(QObject):
         
     def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def reset_syringe(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('RELATIVE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
@@ -904,7 +907,8 @@ class Machine(QObject):
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',0,0,0,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_X',0,0,0,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_Y',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_Y',0,0,0,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         return True
     
     def open_gripper_handler(self,additional_handler=None):

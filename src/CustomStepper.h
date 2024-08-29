@@ -25,6 +25,7 @@ public:
     void safeStop();              // Method to safely stop the motor
     void checkLimitSwitch();      // Method to check the limit switch
     void beginHoming();           // Method to start the homing process
+    bool isHomingComplete();      // Method to check if homing is complete
 
     void setTargetPosition(long position);  // Set a new target position and start moving
     void moveRelative(long distance);       // Move the motor by a relative distance

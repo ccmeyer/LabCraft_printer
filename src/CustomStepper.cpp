@@ -116,6 +116,11 @@ void CustomStepper::checkLimitSwitch() {
     }
 }
 
+// Method to check if homing is complete
+bool CustomStepper::isHomingComplete() {
+    return homingComplete;
+}
+
 // Method to start the homing process
 void CustomStepper::beginHoming() {
     homingComplete = false;

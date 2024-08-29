@@ -160,6 +160,10 @@ class Controller(QObject):
         print(f"Setting absolute pressure: {pressure}")
         self.machine.set_absolute_pressure(pressure,manual=manual)
 
+    def reset_syringe(self):
+        """Reset the syringe."""
+        self.machine.reset_syringe()
+
     def home_machine(self):
         """Home the machine."""
         print("Homing machine...")

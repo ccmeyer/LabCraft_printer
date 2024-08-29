@@ -6,9 +6,10 @@ PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sen
     : stepper(stepper), sensor(sensor), taskQueue(taskQueue), 
       adjustPressureTask([this]() { this->adjustPressure(); }, 0), 
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
+      homeSyringeTask([this]() { this->homeSyringeCheck(); }, 0),
       stepTask([this]() { this->stepMotorDirectly(); }, 0),
       regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1638), 
-      tolerance(3), cutoff(200), currentPressure(1638), previousPressure(1638), pressureDifference(0), targetReached(true), syringeSpeed(0), 
+      tolerance(3), cutoff(200), homing(false), currentPressure(1638), previousPressure(1638), pressureDifference(0), targetReached(true), syringeSpeed(0), 
       adjustInterval(5000), resetInterval(5000), stepInterval(1000), stepperTaskActive(false), lowerBound(-300), upperBound(25000) {
         pinMode(valvePin, OUTPUT);
         digitalWrite(valvePin, LOW);
@@ -27,6 +28,32 @@ void PressureRegulator::enableRegulator() {
 // Method to disable the pressure regulator
 void PressureRegulator::disableRegulator() {
     stepper.disableMotor();
+}
+
+// Method to home the syringe
+void PressureRegulator::homeSyringe() {
+    homing = true;
+    syringeSpeed = 0;
+    digitalWrite(valvePin, HIGH);
+    stepper.beginHoming();
+    homeSyringeTask.nextExecutionTime = micros() + 1000;
+    taskQueue.addTask(homeSyringeTask);
+}
+
+// Method to check if the syringe is homed
+void PressureRegulator::homeSyringeCheck() {
+    if (stepper.isHomingComplete()) {
+        digitalWrite(valvePin, LOW);
+        homing = false;
+        stepperTaskActive = false;
+        if (regulatingPressure) {
+            adjustPressureTask.nextExecutionTime = micros();
+            taskQueue.addTask(adjustPressureTask); // Resume pressure regulation
+        }
+    } else {
+        homeSyringeTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(homeSyringeTask);
+    }
 }
 
 // Method to begin pressure regulation
@@ -73,7 +100,7 @@ void PressureRegulator::stopRegulation() {
 
 // Method to check if the syringe is busy
 bool PressureRegulator::isBusy() {
-    if ((regulatingPressure && !targetReached) || resetInProgress) {
+    if ((regulatingPressure && !targetReached) || resetInProgress || stepper.isBusy()) {
         return true;
     } else {
         return false;
@@ -107,7 +134,7 @@ void PressureRegulator::resetSyringe() {
 
 // Method to adjust the pressure based on current readings
 void PressureRegulator::adjustPressure() {
-    if (!regulatingPressure || resetInProgress) return;
+    if (!regulatingPressure || resetInProgress || homing) return;
 
     currentPressure = sensor.getPressure();
 

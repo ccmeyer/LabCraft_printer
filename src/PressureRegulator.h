@@ -12,6 +12,8 @@ public:
     void setupRegulator();
     void enableRegulator();
     void disableRegulator();
+    void homeSyringe();
+
     void beginRegulation();
     void setTargetPressureAbsolute(int targetPressure);
     void setTargetPressureRelative(int targetPressure);
@@ -29,6 +31,7 @@ private:
 
     Task adjustPressureTask;      // Task to adjust pressure
     Task resetSyringeTask;        // Task to reset the syringe
+    Task homeSyringeTask;         // Task to home the syringe
     Task stepTask;                // Task to step the motor
 
     int valvePin;                 // Pin for the pressure regulator valve
@@ -37,6 +40,7 @@ private:
     float targetPressure;           // Target pressure to maintain
     int tolerance;                // Tolerance range for pressure regulation
     int cutoff;                   // Cutoff value for pressure regulation
+    bool homing;                  // Flag to indicate if the syringe is homing
 
     float currentPressure;          // Current pressure reading
     float previousPressure;         // Previous pressure reading
@@ -53,6 +57,7 @@ private:
 
     void adjustPressure();        // Method to adjust the pressure based on current readings
     void stepMotorDirectly();    // Method to step the motor directly
+    void homeSyringeCheck();      // Method to check if the syringe is homed
 };
 
 #endif // PRESSUREREGULATOR_H
