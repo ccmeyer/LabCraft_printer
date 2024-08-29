@@ -616,22 +616,27 @@ class Machine(QObject):
         self.balance_droplets = []
 
     def begin_communication_timer(self):
+        print('Starting communication timer')
         self.communication_timer = QTimer()
         self.communication_timer.timeout.connect(self.request_status_update)
         self.communication_timer.start(5)  # Update every 100 ms
 
     def begin_execution_timer(self):
+        print('Starting execution timer')
         self.execution_timer = QTimer()
         self.execution_timer.timeout.connect(self.send_next_command)
         self.execution_timer.start(90)  # Update every 100 ms
 
     def stop_communication_timer(self):
+        print('Stopping communication timer')
         self.communication_timer.stop()
 
     def stop_execution_timer(self):
+        print('Stopping execution timer')
         self.execution_timer.stop()
 
     def reset_board(self):
+        print('Resetting board')
         self.board = None
         self.port = None
         self.command_queue.clear_queue()
@@ -645,6 +650,7 @@ class Machine(QObject):
             self.simulate = True
             self.port = port
         else:
+            print('Connecting to machine at port:',port)
             try:
                 self.board = serial.Serial(port, baudrate=115200,timeout=2)
                 if not self.board.is_open:  # Add this line
@@ -679,9 +685,9 @@ class Machine(QObject):
         if not error:
             self.gripper_off()
             self.disable_motors()
-            self.deregulate_pressure(handler=self.disconnect_handler)
-        else:
-            self.disconnect_handler()
+            self.deregulate_pressure()
+            self.clear_command_queue(handler=self.disconnect_handler)
+        self.disconnect_handler()
         return True
     
     def get_machine_port(self):
@@ -821,9 +827,9 @@ class Machine(QObject):
         print('Sending resume command')
         self.send_command_to_board(new_command)
 
-    def clear_command_queue(self):
+    def clear_command_queue(self,handler=None):
         print('Clearing command queue')
-        new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0)
+        new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0, handler=handler)
         if self.sent_command is not None:
             print('Overriding command:',self.sent_command.get_command())
         print('Sending clear command')
