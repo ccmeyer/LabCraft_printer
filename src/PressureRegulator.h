@@ -23,6 +23,7 @@ public:
     void stopRegulation();
     void resetSyringe();
     bool isBusy();
+    bool isRegulating();
     void resetState();  // Method to reset the state of the regulator
     void restartRegulation();  // Method to restart pressure regulation task if already regulating
 

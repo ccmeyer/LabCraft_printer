@@ -59,13 +59,15 @@ void DropletPrinter::printDroplet() {
     }
 
     // Check the current pressure
-    float currentPressure = sensor.getPressure();
-    float targetPressure = regulator.getTargetPressure();
-    if (abs(currentPressure - targetPressure) > pressureTolerance) {
-        // If the pressure is out of range, delay and retry
-        printDropletTask.nextExecutionTime = micros() + 1000; // Delay by 1ms before retrying
-        taskQueue.addTask(printDropletTask);
-        return;
+    if (regulator.isRegulating()) {
+        float currentPressure = sensor.getPressure();
+        float targetPressure = regulator.getTargetPressure();
+        if (abs(currentPressure - targetPressure) > pressureTolerance) {
+            // If the pressure is out of range, delay and retry
+            printDropletTask.nextExecutionTime = micros() + 1000; // Delay by 1ms before retrying
+            taskQueue.addTask(printDropletTask);
+            return;
+        }        
     }
 
     // Open the valve to print the droplet

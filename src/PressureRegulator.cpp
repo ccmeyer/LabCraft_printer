@@ -121,6 +121,11 @@ bool PressureRegulator::isBusy() {
     }
 }
 
+// Method to check if pressure regulation is active
+bool PressureRegulator::isRegulating() {
+    return regulatingPressure;
+}
+
 // Method to reset the state of the regulator
 void PressureRegulator::resetState() {
     resetInProgress = false;

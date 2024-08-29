@@ -441,6 +441,10 @@ class Controller(QObject):
 
     def print_droplets(self,droplets,handler=None,kwargs=None,manual=False):
         """Print a specified number of droplets."""
+        if not self.model.machine_model.regulating_pressure:
+            self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
+            print('Cannot print: Pressure regulation is not enabled')
+            return
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_calibration_droplets(self,droplets,pressure,manual=False):
@@ -486,6 +490,11 @@ class Controller(QObject):
         if self.model.rack_model.get_gripper_info() == None:
             self.error_occurred_signal.emit('Error','No printer head is loaded')
             print('Cannot print: No printer head is loaded')
+            return
+        
+        if not self.model.machine_model.regulating_pressure:
+            self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
+            print('Cannot print: Pressure regulation is not enabled')
             return
         
         self.close_gripper()
