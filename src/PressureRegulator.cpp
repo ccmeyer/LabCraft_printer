@@ -6,9 +6,10 @@ PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sen
     : stepper(stepper), sensor(sensor), taskQueue(taskQueue), 
       adjustPressureTask([this]() { this->adjustPressure(); }, 0), 
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
+      stepTask([this]() { this->stepMotorDirectly(); }, 0),
       regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1638), 
       tolerance(3), cutoff(200), currentPressure(1638), previousPressure(1638), pressureDifference(0), syringeSpeed(0), 
-      adjustInterval(5000), resetInterval(5000) {
+      adjustInterval(5000), resetInterval(5000), stepInterval(1000), stepperTaskActive(false), lowerBound(-300), upperBound(25000) {
         pinMode(valvePin, OUTPUT);
         digitalWrite(valvePin, LOW);
       }
@@ -63,6 +64,9 @@ long PressureRegulator::getTargetPosition() {
 // Method to stop pressure regulation
 void PressureRegulator::stopRegulation() {
     regulatingPressure = false;
+    stepper.stop();
+    syringeSpeed = 0;
+
 }
 
 // Method to reset the syringe
@@ -75,13 +79,13 @@ void PressureRegulator::resetSyringe() {
         resetSyringeTask.nextExecutionTime = micros();
         taskQueue.addTask(resetSyringeTask);
     } 
-    else if (stepper.isBusy()) { // Continue resetting
-        // stepper.stepMotor(); // Continue stepping if not done
+    else if (stepper.distanceToGo() != 0 ) { // Continue resetting
         resetSyringeTask.nextExecutionTime = micros() + resetInterval;
         taskQueue.addTask(resetSyringeTask);
     } 
     else {                            // Flag reset complete
         resetInProgress = false;
+        stepperTaskActive = false;
         digitalWrite(valvePin, LOW);
         if (regulatingPressure) {
             adjustPressureTask.nextExecutionTime = micros();
@@ -92,44 +96,50 @@ void PressureRegulator::resetSyringe() {
 
 // Method to adjust the pressure based on current readings
 void PressureRegulator::adjustPressure() {
-    if (!regulatingPressure || resetInProgress) {   // Only regulate pressure when it's active
-        return;
-    }
+    if (!regulatingPressure || resetInProgress) return;
 
-    // Get the current pressure from the sensor
     currentPressure = sensor.getPressure();
 
-    if (previousPressure != currentPressure){
-        // Calculate the difference between current pressure and target pressure
-        pressureDifference = currentPressure - targetPressure;
+    pressureDifference = currentPressure - targetPressure;
 
-        // Determine the speed based on the difference
+    if (abs(pressureDifference) <= tolerance) {
         syringeSpeed = 0;
-        if (pressureDifference > cutoff) {
-            syringeSpeed = 1500;  // Move quickly when far above target pressure
-        } else if (pressureDifference < -cutoff) {
-            syringeSpeed = -1500; // Move quickly when far below target pressure
-        } else if (abs(pressureDifference) <= tolerance) {
-            syringeSpeed = 0;          // Stop moving when within tolerance range
-        } else {
-            // Map the absolute value of pressure difference to a speed between the min and max speed
-            syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 100, 1500);
-            // Apply the sign of the pressure difference to the speed
-            syringeSpeed *= (pressureDifference < 0) ? -1 : 1;
-        }
+    } else if (abs(pressureDifference) > cutoff) {
+        syringeSpeed = 1500;
+    } else {
+        syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 100, 1500);
+    }
+    syringeSpeed *= (pressureDifference < 0) ? 1 : -1;
 
-        // Set the speed of the stepper motor and move
+    // Set the step interval based on the syringe speed
+    if (syringeSpeed != 0) {
+        stepInterval = 1000000L / abs(syringeSpeed); // Calculate step interval based on speed
         stepper.setSpeed(syringeSpeed);
-        stepper.moveRelative(syringeSpeed);
-        previousPressure = currentPressure;
+        if (!stepperTaskActive) {
+            stepTask.nextExecutionTime = micros();
+            taskQueue.addTask(stepTask);
+            stepperTaskActive = true;
+        }
     }
 
-    // Check if the syringe needs to be reset
-    if (stepper.currentPosition() < -300 || stepper.currentPosition() > 25000) {
+    adjustPressureTask.nextExecutionTime = micros() + adjustInterval;
+    taskQueue.addTask(adjustPressureTask);
+}
+
+void PressureRegulator::stepMotorDirectly() {
+    if (stepper.currentPosition() < lowerBound || stepper.currentPosition() > upperBound) {
         resetSyringe();
+        return;
+    }
+    if (syringeSpeed != 0) {
+        if (syringeSpeed > 0) {
+            stepper.manualStepForward();  // Directly step forward
+        } else {
+            stepper.manualStepBackward(); // Directly step backward
+        }
+        stepTask.nextExecutionTime = micros() + stepInterval;
+        taskQueue.addTask(stepTask);
     } else {
-        // Reinsert the task into the queue
-        adjustPressureTask.nextExecutionTime = micros() + adjustInterval;
-        taskQueue.addTask(adjustPressureTask);
+        stepperTaskActive = false;
     }
 }

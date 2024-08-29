@@ -191,3 +191,13 @@ void CustomStepper::continueHoming() {
         taskQueue.addTask(homingTask);
     }
 }
+
+// Method to perform a manual step in the forward direction
+void CustomStepper::manualStepForward() {
+    stepForward();
+}
+
+// Method to perform a manual step in the backward direction
+void CustomStepper::manualStepBackward() {
+    stepBackward();
+}

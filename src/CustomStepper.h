@@ -32,6 +32,8 @@ public:
     bool movingForward();                   // Method to check if the motor direction is forward
     void updateStepInterval();             // Method to use computeNewSpeed
     void stepMotor();            // Perform a single step
+    void manualStepForward();    // Perform a manual step in the forward direction
+    void manualStepBackward();   // Perform a manual step in the backward direction
 
 
 private:
