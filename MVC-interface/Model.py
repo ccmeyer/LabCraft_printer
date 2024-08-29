@@ -389,13 +389,15 @@ class ExperimentModel(QObject):
         self.reagents = loaded_data["reagents"]
         self.metadata = loaded_data["metadata"]
 
+        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0])
+
         # Recalculate any necessary information and emit signals to update the view
         for i in range(len(self.reagents)):
 
             self.data_updated.emit(i)
             self.calculate_concentrations(i,calc_experiment=True)
             print(f'finished conc for {i}\n{self.experiment_df}')
-
+        
         print(f"Experiment data loaded from {filename}")
         
 
@@ -1093,6 +1095,7 @@ class PrinterHead(QObject):
     def check_complete(self,well_plate):
         '''Check the stock solution to see if all droplets have been added'''
         stock_id = self.get_stock_id()
+        print('Checking stock complete:',stock_id)
         for well in well_plate.get_all_wells():
             if well.assigned_reaction is not None:
                 if not well.check_stock_complete(stock_id):
@@ -1992,11 +1995,11 @@ class Model(QObject):
 
     def __init__(self):
         super().__init__()
-
-        self.locations_path = '.\\MVC-interface\\Presets\\Locations.json'
-        self.plates_path = '.\\MVC-interface\\Presets\\Plates.json'
-        self.colors_path = '.\\MVC-interface\\Presets\\Printer_head_colors.json'
-        self.settings_path = '.\\MVC-interface\\Presets\\Settings.json'
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.locations_path = os.path.join(self.script_dir, 'Presets','Locations.json')
+        self.plates_path = os.path.join(self.script_dir, 'Presets','Plates.json')
+        self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
+        self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
 
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)

@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+import os
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -388,7 +389,7 @@ class ConnectionWidget(QGroupBox):
         if default_port in ports:
             self.machine_port_combobox.setCurrentText(default_port)
         else:
-            self.machine_port_combobox.setCurrentText(ports[0])
+            self.machine_port_combobox.setCurrentText(ports_with_virtual[0])
 
     def update_balance_ports(self, ports):
         """Update the COM port selections for the balance."""
@@ -399,7 +400,7 @@ class ConnectionWidget(QGroupBox):
         if default_port in ports:
             self.balance_port_combobox.setCurrentText(default_port)
         else:
-            self.balance_port_combobox.setCurrentText(ports[0])
+            self.balance_port_combobox.setCurrentText(ports_with_virtual[0])
 
     def request_machine_connect_change(self):
         """Handle machine connection request."""
@@ -2657,13 +2658,33 @@ class ExperimentDesignDialog(QDialog):
     def save_experiment(self):
         """Save the current experiment setup to a file."""
         self.update_all_model_reagents()
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", "", "JSON Files (*.json)")
+        # Get the directory where the currently executed script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Define the directory for experiments relative to the script location
+        experiment_dir = os.path.join(script_dir, "Experiments")
+
+        # Ensure the directory exists
+        if not os.path.exists(experiment_dir):
+            os.makedirs(experiment_dir)
+
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", experiment_dir, "JSON Files (*.json)")
         if filename:
             self.experiment_model.save_experiment(filename)
 
     def load_experiment(self):
         """Load a saved experiment setup from a file."""
-        filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment", "", "JSON Files (*.json)")
+        # Get the directory where the currently executed script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Define the directory for experiments relative to the script location
+        experiment_dir = os.path.join(script_dir, "Experiments")
+
+        # Ensure the directory exists
+        if not os.path.exists(experiment_dir):
+            os.makedirs(experiment_dir)
+
+        filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment", experiment_dir, "JSON Files (*.json)")
         if filename:
             self.experiment_model.load_experiment(filename)
             print("\n----Finished model loading----\n")
