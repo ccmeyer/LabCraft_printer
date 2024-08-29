@@ -6,6 +6,7 @@
 #include "CustomStepper.h"
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
+#include "DropletPrinter.h"
 #include <Arduino.h>
 
 enum StatusStep {
@@ -30,7 +31,7 @@ class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
     CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
-    PressureSensor& pressureSensor, PressureRegulator& regulator, int baudRate);
+    PressureSensor& pressureSensor, PressureRegulator& regulator, DropletPrinter& printer, int baudRate);
 
     void beginSerial();
     void sendStatus();
@@ -50,6 +51,7 @@ private:
     CustomStepper& stepperZ;  // Reference to the CustomStepper object
     PressureSensor& pressureSensor;  // Reference to the PressureSensor object
     PressureRegulator& regulator;  // Reference to the PressureRegulator object
+    DropletPrinter& printer;  // Reference to the DropletPrinter object
     StatusStep statusStep = CYCLE_COUNT;
 
     int baudRate;

@@ -3,9 +3,10 @@
 
 // Constructor
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
-CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor, PressureRegulator& regulator, int baudRate)
+CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
+PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
     : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
-    pressureSensor(pressureSensor), regulator(regulator), baudRate(baudRate), 
+    pressureSensor(pressureSensor), regulator(regulator), printer(printer), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
@@ -98,7 +99,6 @@ void Communication::sendStatus() {
             case TARGET_PRESSURE:
                 Serial.print("Tar_pressure:");
                 Serial.println(round(regulator.getTargetPressure()));
-                // Serial.println();
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -187,7 +187,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() {
-    if (stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy()) {
+    if (stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
         return false;
     } else {
         return true;
@@ -268,8 +268,11 @@ void Communication::executeCommand(const Command& cmd) {
         case ABSOLUTE_PRESSURE:
             regulator.setTargetPressureAbsolute(cmd.param1);
             break;
+        case PRINT:
+            printer.startPrinting(cmd.param1);
+            break;
         case UNKNOWN:
-            // Serial.println("Unknown command type");
+            Serial.println("Unknown command type");
             // Handle unknown command
             break;
         // Add more cases for other command types

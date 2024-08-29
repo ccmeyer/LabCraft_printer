@@ -530,7 +530,7 @@ class CommandQueue(QObject):
         
         
         self.command_number += 1
-        print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
+        # print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
         print(f'Adding command: {command_type} {param1} {param2} {param3}')
         command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
         self.queue.append(command)
@@ -555,8 +555,8 @@ class CommandQueue(QObject):
             print('No commands to update')
             return
         for command in self.queue:
-            print(f'Checking command: {command.command_number} {command.command_type} {command.status}')
-            print(f'Current command: {current_executing_command} Last completed: {last_completed_command}')
+            # print(f'Checking command: {command.command_number} {command.command_type} {command.status}')
+            # print(f'Current command: {current_executing_command} Last completed: {last_completed_command}')
             if command.status == "Sent" and command.command_number == int(current_executing_command):
                 command.mark_as_executing()
             if command.command_number <= int(last_completed_command):

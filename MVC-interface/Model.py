@@ -1942,7 +1942,6 @@ class MachineModel(QObject):
         """Update the pressure readings with a new value."""
         # Shift the existing readings and add the new reading
         converted_pressure = self.convert_to_psi(new_pressure)
-        # print(f"Pressure: {converted_pressure} psi")
         self.current_pressure = converted_pressure
         self.pressure_readings = np.roll(self.pressure_readings, -1)
         self.pressure_readings[-1] = converted_pressure

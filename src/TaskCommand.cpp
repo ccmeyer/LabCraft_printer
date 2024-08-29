@@ -123,6 +123,9 @@ CommandType mapCommandType(const char* commandName) {
         return RELATIVE_PRESSURE;
     } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
         return ABSOLUTE_PRESSURE;
+    } else if (strcmp(commandName, "PRINT") == 0) {
+        Serial.println("PRINT");
+        return PRINT;
     } else {
         return UNKNOWN;
     }

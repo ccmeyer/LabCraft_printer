@@ -20,6 +20,7 @@ public:
     long getTargetPosition();
     void stopRegulation();
     void resetSyringe();
+    bool isBusy();
 
 private:
     CustomStepper& stepper;       // Reference to the CustomStepper controlling the syringe
@@ -40,6 +41,7 @@ private:
     float currentPressure;          // Current pressure reading
     float previousPressure;         // Previous pressure reading
     float pressureDifference;       // Difference between target and current pressure
+    bool targetReached;             // Flag to indicate if the target pressure is reached
 
     int syringeSpeed;             // Speed of the syringe motor
     int adjustInterval;   // Interval for adjusting pressure

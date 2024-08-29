@@ -55,6 +55,7 @@ enum CommandType {
     DEREGULATE_PRESSURE,
     RELATIVE_PRESSURE,
     ABSOLUTE_PRESSURE,
+    PRINT,
     UNKNOWN
     // Add more command types as needed
 };

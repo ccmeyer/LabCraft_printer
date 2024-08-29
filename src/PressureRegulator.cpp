@@ -8,7 +8,7 @@ PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sen
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
       stepTask([this]() { this->stepMotorDirectly(); }, 0),
       regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1638), 
-      tolerance(3), cutoff(200), currentPressure(1638), previousPressure(1638), pressureDifference(0), syringeSpeed(0), 
+      tolerance(3), cutoff(200), currentPressure(1638), previousPressure(1638), pressureDifference(0), targetReached(true), syringeSpeed(0), 
       adjustInterval(5000), resetInterval(5000), stepInterval(1000), stepperTaskActive(false), lowerBound(-300), upperBound(25000) {
         pinMode(valvePin, OUTPUT);
         digitalWrite(valvePin, LOW);
@@ -39,11 +39,13 @@ void PressureRegulator::beginRegulation() {
 // Method to set the target pressure
 void PressureRegulator::setTargetPressureAbsolute(int targetPressure) {
     this->targetPressure = targetPressure;
+    targetReached = false;
 }
 
 // Method to set the target pressure relative to the current target pressure
 void PressureRegulator::setTargetPressureRelative(int targetPressure) {
     this->targetPressure += targetPressure;
+    targetReached = false;
 }
 
 // Method to get the target pressure
@@ -69,6 +71,15 @@ void PressureRegulator::stopRegulation() {
 
 }
 
+// Method to check if the syringe is busy
+bool PressureRegulator::isBusy() {
+    if ((regulatingPressure && !targetReached) || resetInProgress) {
+        return true;
+    } else {
+        return false;
+    }
+}
+    
 // Method to reset the syringe
 void PressureRegulator::resetSyringe() {
     if (!resetInProgress) {    // Initiate the reset process
@@ -120,6 +131,8 @@ void PressureRegulator::adjustPressure() {
             taskQueue.addTask(stepTask);
             stepperTaskActive = true;
         }
+    } else {
+        targetReached = true;
     }
 
     adjustPressureTask.nextExecutionTime = micros() + adjustInterval;

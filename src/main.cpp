@@ -60,6 +60,7 @@ extern "C" void SystemClock_Config(void)
 #include "CustomStepper.h"
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
+#include "DropletPrinter.h"
 #include "pin_assignments.h"
 #include "all_constants.h"
 
@@ -72,8 +73,9 @@ CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, t
 CustomStepper stepperP(stepperP.DRIVER,P_EN_PIN, P_STEP_PIN, P_DIR_PIN, pstop, taskQueue,P_INV_DIR);
 PressureSensor pressureSensor(sensorAddress,taskQueue);
 PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
+DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, 115200);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
 
 
 void setup() {
