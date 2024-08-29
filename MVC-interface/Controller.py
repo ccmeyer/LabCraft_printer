@@ -49,6 +49,7 @@ class Controller(QObject):
         # Get a list of all connected COM ports
         ports = comports()
         port_names = [port.device for port in ports]
+        print(f"Available ports: {port_names}")
         self.model.machine_model.update_ports(port_names)
 
     def connect_machine(self, port):

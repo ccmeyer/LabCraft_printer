@@ -1996,9 +1996,10 @@ class Model(QObject):
         self.locations_path = '.\\MVC-interface\\Presets\\Locations.json'
         self.plates_path = '.\\MVC-interface\\Presets\\Plates.json'
         self.colors_path = '.\\MVC-interface\\Presets\\Printer_head_colors.json'
-
+        self.settings_path = '.\\MVC-interface\\Presets\\Settings.json'
 
         self.printer_head_colors = self.load_colors(self.colors_path)
+        self.settings = self.load_settings(self.settings_path)
         self.machine_model = MachineModel()
         self.num_slots = 5
         self.location_data = self.load_all_location_data(self.locations_path)
@@ -2027,6 +2028,16 @@ class Model(QObject):
     def load_all_location_data(self,file_path):
         with open(file_path, 'r') as file:
             return json.load(file)
+        
+    def load_settings(self,file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+        
+    def get_default_machine_port(self):
+        return self.settings['MACHINE_PORT']
+    
+    def get_default_balance_port(self):
+        return self.settings['BALANCE_PORT']
         
     def update_rack_calibration(self):
         print('\n---Updating rack calibration')

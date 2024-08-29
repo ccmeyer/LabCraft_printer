@@ -325,7 +325,8 @@ class ConnectionWidget(QGroupBox):
         self.init_ui()
 
         # Connect signals from the model to update the view
-        self.model.machine_model.ports_updated.connect(self.update_ports)
+        self.model.machine_model.ports_updated.connect(self.update_machine_ports)
+        self.model.machine_model.ports_updated.connect(self.update_balance_ports)
         self.model.machine_model.machine_state_updated.connect(self.update_machine_connect_button)
         self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
 
@@ -333,6 +334,9 @@ class ConnectionWidget(QGroupBox):
         self.connect_machine_requested.connect(self.controller.connect_machine)
         self.connect_balance_requested.connect(self.controller.connect_balance)
         self.refresh_ports_requested.connect(self.controller.update_available_ports)
+
+        # Populate ports initially
+        self.refresh_ports()
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -375,23 +379,27 @@ class ConnectionWidget(QGroupBox):
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.layout().addWidget(self.refresh_button, 3, 1, 1, 2)
 
-        # Populate ports initially
-        self.refresh_ports()
-        self.update_ports(self.model.machine_model.available_ports)
-
-    def update_ports(self, ports):
-        """Update the COM port selections."""
+    def update_machine_ports(self, ports):
+        """Update the COM port selections for the machine."""
         ports_with_virtual = ports + ["Virtual"]
-        
         self.machine_port_combobox.clear()
-        self.balance_port_combobox.clear()
-        
         self.machine_port_combobox.addItems(ports_with_virtual)
-        self.balance_port_combobox.addItems(ports_with_virtual)
+        default_port = self.model.get_default_machine_port()
+        if default_port in ports:
+            self.machine_port_combobox.setCurrentText(default_port)
+        else:
+            self.machine_port_combobox.setCurrentText(ports[0])
 
-        # Set the default selected port
-        self.machine_port_combobox.setCurrentText(self.controller.get_machine_port())
-        self.balance_port_combobox.setCurrentText(self.model.machine_model.balance_port)
+    def update_balance_ports(self, ports):
+        """Update the COM port selections for the balance."""
+        ports_with_virtual = ports + ["Virtual"]
+        self.balance_port_combobox.clear()
+        self.balance_port_combobox.addItems(ports_with_virtual)
+        default_port = self.model.get_default_balance_port()
+        if default_port in ports:
+            self.balance_port_combobox.setCurrentText(default_port)
+        else:
+            self.balance_port_combobox.setCurrentText(ports[0])
 
     def request_machine_connect_change(self):
         """Handle machine connection request."""
