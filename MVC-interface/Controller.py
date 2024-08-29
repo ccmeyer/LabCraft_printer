@@ -100,67 +100,102 @@ class Controller(QObject):
         """Set the relative X coordinate for the machine."""
         print(f"Setting relative X: {x}")
         self.machine.set_relative_X(x,manual=manual,handler=handler)
+        self.expected_position['X'] += x
 
     def set_relative_Y(self, y,manual=False,handler=None):
         """Set the relative Y coordinate for the machine."""
         print(f"Setting relative Y: {y}")
         self.machine.set_relative_Y(y,manual=manual,handler=handler)
+        self.expected_position['Y'] += y
 
     def set_relative_Z(self, z,manual=False,handler=None):
         """Set the relative Z coordinate for the machine."""
         print(f"Setting relative Z: {z}")
         self.machine.set_relative_Z(z,manual=manual,handler=handler)
+        self.expected_position['Z'] += z
 
     def set_absolute_X(self, x,manual=False,handler=None):
         """Set the absolute X coordinate for the machine."""
         print(f"Setting absolute X: {x}")
         self.machine.set_absolute_X(x,manual=manual,handler=handler)
+        self.update_expected_position(x=x)
 
     def set_absolute_Y(self, y,manual=False,handler=None):
         """Set the absolute Y coordinate for the machine."""
         print(f"Setting absolute Y: {y}")
         self.machine.set_absolute_Y(y,manual=manual,handler=handler)
+        self.update_expected_position(y=y)
     
     def set_absolute_Z(self, z,manual=False,handler=None):
         """Set the absolute Z coordinate for the machine."""
         print(f"Setting absolute Z: {z}")
         self.machine.set_absolute_Z(z,manual=manual,handler=handler)
+        self.update_expected_position(z=z)
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
+        
+        # If moving up in Z, do Z first
         if z > 0:
+            if z != 0:
+                self.machine.set_relative_Z(z, manual=manual, handler=None)
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+                self.machine.set_relative_Y(y, manual=manual, handler=None)
             if x != 0:
                 self.machine.set_relative_X(x, manual=manual, handler=handler)
-            if z != 0:
-                self.machine.set_relative_Z(z, manual=manual, handler=handler)
         else:
+            # If moving down in Z, do X and Y first, then Z
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+                self.machine.set_relative_Y(y, manual=manual, handler=None)
             if x != 0:
-                self.machine.set_relative_X(x, manual=manual, handler=handler)
+                self.machine.set_relative_X(x, manual=manual, handler=None)
             if z != 0:
                 self.machine.set_relative_Z(z, manual=manual, handler=handler)
+
+        # Update the expected position
+        self.expected_position['X'] += x
+        self.expected_position['Y'] += y
+        self.expected_position['Z'] += z
 
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None):
         """Set the absolute coordinates for the machine."""
         print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
+        print(f"Expected position: {self.expected_position}")
+        
         if self.expected_position['Z'] != z:
+            print('Z changed')
+            # Move up first if needed
             if z > self.expected_position['Z']:
-                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
-            else:
+                print('Moving up first')
+                self.machine.set_absolute_Z(z, manual=manual, handler=None)
+                # Move Y first if it's different
                 if self.expected_position['Y'] != y:
-                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
+                    self.machine.set_absolute_Y(y, manual=manual, handler=None)
+                # Move X if it's different
                 if self.expected_position['X'] != x:
                     self.machine.set_absolute_X(x, manual=manual, handler=handler)
+            else:
+                print('Moving down last')
+                # Move Y first if it's different
+                if self.expected_position['Y'] != y:
+                    self.machine.set_absolute_Y(y, manual=manual, handler=None)
+                # Move X if it's different
+                if self.expected_position['X'] != x:
+                    self.machine.set_absolute_X(x, manual=manual, handler=None)
+                # Finally, move Z down if needed
                 self.machine.set_absolute_Z(z, manual=manual, handler=handler)
         else:
+            print('Z did not change')
+            # If Z doesn't need to change, move X and Y as needed
             if self.expected_position['Y'] != y:
-                self.machine.set_absolute_Y(y, manual=manual, handler=handler)
+                self.machine.set_absolute_Y(y, manual=manual, handler=None)
             if self.expected_position['X'] != x:
                 self.machine.set_absolute_X(x, manual=manual, handler=handler)
+
+        # Update the expected position
+        self.update_expected_position(x=x, y=y, z=z)
+
 
     def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -273,9 +308,7 @@ class Controller(QObject):
         up_first = False
         if direct and current['Z'] > target['Z']:
             up_first = True
-            self.set_absolute_Z(target['Z'],
-                handler=lambda: self.update_expected_position(z=target['Z'])
-            )
+            self.set_absolute_Z(target['Z'])
 
         x_limit = 5500
         safe_height = 3000
@@ -286,38 +319,38 @@ class Controller(QObject):
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
-            self.set_absolute_Z(safe_height,handler=lambda: self.update_expected_position(z=safe_height))
-            self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
-            self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+            self.set_absolute_Z(safe_height)
+            self.set_absolute_Y(target['Y'])
+            self.set_absolute_X(target['X'])
+            self.set_absolute_Z(target['Z'])
 
         elif not direct and safe_y:
             print('Not direct, safe-y')
-            self.set_absolute_Z(safe_height,handler=lambda: self.update_expected_position(z=safe_height))
-            self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
-            self.set_absolute_X(current['X'],handler=lambda: self.update_expected_position(x=current['X']))
-            self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+            self.set_absolute_Z(safe_height)
+            self.set_absolute_Y(safe_y_value)
+            self.set_absolute_X(current['X'])
+            self.set_absolute_Y(target['Y'])
+            self.set_absolute_Z(target['Z'])
         elif direct and safe_y:
             if up_first:
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
-                self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
-                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
+                self.set_absolute_Z(target['Z'])
+                self.set_absolute_Y(safe_y_value)
+                self.set_absolute_X(target['X'])
+                self.set_absolute_Y(target['Y'])
             else:
-                self.set_absolute_Y(safe_y_value,handler=lambda: self.update_expected_position(y=safe_y_value))
-                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+                self.set_absolute_Y(safe_y_value)
+                self.set_absolute_X(target['X'])
+                self.set_absolute_Y(target['Y'])
+                self.set_absolute_Z(target['Z'])
         else:
             if up_first:
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
-                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
+                self.set_absolute_Z(target['Z'])
+                self.set_absolute_Y(target['Y'])
+                self.set_absolute_X(target['X'])
             else:
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_expected_position(y=target['Y']))
-                self.set_absolute_X(target['X'],handler=lambda: self.update_expected_position(x=target['X']))
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_expected_position(z=target['Z']))
+                self.set_absolute_Y(target['Y'])
+                self.set_absolute_X(target['X'])
+                self.set_absolute_Z(target['Z'])
         self.set_absolute_coordinates(
             target['X'], target['Y'], target['Z'],
             handler=lambda: self.update_location_handler(name)
@@ -462,7 +495,7 @@ class Controller(QObject):
         self.wait_command()
 
         self.move_to_location('pause')
-        self.machine.change_acceleration(8000)
+        self.machine.change_acceleration(24000)
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')

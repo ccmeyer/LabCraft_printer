@@ -945,7 +945,7 @@ class Machine(QObject):
         return self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def wait_command(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('WAIT',2000,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('WAIT',500,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
