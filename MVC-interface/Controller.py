@@ -139,17 +139,17 @@ class Controller(QObject):
         # If moving up in Z, do Z first
         if z > 0:
             if z != 0:
-                self.machine.set_relative_Z(z, manual=manual, handler=None)
+                self.machine.set_relative_Z(z, manual=manual, handler=handler)
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=None)
+                self.machine.set_relative_Y(y, manual=manual, handler=handler)
             if x != 0:
                 self.machine.set_relative_X(x, manual=manual, handler=handler)
         else:
             # If moving down in Z, do X and Y first, then Z
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=None)
+                self.machine.set_relative_Y(y, manual=manual, handler=handler)
             if x != 0:
-                self.machine.set_relative_X(x, manual=manual, handler=None)
+                self.machine.set_relative_X(x, manual=manual, handler=handler)
             if z != 0:
                 self.machine.set_relative_Z(z, manual=manual, handler=handler)
 
@@ -168,10 +168,10 @@ class Controller(QObject):
             # Move up first if needed
             if z > self.expected_position['Z']:
                 print('Moving up first')
-                self.machine.set_absolute_Z(z, manual=manual, handler=None)
+                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
                 # Move Y first if it's different
                 if self.expected_position['Y'] != y:
-                    self.machine.set_absolute_Y(y, manual=manual, handler=None)
+                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
                 # Move X if it's different
                 if self.expected_position['X'] != x:
                     self.machine.set_absolute_X(x, manual=manual, handler=handler)
@@ -179,17 +179,17 @@ class Controller(QObject):
                 print('Moving down last')
                 # Move Y first if it's different
                 if self.expected_position['Y'] != y:
-                    self.machine.set_absolute_Y(y, manual=manual, handler=None)
+                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
                 # Move X if it's different
                 if self.expected_position['X'] != x:
-                    self.machine.set_absolute_X(x, manual=manual, handler=None)
+                    self.machine.set_absolute_X(x, manual=manual, handler=handler)
                 # Finally, move Z down if needed
                 self.machine.set_absolute_Z(z, manual=manual, handler=handler)
         else:
             print('Z did not change')
             # If Z doesn't need to change, move X and Y as needed
             if self.expected_position['Y'] != y:
-                self.machine.set_absolute_Y(y, manual=manual, handler=None)
+                self.machine.set_absolute_Y(y, manual=manual, handler=handler)
             if self.expected_position['X'] != x:
                 self.machine.set_absolute_X(x, manual=manual, handler=handler)
 
@@ -322,7 +322,7 @@ class Controller(QObject):
             self.set_absolute_Z(safe_height)
             self.set_absolute_Y(target['Y'])
             self.set_absolute_X(target['X'])
-            self.set_absolute_Z(target['Z'])
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
 
         elif not direct and safe_y:
             print('Not direct, safe-y')
@@ -330,32 +330,29 @@ class Controller(QObject):
             self.set_absolute_Y(safe_y_value)
             self.set_absolute_X(current['X'])
             self.set_absolute_Y(target['Y'])
-            self.set_absolute_Z(target['Z'])
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
         elif direct and safe_y:
             if up_first:
                 self.set_absolute_Z(target['Z'])
                 self.set_absolute_Y(safe_y_value)
                 self.set_absolute_X(target['X'])
-                self.set_absolute_Y(target['Y'])
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name))
             else:
                 self.set_absolute_Y(safe_y_value)
                 self.set_absolute_X(target['X'])
                 self.set_absolute_Y(target['Y'])
-                self.set_absolute_Z(target['Z'])
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
         else:
             if up_first:
                 self.set_absolute_Z(target['Z'])
                 self.set_absolute_Y(target['Y'])
-                self.set_absolute_X(target['X'])
+                self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name))
             else:
                 self.set_absolute_Y(target['Y'])
                 self.set_absolute_X(target['X'])
-                self.set_absolute_Z(target['Z'])
-        self.set_absolute_coordinates(
-            target['X'], target['Y'], target['Z'],
-            handler=lambda: self.update_location_handler(name)
-        )
-        self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
+
+        # self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
     
     def open_gripper(self,handler=None):
         """Open the gripper."""
@@ -495,7 +492,7 @@ class Controller(QObject):
         self.wait_command()
 
         self.move_to_location('pause')
-        self.machine.change_acceleration(24000)
+        self.machine.change_acceleration(16000)
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')
