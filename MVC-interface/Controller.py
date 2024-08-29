@@ -333,8 +333,14 @@ class Controller(QObject):
         self.machine.close_gripper(handler=handler)
 
     def wait_command(self):
-        """Tells the machine to wait a specified amount of time."""
+        """Tells the machine to wait a specified amount of time in milliseconds."""
         self.machine.wait_command()
+
+    def test_print_wait(self):
+        """Test the print wait command."""
+        self.print_droplets(10)
+        self.wait_command()
+        self.print_droplets(10)
     
     def pick_up_handler(self,slot):
         """Handle the pick up signal from the rack."""

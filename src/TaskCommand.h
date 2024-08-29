@@ -58,6 +58,7 @@ enum CommandType {
     ABSOLUTE_PRESSURE,
     PRINT,
     RESET_P,
+    WAIT,
     PAUSE,
     RESUME,
     CLEAR_QUEUE,

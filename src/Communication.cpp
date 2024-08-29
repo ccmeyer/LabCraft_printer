@@ -10,7 +10,8 @@ PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
     pressureSensor(pressureSensor), regulator(regulator), printer(printer), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
-    executeCmdTask([this]() { this->executeCommandTask(); }, 0) {}
+    executeCmdTask([this]() { this->executeCommandTask(); }, 0),
+    waitTask([this]() { this->stopWaiting(); }, 0) {}
 
 // Method to initialize the serial communication
 void Communication::beginSerial() {
@@ -224,7 +225,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() {
-    if (currentState == PAUSED || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
         Serial.println("---Busy");
         return false;
     } else {
@@ -315,6 +316,9 @@ void Communication::executeCommand(const Command& cmd) {
         case RESET_P:
             regulator.resetSyringe();
             break;
+        case WAIT:
+            startWaiting(cmd.param1);
+            break;
         case PAUSE:
             currentState = PAUSED;
             break;
@@ -330,4 +334,16 @@ void Communication::executeCommand(const Command& cmd) {
             // Handle unknown command
             break;
     }
+}
+
+// Method to start the wait task
+void Communication::startWaiting(long waitTime) {
+    waiting = true;
+    waitTask.nextExecutionTime = micros() + (waitTime * 1000);
+    taskQueue.addTask(waitTask);
+}
+
+// Method to stop waiting
+void Communication::stopWaiting() {
+    waiting = false;
 }

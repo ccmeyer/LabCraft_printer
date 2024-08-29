@@ -202,6 +202,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
         self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
         self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
+        self.shortcut_manager.add_shortcut('Shift+t','test wait', lambda: self.controller.test_print_wait())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
         self.shortcut_manager.add_shortcut('c','Print 5 droplets', lambda: self.controller.print_droplets(5))
         self.shortcut_manager.add_shortcut('v','Print 20 droplets', lambda: self.controller.print_droplets(20))

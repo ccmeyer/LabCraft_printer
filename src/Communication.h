@@ -41,6 +41,8 @@ public:
     void parseAndAddCommand();
     void executeCommandTask();
     bool checkIfFree();
+    void startWaiting(long waitTime);
+    void stopWaiting();
     void IncrementCycleCounter();
 
 private:
@@ -68,10 +70,12 @@ private:
     int currentCmdNum = 0;
     int lastCompletedCmdNum = 0;
     int lastAddedCmdNum = 0;
+    bool waiting = false;
 
     Task receiveCommandTask;       // Task to read serial data
     Task sendStatusTask;          // Task to send status
     Task executeCmdTask;        // Task to execute the next command
+    Task waitTask;              // Task to wait for a certain time
 
     void executeCommand(const Command& cmd);
 };
