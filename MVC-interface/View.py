@@ -1257,7 +1257,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.model.well_plate.discard_temp_calibrations()
 
     def open_experiment_designer(self):
-        dialog = ExperimentDesignDialog(self, self.model)
+        dialog = ExperimentDesignDialog(self.main_window, self.model)
         if dialog.exec():
             print("Experiment file generated and loaded.")
 
@@ -2401,23 +2401,36 @@ class ExperimentDesignDialog(QDialog):
         self.layout = QHBoxLayout(self)
         
         # Table to hold all reagent information
-        self.reagent_table = QTableWidget(0, 10, self)
+        self.reagent_table = QTableWidget(0, 12, self)
         self.reagent_table.setHorizontalHeaderLabels([
             "Reagent Name", "Min Conc", "Max Conc", "Steps", 
             "Mode", "Manual Input", "Max Droplets",
-            "Concentrations Preview", "Stock Solutions", "Delete"
+            "Concentrations Preview", "Stock Solutions", "Missing", "Used","Delete"
         ])
+        self.reagent_table.setColumnWidth(0, 100)
+        self.reagent_table.setColumnWidth(1, 75)
+        self.reagent_table.setColumnWidth(2, 75)
+        self.reagent_table.setColumnWidth(3, 50)
         self.reagent_table.setColumnWidth(7, 200)
         self.reagent_table.setColumnWidth(8, 100)
+        self.reagent_table.setColumnWidth(9, 100)
+        self.reagent_table.setColumnWidth(10, 50)
+        self.reagent_table.setColumnWidth(11, 50)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
+
+        self.reagent_table.setWordWrap(True)
 
         # Stock solutions table
         self.stock_table = QTableWidget(0, 4, self)
         self.stock_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Concentration", "Total Droplets", "Total Volume (uL)"
+            "Reagent Name", "Concentration", "Total\nDroplets", "Total\nVolume (uL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.setFixedWidth(400)
+        self.stock_table.setColumnWidth(0, 100)
+        self.stock_table.setColumnWidth(1, 100)
+        self.stock_table.setColumnWidth(2, 50)
+        self.stock_table.setColumnWidth(3, 100)
 
         self.left_layout = QVBoxLayout()
         self.left_layout.addWidget(self.reagent_table)
@@ -2474,11 +2487,6 @@ class ExperimentDesignDialog(QDialog):
         self.update_table_button.clicked.connect(self.update_all_model_reagents)
         self.button_layout.addWidget(self.update_table_button)
 
-        # Button to optimize stock solutions
-        self.optimize_button = QPushButton("Optimize Stock Solutions")
-        self.optimize_button.clicked.connect(self.optimize_stock_solutions)
-        self.button_layout.addWidget(self.optimize_button)
-        
         # Button to load an experiment
         self.load_experiment_button = QPushButton("Load Experiment")
         self.load_experiment_button.clicked.connect(self.load_experiment)
@@ -2489,6 +2497,12 @@ class ExperimentDesignDialog(QDialog):
         self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         self.save_experiment_button.clicked.connect(self.save_experiment)
         self.button_layout.addWidget(self.save_experiment_button)
+
+        # Button to generate the experiment
+        self.generate_experiment_button = QPushButton("Generate Experiment")
+        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
+        self.generate_experiment_button.clicked.connect(self.close)
+        self.button_layout.addWidget(self.generate_experiment_button)
 
         self.bottom_layout.addLayout(self.info_layout)
         self.bottom_layout.addLayout(self.button_layout)
@@ -2501,11 +2515,10 @@ class ExperimentDesignDialog(QDialog):
         self.experiment_model.data_updated.connect(self.update_preview)
         self.experiment_model.stock_updated.connect(self.update_stock_table)
         self.experiment_model.experiment_generated.connect(self.update_total_reactions)
-        self.experiment_model.update_max_droplets_signal.connect(self.update_max_droplets)
 
         self.load_experiment_to_view()
 
-    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10, stock_solutions="",view_only=False):
+    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
         """Add a new reagent row to the table and model."""
         row_position = self.reagent_table.rowCount()
         self.reagent_table.insertRow(row_position)
@@ -2554,14 +2567,22 @@ class ExperimentDesignDialog(QDialog):
         preview_item.setTextAlignment(Qt.AlignCenter)
         self.reagent_table.setItem(row_position, 7, preview_item)
 
-        stock_solutions_item = QTableWidgetItem(stock_solutions)
-        stock_solutions_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 8, stock_solutions_item)
+        stock_solutions_item = QLineEdit(stock_solutions)
+        stock_solutions_item.setPlaceholderText("e.g., 0.5, 1, 5")
+        self.reagent_table.setCellWidget(row_position, 8, stock_solutions_item)
+
+        missing_conc_item = QTableWidgetItem()
+        missing_conc_item.setTextAlignment(Qt.AlignCenter)
+        self.reagent_table.setItem(row_position, 9, missing_conc_item)
+
+        droplets_used_item = QTableWidgetItem()
+        droplets_used_item.setTextAlignment(Qt.AlignCenter)
+        self.reagent_table.setItem(row_position, 10, droplets_used_item)
 
         # Delete button
         delete_button = QPushButton("Delete")
         delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
-        self.reagent_table.setCellWidget(row_position, 9, delete_button)
+        self.reagent_table.setCellWidget(row_position, 11, delete_button)
 
         if not view_only:
             # Add reagent to model
@@ -2572,7 +2593,8 @@ class ExperimentDesignDialog(QDialog):
                 steps=steps,
                 mode=mode,
                 manual_input=manual_input,
-                max_droplets=max_droplets
+                max_droplets=max_droplets,
+                stock_solutions=stock_solutions
             )
 
         # Connect signals after initializing the row to avoid 'NoneType' errors
@@ -2583,6 +2605,7 @@ class ExperimentDesignDialog(QDialog):
         mode_item.currentIndexChanged.connect(lambda: self.toggle_manual_entry(row_position))
         manual_conc_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         max_droplets_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
+        stock_solutions_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         # if not view_only:
         self.update_model_reagent(row_position)
 
@@ -2600,8 +2623,9 @@ class ExperimentDesignDialog(QDialog):
         mode = self.reagent_table.cellWidget(row, 4).currentText()
         manual_input = self.reagent_table.cellWidget(row, 5).text()
         max_droplets = self.reagent_table.cellWidget(row, 6).value()
+        stock_solutions = self.reagent_table.cellWidget(row, 8).text()
 
-        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, max_droplets=max_droplets)
+        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, max_droplets=max_droplets,stock_solutions=stock_solutions)
 
     def update_all_model_reagents(self):
         """Update all reagents in the model based on the current row values."""
@@ -2690,18 +2714,18 @@ class ExperimentDesignDialog(QDialog):
             print("\n----Finished model loading----\n")
             self.load_experiment_to_view()
     
-    def optimize_stock_solutions(self):
-        self.experiment_model.optimize_stock_solutions()
+    # def optimize_stock_solutions(self):
+    #     self.experiment_model.optimize_stock_solutions()
     
-    def update_max_droplets(self, row):
-        """Update the maximum droplets for a reagent based on the total droplets available."""
-        print(f"\n-------Updating max droplets for row {row}\n")
-        max_droplets = self.experiment_model.get_reagent(row)["max_droplets"]
-        max_droplets_item = self.reagent_table.cellWidget(row, 6)
-        max_droplets_item.blockSignals(True)
-        max_droplets_item.setValue(max_droplets)
-        max_droplets_item.blockSignals(False)
-        self.update_model_reagent(row)
+    # def update_max_droplets(self, row):
+    #     """Update the maximum droplets for a reagent based on the total droplets available."""
+    #     print(f"\n-------Updating max droplets for row {row}\n")
+    #     max_droplets = self.experiment_model.get_reagent(row)["max_droplets"]
+    #     max_droplets_item = self.reagent_table.cellWidget(row, 6)
+    #     max_droplets_item.blockSignals(True)
+    #     max_droplets_item.setValue(max_droplets)
+    #     max_droplets_item.blockSignals(False)
+    #     self.update_model_reagent(row)
 
     def toggle_manual_entry(self, row):
         """Enable or disable the manual entry field based on mode selection."""
@@ -2713,18 +2737,25 @@ class ExperimentDesignDialog(QDialog):
     def update_preview(self, row):
         """Update the concentrations preview in the table based on the model."""
         reagent = self.experiment_model.get_reagent(row)   
-
         preview_text = ", ".join(map(str, reagent["concentrations"]))
         preview_item = self.reagent_table.item(row, 7)
         if type(preview_item) != type(None):
             preview_item.setText(preview_text)
+            preview_item.setToolTip(preview_text)
             preview_item.setTextAlignment(Qt.AlignCenter)
 
-        stock_solution_text = ", ".join(map(str, reagent["stock_solutions"]))
-        stock_solution_item = self.reagent_table.item(row, 8)
-        if type(stock_solution_item) != type(None):
-            stock_solution_item.setText(stock_solution_text)
-            stock_solution_item.setTextAlignment(Qt.AlignCenter)
+        missing_conc_text = ", ".join(map(str, reagent["missing_concentrations"]))
+        missing_conc_item = self.reagent_table.item(row, 9)
+        if type(missing_conc_item) != type(None):
+            missing_conc_item.setText(missing_conc_text)
+            missing_conc_item.setToolTip(missing_conc_text)
+            missing_conc_item.setTextAlignment(Qt.AlignCenter)
+
+        droplets_used_text = reagent['max_droplets_for_conc']
+        droplets_used_item = self.reagent_table.item(row, 10)
+        if type(droplets_used_item) != type(None):
+            droplets_used_item.setText(str(droplets_used_text))
+            droplets_used_item.setTextAlignment(Qt.AlignCenter)
 
     def update_stock_table(self):
         # Populate the stock table
@@ -2738,7 +2769,6 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock_solution['concentration'])))
             self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['total_droplets'])))
             self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_volume'])))
-
 
     def generate_experiment(self):
         """Generate the experiment by asking the model to calculate it."""
@@ -2758,7 +2788,15 @@ class ExperimentDesignDialog(QDialog):
     def closeEvent(self, event):
         """Handle the window close event."""
         self.update_all_model_reagents()  # Update all reagents before closing
-        self.model.load_experiment_from_model()
-        event.accept()  # Close the dialog
-
+        # Add check that there are no missing concentrations
+        if self.experiment_model.check_missing_concentrations():
+            response = self.main_window.popup_yes_no("Missing Concentrations","There are missing concentrations. Are you sure you want to close the experiment design window?")
+            if response == '&Yes':
+                self.model.load_experiment_from_model()
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            self.model.load_experiment_from_model()
+            event.accept()
         

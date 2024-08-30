@@ -18,7 +18,7 @@ def set_dark_theme(app):
     dark_palette.setColor(QPalette.WindowText, QColor(255, 255, 255))  # white
     dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
     dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    dark_palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))  # white
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(50,50,50))  # white
     dark_palette.setColor(QPalette.ToolTipText, QColor(255, 255, 255))  # white
     dark_palette.setColor(QPalette.Text, QColor(255, 255, 255))  # white
     dark_palette.setColor(QPalette.Button, QColor(53, 53, 53))
