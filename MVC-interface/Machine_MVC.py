@@ -1,7 +1,7 @@
 import threading
 import time
 from PySide6 import QtCore, QtWidgets, QtGui
-from PySide6.QtCore import QObject, Signal, Slot, QTimer
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from collections import deque
 
 import serial
@@ -576,6 +576,30 @@ class CommandQueue(QObject):
         self.completed.clear()
         self.command_number = 0
         self.queue_updated.emit()
+
+class DisconnectWorker(QThread):
+    finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+
+    def run(self):
+        self.parent.gripper_off()
+        self.parent.disable_motors()
+        self.parent.deregulate_pressure()
+
+        # Continuously check until all tasks are completed
+        timeout_counter = 0
+        while not self.parent.check_if_all_completed():
+            timeout_counter += 1
+            time.sleep(0.1)
+            if timeout_counter > 100:
+                print('Timeout disconnecting from machine')
+                break
+
+        self.parent.clear_command_queue()
+        self.finished.emit()
     
 
 class Machine(QObject):
@@ -676,19 +700,13 @@ class Machine(QObject):
         self.disconnect_complete_signal.emit()
 
     def disconnect_board(self, error=False):
-        '''
-        Creates a thread to disconnect from the machine. This is necessary
-        because several should be executed before the machine is disconnected.
-        '''
-        # def disconnect():
         print('--------Disconnecting from machine---------')
         if not error:
-            self.gripper_off()
-            self.disable_motors()
-            self.deregulate_pressure()
-            self.clear_command_queue(handler=self.disconnect_handler)
-        self.disconnect_handler()
-        return True
+            self.worker = DisconnectWorker(self)
+            self.worker.finished.connect(self.disconnect_handler)
+            self.worker.start()
+        else:
+            self.disconnect_handler()
     
     def get_machine_port(self):
         return self.port
