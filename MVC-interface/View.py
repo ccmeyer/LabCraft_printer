@@ -2357,7 +2357,13 @@ class CommandQueueWidget(QGroupBox):
         self.table.setRowCount(0)  # Clear the table
 
         # Get the commands from both the active queue and the completed queue
-        all_commands = list(self.machine.command_queue.queue) + list(self.machine.command_queue.completed)
+        completed = list(self.machine.command_queue.completed)
+        if len(completed) > 10:
+            completed = completed[-10:]
+        in_queue = list(self.machine.command_queue.queue)
+        if len(in_queue) > 50:
+            in_queue = in_queue[:50]
+        all_commands = in_queue + completed
         
         # Sort commands by command number in descending order
         all_commands.sort(key=lambda cmd: cmd.get_number(), reverse=True)

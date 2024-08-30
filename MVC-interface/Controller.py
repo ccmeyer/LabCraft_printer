@@ -507,8 +507,8 @@ class Controller(QObject):
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')
         reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
-        
-        for i,well in enumerate(reaction_wells):
+        wells_with_droplets = [well for well in reaction_wells if well.get_remaining_droplets(current_stock_id) > 0]
+        for i,well in enumerate(wells_with_droplets):
             target_droplets = well.get_remaining_droplets(current_stock_id)
             if target_droplets == 0:
                 print(f'No droplets required for well {well.well_id}')
@@ -516,7 +516,7 @@ class Controller(QObject):
             well_coords = well.get_coordinates()
             self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'])
             print(f'Printing {target_droplets} droplets to well {well.well_id}')
-            is_last_iteration = i == len(reaction_wells) - 1
+            is_last_iteration = i == len(wells_with_droplets) - 1
             if not is_last_iteration:
                 self.print_droplets(target_droplets, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
             else:

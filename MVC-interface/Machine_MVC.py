@@ -555,8 +555,6 @@ class CommandQueue(QObject):
             print('No commands to update')
             return
         for command in self.queue:
-            # print(f'Checking command: {command.command_number} {command.command_type} {command.status}')
-            # print(f'Current command: {current_executing_command} Last completed: {last_completed_command}')
             if command.status == "Sent" and command.command_number == int(current_executing_command):
                 command.mark_as_executing()
             if command.command_number <= int(last_completed_command):
@@ -567,6 +565,10 @@ class CommandQueue(QObject):
             completed_command = self.queue.popleft()
             print(f"Command '{completed_command.command_type}' completed and removed from queue.")
             self.completed.append(completed_command)
+
+            # Remove oldest commands from the completed deque if it exceeds 100
+            if len(self.completed) > 100:
+                self.completed.popleft()
 
         self.queue_updated.emit()
 
