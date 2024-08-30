@@ -696,7 +696,7 @@ class Machine(QObject):
         return True
     
     def disconnect_handler(self):
-        if not self.simulate:
+        if not self.simulate and self.board is not None:
             self.board.close()
         self.reset_board()
         self.disconnect_complete_signal.emit()
