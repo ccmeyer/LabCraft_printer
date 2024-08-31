@@ -1126,10 +1126,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.design_experiment_button.clicked.connect(self.open_experiment_designer)
         self.bottom_layout.addWidget(self.design_experiment_button)
 
-        # self.experiment_button = QPushButton("Load Experiment")
-        # self.experiment_button.clicked.connect(self.on_load_experiment)
-        # self.bottom_layout.addWidget(self.experiment_button)
-
         self.start_print_array_button = QPushButton("Start Print")
         self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
         self.start_print_array_button.setEnabled(False)
@@ -1269,22 +1265,22 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         else:
             self.model.well_plate.set_plate_format(plate_format)
     
-    def on_load_experiment(self):
-        """Load an experiment CSV file."""
-        # Check if a printer head is picked up
-        if self.model.rack_model.gripper_printer_head is not None:
-            self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before loading an experiment.")
-            return
-        # Check if an experiment is already loaded
-        if not self.model.reaction_collection.is_empty():
-            response = self.main_window.popup_yes_no("Load Experiment", "An experiment is already loaded. Do you want to clear it and load a new one?")
-            if response == "&No":
-                return
-            else:
-                self.model.clear_experiment()
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Experiment CSV", "", "CSV Files (*.csv)")
-        if file_path:
-            self.model.load_experiment_from_file(file_path)
+    # def on_load_experiment(self):
+    #     """Load an experiment CSV file."""
+    #     # Check if a printer head is picked up
+    #     if self.model.rack_model.gripper_printer_head is not None:
+    #         self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before loading an experiment.")
+    #         return
+    #     # Check if an experiment is already loaded
+    #     if not self.model.reaction_collection.is_empty():
+    #         response = self.main_window.popup_yes_no("Load Experiment", "An experiment is already loaded. Do you want to clear it and load a new one?")
+    #         if response == "&No":
+    #             return
+    #         else:
+    #             self.model.clear_experiment()
+    #     file_path, _ = QFileDialog.getOpenFileName(self, "Open Experiment CSV", "", "CSV Files (*.csv)")
+    #     if file_path:
+    #         self.model.load_experiment_from_file(file_path)
 
     def on_experiment_loaded(self):
         """Handle the experiment loaded signal."""
@@ -1311,6 +1307,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if plate_calibration_dialog.exec() == QDialog.Accepted:
             print("Calibration completed successfully.")
             self.model.well_plate.update_calibration_data()
+            self.model.location_model.post_calibration_update(self.model.well_plate.calibrations['top_left'])
+
         else:
             print("Calibration was canceled or failed.")
             self.model.well_plate.discard_temp_calibrations()
@@ -1694,7 +1692,7 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
         offsets = {
             'X': 0,
             'Y': 0,
-            'Z': 500
+            'Z': -500
         }
         super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict,offsets)
 
@@ -1761,7 +1759,7 @@ class RackCalibrationDialog(BaseCalibrationDialog):
             "Right": "rack_position_Right"
         }
         offsets = {
-            'X': -2500,
+            'X': 2500,
             'Y': 0,
             'Z': 0
         }

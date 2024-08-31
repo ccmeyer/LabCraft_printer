@@ -138,7 +138,7 @@ class Controller(QObject):
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         
         # If moving up in Z, do Z first
-        if z > 0:
+        if z < 0:
             if z != 0:
                 self.machine.set_relative_Z(z, manual=manual, handler=handler)
             if y != 0:
@@ -167,7 +167,7 @@ class Controller(QObject):
         if self.expected_position['Z'] != z:
             print('Z changed')
             # Move up first if needed
-            if z > self.expected_position['Z']:
+            if z < self.expected_position['Z']:
                 print('Moving up first')
                 self.machine.set_absolute_Z(z, manual=manual, handler=handler)
                 # Move Y first if it's different

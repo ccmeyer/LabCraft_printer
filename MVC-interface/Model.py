@@ -1832,6 +1832,22 @@ class LocationModel(QObject):
     def get_location_names(self):
         """Get a list of all location names."""
         return list(self.locations.keys())
+    
+    def post_calibration_update(self,calibration_data):
+        self.update_pause_location(calibration_data)
+        self.update_plate_locatin(calibration_data)
+        self.save_locations()
+    
+    def update_pause_location(self,coords):
+        offset_coords = {'X':coords['X']-500,'Y':coords['Y']-500,'Z':coords['Z']}
+        self.update_location_coords('pause',offset_coords)
+        self.locations_updated.emit()
+        print(f"Pause location updated.")
+
+    def update_plate_locatin(self,coords):
+        self.update_location_coords('plate',coords)
+        self.locations_updated.emit()
+        print(f"Plate location updated.")
 
 class MachineModel(QObject):
     '''
