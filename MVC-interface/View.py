@@ -173,41 +173,34 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_X(-self.model.machine_model.step_size, manual=True))
         self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_Z(-self.model.machine_model.step_size,manual=True))
         self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_Z(self.model.machine_model.step_size,manual=True))
-        
-        self.shortcut_manager.add_shortcut(
-            'Ctrl+Up', 'Increase step size', 
-            self.model.machine_model.increase_step_size
-        )
-        self.shortcut_manager.add_shortcut(
-            'Ctrl+Down', 'Decrease step size', 
-            self.model.machine_model.decrease_step_size
-        )
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+
+        self.shortcut_manager.add_shortcut('5','Set pressure to 0', lambda: self.controller.set_absolute_pressure(0,manual=True))
         self.shortcut_manager.add_shortcut('6','Large pressure decrease', lambda: self.controller.set_relative_pressure(-1,manual=True))
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
-        self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True)) 
-        self.shortcut_manager.add_shortcut('1','Add reagent to slot 1', lambda: self.controller.add_reagent_to_slot(0))
-        self.shortcut_manager.add_shortcut('2','Add reagent to slot 2', lambda: self.controller.add_reagent_to_slot(1))
-        self.shortcut_manager.add_shortcut('3','Add reagent to slot 3', lambda: self.controller.add_reagent_to_slot(2))
-        self.shortcut_manager.add_shortcut('4','Add reagent to slot 4', lambda: self.controller.add_reagent_to_slot(3))
-        self.shortcut_manager.add_shortcut('s','Save new location', lambda: self.add_new_location())
-        self.shortcut_manager.add_shortcut('d','Modify location', lambda: self.modify_location())
+        self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set pressure to 2', lambda: self.controller.set_absolute_pressure(2,manual=True))
+
+        self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
+        self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
         self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location(manual=True))
-        self.shortcut_manager.add_shortcut('Shift+n','Popup message', lambda: self.popup_message('Title','Message'))
-        self.shortcut_manager.add_shortcut('Shift+o','Popup options', lambda: self.popup_options('Title','Message',['Option 1','Option 2','Option 3']))
-        self.shortcut_manager.add_shortcut('Shift+y','Popup yes/no', lambda: self.popup_yes_no('Title','Message'))
-        self.shortcut_manager.add_shortcut('Shift+i','Popup input', lambda: self.popup_input('Title','Message'))
+    
         self.shortcut_manager.add_shortcut('g','Close gripper', lambda: self.controller.close_gripper())
         self.shortcut_manager.add_shortcut('Shift+g','Open gripper', lambda: self.controller.open_gripper())
+
         self.shortcut_manager.add_shortcut('Shift+p','Print Array', lambda: self.controller.print_array())
         self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
         self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
-        self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
-        self.shortcut_manager.add_shortcut('Shift+t','test wait', lambda: self.controller.test_print_wait())
-        self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
+
         self.shortcut_manager.add_shortcut('c','Print 5 droplets', lambda: self.controller.print_droplets(5))
         self.shortcut_manager.add_shortcut('v','Print 20 droplets', lambda: self.controller.print_droplets(20))
         self.shortcut_manager.add_shortcut('b','Print 100 droplets', lambda: self.controller.print_droplets(100))
+        self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
+
+        self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
+
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
