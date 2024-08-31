@@ -19,6 +19,7 @@ PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sen
 // Method to setup the pressure regulator
 void PressureRegulator::setupRegulator() {
     stepper.setupMotor();
+    stepper.setProperties(6000, 24000);
 }
 
 // Method to enable the pressure regulator

@@ -106,6 +106,11 @@ void Communication::sendStatus() {
             case TARGET_PRESSURE:
                 Serial.print("Tar_pressure:");
                 Serial.println(round(regulator.getTargetPressure()));
+                statusStep = PULSE_WIDTH;
+                break;
+            case PULSE_WIDTH:
+                Serial.print("Pulse_width:");
+                Serial.println(printer.getDuration());
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -317,6 +322,9 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case WAIT:
             startWaiting(cmd.param1);
+            break;
+        case SET_WIDTH:
+            printer.setDuration(cmd.param1);
             break;
         case PAUSE:
             currentState = PAUSED;

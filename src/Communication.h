@@ -24,7 +24,8 @@ enum StatusStep {
     TARGET_P,
     GRIPPER,
     PRESSURE,
-    TARGET_PRESSURE
+    TARGET_PRESSURE,
+    PULSE_WIDTH
 };
 
 class Communication {

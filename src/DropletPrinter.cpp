@@ -4,7 +4,7 @@
 // Constructor
 DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int valvePin)
     : valvePin(valvePin), sensor(sensor), regulator(regulator), taskQueue(taskQueue),
-      frequency(20), interval(50000), duration(1400), pressureTolerance(20), 
+      frequency(20), interval(50000), duration(3000), pressureTolerance(20), 
       targetDroplets(0), printedDroplets(0), printingComplete(true),
       printDropletTask([this]() { this->printDroplet(); }, 0) {
     pinMode(valvePin, OUTPUT);
@@ -17,6 +17,16 @@ void DropletPrinter::setPrintingParameters(int frequency, unsigned long duration
     this->interval = (1000000L / frequency);
     this->duration = duration;
     this->pressureTolerance = pressureTolerance;
+}
+
+// Method to set the duration
+void DropletPrinter::setDuration(unsigned long duration) {
+    this->duration = duration;
+}
+
+// Method to get the duration
+unsigned long DropletPrinter::getDuration() {
+    return duration;
 }
 
 // Method to start printing the specified number of droplets

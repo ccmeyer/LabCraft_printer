@@ -11,6 +11,8 @@ public:
     DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int valvePin);
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
+    void setDuration(unsigned long duration);
+    unsigned long getDuration();
     void startPrinting(int numberOfDroplets);
     bool isPrintingComplete() const;
     bool isBusy();

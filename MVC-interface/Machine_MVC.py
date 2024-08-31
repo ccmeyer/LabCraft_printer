@@ -926,6 +926,9 @@ class Machine(QObject):
         print('Setting absolute pressure:',pressure)
         return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
+    def set_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('SET_WIDTH',pulse_width,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
     def home_motor_handler(self):
         self.homed = True
         self.location = 'Home'

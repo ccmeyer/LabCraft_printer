@@ -208,6 +208,11 @@ class Controller(QObject):
         print(f"Setting absolute pressure: {pressure}")
         self.machine.set_absolute_pressure(pressure,manual=manual)
 
+    def set_pulse_width(self, pulse_width,manual=False):
+        """Set the pulse width for the machine."""
+        print(f"Setting pulse width: {pulse_width}")
+        self.machine.set_pulse_width(pulse_width,manual=True)
+
     def reset_syringe(self):
         """Reset the syringe."""
         self.machine.reset_syringe()

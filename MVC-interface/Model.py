@@ -1895,6 +1895,7 @@ class MachineModel(QObject):
         self.current_pressure = 0
         self.pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
         self.target_pressure = 0
+        self.pulse_width = 0
 
         self.fss = 13107
         self.psi_offset = 1638
@@ -2055,6 +2056,9 @@ class MachineModel(QObject):
 
     def get_current_pressure(self):
         return self.current_pressure
+    
+    def update_pulse_width(self,pulse_width):
+        self.pulse_width = int(pulse_width)
 
     def update_cycle_count(self,cycle_count):
         self.cycle_count = int(cycle_count)
@@ -2173,10 +2177,9 @@ class Model(QObject):
             self.machine_model.update_cycle_count(status_dict['Cycle_count'])
         if 'Max_cycle' in status_keys:
             self.machine_model.update_max_cycle(status_dict['Max_cycle'])
-        # self.machine_model.update_target_pressure(status_dict.get('Tar_pressure', None))
-        # self.machine_model.update_pressure(status_dict.get('Pressure', None))
-        # self.machine_model.update_cycle_count(status_dict.get('Cycle_count', self.machine_model.cycle_count))
-        # self.machine_model.update_max_cycle(status_dict.get('Max_cycle', self.machine_model.max_cycle))
+        if 'Pulse_width' in status_keys:
+            self.machine_model.update_pulse_width(status_dict['Pulse_width'])
+
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
         self.machine_state_updated.emit()

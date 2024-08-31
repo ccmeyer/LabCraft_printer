@@ -618,6 +618,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     A widget to display the pressure readings and target
     """
     toggle_regulation_requested = QtCore.Signal()
+    # update_target_pressure_input = QtCore.Signal(float)
+    # update_pulse_width_input = QtCore.Signal(int)
     popup_message_signal = QtCore.Signal(str,str)
 
     def __init__(self, main_window, model,controller):
@@ -630,6 +632,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
         self.toggle_regulation_requested.connect(self.controller.toggle_regulation)
+        # self.update_target_pressure_input.connect(self.controller.set_absolute_pressure)
+        # self.update_pulse_width_input.connect(self.controller.set_pulse_width)
 
         self.update_regulation_button_state(self.model.machine_model.is_connected())
         self.popup_message_signal.connect(self.main_window.popup_message)
@@ -641,12 +645,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.current_pressure_label = QtWidgets.QLabel("Current Pressure:")  # Create a new QLabel for the current pressure label
         self.current_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
         self.target_pressure_label = QtWidgets.QLabel("Target Pressure:")  # Create a new QLabel for the target pressure label
-        self.target_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the target pressure value
+        self.target_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
+        self.target_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
+        self.target_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
+        self.target_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
+        self.target_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.target_pressure_spinbox.valueChanged.connect(self.handle_target_pressure_change)  # Connect value changes to the update_pressure function
 
         self.layout.addWidget(self.current_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
         self.layout.addWidget(self.current_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
         self.layout.addWidget(self.target_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
-        self.layout.addWidget(self.target_pressure_value, 0, 3)  # Add the QLabel to the layout at position (1, 1)
+        self.layout.addWidget(self.target_pressure_spinbox, 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
 
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -688,9 +697,30 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
-        self.layout.addWidget(self.calibrate_pressure_button, 3, 0, 1, 4)
+        self.layout.addWidget(self.calibrate_pressure_button, 3, 0, 2, 2)
+
+        self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
+        self.pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.pulse_width_spinbox.setRange(0, 10000)
+        self.pulse_width_spinbox.setSingleStep(50)
+        self.pulse_width_spinbox.setValue(3000)
+        self.pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pulse_width_spinbox.valueChanged.connect(self.handle_pulse_width_change)
+        self.layout.addWidget(self.pulse_width_label,3,2,1,1)
+        self.layout.addWidget(self.pulse_width_spinbox,3,3,1,1)
+
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
+
+    def handle_target_pressure_change(self, value):
+        """Handle changes to the target pressure value."""
+        # self.update_target_pressure_input.emit(value)
+        self.controller.set_absolute_pressure(value,manual=True)
+
+    def handle_pulse_width_change(self, value):
+        """Handle changes to the pulse width value."""
+        # self.update_pulse_width_input.emit(value)
+        self.controller.set_pulse_width(value,manual=True)
 
     def update_pressure(self, pressure_log):
         """Update the current pressure label and plot with the new pressure values."""
@@ -716,7 +746,14 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         # Update the pressure display labels
         self.current_pressure_value.setText(f"{pressure_log[-1]:.3f}")
-        self.target_pressure_value.setText(f"{target_pressure:.3f}")
+
+        self.target_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+        self.target_pressure_spinbox.setValue(target_pressure)
+        self.target_pressure_spinbox.blockSignals(False)  # Unblock signals
+
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(self.model.machine_model.pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
@@ -2219,6 +2256,7 @@ class BoardStatusBox(QGroupBox):
 
         # Connect model signals to the update methods
         self.model.machine_state_updated.connect(self.update_status)
+        self.model.location_model.locations_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
         self.model.machine_model.home_status_signal.connect(self.update_status)
     

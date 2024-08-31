@@ -125,6 +125,8 @@ CommandType mapCommandType(const char* commandName) {
         return RELATIVE_PRESSURE;
     } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
         return ABSOLUTE_PRESSURE;
+    } else if (strcmp(commandName, "SET_WIDTH") == 0) {
+        return SET_WIDTH;
     } else if (strcmp(commandName, "PRINT") == 0) {
         return PRINT;
     } else if (strcmp(commandName, "RESET_P") == 0) {

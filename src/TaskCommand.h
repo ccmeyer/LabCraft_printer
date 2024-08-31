@@ -56,6 +56,7 @@ enum CommandType {
     DEREGULATE_PRESSURE,
     RELATIVE_PRESSURE,
     ABSOLUTE_PRESSURE,
+    SET_WIDTH,
     PRINT,
     RESET_P,
     WAIT,
