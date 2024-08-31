@@ -1741,6 +1741,7 @@ class LocationModel(QObject):
     """
 
     locations_updated = Signal()  # Signal to notify when locations are updated
+    current_location_updated = Signal(str)  # Signal to notify when the current location is updated
 
     def __init__(self, json_file_path='Presets\\Locations.json'):
         super().__init__()
@@ -1779,13 +1780,14 @@ class LocationModel(QObject):
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
         self.locations[name] = {'X': x, 'Y': y, 'Z': z}
-        self.locations_updated.emit()
+        self.locations_updated.emit(name)
         print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
         """Update an existing location by name."""
         if name in self.locations:
             self.locations[name] = {'X': x, 'Y': y, 'Z': z}
+            self.current_location_updated.emit(name)
             self.locations_updated.emit()
             print(f"Location '{name}' updated.")
         else:
@@ -2126,6 +2128,7 @@ class Model(QObject):
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
+        self.location_model.current_location_updated.connect(self.machine_model.update_current_location)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:

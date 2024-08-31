@@ -1095,6 +1095,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
         self.model.well_plate.clear_all_wells_signal.connect(self.update_well_colors)
         self.model.well_plate.plate_format_changed_signal.connect(self.update_grid)
+        self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
         self.init_ui()
 
     def init_ui(self):
@@ -1121,13 +1122,24 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         
         self.bottom_layout = QHBoxLayout()
 
-        self.design_experiment_button = QPushButton("Design Experiment")
+        self.design_experiment_button = QPushButton("Experiment Editor")
         self.design_experiment_button.clicked.connect(self.open_experiment_designer)
         self.bottom_layout.addWidget(self.design_experiment_button)
 
-        self.experiment_button = QPushButton("Load Experiment")
-        self.experiment_button.clicked.connect(self.on_load_experiment)
-        self.bottom_layout.addWidget(self.experiment_button)
+        # self.experiment_button = QPushButton("Load Experiment")
+        # self.experiment_button.clicked.connect(self.on_load_experiment)
+        # self.bottom_layout.addWidget(self.experiment_button)
+
+        self.start_print_array_button = QPushButton("Start Print")
+        self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+        self.start_print_array_button.setEnabled(False)
+        self.start_print_array_button.clicked.connect(self.start_print_array)
+        self.bottom_layout.addWidget(self.start_print_array_button)
+
+        self.pause_machine_button = QPushButton("Pause")
+        self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
+        self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
+        self.bottom_layout.addWidget(self.pause_machine_button)
 
         self.reagent_selection = QComboBox()
         self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names_formated())
@@ -1140,6 +1152,23 @@ class WellPlateWidget(QtWidgets.QGroupBox):
 
         self.setLayout(self.layout)
         self.update_grid()
+
+    def update_start_print_array_button(self):
+        if self.model.rack_model.gripper_printer_head is not None:
+            self.start_print_array_button.setEnabled(True)
+            self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+        else:
+            self.start_print_array_button.setEnabled(False)
+            self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+
+    def start_print_array(self):
+        if not self.controller.check_if_all_completed():
+            return
+        response = self.main_window.popup_yes_no("Start Print Array","Are you sure you want to start the print array?")
+        if response == "&Yes":
+            self.controller.print_array()
+        else:
+            return
 
     def update_grid(self):
         """Update the grid layout to match the selected plate format."""

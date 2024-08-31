@@ -482,6 +482,10 @@ class Controller(QObject):
         """Resets the droplet count for all wells in the well plate for all stock solutions."""
         self.model.well_plate.reset_all_wells()
         self.update_slots_signal.emit()
+
+    def check_if_all_completed(self):
+        """Check if all commands have been completed."""
+        return self.machine.check_if_all_completed()
     
     def print_array(self):
         '''

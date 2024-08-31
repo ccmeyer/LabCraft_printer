@@ -601,6 +601,7 @@ class DisconnectWorker(QThread):
                 break
 
         self.parent.clear_command_queue()
+        time.sleep(1)
         self.finished.emit()
     
 
