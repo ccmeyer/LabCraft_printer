@@ -1743,14 +1743,14 @@ class LocationModel(QObject):
     locations_updated = Signal()  # Signal to notify when locations are updated
     current_location_updated = Signal(str)  # Signal to notify when the current location is updated
 
-    def __init__(self, json_file_path='Presets\\Locations.json'):
+    def __init__(self, json_file_path='Presets\\Locations.json',obstacle_path='Presets\\Obstacles.json'):
         super().__init__()
-        # Get the directory of the current script
-        # script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct the full file path
-        # self.json_file_path = os.path.join(script_dir, json_file_path)     
+        # Get the directory of the current script    
         self.json_file_path = json_file_path   
         self.locations = {}  # Dictionary to hold location data
+        self.obstacle_path = obstacle_path
+        self.boundaries = []
+        self.obstacles = []
 
     def load_locations(self):
         """Load locations from a JSON file."""
@@ -1776,6 +1776,29 @@ class LocationModel(QObject):
             print(f"Locations saved to {self.json_file_path}")
         except Exception as e:
             print(f"Failed to save locations: {e}")
+
+    def load_obstacles(self):
+        """Load locations from a JSON file."""
+        try:
+            with open(self.obstacle_path, "r") as file:
+                data = json.load(file)
+                self.boundaries = data['boundaries']
+                self.obstacles = data['obstacles']
+            print(f"Obstacles loaded from {self.obstacle_path}")
+        except FileNotFoundError:
+            print(f"{self.obstacle_path} not found. Starting with an empty obstacles dictionary.")
+            self.obstacles = {}
+        except json.JSONDecodeError:
+            print(f"Error decoding JSON from {self.obstacle_path}. Starting with an empty locations dictionary.")
+            self.obstacles = {}
+        except Exception as e:
+            print(f"Failed to load locations: {e}")
+
+    def get_obstacles(self):
+        return self.obstacles
+    
+    def get_boundaries(self):
+        return self.boundaries
 
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
@@ -2125,6 +2148,7 @@ class Model(QObject):
         self.plates_path = os.path.join(self.script_dir, 'Presets','Plates.json')
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
+        self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
 
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
@@ -2132,8 +2156,9 @@ class Model(QObject):
         self.num_slots = 5
         self.location_data = self.load_all_location_data(self.locations_path)
         self.rack_model = RackModel(self.num_slots,location_data=self.location_data)
-        self.location_model = LocationModel(json_file_path=self.locations_path)
+        self.location_model = LocationModel(json_file_path=self.locations_path,obstacle_path=self.obstacles_path)
         self.location_model.load_locations()  # Load locations at startup
+        self.location_model.load_obstacles()
         self.all_plate_data = self.load_all_plate_data(self.plates_path)
         self.well_plate = WellPlate(self.all_plate_data)
         self.stock_solutions = StockSolutionManager()

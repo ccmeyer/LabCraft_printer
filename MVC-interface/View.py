@@ -1510,12 +1510,12 @@ class BaseCalibrationDialog(QDialog):
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
 
@@ -1561,14 +1561,14 @@ class BaseCalibrationDialog(QDialog):
             return
         else:
             intermediate_coords = self.apply_offset(target_coordinates)
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(intermediate_coords))
-            self.controller.set_absolute_coordinates(*self.convert_dict_coords(target_coordinates))
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(intermediate_coords),override=True)
+            self.controller.set_absolute_coordinates(*self.convert_dict_coords(target_coordinates),override=True)
 
     def move_to_offset_position(self):
         """Move the machine to the offset position from the current position."""
         current_position = self.model.machine_model.get_current_position_dict_capital().copy()
         offset_position = self.apply_offset(current_position)
-        self.controller.set_absolute_coordinates(*self.convert_dict_coords(offset_position))
+        self.controller.set_absolute_coordinates(*self.convert_dict_coords(offset_position),override=True)
 
     def next_step(self):
         # Check if the machine has completed all commands in the queue

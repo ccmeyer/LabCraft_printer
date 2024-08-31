@@ -3,6 +3,7 @@ from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
 import time
+import numpy as np
 
 
 class Controller(QObject):
@@ -26,6 +27,7 @@ class Controller(QObject):
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
+        self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -97,45 +99,123 @@ class Controller(QObject):
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
 
-    def set_relative_X(self, x,manual=False,handler=None):
+    def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+                print('Collision detected')
+                return False
         print(f"Setting relative X: {x}")
         self.machine.set_relative_X(x,manual=manual,handler=handler)
         self.expected_position['X'] += x
+        return True
 
-    def set_relative_Y(self, y,manual=False,handler=None):
+    def set_relative_Y(self, y,manual=False,handler=None, override=False):
         """Set the relative Y coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}):
+                print('Collision detected')
+                return False
         print(f"Setting relative Y: {y}")
         self.machine.set_relative_Y(y,manual=manual,handler=handler)
         self.expected_position['Y'] += y
+        return True
 
-    def set_relative_Z(self, z,manual=False,handler=None):
+    def set_relative_Z(self, z,manual=False,handler=None, override=False):
         """Set the relative Z coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}):
+                print('Collision detected')
+                return False
         print(f"Setting relative Z: {z}")
         self.machine.set_relative_Z(z,manual=manual,handler=handler)
         self.expected_position['Z'] += z
+        return True
 
-    def set_absolute_X(self, x,manual=False,handler=None):
+    def set_absolute_X(self, x,manual=False,handler=None, override=False):
         """Set the absolute X coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+                print('Collision detected')
+                return False
         print(f"Setting absolute X: {x}")
         self.machine.set_absolute_X(x,manual=manual,handler=handler)
         self.update_expected_position(x=x)
+        return True
 
-    def set_absolute_Y(self, y,manual=False,handler=None):
+    def set_absolute_Y(self, y,manual=False,handler=None, override=False):
         """Set the absolute Y coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}):
+                print('Collision detected')
+                return False
         print(f"Setting absolute Y: {y}")
         self.machine.set_absolute_Y(y,manual=manual,handler=handler)
         self.update_expected_position(y=y)
+        return True
     
-    def set_absolute_Z(self, z,manual=False,handler=None):
+    def set_absolute_Z(self, z,manual=False,handler=None, override=False):
         """Set the absolute Z coordinate for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}):
+                print('Collision detected')
+                return False
         print(f"Setting absolute Z: {z}")
         self.machine.set_absolute_Z(z,manual=manual,handler=handler)
         self.update_expected_position(z=z)
+        return True
+
+    def check_collision(self,current_pos, target_pos):
+        """
+        Check if a straight-line path from current_pos to target_pos intersects any 3D obstacles
+        or goes out of bounds.
+        
+        Parameters:
+        - current_pos: tuple of floats (x, y, z) representing the current position.
+        - target_pos: tuple of floats (x, y, z) representing the target position.
+        - obstacles: list of obstacles, where each obstacle is defined by two tuples representing
+                    the opposite corners of a 3D rectangular prism: [(corner1, corner2), ...]
+        - boundaries: tuple of two corners defining the machine workspace boundaries.
+
+        Returns:
+        - True if a collision or out-of-bounds is detected, False otherwise.
+        """
+        boundaries = self.model.location_model.get_boundaries()
+        obstacles = self.model.location_model.get_obstacles()
+
+        # Boundary check
+        for axis in ['X', 'Y', 'Z']:
+            if not (boundaries['min'][axis] <= min(current_pos[axis], target_pos[axis]) and 
+                    max(current_pos[axis], target_pos[axis]) <= boundaries['max'][axis]):
+                print(f"Path goes out of bounds on axis {axis}.")
+                return True
+
+        # Obstacle check
+        for obstacle in obstacles:
+            min_corner = {axis: min(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
+            max_corner = {axis: max(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
+            
+            for axis in ['X', 'Y', 'Z']:
+                min_proj = min(current_pos[axis], target_pos[axis])
+                max_proj = max(current_pos[axis], target_pos[axis])
+                
+                if max_proj < min_corner[axis] or min_proj > max_corner[axis]:
+                    break
+            else:
+                print(f"Collision with {obstacle['name']} detected.")
+                print(f'Current position: {current_pos}')
+                print(f'Target position: {target_pos}')
+                return True
+
+        return False
     
-    def set_relative_coordinates(self, x, y, z, manual=False, handler=None):
+    def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the relative coordinates for the machine."""
         print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
+        if not override:
+            if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z'] + z}):
+                print('Collision detected')
+                return False
         
         # If moving up in Z, do Z first
         if z < 0:
@@ -158,11 +238,19 @@ class Controller(QObject):
         self.expected_position['X'] += x
         self.expected_position['Y'] += y
         self.expected_position['Z'] += z
+        return True
 
-    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None):
+    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the absolute coordinates for the machine."""
         print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
         print(f"Expected position: {self.expected_position}")
+
+        if not override:
+            if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': z}):
+                print('---Collision detected---')
+                return False
+            else:
+                print('Safe')
         
         if self.expected_position['Z'] != z:
             print('Z changed')
@@ -196,6 +284,8 @@ class Controller(QObject):
 
         # Update the expected position
         self.update_expected_position(x=x, y=y, z=z)
+
+        return True
 
 
     def set_relative_pressure(self, pressure,manual=False):
@@ -279,6 +369,7 @@ class Controller(QObject):
     def home_complete_handler(self):
         """Handle the home complete signal."""
         self.model.machine_model.handle_home_complete()
+        self.update_expected_position(x=500, y=500, z=500)
 
     def update_expected_position(self, x=None, y=None, z=None):
         """Update the expected position after a move."""
@@ -288,12 +379,16 @@ class Controller(QObject):
             self.expected_position['Y'] = y
         if z is not None:
             self.expected_position['Z'] = z
+
+    def update_expected_with_current(self):
+        """Update the expected position with the current position."""
+        self.expected_position = self.model.machine_model.get_current_position_dict()
     
     def update_location_handler(self,name):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False,coords=None):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
         if manual == True:
             status = self.machine.check_if_all_completed()
@@ -325,38 +420,38 @@ class Controller(QObject):
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
-            self.set_absolute_Z(safe_height)
-            self.set_absolute_Y(target['Y'])
-            self.set_absolute_X(target['X'])
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
+            self.set_absolute_Z(safe_height,override=override)
+            self.set_absolute_Y(target['Y'],override=override)
+            self.set_absolute_X(target['X'],override=override)
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
 
         elif not direct and safe_y:
             print('Not direct, safe-y')
-            self.set_absolute_Z(safe_height)
-            self.set_absolute_Y(safe_y_value)
-            self.set_absolute_X(current['X'])
-            self.set_absolute_Y(target['Y'])
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
+            self.set_absolute_Z(safe_height,override=override)
+            self.set_absolute_Y(safe_y_value,override=override)
+            self.set_absolute_X(current['X'],override=override)
+            self.set_absolute_Y(target['Y'],override=override)
+            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
         elif direct and safe_y:
             if up_first:
-                self.set_absolute_Z(target['Z'])
-                self.set_absolute_Y(safe_y_value)
-                self.set_absolute_X(target['X'])
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name))
+                self.set_absolute_Z(target['Z'],override=override)
+                self.set_absolute_Y(safe_y_value,override=override)
+                self.set_absolute_X(target['X'],override=override)
+                self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name),override=override)
             else:
-                self.set_absolute_Y(safe_y_value)
-                self.set_absolute_X(target['X'])
-                self.set_absolute_Y(target['Y'])
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
+                self.set_absolute_Y(safe_y_value,override=override)
+                self.set_absolute_X(target['X'],override=override)
+                self.set_absolute_Y(target['Y'],override=override)
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
         else:
             if up_first:
-                self.set_absolute_Z(target['Z'])
-                self.set_absolute_Y(target['Y'])
-                self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name))
+                self.set_absolute_Z(target['Z'],override=override)
+                self.set_absolute_Y(target['Y'],override=override)
+                self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name),override=override)
             else:
-                self.set_absolute_Y(target['Y'])
-                self.set_absolute_X(target['X'])
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name))
+                self.set_absolute_Y(target['Y'],override=override)
+                self.set_absolute_X(target['X'],override=override)
+                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
 
         # self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
     
@@ -398,10 +493,10 @@ class Controller(QObject):
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
 
-            self.move_to_location(name,coords=coords)
+            self.move_to_location(name,coords=coords,override=True)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
             self.wait_command()
-            self.move_to_location(name,x_offset=True,coords=coords)
+            self.move_to_location(name,x_offset=True,coords=coords,override=True)
         else:
             print(f'Error: {error_msg}')
 
@@ -422,10 +517,10 @@ class Controller(QObject):
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
-            self.move_to_location(name,coords=coords)
+            self.move_to_location(name,coords=coords,override=True)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
             self.wait_command()
-            self.move_to_location(name,x_offset=True,coords=coords)
+            self.move_to_location(name,x_offset=True,coords=coords,override=True)
             self.close_gripper()
             self.wait_command()
         else:
@@ -523,7 +618,7 @@ class Controller(QObject):
                 print(f'No droplets required for well {well.well_id}')
                 continue
             well_coords = well.get_coordinates()
-            self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'])
+            self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'],override=True)
             print(f'Printing {target_droplets} droplets to well {well.well_id}')
             is_last_iteration = i == len(wells_with_droplets) - 1
             if not is_last_iteration:

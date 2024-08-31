@@ -517,6 +517,7 @@ class CommandQueue(QObject):
     Completed commands are transferred to the completed queue.
     """
     queue_updated = Signal()  # Signal to emit when the queue is updated
+    commands_completed = Signal()  # Signal to emit when all commands are completed
 
     def __init__(self):
         super().__init__()  # Initialize the QObject
@@ -570,6 +571,9 @@ class CommandQueue(QObject):
             if len(self.completed) > 100:
                 self.completed.popleft()
 
+        if len(self.queue) == 0:
+            self.commands_completed.emit()
+            
         self.queue_updated.emit()
 
     def clear_queue(self):
