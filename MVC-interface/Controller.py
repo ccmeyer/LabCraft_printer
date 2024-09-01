@@ -554,6 +554,7 @@ class Controller(QObject):
 
     def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
         self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
+        self.model.experiment_model.create_progress_file()
         print(f'Printing complete for well {well_id}')
 
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
@@ -562,6 +563,7 @@ class Controller(QObject):
             self.machine.reset_acceleration()
             self.move_to_location('pause')
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
+            self.model.experiment_model.update_progress(well_id)
             self.array_complete.emit()
             print('---Printing complete---')
         

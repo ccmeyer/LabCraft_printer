@@ -155,8 +155,9 @@ class ExperimentModel(QObject):
     experiment_generated = Signal(int,int)  # Signal to notify when the experiment is generated, passing the total number of reactions
     update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
     
-    def __init__(self):
+    def __init__(self,well_plate):
         super().__init__()
+        self.well_plate = well_plate
         self.reagents = []
         self.metadata = {
             "replicates": 1,
@@ -168,6 +169,11 @@ class ExperimentModel(QObject):
         self.experiment_df = pd.DataFrame()
         self.complete_lookup_table = pd.DataFrame()
         self.all_droplet_df = pd.DataFrame()
+
+        self.experiment_name = None
+        self.experiment_file_path = None
+        self.progress_file_path = None
+        self.progress_data = {}
 
         self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0])
 
@@ -457,11 +463,12 @@ class ExperimentModel(QObject):
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
     
-    def save_experiment(self, filename):
+    def save_experiment(self, experiment_name,filename):
         """Save all information required to repopulate the model to a JSON file."""
         print(f'Saving experiment to {filename}')
-        print(f'Experiment data:\n{self.reagents}')
-        print(f'Metadata:\n{self.metadata}')
+        self.experiment_name = experiment_name
+        self.experiment_file_path = filename
+
         data_to_save = {
             "reagents": self.reagents,
             "metadata": self.metadata,
@@ -469,7 +476,56 @@ class ExperimentModel(QObject):
         with open(filename, 'w') as file:
             json.dump(data_to_save, file, indent=4, default=self.convert_to_serializable)
         print(f"Experiment data saved to {filename}")
-    
+
+    def create_progress_file(self,file_name=None):
+        """Create a JSON file to store the progress of the experiment."""
+        if file_name is not None:
+            self.progress_file_path = file_name
+        print(f'Creating progress file at {self.progress_file_path}')
+
+        for well in self.well_plate.get_all_wells():
+            well_id = well.well_id
+            reaction = well.assigned_reaction
+            
+            if reaction:
+                self.progress_data[well_id] = {
+                    "reaction_id": reaction.unique_id,
+                    "reagents": {
+                        stock_id: {
+                            "target_droplets": reagent.get_target_droplets(),
+                            "added_droplets": reagent.added_droplets
+                        }
+                        for stock_id, reagent in reaction.get_all_reagents().items()
+                    },
+                    "completed": reaction.check_all_complete()
+                }
+
+        with open(self.progress_file_path, 'w') as f:
+            json.dump(self.progress_data, f, indent=4)
+
+    def update_progress(self, well_id):
+        """Update the progress of a specific well in the experiment."""
+        well = self.well_plate.get_well(well_id)
+        reaction = well.assigned_reaction
+        
+        # Update the specific entry
+        self.progress_data[well_id] = {
+                "reaction_id": reaction.unique_id,
+                "reagents": {
+                    stock_id: {
+                        "target_droplets": reagent.get_target_droplets(),
+                        "added_droplets": reagent.added_droplets
+                    }
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                },
+                "completed": reaction.check_all_complete()
+            }
+
+        # Save the updated progress back to the file
+        with open(self.progress_file_path, 'w') as f:
+            json.dump(self.progress_data, f, indent=4)
+
+
     def load_experiment(self, filename):
         """Load all information required to repopulate the model from a JSON file."""
         with open(filename, 'r') as file:
@@ -502,7 +558,27 @@ class ExperimentModel(QObject):
             print(f'finished conc for {i}\n{self.experiment_df}')
         
         print(f"Experiment data loaded from {filename}")
-        
+
+    def read_progress_file(self, progress_file):
+        """Read the progress of the experiment from a JSON file."""
+        self.progress_file_path = progress_file
+        with open(progress_file, 'r') as file:
+            self.progress_data = json.load(file)
+
+    def load_progress(self):
+        for well_id, well_data in self.progress_data.items():
+            well = self.well_plate.get_well(well_id)
+            reaction = well.assigned_reaction
+            
+            if reaction and reaction.unique_id == well_data["reaction_id"]:
+                for stock_id, reagent_data in well_data["reagents"].items():
+                    reagent = reaction.get_reagent_by_id(stock_id)
+                    reagent.added_droplets = reagent_data["added_droplets"]
+                    reagent.completed = reagent.is_complete()
+
+                if well_data["completed"]:
+                    well.state_changed.emit(well_id)
+            
 
 
 class StockSolution(QObject):
@@ -2164,7 +2240,7 @@ class Model(QObject):
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
-        self.experiment_model = ExperimentModel()
+        self.experiment_model = ExperimentModel(self.well_plate)
         self.experiment_file_path = None
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
@@ -2312,6 +2388,7 @@ class Model(QObject):
         self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
+        self.experiment_model.load_progress()
         self.experiment_loaded.emit()
 
     def reload_experiment(self, plate_name=None):

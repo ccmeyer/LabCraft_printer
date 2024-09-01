@@ -2744,24 +2744,60 @@ class ExperimentDesignDialog(QDialog):
             self.experiment_model.calculate_concentrations(i,calc_experiment=False)
 
     def save_experiment(self):
-        """Save the current experiment setup to a file."""
+        """Save the current experiment setup to a new directory."""
         self.update_all_model_reagents()
+
         # Get the directory where the currently executed script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Define the directory for experiments relative to the script location
-        experiment_dir = os.path.join(script_dir, "Experiments")
+        # Define the base directory for experiments relative to the script location
+        base_experiment_dir = os.path.join(script_dir, "Experiments")
 
-        # Ensure the directory exists
-        if not os.path.exists(experiment_dir):
-            os.makedirs(experiment_dir)
+        # Ensure the base directory exists
+        if not os.path.exists(base_experiment_dir):
+            os.makedirs(base_experiment_dir)
 
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Experiment", experiment_dir, "JSON Files (*.json)")
-        if filename:
-            self.experiment_model.save_experiment(filename)
+        # Ask the user to define a name for the new directory
+        experiment_dir_name, ok = QInputDialog.getText(self, "Experiment Name", "Enter the name for the new experiment directory:")
+        
+        if ok and experiment_dir_name:
+            # Create the full path to the new directory
+            experiment_dir = os.path.join(base_experiment_dir, experiment_dir_name)
+            
+            # Check if the directory already exists
+            if os.path.exists(experiment_dir):
+                overwrite = QMessageBox.question(self, "Overwrite Directory?", 
+                                                "The directory already exists. Do you want to overwrite it?",
+                                                QMessageBox.Yes | QMessageBox.No)
+                if overwrite == QMessageBox.No:
+                    return
 
+            # Create the directory
+            os.makedirs(experiment_dir, exist_ok=True)
+
+            # Define the path for the experiment design JSON file within the new directory
+            experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
+            progress_file_path = os.path.join(experiment_dir, "progress.json")
+
+            # Save the experiment
+            self.experiment_model.save_experiment(experiment_dir_name,experiment_file_path)
+            self.experiment_model.create_progress_file(file_name=progress_file_path)
+
+            print(f"Experiment data saved in directory: {experiment_dir}")
+
+    def experiment_in_progress(self, progress_file_path):
+        with open(progress_file_path, 'r') as file:
+            loaded_data = json.load(file)
+        for well_id, well_data in loaded_data.items():
+            for stock_id, reagent_data in well_data["reagents"].items():
+                if reagent_data["added_droplets"] > 0:
+                    return True
+                
+        return False
+        
+    
     def load_experiment(self):
-        """Load a saved experiment setup from a file."""
+        """Load a saved experiment setup from a directory."""
         # Get the directory where the currently executed script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -2772,11 +2808,36 @@ class ExperimentDesignDialog(QDialog):
         if not os.path.exists(experiment_dir):
             os.makedirs(experiment_dir)
 
-        filename, _ = QFileDialog.getOpenFileName(self, "Load Experiment", experiment_dir, "JSON Files (*.json)")
-        if filename:
-            self.experiment_model.load_experiment(filename)
-            print("\n----Finished model loading----\n")
-            self.load_experiment_to_view()
+        # Ask the user to select the experiment directory
+        chosen_dir = QFileDialog.getExistingDirectory(self, "Select Experiment Directory", experiment_dir)
+
+        if chosen_dir:
+            # Define the path for the experiment design JSON file within the selected directory
+            experiment_file_path = os.path.join(chosen_dir, "experiment_design.json")
+
+            # Check if the experiment design file exists
+            if os.path.exists(experiment_file_path):
+                self.experiment_model.load_experiment(experiment_file_path)
+                print("\n----Finished model loading----\n")
+                self.load_experiment_to_view()
+
+                progress_file_path = os.path.join(chosen_dir, "progress.json")
+                if os.path.exists(progress_file_path):
+                    in_progress = self.experiment_in_progress(progress_file_path)
+                    if in_progress:
+                        resume = QMessageBox.question(self, "Resume previous run?", 
+                                                    "A previous run is saved for this experiment. Do you want to resume or start a fresh run?",
+                                                    QMessageBox.Yes | QMessageBox.No)
+                        if resume == QMessageBox.No:
+                            self.experiment_model.create_progress_file(file_name=progress_file_path)
+                            return
+                        elif resume == QMessageBox.Yes:
+                            self.experiment_model.read_progress_file(progress_file_path)
+                            self.close()
+                else:
+                    self.experiment_model.create_progress_file(file_name=progress_file_path) 
+            else:
+                print(f"No experiment_design.json file found in the directory: {chosen_dir}")
     
     # def optimize_stock_solutions(self):
     #     self.experiment_model.optimize_stock_solutions()
