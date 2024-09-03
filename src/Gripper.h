@@ -22,9 +22,9 @@ private:
     int valvePin2;
     unsigned long lastPumpActivationTime;
     bool pumpActive;
-    bool busy;
+    volatile bool busy;
     bool gripperOpen;
-    int pumpOnDuration = 800000; // Default pump on duration of 500ms
+    int pumpOnDuration = 1500000; // Default pump on duration of 1500ms
     int refreshInterval = 60000000; // Default refresh interval of 60 seconds
 
     TaskQueue& taskQueue;  // Reference to the global TaskQueue

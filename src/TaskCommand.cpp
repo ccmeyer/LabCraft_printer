@@ -8,7 +8,8 @@ void TaskQueue::addTask(const Task& task) {
 
 // Method to execute the next task in the task queue
 void TaskQueue::executeNextTask() {
-    if (!taskQueue.empty()) {
+    if (!taskQueue.empty() && !taskRunning) {
+        taskRunning = true;
         Task currentTask = taskQueue.top();
         unsigned long currentMicros = micros();
 
@@ -16,6 +17,7 @@ void TaskQueue::executeNextTask() {
             taskQueue.pop();
             currentTask.function();  // Execute the task
         }
+        taskRunning = false;
     }
 }
 

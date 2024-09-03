@@ -32,6 +32,7 @@ private:
     };
 
     std::priority_queue<Task, std::vector<Task>, CompareTask> taskQueue;  // Priority queue to store tasks
+    bool taskRunning = false;  // Flag to indicate if a task is currently running
 };
 
 enum CommandType {
