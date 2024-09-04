@@ -177,12 +177,16 @@ void PressureRegulator::resetSyringe() {
 
 // Method to adjust the pressure based on current readings
 void PressureRegulator::adjustPressure() {
+    noInterrupts();
     if (currentState == PAUSED) {
         adjustPressureTask.nextExecutionTime = micros() + 10000;
         taskQueue.addTask(adjustPressureTask);
         return;
     }
-    if (!regulatingPressure || resetInProgress || homing) return;
+    if (!regulatingPressure || resetInProgress || homing) {
+        interrupts();
+        return;
+    }
 
     currentPressure = sensor.getPressure();
 
@@ -212,6 +216,7 @@ void PressureRegulator::adjustPressure() {
 
     adjustPressureTask.nextExecutionTime = micros() + adjustInterval;
     taskQueue.addTask(adjustPressureTask);
+    interrupts();
 }
 
 void PressureRegulator::stepMotorDirectly() {

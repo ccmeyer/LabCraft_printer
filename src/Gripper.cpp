@@ -49,13 +49,20 @@ void Gripper::turnOffPump() {
     setBusy(false);
 }
 
+// Method to set the open flag
+void Gripper::setOpen(bool gripperOpen) {
+    noInterrupts();
+    this->gripperOpen = gripperOpen;
+    interrupts();
+}
+
 // Method to open the gripper
 void Gripper::openGripper() {
     digitalWrite(valvePin1, HIGH);
     digitalWrite(valvePin2, HIGH);
     // Serial.println("Opening gripper");
     turnOnPump(pumpOnDuration);  // Turn on the pump for 500ms to ensure full opening
-    gripperOpen = true;
+    setOpen(true);
 }
 
 // Method to close the gripper
@@ -64,7 +71,7 @@ void Gripper::closeGripper() {
     digitalWrite(valvePin2, LOW);
     // Serial.println("Closing gripper");
     turnOnPump(pumpOnDuration);  // Turn on the pump for 500ms to ensure full closing
-    gripperOpen = false;
+    setOpen(false);
     if (!refreshTaskScheduled){
         startVacuumRefresh();
     }
@@ -76,7 +83,6 @@ void Gripper::refreshVacuum() {
     currentMicros = micros();
     if (!pumpActive) {
         refreshTaskScheduled = false;
-        interrupts();
         return;
     }
     if ((currentMicros - lastPumpActivationTime >= refreshInterval)) {

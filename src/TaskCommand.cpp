@@ -3,19 +3,26 @@
 
 // Add a task to the queue
 void TaskQueue::addTask(const Task& task) {
+    noInterrupts();
     taskQueue.push(task);
+    interrupts();
 }
 
 // Method to execute the next task in the task queue
 void TaskQueue::executeNextTask() {
     if (!taskQueue.empty() && !taskRunning) {
         taskRunning = true;
+
+        noInterrupts();
         Task currentTask = taskQueue.top();
         unsigned long currentMicros = micros();
 
         if (currentMicros >= currentTask.nextExecutionTime) {
             taskQueue.pop();
+            interrupts();
             currentTask.function();  // Execute the task
+        } else {
+            interrupts();
         }
         taskRunning = false;
     }
@@ -23,14 +30,19 @@ void TaskQueue::executeNextTask() {
 
 // Remove the next task from the queue
 void TaskQueue::removeTask() {
+    noInterrupts();
     if (!taskQueue.empty()) {
         taskQueue.pop();
     }
+    interrupts();
 }
 
 // Check if the queue is empty
 bool TaskQueue::isEmpty() const {
-    return taskQueue.empty();
+    noInterrupts();
+    bool result = taskQueue.empty();
+    interrupts();
+    return result;
 }
 
 // Add a command to the queue

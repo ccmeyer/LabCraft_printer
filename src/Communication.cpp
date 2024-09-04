@@ -55,62 +55,86 @@ void Communication::sendStatus() {
                 break;
             case X:
                 Serial.print("X:");
+                noInterrupts();
                 Serial.println(stepperX.currentPosition());
+                interrupts();
                 statusStep = Y;
                 break;
             case Y:
                 Serial.print("Y:");
+                noInterrupts();
                 Serial.println(stepperY.currentPosition());
+                interrupts();
                 statusStep = Z;
                 break;
             case Z:
                 Serial.print("Z:");
+                noInterrupts();
                 Serial.println(stepperZ.currentPosition());
+                interrupts();
                 statusStep = P;
                 break;
             case P:
                 Serial.print("P:");
+                noInterrupts();
                 Serial.println(regulator.getCurrentPosition());
+                interrupts();
                 statusStep = TARGET_X;
                 break;
             case TARGET_X:
                 Serial.print("Tar_X:");
+                noInterrupts();
                 Serial.println(stepperX.targetPosition());
+                interrupts();
                 statusStep = TARGET_Y;
                 break;
             case TARGET_Y:
                 Serial.print("Tar_Y:");
+                noInterrupts();
                 Serial.println(stepperY.targetPosition());
+                interrupts();
                 statusStep = TARGET_Z;
                 break;
             case TARGET_Z:
                 Serial.print("Tar_Z:");
+                noInterrupts();
                 Serial.println(stepperZ.targetPosition());
+                interrupts();
                 statusStep = TARGET_P;
                 break;
             case TARGET_P:
                 Serial.print("Tar_P:");
+                noInterrupts();
                 Serial.println(regulator.getTargetPosition());
+                interrupts();
                 statusStep = GRIPPER;
                 break;
             case GRIPPER:
                 Serial.print("Gripper:");
+                noInterrupts();
                 Serial.println(gripper.isOpen());
+                interrupts();
                 statusStep = PRESSURE;
                 break;
             case PRESSURE:
                 Serial.print("Pressure:");
+                noInterrupts();
                 Serial.println(round(pressureSensor.getPressure()));
+                interrupts();
                 statusStep = TARGET_PRESSURE;
                 break;
             case TARGET_PRESSURE:
                 Serial.print("Tar_pressure:");
+                noInterrupts();
                 Serial.println(round(regulator.getTargetPressure()));
+                interrupts();
                 statusStep = PULSE_WIDTH;
                 break;
             case PULSE_WIDTH:
                 Serial.print("Pulse_width:");
+                noInterrupts();
                 Serial.println(printer.getDuration());
+                interrupts();
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -171,6 +195,7 @@ void Communication::readSerial(){
 
 // Method to parse the received command and add it to the command queue
 void Communication::parseAndAddCommand() {
+    noInterrupts();
     Command newCommand = convertCommand(receivedChars);
     if (newCommand.type == PAUSE) {
         currentState = PAUSED;
@@ -204,11 +229,13 @@ void Communication::parseAndAddCommand() {
         Serial.println(newCommand.type);
         lastAddedCmdNum = newCommand.commandNum;
         commandQueue.addCommand(newCommand);
-    } 
+    }
+    interrupts();
 }
 
 // Task to execute the next command from the command queue
 void Communication::executeCommandTask() {
+    noInterrupts();
     if (!commandQueue.isEmpty()) {
         if (checkIfFree()) {
             lastCompletedCmdNum = currentCmdNum;
@@ -226,6 +253,7 @@ void Communication::executeCommandTask() {
     // Reinsert the task into the queue to execute the next command
     executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
     taskQueue.addTask(executeCmdTask);
+    interrupts();
 }
 
 // Method to check if the system is free to execute a new command
