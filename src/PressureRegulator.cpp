@@ -138,6 +138,11 @@ void PressureRegulator::resetState() {
     stepper.resetState();
     digitalWrite(valvePin, LOW);
 }
+
+// Method to reset the targetReached flag
+void PressureRegulator::resetTargetReached() {
+    targetReached = false;
+}
     
 // Method to reset the syringe
 void PressureRegulator::resetSyringe() {
@@ -161,6 +166,7 @@ void PressureRegulator::resetSyringe() {
     else {                            // Flag reset complete
         resetInProgress = false;
         stepperTaskActive = false;
+        targetReached = false;
         digitalWrite(valvePin, LOW);
         if (regulatingPressure) {
             adjustPressureTask.nextExecutionTime = micros();

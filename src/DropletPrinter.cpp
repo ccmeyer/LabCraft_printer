@@ -33,6 +33,7 @@ unsigned long DropletPrinter::getDuration() {
 void DropletPrinter::startPrinting(int numberOfDroplets) {
     targetDroplets += numberOfDroplets;
     printingComplete = false;
+    regulator.resetTargetReached();
 
     // Start the printing task
     printDropletTask.nextExecutionTime = micros();

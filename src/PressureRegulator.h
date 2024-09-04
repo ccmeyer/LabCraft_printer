@@ -26,6 +26,7 @@ public:
     bool isRegulating();
     void resetState();  // Method to reset the state of the regulator
     void restartRegulation();  // Method to restart pressure regulation task if already regulating
+    void resetTargetReached();  // Method to reset the targetReached flag
 
 private:
     CustomStepper& stepper;       // Reference to the CustomStepper controlling the syringe
