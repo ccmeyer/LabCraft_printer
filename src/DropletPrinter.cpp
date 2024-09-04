@@ -25,7 +25,7 @@ void DropletPrinter::setDuration(unsigned long duration) {
 }
 
 // Method to get the duration
-unsigned long DropletPrinter::getDuration() {
+unsigned long DropletPrinter::getDuration() const{
     return duration;
 }
 
@@ -46,7 +46,7 @@ bool DropletPrinter::isPrintingComplete() const {
 }
 
 // Method to check if the printer is busy
-bool DropletPrinter::isBusy() {
+bool DropletPrinter::isBusy() const{
     return !printingComplete;
 }
 

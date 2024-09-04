@@ -27,7 +27,7 @@ void PressureSensor::resetPressure() {
 }
 
 // Method to get the current pressure value
-float PressureSensor::getPressure() {
+float PressureSensor::getPressure() const{
     return currentPressure;
 }
 

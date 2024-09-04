@@ -12,10 +12,10 @@ public:
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
     void setDuration(unsigned long duration);
-    unsigned long getDuration();
+    unsigned long getDuration() const;
     void startPrinting(int numberOfDroplets);
     bool isPrintingComplete() const;
-    bool isBusy();
+    bool isBusy() const;
     void resetDropletCounts();
 
 private:

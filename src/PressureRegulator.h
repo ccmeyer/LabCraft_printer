@@ -17,13 +17,13 @@ public:
     void beginRegulation();
     void setTargetPressureAbsolute(int targetPressure);
     void setTargetPressureRelative(int targetPressure);
-    float getTargetPressure();
-    long getCurrentPosition();
-    long getTargetPosition();
+    float getTargetPressure() const;
+    long getCurrentPosition() const;
+    long getTargetPosition() const;
     void stopRegulation();
     void resetSyringe();
-    bool isBusy();
-    bool isRegulating();
+    bool isBusy() const;
+    bool isRegulating() const;
     void resetState();  // Method to reset the state of the regulator
     void restartRegulation();  // Method to restart pressure regulation task if already regulating
     void resetTargetReached();  // Method to reset the targetReached flag

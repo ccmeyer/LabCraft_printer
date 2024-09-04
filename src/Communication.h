@@ -41,7 +41,7 @@ public:
     void receiveCommand();
     void parseAndAddCommand();
     void executeCommandTask();
-    bool checkIfFree();
+    bool checkIfFree() const;
     void startWaiting(long waitTime);
     void stopWaiting();
     void IncrementCycleCounter();

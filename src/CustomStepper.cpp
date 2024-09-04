@@ -27,7 +27,7 @@ void CustomStepper::updateStepInterval() {
 }
 
 // Method to check if the motor is busy
-bool CustomStepper::isBusy() {
+bool CustomStepper::isBusy() const{
     return busy;
 }
 
@@ -142,7 +142,7 @@ void CustomStepper::checkLimitSwitch() {
 }
 
 // Method to check if homing is complete
-bool CustomStepper::isHomingComplete() {
+bool CustomStepper::isHomingComplete() const{
     return homingComplete;
 }
 

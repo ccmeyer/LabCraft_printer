@@ -9,7 +9,7 @@ public:
 
     void beginCommunication(int sdaPin, int sclPin, int frequency);
     void resetPressure();
-    float getPressure();
+    float getPressure() const;
     void setReadInterval(int interval);  // Set the read interval
     void startReading();                // Start periodic pressure reading
     void stopReading();                 // Stop periodic pressure reading

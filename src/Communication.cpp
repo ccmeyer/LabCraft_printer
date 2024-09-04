@@ -229,7 +229,7 @@ void Communication::executeCommandTask() {
 }
 
 // Method to check if the system is free to execute a new command
-bool Communication::checkIfFree() {
+bool Communication::checkIfFree() const{
     if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
         return false;
     } else {

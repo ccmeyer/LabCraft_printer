@@ -91,17 +91,17 @@ void PressureRegulator::setTargetPressureRelative(int targetPressure) {
 }
 
 // Method to get the target pressure
-float PressureRegulator::getTargetPressure() {
+float PressureRegulator::getTargetPressure() const{
     return targetPressure;
 }
 
 // Method to get the current position of the syringe
-long PressureRegulator::getCurrentPosition() {
+long PressureRegulator::getCurrentPosition() const{
     return stepper.currentPosition();
 }
 
 // Method to get the target position of the syringe
-long PressureRegulator::getTargetPosition() {
+long PressureRegulator::getTargetPosition() const{
     return stepper.targetPosition();
 }
 
@@ -114,7 +114,7 @@ void PressureRegulator::stopRegulation() {
 }
 
 // Method to check if the syringe is busy
-bool PressureRegulator::isBusy() {
+bool PressureRegulator::isBusy() const{
     if ((regulatingPressure && !targetReached) || resetInProgress || stepper.isBusy()) {
         return true;
     } else {
@@ -123,7 +123,7 @@ bool PressureRegulator::isBusy() {
 }
 
 // Method to check if pressure regulation is active
-bool PressureRegulator::isRegulating() {
+bool PressureRegulator::isRegulating() const{
     return regulatingPressure;
 }
 
