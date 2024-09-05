@@ -16,6 +16,7 @@ public:
     void openGripper();
     void closeGripper();
     void refreshVacuum();
+    void setRefreshTaskScheduled(bool refreshTaskScheduled);
     void startVacuumRefresh();
     void stopVacuumRefresh();
 

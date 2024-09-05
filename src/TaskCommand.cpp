@@ -1,5 +1,11 @@
 #include "TaskCommand.h"
 #include <Arduino.h>
+#include "stm32f4xx_hal.h"
+#include <stm32f4xx_hal_iwdg.h>
+
+// Constructor for TaskQueue
+TaskQueue::TaskQueue(IWDG_HandleTypeDef* watchdogPtr) : watchdog(watchdogPtr) {}
+
 
 // Add a task to the queue
 void TaskQueue::addTask(const Task& task) {
@@ -21,6 +27,7 @@ void TaskQueue::executeNextTask() {
             taskQueue.pop();
             interrupts();
             currentTask.function();  // Execute the task
+            HAL_IWDG_Refresh(watchdog);  // Reset watchdog after task execution
         } else {
             interrupts();
         }

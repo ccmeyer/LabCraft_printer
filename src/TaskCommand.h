@@ -5,6 +5,8 @@
 #include <queue>
 #include <vector>
 #include <cstring> // For strcmp()
+#include "stm32f4xx_hal.h"
+#include <stm32f4xx_hal_iwdg.h>
 
 // Task struct to represent a scheduled task
 struct Task {
@@ -18,6 +20,7 @@ struct Task {
 // Task queue to manage scheduled tasks
 class TaskQueue {
 public:
+    TaskQueue(IWDG_HandleTypeDef* watchdogPtr);  // Constructor for TaskQueue
     void addTask(const Task& task);       // Add a task to the queue
     void removeTask();                    // Remove the next task from the queue
     void executeNextTask();               // Execute the next task in the queue
@@ -33,6 +36,7 @@ private:
 
     std::priority_queue<Task, std::vector<Task>, CompareTask> taskQueue;  // Priority queue to store tasks
     bool taskRunning = false;  // Flag to indicate if a task is currently running
+    IWDG_HandleTypeDef* watchdog;  // Pointer to the watchdog handler
 };
 
 enum CommandType {

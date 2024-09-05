@@ -223,6 +223,7 @@ void Communication::parseAndAddCommand() {
         startTasks();
         pressureSensor.startReading();
         regulator.restartRegulation();
+        gripper.setRefreshTaskScheduled(false);
         Serial.println("--Restarted tasks");
     } else {
         Serial.print("Adding command: ");

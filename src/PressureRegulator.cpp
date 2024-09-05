@@ -197,7 +197,7 @@ void PressureRegulator::adjustPressure() {
     } else if (abs(pressureDifference) > cutoff) {
         syringeSpeed = 1500;
     } else {
-        syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 100, 1500);
+        syringeSpeed = map(abs(pressureDifference), tolerance, cutoff, 300, 1500);
     }
     syringeSpeed *= (pressureDifference < 0) ? 1 : -1;
 

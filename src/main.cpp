@@ -64,10 +64,13 @@ extern "C" void SystemClock_Config(void)
 #include "pin_assignments.h"
 #include "all_constants.h"
 #include "GlobalState.h"
+#include "stm32f4xx_hal.h"
+#include <stm32f4xx_hal_iwdg.h>
 
 SystemState currentState = RUNNING; // Define the global state
+IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
 
-TaskQueue taskQueue;
+TaskQueue taskQueue(&hiwdg);
 CommandQueue commandQueue;
 Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
@@ -91,6 +94,18 @@ void setup() {
     pressureSensor.startReading();
     regulator.setupRegulator();
     comm.beginSerial();
+
+    __HAL_RCC_WWDG_CLK_ENABLE(); // Enable the clock for the watchdog
+    hiwdg.Instance = IWDG;       // Use the IWDG instance
+    hiwdg.Init.Prescaler = IWDG_PRESCALER_64;  // Set prescaler
+    hiwdg.Init.Reload = 3125;    // Set reload value (timeout duration)
+
+    // Initialize the watchdog timer
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK) {
+        // Handle initialization error
+        Serial.println("Watchdog initialization failed");
+    }
+    Serial.println("System initialized with watchdog");
 
 }
 
