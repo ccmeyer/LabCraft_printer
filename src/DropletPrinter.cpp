@@ -76,7 +76,7 @@ void DropletPrinter::configureTimer() {
 
     // Configure the timer for one-pulse mode
     htim->Instance = TIM9;  // Replace TIMx with your timer (e.g., TIM1, TIM2, etc.)
-    htim->Init.Period = timerTicks - 1;  // Set the period (time for one pulse)
+    htim->Init.Period = (timerTicks*2) - 1;  // Set the period (time for one pulse)
     htim->Init.CounterMode = TIM_COUNTERMODE_UP;
     htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim->Init.RepetitionCounter = 0;       // Only one repetition (single pulse)
@@ -87,7 +87,7 @@ void DropletPrinter::configureTimer() {
     }
     // Configure the output compare mode for PWM
     sConfigOC.OCMode = TIM_OCMODE_PWM1;     // Set PWM mode 1
-    sConfigOC.Pulse = timerTicks / 2;    // Set the duty cycle (pulse duration)
+    sConfigOC.Pulse = timerTicks;    // Set the duty cycle (pulse duration)
     sConfigOC.OCPolarity = TIM_OCPOLARITY_LOW;
     sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
     sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
