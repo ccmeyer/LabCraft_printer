@@ -71,8 +71,6 @@ void DropletPrinter::configureTimer() {
     // Convert the pulse duration in microseconds to timer ticks
     uint32_t timerTicks = convertMicrosecondsToTicks(duration, 84000000, 84);  // For 84MHz clock and prescaler 84
     // uint32_t timerTicks = 5;
-    Serial.println("Setting up timer");
-    Serial.println(timerTicks);
 
     // Configure the timer for one-pulse mode
     htim->Instance = TIM9;  // Replace TIMx with your timer (e.g., TIM1, TIM2, etc.)
@@ -96,7 +94,7 @@ void DropletPrinter::configureTimer() {
     if (HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, channel) != HAL_OK) {
         Serial.println("PWM configuration failed");
     }
-    Serial.println("Timer configured");
+    // Serial.println("Timer configured");
 }
 
 // Method to handle printing a single droplet

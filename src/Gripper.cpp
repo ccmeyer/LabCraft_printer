@@ -87,6 +87,7 @@ void Gripper::resetRefreshCounter() {
 // Method to refresh the vacuum periodically
 void Gripper::refreshVacuum() {
     Serial.println("--Refreshing vacuum");
+    Serial.println(refreshTaskCounter);
     currentMicros = micros();
     if (!pumpActive) {
         // setRefreshTaskScheduled(false);
