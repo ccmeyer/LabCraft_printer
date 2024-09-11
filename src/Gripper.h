@@ -16,7 +16,8 @@ public:
     void openGripper();
     void closeGripper();
     void refreshVacuum();
-    void setRefreshTaskScheduled(bool refreshTaskScheduled);
+    void changeRefreshCounter(int counterChange);
+    void resetRefreshCounter();
     void startVacuumRefresh();
     void stopVacuumRefresh();
 
@@ -26,7 +27,7 @@ private:
     int valvePin2;
     unsigned long lastPumpActivationTime;
     bool pumpActive;
-    bool refreshTaskScheduled;
+    int refreshTaskCounter;
     volatile bool busy;
     bool gripperOpen;
     int pumpOnDuration = 1500000; // Default pump on duration of 1500ms

@@ -4,7 +4,7 @@
 // Constructor
 Gripper::Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue)
     : pumpPin(pumpPin), valvePin1(valvePin1), valvePin2(valvePin2), taskQueue(taskQueue), pumpActive(false), 
-      gripperOpen(false), refreshTaskScheduled(false),lastPumpActivationTime(0), busy(false), currentMicros(0),
+      gripperOpen(false), refreshTaskCounter(0),lastPumpActivationTime(0), busy(false), currentMicros(0),
       pumpOffTask([this]() { this->turnOffPump(); }, 0), 
       refreshVacuumTask([this]() { this->refreshVacuum(); }, 0) {
     pinMode(pumpPin, OUTPUT);
@@ -72,9 +72,16 @@ void Gripper::closeGripper() {
     // Serial.println("Closing gripper");
     turnOnPump(pumpOnDuration);  // Turn on the pump for 500ms to ensure full closing
     setOpen(false);
-    if (!refreshTaskScheduled){
+    if (refreshTaskCounter == 0){
         startVacuumRefresh();
     }
+}
+
+// Method to reset the refresh counter
+void Gripper::resetRefreshCounter() {
+    noInterrupts();
+    refreshTaskCounter = 0;
+    interrupts();
 }
 
 // Method to refresh the vacuum periodically
@@ -82,39 +89,46 @@ void Gripper::refreshVacuum() {
     Serial.println("--Refreshing vacuum");
     currentMicros = micros();
     if (!pumpActive) {
-        setRefreshTaskScheduled(false);
+        // setRefreshTaskScheduled(false);
+        changeRefreshCounter(-1);
         return;
     }
     if ((currentMicros - lastPumpActivationTime >= refreshInterval)) {
         // Serial.println("Refreshing vacuum");
         turnOnPump(pumpOnDuration);  // Turn on the pump for 500ms to refresh the vacuum
-
+        changeRefreshCounter(-1);
         // Update the next execution time for the refreshVacuumTask
-        refreshVacuumTask.nextExecutionTime = currentMicros + refreshInterval;
-        taskQueue.addTask(refreshVacuumTask);
-        setRefreshTaskScheduled(true);
+        if (refreshTaskCounter == 0){
+            refreshVacuumTask.nextExecutionTime = currentMicros + refreshInterval;
+            taskQueue.addTask(refreshVacuumTask);
+            changeRefreshCounter(1);
+        }
+        
     } else {
         // If the pump is active but the refresh interval hasn't elapsed, reinsert the task
-        refreshVacuumTask.nextExecutionTime = lastPumpActivationTime + refreshInterval;
-        taskQueue.addTask(refreshVacuumTask);
-        setRefreshTaskScheduled(true);
+        changeRefreshCounter(-1);
+        if (refreshTaskCounter == 0){
+            refreshVacuumTask.nextExecutionTime = lastPumpActivationTime + refreshInterval;
+            taskQueue.addTask(refreshVacuumTask);
+            changeRefreshCounter(1);
+        }
     }
 }
 
 // Method to set the refresh task scheduled flag
-void Gripper::setRefreshTaskScheduled(bool refreshTaskScheduled) {
+void Gripper::changeRefreshCounter(int counterChange) {
     noInterrupts();
-    this->refreshTaskScheduled = refreshTaskScheduled;
+    this->refreshTaskCounter += counterChange;
     interrupts();
 }
 
 // Method to start the vacuum refresh
 void Gripper::startVacuumRefresh() {
-    if (!refreshTaskScheduled) {
+    if (refreshTaskCounter == 0) {
         pumpActive = true;
         refreshVacuumTask.nextExecutionTime = micros() + refreshInterval;
         taskQueue.addTask(refreshVacuumTask);
-        setRefreshTaskScheduled(true);
+        changeRefreshCounter(1);
     }
 }
 
