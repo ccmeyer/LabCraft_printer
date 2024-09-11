@@ -5,10 +5,11 @@
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
 #include <Arduino.h>
+#include "stm32f4xx_hal.h"
 
 class DropletPrinter {
 public:
-    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int valvePin);
+    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int valvePin, TIM_HandleTypeDef* htim, uint32_t channel);
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
     void setDuration(unsigned long duration);
@@ -35,7 +36,12 @@ private:
 
     Task printDropletTask;      // Task for printing droplets
 
+    TIM_HandleTypeDef* htim;    // Timer handler for one-pulse mode
+    uint32_t channel;                // Timer channel for one-pulse mode
+
     void printDroplet();        // Method to handle printing a single droplet
+    void configureTimer();      // Method to configure the timer for one-pulse mode
+    uint32_t convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler);
 };
 
 #endif // DROPLETPRINTER_H

@@ -5,8 +5,8 @@
 const int ledPin = PA13;    // Onboard LED
 
 //== FAN PINS ===========================================
-const int printPin = PA8;       // Fan0 - J50
-const int pumpValvePin1 = PE5;  // Fan1 - J51
+const int printPin = PE5;       // Fan1 - J51
+const int pumpValvePin1 = PA8;  // Fan0 - J50
 const int pumpValvePin2 = PD12; // Fan2 - J52
 const int pumpPin = PD13;       // Fan3 - J53
 const int printValvePin = PD14; // Fan4 - J54

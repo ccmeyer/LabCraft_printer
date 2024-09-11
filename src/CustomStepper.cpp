@@ -175,8 +175,8 @@ void CustomStepper::continueHoming() {
             if (limitPressed) {
                 // Serial.println("Limit switch pressed");
                 safeStop();
-                setMaxSpeed(maxSpeed / 10);
-                setAcceleration(maxAcceleration / 10);
+                setMaxSpeed(maxSpeed / 20);
+                setAcceleration(maxAcceleration / 20);
                 move(10000);
                 updateStepInterval();
                 homingStage = AWAY_FROM_SWITCH;

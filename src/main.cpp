@@ -69,6 +69,7 @@ extern "C" void SystemClock_Config(void)
 
 SystemState currentState = RUNNING; // Define the global state
 IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
+TIM_HandleTypeDef htim9;  // Define your timer handle
 
 TaskQueue taskQueue(&hiwdg);
 CommandQueue commandQueue;
@@ -79,13 +80,46 @@ CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, t
 CustomStepper stepperP(stepperP.DRIVER,P_EN_PIN, P_STEP_PIN, P_DIR_PIN, pstop, taskQueue,P_INV_DIR);
 PressureSensor pressureSensor(sensorAddress,taskQueue);
 PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
-DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin);
+DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin, &htim9, TIM_CHANNEL_1);
 
 Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
+
+// Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
+void configureGPIOForTimer() {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOE_CLK_ENABLE();  // Enable the GPIO clock (replace with the appropriate port)
+
+    GPIO_InitStruct.Pin = GPIO_PIN_5;  // Replace with the correct pin number for your valve pin
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM9;  // TIM9 alternate function
+
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);  // Replace GPIOA with your GPIO port
+}
+
+void initTimer9() {
+    htim9.Instance = TIM9;  // Use TIM9
+    htim9.Init.Prescaler = 83;  // Set the prescaler for 1MHz timer clock (84MHz system clock / 84 prescaler)
+    htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim9.Init.Period = 0xFFFF;  // Set a default period, can be adjusted later in DropletPrinter class
+    htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim9.Init.RepetitionCounter = 0;  // No repetition
+
+    if (HAL_TIM_Base_Init(&htim9) != HAL_OK) {
+        // Initialization error
+        Serial.println("Timer initialization failed");
+    }
+}
 
 
 void setup() {
     SystemClock_Config();
+    
+    configureGPIOForTimer();
+    initTimer9();
+
     stepperX.setupMotor();
     stepperY.setupMotor();
     stepperZ.setupMotor();
