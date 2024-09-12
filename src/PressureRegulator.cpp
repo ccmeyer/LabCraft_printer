@@ -225,6 +225,11 @@ void PressureRegulator::stepMotorDirectly() {
         taskQueue.addTask(stepTask);
         return;
     }
+    // Prevent direct motor stepping while syringe reset is in progress
+    if (resetInProgress) {
+        // Exit the function early if reset is in progress
+        return;
+    }
     if (stepper.currentPosition() > upperBound) {
         resetSyringe();
         return;
