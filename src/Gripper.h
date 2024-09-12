@@ -30,9 +30,9 @@ private:
     int refreshTaskCounter;
     volatile bool busy;
     bool gripperOpen;
-    int pumpOnDuration = 1500000; // Default pump on duration of 1500ms
-    int refreshInterval = 60000000; // Default refresh interval of 60 seconds
-    long currentMicros;
+    unsigned long pumpOnDuration = 1500000; // Default pump on duration of 1500ms
+    unsigned long refreshInterval = 60000000; // Default refresh interval of 60 seconds
+    unsigned long currentMicros;
 
     TaskQueue& taskQueue;  // Reference to the global TaskQueue
 

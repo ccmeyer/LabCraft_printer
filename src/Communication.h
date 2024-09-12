@@ -25,7 +25,8 @@ enum StatusStep {
     GRIPPER,
     PRESSURE,
     TARGET_PRESSURE,
-    PULSE_WIDTH
+    PULSE_WIDTH,
+    MICROS
 };
 
 class Communication {
@@ -42,7 +43,7 @@ public:
     void parseAndAddCommand();
     void executeCommandTask();
     bool checkIfFree() const;
-    void startWaiting(long waitTime);
+    void startWaiting(unsigned long waitTime);
     void stopWaiting();
     void IncrementCycleCounter();
 
@@ -63,9 +64,9 @@ private:
     bool newData = false;
     static const byte numChars = 64;
     char receivedChars[64];
-    int receiveInterval = 20000; // Default receive interval of 50 msec
-    int sendInterval = 10000;  // Default send interval of 10 msec
-    int commandExecutionInterval = 10000;  // Interval for executing commands
+    unsigned long receiveInterval = 20000; // Default receive interval of 50 msec
+    unsigned long sendInterval = 10000;  // Default send interval of 10 msec
+    unsigned long commandExecutionInterval = 10000;  // Interval for executing commands
     int receivedCounter = 0;
     int cycleCounter = 0;
     int currentCmdNum = 0;

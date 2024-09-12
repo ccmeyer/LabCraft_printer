@@ -52,9 +52,9 @@ private:
     bool targetReached;             // Flag to indicate if the target pressure is reached
 
     int syringeSpeed;             // Speed of the syringe motor
-    int adjustInterval;   // Interval for adjusting pressure
-    int resetInterval;    // Interval for resetting the syringe
-    int stepInterval;     // Interval for stepping the syringe motor
+    unsigned long adjustInterval;   // Interval for adjusting pressure
+    unsigned long resetInterval;    // Interval for resetting the syringe
+    unsigned long stepInterval;     // Interval for stepping the syringe motor
     bool stepperTaskActive;       // Flag to indicate if the stepper task is active
     int lowerBound;               // Lower bound for the syringe position
     int upperBound;               // Upper bound for the syringe position

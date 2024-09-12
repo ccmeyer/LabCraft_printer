@@ -21,6 +21,7 @@ void Communication::beginSerial() {
 
 // Method to start the communication tasks
 void Communication::startTasks() {
+    Serial.println("Starting tasks");
     receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
     sendStatusTask.nextExecutionTime = micros() + sendInterval;
     executeCmdTask.nextExecutionTime = micros() + commandExecutionInterval;
@@ -135,6 +136,11 @@ void Communication::sendStatus() {
                 noInterrupts();
                 Serial.println(printer.getDuration());
                 interrupts();
+                statusStep = MICROS;
+                break;
+            case MICROS:
+                Serial.print("Micros:");
+                Serial.println(micros());
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -154,6 +160,7 @@ void Communication::receiveCommand() {
     }
     receiveCommandTask.nextExecutionTime = micros() + receiveInterval;
     taskQueue.addTask(receiveCommandTask);
+    taskQueue.resetWatchdog();
 }
 
 void Communication::IncrementCycleCounter() {
@@ -373,7 +380,7 @@ void Communication::executeCommand(const Command& cmd) {
 }
 
 // Method to start the wait task
-void Communication::startWaiting(long waitTime) {
+void Communication::startWaiting(unsigned long waitTime) {
     waiting = true;
     waitTask.nextExecutionTime = micros() + (waitTime * 1000);
     taskQueue.addTask(waitTask);

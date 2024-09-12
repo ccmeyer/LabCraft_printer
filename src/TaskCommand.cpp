@@ -21,18 +21,22 @@ void TaskQueue::executeNextTask() {
 
         noInterrupts();
         Task currentTask = taskQueue.top();
-        unsigned long currentMicros = micros();
+        currentMicros = micros();
 
-        if (currentMicros >= currentTask.nextExecutionTime) {
+        if ((unsigned long)(currentMicros - currentTask.nextExecutionTime) <= (unsigned long)(1UL << 31)) {
             taskQueue.pop();
             interrupts();
             currentTask.function();  // Execute the task
-            HAL_IWDG_Refresh(watchdog);  // Reset watchdog after task execution
         } else {
             interrupts();
         }
         taskRunning = false;
     }
+}
+
+// Reset the watchdog timer
+void TaskQueue::resetWatchdog() {
+    HAL_IWDG_Refresh(watchdog);
 }
 
 // Remove the next task from the queue

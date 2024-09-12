@@ -23,7 +23,7 @@ private:
     float total = 0;
     float average = 0;
     static const int numReadings = 10;
-    int readInterval = 10000;  // Default read interval of 10 msec
+    unsigned long readInterval = 10000;  // Default read interval of 10 msec
     bool reading = false;
 
     TaskQueue& taskQueue;

@@ -25,8 +25,8 @@ private:
     PressureRegulator& regulator;
     TaskQueue& taskQueue;
     
-    int frequency;              // Printing frequency (Hz)
-    int interval;               // Interval between droplets (microseconds)
+    unsigned long frequency;              // Printing frequency (Hz)
+    unsigned long interval;               // Interval between droplets (microseconds)
     unsigned long duration;     // Duration the valve is open per droplet (microseconds)
     int pressureTolerance;      // Acceptable pressure tolerance (units depend on the sensor)
 

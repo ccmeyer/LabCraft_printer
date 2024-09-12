@@ -25,18 +25,20 @@ public:
     void removeTask();                    // Remove the next task from the queue
     void executeNextTask();               // Execute the next task in the queue
     bool isEmpty() const;                 // Check if the queue is empty
+    void resetWatchdog();                 // Reset the watchdog timer
 
 private:
     // Custom comparator for priority queue (sorted by nextExecutionTime)
     struct CompareTask {
         bool operator()(const Task& t1, const Task& t2) {
-            return t1.nextExecutionTime > t2.nextExecutionTime; // Earlier tasks have higher priority
+            return (t1.nextExecutionTime - t2.nextExecutionTime) < (unsigned long)(1UL << 31); // Earlier tasks have higher priority
         }
     };
 
     std::priority_queue<Task, std::vector<Task>, CompareTask> taskQueue;  // Priority queue to store tasks
     bool taskRunning = false;  // Flag to indicate if a task is currently running
     IWDG_HandleTypeDef* watchdog;  // Pointer to the watchdog handler
+    unsigned long currentMicros;  // Current micros value
 };
 
 enum CommandType {
