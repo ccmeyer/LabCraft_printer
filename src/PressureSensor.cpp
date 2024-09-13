@@ -49,6 +49,11 @@ void PressureSensor::readPressure() {
     rawPressure = pressureRaw;
 }
 
+// Method to set the read interval
+void PressureSensor::setReadInterval(unsigned long interval) {
+    readInterval = interval;
+} 
+
 // Private method to smooth the pressure readings
 void PressureSensor::smoothPressure() {
     if (!reading) {
@@ -81,6 +86,7 @@ void PressureSensor::setReadInterval(int interval) {
 // Method to start periodic pressure reading
 void PressureSensor::startReading() {
     reading = true;
+    setReadInterval(5000);
     readPressureTask.nextExecutionTime = micros() + readInterval;
     taskQueue.addTask(readPressureTask);
 }

@@ -5,7 +5,7 @@
 DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int valvePin, TIM_HandleTypeDef* htim, uint32_t channel)
     : valvePin(valvePin), sensor(sensor), regulator(regulator), taskQueue(taskQueue),htim(htim), channel(channel),
       frequency(20), interval(50000), duration(3000), pressureTolerance(20), 
-      targetDroplets(0), printedDroplets(0), printingComplete(true),
+      targetDroplets(0), printedDroplets(0), printingComplete(true), resetTriggered(false),
       printDropletTask([this]() { this->printDroplet(); }, 0) {
     pinMode(valvePin, OUTPUT);
     digitalWrite(valvePin, LOW); // Ensure the valve is closed initially
@@ -34,6 +34,9 @@ unsigned long DropletPrinter::getDuration() const{
 
 // Method to start printing the specified number of droplets
 void DropletPrinter::startPrinting(int numberOfDroplets) {
+    sensor.setReadInterval(2000);  // Set the read interval to 2ms for faster response
+    regulator.setAdjustInterval(2000); // Set the adjust interval to 2ms for faster response
+    regulator.setPressureTolerance(1);
     targetDroplets += numberOfDroplets;
     printingComplete = false;
     regulator.resetTargetReached();
@@ -58,6 +61,7 @@ void DropletPrinter::resetDropletCounts() {
     targetDroplets = 0;
     printedDroplets = 0;
     printingComplete = true;
+    resetTriggered = false;
 }
 
 // Convert microseconds to timer ticks based on the clock frequency and prescaler
@@ -106,7 +110,21 @@ void DropletPrinter::printDroplet() {
     }
     if (printedDroplets >= targetDroplets) {
         printingComplete = true;
+        sensor.setReadInterval(5000);  // Reset the read interval to 5ms
+        regulator.setAdjustInterval(5000); // Reset the adjust interval to 5ms
+        regulator.setPressureTolerance(10);
         return;
+    }
+    if (regulator.isResetInProgress()){
+        resetTriggered = true;
+        printDropletTask.nextExecutionTime = micros() + 10000;
+        taskQueue.addTask(printDropletTask);
+        return;
+    } else if (resetTriggered) {
+        resetTriggered = false;
+        sensor.setReadInterval(2000);  // Set the read interval to 2ms for faster response
+        regulator.setAdjustInterval(2000); // Set the adjust interval to 2ms for faster response
+        regulator.setPressureTolerance(1);
     }
 
     // Check the current pressure

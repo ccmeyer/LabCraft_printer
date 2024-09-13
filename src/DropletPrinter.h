@@ -33,6 +33,7 @@ private:
     int targetDroplets;         // Total droplets to print
     int printedDroplets;        // Droplets printed so far
     bool printingComplete;      // Flag to indicate if printing is complete
+    bool resetTriggered;       // Flag to indicate that the syringe reset has been triggered
 
     Task printDropletTask;      // Task for printing droplets
 

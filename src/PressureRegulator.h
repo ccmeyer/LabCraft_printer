@@ -27,6 +27,9 @@ public:
     void resetState();  // Method to reset the state of the regulator
     void restartRegulation();  // Method to restart pressure regulation task if already regulating
     void resetTargetReached();  // Method to reset the targetReached flag
+    void setAdjustInterval(unsigned long interval);  // Method to set the adjust interval
+    bool isResetInProgress() const;  // Method to check if the syringe is being reset
+    void setPressureTolerance(int tolerance);  // Method to set the pressure tolerance
 
 private:
     CustomStepper& stepper;       // Reference to the CustomStepper controlling the syringe
@@ -50,6 +53,14 @@ private:
     float previousPressure;         // Previous pressure reading
     float pressureDifference;       // Difference between target and current pressure
     bool targetReached;             // Flag to indicate if the target pressure is reached
+    int targetReachedCounter;      // Counter for target reached
+    float deadband;                 // Deadband for pressure regulation
+
+    long motorPosition;             // Current position of the syringe motor
+    long totalRange;                // Total range of the syringe motor
+    float positionFactor;            // Scale between 0 (start) and 1 (far inside)
+    int maxSpeed;                   // Maximum speed for the syringe motor
+    int minSpeed;                   // Minimum speed for the syringe motor
 
     int syringeSpeed;             // Speed of the syringe motor
     unsigned long adjustInterval;   // Interval for adjusting pressure
