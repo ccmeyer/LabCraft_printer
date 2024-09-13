@@ -10,8 +10,10 @@ import json
 import cv2
 import numpy as np
 
-class Balance():
+class Balance(QObject):
+    balance_mass_updated_signal = Signal(float)
     def __init__(self,machine):
+        super().__init__()
         self.machine = machine
         self.connected = False
         self.port = None
@@ -74,6 +76,7 @@ class Balance():
                     mass = float(''.join([sign,mass]))
                     self.current_mass = mass
                     self.add_to_log(self.current_mass)
+                    self.balance_mass_updated_signal.emit(self.current_mass)
                 except Exception as e:
                     print(f'--Error {e} reading from balance')
                     self.error_count += 1
@@ -83,6 +86,9 @@ class Balance():
                     
         else:
             self.add_to_log(self.current_mass)
+            self.balance_mass_updated_signal.emit(self.current_mass)
+
+        
         
     def begin_reading(self):
         print('\n---Begin reading balance---\n')
@@ -573,7 +579,7 @@ class CommandQueue(QObject):
 
         if len(self.queue) == 0:
             self.commands_completed.emit()
-            
+
         self.queue_updated.emit()
 
     def clear_queue(self):
@@ -608,6 +614,30 @@ class DisconnectWorker(QThread):
         time.sleep(1)
         self.finished.emit()
     
+class ResetWorker(QThread):
+    finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+
+    def run(self):
+        self.parent.gripper_off()
+        self.parent.disable_motors()
+        self.parent.deregulate_pressure()
+
+        # Continuously check until all tasks are completed
+        timeout_counter = 0
+        while not self.parent.check_if_all_completed():
+            timeout_counter += 1
+            time.sleep(0.1)
+            if timeout_counter > 10:
+                print('Timeout disconnecting from machine')
+                break
+
+        self.parent.clear_command_queue()
+        time.sleep(1)
+        self.finished.emit()
 
 class Machine(QObject):
     """
@@ -625,7 +655,8 @@ class Machine(QObject):
     gripper_off_signal = Signal()       # Signal to emit when the gripper is turned off
     disconnect_complete_signal = Signal()  # Signal to stop timers
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
-    
+    all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
+
     def __init__(self):
         super().__init__()
         self.command_queue = CommandQueue()
@@ -687,6 +718,7 @@ class Machine(QObject):
                 if not self.board.is_open:  # Add this line
                     self.error_occurred.emit('Could not open port')
                     raise serial.SerialException('Could not open port')  # Add this line
+                self.initial_reset_board()
                 self.machine_connected_signal.emit(True)
                 self.simulate = False
                 self.port = port
@@ -699,6 +731,14 @@ class Machine(QObject):
         self.begin_communication_timer()
         self.begin_execution_timer()
         return True
+    
+    def reset_handler(self):
+        print('Reset Complete')
+    
+    def initial_reset_board(self):
+        self.reset_worker = ResetWorker(self)
+        self.reset_worker.finished.connect(self.reset_handler)
+        self.reset_worker.start()
     
     def disconnect_handler(self):
         if not self.simulate and self.board is not None:
@@ -981,13 +1021,13 @@ class Machine(QObject):
         return self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def wait_command(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('WAIT',500,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('WAIT',200,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def calibrate_pressure_handler(self,num_droplets=100,psi=1.8):
-        self.balance_droplets.append([num_droplets,psi])
+    def calibrate_pressure_handler(self):
+        self.all_calibration_droplets_printed.emit()
 
-    def print_calibration_droplets(self,num_droplets,pressure,manual=False):
-        self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,kwargs={'num_droplets':num_droplets,'psi':pressure},manual=manual)
+    def print_calibration_droplets(self,num_droplets,manual=False):
+        self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)

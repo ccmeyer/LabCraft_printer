@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import json
 import os
+import random
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -176,14 +177,15 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
 
+        self.shortcut_manager.add_shortcut('1','Set pulse width to 3000', lambda: self.controller.set_pulse_width(4200,manual=True))
         self.shortcut_manager.add_shortcut('5','Set pressure to 0', lambda: self.controller.set_absolute_pressure(0,manual=True))
         self.shortcut_manager.add_shortcut('6','Large pressure decrease', lambda: self.controller.set_relative_pressure(-1,manual=True))
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set pressure to 2', lambda: self.controller.set_absolute_pressure(2,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set pressure to 1.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
 
-        self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
+        # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
         self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location(manual=True))
     
@@ -775,18 +777,22 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
     def calibrate_pressure(self):
-        """Calibrate the pressure for a specific printer head."""
-        if self.model.rack_model.gripper_printer_head is None:
-            self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
-            return
+        mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+        mass_calibration_dialog.exec()
+    
+    # def calibrate_pressure(self):
+    #     """Calibrate the pressure for a specific printer head."""
+    #     if self.model.rack_model.gripper_printer_head is None:
+    #         self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
+    #         return
         
-        self.target_pressure = self.model.machine_model.get_current_pressure()
-        pressure_calibration_dialog = PressureCalibrationDialog(self.main_window,self.model,self.controller)
-        pressure_calibration_dialog.print_calibration_droplets.connect(self.print_calibration_droplets)
-        pressure_calibration_dialog.change_pressure.connect(self.calibration_pressure_change)
-        # pressure_calibration_dialog.calibration_complete.connect(self.store_calibrations)
-        pressure_calibration_dialog.exec()
-        print('Calibrating pressure')
+    #     self.target_pressure = self.model.machine_model.get_current_pressure()
+    #     pressure_calibration_dialog = PressureCalibrationDialog(self.main_window,self.model,self.controller)
+    #     pressure_calibration_dialog.print_calibration_droplets.connect(self.print_calibration_droplets)
+    #     pressure_calibration_dialog.change_pressure.connect(self.calibration_pressure_change)
+    #     # pressure_calibration_dialog.calibration_complete.connect(self.store_calibrations)
+    #     pressure_calibration_dialog.exec()
+    #     print('Calibrating pressure')
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)
@@ -797,6 +803,522 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_pressure = pressure
         self.controller.set_absolute_pressure(pressure)
         
+class MassCalibrationDialog(QtWidgets.QDialog):
+
+    def __init__(self, main_window,model,controller):
+        super().__init__()
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+        self.model = model
+        self.controller = controller
+        
+        self.current_printer_head = self.model.rack_model.get_gripper_printer_head()
+        self.current_stock_solution = self.current_printer_head.get_stock_solution()
+
+        self.num_calibration_droplets = 100
+        self.repeat_measurements = 0
+        self.pressures_to_screen = []
+
+        self.setWindowTitle("Mass Calibration")
+        self.resize(1200, 700)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.label = QtWidgets.QLabel("Begin the mass calibration")
+        self.layout.addWidget(self.label)
+
+        self.charts_layout = QtWidgets.QHBoxLayout()
+
+        # Create a series and chart to display mass over time
+        self.series = QtCharts.QLineSeries()
+        self.series.setColor(QtCore.Qt.white)
+        self.chart = QtCharts.QChart()
+        self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
+        self.chart.addSeries(self.series)
+        # self.chart.createDefaultAxes()
+        self.chart.setTitle("Mass over time")
+
+        self.axisX = QtCharts.QValueAxis()
+        self.axisX.setTickCount(3)
+        self.axisX.setRange(0, 300)
+        self.axisY = QtCharts.QValueAxis()
+        self.axisY.setTitleText("Mass (g)")
+
+        self.chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
+        self.chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
+        self.series.attachAxis(self.axisX)
+        self.series.attachAxis(self.axisY)
+
+        # Create a chart view to display the chart
+        self.chart_view = QtCharts.QChartView(self.chart)
+        self.chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.chart.legend().hide()  # Hide
+        self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # Add the chart view to the layout
+        self.charts_layout.addWidget(self.chart_view)
+
+        self.volume_pressure_series = QtCharts.QScatterSeries()
+        self.volume_pressure_series.setColor(QtCore.Qt.white)
+        self.volume_pressure_series.setMarkerSize(3.0)
+        self.volume_pressure_chart = QtCharts.QChart()
+        self.volume_pressure_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.volume_pressure_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
+        self.volume_pressure_chart.addSeries(self.volume_pressure_series)
+        self.volume_pressure_chart.setTitle("Mass versus Pressure")
+
+        self.volume_pressure_axisX = QtCharts.QValueAxis()
+        self.volume_pressure_axisX.setTitleText("Pulse Width (us)")
+        self.volume_pressure_axisY = QtCharts.QValueAxis()
+        self.volume_pressure_axisY.setTitleText("Volume (nL)")
+
+        self.volume_pressure_chart.addAxis(self.volume_pressure_axisX, QtCore.Qt.AlignBottom)
+        self.volume_pressure_chart.addAxis(self.volume_pressure_axisY, QtCore.Qt.AlignLeft)
+        self.volume_pressure_series.attachAxis(self.volume_pressure_axisX)
+        self.volume_pressure_series.attachAxis(self.volume_pressure_axisY)
+
+        # Create a series for the linear fit
+        self.linear_fit_series = QtCharts.QLineSeries()
+        self.linear_fit_series.setColor(QtCore.Qt.red)
+        self.volume_pressure_chart.addSeries(self.linear_fit_series)
+        self.linear_fit_series.attachAxis(self.volume_pressure_axisX)
+        self.linear_fit_series.attachAxis(self.volume_pressure_axisY)
+
+        # Ensure proper pen settings for each line
+        line_pen = QtGui.QPen(QtCore.Qt.black)
+        line_pen.setWidth(1)
+
+        # Add horizontal lines using QLineSeries
+        # Target line at 40 nL (red)
+        target_line = QtCharts.QLineSeries()
+        target_line.setColor(QtCore.Qt.red)
+        target_line.append(0, 40)  # Starting point of the line at (0, 40)
+        target_line.append(6000, 40)  # Ending point of the line at (5, 40)
+        self.volume_pressure_chart.addSeries(target_line)
+        target_line.attachAxis(self.volume_pressure_axisX)
+        target_line.attachAxis(self.volume_pressure_axisY)
+
+        # Line above target at 41 nL (black)
+        above_target_line = QtCharts.QLineSeries()
+        above_target_line.setPen(line_pen)  # Apply custom pen for consistent color and width
+        above_target_line.append(0, 41)
+        above_target_line.append(6000, 41)
+        self.volume_pressure_chart.addSeries(above_target_line)
+        above_target_line.attachAxis(self.volume_pressure_axisX)
+        above_target_line.attachAxis(self.volume_pressure_axisY)
+
+        # Line below target at 39 nL (black)
+        below_target_line = QtCharts.QLineSeries()
+        below_target_line.setPen(line_pen)  # Apply custom pen for consistent color and width
+        below_target_line.append(0, 39)
+        below_target_line.append(6000, 39)
+        self.volume_pressure_chart.addSeries(below_target_line)
+        below_target_line.attachAxis(self.volume_pressure_axisX)
+        below_target_line.attachAxis(self.volume_pressure_axisY)
+
+        # Create a chart view to display the chart
+        self.volume_pressure_chart_view = QtCharts.QChartView(self.volume_pressure_chart)
+        self.volume_pressure_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.volume_pressure_chart.legend().hide()  # Hide the legend
+        self.volume_pressure_chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.volume_pressure_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # Add the chart view to the layout
+        self.charts_layout.addWidget(self.volume_pressure_chart_view)
+
+        row = 0
+
+        self.user_input_layout = QtWidgets.QGridLayout()
+
+        self.current_stock_label = QtWidgets.QLabel("Current Stock Solution:")
+        self.current_stock_value = QtWidgets.QLabel(self.current_stock_solution.get_stock_name())
+        self.user_input_layout.addWidget(self.current_stock_label, row, 0)
+        self.user_input_layout.addWidget(self.current_stock_value, row, 1)
+        row += 1
+
+        self.current_volume_label = QtWidgets.QLabel("Current Volume:")
+        self.current_volume_value = QtWidgets.QLabel(f"{self.current_printer_head.get_current_volume():.2f} uL")
+        self.user_input_layout.addWidget(self.current_volume_label, row, 0)
+        self.user_input_layout.addWidget(self.current_volume_value, row, 1)
+        row += 1
+
+        self.set_volume_label = QtWidgets.QLabel("Set Volume:")
+        self.set_volume_spinbox = QtWidgets.QDoubleSpinBox()
+        self.set_volume_spinbox.setDecimals(1)
+        self.set_volume_spinbox.setSingleStep(10)
+        self.set_volume_spinbox.setRange(0, 1000)
+        self.set_volume_spinbox.setValue(100)
+        # self.set_volume_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.set_volume_label, row, 0)
+        self.user_input_layout.addWidget(self.set_volume_spinbox, row, 1)
+        row += 1
+
+        self.set_volume_button = QtWidgets.QPushButton("Set Volume")
+        self.set_volume_button.clicked.connect(self.set_volume)
+        self.user_input_layout.addWidget(self.set_volume_button, row, 0, 1, 2)
+        row += 1
+
+        self.target_drop_volume_label = QtWidgets.QLabel("Target Droplet Volume:")
+        self.target_drop_volume_spinbox = QtWidgets.QDoubleSpinBox()
+        self.target_drop_volume_spinbox.setDecimals(1)
+        self.target_drop_volume_spinbox.setSingleStep(1)
+        self.target_drop_volume_spinbox.setRange(1, 100)
+        self.target_drop_volume_spinbox.setValue(40)
+        # self.target_drop_volume_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.target_drop_volume_label, row, 0)
+        self.user_input_layout.addWidget(self.target_drop_volume_spinbox, row, 1)
+        row += 1
+
+        self.coarse_pulse_width_calibration_button = QtWidgets.QPushButton("Coarse Pulse Width Calibration")
+        self.coarse_pulse_width_calibration_button.clicked.connect(self.coarse_pulse_width_calibration)
+        self.user_input_layout.addWidget(self.coarse_pulse_width_calibration_button, row, 0, 1, 2)
+        row += 1
+
+        self.calculate_target_pressure_button = QtWidgets.QPushButton("Calculate Target Pressure")
+        self.calculate_target_pressure_button.clicked.connect(self.calculate_target_pressure)
+        self.user_input_layout.addWidget(self.calculate_target_pressure_button, row, 0, 1, 2)
+        row += 1
+
+        self.refine_pulse_width_button = QtWidgets.QPushButton("Refine Pulse Width")
+        self.refine_pulse_width_button.clicked.connect(self.refine_pulse_width)
+        self.user_input_layout.addWidget(self.refine_pulse_width_button, row, 0, 1, 2)
+        row += 1
+
+        self.current_pressure_label = QtWidgets.QLabel("Current Pressure:")
+        self.current_pressure_value = QtWidgets.QLabel()
+        self.user_input_layout.addWidget(self.current_pressure_label, row, 0)
+        self.user_input_layout.addWidget(self.current_pressure_value, row, 1)
+        row += 1
+
+        self.target_pressure_label = QtWidgets.QLabel("Target Pressure:")
+        self.target_pressure_spinbox = QtWidgets.QDoubleSpinBox()
+        self.target_pressure_spinbox.setDecimals(2)
+        self.target_pressure_spinbox.setSingleStep(0.1)
+        self.target_pressure_spinbox.setRange(0, 5)
+        # self.target_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.target_pressure_spinbox.valueChanged.connect(self.handle_target_pressure_change)
+        
+        self.user_input_layout.addWidget(self.target_pressure_label, row, 0)
+        self.user_input_layout.addWidget(self.target_pressure_spinbox, row, 1)
+        row += 1
+
+        self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
+        self.pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.pulse_width_spinbox.setRange(0, 10000)
+        self.pulse_width_spinbox.setSingleStep(5)
+        self.pulse_width_spinbox.setValue(3000)
+        # self.pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pulse_width_spinbox.valueChanged.connect(self.handle_pulse_width_change)
+        self.user_input_layout.addWidget(self.pulse_width_label, row, 0)
+        self.user_input_layout.addWidget(self.pulse_width_spinbox, row, 1)
+        row += 1
+
+        self.num_droplets_label = QtWidgets.QLabel("Number of Droplets:")
+        self.num_droplets_spinbox = QtWidgets.QSpinBox()
+        self.num_droplets_spinbox.setRange(1, 100)
+        self.num_droplets_spinbox.setSingleStep(5)
+        self.num_droplets_spinbox.setValue(100)
+        # self.num_droplets_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.num_droplets_spinbox.valueChanged.connect(self.handle_num_droplets_change)
+        self.user_input_layout.addWidget(self.num_droplets_label, row, 0)
+        self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
+        row += 1
+
+        self.calibrate_button = QtWidgets.QPushButton("Calibrate")
+        self.calibrate_button.clicked.connect(self.initiate_calibration_process)
+        self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
+        row += 1
+
+        self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
+        self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_low_spinbox.setDecimals(0)
+        self.pressure_screen_low_spinbox.setSingleStep(10)
+        self.pressure_screen_low_spinbox.setRange(10,4000)
+        self.pressure_screen_low_spinbox.setValue(2500)
+        # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
+        row += 1
+
+        self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
+        self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_high_spinbox.setDecimals(0)
+        self.pressure_screen_high_spinbox.setSingleStep(10)
+        self.pressure_screen_high_spinbox.setRange(10, 4000)
+        self.pressure_screen_high_spinbox.setValue(3500)
+        # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
+        row += 1
+
+        self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
+        self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
+        self.repeat_measurement_spinbox.setRange(1, 100)
+        self.repeat_measurement_spinbox.setSingleStep(1)
+        self.repeat_measurement_spinbox.setValue(3)
+        # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
+        self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
+        row += 1
+        
+        self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
+        self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
+        row += 1
+
+        self.start_screen_button = QtWidgets.QPushButton("Start Screen")
+        self.start_screen_button.clicked.connect(self.start_screen)
+        self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
+        row += 1
+
+        self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
+        self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
+        row += 1
+
+        self.remove_last_measurement_button = QtWidgets.QPushButton("Remove Last")
+        self.remove_last_measurement_button.clicked.connect(self.remove_last_measurement)
+        self.user_input_layout.addWidget(self.remove_last_measurement_button, row, 0, 1, 2)
+        row += 1
+
+        self.remove_all_calibrations_button = QtWidgets.QPushButton("Remove All")
+        self.remove_all_calibrations_button.clicked.connect(self.remove_all_calibrations_for_stock)
+        self.user_input_layout.addWidget(self.remove_all_calibrations_button, row, 0, 1, 2)
+        row += 1
+
+        self.results_label = QtWidgets.QLabel("Calibration Results:")
+        self.results_value = QtWidgets.QLabel()
+        self.user_input_layout.addWidget(self.results_label, row, 0)
+        self.user_input_layout.addWidget(self.results_value, row, 1)
+        row += 1
+
+
+        # Add the grid layout into a QVBoxLayout
+        self.user_input_container_layout = QtWidgets.QVBoxLayout()
+        self.user_input_container_layout.addLayout(self.user_input_layout)
+        self.user_input_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
+
+        # Add the QVBoxLayout to the charts_layout without alignment argument
+        self.charts_layout.addLayout(self.user_input_container_layout)
+
+        # Set the alignment to top after adding the layout
+        self.charts_layout.setAlignment(self.user_input_container_layout, QtCore.Qt.AlignTop)
+
+        self.layout.addLayout(self.charts_layout)
+        self.setLayout(self.layout)
+
+        self.model.calibration_model.mass_updated_signal.connect(self.update_mass_time_plot)
+        self.model.machine_model.printing_parameters_updated.connect(self.update_printing_parameters)
+        self.model.calibration_model.initial_mass_captured_signal.connect(self.initiate_calibration_print)
+        self.model.calibration_model.calibration_complete_signal.connect(self.handle_calibration_complete)
+        self.model.calibration_model.change_volume_signal.connect(self.decrease_volume)
+        
+        self.update_printing_parameters()
+        self.update_volume_pressure_plot()
+
+
+    def handle_target_pressure_change(self, value):
+        """Handle changes to the target pressure value."""
+        self.controller.set_absolute_pressure(value,manual=True)
+
+    def handle_pulse_width_change(self, value):
+        """Handle changes to the pulse width value."""
+        self.controller.set_pulse_width(value,manual=True)
+
+    def handle_num_droplets_change(self, value):
+        """Handle changes to the number of droplets value."""
+        self.num_calibration_droplets = value
+
+    def update_printing_parameters(self):
+        """Update the spinboxes with the current printing parameters."""
+
+        self.current_pressure_value.setText(f"{self.model.machine_model.current_pressure:.3f}")
+
+        self.target_pressure_spinbox.blockSignals(True)
+        self.target_pressure_spinbox.setValue(self.model.machine_model.target_pressure)
+        self.target_pressure_spinbox.blockSignals(False)
+
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(self.model.machine_model.pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
+
+    def set_volume(self):
+        """Set the volume of the current stock solution."""
+        volume = self.set_volume_spinbox.value()
+        self.current_printer_head.set_absolute_volume(volume)
+        self.current_volume_value.setText(f"{volume:.2f} uL")
+
+    def decrease_volume(self,volume):
+        current_volume = self.current_printer_head.get_current_volume()
+        new_volume = max(0,current_volume - volume)
+        self.current_printer_head.set_absolute_volume(new_volume)
+        self.current_volume_value.setText(f"{new_volume:.2f} uL")
+    
+    def update_mass_time_plot(self):
+        """Update the mass over time plot."""
+        mass_log = self.model.calibration_model.get_mass_log()
+
+        self.series.clear()
+        for i, mass in enumerate(mass_log):
+            self.series.append(i, mass)
+
+        if len(mass_log) > 0:
+            self.axisX.setRange(0, len(mass_log))
+            self.axisY.setRange(min(mass_log) - 0.5, max(mass_log) + 0.5)
+        
+    def start_screen(self):
+        """Start the screen for the current stock solution."""
+        # self.start_screen_button.setDisabled(True)
+        # self.calibrate_button.setDisabled(True)
+        # self.repeat_measurement_button.setDisabled(True)
+        # self.stop_repeat_measurement_button.setDisabled(False)
+
+        screen_low = self.pressure_screen_low_spinbox.value()
+        screen_high = self.pressure_screen_high_spinbox.value()
+        steps = self.repeat_measurement_spinbox.value()
+        self.pressures_to_screen = list(np.linspace(screen_low,screen_high,steps))
+        random.shuffle(self.pressures_to_screen)
+        print(f'Screening pulse widths: {self.pressures_to_screen}')
+
+        self.repeat_measurements = steps
+        self.repeat_measurements -= 1
+        current_screen_pressure = self.pressures_to_screen.pop()
+        self.label.setText(f"---Testing {current_screen_pressure} psi, {self.repeat_measurements} remaining---")
+        print(f'Screening pulse widths: {current_screen_pressure}')
+        self.controller.set_pulse_width(current_screen_pressure,manual=False)
+        self.model.calibration_model.initiate_new_measurement_pulse(self.current_stock_solution.get_stock_id(),current_screen_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+
+    
+    def initiate_repeat_calibration_process(self):
+        """Initiate the process of capturing a new measurement."""
+        # self.start_screen_button.setDisabled(True)
+        # self.calibrate_button.setDisabled(True)
+        # self.repeat_measurement_button.setDisabled(True)
+        self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
+        self.repeat_measurements = self.repeat_measurement_spinbox.value()
+        pulse_width = self.coarse_pulse_width_calibration()
+        self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width)
+
+    def stop_repeat_calibration_process(self):
+        """Stop the process of capturing a new measurement."""
+        self.label.setText(f'Stopping repeat measurements')
+        self.repeat_measurements = 0
+        self.pressures_to_screen = []
+    
+    def initiate_calibration_process(self):
+        """Initiate the process of capturing a new measurement."""
+        self.label.setText("Started calibration process, waiting for mass stabilization")
+        self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+    
+    def initiate_calibration_print(self):
+        """Initiate the printing of calibration droplets."""
+        self.label.setText("Printing calibration droplets")
+        self.controller.print_calibration_droplets(self.num_calibration_droplets)
+
+    def handle_calibration_complete(self):
+        """Handle the completion of the calibration process."""
+        self.update_volume_pressure_plot()
+        self.results_value.setText(f"{self.model.calibration_model.get_last_droplet_volume(self.current_stock_solution.get_stock_id()):.2f} nL")
+        if self.repeat_measurements > 0:
+            print(f'---{self.repeat_measurements} measurements remaining---')
+            self.repeat_measurements -= 1
+            if len(self.pressures_to_screen) > 0:
+                current_screening_pressure = self.pressures_to_screen.pop()
+                print(f'Screening pressure: {current_screening_pressure}')
+                self.label.setText(f"---Testing {current_screening_pressure} psi, {self.repeat_measurements} remaining---")
+                self.controller.set_pulse_width(current_screening_pressure,manual=False)
+                self.model.calibration_model.initiate_new_measurement_pulse(self.current_stock_solution.get_stock_id(),current_screening_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+            else:
+                pulse_width = self.coarse_pulse_width_calibration()
+                self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
+                self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width)
+        else:
+            self.label.setText("Calibration complete")
+
+    
+    def update_volume_pressure_plot(self):
+        self.volume_pressure_series.clear()
+        measurements = self.model.calibration_model.get_measurements(self.current_stock_solution.get_stock_id())
+        pressures = []
+        volumes = []
+        for pressure,pulse_width,droplets, volume in measurements:
+            self.volume_pressure_series.append(pulse_width, volume)
+            pressures.append(pulse_width)
+            volumes.append(volume)
+        
+        if len(measurements) >= 2 and np.std(pressures) > 0.01:
+            # Calculate the linear fit
+            slope, intercept = np.polyfit(pressures, volumes, 1)
+
+            # Update the linear fit series
+            self.linear_fit_series.clear()
+            min_pressure = min(pressures)
+            max_pressure = max(pressures)
+            self.linear_fit_series.append(min_pressure, min_pressure * slope + intercept)
+            self.linear_fit_series.append(max_pressure, max_pressure * slope + intercept)
+
+        if len(pressures) > 0:
+            min_pressure = min(pressures) - 200
+            max_pressure = max(pressures) + 200
+        else:
+            min_pressure = 1500
+            max_pressure = 3500
+        
+        if len(volumes) > 0:
+            min_volume = min(volumes) - 5
+            max_volume = max(volumes) + 5
+        else:
+            min_volume = 20
+            max_volume = 60
+
+        self.volume_pressure_axisX.setRange(min_pressure, max_pressure)
+        self.volume_pressure_axisY.setRange(min_volume, max_volume)
+
+    def remove_last_measurement(self):
+        """Remove the last measurement from the calibration log."""
+        self.model.calibration_model.remove_last_measurement(self.current_stock_solution.get_stock_id())
+
+    def remove_all_calibrations_for_stock(self):
+        """Remove all the calibration measurements for the current stock solution."""
+        self.model.calibration_model.remove_all_calibrations_for_stock(self.current_stock_solution.get_stock_id())
+
+    def coarse_pulse_width_calibration(self):
+        """Perform a coarse pulse width calibration."""
+        # pulse_width = self.model.calibration_model.predict_common_pulse_width_last_measurement()
+        target_volume = self.target_drop_volume_spinbox.value()
+        starting_volume = self.current_printer_head.get_current_volume()
+        target_pressure = self.model.machine_model.get_target_pressure()
+        stock_id = self.current_stock_solution.get_stock_id()
+        pulse_width = self.model.calibration_model.predict_target_pulse_width_reagent(target_volume,target_pressure,starting_volume,stock_id)
+        print(f'Coarse pulse width calibration: {pulse_width}')
+
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
+        self.controller.set_pulse_width(pulse_width,manual=False)
+        return pulse_width
+
+    def calculate_target_pressure(self):
+        """Calculate the target pressure for a specific droplet volume."""
+        droplet_volume = self.target_drop_volume_spinbox.value()
+        starting_volume = self.current_printer_head.get_current_volume()
+        pulse_width = self.model.machine_model.pulse_width
+        target_pressure = self.model.calibration_model.find_pressure_for_target_volume(droplet_volume,pulse_width,starting_volume)
+        self.target_pressure_spinbox.blockSignals(True)
+        self.target_pressure_spinbox.setValue(target_pressure)
+        self.target_pressure_spinbox.blockSignals(False)
+        self.controller.set_absolute_pressure(target_pressure,manual=False)
+
+    def refine_pulse_width(self):
+        """Refine the pulse width for a specific droplet volume."""
+        pulse_width = self.model.calibration_model.refine_pulse_width_last_measurement()
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
+        self.controller.set_pulse_width(pulse_width,manual=False)
+
+
 class PressureCalibrationDialog(QtWidgets.QDialog):
     print_calibration_droplets = QtCore.Signal(int)
     change_pressure = QtCore.Signal(float)
@@ -2286,6 +2808,7 @@ class BoardStatusBox(QGroupBox):
         self.model.location_model.locations_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
         self.model.machine_model.home_status_signal.connect(self.update_status)
+        self.model.calibration_model.mass_updated_signal.connect(self.update_status)
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -2296,7 +2819,9 @@ class BoardStatusBox(QGroupBox):
             'Paused': QLabel('False'),
             'Location': QLabel('Unknown'),
             'Cycle Count': QLabel('0'),
-            'Max Cycle Time': QLabel('0')
+            'Current Micros': QLabel('0'),
+            'Mass': QLabel('0'),
+            'Stable': QLabel('False')
         }
 
         row = 0
@@ -2316,7 +2841,9 @@ class BoardStatusBox(QGroupBox):
         self.labels['Homed'].setText(str(self.model.machine_model.motors_homed))
         self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
-        self.labels['Max Cycle Time'].setText(str(self.model.machine_model.max_cycle))
+        self.labels['Current Micros'].setText(str(self.model.machine_model.current_micros))
+        self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
+        self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
 
 class ShortcutTableWidget(QGroupBox):
     """
@@ -2778,10 +3305,12 @@ class ExperimentDesignDialog(QDialog):
             # Define the path for the experiment design JSON file within the new directory
             experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
             progress_file_path = os.path.join(experiment_dir, "progress.json")
+            calibration_file_path = os.path.join(experiment_dir, "calibration.json")
 
             # Save the experiment
-            self.experiment_model.save_experiment(experiment_dir_name,experiment_file_path)
+            self.experiment_model.save_experiment(experiment_dir_name,experiment_dir,experiment_file_path)
             self.experiment_model.create_progress_file(file_name=progress_file_path)
+            self.model.calibration_model.create_calibration_file(calibration_file_path)
 
             print(f"Experiment data saved in directory: {experiment_dir}")
 
@@ -2817,10 +3346,17 @@ class ExperimentDesignDialog(QDialog):
 
             # Check if the experiment design file exists
             if os.path.exists(experiment_file_path):
-                self.experiment_model.load_experiment(experiment_file_path)
+                self.experiment_model.load_experiment(experiment_file_path,chosen_dir)
                 print("\n----Finished model loading----\n")
                 self.load_experiment_to_view()
 
+                calibration_file_path = os.path.join(chosen_dir, "calibration.json")
+                if os.path.exists(calibration_file_path):
+                    self.model.calibration_model.load_calibration_data(calibration_file_path)
+                else:
+                    print(f"No calibration.json file found in the directory: {chosen_dir}")
+                    self.model.calibration_model.create_calibration_file(calibration_file_path)
+                
                 progress_file_path = os.path.join(chosen_dir, "progress.json")
                 if os.path.exists(progress_file_path):
                     in_progress = self.experiment_in_progress(progress_file_path)

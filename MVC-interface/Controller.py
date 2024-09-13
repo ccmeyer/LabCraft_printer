@@ -29,6 +29,9 @@ class Controller(QObject):
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 
+        self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
+        self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
+
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
         self.model.update_state(status_dict)
@@ -548,9 +551,19 @@ class Controller(QObject):
             return
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
 
-    def print_calibration_droplets(self,droplets,pressure,manual=False):
+    # def print_calibration_droplets(self,droplets,pressure,manual=False):
+    #     """Print a specified number of droplets for calibration."""
+    #     self.machine.print_calibration_droplets(droplets,pressure,manual=manual)
+
+    def print_calibration_droplets(self,droplets,manual=False):
         """Print a specified number of droplets for calibration."""
-        self.machine.print_calibration_droplets(droplets,pressure,manual=manual)
+        self.machine.print_calibration_droplets(droplets,manual=manual)
+
+    def start_mass_stabilization_timer(self):
+        """Create a single shot timer that when triggered it will signal the model to check for the final stable mass."""
+        print('Starting mass stabilization timer...')
+        QtCore.QTimer.singleShot(2000, self.model.calibration_model.check_for_final_mass)
+
 
     def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
         self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
