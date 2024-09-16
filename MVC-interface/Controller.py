@@ -304,7 +304,7 @@ class Controller(QObject):
     def set_pulse_width(self, pulse_width,manual=False):
         """Set the pulse width for the machine."""
         print(f"Setting pulse width: {pulse_width}")
-        self.machine.set_pulse_width(pulse_width,manual=True)
+        self.machine.set_pulse_width(pulse_width,manual=manual)
 
     def reset_syringe(self):
         """Reset the syringe."""
@@ -549,17 +549,36 @@ class Controller(QObject):
         """
         self.model.rack_model.swap_printer_heads_between_slots(slot_number_1, slot_number_2)
 
-    def print_droplets(self,droplets,handler=None,kwargs=None,manual=False):
+    def volume_update_handler(self,droplet_count=None):
+        """Handle the volume update signal."""
+        self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(droplet_count)
+    
+    def print_droplets(self,droplets,handler=None,kwargs=None,manual=False,expected_volume=None):
         """Print a specified number of droplets."""
         if not self.model.machine_model.regulating_pressure:
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
             print('Cannot print: Pressure regulation is not enabled')
             return
-        self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+        printer_head = self.model.rack_model.get_gripper_printer_head()
+        if printer_head is not None:
+            if printer_head.check_calibration_complete():
+                print('Controller: using calibrations to change pulse width')
+                vol, res, target, bias = printer_head.get_prediction_data()
+                if expected_volume is not None:
+                    print(f'Controller: using expected volume: {expected_volume}')
+                    vol = expected_volume
+                new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias)
+                self.set_pulse_width(new_pulse_width,manual=False)
+            
+                if handler is None:
+                    handler = self.volume_update_handler
+                    kwargs = {'droplet_count':droplets}
+                else:
+                    kwargs['update_volume'] = True
+            else:
+                print('Controller: using default pulse width')
 
-    # def print_calibration_droplets(self,droplets,pressure,manual=False):
-    #     """Print a specified number of droplets for calibration."""
-    #     self.machine.print_calibration_droplets(droplets,pressure,manual=manual)
+        self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_calibration_droplets(self,droplets,manual=False):
         """Print a specified number of droplets for calibration."""
@@ -572,15 +591,20 @@ class Controller(QObject):
         QtCore.QTimer.singleShot(2000, self.model.calibration_model.check_for_final_mass)
 
 
-    def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
+    def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
         self.model.well_plate.get_well(well_id).record_stock_print(stock_id,target_droplets)
+        if update_volume:
+            self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
         self.model.experiment_model.create_progress_file()
         print(f'Printing complete for well {well_id}')
 
-    def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None):
+    def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
         # Reset acceleration and move to pause after the queue is processed
         def finalize_printing():
+            if update_volume:
+                self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
             self.machine.reset_acceleration()
+            self.exit_print_mode()
             self.move_to_location('pause')
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
             self.model.experiment_model.update_progress(well_id)
@@ -603,6 +627,14 @@ class Controller(QObject):
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
+    
+    def enter_print_mode(self):
+        """Enter print mode."""
+        self.machine.enter_print_mode()
+
+    def exit_print_mode(self):
+        """Exit print mode."""
+        self.machine.exit_print_mode()
     
     def print_array(self):
         '''
@@ -629,6 +661,19 @@ class Controller(QObject):
 
         self.move_to_location('pause')
         self.machine.change_acceleration(16000)
+        self.enter_print_mode()
+
+        current_printer_head = self.model.rack_model.get_gripper_printer_head()
+        if current_printer_head is not None:
+            if current_printer_head.check_calibration_complete():
+                print('\nController: Using calibrations during array printing')
+                expected_volume = current_printer_head.get_current_volume()
+                droplet_volume = current_printer_head.get_target_droplet_volume()
+                update_volume = True
+            else:
+                print('\nController: using default pulse width')
+                expected_volume = None
+                update_volume = False
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         print(f'Current stock:{current_stock_id}')
@@ -643,10 +688,12 @@ class Controller(QObject):
             self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'],override=True)
             print(f'Printing {target_droplets} droplets to well {well.well_id}')
             is_last_iteration = i == len(wells_with_droplets) - 1
+            if update_volume:
+                expected_volume -= target_droplets * droplet_volume / 1000
             if not is_last_iteration:
-                self.print_droplets(target_droplets, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
+                self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             else:
-                self.print_droplets(target_droplets, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
+                self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             
         
 

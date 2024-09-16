@@ -66,6 +66,8 @@ enum CommandType {
     SET_WIDTH,
     PRINT,
     RESET_P,
+    PRINT_MODE,
+    NORMAL_MODE,
     WAIT,
     PAUSE,
     RESUME,

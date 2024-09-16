@@ -160,6 +160,7 @@ class MassCalibrationModel(QObject):
         if self.current_measurement['measurement_type'] == 'predicted':
             self.current_measurement['bias'] = self.current_measurement['droplet_volume'] - self.current_measurement['target_volume']
         self.change_current_volume(-self.current_measurement['mass_difference'])
+        self.apply_calibrations_to_printer_head(self.current_measurement['stock_id'])
         print(f'Completed measurement: {self.current_measurement}')
 
         self.measurements.append(self.current_measurement)
@@ -191,7 +192,19 @@ class MassCalibrationModel(QObject):
         self.calibration_file_path = file_path
         with open(file_path, 'r') as file:
             self.measurements = json.load(file)
+        self.apply_calibrations_to_all_printer_heads()
         print(f"Calibration data loaded from {file_path}")
+
+    def apply_calibrations_to_all_printer_heads(self):
+        for printer_head in self.printer_head_manager.get_all_printer_heads():
+            self.apply_calibrations_to_printer_head(printer_head.get_stock_id())
+
+    def apply_calibrations_to_printer_head(self,stock_id):
+        resistance = self.calculate_resistance_for_stock(stock_id)
+        bias = self.calculate_bias(stock_id)
+        target_droplet_volume = self.get_target_droplet_volume_for_stock(stock_id)
+        printer_head = self.printer_head_manager.get_printer_head_by_id(stock_id)
+        printer_head.set_calibration_data(resistance,bias,target_droplet_volume)
 
     def get_measurements(self):
         return [[m['pressure'],m['pulse_width'],m['droplets'],m['droplet_volume']] for m in self.measurements if m['stock_id'] == self.current_stock_id]
@@ -230,11 +243,14 @@ class MassCalibrationModel(QObject):
         res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
         res_df['effective_resistance'] = self.resistance_model.predict(res_df)
         resistance = res_df['effective_resistance'].mean()
-        print(f"Effective resistance for stock '{stock_id}': {resistance:.2f} nL")
-        return resistance
+        print(f"\nEffective resistance for stock '{stock_id}': {resistance:.2f} nL\n")
+        return round(resistance,2)
     
     def calculate_bias(self,stock_id):
         stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
+        if len(stock_measurements) == 0:
+            print(f"No measurements found for stock '{stock_id}'")
+            return None
         stock_data = pd.DataFrame(stock_measurements).dropna(subset=['bias'])
         if len(stock_data) == 0:
             print(f"No bias measurements found for stock '{stock_id}'")
@@ -242,7 +258,20 @@ class MassCalibrationModel(QObject):
         stock_data['total_bias'] = stock_data['bias'] + stock_data['applied_bias']
         bias = stock_data['total_bias'].mean()
         print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
-        return bias
+        return round(bias,2)
+    
+    def get_target_droplet_volume_for_stock(self,stock_id):
+        stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
+        if len(stock_measurements) == 0:
+            print(f"No measurements found for stock '{stock_id}'")
+            return None
+        stock_data = pd.DataFrame(stock_measurements).dropna(subset=['target_volume'])
+        if len(stock_data) == 0:
+            print(f"No target volume measurements found for stock '{stock_id}'")
+            return None
+        target_droplet_volume = stock_data.iloc[-1]['target_volume']
+        print(f"Target droplet volume for stock '{stock_id}': {target_droplet_volume:.2f} nL")
+        return target_droplet_volume
     
     def predict_pulse_width_for_droplet(self, target_droplet_volume,calc_bias=True):
         total_volume = self.get_current_printer_head_volume()
@@ -255,24 +284,24 @@ class MassCalibrationModel(QObject):
                 bias = 0
         else:
             bias = 0
-        pulse_width = self.predict_pulse_width(self.prediction_model, total_volume, resistance, target_droplet_volume,bias=bias)
+        pulse_width = self.predict_pulse_width(total_volume, resistance, target_droplet_volume,bias=bias)
         print(f"Required pulse width for {target_droplet_volume} nL droplet: {pulse_width:.2f} µs")
         return pulse_width, bias
     
-    def predict_pulse_width(self, model, total_volume, effective_resistance, target_droplet_volume,bias=0):
+    def predict_pulse_width(self, total_volume, effective_resistance, target_droplet_volume,bias=0):
         def func(pulse_width):
             input_features = pd.DataFrame({
                 'pulse_width': [pulse_width],
                 'starting_volume': [total_volume],
                 'effective_resistance': [effective_resistance]
             })
-            predicted_volume = model.predict(input_features)[0] + bias
+            predicted_volume = self.prediction_model.predict(input_features)[0] + bias
             return predicted_volume - target_droplet_volume
 
         # Initial guess for pulse width
         initial_guess = self.standard_pulse_width
         pulse_width_solution = fsolve(func, initial_guess)
-        return pulse_width_solution[0]
+        return round(pulse_width_solution[0],0)
 
 
 def find_minimal_stock_solutions_backtracking(target_concentrations, max_droplets):
@@ -395,7 +424,7 @@ def check_stock_solution_calculations(target_concentrations, stock_solutions, ma
     else:
         max_droplets_for_any_concentration = lookup_table.groupby('target_concentration')['droplet_count'].sum().max()
 
-    print(f'Max droplets for any concentration: {max_droplets_for_any_concentration}')
+    # print(f'Max droplets for any concentration: {max_droplets_for_any_concentration}')
     # If there are unachievable concentrations, return them
     if unachievable_concentrations:
         return False, unachievable_concentrations, lookup_table, max_droplets_for_any_concentration
@@ -506,7 +535,7 @@ class ExperimentModel(QObject):
             
             if steps == 1:
                 reagent["concentrations"] = [round(max_conc, 2)]
-                print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
+                # print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
             elif mode == "Linear":
                 reagent["concentrations"] = [round(x, 2) for x in np.linspace(min_conc, max_conc, steps).tolist()]
             elif mode == "Quadratic":
@@ -547,18 +576,6 @@ class ExperimentModel(QObject):
         reagent['max_droplets_for_conc'] = max_droplets_for_conc
         return feasible
 
-    # def calculate_stock_solutions(self, index):
-    #     self.remove_stock_solutions_for_unused_reagents()
-    #     reagent = self.reagents[index]
-    #     stock_solutions, achievable_concentrations = find_minimal_stock_solutions_backtracking(reagent['concentrations'], reagent['max_droplets'])
-    #     print(f"Stock solutions for {reagent['name']}: {stock_solutions}")
-    #     print(f"Achievable concentrations for {reagent['name']}: {achievable_concentrations}")
-    #     reagent['stock_solutions'] = stock_solutions
-    #     reagent_lookup_table = self.create_lookup_table(reagent['name'],achievable_concentrations,stock_solutions)
-    #     print(f"Lookup table for {reagent['name']}:\n{reagent_lookup_table}")
-    #     self.add_lookup_table(reagent['name'],reagent_lookup_table)
-    #     self.add_new_stock_solutions_for_reagent(reagent['name'], stock_solutions)
-
     def add_new_stock_solutions_for_reagent(self, reagent_name, concentrations):
         # Remove any existing stock solutions for this reagent
         self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != reagent_name]
@@ -588,7 +605,7 @@ class ExperimentModel(QObject):
         if not self.all_droplet_df.empty:
             self.all_droplet_df = self.all_droplet_df[self.all_droplet_df['reagent_name'].isin(used_reagents)].copy()
         # Update the stock solutions in the lookup table
-        print(f'Complete lookup table:\n{self.complete_lookup_table}')
+        # print(f'Complete lookup table:\n{self.complete_lookup_table}')
         if not self.complete_lookup_table.empty:
             self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'].isin(used_reagents)].copy()
 
@@ -653,8 +670,8 @@ class ExperimentModel(QObject):
                 temp_df['unique_id'] = temp_df['reaction_id'] + (temp_df['replicate']*(max(temp_df['reaction_id'])+1))
             all_dfs.append(temp_df)
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
-        print(f'Experiment df:\n{self.experiment_df}')
-        print(f'complete lookup table:\n{self.complete_lookup_table}')
+        # print(f'Experiment df:\n{self.experiment_df}')
+        # print(f'complete lookup table:\n{self.complete_lookup_table}')
         if feasible:
             self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
             max_droplet_df = self.all_droplet_df[['reaction_id','unique_id','replicate','droplet_count']].groupby(['reaction_id','unique_id','replicate']).sum().reset_index()
@@ -683,9 +700,9 @@ class ExperimentModel(QObject):
     
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
-            print(f'Stock solution: {stock_solution}')
+            # print(f'Stock solution: {stock_solution}')
             total_droplets = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
-            print(f'Total droplets: {total_droplets}')
+            # print(f'Total droplets: {total_droplets}')
             stock_solution['total_droplets'] = total_droplets
             stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
 
@@ -699,8 +716,8 @@ class ExperimentModel(QObject):
 
         max_total_droplets = self.metadata['max_droplets']
         optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, max_total_droplets)
-        print(f"Optimized stock solutions: {optimized_solutions}")
-        print(f"Max droplets per reagent: {max_droplets_per_reagent}")
+        # print(f"Optimized stock solutions: {optimized_solutions}")
+        # print(f"Max droplets per reagent: {max_droplets_per_reagent}")
         for i in range(len(max_droplets_per_reagent)):
             self.reagents[i]['max_droplets'] = max_droplets_per_reagent[i]
 
@@ -755,7 +772,7 @@ class ExperimentModel(QObject):
                     },
                     "completed": reaction.check_all_complete()
                 }
-
+        print(f'Create progress file: {self.progress_file_path}')
         with open(self.progress_file_path, 'w') as f:
             json.dump(self.progress_data, f, indent=4)
 
@@ -814,7 +831,7 @@ class ExperimentModel(QObject):
 
             self.data_updated.emit(i)
             self.calculate_concentrations(i,calc_experiment=True)
-            print(f'finished conc for {i}\n{self.experiment_df}')
+            # print(f'finished conc for {i}\n{self.experiment_df}')
         
         print(f"Experiment data loaded from {filename}")
 
@@ -1498,8 +1515,16 @@ class PrinterHead(QObject):
         self.color = color
         self.confirmed = False
         self.completed = False
-        self.calibrations = []
         self.current_volume = 0
+        self.effective_resistance = None
+        self.bias = None
+        self.target_droplet_volume = None
+
+    def record_droplet_volume_lost(self,droplet_count):
+        if self.target_droplet_volume is not None:
+            self.current_volume -= (droplet_count * self.target_droplet_volume) / 1000
+        else:
+            print('No target droplet volume set for printer head:',self.stock_solution.get_stock_id())
 
     def set_absolute_volume(self,volume):
         self.current_volume = volume
@@ -1510,6 +1535,9 @@ class PrinterHead(QObject):
 
     def get_current_volume(self):
         return self.current_volume
+    
+    def get_target_droplet_volume(self):
+        return self.target_droplet_volume
 
     def get_stock_solution(self):
         return self.stock_solution
@@ -1552,12 +1580,23 @@ class PrinterHead(QObject):
                     return False
         self.mark_complete()
         return True
-    
-    def add_calibration(self,calibration):
-        self.calibrations.append(calibration)
 
-    def get_calibrations(self):
-        return self.calibrations
+    def check_calibration_complete(self):
+        '''Check if the calibration data has been set for the printer head'''
+        if self.effective_resistance is not None and self.bias is not None and self.target_droplet_volume is not None:
+            return True
+        else:
+            return False
+    
+    def set_calibration_data(self, resistance, bias, target_droplet_volume):
+        print(f'Calibration data set for printer head {self.stock_solution.get_stock_id()}, R:{resistance}, B:{bias}, V:{target_droplet_volume}')
+        self.effective_resistance = resistance
+        self.bias = bias
+        self.target_droplet_volume = target_droplet_volume
+
+    def get_prediction_data(self):
+        return self.current_volume,self.effective_resistance, self.target_droplet_volume, self.bias
+
 
 class PrinterHeadManager(QObject):
     """
@@ -2686,6 +2725,7 @@ class Model(QObject):
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
         self.experiment_model.load_progress()
+        self.calibration_model.apply_calibrations_to_all_printer_heads()
         self.experiment_loaded.emit()
 
     def reload_experiment(self, plate_name=None):

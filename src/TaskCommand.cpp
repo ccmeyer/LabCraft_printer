@@ -156,6 +156,10 @@ CommandType mapCommandType(const char* commandName) {
         return PRINT;
     } else if (strcmp(commandName, "RESET_P") == 0) {
         return RESET_P;
+    } else if (strcmp(commandName, "PRINT_MODE") == 0) {
+        return PRINT_MODE;
+    } else if (strcmp(commandName, "NORMAL_MODE") == 0) {
+        return NORMAL_MODE;
     } else if (strcmp(commandName, "WAIT") == 0) {
         return WAIT;
     } else if (strcmp(commandName, "PAUSE") == 0) {

@@ -362,6 +362,12 @@ void Communication::executeCommand(const Command& cmd) {
         case SET_WIDTH:
             printer.setDuration(cmd.param1);
             break;
+        case PRINT_MODE:
+            printer.enterPrintMode();
+            break;
+        case NORMAL_MODE:
+            printer.exitPrintMode();
+            break;
         case PAUSE:
             currentState = PAUSED;
             break;

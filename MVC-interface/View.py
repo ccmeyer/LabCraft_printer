@@ -200,7 +200,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('v','Print 20 droplets', lambda: self.controller.print_droplets(20))
         self.shortcut_manager.add_shortcut('b','Print 100 droplets', lambda: self.controller.print_droplets(100))
         self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
-
+        self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
 
@@ -242,6 +242,12 @@ class MainWindow(QMainWindow):
             return text
         else:
             return None
+
+    def show_calibrations(self):
+        """Print all printer head calibrations to terminal."""
+        for printer_head in self.model.printer_head_manager.get_all_printer_heads():
+            print(f'Printer Head {printer_head.get_stock_id()}')
+            print(printer_head.get_prediction_data())
         
     def reset_single_array(self):
         """Reset a single array."""
@@ -811,6 +817,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+
+        self.controller.enter_print_mode()
         
         # self.current_printer_head = self.model.rack_model.get_gripper_printer_head()
         # self.current_stock_solution = self.current_printer_head.get_stock_solution()
@@ -1334,40 +1342,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         """Remove all the calibration measurements for the current stock solution."""
         self.model.calibration_model.remove_all_calibrations_for_stock()
 
-    # def coarse_pulse_width_calibration(self):
-    #     """Perform a coarse pulse width calibration."""
-    #     # pulse_width = self.model.calibration_model.predict_common_pulse_width_last_measurement()
-    #     target_volume = self.target_drop_volume_spinbox.value()
-    #     starting_volume = self.current_printer_head.get_current_volume()
-    #     target_pressure = self.model.machine_model.get_target_pressure()
-    #     stock_id = self.current_stock_solution.get_stock_id()
-    #     pulse_width = self.model.calibration_model.predict_target_pulse_width_reagent(target_volume,target_pressure,starting_volume,stock_id)
-    #     print(f'Coarse pulse width calibration: {pulse_width}')
-
-    #     self.pulse_width_spinbox.blockSignals(True)
-    #     self.pulse_width_spinbox.setValue(pulse_width)
-    #     self.pulse_width_spinbox.blockSignals(False)
-    #     self.controller.set_pulse_width(pulse_width,manual=False)
-    #     return pulse_width
-
-    # def calculate_target_pressure(self):
-    #     """Calculate the target pressure for a specific droplet volume."""
-    #     droplet_volume = self.target_drop_volume_spinbox.value()
-    #     starting_volume = self.current_printer_head.get_current_volume()
-    #     pulse_width = self.model.machine_model.pulse_width
-    #     target_pressure = self.model.calibration_model.find_pressure_for_target_volume(droplet_volume,pulse_width,starting_volume)
-    #     self.target_pressure_spinbox.blockSignals(True)
-    #     self.target_pressure_spinbox.setValue(target_pressure)
-    #     self.target_pressure_spinbox.blockSignals(False)
-    #     self.controller.set_absolute_pressure(target_pressure,manual=False)
-
-    # def refine_pulse_width(self):
-    #     """Refine the pulse width for a specific droplet volume."""
-    #     pulse_width = self.model.calibration_model.refine_pulse_width_last_measurement()
-    #     self.pulse_width_spinbox.blockSignals(True)
-    #     self.pulse_width_spinbox.setValue(pulse_width)
-    #     self.pulse_width_spinbox.blockSignals(False)
-    #     self.controller.set_pulse_width(pulse_width,manual=False)
+    def closeEvent(self, event):
+        """Handle the closing of the dialog."""
+        self.model.calibration_model.mass_updated_signal.disconnect(self.update_mass_time_plot)
+        self.model.machine_model.printing_parameters_updated.disconnect(self.update_printing_parameters)
+        self.model.calibration_model.initial_mass_captured_signal.disconnect(self.initiate_calibration_print)
+        self.model.calibration_model.calibration_complete_signal.disconnect(self.handle_calibration_complete)
+        self.model.calibration_model.change_volume_signal.disconnect(self.update_volume)
+        self.controller.exit_print_mode()
+        event.accept()
 
 
 class PressureCalibrationDialog(QtWidgets.QDialog):
@@ -2733,7 +2716,7 @@ class RackBox(QGroupBox):
             else:
                 label.setStyleSheet(f"background-color: {rgba_color}; color: white;")
 
-            print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
+            # print(f'slot: {slot_number} locked: {slot.locked} confirmed: {slot.confirmed}')
             if slot.confirmed and not slot.locked:
                 combined_button.setText("Load")
                 combined_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
@@ -3168,7 +3151,7 @@ class ExperimentDesignDialog(QDialog):
         # Generate a default name for the reagent
         if not name:
             name = f"reagent-{row_position + 1}"
-        print(f'---name: {name}---')
+        # print(f'---name: {name}---')
         # Add cells for reagent name, min/max concentrations, steps, and mode
         reagent_name_item = QTableWidgetItem(name)
         reagent_name_item.setFlags(reagent_name_item.flags() | Qt.ItemIsEditable)
@@ -3303,10 +3286,10 @@ class ExperimentDesignDialog(QDialog):
         self.replicate_spinbox.blockSignals(False)
         
         original_reagents = self.experiment_model.get_all_reagents().copy()
-        print(f"Original reagents: {original_reagents}")
+        # print(f"Original reagents: {original_reagents}")
 
         for i, reagent in enumerate(original_reagents):
-            print(f"-=-=-Adding reagent: {reagent}-{i}")
+            # print(f"-=-=-Adding reagent: {reagent}-{i}")
 
             self.add_reagent(
                 name=reagent["name"],

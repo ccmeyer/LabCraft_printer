@@ -18,6 +18,8 @@ public:
     bool isPrintingComplete() const;
     bool isBusy() const;
     void resetDropletCounts();
+    void enterPrintMode();
+    void exitPrintMode();
 
 private:
     int valvePin;

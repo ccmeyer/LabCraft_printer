@@ -625,6 +625,7 @@ class ResetWorker(QThread):
         self.parent.gripper_off()
         self.parent.disable_motors()
         self.parent.deregulate_pressure()
+        self.parent.exit_print_mode()
 
         # Continuously check until all tasks are completed
         timeout_counter = 0
@@ -973,6 +974,12 @@ class Machine(QObject):
 
     def set_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('SET_WIDTH',pulse_width,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def enter_print_mode(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def exit_print_mode(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('NORMAL_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def home_motor_handler(self):
         self.homed = True

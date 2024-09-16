@@ -32,11 +32,22 @@ unsigned long DropletPrinter::getDuration() const{
     return duration;
 }
 
-// Method to start printing the specified number of droplets
-void DropletPrinter::startPrinting(int numberOfDroplets) {
+// Method to enter print mode
+void DropletPrinter::enterPrintMode() {
     sensor.setReadInterval(2000);  // Set the read interval to 2ms for faster response
     regulator.setAdjustInterval(2000); // Set the adjust interval to 2ms for faster response
     regulator.setPressureTolerance(1);
+}
+
+// Method to exit print mode
+void DropletPrinter::exitPrintMode() {
+    sensor.setReadInterval(5000);  // Reset the read interval to 5ms
+    regulator.setAdjustInterval(5000); // Reset the adjust interval to 5ms
+    regulator.setPressureTolerance(10);
+}
+
+// Method to start printing the specified number of droplets
+void DropletPrinter::startPrinting(int numberOfDroplets) {
     targetDroplets += numberOfDroplets;
     printingComplete = false;
     regulator.resetTargetReached();
@@ -110,9 +121,6 @@ void DropletPrinter::printDroplet() {
     }
     if (printedDroplets >= targetDroplets) {
         printingComplete = true;
-        sensor.setReadInterval(5000);  // Reset the read interval to 5ms
-        regulator.setAdjustInterval(5000); // Reset the adjust interval to 5ms
-        regulator.setPressureTolerance(10);
         return;
     }
     if (regulator.isResetInProgress()){
