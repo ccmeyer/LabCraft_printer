@@ -648,6 +648,5 @@ class Controller(QObject):
             else:
                 self.print_droplets(target_droplets, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets})
             
-            
         
 

@@ -12,31 +12,26 @@ from itertools import combinations_with_replacement
 import joblib
 from scipy.optimize import minimize, fsolve
 
-# Function to predict droplet volume based on a pressure and given pulse width, starting volume
-def predict_droplet_volume(pressure, pulse_width, starting_volume, model, poly):
-    # Store the original feature names
-    original_feature_names = ['pressure', 'pulse_width', 'starting_volume']
-    new_data = pd.DataFrame([[pressure[0], pulse_width, starting_volume]], columns=original_feature_names)
-    # Transform the DataFrame using PolynomialFeatures
-    X = poly.transform(new_data)
-    return model.predict(X)[0]
-
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
     initial_mass_captured_signal = Signal()
     calibration_complete_signal = Signal()
-    change_volume_signal = Signal(float)
+    change_volume_signal = Signal()
     
-    def __init__(self, machine_model,experiment_model,prediction_model_path,resistance_model_path):
+    def __init__(self, machine_model,printer_head_manager,rack_model,prediction_model_path,resistance_model_path):
         super().__init__()
         self.machine_model = machine_model
-        self.experiment_model = experiment_model
+        self.printer_head_manager = printer_head_manager
+        self.rack_model = rack_model
 
         self.prediction_model_path = prediction_model_path
         self.prediction_model = None
         self.resistance_model_path = resistance_model_path
         self.resistance_model = None
         self.load_prediction_models()
+
+        self.current_printer_head = None
+        self.current_stock_id = None
 
         self.current_mass = 0
         self.mass_log = []
@@ -48,6 +43,34 @@ class MassCalibrationModel(QObject):
         self.measurement_stage = 'Complete'
         self.calibration_file_path = None
         self.standard_pulse_width = 4200
+
+        self.rack_model.gripper_updated.connect(self.update_current_info)
+
+    def update_current_info(self):
+        print('\n\n---Updating current info...\n\n')
+        self.current_printer_head = self.rack_model.get_gripper_printer_head()
+        if self.current_printer_head is not None:
+            self.current_stock_id = self.current_printer_head.get_stock_id()
+        else:
+            self.current_stock_id = None
+
+    def set_current_volume(self,volume):
+        self.current_printer_head.set_absolute_volume(volume)
+        self.change_volume_signal.emit()
+
+    def change_current_volume(self, change):
+        self.current_printer_head.change_volume(change)
+        self.change_volume_signal.emit()
+
+    def get_current_stock_id(self):
+        print(f'\n--Current stock ID: {self.current_stock_id}\n')
+        return self.current_stock_id
+    
+    def get_current_printer_head_volume(self):
+        if self.current_printer_head is not None:
+            return self.current_printer_head.get_current_volume()
+        else:
+            return 0
 
     def update_mass(self, mass):
         self.add_mass_to_log(mass)
@@ -93,11 +116,15 @@ class MassCalibrationModel(QObject):
     def is_mass_stable(self):
         return self.mass_stable
     
-    def initiate_new_measurement(self, measurement_type,stock_id,starting_volume,calibration_droplets,pulse_width=None,target_pressure=None,target_volume=None,applied_bias=0):
+    def initiate_new_measurement(self, measurement_type,calibration_droplets,stock_id=None,starting_volume=None,pulse_width=None,target_pressure=None,target_volume=None,applied_bias=0):
         if pulse_width is None:
             pulse_width = self.machine_model.get_pulse_width()
         if target_pressure is None:
             target_pressure = self.machine_model.get_target_pressure()
+        if stock_id is None:
+            stock_id = self.current_stock_id
+        if starting_volume is None:
+            starting_volume = self.get_current_printer_head_volume()
 
         if measurement_type == 'resistance':
             pulse_width = self.standard_pulse_width
@@ -132,17 +159,18 @@ class MassCalibrationModel(QObject):
         self.current_measurement['completed'] = True
         if self.current_measurement['measurement_type'] == 'predicted':
             self.current_measurement['bias'] = self.current_measurement['droplet_volume'] - self.current_measurement['target_volume']
+        self.change_current_volume(-self.current_measurement['mass_difference'])
         print(f'Completed measurement: {self.current_measurement}')
+
         self.measurements.append(self.current_measurement)
-        self.change_volume_signal.emit(self.current_measurement['mass_difference'])
         self.current_measurement = {}
         self.measurement_stage = 'Complete'
         self.calibration_complete_signal.emit()
         self.save_calibration_data(self.calibration_file_path)
 
-    def get_last_droplet_volume(self,stock_id):
+    def get_last_droplet_volume(self):
         for m in reversed(self.measurements):
-            if m['stock_id'] == stock_id:
+            if m['stock_id'] == self.current_stock_id:
                 return m['droplet_volume']
         return 0
 
@@ -165,13 +193,13 @@ class MassCalibrationModel(QObject):
             self.measurements = json.load(file)
         print(f"Calibration data loaded from {file_path}")
 
-    def get_measurements(self,stock_id):
-        return [[m['pressure'],m['pulse_width'],m['droplets'],m['droplet_volume']] for m in self.measurements if m['stock_id'] == stock_id]
+    def get_measurements(self):
+        return [[m['pressure'],m['pulse_width'],m['droplets'],m['droplet_volume']] for m in self.measurements if m['stock_id'] == self.current_stock_id]
     
-    def remove_last_measurement(self,stock_id):
+    def remove_last_measurement(self):
         """Removes the last measurement."""
         if len(self.measurements) > 0:
-            if self.measurements[-1]['stock_id'] == stock_id:
+            if self.measurements[-1]['stock_id'] == self.current_stock_id:
                 self.measurements.pop()
                 self.calibration_complete_signal.emit()
             else:
@@ -181,9 +209,9 @@ class MassCalibrationModel(QObject):
 
         self.save_calibration_data(self.calibration_file_path)
 
-    def remove_all_calibrations_for_stock(self,stock_id):
+    def remove_all_calibrations_for_stock(self,):
         """Removes all measurements for the specified stock ID."""
-        self.measurements = [m for m in self.measurements if m['stock_id'] != stock_id]
+        self.measurements = [m for m in self.measurements if m['stock_id'] != self.current_stock_id]
         self.calibration_complete_signal.emit()
         self.save_calibration_data(self.calibration_file_path)
 
@@ -216,12 +244,13 @@ class MassCalibrationModel(QObject):
         print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
         return bias
     
-    def predict_pulse_width_for_droplet(self,stock_id, total_volume, target_droplet_volume,calc_bias=True):
-        resistance = self.calculate_resistance_for_stock(stock_id)
+    def predict_pulse_width_for_droplet(self, target_droplet_volume,calc_bias=True):
+        total_volume = self.get_current_printer_head_volume()
+        resistance = self.calculate_resistance_for_stock(self.current_stock_id)
         if resistance is None:
             return self.standard_pulse_width
         if calc_bias:
-            bias = self.calculate_bias(stock_id)
+            bias = self.calculate_bias(self.current_stock_id)
             if bias is None:
                 bias = 0
         else:
@@ -1474,6 +1503,7 @@ class PrinterHead(QObject):
 
     def set_absolute_volume(self,volume):
         self.current_volume = volume
+        # self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
 
     def change_volume(self,volume):
         self.current_volume += volume
@@ -1561,8 +1591,8 @@ class PrinterHeadManager(QObject):
             self.unassigned_printer_heads.append(printer_head)
         print(f"Created {len(self.printer_heads)} printer heads.")
 
-    # def volume_changed(self):
-    #     print('Volume changed')
+    # def volume_changed(self,stock_id):
+    #     print(f'Volume changed for printer head {stock_id}')
 
 
     def assign_printer_head_to_slot(self, slot_number, rack_model):
@@ -2486,13 +2516,8 @@ class Model(QObject):
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
-        # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','random_forest_model.pkl')
-        # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','linear_model.pkl')
         self.prediction_model_path = os.path.join(self.script_dir, 'Presets','lr_pipeline.pkl')
         self.resistance_model_path = os.path.join(self.script_dir, 'Presets','resistance_pipeline.pkl')
-        # self.prediction_features_path = os.path.join(self.script_dir, 'Presets','LV_poly_features.pkl')
-        # self.pulse_model_path = os.path.join(self.script_dir, 'Presets','pulse_width_model.pkl')
-        # self.pulse_features_path = os.path.join(self.script_dir, 'Presets','pulse_poly_features.pkl')
     
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
@@ -2510,7 +2535,7 @@ class Model(QObject):
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
         self.experiment_model = ExperimentModel(self.well_plate)
         self.experiment_file_path = None
-        self.calibration_model = MassCalibrationModel(self.machine_model,self.experiment_model,self.prediction_model_path,self.resistance_model_path)
+        self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.prediction_model_path,self.resistance_model_path)
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
