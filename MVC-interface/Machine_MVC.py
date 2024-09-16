@@ -1030,4 +1030,5 @@ class Machine(QObject):
         self.all_calibration_droplets_printed.emit()
 
     def print_calibration_droplets(self,num_droplets,manual=False):
+        print('Machine: Printing calibration droplets')
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)

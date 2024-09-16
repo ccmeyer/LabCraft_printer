@@ -310,6 +310,12 @@ class Controller(QObject):
         """Reset the syringe."""
         self.machine.reset_syringe()
 
+    def check_syringe_position(self):
+        """Checks the syringe position and resets it if nearly at the limit."""
+        current_p = self.model.machine_model.get_current_p_motor()
+        if current_p > 22500:
+            self.reset_syringe()
+
     def pause_machine(self):
         """Pause the machine."""
         self.machine.pause_machine()
@@ -557,6 +563,7 @@ class Controller(QObject):
 
     def print_calibration_droplets(self,droplets,manual=False):
         """Print a specified number of droplets for calibration."""
+        print('Controller: Printing calibration droplets')
         self.machine.print_calibration_droplets(droplets,manual=manual)
 
     def start_mass_stabilization_timer(self):

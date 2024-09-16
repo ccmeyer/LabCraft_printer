@@ -970,19 +970,19 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.target_drop_volume_spinbox, row, 1)
         row += 1
 
-        self.coarse_pulse_width_calibration_button = QtWidgets.QPushButton("Coarse Pulse Width Calibration")
-        self.coarse_pulse_width_calibration_button.clicked.connect(self.coarse_pulse_width_calibration)
-        self.user_input_layout.addWidget(self.coarse_pulse_width_calibration_button, row, 0, 1, 2)
+        self.resistance_calibration_button = QtWidgets.QPushButton("Resistance Calibration")
+        self.resistance_calibration_button.clicked.connect(self.initiate_resistance_calibration)
+        self.user_input_layout.addWidget(self.resistance_calibration_button, row, 0, 1, 2)
         row += 1
 
-        self.calculate_target_pressure_button = QtWidgets.QPushButton("Calculate Target Pressure")
-        self.calculate_target_pressure_button.clicked.connect(self.calculate_target_pressure)
-        self.user_input_layout.addWidget(self.calculate_target_pressure_button, row, 0, 1, 2)
+        self.predict_pulse_width_button = QtWidgets.QPushButton("Predict pulse")
+        self.predict_pulse_width_button.clicked.connect(self.evaluate_predicted_pulse_width)
+        self.user_input_layout.addWidget(self.predict_pulse_width_button, row, 0, 1, 2)
         row += 1
 
-        self.refine_pulse_width_button = QtWidgets.QPushButton("Refine Pulse Width")
-        self.refine_pulse_width_button.clicked.connect(self.refine_pulse_width)
-        self.user_input_layout.addWidget(self.refine_pulse_width_button, row, 0, 1, 2)
+        self.predict_pulse_width_no_bias_button = QtWidgets.QPushButton("Predict pulse no bias")
+        self.predict_pulse_width_no_bias_button.clicked.connect(self.evaluate_predict_pulse_width_no_bias)
+        self.user_input_layout.addWidget(self.predict_pulse_width_no_bias_button, row, 0, 1, 2)
         row += 1
 
         self.current_pressure_label = QtWidgets.QLabel("Current Pressure:")
@@ -1034,8 +1034,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
         self.pressure_screen_low_spinbox.setDecimals(0)
         self.pressure_screen_low_spinbox.setSingleStep(10)
-        self.pressure_screen_low_spinbox.setRange(10,4000)
-        self.pressure_screen_low_spinbox.setValue(2500)
+        self.pressure_screen_low_spinbox.setRange(10,7000)
+        self.pressure_screen_low_spinbox.setValue(3500)
         # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
         self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
@@ -1045,8 +1045,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
         self.pressure_screen_high_spinbox.setDecimals(0)
         self.pressure_screen_high_spinbox.setSingleStep(10)
-        self.pressure_screen_high_spinbox.setRange(10, 4000)
-        self.pressure_screen_high_spinbox.setValue(3500)
+        self.pressure_screen_high_spinbox.setRange(10, 7000)
+        self.pressure_screen_high_spinbox.setValue(4500)
         # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
         self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
@@ -1166,7 +1166,50 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         if len(mass_log) > 0:
             self.axisX.setRange(0, len(mass_log))
             self.axisY.setRange(min(mass_log) - 0.5, max(mass_log) + 0.5)
+
+    def initiate_resistance_calibration(self):
+        """Initiate a measurement of the resistance of the printer head using the standard condition."""
+        self.label.setText("Started resistance calibration process, waiting for mass stabilization")
+        self.controller.check_syringe_position()
+        self.controller.set_pulse_width(self.model.calibration_model.standard_pulse_width,manual=False)
+        self.model.calibration_model.initiate_new_measurement('resistance',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
         
+    def predict_pulse_width(self):
+        """Predict the pulse width for a given volume."""
+        target_volume = self.target_drop_volume_spinbox.value()
+        return self.model.calibration_model.predict_pulse_width_for_droplet(self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),target_volume,calc_bias=True)
+    
+    def evaluate_predicted_pulse_width(self):
+        """Evaluate the predicted pulse width for a given volume."""
+        self.label.setText("Evaluating prediction, waiting for mass stabilization")
+        self.controller.check_syringe_position()
+        predicted_pulse_width, applied_bias = self.predict_pulse_width()
+        target_volume = self.target_drop_volume_spinbox.value()
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(predicted_pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
+        self.controller.set_pulse_width(predicted_pulse_width,manual=False)
+        self.model.calibration_model.initiate_new_measurement('predicted',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+
+    def predict_pulse_width_no_bias(self):
+        """Predict the pulse width for a given volume without bias."""
+        target_volume = self.target_drop_volume_spinbox.value()
+        return self.model.calibration_model.predict_pulse_width_for_droplet(self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),target_volume,calc_bias=False)
+    
+    def evaluate_predict_pulse_width_no_bias(self):
+        """Evaluate the predicted pulse width for a given volume without bias."""
+        self.label.setText("Evaluating prediction without bias, waiting for mass stabilization")
+        self.controller.check_syringe_position()
+        predicted_pulse_width, applied_bias = self.predict_pulse_width_no_bias()
+        target_volume = self.target_drop_volume_spinbox.value()
+        self.pulse_width_spinbox.blockSignals(True)
+        self.pulse_width_spinbox.setValue(predicted_pulse_width)
+        self.pulse_width_spinbox.blockSignals(False)
+        self.controller.set_pulse_width(predicted_pulse_width,manual=False)
+        self.model.calibration_model.initiate_new_measurement('predicted',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+
+
+
     def start_screen(self):
         """Start the screen for the current stock solution."""
         # self.start_screen_button.setDisabled(True)
@@ -1187,7 +1230,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.label.setText(f"---Testing {current_screen_pressure} psi, {self.repeat_measurements} remaining---")
         print(f'Screening pulse widths: {current_screen_pressure}')
         self.controller.set_pulse_width(current_screen_pressure,manual=False)
-        self.model.calibration_model.initiate_new_measurement_pulse(self.current_stock_solution.get_stock_id(),current_screen_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+        self.model.calibration_model.initiate_new_measurement('screen',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=current_screen_pressure)
 
     
     def initiate_repeat_calibration_process(self):
@@ -1197,8 +1240,12 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.repeat_measurement_button.setDisabled(True)
         self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
         self.repeat_measurements = self.repeat_measurement_spinbox.value()
-        pulse_width = self.coarse_pulse_width_calibration()
-        self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width)
+        pulse_width,applied_bias = self.predict_pulse_width()
+        target_volume = self.target_drop_volume_spinbox.value()
+        self.controller.set_pulse_width(pulse_width,manual=False)
+        self.controller.check_syringe_position()
+        self.model.calibration_model.initiate_new_measurement('repeat',self.current_stock_solution.get_stock_id(), self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+        self.repeat_measurements -= 1
 
     def stop_repeat_calibration_process(self):
         """Stop the process of capturing a new measurement."""
@@ -1209,11 +1256,13 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     def initiate_calibration_process(self):
         """Initiate the process of capturing a new measurement."""
         self.label.setText("Started calibration process, waiting for mass stabilization")
-        self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+        self.controller.check_syringe_position()
+        self.model.calibration_model.initiate_new_measurement('standard',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
     
     def initiate_calibration_print(self):
         """Initiate the printing of calibration droplets."""
         self.label.setText("Printing calibration droplets")
+        print('View: Printing calibration droplets')
         self.controller.print_calibration_droplets(self.num_calibration_droplets)
 
     def handle_calibration_complete(self):
@@ -1228,11 +1277,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
                 print(f'Screening pressure: {current_screening_pressure}')
                 self.label.setText(f"---Testing {current_screening_pressure} psi, {self.repeat_measurements} remaining---")
                 self.controller.set_pulse_width(current_screening_pressure,manual=False)
-                self.model.calibration_model.initiate_new_measurement_pulse(self.current_stock_solution.get_stock_id(),current_screening_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets)
+                self.controller.check_syringe_position()
+                self.model.calibration_model.initiate_new_measurement('screen',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=current_screening_pressure)
             else:
-                pulse_width = self.coarse_pulse_width_calibration()
+                pulse_width,applied_bias = self.predict_pulse_width()
+                self.controller.set_pulse_width(pulse_width,manual=False)
+                target_volume = self.target_drop_volume_spinbox.value()
+                self.controller.check_syringe_position()
                 self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
-                self.model.calibration_model.initiate_new_measurement(self.current_stock_solution.get_stock_id(),self.model.machine_model.target_pressure,self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width)
+                self.model.calibration_model.initiate_new_measurement('repeat',self.current_stock_solution.get_stock_id(),self.current_printer_head.get_current_volume(),self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
         else:
             self.label.setText("Calibration complete")
 
@@ -1283,40 +1336,40 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         """Remove all the calibration measurements for the current stock solution."""
         self.model.calibration_model.remove_all_calibrations_for_stock(self.current_stock_solution.get_stock_id())
 
-    def coarse_pulse_width_calibration(self):
-        """Perform a coarse pulse width calibration."""
-        # pulse_width = self.model.calibration_model.predict_common_pulse_width_last_measurement()
-        target_volume = self.target_drop_volume_spinbox.value()
-        starting_volume = self.current_printer_head.get_current_volume()
-        target_pressure = self.model.machine_model.get_target_pressure()
-        stock_id = self.current_stock_solution.get_stock_id()
-        pulse_width = self.model.calibration_model.predict_target_pulse_width_reagent(target_volume,target_pressure,starting_volume,stock_id)
-        print(f'Coarse pulse width calibration: {pulse_width}')
+    # def coarse_pulse_width_calibration(self):
+    #     """Perform a coarse pulse width calibration."""
+    #     # pulse_width = self.model.calibration_model.predict_common_pulse_width_last_measurement()
+    #     target_volume = self.target_drop_volume_spinbox.value()
+    #     starting_volume = self.current_printer_head.get_current_volume()
+    #     target_pressure = self.model.machine_model.get_target_pressure()
+    #     stock_id = self.current_stock_solution.get_stock_id()
+    #     pulse_width = self.model.calibration_model.predict_target_pulse_width_reagent(target_volume,target_pressure,starting_volume,stock_id)
+    #     print(f'Coarse pulse width calibration: {pulse_width}')
 
-        self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(pulse_width)
-        self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_pulse_width(pulse_width,manual=False)
-        return pulse_width
+    #     self.pulse_width_spinbox.blockSignals(True)
+    #     self.pulse_width_spinbox.setValue(pulse_width)
+    #     self.pulse_width_spinbox.blockSignals(False)
+    #     self.controller.set_pulse_width(pulse_width,manual=False)
+    #     return pulse_width
 
-    def calculate_target_pressure(self):
-        """Calculate the target pressure for a specific droplet volume."""
-        droplet_volume = self.target_drop_volume_spinbox.value()
-        starting_volume = self.current_printer_head.get_current_volume()
-        pulse_width = self.model.machine_model.pulse_width
-        target_pressure = self.model.calibration_model.find_pressure_for_target_volume(droplet_volume,pulse_width,starting_volume)
-        self.target_pressure_spinbox.blockSignals(True)
-        self.target_pressure_spinbox.setValue(target_pressure)
-        self.target_pressure_spinbox.blockSignals(False)
-        self.controller.set_absolute_pressure(target_pressure,manual=False)
+    # def calculate_target_pressure(self):
+    #     """Calculate the target pressure for a specific droplet volume."""
+    #     droplet_volume = self.target_drop_volume_spinbox.value()
+    #     starting_volume = self.current_printer_head.get_current_volume()
+    #     pulse_width = self.model.machine_model.pulse_width
+    #     target_pressure = self.model.calibration_model.find_pressure_for_target_volume(droplet_volume,pulse_width,starting_volume)
+    #     self.target_pressure_spinbox.blockSignals(True)
+    #     self.target_pressure_spinbox.setValue(target_pressure)
+    #     self.target_pressure_spinbox.blockSignals(False)
+    #     self.controller.set_absolute_pressure(target_pressure,manual=False)
 
-    def refine_pulse_width(self):
-        """Refine the pulse width for a specific droplet volume."""
-        pulse_width = self.model.calibration_model.refine_pulse_width_last_measurement()
-        self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(pulse_width)
-        self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_pulse_width(pulse_width,manual=False)
+    # def refine_pulse_width(self):
+    #     """Refine the pulse width for a specific droplet volume."""
+    #     pulse_width = self.model.calibration_model.refine_pulse_width_last_measurement()
+    #     self.pulse_width_spinbox.blockSignals(True)
+    #     self.pulse_width_spinbox.setValue(pulse_width)
+    #     self.pulse_width_spinbox.blockSignals(False)
+    #     self.controller.set_pulse_width(pulse_width,manual=False)
 
 
 class PressureCalibrationDialog(QtWidgets.QDialog):
@@ -2036,8 +2089,8 @@ class BaseCalibrationDialog(QDialog):
         self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
         self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
         self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
 
@@ -2655,7 +2708,7 @@ class RackBox(QGroupBox):
                             self.update_unassigned_printer_heads()  # Update the table to reflect the change
                             return
         return swap_printer_head
-
+    
     def update_all_slots(self):
         """Update all slots in the rack."""
         for slot_number in range(len(self.rack_model.slots)):

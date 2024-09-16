@@ -10,7 +10,7 @@ import cv2
 import itertools
 from itertools import combinations_with_replacement
 import joblib
-from scipy.optimize import minimize
+from scipy.optimize import minimize, fsolve
 
 # Function to predict droplet volume based on a pressure and given pulse width, starting volume
 def predict_droplet_volume(pressure, pulse_width, starting_volume, model, poly):
@@ -27,20 +27,17 @@ class MassCalibrationModel(QObject):
     calibration_complete_signal = Signal()
     change_volume_signal = Signal(float)
     
-    def __init__(self, machine_model,experiment_model,prediction_model_path,features_path,pulse_model_path,pulse_features_path):
+    def __init__(self, machine_model,experiment_model,prediction_model_path,resistance_model_path):
         super().__init__()
         self.machine_model = machine_model
         self.experiment_model = experiment_model
+
         self.prediction_model_path = prediction_model_path
         self.prediction_model = None
-        self.features_path = features_path
-        self.poly = None
-
-        self.pulse_model_path = pulse_model_path
-        self.pulse_model = None
-        self.pulse_features_path = pulse_features_path
-        self.pulse_poly = None
+        self.resistance_model_path = resistance_model_path
+        self.resistance_model = None
         self.load_prediction_models()
+
         self.current_mass = 0
         self.mass_log = []
         self.stable_counter = 0
@@ -96,10 +93,17 @@ class MassCalibrationModel(QObject):
     def is_mass_stable(self):
         return self.mass_stable
     
-    def initiate_new_measurement(self,stock_id,target_pressure,starting_volume,calibration_droplets,pulse_width=None):
+    def initiate_new_measurement(self, measurement_type,stock_id,starting_volume,calibration_droplets,pulse_width=None,target_pressure=None,target_volume=None,applied_bias=0):
         if pulse_width is None:
             pulse_width = self.machine_model.get_pulse_width()
+        if target_pressure is None:
+            target_pressure = self.machine_model.get_target_pressure()
+
+        if measurement_type == 'resistance':
+            pulse_width = self.standard_pulse_width
+        
         self.current_measurement = {
+            'measurement_type':measurement_type,
             'stock_id':stock_id,
             "starting_volume": starting_volume,
             "initial_mass": 0,
@@ -109,23 +113,10 @@ class MassCalibrationModel(QObject):
             "pressure": target_pressure,
             "pulse_width": pulse_width,
             "droplets": calibration_droplets,
+            "target_volume": target_volume,
             "syringe_position": self.machine_model.get_current_p_motor(),
-            "completed": False
-        }
-        self.measurement_stage = 'Initial'
-
-    def initiate_new_measurement_pulse(self,stock_id,target_pulse,starting_volume,calibration_droplets):
-        self.current_measurement = {
-            'stock_id':stock_id,
-            "starting_volume": starting_volume,
-            "initial_mass": 0,
-            "final_mass": 0,
-            "mass_difference": 0,
-            "droplet_volume": 0,
-            "pressure": self.machine_model.get_target_pressure(),
-            "pulse_width": target_pulse,
-            "droplets": calibration_droplets,
-            "syringe_position": self.machine_model.get_current_p_motor(),
+            "applied_bias": applied_bias,
+            "bias": None,
             "completed": False
         }
         self.measurement_stage = 'Initial'
@@ -138,6 +129,9 @@ class MassCalibrationModel(QObject):
     def complete_measurement(self):
         self.current_measurement['mass_difference'] = self.current_measurement['final_mass'] - self.current_measurement['initial_mass']
         self.current_measurement['droplet_volume'] = round((self.current_measurement['mass_difference'] / self.current_measurement['droplets']) * 1000,2)
+        self.current_measurement['completed'] = True
+        if self.current_measurement['measurement_type'] == 'predicted':
+            self.current_measurement['bias'] = self.current_measurement['droplet_volume'] - self.current_measurement['target_volume']
         print(f'Completed measurement: {self.current_measurement}')
         self.measurements.append(self.current_measurement)
         self.change_volume_signal.emit(self.current_measurement['mass_difference'])
@@ -196,154 +190,60 @@ class MassCalibrationModel(QObject):
     def load_prediction_models(self):
         """Load the prediction model from the specified file path."""
         self.prediction_model = joblib.load(self.prediction_model_path)
-        self.poly = joblib.load(self.features_path)
-        self.pulse_model = joblib.load(self.pulse_model_path)
-        self.pulse_poly = joblib.load(self.pulse_features_path)
+        self.resistance_model = joblib.load(self.resistance_model_path)
 
-    def find_pressure_for_target_volume(self, target_volume, pulse_width, starting_volume):
-        '''Function to find the pressure that achieves the target droplet volume'''
-        # Define an objective function for minimization
-        def objective(pressure):
-            return abs(predict_droplet_volume(pressure, pulse_width, starting_volume, self.prediction_model, self.poly) - target_volume)
-        
-        # Minimize the objective function to find the pressure that gives the target volume
-        result = minimize(objective, x0=[1.5], bounds=[(1.0, 2.0)])  # Adjust initial guess and bounds
-        return result.x[0]
+    def calculate_resistance_for_stock(self,stock_id):
+        stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
+        if len(stock_measurements) == 0:
+            print(f"No measurements found for stock '{stock_id}'")
+            return None
+        stock_data = pd.DataFrame(stock_measurements)
+        standard_data = stock_data[stock_data['pulse_width'] == self.standard_pulse_width].copy()
+        res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
+        res_df['effective_resistance'] = self.resistance_model.predict(res_df)
+        resistance = res_df['effective_resistance'].mean()
+        print(f"Effective resistance for stock '{stock_id}': {resistance:.2f} nL")
+        return resistance
     
-    def predict_target_pulse_width_reagent(self, target_volume, pressure, starting_volume, stock_id):
-        '''Function to use the droplet volume from the standard condition to predict the necessary pulse width'''
-        current_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
-        if len(current_measurements) == 0:
-            print('No measurements found for this reagent')
+    def calculate_bias(self,stock_id):
+        stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
+        stock_data = pd.DataFrame(stock_measurements).dropna(subset=['bias'])
+        if len(stock_data) == 0:
+            print(f"No bias measurements found for stock '{stock_id}'")
+            return None
+        stock_data['total_bias'] = stock_data['bias'] + stock_data['applied_bias']
+        bias = stock_data['total_bias'].mean()
+        print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
+        return bias
+    
+    def predict_pulse_width_for_droplet(self,stock_id, total_volume, target_droplet_volume,calc_bias=True):
+        resistance = self.calculate_resistance_for_stock(stock_id)
+        if resistance is None:
             return self.standard_pulse_width
-        standard_measurements = [m for m in current_measurements if m['pulse_width'] == self.standard_pulse_width]
-        if len(standard_measurements) == 0:
-            print('No measurements found for the standard pulse width')
-            return self.standard_pulse_width
-        elif len(standard_measurements) > 1:
-            print('Multiple measurements found for the standard pulse width')
-            volume_from_standard = np.mean([m['droplet_volume'] for m in standard_measurements])
+        if calc_bias:
+            bias = self.calculate_bias(stock_id)
+            if bias is None:
+                bias = 0
         else:
-            volume_from_standard = standard_measurements[0]['droplet_volume']
-        pulse_width = self.predict_target_pulse_width(target_volume, volume_from_standard, pressure, starting_volume)
-        return round(pulse_width,0)
-
+            bias = 0
+        pulse_width = self.predict_pulse_width(self.prediction_model, total_volume, resistance, target_droplet_volume,bias=bias)
+        print(f"Required pulse width for {target_droplet_volume} nL droplet: {pulse_width:.2f} µs")
+        return pulse_width, bias
     
+    def predict_pulse_width(self, model, total_volume, effective_resistance, target_droplet_volume,bias=0):
+        def func(pulse_width):
+            input_features = pd.DataFrame({
+                'pulse_width': [pulse_width],
+                'starting_volume': [total_volume],
+                'effective_resistance': [effective_resistance]
+            })
+            predicted_volume = model.predict(input_features)[0] + bias
+            return predicted_volume - target_droplet_volume
 
-    def predict_target_pulse_width(self,target_volume, volume_from_standard, pressure, starting_volume):
-        '''Function to predict the common pulse width using scipy.optimize.minimize'''
-        pulse_columns = ['pressure', 'pulse_width', 'starting_volume', 'standard']
-        # Define the objective function for minimization
-        def objective(pulse_width):
-            # Prepare the input with the current guess of common pulse width
-            df_input = pd.DataFrame([[pressure, pulse_width[0], starting_volume, volume_from_standard]], 
-                                    columns=pulse_columns)
-            transformed_input = self.poly.transform(df_input)
-            
-            # Predict the droplet volume based on the input
-            predicted_volume = self.prediction_model.predict(transformed_input)[0]
-            
-            # Return the absolute difference between the predicted and target droplet volumes
-            return abs(predicted_volume - target_volume)
-
-        # Use minimize to find the optimal common pulse width
-        result = minimize(objective, x0=[4200], bounds=[(3500, 6000)])  # Adjust bounds as needed
-        return result.x[0]
-
-    def refine_pulse_width_last_measurement(self):
-        '''Function to refine the pulse width based on the last measurement'''
-        if len(self.measurements) == 0:
-            return 1
-        last_measurement = self.measurements[-1]
-        observed_volume = last_measurement['droplet_volume']
-        pressure = last_measurement['pressure']
-        starting_volume = last_measurement['starting_volume']
-        pulse_width = self.refine_pulse_width(observed_volume, pressure, starting_volume)
-        return pulse_width
-    
-    def refine_pulse_width(self,observed_volume, pressure, starting_volume):
-        '''Function to predict the pulse width that would have resulted in the observed droplet volume'''
-        original_feature_names = ['pressure', 'pulse_width', 'starting_volume']
-        # Define the objective function for minimization
-        def objective(pulse_width):
-            df_input = pd.DataFrame([[pressure, pulse_width[0], starting_volume]], columns=original_feature_names)
-            transformed_input = self.poly.transform(df_input)
-            predicted_volume = self.prediction_model.predict(transformed_input)[0]
-            print(f"Trying pulse width: {pulse_width[0]}, Predicted volume: {predicted_volume}, Observed volume: {observed_volume}")
-            return abs(predicted_volume - observed_volume)
-
-        # Use minimize to find the optimal pulse width
-        result = minimize(objective, x0=[2200], bounds=[(1700, 3400)])  # Adjust bounds as needed based on your system
-        return result.x[0]
-    
-    def predict_common_pulse_width_last_measurement(self):
-        '''Function to predict the common pulse width using the last measurement'''
-        if len(self.measurements) == 0:
-            return 1
-        last_measurement = self.measurements[-1]
-        observed_volume = last_measurement['droplet_volume']
-        pressure = last_measurement['pressure']
-        starting_volume = last_measurement['starting_volume']
-        current_pulse_width = last_measurement['pulse_width']
-        pulse_width = self.predict_common_pulse_width(observed_volume, pressure,current_pulse_width, starting_volume)
-        return pulse_width
-    
-    def predict_common_pulse_width(self,observed_volume, pressure, pulse_width, starting_volume):
-        '''Function to predict the common pulse width using scipy.optimize.minimize'''
-        pulse_columns = ['pressure', 'pulse_width', 'starting_volume', 'common_pulse_width']
-        # Define the objective function for minimization
-        def objective(common_pulse_width):
-            # Prepare the input with the current guess of common pulse width
-            df_input = pd.DataFrame([[pressure, pulse_width, starting_volume, common_pulse_width[0]]], 
-                                    columns=pulse_columns)
-            transformed_input = self.pulse_poly.transform(df_input)
-            
-            # Predict the droplet volume based on the input
-            predicted_volume = self.pulse_model.predict(transformed_input)[0]
-            
-            # Return the absolute difference between the predicted and target droplet volumes
-            return abs(predicted_volume - observed_volume)
-
-        # Use minimize to find the optimal common pulse width
-        result = minimize(objective, x0=[3000], bounds=[(1600, 3800)])  # Adjust bounds as needed
-        return result.x[0]
-
-    # def calculate_pressure(self, target_droplet_volume, current_volume, pressure_range=(0.1, 2.0), precision=0.001):
-    #     # Start with a reasonable pressure range (e.g., 0.1 to 2.0 psi)
-    #     min_pressure, max_pressure = pressure_range
-        
-    #     while max_pressure - min_pressure > precision:
-    #         # Take the midpoint of the current pressure range
-    #         mid_pressure = (min_pressure + max_pressure) / 2
-            
-    #         # Create a DataFrame with the correct feature names
-    #         X_new = pd.DataFrame({'pressure': [mid_pressure], 'starting_volume': [current_volume]})
-            
-    #         # Predict the droplet volume with the current midpoint pressure
-    #         predicted_volume = self.prediction_model.predict(X_new)[0]
-            
-    #         # Adjust the pressure range based on whether we're above or below the target volume
-    #         if predicted_volume < target_droplet_volume:
-    #             min_pressure = mid_pressure  # Need more pressure
-    #         else:
-    #             max_pressure = mid_pressure  # Need less pressure
-        
-    #     # The best estimate for pressure is the midpoint of the final range
-    #     required_pressure = (min_pressure + max_pressure) / 2
-    #     return required_pressure
-
-    # # Function to calculate the necessary pressure given target droplet volume and current volume
-    # def calculate_pressure(self,target_droplet_volume, current_volume):
-    #     # Extract the model coefficients and intercept
-    #     coef_pressure, coef_volume = self.prediction_model.coef_
-    #     intercept = self.prediction_model.intercept_
-        
-    #     # Rearrange the linear equation to solve for pressure
-    #     # droplet_volume = coef_pressure * pressure + coef_volume * current_volume + intercept
-    #     # pressure = (target_droplet_volume - coef_volume * current_volume - intercept) / coef_pressure
-        
-    #     pressure = (target_droplet_volume - coef_volume * current_volume - intercept) / coef_pressure
-    #     return pressure
+        # Initial guess for pulse width
+        initial_guess = self.standard_pulse_width
+        pulse_width_solution = fsolve(func, initial_guess)
+        return pulse_width_solution[0]
 
 
 def find_minimal_stock_solutions_backtracking(target_concentrations, max_droplets):
@@ -2588,10 +2488,11 @@ class Model(QObject):
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','random_forest_model.pkl')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','linear_model.pkl')
-        self.prediction_model_path = os.path.join(self.script_dir, 'Presets','LV_pulse_width_model.pkl')
-        self.prediction_features_path = os.path.join(self.script_dir, 'Presets','LV_poly_features.pkl')
-        self.pulse_model_path = os.path.join(self.script_dir, 'Presets','pulse_width_model.pkl')
-        self.pulse_features_path = os.path.join(self.script_dir, 'Presets','pulse_poly_features.pkl')
+        self.prediction_model_path = os.path.join(self.script_dir, 'Presets','lr_pipeline.pkl')
+        self.resistance_model_path = os.path.join(self.script_dir, 'Presets','resistance_pipeline.pkl')
+        # self.prediction_features_path = os.path.join(self.script_dir, 'Presets','LV_poly_features.pkl')
+        # self.pulse_model_path = os.path.join(self.script_dir, 'Presets','pulse_width_model.pkl')
+        # self.pulse_features_path = os.path.join(self.script_dir, 'Presets','pulse_poly_features.pkl')
     
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
@@ -2609,7 +2510,7 @@ class Model(QObject):
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
         self.experiment_model = ExperimentModel(self.well_plate)
         self.experiment_file_path = None
-        self.calibration_model = MassCalibrationModel(self.machine_model,self.experiment_model,self.prediction_model_path,self.prediction_features_path,self.pulse_model_path,self.pulse_features_path)
+        self.calibration_model = MassCalibrationModel(self.machine_model,self.experiment_model,self.prediction_model_path,self.resistance_model_path)
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
