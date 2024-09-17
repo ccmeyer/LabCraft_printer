@@ -568,7 +568,8 @@ class Controller(QObject):
                     print(f'Controller: using expected volume: {expected_volume}')
                     vol = expected_volume
                 new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias)
-                self.set_pulse_width(new_pulse_width,manual=False)
+                if abs(self.model.machine_model.get_pulse_width() - new_pulse_width) > 2:
+                    self.set_pulse_width(new_pulse_width,manual=False)
             
                 if handler is None:
                     handler = self.volume_update_handler

@@ -2360,6 +2360,9 @@ class MachineModel(QObject):
     def is_connected(self):
         return self.machine_connected
     
+    def is_balance_connected(self):
+        return self.balance_connected
+    
     def motors_are_enabled(self):
         return self.motors_enabled
     

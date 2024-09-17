@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEventLoop
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -14,6 +14,7 @@ import numpy as np
 import json
 import os
 import random
+import time
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -76,8 +77,10 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
+        self.disconnected = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
+        self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -311,6 +314,36 @@ class MainWindow(QMainWindow):
             name = location
         if name is not None:
             self.controller.move_to_location(name,direct=direct,safe_y=safe_y,manual=manual)
+
+    def disconnect_successful(self):
+        self.disconnected = True
+    
+    def closeEvent(self, event):
+        """Handle the window close event."""
+        if self.model.machine_model.is_connected():
+            response = self.popup_yes_no('Close Application','Disconnect from the machine and close the application?')
+            if response == '&No':
+                event.ignore()
+                return
+            else:
+                self.controller.disconnect_machine()
+                # Create an event loop to wait for the disconnection to complete
+                loop = QEventLoop()
+
+                # Temporarily connect the disconnect_complete_signal to the loop.quit() to unblock the close event
+                self.controller.machine.disconnect_complete_signal.connect(loop.quit)
+
+                # Run the event loop (non-blocking) until the disconnect is complete
+                loop.exec()
+                if self.disconnected:
+                    print('Disconnected machine')
+                else:
+                    print('Failed to disconnect the machine')
+        if self.model.machine_model.is_balance_connected():
+            self.controller.disconnect_balance()
+            print('Disconnected balance')
+
+        event.accept()
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
