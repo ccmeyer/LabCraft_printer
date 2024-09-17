@@ -719,11 +719,20 @@ class Machine(QObject):
                 if not self.board.is_open:  # Add this line
                     self.error_occurred.emit('Could not open port')
                     raise serial.SerialException('Could not open port')  # Add this line
+                
+                time.sleep(0.2)  # Give some time for the device to respond
+                # Read the response
+                response = self.board.read_all().decode('ascii').strip()
+                if 'Cycle_count' not in response:  # Check if the response matches the expected handshake
+                    raise serial.SerialException(f'Unexpected response from machine: {response}')
+
                 self.initial_reset_board()
                 self.machine_connected_signal.emit(True)
                 self.simulate = False
                 self.port = port
             except Exception as e:
+                if self.board.is_open:
+                    self.board.close()
                 self.error_occurred.emit(f'Could not connect to machine at port {port}\nError: {e}')
                 self.machine_connected_signal.emit(False)
                 self.port = None
