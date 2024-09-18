@@ -2558,8 +2558,8 @@ class Model(QObject):
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
-        self.prediction_model_path = os.path.join(self.script_dir, 'Presets','lr_pipeline.pkl')
-        self.resistance_model_path = os.path.join(self.script_dir, 'Presets','resistance_pipeline.pkl')
+        self.prediction_model_path = os.path.join(self.script_dir, 'Presets','large_lr_pipeline.pkl')
+        self.resistance_model_path = os.path.join(self.script_dir, 'Presets','large_resistance_pipeline.pkl')
     
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)

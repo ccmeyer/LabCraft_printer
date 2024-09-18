@@ -219,6 +219,9 @@ class VirtualMachine():
         self.regulate_pressure = False
         self.correct_pressure = True
 
+        self.pulse_width = 4200
+        self.current_micros = 0
+
         self.current_droplets = 0
         self.target_droplets = 0
         self.correct_droplets = True
@@ -227,6 +230,8 @@ class VirtualMachine():
         self.gripper_open = False
         self.target_gripper_open = False
         self.correct_gripper = True
+
+        self.status_step = 'Cycle_count'
     
     def pause_commands(self):
         self.state = "Paused"
@@ -277,6 +282,64 @@ class VirtualMachine():
             f'Cycle_count:{self.cycle_count}'
         )
         return full_string
+    
+    def get_current_state(self):
+        if self.status_step == 'Cycle_count':
+            self.status_step = 'Last_completed'
+            return f'Cycle_count:{self.cycle_count}'
+        elif self.status_step == 'Last_completed':
+            self.status_step = 'Last_added'
+            return f'Last_completed:{self.last_completed_command_number}'
+        elif self.status_step == 'Last_added':
+            self.status_step = 'Current_command'
+            return f'Last_added:{self.last_added_command_number}'
+        elif self.status_step == 'Current_command':
+            self.status_step = 'X'
+            return f'Current_command:{self.current_command_number}'
+        elif self.status_step == 'X':
+            self.status_step = 'Y'
+            return f'X:{self.x_pos}'
+        elif self.status_step == 'Y':
+            self.status_step = 'Z'
+            return f'Y:{self.y_pos}'
+        elif self.status_step == 'Z':
+            self.status_step = 'P'
+            return f'Z:{self.z_pos}'
+        elif self.status_step == 'P':
+            self.status_step = 'Tar_X'
+            return f'P:{self.p_pos}'
+        elif self.status_step == 'Tar_X':
+            self.status_step = 'Tar_Y'
+            return f'Tar_X:{self.target_x}'
+        elif self.status_step == 'Tar_Y':
+            self.status_step = 'Tar_Z'
+            return f'Tar_Y:{self.target_y}'
+        elif self.status_step == 'Tar_Z':
+            self.status_step = 'Tar_P'
+            return f'Tar_Z:{self.target_z}'
+        elif self.status_step == 'Tar_P':
+            self.status_step = 'Gripper'
+            return f'Tar_P:{self.target_p}'
+        elif self.status_step == 'Gripper':
+            self.status_step = 'Pressure'
+            return f'Gripper:{self.gripper_open}'
+        elif self.status_step == 'Pressure':
+            self.status_step = 'Tar_pressure'
+            return f'Pressure:{self.pressure}'
+        elif self.status_step == 'Tar_pressure':
+            self.status_step = 'Pulse_width'
+            return f'Tar_pressure:{self.target_pressure}'
+        elif self.status_step == 'Pulse_width':
+            self.status_step = 'Micros'
+            return f'Pulse_width:{self.pulse_width}'
+        elif self.status_step == 'Micros':
+            self.status_step = 'Cycle_count'
+            self.current_micros += 10000
+            if self.current_micros > 46000000:
+                self.current_micros = 0
+            return f'Micros:{self.current_micros}'
+
+        
 
     def check_for_command(self):
         if self.machine.sent_command is not None:
@@ -402,6 +465,18 @@ class VirtualMachine():
             self.target_x += int(command.param1)
             self.target_y += int(command.param2)
             self.target_z += int(command.param3)
+        elif command.command_type == 'RELATIVE_X':
+            self.correct_pos = False
+            self.correct_x = False
+            self.target_x += int(command.param1)
+        elif command.command_type == 'RELATIVE_Y':
+            self.correct_pos = False
+            self.correct_y = False
+            self.target_y += int(command.param1)
+        elif command.command_type == 'RELATIVE_Z':
+            self.correct_pos = False
+            self.correct_z = False
+            self.target_z += int(command.param1)
         elif command.command_type == 'ABSOLUTE_XYZ':
             self.correct_pos = False
             self.correct_x = False
@@ -411,6 +486,19 @@ class VirtualMachine():
             self.target_x = int(command.param1)
             self.target_y = int(command.param2)
             self.target_z = int(command.param3)
+        elif command.command_type == 'ABSOLUTE_X':
+            self.correct_pos = False
+            self.correct_x = False
+            self.target_x = int(command.param1)
+        elif command.command_type == 'ABSOLUTE_Y':
+            self.correct_pos = False
+            self.correct_y = False
+            self.target_y = int(command.param1)
+        elif command.command_type == 'ABSOLUTE_Z':
+            self.correct_pos = False
+            self.correct_z = False
+            self.target_z = int(command.param1)
+        
         elif command.command_type == 'RELATIVE_PRESSURE':
             self.correct_pressure = False
             self.target_pressure += int(command.param1)
@@ -455,6 +543,25 @@ class VirtualMachine():
             self.target_y = 0
             self.target_z = 0
             self.target_p = 0
+        elif command.command_type == 'HOME_X':
+            self.x_pos = 0
+            self.target_x = 500
+        elif command.command_type == 'HOME_Y':
+            self.y_pos = 0
+            self.target_y = 500
+        elif command.command_type == 'HOME_Z':
+            self.z_pos = 0
+            self.target_z = 500
+        elif command.command_type == 'HOME_P':
+            self.p_pos = 0
+            self.target_p = 500
+        elif command.command_type == 'SET_WIDTH':
+            self.pulse_width = int(command.param1)
+        elif command.command_type == 'PRINT_MODE':
+            print('--Entered print mode--')
+        elif command.command_type == 'NORMAL_MODE':
+            print('--Entered normal mode--')
+            
         elif command.command_type == 'CHANGE_ACCEL':
             print('Changing acceleration')
         elif command.command_type == 'RESET_ACCEL':
@@ -791,7 +898,7 @@ class Machine(QObject):
         """Send a request to the control board for a status update."""
         if self.board is not None:
             if self.simulate:
-                status_string = self.board.get_complete_state()
+                status_string = self.board.get_current_state()
             else:
                 try:
                     if self.board.in_waiting > 0:

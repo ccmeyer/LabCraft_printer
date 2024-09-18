@@ -856,7 +856,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.current_printer_head = self.model.rack_model.get_gripper_printer_head()
         # self.current_stock_solution = self.current_printer_head.get_stock_solution()
 
-        self.num_calibration_droplets = 100
+        self.num_calibration_droplets = 50
         self.repeat_measurements = 0
         self.pressures_to_screen = []
 
@@ -883,7 +883,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.axisX.setTickCount(3)
         self.axisX.setRange(0, 300)
         self.axisY = QtCharts.QValueAxis()
-        self.axisY.setTitleText("Mass (g)")
+        self.axisY.setTitleText("Mass (mg)")
 
         self.chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
         self.chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
@@ -935,7 +935,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         target_line = QtCharts.QLineSeries()
         target_line.setColor(QtCore.Qt.red)
         target_line.append(0, 40)  # Starting point of the line at (0, 40)
-        target_line.append(6000, 40)  # Ending point of the line at (5, 40)
+        target_line.append(10000, 40)  # Ending point of the line at (5, 40)
         self.volume_pressure_chart.addSeries(target_line)
         target_line.attachAxis(self.volume_pressure_axisX)
         target_line.attachAxis(self.volume_pressure_axisY)
@@ -944,7 +944,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         above_target_line = QtCharts.QLineSeries()
         above_target_line.setPen(line_pen)  # Apply custom pen for consistent color and width
         above_target_line.append(0, 41)
-        above_target_line.append(6000, 41)
+        above_target_line.append(10000, 41)
         self.volume_pressure_chart.addSeries(above_target_line)
         above_target_line.attachAxis(self.volume_pressure_axisX)
         above_target_line.attachAxis(self.volume_pressure_axisY)
@@ -953,7 +953,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         below_target_line = QtCharts.QLineSeries()
         below_target_line.setPen(line_pen)  # Apply custom pen for consistent color and width
         below_target_line.append(0, 39)
-        below_target_line.append(6000, 39)
+        below_target_line.append(10000, 39)
         self.volume_pressure_chart.addSeries(below_target_line)
         below_target_line.attachAxis(self.volume_pressure_axisX)
         below_target_line.attachAxis(self.volume_pressure_axisY)
@@ -1046,9 +1046,9 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
         self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
         self.pulse_width_spinbox = QtWidgets.QSpinBox()
-        self.pulse_width_spinbox.setRange(0, 10000)
+        self.pulse_width_spinbox.setRange(10, 10000)
         self.pulse_width_spinbox.setSingleStep(5)
-        self.pulse_width_spinbox.setValue(3000)
+        self.pulse_width_spinbox.setValue(4200)
         # self.pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.pulse_width_spinbox.valueChanged.connect(self.handle_pulse_width_change)
         self.user_input_layout.addWidget(self.pulse_width_label, row, 0)
@@ -1059,7 +1059,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox = QtWidgets.QSpinBox()
         self.num_droplets_spinbox.setRange(1, 100)
         self.num_droplets_spinbox.setSingleStep(5)
-        self.num_droplets_spinbox.setValue(100)
+        self.num_droplets_spinbox.setValue(50)
         # self.num_droplets_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.num_droplets_spinbox.valueChanged.connect(self.handle_num_droplets_change)
         self.user_input_layout.addWidget(self.num_droplets_label, row, 0)
@@ -2437,12 +2437,12 @@ class MovementBox(QtWidgets.QGroupBox):
         """Initialize the user interface."""
         self.layout = QtWidgets.QHBoxLayout(self)
 
-        self.x_min = -15000
-        self.x_max = 0
+        self.x_min = 0
+        self.x_max = 15000
         self.y_min = 0
         self.y_max = 10000
-        self.z_min = -35000
-        self.z_max = 0
+        self.z_min = 0
+        self.z_max = 35000
 
         # Create a chart, a chart view and a line series for X and Y coordinates
         self.xy_chart = QtCharts.QChart()
@@ -3186,9 +3186,12 @@ class ExperimentDesignDialog(QDialog):
             name = f"reagent-{row_position + 1}"
         # print(f'---name: {name}---')
         # Add cells for reagent name, min/max concentrations, steps, and mode
-        reagent_name_item = QTableWidgetItem(name)
-        reagent_name_item.setFlags(reagent_name_item.flags() | Qt.ItemIsEditable)
-        self.reagent_table.setItem(row_position, 0, reagent_name_item)
+        # reagent_name_item = QTableWidgetItem(name)
+        # reagent_name_item.setFlags(reagent_name_item.flags() | Qt.ItemIsEditable)
+        # self.reagent_table.setItem(row_position, 0, reagent_name_item)
+        
+        reagent_name_item = QLineEdit(name)
+        self.reagent_table.setCellWidget(row_position, 0, reagent_name_item)
 
         min_conc_item = QDoubleSpinBox()
         min_conc_item.setMinimum(0.0)
@@ -3256,6 +3259,7 @@ class ExperimentDesignDialog(QDialog):
             )
 
         # Connect signals after initializing the row to avoid 'NoneType' errors
+        reagent_name_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         min_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
         max_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
         steps_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
@@ -3268,13 +3272,13 @@ class ExperimentDesignDialog(QDialog):
         self.update_model_reagent(row_position)
 
     def delete_reagent(self, row):
-        reagent_name = self.reagent_table.item(row, 0).text()
+        reagent_name = self.reagent_table.cellWidget(row, 0).text()
         self.experiment_model.delete_reagent(reagent_name)
         self.reagent_table.removeRow(row)
 
     def update_model_reagent(self, row):
         """Update the reagent in the model based on the current row values."""
-        name = self.reagent_table.item(row, 0).text()
+        name = self.reagent_table.cellWidget(row, 0).text()
         min_conc = self.reagent_table.cellWidget(row, 1).value()
         max_conc = self.reagent_table.cellWidget(row, 2).value()
         steps = self.reagent_table.cellWidget(row, 3).value()
