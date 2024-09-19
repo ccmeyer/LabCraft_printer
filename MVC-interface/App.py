@@ -45,8 +45,8 @@ def main():
     app = QApplication(sys.argv)
 
     # Initialize components
-    machine = Machine()
     model = Model()
+    machine = Machine(model)
     controller = Controller(machine, model)
 
     set_dark_theme(app)

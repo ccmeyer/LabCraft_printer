@@ -301,9 +301,11 @@ class Controller(QObject):
         print(f"Setting absolute pressure: {pressure}")
         self.machine.set_absolute_pressure(pressure,manual=manual)
 
-    def set_pulse_width(self, pulse_width,manual=False):
+    def set_pulse_width(self, pulse_width,manual=False,update_model=False):
         """Set the pulse width for the machine."""
         print(f"Setting pulse width: {pulse_width}")
+        if update_model:
+            self.model.machine_model.update_pulse_width(pulse_width)
         self.machine.set_pulse_width(pulse_width,manual=manual)
 
     def reset_syringe(self):
@@ -581,10 +583,10 @@ class Controller(QObject):
 
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
 
-    def print_calibration_droplets(self,droplets,manual=False):
+    def print_calibration_droplets(self,droplets,manual=False,pulse_width=None):
         """Print a specified number of droplets for calibration."""
         print('Controller: Printing calibration droplets')
-        self.machine.print_calibration_droplets(droplets,manual=manual)
+        self.machine.print_calibration_droplets(droplets,manual=manual,pulse_width=pulse_width)
 
     def start_mass_stabilization_timer(self):
         """Create a single shot timer that when triggered it will signal the model to check for the final stable mass."""

@@ -9,12 +9,16 @@ import re
 import json
 import cv2
 import numpy as np
+import pandas as pd
+import os
+import joblib
 
 class Balance(QObject):
     balance_mass_updated_signal = Signal(float)
-    def __init__(self,machine):
+    def __init__(self,machine,model):
         super().__init__()
         self.machine = machine
+        self.model = model
         self.connected = False
         self.port = None
         self.simulate = True
@@ -30,6 +34,17 @@ class Balance(QObject):
     def connect_balance(self,port):
         if port == 'Virtual':
             print('Connecting to virtual balance')
+            self.script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.prediction_model_path = os.path.join(self.script_dir, 'Presets','large_lr_pipeline.pkl')
+            self.resistance_model_path = os.path.join(self.script_dir, 'Presets','large_resistance_pipeline.pkl')
+            self.prediction_model = None
+            self.resistance_model = None
+            self.load_prediction_models()
+            self.current_resistance = None
+            self.current_printer_head_id = None
+            self.current_pulse_width = None
+            self.resistance_dict = {}
+
             self.connected = True
             self.simulate = True
             self.mass_simulate_timer = QtCore.QTimer()
@@ -51,6 +66,11 @@ class Balance(QObject):
             self.main_window.popup_message('Connection error',f'Could not connect to balance at port {port}')
             self.connected = False
             return False
+        
+    def load_prediction_models(self):
+        """Load the prediction model from the specified file path."""
+        self.prediction_model = joblib.load(self.prediction_model_path)
+        self.resistance_model = joblib.load(self.resistance_model_path)
         
     def close_connection(self):
         if not self.simulate:
@@ -108,34 +128,65 @@ class Balance(QObject):
         else:
             return 0
 
-    def simulate_mass(self,num_droplets,psi):
-        print('Simulating mass')
-        # Reference points
-        ref_droplets = 100
-        ref_points = np.array([
-            [1.8, 3],
-            [2.2, 4],
-        ])
+    # def simulate_mass(self,num_droplets,psi):
+    #     print('Simulating mass')
+    #     # Reference points
+    #     ref_droplets = 100
+    #     ref_points = np.array([
+    #         [1.8, 3],
+    #         [2.2, 4],
+    #     ])
 
-        # Calculate the linear fit for the reference points
-        coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
-        # print('Coefficients:',coefficients)
-        # Calculate the mass per droplet for the given pressure
-        mass_per_droplet = coefficients[0] * psi + coefficients[1]
-        # for point in ref_points:
-        #     print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
-        # Calculate the mass for the given number of droplets
-        mass = mass_per_droplet * num_droplets
+    #     # Calculate the linear fit for the reference points
+    #     coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
+    #     # print('Coefficients:',coefficients)
+    #     # Calculate the mass per droplet for the given pressure
+    #     mass_per_droplet = coefficients[0] * psi + coefficients[1]
+    #     # for point in ref_points:
+    #     #     print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
+    #     # Calculate the mass for the given number of droplets
+    #     mass = mass_per_droplet * num_droplets
 
+    #     return mass
+    
+    def simulate_mass(self, num_droplets,pulse_width):
+        printer_head = self.model.rack_model.get_gripper_printer_head()
+        current_id = printer_head.get_stock_id()
+        
+        if printer_head is not None:
+            if current_id not in self.resistance_dict.keys():
+                resistance = np.random.randint(25,45)
+                self.resistance_dict.update({current_id:resistance})
+                print(f'Adding simulated resistance: {current_id}-{self.current_resistance}')
+            effective_resistance = self.resistance_dict[current_id]
+            current_volume, _, _, _ = printer_head.get_prediction_data()
+            input_features = pd.DataFrame({
+                'pulse_width': [pulse_width],
+                'starting_volume': [current_volume],
+                'effective_resistance': [effective_resistance]
+            })
+            predicted_volume = self.prediction_model.predict(input_features)[0]
+            mass = predicted_volume * num_droplets / 1000
+            error = np.random.normal(0, 0.005)
+            print(f'\nError: {error}\n')
+            mass += error
+            
+            print(f'\nDrop: {predicted_volume} Mass: {mass} Pulse: {pulse_width} Vol: {current_volume} Res: {effective_resistance}')
+
+        else:
+            mass = 0
         return mass
+
     
     def update_simulated_mass(self):
         # print('Updating simulated mass')
+        # self.pulse_width = self.model.machine_model.get_pulse_width()
         if self.machine.balance_droplets != []:
+            time.sleep(0.5)
             # print('Balance droplets:',self.machine.balance_droplets)
-            [num_droplets,psi] = self.machine.balance_droplets.pop(0)
+            [num_droplets,pulse_width] = self.machine.balance_droplets.pop(0)
             # print('Found balance droplets',num_droplets,psi)
-            mass = self.simulate_mass(num_droplets,psi)
+            mass = self.simulate_mass(num_droplets,pulse_width)
             # print('Simulated mass:',mass,self.current_mass,self.target_mass)
             self.target_mass += mass
         
@@ -194,7 +245,7 @@ class VirtualMachine():
         
         self.board_update_timer = QTimer()
         self.board_update_timer.timeout.connect(self.update_states)
-        self.board_update_timer.start(10)  # Update every 20 ms
+        self.board_update_timer.start(2)  # Update every 20 ms
 
         self.motors_active = False
         self.x_pos = 0
@@ -765,9 +816,10 @@ class Machine(QObject):
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
 
-    def __init__(self):
+    def __init__(self,model):
         super().__init__()
         self.command_queue = CommandQueue()
+        self.model = model
         self.board = None
         self.port = 'Virtual'
         self.simulate = True
@@ -781,7 +833,7 @@ class Machine(QObject):
         self.psi_max = 15
 
         self.simulate_balance = True
-        self.balance = Balance(self)
+        self.balance = Balance(self,self.model)
         self.balance_connected = False
         self.balance_droplets = []
 
@@ -1089,7 +1141,7 @@ class Machine(QObject):
         return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('SET_WIDTH',pulse_width,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('SET_WIDTH',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def enter_print_mode(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -1152,6 +1204,13 @@ class Machine(QObject):
     def calibrate_pressure_handler(self):
         self.all_calibration_droplets_printed.emit()
 
-    def print_calibration_droplets(self,num_droplets,manual=False):
+    def get_pulse_width(self):
+        return self.model.machine_model.get_pulse_width()
+
+    def print_calibration_droplets(self,num_droplets,manual=False,pulse_width=None):
         print('Machine: Printing calibration droplets')
+        if self.balance.simulate:
+            if pulse_width is None:
+                pulse_width = self.get_pulse_width()
+            self.balance_droplets.append([num_droplets,pulse_width])
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)
