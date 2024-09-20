@@ -12,6 +12,7 @@ from itertools import combinations_with_replacement
 import joblib
 from scipy.optimize import minimize, fsolve
 import random
+import pyDOE3
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -448,7 +449,8 @@ class ExperimentModel(QObject):
             "max_droplets": 20,
             'droplet_volume': 0.03,
             'fill_reagent': 'Water',
-            'random_seed': None
+            'random_seed': None,
+            'reduction_factor': 1
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
@@ -510,9 +512,11 @@ class ExperimentModel(QObject):
     def get_random_seed(self):
         return self.metadata['random_seed']
 
-    def update_metadata(self, replicates, max_droplets):
+    def update_metadata(self, replicates, max_droplets,reduction_factor):
         self.metadata["replicates"] = replicates
         self.metadata["max_droplets"] = max_droplets
+        self.metadata["reduction_factor"] = reduction_factor
+
         self.generate_experiment(feasible=False)
 
     def update_fill_reagent_name(self,fill_reagent):
@@ -661,11 +665,21 @@ class ExperimentModel(QObject):
     def generate_experiment(self,feasible=True):
         """Generate the experiment combinations as a pandas DataFrame."""
         reagent_names = [reagent['name'] for reagent in self.reagents]
+        print('\nReagent names:\n',reagent_names)
         concentrations = [reagent['concentrations'] for reagent in self.reagents]
-        concentration_combinations = list(itertools.product(*concentrations))
-        self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
+        print('\nConcentrations:\n',concentrations)
+        if self.metadata['reduction_factor'] == 1:
+            concentration_combinations = list(itertools.product(*concentrations))
+            self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
+        else:
+            num_concentrations = [len(c) for c in concentrations]
+            reduced_comb = pyDOE3.gsd(num_concentrations, self.metadata['reduction_factor'])
+            self.experiment_df = pd.DataFrame(
+                [[concentrations[j][idx] for j, idx in enumerate(row)] for row in reduced_comb],
+                columns=reagent_names
+            )
         self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
-        
+        print(f'\nExperiment df:\n{self.experiment_df}')
         # Apply replicates
         all_dfs = []
         for i in range(self.metadata["replicates"]):

@@ -3120,6 +3120,16 @@ class ExperimentDesignDialog(QDialog):
         self.info_layout.addWidget(self.replica_label)
         self.info_layout.addWidget(self.replicate_spinbox)
 
+        ## Add a reduction factor spinbox
+        self.reduction_factor_label = QLabel("Reduction Factor:", self)
+        self.reduction_factor_spinbox = QSpinBox(self)
+        self.reduction_factor_spinbox.setMinimum(1)
+        self.reduction_factor_spinbox.setMaximum(10)
+        self.reduction_factor_spinbox.setValue(self.experiment_model.metadata.get("reduction_factor", 1))
+        self.reduction_factor_spinbox.valueChanged.connect(self.update_model_metadata)
+        self.info_layout.addWidget(self.reduction_factor_label)
+        self.info_layout.addWidget(self.reduction_factor_spinbox)
+
         self.total_droplets_label = QLabel("Total Droplets Available:", self)
         self.total_droplets_spinbox = QSpinBox(self)
         self.total_droplets_spinbox.setMinimum(1)
@@ -3327,7 +3337,8 @@ class ExperimentDesignDialog(QDialog):
         """Update the metadata in the model based on the current values."""
         replicates = self.replicate_spinbox.value()
         max_droplets = self.total_droplets_spinbox.value()
-        self.experiment_model.update_metadata(replicates, max_droplets)
+        reduction_factor = self.reduction_factor_spinbox.value()
+        self.experiment_model.update_metadata(replicates, max_droplets, reduction_factor)
 
     def update_fill_reagent(self):
         """Update the fill reagent in the model based on the current value."""
