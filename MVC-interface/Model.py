@@ -11,6 +11,7 @@ import itertools
 from itertools import combinations_with_replacement
 import joblib
 from scipy.optimize import minimize, fsolve
+import random
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -446,7 +447,8 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "max_droplets": 20,
             'droplet_volume': 0.03,
-            'fill_reagent': 'Water'
+            'fill_reagent': 'Water',
+            'random_seed': None
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
@@ -505,6 +507,9 @@ class ExperimentModel(QObject):
         self.remove_stock_solutions_for_unused_reagents()
         self.generate_experiment(feasible=False)
 
+    def get_random_seed(self):
+        return self.metadata['random_seed']
+
     def update_metadata(self, replicates, max_droplets):
         self.metadata["replicates"] = replicates
         self.metadata["max_droplets"] = max_droplets
@@ -561,7 +566,7 @@ class ExperimentModel(QObject):
         self.remove_stock_solutions_for_unused_reagents()
         reagent = self.reagents[index]
         if type(reagent["stock_solutions"]) == str:
-            current_stock_solutions = [round(float(c.strip()), 2) for c in reagent["stock_solutions"].split(',') if c.strip()]
+            current_stock_solutions = [round(float(c.strip()), 3) for c in reagent["stock_solutions"].split(',') if c.strip()]
             reagent['stock_solutions'] = current_stock_solutions
         else:
             current_stock_solutions = reagent["stock_solutions"]
@@ -754,6 +759,10 @@ class ExperimentModel(QObject):
         """Create a JSON file to store the progress of the experiment."""
         if file_name is not None:
             self.progress_file_path = file_name
+        elif self.experiment_name is None:
+            print('Experiment name is not set, cannot create progress file')
+            return
+
         print(f'Creating progress file at {self.progress_file_path}')
 
         for well in self.well_plate.get_all_wells():
@@ -2724,7 +2733,12 @@ class Model(QObject):
         self.stock_solutions = stock_solutions
         self.reaction_collection = reaction_collection
         print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
-        self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+        all_reactions = self.reaction_collection.get_all_reactions()
+        random_seed = self.experiment_model.get_random_seed()
+        if random_seed is not None:
+            random.seed(random_seed)
+            random.shuffle(all_reactions)
+        self.well_plate.assign_reactions_to_wells(all_reactions)
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
         self.experiment_model.load_progress()

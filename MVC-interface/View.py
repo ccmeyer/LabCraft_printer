@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
 
         # Create the left panel with the motor positions
         left_panel = QtWidgets.QWidget()
-        left_panel.setFixedWidth(400)
+        left_panel.setFixedWidth(350)
         left_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         
@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
 
         # Add other widgets to the right panel as needed
         right_panel = QtWidgets.QWidget()
-        right_panel.setFixedWidth(400)
+        right_panel.setFixedWidth(350)
         right_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)
 
@@ -1070,57 +1070,57 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
         row += 1
 
-        self.calibrate_button = QtWidgets.QPushButton("Calibrate")
-        self.calibrate_button.clicked.connect(self.initiate_calibration_process)
-        self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
-        row += 1
+        # self.calibrate_button = QtWidgets.QPushButton("Calibrate")
+        # self.calibrate_button.clicked.connect(self.initiate_calibration_process)
+        # self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
+        # row += 1
 
-        self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
-        self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
-        self.pressure_screen_low_spinbox.setDecimals(0)
-        self.pressure_screen_low_spinbox.setSingleStep(10)
-        self.pressure_screen_low_spinbox.setRange(10,7000)
-        self.pressure_screen_low_spinbox.setValue(3500)
-        # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
-        self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
-        row += 1
+        # self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
+        # self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.pressure_screen_low_spinbox.setDecimals(0)
+        # self.pressure_screen_low_spinbox.setSingleStep(10)
+        # self.pressure_screen_low_spinbox.setRange(10,7000)
+        # self.pressure_screen_low_spinbox.setValue(3500)
+        # # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
+        # self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
+        # row += 1
 
-        self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
-        self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
-        self.pressure_screen_high_spinbox.setDecimals(0)
-        self.pressure_screen_high_spinbox.setSingleStep(10)
-        self.pressure_screen_high_spinbox.setRange(10, 7000)
-        self.pressure_screen_high_spinbox.setValue(4500)
-        # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
-        self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
-        row += 1
+        # self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
+        # self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.pressure_screen_high_spinbox.setDecimals(0)
+        # self.pressure_screen_high_spinbox.setSingleStep(10)
+        # self.pressure_screen_high_spinbox.setRange(10, 7000)
+        # self.pressure_screen_high_spinbox.setValue(4500)
+        # # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
+        # self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
+        # row += 1
 
-        self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
-        self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
-        self.repeat_measurement_spinbox.setRange(1, 100)
-        self.repeat_measurement_spinbox.setSingleStep(1)
-        self.repeat_measurement_spinbox.setValue(3)
-        # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
-        self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
-        row += 1
+        # self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
+        # self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
+        # self.repeat_measurement_spinbox.setRange(1, 100)
+        # self.repeat_measurement_spinbox.setSingleStep(1)
+        # self.repeat_measurement_spinbox.setValue(3)
+        # # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
+        # self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
+        # row += 1
         
-        self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
-        self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
-        self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
-        row += 1
+        # self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
+        # self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
+        # self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
+        # row += 1
 
-        self.start_screen_button = QtWidgets.QPushButton("Start Screen")
-        self.start_screen_button.clicked.connect(self.start_screen)
-        self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
-        row += 1
+        # self.start_screen_button = QtWidgets.QPushButton("Start Screen")
+        # self.start_screen_button.clicked.connect(self.start_screen)
+        # self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
+        # row += 1
 
-        self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
-        self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
-        self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
-        row += 1
+        # self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
+        # self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
+        # self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
+        # row += 1
 
         self.remove_last_measurement_button = QtWidgets.QPushButton("Remove Last")
         self.remove_last_measurement_button.clicked.connect(self.remove_last_measurement)
@@ -3065,7 +3065,7 @@ class ExperimentDesignDialog(QDialog):
         self.model = model
         self.experiment_model = self.model.experiment_model
         self.setWindowTitle("Experiment Design")
-        self.setFixedSize(1600, 400)
+        self.setFixedSize(1500, 400)
 
         self.layout = QHBoxLayout(self)
         
@@ -3095,7 +3095,7 @@ class ExperimentDesignDialog(QDialog):
             "Reagent Name", "Concentration", "Total\nDroplets", "Total\nVolume (uL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.stock_table.setFixedWidth(400)
+        self.stock_table.setFixedWidth(350)
         self.stock_table.setColumnWidth(0, 100)
         self.stock_table.setColumnWidth(1, 100)
         self.stock_table.setColumnWidth(2, 50)
@@ -3144,13 +3144,19 @@ class ExperimentDesignDialog(QDialog):
         self.info_layout.addWidget(self.total_droplets_used_label)
         self.info_layout.addWidget(self.total_reactions_label)
 
-
         self.button_layout = QVBoxLayout()
         # Button to add a new reagent
         self.add_reagent_button = QPushButton("Add Reagent")
         self.add_reagent_button.clicked.connect(self.add_reagent)
         self.button_layout.addWidget(self.add_reagent_button)
 
+
+        self.randomize_wells_button = QPushButton("Randomize Wells")
+        self.randomize_wells_button.setCheckable(True)
+        self.randomize_wells_button.setChecked(self.experiment_model.metadata.get("randomize_wells", False))
+        self.randomize_wells_button.toggled.connect(self.update_randomize_wells)                       # Checkable button to specify if the wells should be randomized or not       
+        self.button_layout.addWidget(self.randomize_wells_button) 
+        
         # Button to update the table
         self.update_table_button = QPushButton("Update Table")
         self.update_table_button.clicked.connect(self.update_all_model_reagents)
@@ -3186,6 +3192,18 @@ class ExperimentDesignDialog(QDialog):
         self.experiment_model.experiment_generated.connect(self.update_total_reactions)
 
         self.load_experiment_to_view()
+
+    def update_randomize_wells(self, checked):
+        """Update the model with the randomize wells setting."""
+        if not checked:
+            self.randomize_wells_button.setText("Randomize Wells")
+            print('Setting the random seed to None')
+            self.experiment_model.metadata["random_seed"] = None
+        else:
+            self.randomize_wells_button.setText("Randomized")
+            new_seed = random.randint(0, 1000000)
+            print(f'Setting the random seed to {new_seed}')
+            self.experiment_model.metadata["random_seed"] = new_seed
 
     def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
         """Add a new reagent row to the table and model."""
@@ -3324,14 +3342,19 @@ class ExperimentDesignDialog(QDialog):
         # Temporarily disconnect the signals
         self.total_droplets_spinbox.blockSignals(True)
         self.replicate_spinbox.blockSignals(True)
+        self.randomize_wells_button.blockSignals(True)
 
         self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
         self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
         self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))
-        
+        if self.experiment_model.metadata['random_seed'] is not None:
+            self.randomize_wells_button.setChecked(True)
+            self.randomize_wells_button.setText("Randomized")
+
         # Reconnect the signals
         self.total_droplets_spinbox.blockSignals(False)
         self.replicate_spinbox.blockSignals(False)
+        self.randomize_wells_button.blockSignals(False)
         
         original_reagents = self.experiment_model.get_all_reagents().copy()
         # print(f"Original reagents: {original_reagents}")

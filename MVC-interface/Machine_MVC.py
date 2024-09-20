@@ -1199,7 +1199,7 @@ class Machine(QObject):
         return self.add_command_to_queue('WAIT',200,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('PRINT',droplet_count,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('PRINT',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def calibrate_pressure_handler(self):
         self.all_calibration_droplets_printed.emit()
