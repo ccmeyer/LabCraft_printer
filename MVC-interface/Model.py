@@ -691,7 +691,7 @@ class ExperimentModel(QObject):
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
         # print(f'Experiment df:\n{self.experiment_df}')
         # print(f'complete lookup table:\n{self.complete_lookup_table}')
-        if feasible:
+        try:
             self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration'], how='left')
             max_droplet_df = self.all_droplet_df[['reaction_id','unique_id','replicate','droplet_count']].groupby(['reaction_id','unique_id','replicate']).sum().reset_index()
             fill_reagent_df = max_droplet_df.copy()
@@ -703,7 +703,7 @@ class ExperimentModel(QObject):
             
             droplet_count = max_droplet_df['droplet_count'].max()
             self.add_total_droplet_count_to_stock()
-        else:
+        except:
             droplet_count = 0
             self.all_droplet_df = pd.DataFrame()
 
