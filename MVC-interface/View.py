@@ -1786,7 +1786,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle when the gripper picks up a new printer head."""
         if self.model.rack_model.gripper_printer_head is not None:
             printer_head = self.model.rack_model.gripper_printer_head
-            stock_name = printer_head.get_stock_name()
+            stock_name = printer_head.get_stock_name(new_line=True)
             self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_name))
             self.update_well_colors()            
     
@@ -2717,7 +2717,7 @@ class RackBox(QGroupBox):
                 printer_head_manager = self.model.printer_head_manager
                 # Check if the selected printer head is unassigned
                 for printer_head in printer_head_manager.get_unassigned_printer_heads():
-                    if selected_text == f"{printer_head.get_reagent_name()} ({printer_head.get_stock_concentration()} M)":
+                    if selected_text == f"{printer_head.get_stock_name()}":
                         self.controller.swap_printer_head(slot_number, printer_head)
                         self.update_all_slots()  # Update all dropdowns after swapping
                         self.update_unassigned_printer_heads()  # Update the table to reflect the change
@@ -2726,7 +2726,7 @@ class RackBox(QGroupBox):
                 # Check if the selected printer head is in another slot
                 for i, slot in enumerate(self.rack_model.slots):
                     if i != slot_number and slot.printer_head:
-                        slot_text = f"Slot {i+1}: {slot.printer_head.get_reagent_name()} ({slot.printer_head.get_stock_concentration()} M)"
+                        slot_text = f"Slot {i+1}: {slot.printer_head.get_stock_name()}"
                         if selected_text == slot_text:
                             self.controller.swap_printer_heads_between_slots(slot_number, i)
                             self.update_all_slots()  # Update all dropdowns after swapping
@@ -2750,7 +2750,7 @@ class RackBox(QGroupBox):
         if slot.printer_head:
             printer_head = slot.printer_head
             complete = printer_head.check_complete(self.model.well_plate)
-            label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
+            label.setText(f"{printer_head.get_stock_name(new_line=True)}")
             color = QtGui.QColor(printer_head.color)
             color.setAlphaF(0.7)
             rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
@@ -2798,12 +2798,12 @@ class RackBox(QGroupBox):
 
         # Add all unassigned printer heads
         for printer_head in self.model.printer_head_manager.get_unassigned_printer_heads():
-            dropdown.addItem(f"{printer_head.get_reagent_name()} ({printer_head.get_stock_concentration()} M)")
+            dropdown.addItem(f"{slot.printer_head.get_stock_name()}")
 
         # Add all printer heads in other slots
         for i, slot in enumerate(self.rack_model.slots):
             if i != slot_number and slot.printer_head:
-                dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_reagent_name()} ({slot.printer_head.get_stock_concentration()} M)")
+                dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_stock_name()}")
         
         dropdown.blockSignals(False)
 
@@ -2811,7 +2811,7 @@ class RackBox(QGroupBox):
         """Update the UI when the gripper state changes."""
         if self.rack_model.gripper_printer_head:
             printer_head = self.rack_model.gripper_printer_head
-            self.gripper_label.setText(f"{printer_head.get_reagent_name()}\n{printer_head.get_stock_concentration()} M")
+            self.gripper_label.setText(f"{printer_head.get_stock_name(new_line=True)}")
             self.gripper_label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
         else:
             self.gripper_label.setText("Gripper Empty")
@@ -3070,36 +3070,38 @@ class ExperimentDesignDialog(QDialog):
         self.layout = QHBoxLayout(self)
         
         # Table to hold all reagent information
-        self.reagent_table = QTableWidget(0, 12, self)
+        self.reagent_table = QTableWidget(0, 13, self)
         self.reagent_table.setHorizontalHeaderLabels([
             "Reagent Name", "Min Conc", "Max Conc", "Steps", 
-            "Mode", "Manual Input", "Max Droplets",
+            "Mode", "Manual Input", "Units", "Max Droplets",
             "Concentrations Preview", "Stock Solutions", "Missing", "Used","Delete"
         ])
         self.reagent_table.setColumnWidth(0, 100)
         self.reagent_table.setColumnWidth(1, 75)
         self.reagent_table.setColumnWidth(2, 75)
         self.reagent_table.setColumnWidth(3, 50)
-        self.reagent_table.setColumnWidth(7, 200)
-        self.reagent_table.setColumnWidth(8, 100)
+        self.reagent_table.setColumnWidth(6, 75)
+        self.reagent_table.setColumnWidth(8, 200)
         self.reagent_table.setColumnWidth(9, 100)
-        self.reagent_table.setColumnWidth(10, 50)
+        self.reagent_table.setColumnWidth(10, 100)
         self.reagent_table.setColumnWidth(11, 50)
+        self.reagent_table.setColumnWidth(12, 50)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
 
         self.reagent_table.setWordWrap(True)
 
         # Stock solutions table
-        self.stock_table = QTableWidget(0, 4, self)
+        self.stock_table = QTableWidget(0, 5, self)
         self.stock_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Concentration", "Total\nDroplets", "Total\nVolume (uL)"
+            "Reagent Name", "Concentration", "Units", "Total\nDroplets", "Total\nVolume (uL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.setFixedWidth(350)
         self.stock_table.setColumnWidth(0, 100)
         self.stock_table.setColumnWidth(1, 100)
         self.stock_table.setColumnWidth(2, 50)
-        self.stock_table.setColumnWidth(3, 100)
+        self.stock_table.setColumnWidth(3, 50)
+        self.stock_table.setColumnWidth(4, 100)
 
         self.left_layout = QVBoxLayout()
         self.left_layout.addWidget(self.reagent_table)
@@ -3215,7 +3217,7 @@ class ExperimentDesignDialog(QDialog):
             print(f'Setting the random seed to {new_seed}')
             self.experiment_model.metadata["random_seed"] = new_seed
 
-    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
+    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", units='mM',max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
         """Add a new reagent row to the table and model."""
         row_position = self.reagent_table.rowCount()
         self.reagent_table.insertRow(row_position)
@@ -3223,12 +3225,6 @@ class ExperimentDesignDialog(QDialog):
         # Generate a default name for the reagent
         if not name:
             name = f"reagent-{row_position + 1}"
-        # print(f'---name: {name}---')
-        # Add cells for reagent name, min/max concentrations, steps, and mode
-        # reagent_name_item = QTableWidgetItem(name)
-        # reagent_name_item.setFlags(reagent_name_item.flags() | Qt.ItemIsEditable)
-        # self.reagent_table.setItem(row_position, 0, reagent_name_item)
-        
         reagent_name_item = QLineEdit(name)
         self.reagent_table.setCellWidget(row_position, 0, reagent_name_item)
 
@@ -3258,31 +3254,37 @@ class ExperimentDesignDialog(QDialog):
         manual_conc_item.setEnabled(mode == "Manual")  # Enabled only if mode is "Manual"
         self.reagent_table.setCellWidget(row_position, 5, manual_conc_item)
 
+        unit_item = QComboBox()
+        unit_item.addItems(['mM','uM','M','g/L','ng/uL','%','__'])
+        unit_item.setCurrentText(units)
+        self.reagent_table.setCellWidget(row_position, 6, unit_item)
+
+
         max_droplets_item = QSpinBox()
         max_droplets_item.setMinimum(1)
         max_droplets_item.setValue(max_droplets)
-        self.reagent_table.setCellWidget(row_position, 6, max_droplets_item)
+        self.reagent_table.setCellWidget(row_position, 7, max_droplets_item)
 
         preview_item = QTableWidgetItem()
         preview_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 7, preview_item)
+        self.reagent_table.setItem(row_position, 8, preview_item)
 
         stock_solutions_item = QLineEdit(stock_solutions)
         stock_solutions_item.setPlaceholderText("e.g., 0.5, 1, 5")
-        self.reagent_table.setCellWidget(row_position, 8, stock_solutions_item)
+        self.reagent_table.setCellWidget(row_position, 9, stock_solutions_item)
 
         missing_conc_item = QTableWidgetItem()
         missing_conc_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 9, missing_conc_item)
+        self.reagent_table.setItem(row_position, 10, missing_conc_item)
 
         droplets_used_item = QTableWidgetItem()
         droplets_used_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 10, droplets_used_item)
+        self.reagent_table.setItem(row_position, 11, droplets_used_item)
 
         # Delete button
         delete_button = QPushButton("Delete")
         delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
-        self.reagent_table.setCellWidget(row_position, 11, delete_button)
+        self.reagent_table.setCellWidget(row_position, 12, delete_button)
 
         if not view_only:
             # Add reagent to model
@@ -3293,6 +3295,7 @@ class ExperimentDesignDialog(QDialog):
                 steps=steps,
                 mode=mode,
                 manual_input=manual_input,
+                units=units,
                 max_droplets=max_droplets,
                 stock_solutions=stock_solutions
             )
@@ -3304,6 +3307,7 @@ class ExperimentDesignDialog(QDialog):
         steps_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
         mode_item.currentIndexChanged.connect(lambda: self.update_model_reagent(row_position))
         mode_item.currentIndexChanged.connect(lambda: self.toggle_manual_entry(row_position))
+        unit_item.currentIndexChanged.connect(lambda: self.update_model_reagent(row_position))
         manual_conc_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         max_droplets_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
         stock_solutions_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
@@ -3323,10 +3327,11 @@ class ExperimentDesignDialog(QDialog):
         steps = self.reagent_table.cellWidget(row, 3).value()
         mode = self.reagent_table.cellWidget(row, 4).currentText()
         manual_input = self.reagent_table.cellWidget(row, 5).text()
-        max_droplets = self.reagent_table.cellWidget(row, 6).value()
-        stock_solutions = self.reagent_table.cellWidget(row, 8).text()
+        units = self.reagent_table.cellWidget(row, 6).currentText()
+        max_droplets = self.reagent_table.cellWidget(row, 7).value()
+        stock_solutions = self.reagent_table.cellWidget(row, 9).text()
 
-        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, max_droplets=max_droplets,stock_solutions=stock_solutions)
+        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, units=units,max_droplets=max_droplets,stock_solutions=stock_solutions)
 
     def update_all_model_reagents(self):
         """Update all reagents in the model based on the current row values."""
@@ -3379,6 +3384,7 @@ class ExperimentDesignDialog(QDialog):
                 max_conc=reagent["max_conc"],
                 steps=reagent["steps"],
                 mode=reagent["mode"],
+                units=reagent['units'],
                 manual_input=reagent["manual_input"],
                 max_droplets=reagent["max_droplets"],
                 stock_solutions=", ".join(map(str, reagent["stock_solutions"])),
@@ -3515,21 +3521,21 @@ class ExperimentDesignDialog(QDialog):
         """Update the concentrations preview in the table based on the model."""
         reagent = self.experiment_model.get_reagent(row)   
         preview_text = ", ".join(map(str, reagent["concentrations"]))
-        preview_item = self.reagent_table.item(row, 7)
+        preview_item = self.reagent_table.item(row, 8)
         if type(preview_item) != type(None):
             preview_item.setText(preview_text)
             preview_item.setToolTip(preview_text)
             preview_item.setTextAlignment(Qt.AlignCenter)
 
         missing_conc_text = ", ".join(map(str, reagent["missing_concentrations"]))
-        missing_conc_item = self.reagent_table.item(row, 9)
+        missing_conc_item = self.reagent_table.item(row, 10)
         if type(missing_conc_item) != type(None):
             missing_conc_item.setText(missing_conc_text)
             missing_conc_item.setToolTip(missing_conc_text)
             missing_conc_item.setTextAlignment(Qt.AlignCenter)
 
         droplets_used_text = reagent['max_droplets_for_conc']
-        droplets_used_item = self.reagent_table.item(row, 10)
+        droplets_used_item = self.reagent_table.item(row, 11)
         if type(droplets_used_item) != type(None):
             droplets_used_item.setText(str(droplets_used_text))
             droplets_used_item.setTextAlignment(Qt.AlignCenter)
@@ -3544,8 +3550,9 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.insertRow(row_position)
             self.stock_table.setItem(row_position, 0, QTableWidgetItem(stock_solution['reagent_name']))
             self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock_solution['concentration'])))
-            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['total_droplets'])))
-            self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_volume'])))
+            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['units'])))
+            self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_droplets'])))
+            self.stock_table.setItem(row_position, 4, QTableWidgetItem(str(stock_solution['total_volume'])))
 
     def generate_experiment(self):
         """Generate the experiment by asking the model to calculate it."""
