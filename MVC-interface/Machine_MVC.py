@@ -467,7 +467,7 @@ class VirtualMachine():
                 self.correct_droplets = True
 
         self.max_cycle += np.random.randint(-10,10)
-        self.cycle_count += np.random.randint(-10,10)
+        self.cycle_count = np.random.randint(6100,6300)
 
         if self.correct_pos and self.correct_pressure and self.correct_gripper and self.correct_droplets:
             self.state = "Free"

@@ -446,7 +446,7 @@ class ExperimentModel(QObject):
         self.reagents = []
         self.metadata = {
             "replicates": 1,
-            "max_droplets": 20,
+            "max_droplets": 50,
             'droplet_volume': 0.03,
             'fill_reagent': 'Water',
             'random_seed': None,

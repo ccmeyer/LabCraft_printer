@@ -2509,7 +2509,7 @@ class MovementBox(QtWidgets.QGroupBox):
         self.z_chart.axisX().setRange(-1, 1)
         self.z_chart.axisX().setLabelsVisible(False)
         self.z_chart.axisX().setTickCount(3)
-        self.z_chart.axisY().setRange(self.z_min, self.z_max)
+        self.z_chart.axisY().setRange(-self.z_max, -self.z_min)
         self.z_chart.axisY().setLabelFormat("%d")  # Set label format to integer
         self.z_chart.axisY().setTickCount(1)
 
@@ -2524,7 +2524,7 @@ class MovementBox(QtWidgets.QGroupBox):
         # Add the coordinates to the series
         for coord in target_coordinates:
             self.xy_series.append(coord[0], coord[1])
-            self.z_series.append(coord[2], 0)
+            self.z_series.append(-coord[2], 0)
 
     def update_machine_position(self):
         # Clear the position series
@@ -2538,7 +2538,7 @@ class MovementBox(QtWidgets.QGroupBox):
 
         # Add the current position to the position series
         self.xy_position_series.append(y_pos, x_pos)
-        self.z_position_series.append(0,z_pos)
+        self.z_position_series.append(0,-z_pos)
 
 
 class RackBox(QGroupBox):
