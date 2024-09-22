@@ -66,8 +66,8 @@ To get started with PlatformIO, follow these steps:
     - Open the "PlatformIO" sidebar (Ctrl+Alt+P).
 
 3. Compile and upload firmware:
-    - Click on the "Build" button in the PlatformIO sidebar to compile the firmware.
-    - Once the compilation is successful, click on the "Upload" button to upload the firmware to the board.
+    - Click on the "Build" button (Checkmark in the bottom bar, left side) in the PlatformIO sidebar to compile the firmware.
+    - Once the compilation is successful, click on the "Upload" button (Arrow in the bottom bar, left side)to upload the firmware to the board.
 
 Note: Make sure you have the necessary drivers installed for your development board.
 
@@ -77,8 +77,6 @@ For more information, refer to the PlatformIO documentation and the documentatio
 
 To run launch the user interface that connects and drives the machine use the following command once the virtual environment is active:
 ```bash
-python .\PySide6_interface\App.py
+python .\MVC-Interface\App.py
 ```
-Inside of the `.\PySide6_interface\Presets` directory is the file `Settings.json`. This file set several predefined values such as the default COM ports, default plate setup, etc.
-
-## ADDED THIS
+Inside of the `.\MVC-Interface\Presets` directory is the file `Settings.json`. This file sets several predefined values such as the default COM ports, default plate setup, etc.
