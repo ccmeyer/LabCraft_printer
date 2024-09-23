@@ -2798,7 +2798,7 @@ class RackBox(QGroupBox):
 
         # Add all unassigned printer heads
         for printer_head in self.model.printer_head_manager.get_unassigned_printer_heads():
-            dropdown.addItem(f"{slot.printer_head.get_stock_name()}")
+            dropdown.addItem(slot.printer_head.get_stock_name())
 
         # Add all printer heads in other slots
         for i, slot in enumerate(self.rack_model.slots):
