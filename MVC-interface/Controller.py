@@ -38,7 +38,7 @@ class Controller(QObject):
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
-        print(f"Error occurred: {error_message}")
+        #print(f"Error occurred: {error_message}")
         # self.error_occurred_signal.emit('Error Occurred',error_message)
 
     def update_command_numbers(self):
@@ -54,7 +54,7 @@ class Controller(QObject):
         # Get a list of all connected COM ports
         ports = comports()
         port_names = [port.device for port in ports]
-        print(f"Available ports: {port_names}")
+        #print(f"Available ports: {port_names}")
         self.model.machine_model.update_ports(port_names)
 
     def connect_machine(self, port):
@@ -108,7 +108,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
                 print('Collision detected')
                 return False
-        print(f"Setting relative X: {x}")
+        #print(f"Setting relative X: {x}")
         self.machine.set_relative_X(x,manual=manual,handler=handler)
         self.expected_position['X'] += x
         return True
@@ -119,7 +119,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}):
                 print('Collision detected')
                 return False
-        print(f"Setting relative Y: {y}")
+        #print(f"Setting relative Y: {y}")
         self.machine.set_relative_Y(y,manual=manual,handler=handler)
         self.expected_position['Y'] += y
         return True
@@ -130,7 +130,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}):
                 print('Collision detected')
                 return False
-        print(f"Setting relative Z: {z}")
+        #print(f"Setting relative Z: {z}")
         self.machine.set_relative_Z(z,manual=manual,handler=handler)
         self.expected_position['Z'] += z
         return True
@@ -141,7 +141,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
                 print('Collision detected')
                 return False
-        print(f"Setting absolute X: {x}")
+        #print(f"Setting absolute X: {x}")
         self.machine.set_absolute_X(x,manual=manual,handler=handler)
         self.update_expected_position(x=x)
         return True
@@ -152,7 +152,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}):
                 print('Collision detected')
                 return False
-        print(f"Setting absolute Y: {y}")
+        #print(f"Setting absolute Y: {y}")
         self.machine.set_absolute_Y(y,manual=manual,handler=handler)
         self.update_expected_position(y=y)
         return True
@@ -163,7 +163,7 @@ class Controller(QObject):
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}):
                 print('Collision detected')
                 return False
-        print(f"Setting absolute Z: {z}")
+        #print(f"Setting absolute Z: {z}")
         self.machine.set_absolute_Z(z,manual=manual,handler=handler)
         self.update_expected_position(z=z)
         return True
@@ -190,7 +190,7 @@ class Controller(QObject):
         for axis in ['X', 'Y', 'Z']:
             if not (boundaries['min'][axis] <= min(current_pos[axis], target_pos[axis]) and 
                     max(current_pos[axis], target_pos[axis]) <= boundaries['max'][axis]):
-                print(f"Path goes out of bounds on axis {axis}.")
+                #print(f"Path goes out of bounds on axis {axis}.")
                 return True
 
         # Obstacle check
@@ -205,16 +205,16 @@ class Controller(QObject):
                 if max_proj < min_corner[axis] or min_proj > max_corner[axis]:
                     break
             else:
-                print(f"Collision with {obstacle['name']} detected.")
-                print(f'Current position: {current_pos}')
-                print(f'Target position: {target_pos}')
+                #print(f"Collision with {obstacle['name']} detected.")
+                #print(f'Current position: {current_pos}')
+                #print(f'Target position: {target_pos}')
                 return True
 
         return False
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the relative coordinates for the machine."""
-        print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
+        #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         if not override:
             if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z'] + z}):
                 print('Collision detected')
@@ -245,8 +245,8 @@ class Controller(QObject):
 
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the absolute coordinates for the machine."""
-        print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
-        print(f"Expected position: {self.expected_position}")
+        #print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
+        #print(f"Expected position: {self.expected_position}")
 
         if not override:
             if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': z}):
@@ -293,17 +293,17 @@ class Controller(QObject):
 
     def set_relative_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
-        print(f"Setting relative pressure: {pressure}")
+        #print(f"Setting relative pressure: {pressure}")
         self.machine.set_relative_pressure(pressure,manual=manual)
 
     def set_absolute_pressure(self, pressure,manual=False):
         """Set the absolute pressure for the machine."""
-        print(f"Setting absolute pressure: {pressure}")
+        #print(f"Setting absolute pressure: {pressure}")
         self.machine.set_absolute_pressure(pressure,manual=manual)
 
     def set_pulse_width(self, pulse_width,manual=False,update_model=False):
         """Set the pulse width for the machine."""
-        print(f"Setting pulse width: {pulse_width}")
+        #print(f"Setting pulse width: {pulse_width}")
         if update_model:
             self.model.machine_model.update_pulse_width(pulse_width)
         self.machine.set_pulse_width(pulse_width,manual=manual)
@@ -412,7 +412,7 @@ class Controller(QObject):
             original_target = self.model.location_model.get_location_dict(name)
             target = original_target.copy()
         if x_offset:
-            print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
+            #print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
             target['X'] += 2500
         # Use expected position instead of current position from the model
         current = self.expected_position
@@ -426,7 +426,7 @@ class Controller(QObject):
         safe_height = 3000
         safe_y_value = 3500
         if (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
-            print(f'Crossing x limit: {current['X']} -> {target['X']}')
+            #print(f'Crossing x limit: {current['X']} -> {target['X']}')
             safe_y = True
 
         if not direct and not safe_y:
@@ -499,7 +499,7 @@ class Controller(QObject):
         if is_valid:
             self.open_gripper()
             self.wait_command()
-            print(f'Picking up printer head from slot {slot}')
+            #print(f'Picking up printer head from slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
@@ -509,7 +509,8 @@ class Controller(QObject):
             self.wait_command()
             self.move_to_location(name,x_offset=True,coords=coords,override=True)
         else:
-            print(f'Error: {error_msg}')
+            #print(f'Error: {error_msg}')
+            pass
 
     def drop_off_handler(self,slot):
         """Handle the drop off signal from the rack."""
@@ -524,7 +525,7 @@ class Controller(QObject):
                 return
         is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot)
         if is_valid:
-            print(f'Dropping off printer head to slot {slot}')
+            #print(f'Dropping off printer head to slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=True,coords=coords)
@@ -535,7 +536,8 @@ class Controller(QObject):
             self.close_gripper()
             self.wait_command()
         else:
-            print(f'Error: {error_msg}')
+            #print(f'Error: {error_msg}')
+            pass
 
     def swap_printer_head(self, slot_number, new_printer_head):
         """Handle swapping of printer heads."""
@@ -567,7 +569,7 @@ class Controller(QObject):
                 print('Controller: using calibrations to change pulse width')
                 vol, res, target, bias = printer_head.get_prediction_data()
                 if expected_volume is not None:
-                    print(f'Controller: using expected volume: {expected_volume}')
+                    #print(f'Controller: using expected volume: {expected_volume}')
                     vol = expected_volume
                 new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias)
                 if abs(self.model.machine_model.get_pulse_width() - new_pulse_width) > 2:
@@ -599,7 +601,7 @@ class Controller(QObject):
         if update_volume:
             self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
         self.model.experiment_model.create_progress_file()
-        print(f'Printing complete for well {well_id}')
+        #print(f'Printing complete for well {well_id}')
 
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
         # Reset acceleration and move to pause after the queue is processed
@@ -613,6 +615,22 @@ class Controller(QObject):
             self.model.experiment_model.update_progress(well_id)
             self.array_complete.emit()
             print('---Printing complete---')
+        
+        # Ensure that this is done after the command queue has been fully processed
+        QtCore.QTimer.singleShot(0, finalize_printing)
+
+    def refill_printer_head_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
+        # Reset acceleration and move to pause after the queue is processed
+        def finalize_printing():
+            if update_volume:
+                self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
+            self.machine.reset_acceleration()
+            self.exit_print_mode()
+            self.move_to_location('pause')
+            self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
+            self.model.experiment_model.create_progress_file()
+            print('---Must reload printer head---')
+            self.error_occurred_signal.emit('Error','Printer head needs to be reloaded')
         
         # Ensure that this is done after the command queue has been fully processed
         QtCore.QTimer.singleShot(0, finalize_printing)
@@ -679,20 +697,24 @@ class Controller(QObject):
                 update_volume = False
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
-        print(f'Current stock:{current_stock_id}')
+        #print(f'Current stock:{current_stock_id}')
         reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
         wells_with_droplets = [well for well in reaction_wells if well.get_remaining_droplets(current_stock_id) > 0]
         for i,well in enumerate(wells_with_droplets):
             target_droplets = well.get_remaining_droplets(current_stock_id)
             if target_droplets == 0:
-                print(f'No droplets required for well {well.well_id}')
+                #print(f'No droplets required for well {well.well_id}')
                 continue
             well_coords = well.get_coordinates()
             self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'],override=True)
-            print(f'Printing {target_droplets} droplets to well {well.well_id}')
+            #print(f'Printing {target_droplets} droplets to well {well.well_id}')
             is_last_iteration = i == len(wells_with_droplets) - 1
             if update_volume:
                 expected_volume -= target_droplets * droplet_volume / 1000
+                if expected_volume < 10:
+                    self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.refill_printer_head_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
+                    print('---Printer head needs to be reloaded---')
+                    return
             if not is_last_iteration:
                 self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             else:

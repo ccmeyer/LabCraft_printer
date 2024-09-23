@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
 
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
-        print(f"Popup message: {title} - {message}")
+        #print(f"Popup message: {title} - {message}")
         msg = QtWidgets.QMessageBox()
         msg.setWindowTitle(title)
         msg.setText(message)
@@ -249,7 +249,7 @@ class MainWindow(QMainWindow):
     def show_calibrations(self):
         """Print all printer head calibrations to terminal."""
         for printer_head in self.model.printer_head_manager.get_all_printer_heads():
-            print(f'Printer Head {printer_head.get_stock_id()}')
+            #print(f'Printer Head {printer_head.get_stock_id()}')
             print(printer_head.get_prediction_data())
         
     def reset_single_array(self):
@@ -1268,13 +1268,13 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         steps = self.repeat_measurement_spinbox.value()
         self.pressures_to_screen = list(np.linspace(screen_low,screen_high,steps))
         random.shuffle(self.pressures_to_screen)
-        print(f'Screening pulse widths: {self.pressures_to_screen}')
+        #print(f'Screening pulse widths: {self.pressures_to_screen}')
 
         self.repeat_measurements = steps
         self.repeat_measurements -= 1
         current_screen_pressure = self.pressures_to_screen.pop()
         self.label.setText(f"---Testing {current_screen_pressure} psi, {self.repeat_measurements} remaining---")
-        print(f'Screening pulse widths: {current_screen_pressure}')
+        #print(f'Screening pulse widths: {current_screen_pressure}')
         self.controller.set_pulse_width(current_screen_pressure,manual=False)
         self.current_set_pulse_width = current_screen_pressure
         self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,pulse_width=current_screen_pressure)
@@ -1318,11 +1318,11 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.update_volume_pressure_plot()
         self.results_value.setText(f"{self.model.calibration_model.get_last_droplet_volume():.2f} nL")
         if self.repeat_measurements > 0:
-            print(f'---{self.repeat_measurements} measurements remaining---')
+            #print(f'---{self.repeat_measurements} measurements remaining---')
             self.repeat_measurements -= 1
             if len(self.pressures_to_screen) > 0:
                 current_screening_pressure = self.pressures_to_screen.pop()
-                print(f'Screening pressure: {current_screening_pressure}')
+                #print(f'Screening pressure: {current_screening_pressure}')
                 self.label.setText(f"---Testing {current_screening_pressure} psi, {self.repeat_measurements} remaining---")
                 self.current_set_pulse_width = current_screening_pressure
                 self.controller.set_pulse_width(current_screening_pressure,manual=False)
@@ -1620,7 +1620,7 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
         self.mass_pressure_data.append((current_psi, mass_change))
         self.update_mass_pressure_plot()
         
-        print(f"Mass change: {mass_change} g, Target drop mass: {self.target_mass} g")
+        #print(f"Mass change: {mass_change} g, Target drop mass: {self.target_mass} g")
         if abs(mass_change - self.target_mass) < self.mass_tolerance:  # If the droplet mass is close enough to the target
             self.label.setText("Calibration complete!")
             print("=== Calibration complete! ===")
@@ -1653,7 +1653,7 @@ class PressureCalibrationDialog(QtWidgets.QDialog):
                 print('Under max pressure step')
                 target_psi = current_psi - self.max_pressure_step
             self.main_window.popup_message("Pressure Calibration",f"Adjusting pressure from {current_psi} to {target_psi} psi")
-            print(f"- Adjusting pressure from {current_psi} to {target_psi} psi")
+            #print(f"- Adjusting pressure from {current_psi} to {target_psi} psi")
             self.label.setText(f"Adjusted pressure to {target_psi} psi")
             self.change_pressure.emit(target_psi)
             # Here you should add code to adjust the machine's pressure
@@ -1797,13 +1797,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             stock_index = self.reagent_selection.currentIndex()
             stock_formatted = self.reagent_selection.itemText(stock_index)
             stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
-            print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
+            #print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
             if stock_id == None:
                 print('No reagent selected')
                 stock_id = self.model.stock_solutions.get_stock_solution_names()[0]
                 stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
                 self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_formatted))
-                print(f'---Using default reagent: {stock_id}---')
+                #print(f'---Using default reagent: {stock_id}---')
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
             printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
             color = printer_head.get_color()
@@ -2143,21 +2143,21 @@ class BaseCalibrationDialog(QDialog):
 
         if temp_coordinates:
             target_coordinates = temp_coordinates.copy()
-            print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
+            #print(f"Moved to temporary position for {step_name}: {temp_coordinates}")
         elif starting_coordinates:
-            print(f'Starting coords: {starting_coordinates}')
+            #print(f'Starting coords: {starting_coordinates}')
             avg_offset = self.calculate_average_offset()
             adjusted_coordinates = {
                 axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
             }
             target_coordinates = adjusted_coordinates.copy()
-            print(f"Offset: {avg_offset}")
-            print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
+            #print(f"Offset: {avg_offset}")
+            #print(f"Moved to initial position for {step_name}: {adjusted_coordinates}")
         else:
             target_coordinates = None
 
         if target_coordinates is None:
-            print(f"No initial calibration data for {step_name}.")
+            #print(f"No initial calibration data for {step_name}.")
             return
         else:
             intermediate_coords = self.apply_offset(target_coordinates)
@@ -2183,8 +2183,8 @@ class BaseCalibrationDialog(QDialog):
             converted_step_name = self.name_dict[step_name]
             self.set_calibration_position(converted_step_name, current_position)
 
-            print(f"Calibrating {self.steps[self.current_step]} position...")
-            print(f'Applying offset: {self.offsets}')
+            #print(f"Calibrating {self.steps[self.current_step]} position...")
+            #print(f'Applying offset: {self.offsets}')
             self.move_to_offset_position()
             # Move to the next step
             self.current_step += 1
@@ -3214,7 +3214,7 @@ class ExperimentDesignDialog(QDialog):
         else:
             self.randomize_wells_button.setText("Randomized")
             new_seed = random.randint(0, 1000000)
-            print(f'Setting the random seed to {new_seed}')
+            #print(f'Setting the random seed to {new_seed}')
             self.experiment_model.metadata["random_seed"] = new_seed
 
     def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", units='mM',max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
@@ -3434,7 +3434,7 @@ class ExperimentDesignDialog(QDialog):
             self.experiment_model.create_progress_file(file_name=progress_file_path)
             self.model.calibration_model.create_calibration_file(calibration_file_path)
 
-            print(f"Experiment data saved in directory: {experiment_dir}")
+            #print(f"Experiment data saved in directory: {experiment_dir}")
 
     def experiment_in_progress(self, progress_file_path):
         with open(progress_file_path, 'r') as file:
@@ -3476,7 +3476,7 @@ class ExperimentDesignDialog(QDialog):
                 if os.path.exists(calibration_file_path):
                     self.model.calibration_model.load_calibration_data(calibration_file_path)
                 else:
-                    print(f"No calibration.json file found in the directory: {chosen_dir}")
+                    #print(f"No calibration.json file found in the directory: {chosen_dir}")
                     self.model.calibration_model.create_calibration_file(calibration_file_path)
                 
                 progress_file_path = os.path.join(chosen_dir, "progress.json")
@@ -3495,7 +3495,8 @@ class ExperimentDesignDialog(QDialog):
                 else:
                     self.experiment_model.create_progress_file(file_name=progress_file_path) 
             else:
-                print(f"No experiment_design.json file found in the directory: {chosen_dir}")
+                pass
+                #print(f"No experiment_design.json file found in the directory: {chosen_dir}")
     
     # def optimize_stock_solutions(self):
     #     self.experiment_model.optimize_stock_solutions()
@@ -3545,7 +3546,7 @@ class ExperimentDesignDialog(QDialog):
         print("Updating stock table")
         self.stock_table.setRowCount(0)  # Clear existing rows
         for stock_solution in self.experiment_model.get_all_stock_solutions():
-            print(f"---Adding stock solution: {stock_solution}")
+            #print(f"---Adding stock solution: {stock_solution}")
             row_position = self.stock_table.rowCount()
             self.stock_table.insertRow(row_position)
             self.stock_table.setItem(row_position, 0, QTableWidgetItem(stock_solution['reagent_name']))
@@ -3560,7 +3561,7 @@ class ExperimentDesignDialog(QDialog):
 
     def update_total_reactions(self, total_reactions, total_droplets_used):
         """Update the total number of reactions displayed."""
-        print(f"Updating total reactions: {total_reactions}, total droplets used: {total_droplets_used}")
+        #print(f"Updating total reactions: {total_reactions}, total droplets used: {total_droplets_used}")
         self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
         
         self.total_droplets_used_label.setText(f"Total Droplets Used: {total_droplets_used}")

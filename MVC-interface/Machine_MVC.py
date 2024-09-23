@@ -98,7 +98,7 @@ class Balance(QObject):
                     self.add_to_log(self.current_mass)
                     self.balance_mass_updated_signal.emit(self.current_mass)
                 except Exception as e:
-                    print(f'--Error {e} reading from balance')
+                    #print(f'--Error {e} reading from balance')
                     self.error_count += 1
                     if self.error_count > 100:
                         self.close_connection()
@@ -157,7 +157,7 @@ class Balance(QObject):
             if current_id not in self.resistance_dict.keys():
                 resistance = np.random.randint(25,45)
                 self.resistance_dict.update({current_id:resistance})
-                print(f'Adding simulated resistance: {current_id}-{self.current_resistance}')
+                #print(f'Adding simulated resistance: {current_id}-{self.current_resistance}')
             effective_resistance = self.resistance_dict[current_id]
             current_volume, _, _, _ = printer_head.get_prediction_data()
             input_features = pd.DataFrame({
@@ -168,10 +168,10 @@ class Balance(QObject):
             predicted_volume = self.prediction_model.predict(input_features)[0]
             mass = predicted_volume * num_droplets / 1000
             error = np.random.normal(0, 0.005)
-            print(f'\nError: {error}\n')
+            #print(f'\nError: {error}\n')
             mass += error
             
-            print(f'\nDrop: {predicted_volume} Mass: {mass} Pulse: {pulse_width} Vol: {current_volume} Res: {effective_resistance}')
+            #print(f'\nDrop: {predicted_volume} Mass: {mass} Pulse: {pulse_width} Vol: {current_volume} Res: {effective_resistance}')
 
         else:
             mass = 0
@@ -696,7 +696,7 @@ class CommandQueue(QObject):
         
         self.command_number += 1
         # print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
-        print(f'Adding command: {command_type} {param1} {param2} {param3}')
+        #print(f'Adding command: {command_type} {param1} {param2} {param3}')
         command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
         self.queue.append(command)
         return command
@@ -728,7 +728,7 @@ class CommandQueue(QObject):
         # Remove completed commands from the queue
         while self.queue and self.queue[0].status == "Completed":
             completed_command = self.queue.popleft()
-            print(f"Command '{completed_command.command_type}' completed and removed from queue.")
+            # print(f"Command '{completed_command.command_type}' completed and removed from queue.")
             self.completed.append(completed_command)
 
             # Remove oldest commands from the completed deque if it exceeds 100
@@ -1027,7 +1027,7 @@ class Machine(QObject):
         """Send a command to the board."""
         if self.board is not None:
             if self.simulate:
-                print(f'Sending command: {command.get_command()}')
+                #print(f'Sending command: {command.get_command()}')
                 self.sent_command = command
                 self.command_sent.emit({"command": command.get_command()})
                 return True

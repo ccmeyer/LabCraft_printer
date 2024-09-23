@@ -65,7 +65,7 @@ class MassCalibrationModel(QObject):
         self.change_volume_signal.emit()
 
     def get_current_stock_id(self):
-        print(f'\n--Current stock ID: {self.current_stock_id}\n')
+        #print(f'\n--Current stock ID: {self.current_stock_id}\n')
         return self.current_stock_id
     
     def get_current_printer_head_volume(self):
@@ -163,7 +163,7 @@ class MassCalibrationModel(QObject):
             self.current_measurement['bias'] = self.current_measurement['droplet_volume'] - self.current_measurement['target_volume']
         self.change_current_volume(-self.current_measurement['mass_difference'])
         self.apply_calibrations_to_printer_head(self.current_measurement['stock_id'])
-        print(f'Completed measurement: {self.current_measurement}')
+        #print(f'Completed measurement: {self.current_measurement}')
 
         self.measurements.append(self.current_measurement)
         self.current_measurement = {}
@@ -181,13 +181,13 @@ class MassCalibrationModel(QObject):
         self.calibration_file_path = file_path
         with open(file_path, 'w') as file:
             json.dump([], file)
-        print(f"Calibration file created at {file_path}")
+        #print(f"Calibration file created at {file_path}")
 
     def save_calibration_data(self, file_path):
         """Save the calibration data as a JSON file."""
         with open(file_path, 'w') as file:
             json.dump(self.measurements, file, indent=4)
-        print(f"Calibration data saved to {file_path}")
+        #print(f"Calibration data saved to {file_path}")
 
     def load_calibration_data(self, file_path):
         """Load the calibration data from a JSON file."""
@@ -195,7 +195,7 @@ class MassCalibrationModel(QObject):
         with open(file_path, 'r') as file:
             self.measurements = json.load(file)
         self.apply_calibrations_to_all_printer_heads()
-        print(f"Calibration data loaded from {file_path}")
+        #print(f"Calibration data loaded from {file_path}")
 
     def apply_calibrations_to_all_printer_heads(self):
         for printer_head in self.printer_head_manager.get_all_printer_heads():
@@ -238,41 +238,41 @@ class MassCalibrationModel(QObject):
     def calculate_resistance_for_stock(self,stock_id):
         stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
         if len(stock_measurements) == 0:
-            print(f"No measurements found for stock '{stock_id}'")
+            #print(f"No measurements found for stock '{stock_id}'")
             return None
         stock_data = pd.DataFrame(stock_measurements)
         standard_data = stock_data[stock_data['pulse_width'] == self.standard_pulse_width].copy()
         res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
         res_df['effective_resistance'] = self.resistance_model.predict(res_df)
         resistance = res_df['effective_resistance'].mean()
-        print(f"\nEffective resistance for stock '{stock_id}': {resistance:.2f} nL\n")
+        #print(f"\nEffective resistance for stock '{stock_id}': {resistance:.2f} nL\n")
         return round(resistance,2)
     
     def calculate_bias(self,stock_id):
         stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
         if len(stock_measurements) == 0:
-            print(f"No measurements found for stock '{stock_id}'")
+            #print(f"No measurements found for stock '{stock_id}'")
             return None
         stock_data = pd.DataFrame(stock_measurements).dropna(subset=['bias'])
         if len(stock_data) == 0:
-            print(f"No bias measurements found for stock '{stock_id}'")
+            #print(f"No bias measurements found for stock '{stock_id}'")
             return None
         stock_data['total_bias'] = stock_data['bias'] + stock_data['applied_bias']
         bias = stock_data['total_bias'].mean()
-        print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
+        #print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
         return round(bias,2)
     
     def get_target_droplet_volume_for_stock(self,stock_id):
         stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
         if len(stock_measurements) == 0:
-            print(f"No measurements found for stock '{stock_id}'")
+            #print(f"No measurements found for stock '{stock_id}'")
             return None
         stock_data = pd.DataFrame(stock_measurements).dropna(subset=['target_volume'])
         if len(stock_data) == 0:
-            print(f"No target volume measurements found for stock '{stock_id}'")
+            #print(f"No target volume measurements found for stock '{stock_id}'")
             return None
         target_droplet_volume = stock_data.iloc[-1]['target_volume']
-        print(f"Target droplet volume for stock '{stock_id}': {target_droplet_volume:.2f} nL")
+        #print(f"Target droplet volume for stock '{stock_id}': {target_droplet_volume:.2f} nL")
         return target_droplet_volume
     
     def predict_pulse_width_for_droplet(self, target_droplet_volume,calc_bias=True):
@@ -287,7 +287,7 @@ class MassCalibrationModel(QObject):
         else:
             bias = 0
         pulse_width = self.predict_pulse_width(total_volume, resistance, target_droplet_volume,bias=bias)
-        print(f"Required pulse width for {target_droplet_volume} nL droplet: {pulse_width:.2f} µs")
+        #print(f"Required pulse width for {target_droplet_volume} nL droplet: {pulse_width:.2f} µs")
         return pulse_width, bias
     
     def predict_pulse_width(self, total_volume, effective_resistance, target_droplet_volume,bias=0):
@@ -426,7 +426,7 @@ def check_stock_solution_calculations(target_concentrations, stock_solutions, un
     else:
         max_droplets_for_any_concentration = lookup_table.groupby('target_concentration')['droplet_count'].sum().max()
 
-    # print(f'Max droplets for any concentration: {max_droplets_for_any_concentration}')
+    # #print(f'Max droplets for any concentration: {max_droplets_for_any_concentration}')
     # If there are unachievable concentrations, return them
     if unachievable_concentrations:
         return False, unachievable_concentrations, lookup_table, max_droplets_for_any_concentration
@@ -547,7 +547,7 @@ class ExperimentModel(QObject):
             
             if steps == 1:
                 reagent["concentrations"] = [round(max_conc, 2)]
-                # print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
+                # #print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
             elif mode == "Linear":
                 reagent["concentrations"] = [round(x, 2) for x in np.linspace(min_conc, max_conc, steps).tolist()]
             elif mode == "Quadratic":
@@ -618,7 +618,7 @@ class ExperimentModel(QObject):
         if not self.all_droplet_df.empty:
             self.all_droplet_df = self.all_droplet_df[self.all_droplet_df['reagent_name'].isin(used_reagents)].copy()
         # Update the stock solutions in the lookup table
-        # print(f'Complete lookup table:\n{self.complete_lookup_table}')
+        # #print(f'Complete lookup table:\n{self.complete_lookup_table}')
         if not self.complete_lookup_table.empty:
             self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'].isin(used_reagents)].copy()
 
@@ -691,7 +691,7 @@ class ExperimentModel(QObject):
         self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
         self.experiment_df['units'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[-1])
         self.experiment_df['target_concentration'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[0]).astype(float)
-        print(f'\nExperiment df:\n{self.experiment_df}')
+        #print(f'\nExperiment df:\n{self.experiment_df}')
         # Apply replicates
         all_dfs = []
         for i in range(self.metadata["replicates"]):
@@ -701,8 +701,8 @@ class ExperimentModel(QObject):
                 temp_df['unique_id'] = temp_df['reaction_id'] + (temp_df['replicate']*(max(temp_df['reaction_id'])+1))
             all_dfs.append(temp_df)
         self.experiment_df = pd.concat(all_dfs, ignore_index=True)
-        # print(f'Experiment df:\n{self.experiment_df}')
-        # print(f'complete lookup table:\n{self.complete_lookup_table}')
+        # #print(f'Experiment df:\n{self.experiment_df}')
+        # #print(f'complete lookup table:\n{self.complete_lookup_table}')
         
         try:
             self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration','units'], how='left')
@@ -718,7 +718,7 @@ class ExperimentModel(QObject):
             self.add_total_droplet_count_to_stock()
 
         except Exception as e:
-            print(f'Generate experiment error: {e}')
+            #print(f'Generate experiment error: {e}')
             droplet_count = 0
             self.all_droplet_df = pd.DataFrame()
 
@@ -734,9 +734,9 @@ class ExperimentModel(QObject):
     
     def add_total_droplet_count_to_stock(self):
         for stock_solution in self.stock_solutions:
-            # print(f'Stock solution: {stock_solution}')
+            # #print(f'Stock solution: {stock_solution}')
             total_droplets = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
-            # print(f'Total droplets: {total_droplets}')
+            # #print(f'Total droplets: {total_droplets}')
             stock_solution['total_droplets'] = total_droplets
             stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
 
@@ -750,8 +750,8 @@ class ExperimentModel(QObject):
 
         max_total_droplets = self.metadata['max_droplets']
         optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, max_total_droplets)
-        # print(f"Optimized stock solutions: {optimized_solutions}")
-        # print(f"Max droplets per reagent: {max_droplets_per_reagent}")
+        # #print(f"Optimized stock solutions: {optimized_solutions}")
+        # #print(f"Max droplets per reagent: {max_droplets_per_reagent}")
         for i in range(len(max_droplets_per_reagent)):
             self.reagents[i]['max_droplets'] = max_droplets_per_reagent[i]
 
@@ -771,7 +771,7 @@ class ExperimentModel(QObject):
     
     def save_experiment(self, experiment_name,experiment_dir,filename):
         """Save all information required to repopulate the model to a JSON file."""
-        print(f'Saving experiment to {filename}')
+        #print(f'Saving experiment to {filename}')
         self.experiment_name = experiment_name
         self.experiment_dir_path = experiment_dir
         self.experiment_file_path = filename
@@ -782,7 +782,7 @@ class ExperimentModel(QObject):
         }
         with open(filename, 'w') as file:
             json.dump(data_to_save, file, indent=4, default=self.convert_to_serializable)
-        print(f"Experiment data saved to {filename}")
+        #print(f"Experiment data saved to {filename}")
 
     def create_progress_file(self,file_name=None):
         """Create a JSON file to store the progress of the experiment."""
@@ -792,7 +792,7 @@ class ExperimentModel(QObject):
             print('Experiment name is not set, cannot create progress file')
             return
 
-        print(f'Creating progress file at {self.progress_file_path}')
+        #print(f'Creating progress file at {self.progress_file_path}')
 
         for well in self.well_plate.get_all_wells():
             well_id = well.well_id
@@ -810,7 +810,7 @@ class ExperimentModel(QObject):
                     },
                     "completed": reaction.check_all_complete()
                 }
-        print(f'Create progress file: {self.progress_file_path}')
+        #print(f'Create progress file: {self.progress_file_path}')
         with open(self.progress_file_path, 'w') as f:
             json.dump(self.progress_data, f, indent=4)
 
@@ -869,9 +869,9 @@ class ExperimentModel(QObject):
 
             self.data_updated.emit(i)
             self.calculate_concentrations(i,calc_experiment=True)
-            # print(f'finished conc for {i}\n{self.experiment_df}')
+            # #print(f'finished conc for {i}\n{self.experiment_df}')
         
-        print(f"Experiment data loaded from {filename}")
+        #print(f"Experiment data loaded from {filename}")
 
     def read_progress_file(self, progress_file):
         """Read the progress of the experiment from a JSON file."""
@@ -1234,9 +1234,10 @@ class WellPlate(QObject):
         try:
             with open(file_path, 'w') as file:
                 json.dump(self.all_plate_data, file, indent=4)
-            print(f"Calibration data saved to {file_path}")
+            #print(f"Calibration data saved to {file_path}")
         except Exception as e:
-            print(f"Error saving calibration data to file: {e}")
+            pass
+            #print(f"Error saving calibration data to file: {e}")
 
     def discard_temp_calibrations(self):
         """Discard the temporary calibration data."""
@@ -1395,7 +1396,7 @@ class WellPlate(QObject):
     def apply_calibration_data(self):
         if len(list(self.calibrations)) < 4:
             self.calibration_applied = False
-            print(f"Calibration is incomplete. Need at least 4 calibration points, but only {len(list(self.calibrations))} provided.")
+            #print(f"Calibration is incomplete. Need at least 4 calibration points, but only {len(list(self.calibrations))} provided.")
             return
         else:
             well_coords_df = self.calculate_plate_matrix()
@@ -1515,12 +1516,12 @@ class WellPlate(QObject):
 
         if len(reactions) > len(available_wells):
             raise ValueError("Not enough available wells to assign all reactions.")
-        print(f"Assigning {len(reactions)} reactions to {len(available_wells)} available wells.")
+        #print(f"Assigning {len(reactions)} reactions to {len(available_wells)} available wells.")
         for i, reaction in enumerate(reactions):
             well = available_wells[i]
             well.assign_reaction(reaction)
             reaction_assignment[reaction.unique_id] = well.well_id
-            print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
+            #print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
 
         return reaction_assignment
     
@@ -1634,7 +1635,7 @@ class PrinterHead(QObject):
             return False
     
     def set_calibration_data(self, resistance, bias, target_droplet_volume):
-        print(f'Calibration data set for printer head {self.stock_solution.get_stock_id()}, R:{resistance}, B:{bias}, V:{target_droplet_volume}')
+        #print(f'Calibration data set for printer head {self.stock_solution.get_stock_id()}, R:{resistance}, B:{bias}, V:{target_droplet_volume}')
         self.effective_resistance = resistance
         self.bias = bias
         self.target_droplet_volume = target_droplet_volume
@@ -1673,10 +1674,10 @@ class PrinterHeadManager(QObject):
             # printer_head.volume_changed_signal.connect(self.volume_changed)
             self.printer_heads.append(printer_head)
             self.unassigned_printer_heads.append(printer_head)
-        print(f"Created {len(self.printer_heads)} printer heads.")
+        #print(f"Created {len(self.printer_heads)} printer heads.")
 
     # def volume_changed(self,stock_id):
-    #     print(f'Volume changed for printer head {stock_id}')
+    #     #print(f'Volume changed for printer head {stock_id}')
 
 
     def assign_printer_head_to_slot(self, slot_number, rack_model):
@@ -1694,7 +1695,7 @@ class PrinterHeadManager(QObject):
             printer_head = self.unassigned_printer_heads.pop(0)
             rack_model.update_slot_with_printer_head(slot_number, printer_head)
             self.assigned_printer_heads[slot_number] = printer_head
-            print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
+            #print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
             return True
         else:
             print("No more unassigned printer heads available.")
@@ -1710,7 +1711,7 @@ class PrinterHeadManager(QObject):
             self.unassigned_printer_heads.remove(new_printer_head)
             rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
             self.assigned_printer_heads[slot_number] = new_printer_head
-            print(f"Swapped printer head in slot {slot_number} with '{new_printer_head.get_stock_id()}'.")
+            #print(f"Swapped printer head in slot {slot_number} with '{new_printer_head.get_stock_id()}'.")
 
 
     def generate_color(self):
@@ -1852,7 +1853,7 @@ class RackModel(QObject):
     def apply_calibration_data(self):
         if self.calibrations['rack_position_Left'] == {} or self.calibrations['rack_position_Right'] == {}:
             self.calibration_applied = False
-            print(f"Calibration is incomplete. Need at least 2 calibration points, but only {len(list(self.calibrations))} provided.")
+            #print(f"Calibration is incomplete. Need at least 2 calibration points, but only {len(list(self.calibrations))} provided.")
             return
         else:
             slot_positions = self.calculate_slot_positions()
@@ -1951,7 +1952,7 @@ class RackModel(QObject):
             slot.change_printer_head(printer_head)
             slot.set_locked(False)
             self.slot_updated.emit()
-            print(f"Slot {slot_number} updated with printer head: {printer_head.get_stock_id()}, {printer_head.color}")
+            #print(f"Slot {slot_number} updated with printer head: {printer_head.get_stock_id()}, {printer_head.color}")
 
     def lock_slot(self, slot_number):
         """
@@ -1981,7 +1982,7 @@ class RackModel(QObject):
                 self.slots[slot_number].confirm()
                 self.slot_updated.emit()
                 self.gripper_updated.emit()
-                print(f"Slot {slot_number} confirmed.")
+                #print(f"Slot {slot_number} confirmed.")
             else:
                 error_msg = f"Slot {slot_number} has no printer head to confirm."
                 self.error_occurred.emit(error_msg)
@@ -2039,7 +2040,7 @@ class RackModel(QObject):
             self.lock_slot(slot_number)
             self.slot_updated.emit()
             self.gripper_updated.emit()
-            print(f"Printer head from slot {slot_number} transferred to gripper.")
+            #print(f"Printer head from slot {slot_number} transferred to gripper.")
         else:
             self.error_occurred.emit(error_msg)
             print(error_msg)
@@ -2083,7 +2084,7 @@ class RackModel(QObject):
             self.gripper_slot_number = None
             self.slot_updated.emit()
             self.gripper_updated.emit()
-            print(f"Printer head transferred from gripper to slot {slot_number}.")
+            #print(f"Printer head transferred from gripper to slot {slot_number}.")
         else:
             self.error_occurred.emit(error_msg)
             print(error_msg)
@@ -2193,24 +2194,27 @@ class LocationModel(QObject):
             with open(self.json_file_path, "r") as file:
                 self.locations = json.load(file)
             self.locations_updated.emit()
-            print(f"Locations loaded from {self.json_file_path}")
+            #print(f"Locations loaded from {self.json_file_path}")
         except FileNotFoundError:
-            print(f"{self.json_file_path} not found. Starting with an empty locations dictionary.")
+            #print(f"{self.json_file_path} not found. Starting with an empty locations dictionary.")
             self.locations = {}
         except json.JSONDecodeError:
-            print(f"Error decoding JSON from {self.json_file_path}. Starting with an empty locations dictionary.")
+            #print(f"Error decoding JSON from {self.json_file_path}. Starting with an empty locations dictionary.")
             self.locations = {}
         except Exception as e:
-            print(f"Failed to load locations: {e}")
+            pass
+            #print(f"Failed to load locations: {e}")
 
     def save_locations(self):
         """Save locations to a JSON file."""
         try:
             with open(self.json_file_path, "w") as file:
                 json.dump(self.locations, file, indent=4)
-            print(f"Locations saved to {self.json_file_path}")
+            #print(f"Locations saved to {self.json_file_path}")
+
         except Exception as e:
-            print(f"Failed to save locations: {e}")
+            #print(f"Failed to save locations: {e}")
+            pass
 
     def load_obstacles(self):
         """Load locations from a JSON file."""
@@ -2219,15 +2223,16 @@ class LocationModel(QObject):
                 data = json.load(file)
                 self.boundaries = data['boundaries']
                 self.obstacles = data['obstacles']
-            print(f"Obstacles loaded from {self.obstacle_path}")
+            #print(f"Obstacles loaded from {self.obstacle_path}")
         except FileNotFoundError:
-            print(f"{self.obstacle_path} not found. Starting with an empty obstacles dictionary.")
+            #print(f"{self.obstacle_path} not found. Starting with an empty obstacles dictionary.")
             self.obstacles = {}
         except json.JSONDecodeError:
-            print(f"Error decoding JSON from {self.obstacle_path}. Starting with an empty locations dictionary.")
+            #print(f"Error decoding JSON from {self.obstacle_path}. Starting with an empty locations dictionary.")
             self.obstacles = {}
         except Exception as e:
-            print(f"Failed to load locations: {e}")
+            pass
+            #print(f"Failed to load locations: {e}")
 
     def get_obstacles(self):
         return self.obstacles
@@ -2239,7 +2244,7 @@ class LocationModel(QObject):
         """Add a new location or update an existing one."""
         self.locations[name] = {'X': x, 'Y': y, 'Z': z}
         self.locations_updated.emit(name)
-        print(f"Location '{name}' added/updated.")
+        #print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
         """Update an existing location by name."""
@@ -2247,27 +2252,30 @@ class LocationModel(QObject):
             self.locations[name] = {'X': x, 'Y': y, 'Z': z}
             self.current_location_updated.emit(name)
             self.locations_updated.emit()
-            print(f"Location '{name}' updated.")
+            #print(f"Location '{name}' updated.")
         else:
-            print(f"Location '{name}' not found.")
+            pass
+            #print(f"Location '{name}' not found.")
 
     def update_location_coords(self, name, coords):
         """Update an existing location by name."""
         if name in self.locations:
             self.locations[name] = coords
             self.locations_updated.emit()
-            print(f"Location '{name}' updated.")
+            #print(f"Location '{name}' updated.")
         else:
-            print(f"Location '{name}' not found.")
+            pass
+            #print(f"Location '{name}' not found.")
 
     def remove_location(self, name):
         """Remove a location by name."""
         if name in self.locations:
             del self.locations[name]
             self.locations_updated.emit()
-            print(f"Location '{name}' removed.")
+            #print(f"Location '{name}' removed.")
         else:
-            print(f"Location '{name}' not found.")
+            pass
+            #print(f"Location '{name}' not found.")
 
     def get_location(self, name):
         """Get a location's coordinates by name in an array [x,y,z]."""
@@ -2300,12 +2308,12 @@ class LocationModel(QObject):
         offset_coords = {'X':coords['X']-500,'Y':coords['Y']-500,'Z':coords['Z']}
         self.update_location_coords('pause',offset_coords)
         self.locations_updated.emit()
-        print(f"Pause location updated.")
+        #print(f"Pause location updated.")
 
     def update_plate_locatin(self,coords):
         self.update_location_coords('plate',coords)
         self.locations_updated.emit()
-        print(f"Plate location updated.")
+        #print(f"Plate location updated.")
 
 class MachineModel(QObject):
     '''
@@ -2460,7 +2468,7 @@ class MachineModel(QObject):
             self.step_size = new_step_size
             self.step_num = self.possible_steps.index(new_step_size)
             self.step_size_changed.emit(self.step_size)
-            print(f"Step size set to {self.step_size}")
+            #print(f"Step size set to {self.step_size}")
 
     def increase_step_size(self):
         """Increase the step size if possible."""
@@ -2468,7 +2476,7 @@ class MachineModel(QObject):
             self.step_num += 1
             self.step_size = self.possible_steps[self.step_num]
             self.step_size_changed.emit(self.step_size)
-            print(f"Step size increased to {self.step_size}")
+            #print(f"Step size increased to {self.step_size}")
 
     def decrease_step_size(self):
         """Decrease the step size if possible."""
@@ -2476,7 +2484,7 @@ class MachineModel(QObject):
             self.step_num -= 1
             self.step_size = self.possible_steps[self.step_num]
             self.step_size_changed.emit(self.step_size)
-            print(f"Step size decreased to {self.step_size}")
+            #print(f"Step size decreased to {self.step_size}")
     
     def toggle_motor_state(self):
         """Toggle the motor state and emit a signal."""
@@ -2485,23 +2493,23 @@ class MachineModel(QObject):
             self.regulating_pressure = False
             self.regulation_state_changed.emit(self.regulating_pressure)
         self.motor_state_changed.emit(self.motors_enabled)
-        print(f"Motors {'enabled' if self.motors_enabled else 'disabled'}")
+        #print(f"Motors {'enabled' if self.motors_enabled else 'disabled'}")
 
     def toggle_regulation_state(self):
         """Toggle the motor state and emit a signal."""
         self.regulating_pressure = not self.regulating_pressure
         self.regulation_state_changed.emit(self.regulating_pressure)
-        print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
+        #print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
 
     def update_command_numbers(self, current_command_num, last_completed_command_num):
         self.current_command_num = current_command_num
         self.last_completed_command_num = last_completed_command_num
         if self.last_completed_command_num != self.current_command_num:
             self.machine_free = False
-            # print(f"Machine busy. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
+            # #print(f"Machine busy. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
         else:
             self.machine_free = True
-            # print(f"Machine free. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
+            # #print(f"Machine free. Current command: {self.current_command_num}, Last completed command: {self.last_completed_command_num}")
         self.command_numbers_updated.emit()
 
     def get_command_numbers(self):
@@ -2725,7 +2733,7 @@ class Model(QObject):
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
         self.stock_solutions, self.reaction_collection = self.load_reactions_from_csv(file_path)
-        print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
+        #print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
         self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
         self.assign_printer_heads()
         self.experiment_loaded.emit()
@@ -2735,8 +2743,8 @@ class Model(QObject):
         stock_solutions = StockSolutionManager()
         for stock in self.experiment_model.get_all_stock_solutions():
             stock_solutions.add_stock_solution(stock['reagent_name'],stock['concentration'],stock['units'],required_volume=stock['total_volume'])
-        print(f'All stock solutions:\n{stock_solutions.get_stock_solution_names()}')
-        print(f'Stock formated:\n{stock_solutions.get_stock_solution_names_formated()}')
+        #print(f'All stock solutions:\n{stock_solutions.get_stock_solution_names()}')
+        #print(f'Stock formated:\n{stock_solutions.get_stock_solution_names_formated()}')
         reaction_collection = ReactionCollection()
         if self.experiment_model.all_droplet_df.empty:
             print("No reactions in the experiment model.")
@@ -2744,8 +2752,8 @@ class Model(QObject):
         for unique_id, reaction_df in self.experiment_model.all_droplet_df.groupby('unique_id'):
             reaction = ReactionComposition(unique_id)
             for _, row in reaction_df.iterrows():
-                print(f'Row:{row}')
-                print(f'Stock Solution:{row["reagent_name"]},{row["stock_solution"]}')
+                #print(f'Row:{row}')
+                #print(f'Stock Solution:{row["reagent_name"]},{row["stock_solution"]}')
                 current_stock = stock_solutions.get_stock_solution(row['reagent_name'],row['stock_solution'],row['units'])
                 reaction.add_reagent(current_stock, row['droplet_count'])
             
@@ -2768,7 +2776,7 @@ class Model(QObject):
             return
         self.stock_solutions = stock_solutions
         self.reaction_collection = reaction_collection
-        print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
+        #print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
         all_reactions = self.reaction_collection.get_all_reactions()
         random_seed = self.experiment_model.get_random_seed()
         if random_seed is not None:
