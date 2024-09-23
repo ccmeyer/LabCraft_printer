@@ -683,11 +683,16 @@ class ExperimentModel(QObject):
             self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
         else:
             num_concentrations = [len(c) for c in concentrations]
-            reduced_comb = pyDOE3.gsd(num_concentrations, self.metadata['reduction_factor'])
-            self.experiment_df = pd.DataFrame(
-                [[concentrations[j][idx] for j, idx in enumerate(row)] for row in reduced_comb],
-                columns=reagent_names
-            )
+            try:
+                reduced_comb = pyDOE3.gsd(num_concentrations, self.metadata['reduction_factor'])
+                self.experiment_df = pd.DataFrame(
+                    [[concentrations[j][idx] for j, idx in enumerate(row)] for row in reduced_comb],
+                    columns=reagent_names
+                )
+            except Exception as e:
+                print('Error generating reduced experiment:',e)
+                self.experiment_df = pd.DataFrame()
+                return
         self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
         self.experiment_df['units'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[-1])
         self.experiment_df['target_concentration'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[0]).astype(float)
