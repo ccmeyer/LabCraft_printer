@@ -73,7 +73,9 @@ class MainWindow(QMainWindow):
         self.controller = controller
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
-        self.color_dict = self.load_colors('.\\MVC-interface\\Presets\\Colors.json')
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.color_dict_path = os.path.join(self.script_dir, 'Presets','Colors.json')
+        self.color_dict = self.load_colors(self.color_dict_path)
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
