@@ -180,13 +180,13 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
 
-        self.shortcut_manager.add_shortcut('1','Set pulse width to 3000', lambda: self.controller.set_pulse_width(4200,manual=True))
+        self.shortcut_manager.add_shortcut('1','Set pulse width to 4200', lambda: self.controller.set_pulse_width(4200,manual=True))
         self.shortcut_manager.add_shortcut('5','Set pressure to 0', lambda: self.controller.set_absolute_pressure(0,manual=True))
         self.shortcut_manager.add_shortcut('6','Large pressure decrease', lambda: self.controller.set_relative_pressure(-1,manual=True))
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set pressure to 1.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
 
         # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
@@ -205,7 +205,6 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
-
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
@@ -3148,6 +3147,9 @@ class ExperimentDesignDialog(QDialog):
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
 
         self.total_reactions_label = QLabel("Total Reactions: 0", self)
+
+        # Grid layout for setting the start row and start column
+        
 
         self.info_layout.addWidget(self.total_droplets_label)
         self.info_layout.addWidget(self.total_droplets_spinbox)
