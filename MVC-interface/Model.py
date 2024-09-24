@@ -450,7 +450,9 @@ class ExperimentModel(QObject):
             'droplet_volume': 0.03,
             'fill_reagent': 'Water',
             'random_seed': None,
-            'reduction_factor': 1
+            'reduction_factor': 1,
+            'start_row':0,
+            'start_col':0
         }
         self.stock_solutions = []
         self.experiment_df = pd.DataFrame()
@@ -515,10 +517,12 @@ class ExperimentModel(QObject):
     def get_random_seed(self):
         return self.metadata['random_seed']
 
-    def update_metadata(self, replicates, max_droplets,reduction_factor):
+    def update_metadata(self, replicates, max_droplets,reduction_factor,start_row,start_col):
         self.metadata["replicates"] = replicates
         self.metadata["max_droplets"] = max_droplets
         self.metadata["reduction_factor"] = reduction_factor
+        self.metadata['start_row'] = start_row
+        self.metadata['start_col'] = start_col
 
         self.generate_experiment(feasible=False)
 
@@ -527,6 +531,12 @@ class ExperimentModel(QObject):
         self.metadata['fill_reagent'] = fill_reagent
         self.add_new_stock_solutions_for_reagent(fill_reagent,[1.0],'--')
         self.generate_experiment(feasible=False)
+
+    def get_start_row(self):
+        return self.metadata['start_row']
+    
+    def get_start_col(self):
+        return self.metadata['start_col']
 
     def calculate_concentrations(self, index,calc_experiment=True):
         reagent = self.reagents[index]
@@ -1455,7 +1465,7 @@ class WellPlate(QObject):
 
         return wells
 
-    def get_available_wells(self, fill_by="columns"):
+    def get_available_wells(self, fill_by="columns",start_row=0,start_col=0):
         """
         Get a list of available wells, sorted by rows or columns in a zigzag pattern.
 
@@ -1469,7 +1479,7 @@ class WellPlate(QObject):
             raise ValueError("fill_by must be 'rows' or 'columns'.")
 
         available_wells = [well for well in self.wells.values() if well not in self.excluded_wells and well.assigned_reaction is None]
-
+        available_wells = [well for well in available_wells if well.row_num >= start_row and well.col >= start_col+1]
         return self.zigzag_order(available_wells, fill_by=fill_by)
     
     def get_all_wells(self):
@@ -1505,7 +1515,7 @@ class WellPlate(QObject):
             status[well_id] = well.get_status()
         return status
 
-    def assign_reactions_to_wells(self, reactions, fill_by="columns"):
+    def assign_reactions_to_wells(self, reactions, fill_by="columns",start_row=0,start_col=0):
         """
         Systematically assign reactions to available wells.
 
@@ -1516,7 +1526,7 @@ class WellPlate(QObject):
         Returns:
             dict: A dictionary mapping reaction names to well IDs.
         """
-        available_wells = self.get_available_wells(fill_by=fill_by)
+        available_wells = self.get_available_wells(fill_by=fill_by,start_row=start_row,start_col=start_col)
         reaction_assignment = {}
 
         if len(reactions) > len(available_wells):
@@ -1526,7 +1536,7 @@ class WellPlate(QObject):
             well = available_wells[i]
             well.assign_reaction(reaction)
             reaction_assignment[reaction.unique_id] = well.well_id
-            #print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
+            print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
 
         return reaction_assignment
     
@@ -2787,7 +2797,11 @@ class Model(QObject):
         if random_seed is not None:
             random.seed(random_seed)
             random.shuffle(all_reactions)
-        self.well_plate.assign_reactions_to_wells(all_reactions)
+
+        start_row = self.experiment_model.get_start_row()
+        start_col = self.experiment_model.get_start_col()
+
+        self.well_plate.assign_reactions_to_wells(all_reactions,start_row=start_row,start_col=start_col)
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
         self.experiment_model.load_progress()
@@ -2803,7 +2817,10 @@ class Model(QObject):
 
     def update_well_plate(self):
         if self.reaction_collection is not None:
-            self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
+            start_row = self.experiment_model.get_start_row()
+            start_col = self.experiment_model.get_start_col()
+
+            self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions(),start_row=start_row,start_col=start_col)
             self.experiment_loaded.emit()
         else:
             print("No experiment data loaded.")

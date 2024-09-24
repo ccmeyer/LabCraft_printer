@@ -3064,7 +3064,7 @@ class ExperimentDesignDialog(QDialog):
         self.model = model
         self.experiment_model = self.model.experiment_model
         self.setWindowTitle("Experiment Design")
-        self.setFixedSize(1500, 400)
+        self.setFixedSize(1500, 600)
 
         self.layout = QHBoxLayout(self)
         
@@ -3144,6 +3144,20 @@ class ExperimentDesignDialog(QDialog):
         self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))  # Set default value
         self.fill_reagent_input.textChanged.connect(self.update_fill_reagent)
 
+        self.start_row_label = QLabel("Start Row",self)
+        self.start_row_spinbox = QSpinBox(self)
+        self.start_row_spinbox.setMinimum(0)
+        self.start_row_spinbox.setMaximum(15)
+        self.start_row_spinbox.setValue(self.experiment_model.metadata.get("start_row", 0))
+        self.start_row_spinbox.valueChanged.connect(self.update_model_metadata)
+
+        self.start_col_label = QLabel("Start Col",self)
+        self.start_col_spinbox = QSpinBox(self)
+        self.start_col_spinbox.setMinimum(0)
+        self.start_col_spinbox.setMaximum(23)
+        self.start_col_spinbox.setValue(self.experiment_model.metadata.get("start_col", 0))
+        self.start_col_spinbox.valueChanged.connect(self.update_model_metadata)
+
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
 
         self.total_reactions_label = QLabel("Total Reactions: 0", self)
@@ -3155,6 +3169,10 @@ class ExperimentDesignDialog(QDialog):
         self.info_layout.addWidget(self.total_droplets_spinbox)
         self.info_layout.addWidget(self.fill_reagent_label)
         self.info_layout.addWidget(self.fill_reagent_input)
+        self.info_layout.addWidget(self.start_row_label)
+        self.info_layout.addWidget(self.start_row_spinbox)
+        self.info_layout.addWidget(self.start_col_label)
+        self.info_layout.addWidget(self.start_col_spinbox)
         self.info_layout.addWidget(self.total_droplets_used_label)
         self.info_layout.addWidget(self.total_reactions_label)
 
@@ -3345,7 +3363,9 @@ class ExperimentDesignDialog(QDialog):
         replicates = self.replicate_spinbox.value()
         max_droplets = self.total_droplets_spinbox.value()
         reduction_factor = self.reduction_factor_spinbox.value()
-        self.experiment_model.update_metadata(replicates, max_droplets, reduction_factor)
+        start_row = self.start_row_spinbox.value()
+        start_col = self.start_col_spinbox.value()
+        self.experiment_model.update_metadata(replicates, max_droplets, reduction_factor,start_row,start_col)
 
     def update_fill_reagent(self):
         """Update the fill reagent in the model based on the current value."""
