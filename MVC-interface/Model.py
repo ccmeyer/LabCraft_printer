@@ -464,6 +464,7 @@ class ExperimentModel(QObject):
         self.experiment_file_path = None
         self.progress_file_path = None
         self.progress_data = {}
+        self.key_file_path = None
 
         self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
 
@@ -829,6 +830,27 @@ class ExperimentModel(QObject):
         with open(self.progress_file_path, 'w') as f:
             json.dump(self.progress_data, f, indent=4)
 
+    # Function to convert JSON to pandas DataFrame
+    def progress_to_key(self):
+        data = {}
+
+        for well_id, well_data in self.progress_data.items():
+            reagents = well_data['reagents']
+            data[well_id] = {reagent: details['target_droplets'] for reagent, details in reagents.items()}
+
+        df = pd.DataFrame.from_dict(data, orient='index')
+        return df
+
+    def create_key_file(self,file_name=None):
+        if file_name is not None:
+            self.key_file_path = file_name
+        print(f'Creating key file at {file_name}')
+        print(self.progress_data)
+        key_df = self.progress_to_key()
+        print(key_df)
+        key_df.to_csv(self.key_file_path, index_label='Well ID')
+        
+
     def update_progress(self, well_id):
         """Update the progress of a specific well in the experiment."""
         well = self.well_plate.get_well(well_id)
@@ -894,7 +916,15 @@ class ExperimentModel(QObject):
         with open(progress_file, 'r') as file:
             self.progress_data = json.load(file)
 
+    def return_progress_data(self):
+        with open(self.progress_file_path, 'r') as file:
+            return json.load(file)
+
     def load_progress(self):
+        print('Loading progress data')
+        if self.return_progress_data() == {}:
+            print('No progress data found in file, writing new progress file')
+            self.create_progress_file()
         for well_id, well_data in self.progress_data.items():
             well = self.well_plate.get_well(well_id)
             reaction = well.assigned_reaction
@@ -1048,6 +1078,9 @@ class ReactionComposition(QObject):
         """Get all reagents and their concentrations in this reaction."""
         return self.reagents
     
+    def get_all_target_droplets(self):
+        return {stock_id:reagent.get_target_droplets() for stock_id,reagent in self.reagents.items()}
+    
     def get_target_droplets_for_stock(self,stock_id):
         return self.reagents[stock_id].get_target_droplets()
     
@@ -1169,6 +1202,9 @@ class Well(QObject):
     def get_remaining_droplets(self,stock_id):
         return self.assigned_reaction.get_remaining_droplets_for_stock(stock_id)
     
+    def get_assigned_reaction(self):
+        return self.assigned_reaction
+
     def record_stock_print(self,stock_id,droplets):
         self.assigned_reaction.record_stock_print(stock_id,droplets)
         print('emitting state changed',self.well_id)
@@ -2805,6 +2841,7 @@ class Model(QObject):
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
         self.experiment_model.load_progress()
+        self.experiment_model.create_key_file()
         self.calibration_model.apply_calibrations_to_all_printer_heads()
         self.experiment_loaded.emit()
 

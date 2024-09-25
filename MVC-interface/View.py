@@ -3454,12 +3454,12 @@ class ExperimentDesignDialog(QDialog):
             experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
             progress_file_path = os.path.join(experiment_dir, "progress.json")
             calibration_file_path = os.path.join(experiment_dir, "calibration.json")
-
+            key_file_path = os.path.join(experiment_dir, "key.csv")
             # Save the experiment
             self.experiment_model.save_experiment(experiment_dir_name,experiment_dir,experiment_file_path)
             self.experiment_model.create_progress_file(file_name=progress_file_path)
             self.model.calibration_model.create_calibration_file(calibration_file_path)
-
+            self.experiment_model.create_key_file(file_name=key_file_path)
             #print(f"Experiment data saved in directory: {experiment_dir}")
 
     def experiment_in_progress(self, progress_file_path):
@@ -3604,6 +3604,7 @@ class ExperimentDesignDialog(QDialog):
             response = self.main_window.popup_yes_no("Missing Concentrations","There are missing concentrations. Are you sure you want to close the experiment design window?")
             if response == '&Yes':
                 self.model.load_experiment_from_model()
+                self.model.export_experiment_key()
                 event.accept()
             else:
                 event.ignore()
