@@ -3118,6 +3118,7 @@ class ExperimentDesignDialog(QDialog):
         self.replica_label = QLabel("Replicates:", self)
         self.replicate_spinbox = QSpinBox(self)
         self.replicate_spinbox.setMinimum(1)
+        self.replicate_spinbox.setMaximum(384)
         self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
         self.replicate_spinbox.valueChanged.connect(self.update_model_metadata)
         self.info_layout.addWidget(self.replica_label)
@@ -3284,6 +3285,7 @@ class ExperimentDesignDialog(QDialog):
 
         max_droplets_item = QSpinBox()
         max_droplets_item.setMinimum(1)
+        max_droplets_item.setMaximum(1000)
         max_droplets_item.setValue(max_droplets)
         self.reagent_table.setCellWidget(row_position, 7, max_droplets_item)
 
