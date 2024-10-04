@@ -39,7 +39,7 @@ class Controller(QObject):
     def handle_error(self, error_message):
         """Handle errors from the machine."""
         #print(f"Error occurred: {error_message}")
-        self.error_occurred_signal.emit('Error Occurred',error_message)
+        # self.error_occurred_signal.emit('Error Occurred',error_message)
 
     def update_command_numbers(self):
         """Pass the current command and last completed command to the command queue"""
