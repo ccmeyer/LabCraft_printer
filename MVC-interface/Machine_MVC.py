@@ -1073,7 +1073,7 @@ class Machine(QObject):
         self.command_queue.clear_queue()
 
     def check_param_limits(self,param,min_val,max_val):
-        if param > min_val and param < max_val:
+        if param >= min_val and param <= max_val:
             return True
         else:
             self.error_occurred.emit(f'Parameter out of range: {param} not in ({min_val},{max_val})')
