@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(20,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
 
         # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
