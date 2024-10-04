@@ -655,7 +655,7 @@ class ExperimentModel(QObject):
         lookup_table['reagent_name'] = reagent_name
         lookup_table = lookup_table.reset_index().rename(columns={'index': 'target_concentration'})
         lookup_table = lookup_table.set_index(['reagent_name','target_concentration']).stack().reset_index().rename(columns={0: 'droplet_count', 'level_2': 'stock_solution'})
-        print('\nLookup table:\n',lookup_table)
+        # print('\nLookup table:\n',lookup_table)
         return lookup_table
     
     def add_lookup_table(self,reagent_name,lookup_table):
@@ -667,7 +667,7 @@ class ExperimentModel(QObject):
         self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
         # Append the new lookup table
         self.complete_lookup_table = pd.concat([self.complete_lookup_table, lookup_table], ignore_index=True)
-        print('\nLookup table:\n',self.complete_lookup_table)
+        # print('\nLookup table:\n',self.complete_lookup_table)
 
 
     def get_reagent(self, index):
@@ -682,13 +682,13 @@ class ExperimentModel(QObject):
     def generate_experiment(self,feasible=True):
         """Generate the experiment combinations as a pandas DataFrame."""
         reagent_names = [reagent['name'] for reagent in self.reagents]
-        print('\nReagent names:\n',reagent_names)
+        # print('\nReagent names:\n',reagent_names)
         # concentrations = [reagent['concentrations'] for reagent in self.reagents]
         # conc_units = []
         concentrations = []
         for reag in self.reagents:
             concentrations.append(['_'.join([str(conc),reag['units']]) for conc in reag['concentrations']])
-        print('\nConcentrations:\n',concentrations)
+        # print('\nConcentrations:\n',concentrations)
         if self.metadata['reduction_factor'] == 1:
             concentration_combinations = list(itertools.product(*concentrations))
             self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
@@ -1028,7 +1028,7 @@ class StockSolutionManager(QObject):
     def get_stock_solution(self, reagent_name, concentration,units):
         """Retrieve a reagent-concentration pair."""
         unique_id = '_'.join([reagent_name,str(float(concentration)),units])
-        print('Getting stock solution:',unique_id)
+        # print('Getting stock solution:',unique_id)
         return self.stock_solutions.get(unique_id)
         
     def get_stock_by_id(self, stock_id):
@@ -1572,7 +1572,7 @@ class WellPlate(QObject):
             well = available_wells[i]
             well.assign_reaction(reaction)
             reaction_assignment[reaction.unique_id] = well.well_id
-            print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
+            # print(f"Assigned reaction '{reaction.unique_id}' to well '{well.well_id}'.")
 
         return reaction_assignment
     
@@ -1746,7 +1746,7 @@ class PrinterHeadManager(QObject):
             printer_head = self.unassigned_printer_heads.pop(0)
             rack_model.update_slot_with_printer_head(slot_number, printer_head)
             self.assigned_printer_heads[slot_number] = printer_head
-            #print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
+            print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
             return True
         else:
             print("No more unassigned printer heads available.")
@@ -1989,6 +1989,9 @@ class RackModel(QObject):
 
     def get_num_slots(self):
         return len(self.slots)
+    
+    def get_all_slots(self):
+        return self.slots
 
     def update_slot_with_printer_head(self, slot_number, printer_head):
         """

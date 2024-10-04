@@ -2799,10 +2799,10 @@ class RackBox(QGroupBox):
 
         # Add all unassigned printer heads
         for printer_head in self.model.printer_head_manager.get_unassigned_printer_heads():
-            dropdown.addItem(slot.printer_head.get_stock_name())
+            dropdown.addItem(printer_head.get_stock_name())
 
         # Add all printer heads in other slots
-        for i, slot in enumerate(self.rack_model.slots):
+        for i, slot in enumerate(self.rack_model.get_all_slots()):
             if i != slot_number and slot.printer_head:
                 dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_stock_name()}")
         
@@ -3569,7 +3569,7 @@ class ExperimentDesignDialog(QDialog):
 
     def update_stock_table(self):
         # Populate the stock table
-        print("Updating stock table")
+        # print("Updating stock table")
         self.stock_table.setRowCount(0)  # Clear existing rows
         for stock_solution in self.experiment_model.get_all_stock_solutions():
             #print(f"---Adding stock solution: {stock_solution}")
