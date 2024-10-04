@@ -1072,6 +1072,13 @@ class Machine(QObject):
         self.send_command_to_board(new_command)
         self.command_queue.clear_queue()
 
+    def check_param_limits(self,param,min_val,max_val):
+        if param > min_val and param < max_val:
+            return True
+        else:
+            self.error_occurred.emit(f'Parameter out of range: {param} not in ({min_val},{max_val})')
+            return False
+
     def update_state(self, state):
         """Update the machine state."""
         self.status_updated.emit(state)
@@ -1085,7 +1092,8 @@ class Machine(QObject):
         return outcome
     
     def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
-        self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(acceleration,1,50000):
+            return self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def reset_acceleration(self,handler=None,kwargs=None,manual=False):
         self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -1100,28 +1108,36 @@ class Machine(QObject):
         return self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('RELATIVE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(x,-50000,50000):
+            return self.add_command_to_queue('RELATIVE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('ABSOLUTE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(x,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('RELATIVE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(y,-50000,50000):
+            return self.add_command_to_queue('RELATIVE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_absolute_Y(self, y, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('ABSOLUTE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(y,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('RELATIVE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('RELATIVE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('ABSOLUTE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         
     def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
@@ -1133,15 +1149,18 @@ class Machine(QObject):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
         print('Setting relative pressure:',pressure)
-        return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(pressure,-1638,13107):
+            return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_absolute_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute pressure:',pressure)
-        return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(pressure,-1638,13107):
+            return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('SET_WIDTH',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(pulse_width,100,10000):
+            return self.add_command_to_queue('SET_WIDTH',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def enter_print_mode(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -1199,6 +1218,7 @@ class Machine(QObject):
         return self.add_command_to_queue('WAIT',200,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
         return self.add_command_to_queue('PRINT',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def calibrate_pressure_handler(self):
@@ -1213,4 +1233,5 @@ class Machine(QObject):
             if pulse_width is None:
                 pulse_width = self.get_pulse_width()
             self.balance_droplets.append([num_droplets,pulse_width])
+        self.check_param_limits(num_droplets,1,1000)
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)

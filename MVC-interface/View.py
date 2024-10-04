@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(20,manual=True))
 
         # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
@@ -3510,7 +3510,7 @@ class ExperimentDesignDialog(QDialog):
                     in_progress = self.experiment_in_progress(progress_file_path)
                     if in_progress:
                         resume = QMessageBox.question(self, "Resume previous run?", 
-                                                    "A previous run is saved for this experiment. Do you want to resume or start a fresh run?",
+                                                    "A previous run is saved for this experiment. Do you want to resume the previous run?",
                                                     QMessageBox.Yes | QMessageBox.No)
                         if resume == QMessageBox.No:
                             self.experiment_model.create_progress_file(file_name=progress_file_path)
