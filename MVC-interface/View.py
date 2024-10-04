@@ -1787,7 +1787,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle when the gripper picks up a new printer head."""
         if self.model.rack_model.gripper_printer_head is not None:
             printer_head = self.model.rack_model.gripper_printer_head
-            stock_name = printer_head.get_stock_name(new_line=True)
+            stock_name = printer_head.get_stock_name(new_line=False)
             self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_name))
             self.update_well_colors()            
     
