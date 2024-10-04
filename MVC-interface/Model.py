@@ -870,6 +870,8 @@ class ExperimentModel(QObject):
             }
 
         # Save the updated progress back to the file
+        if self.progress_file_path is None:
+            return
         with open(self.progress_file_path, 'w') as f:
             json.dump(self.progress_data, f, indent=4)
 
@@ -917,6 +919,9 @@ class ExperimentModel(QObject):
             self.progress_data = json.load(file)
 
     def return_progress_data(self):
+        if self.progress_file_path == None:
+            print('No progress file path set')
+            return {}
         with open(self.progress_file_path, 'r') as file:
             return json.load(file)
 
