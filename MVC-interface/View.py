@@ -3075,7 +3075,7 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setHorizontalHeaderLabels([
             "Reagent Name", "Min Conc", "Max Conc", "Steps", 
             "Mode", "Manual Input", "Units", "Max Droplets",
-            "Concentrations Preview", "Stock Solutions", "Missing", "Used","Delete"
+            "Concentrations Preview", "Conc Step Sizes", "Missing", "Used","Delete"
         ])
         self.reagent_table.setColumnWidth(0, 100)
         self.reagent_table.setColumnWidth(1, 75)

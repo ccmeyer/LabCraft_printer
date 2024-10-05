@@ -241,20 +241,6 @@ void PressureRegulator::adjustPressure() {
         resetTargetReached();
     }
 
-    // if (!targetReached && abs(pressureDifference) <= 1) {
-    //     syringeSpeed = 0;
-    //     targetReachedCounter++;
-    //     if (targetReachedCounter >= 50) {
-    //         targetReached = true;
-    //         targetReachedCounter = 0;
-    //     }
-    // } else if (targetReached && abs(pressureDifference) <= tolerance) {
-    //     syringeSpeed = 0;
-    // } else if (abs(pressureDifference) > cutoff) {
-    //     syringeSpeed = maxSpeed;
-    // } else {
-    //     syringeSpeed = map(abs(pressureDifference), 0, cutoff, minSpeed, maxSpeed);
-    // }
     syringeSpeed *= (pressureDifference < 0) ? 1 : -1;
 
     // Set the step interval based on the syringe speed
