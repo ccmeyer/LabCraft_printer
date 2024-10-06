@@ -327,6 +327,11 @@ class Controller(QObject):
         print("Homing machine...")
         self.machine.home_motors()
 
+    def export_log(self, filename):
+        """Export the log to a file."""
+        self.machine.export_log(filename)
+
+
     def toggle_motors(self):
         """Slot to toggle the motor state."""
         if self.model.machine_model.motors_enabled:

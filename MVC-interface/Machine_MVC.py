@@ -837,6 +837,9 @@ class Machine(QObject):
         self.balance_connected = False
         self.balance_droplets = []
 
+        # self.log = pd.DataFrame(columns=['micros', 'task_id', 'task_state', 'value'])
+        self.log = pd.DataFrame()
+
     def begin_communication_timer(self):
         print('Starting communication timer')
         self.communication_timer = QTimer()
@@ -993,6 +996,7 @@ class Machine(QObject):
             return {}
         elif status_string[:3] == "<<<":
             print('\nLOG:\n',status_string)
+            self.convert_log_to_dataframe(status_string)
             return {}
 
         status_dict = {}
@@ -1006,6 +1010,29 @@ class Machine(QObject):
 
         return status_dict
 
+    def convert_log_to_dataframe(self,log):
+        if log.startswith('<<<') and log.endswith('>>>'):
+            log = log[3:-3]
+            log = log.split('-')
+            log = [x.split(',') for x in log]
+            log = pd.DataFrame(log, columns=['micros', 'task_id', 'task_state', 'value'])
+
+            # Convert columns to numeric types for calculations
+            log['micros'] = pd.to_numeric(log['micros'])
+            log['task_id'] = pd.to_numeric(log['task_id'])
+            log['task_state'] = pd.to_numeric(log['task_state'])
+            log['value'] = pd.to_numeric(log['value'])
+            if self.log.empty:
+                self.log = log
+            else:
+                self.log = pd.concat([self.log,log],ignore_index=True)
+        else:
+            print('Invalid log:',log)
+
+    def export_log(self,filename):
+        self.log.to_csv(filename,index=False)
+        self.log = pd.DataFrame()
+    
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
         if len(self.command_queue.queue) == 0:

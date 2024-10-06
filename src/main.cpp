@@ -72,10 +72,10 @@ SystemState currentState = RUNNING; // Define the global state
 IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
 TIM_HandleTypeDef htim9;  // Define your timer handle
 
-Logger logger(LOG_DEBUG);
-TaskQueue taskQueue(&hiwdg, logger);
+TaskQueue taskQueue(&hiwdg);
+Logger logger(LOG_INFO, taskQueue);
 CommandQueue commandQueue;
-Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
+Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue, logger);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
 CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
 CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, taskQueue,Z_INV_DIR);
@@ -84,7 +84,7 @@ PressureSensor pressureSensor(sensorAddress,taskQueue,logger);
 PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
 DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin, &htim9, TIM_CHANNEL_1);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
+Communication comm(taskQueue, logger, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
 
 // Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
 void configureGPIOForTimer() {
@@ -122,6 +122,7 @@ void setup() {
     configureGPIOForTimer();
     initTimer9();
 
+    logger.startLogTransfer();
     stepperX.setupMotor();
     stepperY.setupMotor();
     stepperZ.setupMotor();

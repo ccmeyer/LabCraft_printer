@@ -13,7 +13,6 @@ void PressureSensor::beginCommunication(int sdaPin, int sclPin, int frequency) {
     Wire.setSCL(sclPin);
     Wire.begin();        // Join I2C bus
     Wire.setClock(frequency);
-    // Serial.println("Pressure sensor initialized");
 }
 
 // Method to reset the pressure readings
@@ -25,10 +24,11 @@ void PressureSensor::resetPressure() {
     average = 0;
     readIndex = 0;
     currentPressure = 0;
+    errorCounter = 0;  // Reset error counter on pressure reset
 }
 
 // Method to get the current pressure value
-float PressureSensor::getPressure() const{
+float PressureSensor::getPressure() const {
     return currentPressure;
 }
 
@@ -36,50 +36,77 @@ float PressureSensor::getPressure() const{
 void PressureSensor::readPressure() {
     byte p1, p2, t1, t2;
 
-    Wire.requestFrom(sensorAddress, 4);    // Request 4 bytes from peripheral device
-    while (Wire.available()) { // Peripheral may send less than requested
+    Wire.requestFrom(sensorAddress, 4);
+    unsigned long startTime = micros();
+    while (Wire.available() < 4 && micros() - startTime < 1000) {
+        // Wait for data with a 1 msec timeout
+    }
+
+    if (Wire.available() == 4) {
         p1 = Wire.read();
         p2 = Wire.read();
         t1 = Wire.read();
         t2 = Wire.read();
+
+        uint8_t pressureState = (p1 & 0b11000000) >> 6;
+        uint16_t pressureRaw = ((p1 & 0b00111111) << 8) | p2;
+
+        rawPressure = pressureRaw;
+    } else {
+        rawPressure = 0;  // Indicate a failure to read pressure
     }
-
-    uint8_t pressureState = (p1 & 0b11000000) >> 6;
-    uint16_t pressureRaw = ((p1 & 0b00111111) << 8) | p2;
-
-    rawPressure = pressureRaw;
 }
 
-// Method to set the read interval
-void PressureSensor::setReadInterval(unsigned long interval) {
-    readInterval = interval;
-} 
-
-// Private method to smooth the pressure readings
+// Private method to smooth the pressure readings and handle errors
 void PressureSensor::smoothPressure() {
     loggerRef.logEvent(PRESSURE_READING, TASK_START, 0, LOG_DEBUG);
 
     if (!reading) {
         return;
     }
+
     readPressure();
 
-    total = total - readings[readIndex];
-    readings[readIndex] = rawPressure;
-    total = total + readings[readIndex];
-    readIndex = readIndex + 1;
+    // Handle 0 pressure readings (errors)
+    if (rawPressure == 0) {
+        errorCounter++;
+        loggerRef.logEvent(PRESSURE_READING, TASK_ERROR, errorCounter, LOG_ERROR);
 
-    if (readIndex >= numReadings) {
-        readIndex = 0;
+        if (errorCounter > maxErrors) {
+            resetSensorCommunication();  // Reset the sensor after max errors
+        }
+    } else {
+        // Reset error counter if valid reading is received
+        errorCounter = 0;
+
+        // Update the smoothing process
+        total = total - readings[readIndex];
+        readings[readIndex] = rawPressure;
+        total = total + readings[readIndex];
+        readIndex = readIndex + 1;
+
+        if (readIndex >= numReadings) {
+            readIndex = 0;
+        }
+
+        average = total / numReadings;
+        currentPressure = average;
     }
 
-    average = total / numReadings;
-    currentPressure = average;
-
     // Reschedule the task to run again
-    readPressureTask.nextExecutionTime = micros() + readInterval;  // Adjust interval as needed
+    readPressureTask.nextExecutionTime = micros() + readInterval;
     taskQueue.addTask(readPressureTask);
+
     loggerRef.logEvent(PRESSURE_READING, TASK_END, currentPressure, LOG_DEBUG);
+}
+
+// Method to reset sensor communication
+void PressureSensor::resetSensorCommunication() {
+    loggerRef.logEvent(PRESSURE_READING, TASK_RESET, 0, LOG_ERROR);
+
+    Wire.end();         // End I2C communication
+    delay(100);         // Small delay before reconnecting
+    Wire.begin();       // Reinitialize I2C communication
 }
 
 // Method to set the read interval
@@ -98,5 +125,4 @@ void PressureSensor::startReading() {
 // Method to stop periodic pressure reading
 void PressureSensor::stopReading() {
     reading = false;
-    // This can be implemented by simply not rescheduling the task in `smoothPressure()`
 }

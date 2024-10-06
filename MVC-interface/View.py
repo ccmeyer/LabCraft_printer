@@ -208,6 +208,8 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
+        self.shortcut_manager.add_shortcut('Shift+l','Export log', lambda: self.export_log())
+
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
         transparent_image.fill(QtCore.Qt.transparent)
@@ -269,6 +271,12 @@ class MainWindow(QMainWindow):
         response = self.popup_yes_no('Reset All Arrays','Are you sure you want to reset all arrays?')
         if response == '&Yes':
             self.controller.reset_all_arrays()
+
+    def export_log(self):
+        """Export the log to a file."""
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Log", "", "CSV Files (*.csv)")
+        if file_path:
+            self.controller.export_log(file_path)
     
     def pause_machine(self):
         """Pause the machine."""

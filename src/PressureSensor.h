@@ -14,7 +14,6 @@ public:
     void setReadInterval(int interval);  // Set the read interval
     void startReading();                // Start periodic pressure reading
     void stopReading();                 // Stop periodic pressure reading
-    void setReadInterval(unsigned long interval);  // Set the read interval
 
 private:
     int sensorAddress;
@@ -28,6 +27,9 @@ private:
     unsigned long readInterval = 5000;  // Default read interval of 10 msec
     bool reading = false;
 
+    int errorCounter = 0;  // Track sensor errors
+    static const int maxErrors = 10;  // Maximum allowed errors before resetting sensor
+
     TaskQueue& taskQueue;
     Task readPressureTask;
 
@@ -35,6 +37,7 @@ private:
 
     void readPressure();
     void smoothPressure();
+    void resetSensorCommunication();  // New method to reset sensor
 };
 
 #endif // PRESSURESENSOR_H

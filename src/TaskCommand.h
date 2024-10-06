@@ -5,7 +5,6 @@
 #include <queue>
 #include <vector>
 #include <cstring> // For strcmp()
-#include "Logger.h"
 #include "stm32f4xx_hal.h"
 #include <stm32f4xx_hal_iwdg.h>
 
@@ -21,7 +20,7 @@ struct Task {
 // Task queue to manage scheduled tasks
 class TaskQueue {
 public:
-    TaskQueue(IWDG_HandleTypeDef* watchdogPtr, Logger& loggerRef);  // Constructor for TaskQueue
+    TaskQueue(IWDG_HandleTypeDef* watchdogPtr);  // Constructor for TaskQueue
     void addTask(const Task& task);       // Add a task to the queue
     void removeTask();                    // Remove the next task from the queue
     void executeNextTask();               // Execute the next task in the queue

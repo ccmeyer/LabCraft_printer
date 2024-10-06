@@ -1,11 +1,10 @@
 #include "TaskCommand.h"
-#include "Logger.h"
 #include <Arduino.h>
 #include "stm32f4xx_hal.h"
 #include <stm32f4xx_hal_iwdg.h>
 
 // Constructor for TaskQueue
-TaskQueue::TaskQueue(IWDG_HandleTypeDef* watchdogPtr, Logger& loggerRef) : watchdog(watchdogPtr) {}
+TaskQueue::TaskQueue(IWDG_HandleTypeDef* watchdogPtr) : watchdog(watchdogPtr) {}
 
 
 // Add a task to the queue

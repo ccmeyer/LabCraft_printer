@@ -2,10 +2,11 @@
 #define GRIPPER_H
 
 #include "TaskCommand.h"
+#include "Logger.h"
 
 class Gripper {
 public:
-    Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue);
+    Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue, Logger& loggerRef);
     
     bool isBusy() const;
     void setBusy(bool busy);
@@ -35,6 +36,7 @@ private:
     unsigned long currentMicros;
 
     TaskQueue& taskQueue;  // Reference to the global TaskQueue
+    Logger& loggerRef;     // Reference to the global Logger object
 
     Task pumpOffTask;      // Task to turn off the pump after a duration
     Task refreshVacuumTask; // Task to periodically refresh the vacuum

@@ -4,6 +4,8 @@
 
    enum SystemState {
        RUNNING,
+       IDLE,
+       WAITING,
        PAUSED
    };
 

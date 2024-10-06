@@ -7,6 +7,7 @@
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
 #include "DropletPrinter.h"
+#include "Logger.h"
 #include <Arduino.h>
 
 enum StatusStep {
@@ -31,7 +32,7 @@ enum StatusStep {
 
 class Communication {
 public:
-    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+    Communication(TaskQueue& taskQueue, Logger& loggerRef, CommandQueue& commandQueue, Gripper& gripper, 
     CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
     PressureSensor& pressureSensor, PressureRegulator& regulator, DropletPrinter& printer, int baudRate);
 
@@ -49,6 +50,7 @@ public:
 
 private:
     TaskQueue& taskQueue;
+    Logger& loggerRef;
     CommandQueue& commandQueue;
     Gripper& gripper;  // Reference to the Gripper object
     CustomStepper& stepperX;  // Reference to the CustomStepper object

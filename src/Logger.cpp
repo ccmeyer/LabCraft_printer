@@ -1,8 +1,11 @@
 #include "Logger.h"
+#include "TaskCommand.h"
+#include "GlobalState.h"
 #include <Arduino.h>
 
 
-Logger::Logger(LogLevel logLevel) : logBufferPos(0), currentLogLevel(logLevel) {
+Logger::Logger(LogLevel logLevel, TaskQueue& taskQueue) : logBufferPos(0), taskQueue(taskQueue), currentLogLevel(logLevel),
+flushLogBufferTask([this]() { this->checkFlushBuffer(); }, 0) {
     memset(logBuffer, 0, sizeof(logBuffer));
 }
 
@@ -25,6 +28,29 @@ void Logger::setLogLevel(LogLevel level) {
     currentLogLevel = level;
 }
 
+// Start the log transfer process
+void Logger::startLogTransfer() {
+    flushLogBufferTask.nextExecutionTime = micros() + flushInterval;
+    taskQueue.addTask(flushLogBufferTask);
+}
+
+// Check if the log buffer needs to be flushed
+void Logger::checkFlushBuffer() {
+    if (logBufferPos > 0) {
+        // If the machine is idle, flush the log buffer
+        if (currentState == IDLE) {
+            flushLogBuffer();
+        }
+        // Reschedule log flushing based on whether the machine is busy
+        flushLogBufferTask.nextExecutionTime = micros() + (currentState == IDLE ? flushInterval : 10000);
+        taskQueue.addTask(flushLogBufferTask);
+    } else {
+        // If the buffer is empty, reschedule for normal flush interval
+        flushLogBufferTask.nextExecutionTime = micros() + flushInterval;
+        taskQueue.addTask(flushLogBufferTask);
+    }
+}
+
 // Flush log buffer to storage (e.g., SD card or Serial output)
 void Logger::flushLogBuffer() {
     // Example: You could print to Serial, write to an SD card, etc.
@@ -33,6 +59,9 @@ void Logger::flushLogBuffer() {
     Serial.println(">>>");
 
     Serial.flush();
+
+    // Clear the entire buffer content and reset buffer position
+    memset(logBuffer, 0, sizeof(logBuffer));
     logBufferPos = 0;  // Reset buffer position
 }
 

@@ -1,12 +1,13 @@
 #include "Communication.h"
+#include "Logger.h"
 #include "GlobalState.h"
 #include <Arduino.h>
 
 // Constructor
-Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+Communication::Communication(TaskQueue& taskQueue, Logger& loggerRef, CommandQueue& commandQueue, Gripper& gripper, 
 CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
 PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
+    : taskQueue(taskQueue), loggerRef(loggerRef), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
     pressureSensor(pressureSensor), regulator(regulator), printer(printer), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
@@ -225,9 +226,10 @@ void Communication::parseAndAddCommand() {
         currentCmdNum = 0;
         lastCompletedCmdNum = 0;
         lastAddedCmdNum = 0;
-        currentState = RUNNING;
+        currentState = IDLE;
         Serial.println("--Reset");
         startTasks();
+        loggerRef.startLogTransfer();
         pressureSensor.startReading();
         regulator.restartRegulation();
         gripper.resetRefreshCounter();
@@ -249,6 +251,7 @@ void Communication::executeCommandTask() {
             lastCompletedCmdNum = currentCmdNum;
             Command nextCmd = commandQueue.getNextCommand();
             executeCommand(nextCmd);
+            currentState = RUNNING;
             currentCmdNum = nextCmd.commandNum;
             commandQueue.removeCommand(); // Remove the command after execution
         }
@@ -266,9 +269,13 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() const{
-    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || currentState == WAITING) {
+        return false;
+    } else if (stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+        currentState = RUNNING;
         return false;
     } else {
+        currentState = IDLE;
         return true;
     }
 }
@@ -372,7 +379,7 @@ void Communication::executeCommand(const Command& cmd) {
             currentState = PAUSED;
             break;
         case RESUME:
-            currentState = RUNNING;
+            currentState = IDLE;
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");
@@ -387,12 +394,12 @@ void Communication::executeCommand(const Command& cmd) {
 
 // Method to start the wait task
 void Communication::startWaiting(unsigned long waitTime) {
-    waiting = true;
+    currentState = WAITING;
     waitTask.nextExecutionTime = micros() + (waitTime * 1000);
     taskQueue.addTask(waitTask);
 }
 
 // Method to stop waiting
 void Communication::stopWaiting() {
-    waiting = false;
+    currentState = IDLE;
 }
