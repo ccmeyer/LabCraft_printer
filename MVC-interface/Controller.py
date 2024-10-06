@@ -331,6 +331,8 @@ class Controller(QObject):
         """Export the log to a file."""
         self.machine.export_log(filename)
 
+    def change_log_mode(self,mode):
+        self.machine.change_log_mode(mode)
 
     def toggle_motors(self):
         """Slot to toggle the motor state."""

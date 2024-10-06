@@ -71,6 +71,9 @@ enum CommandType {
     WAIT,
     PAUSE,
     RESUME,
+    SET_LOG_DEBUG,
+    SET_LOG_INFO,
+    SET_LOG_ERROR,
     CLEAR_QUEUE,
     UNKNOWN
     // Add more command types as needed

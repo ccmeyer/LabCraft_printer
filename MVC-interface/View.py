@@ -209,7 +209,9 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
         self.shortcut_manager.add_shortcut('Shift+l','Export log', lambda: self.export_log())
-
+        self.shortcut_manager.add_shortcut('Shift+k','Debug Mode',lambda: self.change_log_mode('debug'))
+        self.shortcut_manager.add_shortcut('Shift+j','Info Mode',lambda: self.change_log_mode('info'))
+        
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
         transparent_image.fill(QtCore.Qt.transparent)
@@ -277,6 +279,10 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Log", "", "CSV Files (*.csv)")
         if file_path:
             self.controller.export_log(file_path)
+
+    def change_log_mode(self,mode):
+        """Set the mode for logging"""
+        self.controller.change_log_mode(mode)
     
     def pause_machine(self):
         """Pause the machine."""

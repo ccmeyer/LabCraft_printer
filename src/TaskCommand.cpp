@@ -166,6 +166,12 @@ CommandType mapCommandType(const char* commandName) {
         return PAUSE;
     } else if (strcmp(commandName, "RESUME") == 0) {
         return RESUME;
+    } else if (strcmp(commandName, "SET_LOG_DEBUG") == 0) {
+        return SET_LOG_DEBUG;
+    } else if (strcmp(commandName, "SET_LOG_INFO") == 0) {
+        return SET_LOG_INFO;
+    } else if (strcmp(commandName, "SET_LOG_ERROR") == 0) {
+        return SET_LOG_ERROR;
     } else if (strcmp(commandName, "CLEAR_QUEUE") == 0) {
         return CLEAR_QUEUE;
     } else {

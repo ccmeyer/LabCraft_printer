@@ -1032,6 +1032,16 @@ class Machine(QObject):
     def export_log(self,filename):
         self.log.to_csv(filename,index=False)
         self.log = pd.DataFrame()
+
+    def change_log_mode(self,mode,handler=None,kwargs=None,manual=False):
+        if mode == 'debug':
+            mode_command = 'SET_LOG_DEBUG'
+        elif mode == 'info':
+            mode_command = 'SET_LOG_INFO'
+        else:
+            mode_command = 'SET_LOG_ERROR'
+        self.add_command_to_queue(mode_command,0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
     
     def check_if_all_completed(self):
         """Check if all commands have been completed."""

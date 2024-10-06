@@ -375,6 +375,15 @@ void Communication::executeCommand(const Command& cmd) {
         case NORMAL_MODE:
             printer.exitPrintMode();
             break;
+        case SET_LOG_DEBUG:
+            loggerRef.setLogLevel(LOG_DEBUG);
+            break;
+        case SET_LOG_INFO:
+            loggerRef.setLogLevel(LOG_INFO);
+            break;
+        case SET_LOG_ERROR:
+            loggerRef.setLogLevel(LOG_ERROR);
+            break;
         case PAUSE:
             currentState = PAUSED;
             break;
