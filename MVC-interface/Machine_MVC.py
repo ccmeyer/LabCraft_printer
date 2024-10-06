@@ -989,12 +989,16 @@ class Machine(QObject):
             raise ValueError("Status string is empty")
         
         if "DEBUG" in status_string:
-            # print('Status string:',status_string)
+            print('Status string:',status_string)
+            return {}
+        elif status_string[:3] == "<<<":
+            print('\nLOG:\n',status_string)
             return {}
 
         status_dict = {}
         # for item in status_string.split(','):
         try:
+            # print('Status string:',status_string)
             key, value = status_string.split(':')
             status_dict[key] = value
         except ValueError:

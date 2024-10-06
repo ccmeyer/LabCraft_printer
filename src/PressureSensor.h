@@ -2,10 +2,11 @@
 #define PRESSURESENSOR_H
 
 #include "TaskCommand.h"
+#include "Logger.h"
 
 class PressureSensor {
 public:
-    PressureSensor(int sensorAddress, TaskQueue& taskQueue);
+    PressureSensor(int sensorAddress, TaskQueue& taskQueue, Logger& loggerRef);
 
     void beginCommunication(int sdaPin, int sclPin, int frequency);
     void resetPressure();
@@ -29,6 +30,8 @@ private:
 
     TaskQueue& taskQueue;
     Task readPressureTask;
+
+    Logger& loggerRef;
 
     void readPressure();
     void smoothPressure();

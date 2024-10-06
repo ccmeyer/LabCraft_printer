@@ -1,9 +1,10 @@
 #include "PressureSensor.h"
+#include "Logger.h"
 #include <Wire.h>
 
 // Constructor
-PressureSensor::PressureSensor(int sensorAddress, TaskQueue& taskQueue)
-    : sensorAddress(sensorAddress), taskQueue(taskQueue), 
+PressureSensor::PressureSensor(int sensorAddress, TaskQueue& taskQueue, Logger& loggerRef)
+    : sensorAddress(sensorAddress), taskQueue(taskQueue), loggerRef(loggerRef),
     readPressureTask([this]() { this->smoothPressure(); }, 0) {}
 
 // Method to begin I2C communication with the pressure sensor
@@ -56,6 +57,8 @@ void PressureSensor::setReadInterval(unsigned long interval) {
 
 // Private method to smooth the pressure readings
 void PressureSensor::smoothPressure() {
+    loggerRef.logEvent(PRESSURE_READING, TASK_START, 0, LOG_DEBUG);
+
     if (!reading) {
         return;
     }
@@ -76,6 +79,7 @@ void PressureSensor::smoothPressure() {
     // Reschedule the task to run again
     readPressureTask.nextExecutionTime = micros() + readInterval;  // Adjust interval as needed
     taskQueue.addTask(readPressureTask);
+    loggerRef.logEvent(PRESSURE_READING, TASK_END, currentPressure, LOG_DEBUG);
 }
 
 // Method to set the read interval
