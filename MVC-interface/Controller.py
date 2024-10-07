@@ -416,7 +416,7 @@ class Controller(QObject):
             target['X'] += 2500
 
         if z_offset:
-            target['Z'] -= 15000
+            target['Z'] -= 18000
         # Use expected position instead of current position from the model
         current = self.expected_position
 
