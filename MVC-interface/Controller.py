@@ -334,9 +334,9 @@ class Controller(QObject):
         print("Homing machine...")
         self.machine.home_motors()
 
-    def export_log(self, filename):
+    def save_logs(self):
         """Export the log to a file."""
-        self.machine.export_log(filename)
+        self.model.logging_model.save_logs()
 
     def change_log_mode(self,mode):
         self.machine.change_log_mode(mode)

@@ -4,10 +4,11 @@
 #include "PressureSensor.h"
 #include "CustomStepper.h"
 #include "TaskCommand.h"
+#include "Logger.h"
 
 class PressureRegulator {
 public:
-    PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue, int valvePin);
+    PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue, Logger& loggerRef, int valvePin);
 
     void setupRegulator();
     void enableRegulator();
@@ -40,6 +41,8 @@ private:
     Task resetSyringeTask;        // Task to reset the syringe
     Task homeSyringeTask;         // Task to home the syringe
     Task stepTask;                // Task to step the motor
+
+    Logger& loggerRef;            // Reference to the global Logger
 
     int valvePin;                 // Pin for the pressure regulator valve
     bool regulatingPressure;      // Flag to indicate if pressure regulation is active

@@ -34,7 +34,7 @@ bool Gripper::isOpen() const{
 
 // Method to turn on the pump for a specified duration
 void Gripper::turnOnPump(int duration) {
-    loggerRef.logEvent(GRIPPER_PUMP_ON, TASK_START, duration, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_PUMP_ON, TASK_START, duration, LOG_INFO);
     lastPumpActivationTime = micros();
 
     digitalWrite(pumpPin, HIGH);
@@ -43,15 +43,13 @@ void Gripper::turnOnPump(int duration) {
     // Update the next execution time for the pumpOffTask
     pumpOffTask.nextExecutionTime = lastPumpActivationTime + duration;
     taskQueue.addTask(pumpOffTask);
-    loggerRef.logEvent(GRIPPER_PUMP_ON, TASK_END, 0, LOG_DEBUG);
 }
 
 // Method to turn off the pump
 void Gripper::turnOffPump() {
-    loggerRef.logEvent(GRIPPER_PUMP_OFF, TASK_START, 0, LOG_DEBUG);
     digitalWrite(pumpPin, LOW);
     setBusy(false);
-    loggerRef.logEvent(GRIPPER_PUMP_OFF, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_PUMP_ON, TASK_END, 0, LOG_INFO);
 }
 
 // Method to set the open flag
@@ -63,18 +61,18 @@ void Gripper::setOpen(bool gripperOpen) {
 
 // Method to open the gripper
 void Gripper::openGripper() {
-    loggerRef.logEvent(GRIPPER_OPEN, TASK_START, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_OPEN, TASK_START, 0, LOG_INFO);
     digitalWrite(valvePin1, HIGH);
     digitalWrite(valvePin2, HIGH);
     // Serial.println("Opening gripper");
     turnOnPump(pumpOnDuration);  // Turn on the pump for 500ms to ensure full opening
     setOpen(true);
-    loggerRef.logEvent(GRIPPER_OPEN, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_OPEN, TASK_END, 0, LOG_INFO);
 }
 
 // Method to close the gripper
 void Gripper::closeGripper() {
-    loggerRef.logEvent(GRIPPER_CLOSE, TASK_START, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_CLOSE, TASK_START, 0, LOG_INFO);
     digitalWrite(valvePin1, LOW);
     digitalWrite(valvePin2, LOW);
     // Serial.println("Closing gripper");
@@ -83,7 +81,7 @@ void Gripper::closeGripper() {
     if (refreshTaskCounter == 0){
         startVacuumRefresh();
     }
-    loggerRef.logEvent(GRIPPER_CLOSE, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_CLOSE, TASK_END, 0, LOG_INFO);
 }
 
 // Method to reset the refresh counter
@@ -97,7 +95,7 @@ void Gripper::resetRefreshCounter() {
 void Gripper::refreshVacuum() {
     // Serial.println("--Refreshing vacuum");
     // Serial.println(refreshTaskCounter);
-    loggerRef.logEvent(GRIPPER_PUMP_REFRESH, TASK_START, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_PUMP_REFRESH, TASK_START, 0, LOG_INFO);
     currentMicros = micros();
     if (!pumpActive) {
         // setRefreshTaskScheduled(false);
@@ -124,7 +122,7 @@ void Gripper::refreshVacuum() {
             changeRefreshCounter(1);
         }
     }
-    loggerRef.logEvent(GRIPPER_PUMP_REFRESH, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_PUMP_REFRESH, TASK_END, 0, LOG_INFO);
 }
 
 // Method to set the refresh task scheduled flag
@@ -136,20 +134,20 @@ void Gripper::changeRefreshCounter(int counterChange) {
 
 // Method to start the vacuum refresh
 void Gripper::startVacuumRefresh() {
-    loggerRef.logEvent(GRIPPER_REFRESH_START, TASK_START, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_REFRESH_START, TASK_START, 0, LOG_INFO);
     if (refreshTaskCounter == 0) {
         pumpActive = true;
         refreshVacuumTask.nextExecutionTime = micros() + refreshInterval;
         taskQueue.addTask(refreshVacuumTask);
         changeRefreshCounter(1);
     }
-    loggerRef.logEvent(GRIPPER_REFRESH_START, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_REFRESH_START, TASK_END, 0, LOG_INFO);
 }
 
 // Method to stop the vacuum refresh
 void Gripper::stopVacuumRefresh() {
-    loggerRef.logEvent(GRIPPER_REFRESH_STOP, TASK_START, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_REFRESH_STOP, TASK_START, 0, LOG_INFO);
     // Serial.println("Stopping vacuum refresh");
     pumpActive = false;
-    loggerRef.logEvent(GRIPPER_REFRESH_STOP, TASK_END, 0, LOG_DEBUG);
+    loggerRef.logEvent(GRIPPER_REFRESH_STOP, TASK_END, 0, LOG_INFO);
 }

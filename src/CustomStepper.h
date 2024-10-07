@@ -3,6 +3,7 @@
 
 #include <AccelStepper.h>
 #include "TaskCommand.h"
+#include "Logger.h"
 
 enum HomingStage {
     HOMING_START,
@@ -14,7 +15,7 @@ enum HomingStage {
 
 class CustomStepper : public AccelStepper {
 public:
-    CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool invertDir);
+    CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, Logger& loggerRef, bool invertDir);
 
     bool isBusy() const;               // Method to check if the motor is busy
     void setupMotor();           // Method to set up the motor
@@ -56,6 +57,8 @@ private:
     TaskQueue& taskQueue;        // Reference to the global TaskQueue
     Task stepTask;               // Task to manage motor stepping
     Task homingTask;             // Task to manage homing process
+
+    Logger& loggerRef;           // Reference to the global Logger
 
     void continueHoming();       // Continue the homing process
 };

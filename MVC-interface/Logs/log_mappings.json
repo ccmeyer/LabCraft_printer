@@ -3,7 +3,8 @@
         "0": "TASK_START",
         "1": "TASK_END",
         "2": "TASK_ERROR",
-        "3": "TASK_RESET"
+        "3": "TASK_RESET",
+        "4": "TASK_SINGLE"
     },
     "task_id": {
         "0": "COMM_TX",
@@ -15,6 +16,18 @@
         "6": "GRIPPER_CLOSE",
         "7": "GRIPPER_REFRESH_START",
         "8": "GRIPPER_REFRESH_STOP",
-        "9": "GRIPPER_PUMP_REFRESH"
+        "9": "GRIPPER_PUMP_REFRESH",
+        "10": "STEPPER_ENABLE",
+        "11": "STEPPER_DISABLE",
+        "12": "STEPPER_MOVE",
+        "13": "STEPPER_HOMING",
+        "14": "MACHINE_WAITING",
+        "15": "MACHINE_PAUSED",
+        "16": "COMMAND_READ_ERROR",
+        "17": "MODE_PRINT",
+        "18": "MODE_NORMAL",
+        "19": "PRINT_DROPLETS",
+        "20": "PRESSURE_REGULATION",
+        "21": "PRESSURE_SET"
     }
 }

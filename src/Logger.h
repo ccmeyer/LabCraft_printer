@@ -18,7 +18,8 @@ enum TaskState {
     TASK_START = 0,
     TASK_END = 1,
     TASK_ERROR = 2,
-    TASK_RESET = 3
+    TASK_RESET = 3,
+    TASK_SINGLE = 4
 };
 
 enum TaskID {
@@ -32,6 +33,18 @@ enum TaskID {
     GRIPPER_REFRESH_START = 7,
     GRIPPER_REFRESH_STOP = 8,
     GRIPPER_PUMP_REFRESH = 9,
+    STEPPER_ENABLE = 10,
+    STEPPER_DISABLE = 11,
+    STEPPER_MOVE = 12,
+    STEPPER_HOMING = 13,
+    MACHINE_WAITING = 14,
+    MACHINE_PAUSED = 15,
+    COMMAND_READ_ERROR = 16,
+    MODE_PRINT = 17,
+    MODE_NORMAL = 18,
+    PRINT_DROPLETS = 19,
+    PRESSURE_REGULATION = 20,
+    PRESSURE_SET = 21,
 };
 
 class Logger {

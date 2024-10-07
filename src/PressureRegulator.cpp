@@ -1,10 +1,11 @@
 #include "PressureRegulator.h"
+#include "Logger.h"
 #include "GlobalState.h"
 #include <Arduino.h>
 
 // Constructor
-PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue,int valvePin)
-    : stepper(stepper), sensor(sensor), taskQueue(taskQueue), 
+PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue, Logger& loggerRef, int valvePin)
+    : stepper(stepper), sensor(sensor), taskQueue(taskQueue), loggerRef(loggerRef),
       adjustPressureTask([this]() { this->adjustPressure(); }, 0), 
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
       homeSyringeTask([this]() { this->homeSyringeCheck(); }, 0),
@@ -71,6 +72,7 @@ void PressureRegulator::homeSyringeCheck() {
 
 // Method to begin pressure regulation
 void PressureRegulator::beginRegulation() {
+    loggerRef.logEvent(PRESSURE_REGULATION, TASK_START, 0, LOG_INFO);
     regulatingPressure = true;
     adjustPressureTask.nextExecutionTime = micros();
     taskQueue.addTask(adjustPressureTask);
@@ -79,6 +81,7 @@ void PressureRegulator::beginRegulation() {
 // Method to restart pressure regulation task if already regulating
 void PressureRegulator::restartRegulation() {
     if (regulatingPressure) {
+        loggerRef.logEvent(PRESSURE_REGULATION, TASK_RESET, 0, LOG_INFO);
         adjustPressureTask.nextExecutionTime = micros();
         taskQueue.addTask(adjustPressureTask);
     }
@@ -86,12 +89,14 @@ void PressureRegulator::restartRegulation() {
 
 // Method to set the target pressure
 void PressureRegulator::setTargetPressureAbsolute(int targetPressure) {
+    loggerRef.logEvent(PRESSURE_SET, TASK_SINGLE, targetPressure, LOG_INFO);
     this->targetPressure = targetPressure;
     resetTargetReached();
 }
 
 // Method to set the target pressure relative to the current target pressure
 void PressureRegulator::setTargetPressureRelative(int targetPressure) {
+    loggerRef.logEvent(PRESSURE_SET, TASK_SINGLE, targetPressure, LOG_INFO);
     this->targetPressure += targetPressure;
     resetTargetReached();
 }

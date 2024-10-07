@@ -139,6 +139,7 @@ class LoggingModel(QObject):
         """
         if not self.parsed_logs.empty:
             # Save logs to the current log file
+            print(f"Parsed log:\n{self.parsed_logs}")
             self.parsed_logs.to_csv(self.log_file_path, mode='a', header=not os.path.exists(self.log_file_path), index=False)
             self.parsed_logs = pd.DataFrame(columns=['micros', 'task_id', 'task_state', 'value'])  # Clear the in-memory log
             self.last_save_time = time.time()  # Reset the save time

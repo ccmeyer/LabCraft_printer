@@ -2,6 +2,7 @@
 #define DROPLETPRINTER_H
 
 #include "TaskCommand.h"
+#include "Logger.h"
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
 #include <Arduino.h>
@@ -9,7 +10,7 @@
 
 class DropletPrinter {
 public:
-    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int valvePin, TIM_HandleTypeDef* htim, uint32_t channel);
+    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, Logger& loggerRef, int valvePin, TIM_HandleTypeDef* htim, uint32_t channel);
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
     void setDuration(unsigned long duration);
@@ -26,6 +27,7 @@ private:
     PressureSensor& sensor;
     PressureRegulator& regulator;
     TaskQueue& taskQueue;
+    Logger& loggerRef;
     
     unsigned long frequency;              // Printing frequency (Hz)
     unsigned long interval;               // Interval between droplets (microseconds)

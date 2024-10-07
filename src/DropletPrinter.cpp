@@ -1,9 +1,10 @@
 #include "DropletPrinter.h"
+#include "Logger.h"
 #include "GlobalState.h"
 
 // Constructor
-DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int valvePin, TIM_HandleTypeDef* htim, uint32_t channel)
-    : valvePin(valvePin), sensor(sensor), regulator(regulator), taskQueue(taskQueue),htim(htim), channel(channel),
+DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, Logger& loggerRef, int valvePin, TIM_HandleTypeDef* htim, uint32_t channel)
+    : valvePin(valvePin), sensor(sensor), regulator(regulator), taskQueue(taskQueue), loggerRef(loggerRef),htim(htim), channel(channel),
       frequency(20), interval(50000), duration(3000), pressureTolerance(20), 
       targetDroplets(0), printedDroplets(0), printingComplete(true), resetTriggered(false),
       printDropletTask([this]() { this->printDroplet(); }, 0) {
@@ -37,6 +38,7 @@ void DropletPrinter::enterPrintMode() {
     sensor.setReadInterval(2000);  // Set the read interval to 2ms for faster response
     regulator.setAdjustInterval(2000); // Set the adjust interval to 2ms for faster response
     regulator.setPressureTolerance(1);
+    loggerRef.logEvent(MODE_PRINT, TASK_SINGLE, 0, LOG_INFO);
 }
 
 // Method to exit print mode
@@ -44,10 +46,12 @@ void DropletPrinter::exitPrintMode() {
     sensor.setReadInterval(5000);  // Reset the read interval to 5ms
     regulator.setAdjustInterval(5000); // Reset the adjust interval to 5ms
     regulator.setPressureTolerance(10);
+    loggerRef.logEvent(MODE_NORMAL, TASK_SINGLE, 0, LOG_INFO);
 }
 
 // Method to start printing the specified number of droplets
 void DropletPrinter::startPrinting(int numberOfDroplets) {
+    loggerRef.logEvent(PRINT_DROPLETS, TASK_START, numberOfDroplets, LOG_INFO);
     targetDroplets += numberOfDroplets;
     printingComplete = false;
     regulator.resetTargetReached();
@@ -121,6 +125,7 @@ void DropletPrinter::printDroplet() {
     }
     if (printedDroplets >= targetDroplets) {
         printingComplete = true;
+        loggerRef.logEvent(PRINT_DROPLETS, TASK_END, printedDroplets, LOG_INFO);
         return;
     }
     if (regulator.isResetInProgress()){

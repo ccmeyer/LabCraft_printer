@@ -1,10 +1,11 @@
 #include "CustomStepper.h"
 #include "GlobalState.h"
+#include "Logger.h"
 #include <Arduino.h>
 
 // Constructor
-CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, bool invertDir)
-    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), limitPressed(false), invertDir(invertDir), 
+CustomStepper::CustomStepper(uint8_t interface, uint8_t enablePin, uint8_t stepPin, uint8_t dirPin, int limitSwitchPin, TaskQueue& taskQueue, Logger& loggerRef, bool invertDir)
+    : AccelStepper(interface, stepPin, dirPin),enablePin(enablePin), limitSwitchPin(limitSwitchPin), taskQueue(taskQueue), loggerRef(loggerRef), limitPressed(false), invertDir(invertDir), 
       homingComplete(false), homingStage(HOMING_COMPLETE), busy(false),maxSpeed(4000), maxAcceleration(24000), originalSpeed(4000), originalAcceleration(24000),
       stepTask([this]() { this->stepMotor(); }, 0),
       homingTask([this]() { this->continueHoming(); }, 0) {
@@ -57,15 +58,20 @@ void CustomStepper::resetProperties() {
 
 // Method to enable the motor
 void CustomStepper::enableMotor() {
+    loggerRef.logEvent(STEPPER_ENABLE, TASK_START, enablePin, LOG_INFO);
     enableOutputs();
+    loggerRef.logEvent(STEPPER_ENABLE, TASK_END, enablePin, LOG_INFO);
 }
 
 void CustomStepper::disableMotor() {
+    loggerRef.logEvent(STEPPER_DISABLE, TASK_START, enablePin, LOG_INFO);
     disableOutputs();
+    loggerRef.logEvent(STEPPER_DISABLE, TASK_END, enablePin, LOG_INFO);
 }
 
 // Method to set the target position
 void CustomStepper::setTargetPosition(long position) {
+    loggerRef.logEvent(STEPPER_MOVE, TASK_START, enablePin, LOG_INFO);
     moveTo(position);
     busy = true;
     stepTask.nextExecutionTime = micros();
@@ -74,6 +80,7 @@ void CustomStepper::setTargetPosition(long position) {
 
 // Method to move the motor by a relative distance
 void CustomStepper::moveRelative(long distance) {
+    loggerRef.logEvent(STEPPER_MOVE, TASK_START, enablePin, LOG_INFO);
     move(distance);
     busy = true;
     stepTask.nextExecutionTime = micros();
@@ -91,11 +98,13 @@ void CustomStepper::stepMotor() {
     if (distanceToGo() == 0) {
         stop();
         busy = false;
+        loggerRef.logEvent(STEPPER_MOVE, TASK_END, enablePin, LOG_INFO);
     } else if (limitPressed && !movingForward()) {
         safeStop();
         setAcceleration(maxAcceleration);
         busy = false;
         limitPressed = false;
+        loggerRef.logEvent(STEPPER_MOVE, TASK_ERROR, enablePin, LOG_ERROR);
     } else if (runSpeed()) {
         updateStepInterval();
         stepTask.nextExecutionTime = micros() + getStepInterval()-100;
@@ -148,6 +157,7 @@ bool CustomStepper::isHomingComplete() const{
 
 // Method to start the homing process
 void CustomStepper::beginHoming() {
+    loggerRef.logEvent(STEPPER_HOMING, TASK_START, enablePin, LOG_INFO);
     homingComplete = false;
     homingStage = HOMING_START;
     busy = true;
@@ -212,6 +222,7 @@ void CustomStepper::continueHoming() {
                 homingStage = HOMING_COMPLETE;
                 homingComplete = true;
                 busy = false;
+                loggerRef.logEvent(STEPPER_HOMING, TASK_END, enablePin, LOG_INFO);
             } else {
                 runSpeed();
                 updateStepInterval();

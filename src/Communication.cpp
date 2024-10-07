@@ -208,7 +208,7 @@ void Communication::parseAndAddCommand() {
     if (newCommand.type == PAUSE) {
         currentState = PAUSED;
     } else if (newCommand.type == RESUME) {
-        currentState = RUNNING;
+        currentState = IDLE;
     } else if (newCommand.type == CLEAR_QUEUE) {
         Serial.println("--Clearing");
         while (!commandQueue.isEmpty()) {
@@ -385,13 +385,16 @@ void Communication::executeCommand(const Command& cmd) {
             loggerRef.setLogLevel(LOG_ERROR);
             break;
         case PAUSE:
+            loggerRef.logEvent(MACHINE_PAUSED, TASK_START, 0, LOG_INFO);
             currentState = PAUSED;
             break;
         case RESUME:
             currentState = IDLE;
+            loggerRef.logEvent(MACHINE_PAUSED, TASK_END, 0, LOG_INFO);
             break;
         case UNKNOWN:
             Serial.println("Unknown command type");
+            loggerRef.logEvent(COMMAND_READ_ERROR, TASK_ERROR, 0, LOG_ERROR);
             // Handle unknown command
             break;
         // Add more cases for other command types
@@ -403,6 +406,7 @@ void Communication::executeCommand(const Command& cmd) {
 
 // Method to start the wait task
 void Communication::startWaiting(unsigned long waitTime) {
+    loggerRef.logEvent(MACHINE_WAITING, TASK_START, waitTime, LOG_INFO);
     currentState = WAITING;
     waitTask.nextExecutionTime = micros() + (waitTime * 1000);
     taskQueue.addTask(waitTask);
@@ -411,4 +415,5 @@ void Communication::startWaiting(unsigned long waitTime) {
 // Method to stop waiting
 void Communication::stopWaiting() {
     currentState = IDLE;
+    loggerRef.logEvent(MACHINE_WAITING, TASK_END, 0, LOG_INFO);
 }

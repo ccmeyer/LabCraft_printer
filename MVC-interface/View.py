@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
-        self.shortcut_manager.add_shortcut('Shift+l','Export log', lambda: self.export_log())
+        self.shortcut_manager.add_shortcut('Shift+l','Save logs', lambda: self.save_logs())
         self.shortcut_manager.add_shortcut('Shift+k','Debug Mode',lambda: self.change_log_mode('debug'))
         self.shortcut_manager.add_shortcut('Shift+j','Info Mode',lambda: self.change_log_mode('info'))
         
@@ -279,11 +279,12 @@ class MainWindow(QMainWindow):
         if response == '&Yes':
             self.controller.reset_all_arrays()
 
-    def export_log(self):
+    def save_logs(self):
         """Export the log to a file."""
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Log", "", "CSV Files (*.csv)")
-        if file_path:
-            self.controller.export_log(file_path)
+        self.controller.save_logs()
+        # file_path, _ = QFileDialog.getSaveFileName(self, "Save Log", "", "CSV Files (*.csv)")
+        # if file_path:
+        #     self.controller.export_log(file_path)
 
     def change_log_mode(self,mode):
         """Set the mode for logging"""
