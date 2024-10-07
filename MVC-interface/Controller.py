@@ -399,7 +399,7 @@ class Controller(QObject):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,manual=False,coords=None,override=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
         if manual == True:
             status = self.machine.check_if_all_completed()
@@ -414,6 +414,9 @@ class Controller(QObject):
         if x_offset:
             #print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
             target['X'] += 2500
+
+        if z_offset:
+            target['Z'] -= 15000
         # Use expected position instead of current position from the model
         current = self.expected_position
 
@@ -428,6 +431,7 @@ class Controller(QObject):
         if (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
             #print(f'Crossing x limit: {current['X']} -> {target['X']}')
             safe_y = True
+            # direct = False
 
         if not direct and not safe_y:
             print('Not direct, not safe-y')
@@ -440,7 +444,7 @@ class Controller(QObject):
             print('Not direct, safe-y')
             self.set_absolute_Z(safe_height,override=override)
             self.set_absolute_Y(safe_y_value,override=override)
-            self.set_absolute_X(current['X'],override=override)
+            self.set_absolute_X(target['X'],override=override)
             self.set_absolute_Y(target['Y'],override=override)
             self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
         elif direct and safe_y:
@@ -611,6 +615,7 @@ class Controller(QObject):
             self.machine.reset_acceleration()
             self.exit_print_mode()
             self.move_to_location('pause')
+            self.move_to_location('pause',z_offset=True)
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
             self.model.experiment_model.update_progress(well_id)
             self.array_complete.emit()
@@ -621,7 +626,7 @@ class Controller(QObject):
 
     def refill_printer_head_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
         # Reset acceleration and move to pause after the queue is processed
-        def finalize_printing():
+        def refill_printer_head():
             if update_volume:
                 self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
             self.machine.reset_acceleration()
@@ -633,7 +638,7 @@ class Controller(QObject):
             self.error_occurred_signal.emit('Error','Printer head needs to be reloaded')
         
         # Ensure that this is done after the command queue has been fully processed
-        QtCore.QTimer.singleShot(0, finalize_printing)
+        QtCore.QTimer.singleShot(0, refill_printer_head)
 
     def reset_single_array(self):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
@@ -680,6 +685,7 @@ class Controller(QObject):
         self.close_gripper()
         self.wait_command()
 
+        self.move_to_location('pause',z_offset=True)
         self.move_to_location('pause')
         self.machine.change_acceleration(16000)
         self.enter_print_mode()
