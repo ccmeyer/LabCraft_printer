@@ -32,8 +32,6 @@ enum TaskID {
     GRIPPER_REFRESH_START = 7,
     GRIPPER_REFRESH_STOP = 8,
     GRIPPER_PUMP_REFRESH = 9,
-
-
 };
 
 class Logger {

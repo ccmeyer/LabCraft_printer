@@ -13,6 +13,148 @@ import joblib
 from scipy.optimize import minimize, fsolve
 import random
 import pyDOE3
+import time
+
+class LoggingModel(QObject):
+    critical_error_signal = Signal(str,str)  # Signal to notify critical errors, passing the error title and message
+    def __init__(self, log_dir_path, batch_size=1000, log_rotation_time=60):
+        super().__init__()
+        self.logs = []
+        self.mappings = {}
+        self.parsed_logs = pd.DataFrame(columns=['micros', 'task_id', 'task_state', 'value'])  # DataFrame to store parsed logs
+        self.error_count = 0  # To track errors in the log
+        self.log_dir_path = log_dir_path
+        self.log_file_path = self.create_log_file_path(log_dir_path)
+        self.read_mapping_file(self.log_dir_path)
+        self.batch_size = batch_size  # Maximum number of rows before saving and clearing the log
+        self.last_save_time = time.time()  # Track time for log rotation
+        self.log_rotation_time = log_rotation_time  # Rotate log files after this many seconds
+        self.processed_errors = set()  # Set to track already processed errors
+
+    def read_mapping_file(self, log_dir_path):
+        """Read the mapping file and return a dictionary of task IDs to task names."""
+        file_path = os.path.join(log_dir_path, 'log_mappings.json')
+        if not os.path.exists(file_path):
+            print(f"Mapping file not found at {file_path}")
+            return
+        with open(file_path, 'r') as f:
+            self.mappings = json.load(f)
+        # Convert keys to integers for easier mapping
+        self.mappings['task_id'] = {int(k): v for k, v in self.mappings['task_id'].items()}
+        self.mappings['task_state'] = {int(k): v for k, v in self.mappings['task_state'].items()}
+    
+        print(f"Log mappings loaded from {file_path}")
+
+    
+    def create_log_file_path(self, log_dir_path):
+        log_file_name = f"logs_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        log_file_path = os.path.join(log_dir_path, log_file_name)
+        return log_file_path
+
+    def receive_log(self, log_string):
+        """
+        Receive raw log string from the machine, parse it, and store it.
+        """
+        # Example of log format: "<<<45831594, 3, 0, 0-45831684, 3, 1, 1641>>>"
+        if log_string.startswith('<<<') and log_string.endswith('->>>'):
+            log_string = log_string[3:-4] # Remove the <<< and ->>> markers
+            log_string = log_string.split('-')
+            log_string = [x.split(',') for x in log_string]
+            log = pd.DataFrame(log_string, columns=['micros', 'task_id', 'task_state', 'value'])
+
+            # Convert columns to numeric types for calculations
+            log['micros'] = pd.to_numeric(log['micros'])
+            log['task_id'] = pd.to_numeric(log['task_id'])
+            log['task_state'] = pd.to_numeric(log['task_state'])
+            log['value'] = pd.to_numeric(log['value'])
+
+            # Append the new logs to the DataFrame
+            self.parsed_logs = pd.concat([self.parsed_logs, log], ignore_index=True)
+            self.analyze_logs()
+            # Save logs to disk when the batch size limit is reached or if enough time has passed
+            if len(self.parsed_logs) >= self.batch_size or (time.time() - self.last_save_time) >= self.log_rotation_time:
+                self.save_logs()
+
+        else:
+            print(f"Invalid log format: {log_string}")
+            self.error_count += 1
+
+    def analyze_logs(self):
+        """
+        Convert the parsed logs into a more useful format for analysis. Then identify any errors in the logs.
+        """
+        if self.parsed_logs.empty:
+            return None
+        
+        # Apply task ID mappings
+        mapped_df = self.apply_mappings(self.parsed_logs)
+
+        # Identify specific errors (PRESSURE_READING with TASK_ERROR and value > 50)
+        specific_errors_df = mapped_df[
+            (mapped_df['task_name'] == 'PRESSURE_READING') & 
+            (mapped_df['task_state_name'] == 'TASK_ERROR') & 
+            (mapped_df['value'] > 50)
+        ]
+        
+        for _, error_row in specific_errors_df.iterrows():
+            error_signature = self.create_error_signature(error_row)
+
+            # Only trigger the critical error signal if this error hasn't been processed
+            if error_signature not in self.processed_errors:
+                print(f"Critical error found: {error_row}")
+                self.critical_error_signal.emit('Critical Error', f"Pressure sensor reading error. Check the pressure sensor and wired connections.")
+                self.processed_errors.add(error_signature)  # Mark this error as processed
+
+        # Identify errors in the logs
+        error_df = mapped_df[mapped_df['task_state_name'] == 'TASK_ERROR']
+        if not error_df.empty:
+            print(f"Errors found in log: {error_df}")
+            self.error_count += len(error_df)
+
+    def create_error_signature(self, error_row):
+        """
+        Create a unique signature for an error based on relevant fields, so that 
+        similar errors can be grouped together, even if they have different timestamps.
+        """
+        # Signature can include task_name, task_state_name, and value or other relevant fields
+        return (error_row['task_name'], error_row['task_state_name'])
+
+
+    def apply_mappings(self,parsed_logs):
+        """
+        Apply the task ID mappings to the parsed logs.
+        """
+        mapped_df = parsed_logs.copy()
+        if self.mappings != {}:
+            mapped_df['task_name'] = mapped_df['task_id'].map(self.mappings['task_id'])
+            mapped_df['task_name'] = mapped_df['task_name'].fillna('Unknown')
+            mapped_df['task_state_name'] = mapped_df['task_state'].map(self.mappings['task_state'])
+            mapped_df['task_state_name'] = mapped_df['task_state_name'].fillna('Unknown')
+        return mapped_df
+
+
+    def save_logs(self):
+        """
+        Save parsed logs to a CSV file.
+        """
+        if not self.parsed_logs.empty:
+            # Save logs to the current log file
+            self.parsed_logs.to_csv(self.log_file_path, mode='a', header=not os.path.exists(self.log_file_path), index=False)
+            self.parsed_logs = pd.DataFrame(columns=['micros', 'task_id', 'task_state', 'value'])  # Clear the in-memory log
+            self.last_save_time = time.time()  # Reset the save time
+
+        # Check for log rotation
+        if (time.time() - self.last_save_time) >= self.log_rotation_time:
+            self.log_file_path = self.create_log_file_path(self.log_dir_path)  # Create a new log file path for rotation    
+
+    def reset_logs(self):
+        """
+        Reset the logs and clear the log file.
+        """
+        self.logs = []
+        self.parsed_logs = pd.DataFrame(columns=['micros', 'task_id', 'task_state', 'value'])
+        self.error_count = 0
+        self.processed_errors = set()
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -2672,10 +2814,12 @@ class Model(QObject):
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
         self.prediction_model_path = os.path.join(self.script_dir, 'Presets','large_lr_pipeline.pkl')
         self.resistance_model_path = os.path.join(self.script_dir, 'Presets','large_resistance_pipeline.pkl')
+        self.log_dir_path = os.path.join(self.script_dir, 'Logs')
     
         self.printer_head_colors = self.load_colors(self.colors_path)
         self.settings = self.load_settings(self.settings_path)
         self.machine_model = MachineModel()
+        self.logging_model = LoggingModel(self.log_dir_path)
         self.num_slots = 5
         self.location_data = self.load_all_location_data(self.locations_path)
         self.rack_model = RackModel(self.num_slots,location_data=self.location_data)

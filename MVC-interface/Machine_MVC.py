@@ -805,6 +805,7 @@ class Machine(QObject):
     the command queue.
     """
     status_updated = Signal(dict)  # Signal to emit status updates
+    log_updated = Signal(str)  # Signal to emit log updates
     command_sent = Signal(dict)    # Signal to emit when a command is sent
     error_occurred = Signal(str)   # Signal to emit errors
     homing_completed = Signal()    # Signal to emit when homing is completed
@@ -995,8 +996,9 @@ class Machine(QObject):
             print('Status string:',status_string)
             return {}
         elif status_string[:3] == "<<<":
-            print('\nLOG:\n',status_string)
-            self.convert_log_to_dataframe(status_string)
+            # print('\nLOG:\n',status_string)
+            self.log_updated.emit(status_string)
+            # self.convert_log_to_dataframe(status_string)
             return {}
 
         status_dict = {}
@@ -1013,7 +1015,7 @@ class Machine(QObject):
     def convert_log_to_dataframe(self,log):
         if log.startswith('<<<') and log.endswith('>>>'):
             log = log[3:-3]
-            log = log.split('-')
+            log = log.split('-')[-1]
             log = [x.split(',') for x in log]
             log = pd.DataFrame(log, columns=['micros', 'task_id', 'task_state', 'value'])
 

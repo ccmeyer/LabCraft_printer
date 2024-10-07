@@ -1,0 +1,20 @@
+{
+    "task_state": {
+        "0": "TASK_START",
+        "1": "TASK_END",
+        "2": "TASK_ERROR",
+        "3": "TASK_RESET"
+    },
+    "task_id": {
+        "0": "COMM_TX",
+        "1": "COMM_RX",
+        "2": "PRESSURE_READING",
+        "3": "GRIPPER_PUMP_ON",
+        "4": "GRIPPER_PUMP_OFF",
+        "5": "GRIPPER_OPEN",
+        "6": "GRIPPER_CLOSE",
+        "7": "GRIPPER_REFRESH_START",
+        "8": "GRIPPER_REFRESH_STOP",
+        "9": "GRIPPER_PUMP_REFRESH"
+    }
+}

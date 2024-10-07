@@ -19,6 +19,7 @@ class Controller(QObject):
 
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
+        self.machine.log_updated.connect(self.handle_log_update)
         self.machine.error_occurred.connect(self.handle_error)
         self.machine.homing_completed.connect(self.home_complete_handler)
         self.machine.gripper_open.connect(self.model.machine_model.open_gripper)
@@ -35,6 +36,10 @@ class Controller(QObject):
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
         self.model.update_state(status_dict)
+
+    def handle_log_update(self, log_string):
+        """Handle the log update and update the machine model."""
+        self.model.logging_model.receive_log(log_string)
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
@@ -69,7 +74,9 @@ class Controller(QObject):
         """Update the machine connection status."""
         if status:
             self.model.machine_model.connect_machine()
+            self.model.logging_model.reset_logs()
         else:
+            self.model.logging_model.save_log()
             self.model.machine_model.disconnect_machine()
 
     def get_machine_port(self):

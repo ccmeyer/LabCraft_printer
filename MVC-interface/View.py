@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self.disconnected = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
+        self.model.logging_model.critical_error_signal.connect(self.handle_critical_error)
         self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
 
     def load_colors(self, file_path):
@@ -218,6 +219,10 @@ class MainWindow(QMainWindow):
         transparent_pixmap = QtGui.QPixmap.fromImage(transparent_image)
         transparent_icon = QtGui.QIcon(transparent_pixmap)
         return transparent_icon
+    
+    def handle_critical_error(self, title,message):
+        self.controller.disconnect_machine()
+        self.popup_message(title,message)
 
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
