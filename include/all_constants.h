@@ -8,7 +8,6 @@ int rmsCurrent = 1000;
 int microsteps = 8;
 int steps_per_mm = 80;      //TODO - Figure out actual steps to mm conversions
 // int steps_per_mm = 320;      //TODO - Figure out actual steps to mm conversions
-float R_SENSE = 0.11f;           // SilentStepStick series use 0.11
 uint16_t maxSpeedXYZ = 50*steps_per_mm;
 uint16_t accelerationXYZ = 300*steps_per_mm;
 uint16_t maxSpeedP = 50*steps_per_mm;

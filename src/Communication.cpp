@@ -3,10 +3,10 @@
 #include <Arduino.h>
 
 // Constructor
-Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, GripperStepper& gripperStepper, 
 CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
 PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
-    : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
+    : taskQueue(taskQueue), commandQueue(commandQueue), gripperStepper(gripperStepper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
     pressureSensor(pressureSensor), regulator(regulator), printer(printer), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
@@ -113,7 +113,7 @@ void Communication::sendStatus() {
             case GRIPPER:
                 Serial.print("Gripper:");
                 noInterrupts();
-                Serial.println(gripper.isOpen());
+                Serial.println(gripperStepper.isOpen());
                 interrupts();
                 statusStep = PRESSURE;
                 break;
@@ -230,7 +230,7 @@ void Communication::parseAndAddCommand() {
         startTasks();
         pressureSensor.startReading();
         regulator.restartRegulation();
-        gripper.resetRefreshCounter();
+        // gripper.resetRefreshCounter();
         Serial.println("--Restarted tasks");
     } else {
         Serial.print("Adding command: ");
@@ -266,7 +266,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() const{
-    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripperStepper.isBusy() || regulator.isBusy() || printer.isBusy()) {
         return false;
     } else {
         return true;
@@ -277,13 +277,13 @@ bool Communication::checkIfFree() const{
 void Communication::executeCommand(const Command& cmd) {
     switch (cmd.type) {
         case OPEN_GRIPPER:
-            gripper.openGripper();
+            gripperStepper.openGripper();
             break;
         case CLOSE_GRIPPER:
-            gripper.closeGripper();
+            gripperStepper.closeGripper();
             break;
         case GRIPPER_OFF:
-            gripper.stopVacuumRefresh();
+            // gripper.stopVacuumRefresh();
             break;
         case ENABLE_MOTORS:
             stepperX.enableMotor();

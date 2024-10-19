@@ -4,10 +4,13 @@
 #include <Arduino.h>
 #include "TaskCommand.h"
 #include <TMCStepper.h>
-#include <SoftwareSerial.h> // Include SoftwareSerial library
+#include <HardwareSerial.h>
+#include "pin_assignments.h"
+// #include <SoftwareSerial.h> // Include SoftwareSerial library
+// #include "all_constants.h"
+// float R_SENSE = 0.11f;           // SilentStepStick series use 0.11
 
-// Define the RSENSE resistor value for TMC2209 (e.g., 0.11 Ohm)
-#define R_SENSE 0.11f
+// using namespace TMC2208_n;
 
 class GripperStepper {
 public:
@@ -15,7 +18,6 @@ public:
         uint8_t enPin,
         uint8_t stepPin,
         uint8_t dirPin,
-        uint8_t uartPin,
         uint8_t address,
         TaskQueue& taskQueue
     );
@@ -26,11 +28,17 @@ public:
     // Function to perform homing
     void home();
 
+    // Function to check if the gripper is open
+    bool isOpen();
+
+    // Function to check if the gripper is busy
+    bool isBusy();
+
     // Function to open the gripper
     void openGripper();
 
     // Function to close the gripper
-    bool closeGripper(); // Returns true if an object is detected
+    void closeGripper(); // Returns true if an object is detected
 
     // Function to check StallGuard status
     bool isStalled();
@@ -40,7 +48,8 @@ public:
 
 private:
     // UART communication
-    SoftwareSerial _softSerial;
+    // HardwareSerial& _serialPort;
+    HardwareSerial _serialPort;
 
     // TMC2209 driver instance (real object)
     TMC2209Stepper _driver;
@@ -51,7 +60,6 @@ private:
     uint8_t _enPin;
     uint8_t _stepPin;
     uint8_t _dirPin;
-    uint8_t _uartPin;
     uint8_t _address;
 
     // StallGuard threshold values
@@ -63,6 +71,7 @@ private:
 
     // Movement direction
     bool _isClosing; // true: closing, false: opening
+    bool _isOpen;     // true: open, false: closed
 
     // Helper functions
     void stepMotor();

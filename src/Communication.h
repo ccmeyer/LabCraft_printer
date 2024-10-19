@@ -3,6 +3,7 @@
 
 #include "TaskCommand.h"
 #include "Gripper.h"
+#include "GripperStepper.h"
 #include "CustomStepper.h"
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
@@ -31,7 +32,7 @@ enum StatusStep {
 
 class Communication {
 public:
-    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
+    Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, GripperStepper& gripperStepper, 
     CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
     PressureSensor& pressureSensor, PressureRegulator& regulator, DropletPrinter& printer, int baudRate);
 
@@ -50,7 +51,7 @@ public:
 private:
     TaskQueue& taskQueue;
     CommandQueue& commandQueue;
-    Gripper& gripper;  // Reference to the Gripper object
+    GripperStepper& gripperStepper;  // Reference to the Gripper object
     CustomStepper& stepperX;  // Reference to the CustomStepper object
     CustomStepper& stepperY;  // Reference to the CustomStepper object
     CustomStepper& stepperZ;  // Reference to the CustomStepper object

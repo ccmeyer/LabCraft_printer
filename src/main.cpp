@@ -57,6 +57,7 @@ extern "C" void SystemClock_Config(void)
 #include "TaskCommand.h"
 #include "Communication.h"
 #include <TMCStepper.h>
+#include <HardwareSerial.h>
 #include "Gripper.h"
 #include "GripperStepper.h"
 #include "CustomStepper.h"
@@ -76,8 +77,9 @@ TIM_HandleTypeDef htim9;  // Define your timer handle
 TaskQueue taskQueue(&hiwdg);
 CommandQueue commandQueue;
 // Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
-HardwareSerial& TMC_UART = Serial6; // Using UART7 for communication
-GripperStepper gripperStepper(GRIPPER_EN, GRIPPER_STEP, GRIPPER_DIR, GRIPPER_ADDRESS, TMC_UART, taskQueue);
+// HardwareSerial& TMC_UART = Serial6; // Using UART7 for communication
+HardwareSerial SerialUART1(GRIPPER_UART_RX, GRIPPER_UART_TX);
+GripperStepper gripperStepper(GRIPPER_EN, GRIPPER_STEP, GRIPPER_DIR, GRIPPER_ADDRESS, taskQueue);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
 CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
 CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, taskQueue,Z_INV_DIR);
@@ -86,7 +88,7 @@ PressureSensor pressureSensor(sensorAddress,taskQueue);
 PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
 DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin, &htim9, TIM_CHANNEL_1);
 
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
+Communication comm(taskQueue, commandQueue, gripperStepper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
 
 // Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
 void configureGPIOForTimer() {
@@ -132,6 +134,8 @@ void setup() {
     pressureSensor.startReading();
     regulator.setupRegulator();
     comm.beginSerial();
+    // SerialUART1.begin(115200);
+    gripperStepper.initialize();
 
     __HAL_RCC_WWDG_CLK_ENABLE(); // Enable the clock for the watchdog
     hiwdg.Instance = IWDG;       // Use the IWDG instance

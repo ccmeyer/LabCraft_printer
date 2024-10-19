@@ -989,7 +989,7 @@ class Machine(QObject):
             raise ValueError("Status string is empty")
         
         if "DEBUG" in status_string:
-            # print('Status string:',status_string)
+            print('Status string:',status_string)
             return {}
 
         status_dict = {}
