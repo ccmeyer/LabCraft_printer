@@ -18,8 +18,8 @@ public:
         uint8_t enPin,
         uint8_t stepPin,
         uint8_t dirPin,
-        uint8_t address,
-        TaskQueue& taskQueue
+        uint8_t address
+        // TaskQueue& taskQueue
     );
 
     // Initialization function
@@ -54,7 +54,7 @@ private:
     // TMC2209 driver instance (real object)
     TMC2209Stepper _driver;
 
-    TaskQueue& taskQueue;   // Reference to the global TaskQueue
+    // TaskQueue& taskQueue;   // Reference to the global TaskQueue
 
     // Pin definitions
     uint8_t _enPin;

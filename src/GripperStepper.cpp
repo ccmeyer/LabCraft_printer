@@ -7,12 +7,12 @@ GripperStepper::GripperStepper(
     uint8_t enPin,
     uint8_t stepPin,
     uint8_t dirPin,
-    uint8_t address,
-    TaskQueue& taskQueue
+    uint8_t address
+    // TaskQueue& taskQueue
 )
     : _serialPort(SerialUART1), // Use Serial1 for hardware UART
       _driver(&_serialPort, 0.11f, 0b00),
-      taskQueue(taskQueue),
+    //   taskQueue(taskQueue),
       _enPin(enPin),
       _stepPin(stepPin),
       _dirPin(dirPin),
@@ -28,17 +28,17 @@ GripperStepper::GripperStepper(
 
 void GripperStepper::initialize() {
       // // Begin SoftwareSerial communication
-    _serialPort.begin(115200);
+    // _serialPort.begin(115200);
     _driver.beginSerial(115200);
-    
+    Serial.println("DEBUG:Initializing gripper stepper");
     // Initialize pins
     pinMode(_enPin, OUTPUT);
     pinMode(_stepPin, OUTPUT);
     pinMode(_dirPin, OUTPUT);
     // pinMode(_SW_RX, INPUT_PULLUP); // Ensure pull-up resistor is enabled
 
-    digitalWrite(_enPin, HIGH); // Disable driver
-
+    digitalWrite(_enPin, LOW); // Disable driver
+    
     // Initialize TMC2209 driver
     _driver.begin();
 
@@ -61,6 +61,7 @@ void GripperStepper::initialize() {
     // _driver.semin(5);
     // _driver.semax(2);
     // _driver.sedn(0b01);
+    Serial.println("DEBUG:End Config");
 
 }
 
@@ -113,10 +114,10 @@ void GripperStepper::openGripper() {
         delayMicroseconds(500);
         Serial.println("DEBUG:Opening gripper step");
 
-        if (isStalled()) {
-            _isOpen = true;
-            break;
-        }
+        // if (isStalled()) {
+        //     _isOpen = true;
+        //     break;
+        // }
     }
     _isClosing = false;
 

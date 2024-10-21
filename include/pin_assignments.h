@@ -66,6 +66,15 @@ const int P_STEP_PIN = PG4;    // Step - STP pin second from bottom left
 const int P_SW_TX = PC7;        // UART-SoftwareSerial receive pin - Attached to the DRIVERX_CS pins of the motor
 const int P_SW_RX = P_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the same pin as receive
 
+// --GRIPPER PINS--
+const int GRIPPER_EN = PG2; // Enable - EN pin top left
+const int GRIPPER_DIR = PF10; // Direction - DIR pin bottom left
+const int GRIPPER_STEP = PF9; // Step - STP pin second from bottom left
+const int GRIPPER_ADDRESS = 0b00; // Address for the TMC2209 driver
+const int GRIPPER_UART_TX = PD5; // UART-SoftwareSerial receive pin - Attached to the DRIVERX_CS pins of the motor
+const int GRIPPER_UART_RX = PD6; // UART-SoftwareSerial transmit pin - Uses the same pin as receive
+
+
 // --I2C communication--
 // All I2C pins in J73
 // top to bottom: 3V3, GND, SCL, SDA
