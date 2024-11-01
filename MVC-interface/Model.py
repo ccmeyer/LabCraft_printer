@@ -89,12 +89,12 @@ class MassCalibrationModel(QObject):
         self.check_mass_stability()
 
     def check_mass_stability(self):
-        if len(self.mass_log) > 10:
-            recent_mass = self.mass_log[-10:]
+        if len(self.mass_log) > 20:
+            recent_mass = self.mass_log[-20:]
             mass_std = np.std(recent_mass)
             if mass_std < self.balance_tolerance:
                 self.stable_counter += 1
-                if self.stable_counter > 10:
+                if self.stable_counter > 30:
                     self.mass_stable = True
                     if self.measurement_stage == 'Initial':
                         self.current_measurement['initial_mass'] = self.current_mass
@@ -242,6 +242,9 @@ class MassCalibrationModel(QObject):
             return None
         stock_data = pd.DataFrame(stock_measurements)
         standard_data = stock_data[stock_data['pulse_width'] == self.standard_pulse_width].copy()
+        if len(standard_data) == 0:
+            print(f"No standard measurements found for stock '{stock_id}'")
+            return None
         res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
         res_df['effective_resistance'] = self.resistance_model.predict(res_df)
         resistance = res_df['effective_resistance'].mean()
@@ -1617,7 +1620,7 @@ class PrinterHead(QObject):
         self.color = color
         self.confirmed = False
         self.completed = False
-        self.current_volume = 0
+        self.current_volume = None
         self.effective_resistance = None
         self.bias = None
         self.target_droplet_volume = None

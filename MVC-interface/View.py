@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
-        self.rack_box.setFixedHeight(200)
+        self.rack_box.setFixedHeight(250)
         self.rack_box.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         mid_layout.addWidget(self.rack_box)
 
@@ -1071,57 +1071,57 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
         row += 1
 
-        # self.calibrate_button = QtWidgets.QPushButton("Calibrate")
-        # self.calibrate_button.clicked.connect(self.initiate_calibration_process)
-        # self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
-        # row += 1
+        self.calibrate_button = QtWidgets.QPushButton("Calibrate")
+        self.calibrate_button.clicked.connect(self.initiate_calibration_process)
+        self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
+        row += 1
 
-        # self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
-        # self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.pressure_screen_low_spinbox.setDecimals(0)
-        # self.pressure_screen_low_spinbox.setSingleStep(10)
-        # self.pressure_screen_low_spinbox.setRange(10,7000)
-        # self.pressure_screen_low_spinbox.setValue(3500)
-        # # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
-        # self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
-        # row += 1
+        self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
+        self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_low_spinbox.setDecimals(0)
+        self.pressure_screen_low_spinbox.setSingleStep(10)
+        self.pressure_screen_low_spinbox.setRange(10,7000)
+        self.pressure_screen_low_spinbox.setValue(3500)
+        # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
+        row += 1
 
-        # self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
-        # self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.pressure_screen_high_spinbox.setDecimals(0)
-        # self.pressure_screen_high_spinbox.setSingleStep(10)
-        # self.pressure_screen_high_spinbox.setRange(10, 7000)
-        # self.pressure_screen_high_spinbox.setValue(4500)
-        # # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
-        # self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
-        # row += 1
+        self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
+        self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_high_spinbox.setDecimals(0)
+        self.pressure_screen_high_spinbox.setSingleStep(10)
+        self.pressure_screen_high_spinbox.setRange(10, 7000)
+        self.pressure_screen_high_spinbox.setValue(4500)
+        # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
+        row += 1
 
-        # self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
-        # self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
-        # self.repeat_measurement_spinbox.setRange(1, 100)
-        # self.repeat_measurement_spinbox.setSingleStep(1)
-        # self.repeat_measurement_spinbox.setValue(3)
-        # # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
-        # self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
-        # row += 1
+        self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
+        self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
+        self.repeat_measurement_spinbox.setRange(1, 100)
+        self.repeat_measurement_spinbox.setSingleStep(1)
+        self.repeat_measurement_spinbox.setValue(3)
+        # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
+        self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
+        row += 1
         
-        # self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
-        # self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
-        # self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
-        # row += 1
+        self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
+        self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
+        row += 1
 
-        # self.start_screen_button = QtWidgets.QPushButton("Start Screen")
-        # self.start_screen_button.clicked.connect(self.start_screen)
-        # self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
-        # row += 1
+        self.start_screen_button = QtWidgets.QPushButton("Start Screen")
+        self.start_screen_button.clicked.connect(self.start_screen)
+        self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
+        row += 1
 
-        # self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
-        # self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
-        # self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
-        # row += 1
+        self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
+        self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
+        row += 1
 
         self.remove_last_measurement_button = QtWidgets.QPushButton("Remove Last")
         self.remove_last_measurement_button.clicked.connect(self.remove_last_measurement)
@@ -2541,6 +2541,39 @@ class MovementBox(QtWidgets.QGroupBox):
         self.xy_position_series.append(y_pos, x_pos)
         self.z_position_series.append(0,-z_pos)
 
+class ClickableLabel(QLabel):
+    doubleClicked = QtCore.Signal()
+
+    def mouseDoubleClickEvent(self, event):
+        self.doubleClicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+class VolumeDialog(QDialog):
+    def __init__(self, initial_volume, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Volume")
+        self.setModal(True)
+        # Define the size of the window
+        self.setFixedSize(200, 100)
+
+        # Layout and SpinBox for volume input
+        layout = QVBoxLayout(self)
+        self.volume_spinbox = QDoubleSpinBox()
+        self.volume_spinbox.setDecimals(2)
+        self.volume_spinbox.setRange(0.0, 1000.0)  # Set range according to your requirements
+        if initial_volume:
+            self.volume_spinbox.setValue(initial_volume)
+        else:
+            self.volume_spinbox.setValue(0.0)
+        layout.addWidget(self.volume_spinbox)
+
+        # Save button
+        save_button = QPushButton("Update volume")
+        save_button.clicked.connect(self.accept)  # Close dialog with accept state
+        layout.addWidget(save_button)
+
+    def get_volume(self):
+        return self.volume_spinbox.value()
 
 class RackBox(QGroupBox):
     """
@@ -2561,6 +2594,7 @@ class RackBox(QGroupBox):
         self.rack_model = model.rack_model
         self.controller = controller
         self.init_ui()
+        self.current_volume = 0
 
         # Connect model signals to the update methods
         self.rack_model.slot_updated.connect(self.update_all_slots)
@@ -2612,6 +2646,13 @@ class RackBox(QGroupBox):
             slot_label = QLabel("Empty")
             slot_label.setAlignment(Qt.AlignCenter)
 
+            volume_label = ClickableLabel(f"---")
+            volume_label.setToolTip(f"Temp Volume")
+            volume_label.doubleClicked.connect(self.create_volume_dialog_callback(slot.number))
+            volume_label.setAlignment(Qt.AlignCenter)
+            volume_label.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+            volume_label.setMaximumHeight(20)
+            
             combined_button = QPushButton("Confirm")
             combined_button.clicked.connect(self.create_combined_button_callback(slot.number))
 
@@ -2620,14 +2661,13 @@ class RackBox(QGroupBox):
             swap_combobox.currentIndexChanged.connect(self.create_swap_callback(slot.number, swap_combobox))
 
             slot_layout.addWidget(slot_label)
+            slot_layout.addWidget(volume_label)
             slot_layout.addWidget(combined_button)
-            # slot_layout.addWidget(confirm_button)
-            # slot_layout.addWidget(load_button)
             slot_layout.addWidget(swap_combobox)
 
             slots_layout.addWidget(slot_widget)
             # self.slot_widgets.append((slot_label, confirm_button, load_button, swap_combobox))
-            self.slot_widgets.append((slot_label, combined_button, swap_combobox))
+            self.slot_widgets.append((slot_label, volume_label, combined_button, swap_combobox))
 
          # Add a spacer to separate slots and table visually
         spacer_right = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
@@ -2671,8 +2711,31 @@ class RackBox(QGroupBox):
 
     def update_button_states(self, machine_connected):
         """Update the button states based on the machine connection state."""
-        for _, combined_button, _ in self.slot_widgets:
+        for _, _, combined_button, _ in self.slot_widgets:
             combined_button.setEnabled(machine_connected)
+
+    def open_volume_dialog(self,volume):
+        # Open the VolumeDialog with the current volume
+        dialog = VolumeDialog(volume, self)
+        if dialog.exec_():  # Check if the dialog was accepted
+            # Update volume and label text after user saves
+            new_volume = dialog.get_volume()
+            return new_volume
+    
+
+    def create_volume_dialog_callback(self, slot_number):
+        """Create a callback function that access the printer head loaded at the specified slot and passes the current volume of the 
+        of the printer head to the volume dialogue."""
+        def volume_dialog_callback():
+            slot = self.rack_model.slots[slot_number]
+            if slot.printer_head:
+                current_volume = slot.printer_head.get_current_volume()
+                new_volume = self.open_volume_dialog(current_volume)
+                if new_volume is not None:
+                    slot.printer_head.set_absolute_volume(new_volume)
+                    self.update_all_slots()
+        return volume_dialog_callback
+        
 
     def create_combined_button_callback(self, slot_number):
         """Create a callback function for the combined Confirm/Load/Unload button."""
@@ -2746,7 +2809,7 @@ class RackBox(QGroupBox):
     def update_slot(self, slot_number):
         """Update the UI for a specific slot."""
         slot = self.rack_model.slots[slot_number]
-        label, combined_button, swap_combobox = self.slot_widgets[slot_number]
+        label, volume_label, combined_button, swap_combobox = self.slot_widgets[slot_number]
 
         if slot.printer_head:
             printer_head = slot.printer_head
@@ -2784,6 +2847,16 @@ class RackBox(QGroupBox):
         # Update dropdown options
         self.update_dropdown(slot_number, swap_combobox)
         swap_combobox.setEnabled(not slot.is_locked())
+
+        # Update the volume label
+        if slot.printer_head:
+            volume = slot.printer_head.get_current_volume()
+            if volume is None:
+                volume_label.setText("---")
+            else:
+                volume_label.setText(f"{volume} uL")
+        else:
+            volume_label.setText("---")
         
         # Update the button's functionality
         combined_button.clicked.disconnect()
