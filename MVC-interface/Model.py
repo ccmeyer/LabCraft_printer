@@ -1613,7 +1613,7 @@ class PrinterHead(QObject):
     change_concentration(new_concentration): Changes the concentration of the reagent.
     change_color(new_color): Changes the color of the printer head.
     """
-    # volume_changed_signal = Signal(str) # Signal to notify when the volume of the printer head changes
+    volume_changed_signal = Signal(str) # Signal to notify when the volume of the printer head changes
     def __init__(self, stock_solution,color='Blue'):
         super().__init__()
         self.stock_solution = stock_solution
@@ -1628,15 +1628,17 @@ class PrinterHead(QObject):
     def record_droplet_volume_lost(self,droplet_count):
         if self.target_droplet_volume is not None:
             self.current_volume -= (droplet_count * self.target_droplet_volume) / 1000
+            self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
         else:
             print('No target droplet volume set for printer head:',self.stock_solution.get_stock_id())
 
     def set_absolute_volume(self,volume):
         self.current_volume = volume
-        # self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
+        self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
 
     def change_volume(self,volume):
         self.current_volume += volume
+        self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
 
     def get_current_volume(self):
         return self.current_volume
@@ -1730,13 +1732,14 @@ class PrinterHeadManager(QObject):
         stock_solutions = stock_solutions_manager.get_all_stock_solutions()
         for stock_solution in stock_solutions:
             printer_head = PrinterHead(stock_solution, color=self.generate_color())
-            # printer_head.volume_changed_signal.connect(self.volume_changed)
+            printer_head.volume_changed_signal.connect(self.volume_changed)
             self.printer_heads.append(printer_head)
             self.unassigned_printer_heads.append(printer_head)
         #print(f"Created {len(self.printer_heads)} printer heads.")
 
-    # def volume_changed(self,stock_id):
-    #     #print(f'Volume changed for printer head {stock_id}')
+    def volume_changed(self,stock_id):
+        print(f'Volume changed for printer head {stock_id}')
+        self.volume_changed_signal.emit()
 
 
     def assign_printer_head_to_slot(self, slot_number, rack_model):

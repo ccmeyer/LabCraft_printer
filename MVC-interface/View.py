@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
 
         self.controller.error_occurred_signal.connect(self.popup_message)
         self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
+        self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -2872,7 +2873,7 @@ class RackBox(QGroupBox):
             if volume is None:
                 volume_label.setText("---")
             else:
-                volume_label.setText(f"{volume} uL")
+                volume_label.setText(f"{round(volume,2)} uL")
         else:
             volume_label.setText("---")
         
@@ -2909,7 +2910,7 @@ class RackBox(QGroupBox):
             if volume is None:
                 self.gripper_volume_label.setText("---")
             else:
-                self.gripper_volume_label.setText(f"{volume} uL")
+                self.gripper_volume_label.setText(f"{round(volume,2)} uL")
         else:
             self.gripper_volume_label.setText("---")
             self.gripper_label.setText("Gripper Empty")

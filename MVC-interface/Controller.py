@@ -10,6 +10,7 @@ class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
     update_slots_signal = Signal()
+    update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
     def __init__(self, machine, model):
         super().__init__()
@@ -32,6 +33,8 @@ class Controller(QObject):
         self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
 
+        self.model.printer_head_manager.volume_changed_signal.connect(self.update_volumes_in_view)
+
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
         self.model.update_state(status_dict)
@@ -44,6 +47,10 @@ class Controller(QObject):
     def update_command_numbers(self):
         """Pass the current command and last completed command to the command queue"""
         self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
+    
+    def update_volumes_in_view(self):
+        """Update the volume in the view."""
+        self.update_volumes_in_view_signal.emit()
 
     def reset_board(self):
         """Reset the machine board."""
