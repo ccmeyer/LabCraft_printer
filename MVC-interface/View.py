@@ -2553,6 +2553,7 @@ class VolumeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Edit Volume")
         self.setModal(True)
+        self.color_dict = parent.color_dict
         # Define the size of the window
         self.setFixedSize(200, 100)
 
@@ -2565,6 +2566,9 @@ class VolumeDialog(QDialog):
             self.volume_spinbox.setValue(initial_volume)
         else:
             self.volume_spinbox.setValue(0.0)
+
+        # Set spinbox color to dark gray
+        self.volume_spinbox.setStyleSheet(f"background-color: {self.color_dict['black']};")
         layout.addWidget(self.volume_spinbox)
 
         # Save button
@@ -2622,6 +2626,15 @@ class RackBox(QGroupBox):
 
         gripper_layout.addWidget(self.gripper_label)
 
+        # Add a clickable label to show the volume of the printer head in the gripper
+        self.gripper_volume_label = ClickableLabel("---")
+        self.gripper_volume_label.setToolTip("Double click to change the volume")
+        self.gripper_volume_label.doubleClicked.connect(self.create_volume_dialog_callback(-1))
+        self.gripper_volume_label.setAlignment(Qt.AlignCenter)
+        self.gripper_volume_label.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+        self.gripper_volume_label.setMaximumHeight(20)
+        gripper_layout.addWidget(self.gripper_volume_label)
+
         self.gripper_state = QLabel("Closed")
         self.gripper_state.setAlignment(Qt.AlignCenter)
         self.gripper_state.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
@@ -2647,7 +2660,7 @@ class RackBox(QGroupBox):
             slot_label.setAlignment(Qt.AlignCenter)
 
             volume_label = ClickableLabel(f"---")
-            volume_label.setToolTip(f"Temp Volume")
+            volume_label.setToolTip(f"Double click to change the volume")
             volume_label.doubleClicked.connect(self.create_volume_dialog_callback(slot.number))
             volume_label.setAlignment(Qt.AlignCenter)
             volume_label.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
@@ -2727,12 +2740,17 @@ class RackBox(QGroupBox):
         """Create a callback function that access the printer head loaded at the specified slot and passes the current volume of the 
         of the printer head to the volume dialogue."""
         def volume_dialog_callback():
-            slot = self.rack_model.slots[slot_number]
-            if slot.printer_head:
-                current_volume = slot.printer_head.get_current_volume()
+            if slot_number == -1:
+                if self.rack_model.gripper_printer_head:
+                    current_printer_head = self.rack_model.gripper_printer_head
+            else:
+                slot = self.rack_model.slots[slot_number]
+                current_printer_head = slot.printer_head
+            if current_printer_head:
+                current_volume = current_printer_head.get_current_volume()
                 new_volume = self.open_volume_dialog(current_volume)
                 if new_volume is not None:
-                    slot.printer_head.set_absolute_volume(new_volume)
+                    current_printer_head.set_absolute_volume(new_volume)
                     self.update_all_slots()
         return volume_dialog_callback
         
@@ -2887,7 +2905,13 @@ class RackBox(QGroupBox):
             printer_head = self.rack_model.gripper_printer_head
             self.gripper_label.setText(f"{printer_head.get_stock_name(new_line=True)}")
             self.gripper_label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
+            volume = printer_head.get_current_volume()
+            if volume is None:
+                self.gripper_volume_label.setText("---")
+            else:
+                self.gripper_volume_label.setText(f"{volume} uL")
         else:
+            self.gripper_volume_label.setText("---")
             self.gripper_label.setText("Gripper Empty")
             self.gripper_label.setStyleSheet("background-color: none; color: white;")
 
