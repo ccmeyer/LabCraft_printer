@@ -13,6 +13,7 @@ import joblib
 from scipy.optimize import minimize, fsolve
 import random
 import pyDOE3
+import time
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -176,6 +177,9 @@ class MassCalibrationModel(QObject):
             if m['stock_id'] == self.current_stock_id:
                 return m['droplet_volume']
         return 0
+    
+    def update_calibration_file_path(self, file_path):
+        self.calibration_file_path = file_path
 
     def create_calibration_file(self, file_path):
         self.calibration_file_path = file_path
@@ -442,12 +446,16 @@ class ExperimentModel(QObject):
     stock_updated = Signal()
     experiment_generated = Signal(int,int)  # Signal to notify when the experiment is generated, passing the total number of reactions
     update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
-    
-    def __init__(self,well_plate):
+    unsaved_changes_signal = Signal() # Signal to notify when there are unsaved changes
+
+    def __init__(self,well_plate,calibration_model):
         super().__init__()
         self.well_plate = well_plate
+        self.calibration_model = calibration_model
         self.reagents = []
+        temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
         self.metadata = {
+            "name": temp_name,
             "replicates": 1,
             "max_droplets": 50,
             'droplet_volume': 0.03,
@@ -462,15 +470,30 @@ class ExperimentModel(QObject):
         self.complete_lookup_table = pd.DataFrame()
         self.all_droplet_df = pd.DataFrame()
 
-        self.experiment_name = None
         self.experiment_dir_path = None
         self.experiment_file_path = None
         self.progress_file_path = None
         self.progress_data = {}
+        self.calibration_file_path = None
         self.key_file_path = None
 
         self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
+        self.initialize_experiment()
 
+        self.unsaved_changes = False
+
+    def mark_unsaved_changes(self):
+        self.unsaved_changes = True
+        self.unsaved_changes_signal.emit()
+
+    def reset_unsaved_changes(self):
+        print('reset unsaved changes')
+        self.unsaved_changes = False
+        self.unsaved_changes_signal.emit()
+
+    def has_unsaved_changes(self):
+        return self.unsaved_changes
+    
     def add_reagent(self, name, min_conc, max_conc, steps, mode, manual_input,units,max_droplets,stock_solutions):
         reagent = {
             "name": name,
@@ -488,6 +511,7 @@ class ExperimentModel(QObject):
         }
         self.reagents.append(reagent)
         self.calculate_concentrations(len(self.reagents) - 1)
+        self.mark_unsaved_changes()
 
     def update_reagent(self, index, name=None, min_conc=None, max_conc=None, steps=None, mode=None, manual_input=None, units=None, max_droplets=None,stock_solutions=None):
         reagent = self.reagents[index]
@@ -512,11 +536,21 @@ class ExperimentModel(QObject):
 
         # Update concentrations preview based on the new data
         self.calculate_concentrations(index)
+        self.mark_unsaved_changes()
 
     def delete_reagent(self, name):
         self.reagents = [reagent for reagent in self.reagents if reagent["name"] != name]
         self.remove_stock_solutions_for_unused_reagents()
         self.generate_experiment(feasible=False)
+        self.mark_unsaved_changes()
+
+    def change_random_seed(self,remove_seed=False):
+        if remove_seed:
+            self.metadata['random_seed'] = None
+        else:
+            self.metadata['random_seed'] = random.randint(0,100000)
+        self.generate_experiment(feasible=False)
+        self.mark_unsaved_changes()
 
     def get_random_seed(self):
         return self.metadata['random_seed']
@@ -529,12 +563,14 @@ class ExperimentModel(QObject):
         self.metadata['start_col'] = start_col
 
         self.generate_experiment(feasible=False)
+        self.mark_unsaved_changes()
 
     def update_fill_reagent_name(self,fill_reagent):
         self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != self.metadata['fill_reagent']]
         self.metadata['fill_reagent'] = fill_reagent
         self.add_new_stock_solutions_for_reagent(fill_reagent,[1.0],'--')
         self.generate_experiment(feasible=False)
+        self.mark_unsaved_changes()
 
     def get_start_row(self):
         return self.metadata['start_row']
@@ -614,6 +650,7 @@ class ExperimentModel(QObject):
                 "total_droplets": 0,
                 'total_volume': 0
             })
+        self.mark_unsaved_changes()
 
     def remove_stock_solutions_for_reagent(self, reagent_name):
         self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != reagent_name]
@@ -623,6 +660,7 @@ class ExperimentModel(QObject):
         # Update the stock solutions in the lookup table
         if not self.complete_lookup_table.empty:
             self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
+        self.mark_unsaved_changes()
     
     def remove_stock_solutions_for_unused_reagents(self):
         used_reagents = [reagent['name'] for reagent in self.reagents]
@@ -635,6 +673,8 @@ class ExperimentModel(QObject):
         # #print(f'Complete lookup table:\n{self.complete_lookup_table}')
         if not self.complete_lookup_table.empty:
             self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'].isin(used_reagents)].copy()
+
+        
 
     def check_missing_concentrations(self):
         for reagent in self.reagents:
@@ -788,28 +828,65 @@ class ExperimentModel(QObject):
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
     
-    def save_experiment(self, experiment_name,experiment_dir,filename):
-        """Save all information required to repopulate the model to a JSON file."""
-        #print(f'Saving experiment to {filename}')
-        self.experiment_name = experiment_name
-        self.experiment_dir_path = experiment_dir
-        self.experiment_file_path = filename
+    def initialize_experiment(self):
+        """Generates the initial directory for the experiment and all initial files"""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        base_experiment_dir = os.path.join(script_dir, "Experiments")
+        if not os.path.exists(base_experiment_dir):
+            os.makedirs(base_experiment_dir)
+        self.experiment_dir_path = os.path.join(base_experiment_dir, self.metadata['name'])
+        print(f'Experiment directory: {self.experiment_dir_path}')
+        if not os.path.exists(self.experiment_dir_path):
+            os.makedirs(self.experiment_dir_path)
+            print(f'Experiment directory created at {self.experiment_dir_path}')
+        self.update_all_paths()
+        self.save_experiment()
+        self.create_progress_file()
+        self.create_key_file()
+        self.calibration_model.create_calibration_file(self.calibration_file_path)
 
+    def rename_experiment(self,new_name):
+        """Rename the experiment directory and update the metadata."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        base_experiment_dir = os.path.join(script_dir, "Experiments")
+        new_experiment_dir = os.path.join(base_experiment_dir, new_name)
+        print(f'New experiment directory: {new_experiment_dir}')
+        if os.path.exists(new_experiment_dir):
+            return False
+        os.rename(self.experiment_dir_path, new_experiment_dir)
+        self.metadata['name'] = new_name
+        self.experiment_dir_path = new_experiment_dir
+        self.update_all_paths()
+        self.save_experiment()
+        return True
+
+    def update_all_paths(self):
+        """Update all file paths based on the experiment directory."""
+        if self.experiment_dir_path is None:
+            return
+        self.experiment_file_path = os.path.join(self.experiment_dir_path, "experiment_design.json")
+        self.progress_file_path = os.path.join(self.experiment_dir_path, "progress.json")
+        self.calibration_file_path = os.path.join(self.experiment_dir_path, "calibration.json")
+        self.calibration_model.update_calibration_file_path(self.calibration_file_path)
+        self.key_file_path = os.path.join(self.experiment_dir_path, "key.csv")
+
+    def save_experiment(self,create_progress=True):
+        """Save all information required to repopulate the model to a JSON file."""
         data_to_save = {
             "reagents": self.reagents,
             "metadata": self.metadata,
         }
-        with open(filename, 'w') as file:
+        with open(self.experiment_file_path, 'w') as file:
             json.dump(data_to_save, file, indent=4, default=self.convert_to_serializable)
-        #print(f"Experiment data saved to {filename}")
+        print(f"Experiment data saved to {self.experiment_file_path}")
+        # if create_progress:
+        #     self.create_progress_file()
+        self.reset_unsaved_changes()
 
     def create_progress_file(self,file_name=None):
         """Create a JSON file to store the progress of the experiment."""
         if file_name is not None:
             self.progress_file_path = file_name
-        elif self.experiment_name is None:
-            print('Experiment name is not set, cannot create progress file')
-            return
 
         #print(f'Creating progress file at {self.progress_file_path}')
 
@@ -2693,9 +2770,9 @@ class Model(QObject):
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
-        self.experiment_model = ExperimentModel(self.well_plate)
-        self.experiment_file_path = None
         self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.prediction_model_path,self.resistance_model_path)
+        self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
+        self.experiment_file_path = None
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -2854,7 +2931,7 @@ class Model(QObject):
         self.well_plate.assign_reactions_to_wells(all_reactions,start_row=start_row,start_col=start_col)
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
-        self.experiment_model.load_progress()
+        self.experiment_model.create_progress_file()
         self.experiment_model.create_key_file()
         self.calibration_model.apply_calibrations_to_all_printer_heads()
         self.experiment_loaded.emit()

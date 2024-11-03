@@ -3167,6 +3167,8 @@ class ExperimentDesignDialog(QDialog):
         self.setFixedSize(1500, 600)
 
         self.layout = QHBoxLayout(self)
+        print('NEW WINDOW')
+        self.no_changes = True
         
         # Table to hold all reagent information
         self.reagent_table = QTableWidget(0, 13, self)
@@ -3212,6 +3214,14 @@ class ExperimentDesignDialog(QDialog):
         self.bottom_layout = QHBoxLayout()
         # Label and spin box for total reactions and replicates
         self.info_layout = QVBoxLayout()
+
+        # Add text edit field for experiment name
+        self.experiment_name_label = QLabel("Experiment Name:", self)
+        self.experiment_name_input = QLineEdit(self)
+        self.experiment_name_input.setText(self.experiment_model.metadata.get("name", "Experiment"))
+        self.experiment_name_input.textChanged.connect(self.update_experiment_name)
+        self.info_layout.addWidget(self.experiment_name_label)
+        self.info_layout.addWidget(self.experiment_name_input)
 
         self.replica_label = QLabel("Replicates:", self)
         self.replicate_spinbox = QSpinBox(self)
@@ -3261,10 +3271,7 @@ class ExperimentDesignDialog(QDialog):
 
         self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
 
-        self.total_reactions_label = QLabel("Total Reactions: 0", self)
-
-        # Grid layout for setting the start row and start column
-        
+        self.total_reactions_label = QLabel("Total Reactions: 0", self)        
 
         self.info_layout.addWidget(self.total_droplets_label)
         self.info_layout.addWidget(self.total_droplets_spinbox)
@@ -3323,20 +3330,50 @@ class ExperimentDesignDialog(QDialog):
         self.experiment_model.data_updated.connect(self.update_preview)
         self.experiment_model.stock_updated.connect(self.update_stock_table)
         self.experiment_model.experiment_generated.connect(self.update_total_reactions)
+        self.experiment_model.unsaved_changes_signal.connect(self.update_save_button)
+        self.experiment_model.unsaved_changes_signal.connect(self.update_change_tracker)
 
         self.load_experiment_to_view()
+
+        if self.experiment_in_progress(self.experiment_model.progress_file_path):
+            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Clear progress to edit")
+        elif self.model.rack_model.get_gripper_printer_head() != None:
+            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Unload gripper to edit")
+        else:
+            self.activate_edit_mode()
+
+    def update_save_button(self):
+        """Change the color of the save button if the experiment has unsaved changes."""
+        if self.experiment_model.unsaved_changes:
+            self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+        else:
+            self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
+    
+    def update_change_tracker(self):
+        """Update the change tracker to indicate if changes have been made."""
+        if self.experiment_model.unsaved_changes:
+            # self.no_changes = False
+            print('Changes made')
+        else:
+            # self.no_changes = True
+            print('No changes made')
+    
+    def update_experiment_name(self):
+        """Update the experiment name in the model."""
+        new_name = self.experiment_name_input.text()
+        self.experiment_model.rename_experiment(new_name)
 
     def update_randomize_wells(self, checked):
         """Update the model with the randomize wells setting."""
         if not checked:
             self.randomize_wells_button.setText("Randomize Wells")
             print('Setting the random seed to None')
-            self.experiment_model.metadata["random_seed"] = None
+            # self.experiment_model.metadata["random_seed"] = None
+            self.experiment_model.change_random_seed(remove_seed=True)
         else:
             self.randomize_wells_button.setText("Randomized")
-            new_seed = random.randint(0, 1000000)
-            #print(f'Setting the random seed to {new_seed}')
-            self.experiment_model.metadata["random_seed"] = new_seed
+            self.experiment_model.change_random_seed(remove_seed=False)
+        self.no_changes = False
 
     def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", units='mM',max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
         """Add a new reagent row to the table and model."""
@@ -3441,7 +3478,39 @@ class ExperimentDesignDialog(QDialog):
         self.experiment_model.delete_reagent(reagent_name)
         self.reagent_table.removeRow(row)
 
-    def update_model_reagent(self, row):
+    def activate_read_only_mode(self,title="Experiment Design (Read-Only)"):
+        """Disable all input fields in the table and the rest of the window."""
+        self.setWindowTitle(title)
+        self.experiment_name_input.setReadOnly(True)
+        self.total_droplets_spinbox.setReadOnly(True)
+        self.replicate_spinbox.setReadOnly(True)
+        self.fill_reagent_input.setReadOnly(True)
+        self.randomize_wells_button.setDisabled(True)
+        self.add_reagent_button.setDisabled(True)
+        self.update_table_button.setDisabled(True)
+        self.load_experiment_button.setDisabled(True)
+        self.save_experiment_button.setDisabled(True)
+        self.generate_experiment_button.setDisabled(True)
+        self.reagent_table.setDisabled(True)
+        self.stock_table.setDisabled(True)
+
+    def activate_edit_mode(self):
+        """Enable all input fields in the table and the rest of the window."""
+        self.setWindowTitle("Experiment Design")
+        self.experiment_name_input.setReadOnly(False)
+        self.total_droplets_spinbox.setReadOnly(False)
+        self.replicate_spinbox.setReadOnly(False)
+        self.fill_reagent_input.setReadOnly(False)
+        self.randomize_wells_button.setDisabled(False)
+        self.add_reagent_button.setDisabled(False)
+        self.update_table_button.setDisabled(False)
+        self.load_experiment_button.setDisabled(False)
+        self.save_experiment_button.setDisabled(False)
+        self.generate_experiment_button.setDisabled(False)
+        self.reagent_table.setDisabled(False)
+        self.stock_table.setDisabled(False)
+
+    def update_model_reagent(self, row,mark_change=True):
         """Update the reagent in the model based on the current row values."""
         name = self.reagent_table.cellWidget(row, 0).text()
         min_conc = self.reagent_table.cellWidget(row, 1).value()
@@ -3454,13 +3523,15 @@ class ExperimentDesignDialog(QDialog):
         stock_solutions = self.reagent_table.cellWidget(row, 9).text()
 
         self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, units=units,max_droplets=max_droplets,stock_solutions=stock_solutions)
+        if mark_change:
+            self.no_changes = False
 
     def update_all_model_reagents(self):
         """Update all reagents in the model based on the current row values."""
         for row in range(self.reagent_table.rowCount()):
-            self.update_model_reagent(row)
+            self.update_model_reagent(row,mark_change=False)
 
-    def update_model_metadata(self):
+    def update_model_metadata(self,mark_change=True):
         """Update the metadata in the model based on the current values."""
         replicates = self.replicate_spinbox.value()
         max_droplets = self.total_droplets_spinbox.value()
@@ -3468,11 +3539,14 @@ class ExperimentDesignDialog(QDialog):
         start_row = self.start_row_spinbox.value()
         start_col = self.start_col_spinbox.value()
         self.experiment_model.update_metadata(replicates, max_droplets, reduction_factor,start_row,start_col)
+        if mark_change:
+            self.no_changes = False
 
     def update_fill_reagent(self):
         """Update the fill reagent in the model based on the current value."""
         fill_reagent = self.fill_reagent_input.text()
         self.experiment_model.update_fill_reagent_name(fill_reagent)
+        self.no_changes = False
 
     def load_experiment_to_view(self):
         """Load reagents, stock solutions, and metadata from the model to the view."""
@@ -3480,10 +3554,12 @@ class ExperimentDesignDialog(QDialog):
         print("Loading experiment to view")
 
         # Temporarily disconnect the signals
+        self.experiment_name_input.blockSignals(True)
         self.total_droplets_spinbox.blockSignals(True)
         self.replicate_spinbox.blockSignals(True)
         self.randomize_wells_button.blockSignals(True)
 
+        self.experiment_name_input.setText(self.experiment_model.metadata.get("name", "Untitled Experiment"))
         self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
         self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
         self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))
@@ -3492,6 +3568,7 @@ class ExperimentDesignDialog(QDialog):
             self.randomize_wells_button.setText("Randomized")
 
         # Reconnect the signals
+        self.experiment_name_input.blockSignals(False)
         self.total_droplets_spinbox.blockSignals(False)
         self.replicate_spinbox.blockSignals(False)
         self.randomize_wells_button.blockSignals(False)
@@ -3515,49 +3592,51 @@ class ExperimentDesignDialog(QDialog):
                 view_only=True
             )
             self.experiment_model.calculate_concentrations(i,calc_experiment=False)
+            self.experiment_model.reset_unsaved_changes()
+            self.no_changes = True
 
     def save_experiment(self):
         """Save the current experiment setup to a new directory."""
         self.update_all_model_reagents()
+        self.experiment_model.save_experiment()
+        # # Get the directory where the currently executed script is located
+        # script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Get the directory where the currently executed script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # # Define the base directory for experiments relative to the script location
+        # base_experiment_dir = os.path.join(script_dir, "Experiments")
 
-        # Define the base directory for experiments relative to the script location
-        base_experiment_dir = os.path.join(script_dir, "Experiments")
+        # # Ensure the base directory exists
+        # if not os.path.exists(base_experiment_dir):
+        #     os.makedirs(base_experiment_dir)
 
-        # Ensure the base directory exists
-        if not os.path.exists(base_experiment_dir):
-            os.makedirs(base_experiment_dir)
-
-        # Ask the user to define a name for the new directory
-        experiment_dir_name, ok = QInputDialog.getText(self, "Experiment Name", "Enter the name for the new experiment directory:")
+        # # Ask the user to define a name for the new directory
+        # experiment_dir_name, ok = QInputDialog.getText(self, "Experiment Name", "Enter the name for the new experiment directory:")
         
-        if ok and experiment_dir_name:
-            # Create the full path to the new directory
-            experiment_dir = os.path.join(base_experiment_dir, experiment_dir_name)
+        # if ok and experiment_dir_name:
+        #     # Create the full path to the new directory
+        #     experiment_dir = os.path.join(base_experiment_dir, experiment_dir_name)
             
-            # Check if the directory already exists
-            if os.path.exists(experiment_dir):
-                overwrite = QMessageBox.question(self, "Overwrite Directory?", 
-                                                "The directory already exists. Do you want to overwrite it?",
-                                                QMessageBox.Yes | QMessageBox.No)
-                if overwrite == QMessageBox.No:
-                    return
+        #     # Check if the directory already exists
+        #     if os.path.exists(experiment_dir):
+        #         overwrite = QMessageBox.question(self, "Overwrite Directory?", 
+        #                                         "The directory already exists. Do you want to overwrite it?",
+        #                                         QMessageBox.Yes | QMessageBox.No)
+        #         if overwrite == QMessageBox.No:
+        #             return
 
-            # Create the directory
-            os.makedirs(experiment_dir, exist_ok=True)
+        #     # Create the directory
+        #     os.makedirs(experiment_dir, exist_ok=True)
 
-            # Define the path for the experiment design JSON file within the new directory
-            experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
-            progress_file_path = os.path.join(experiment_dir, "progress.json")
-            calibration_file_path = os.path.join(experiment_dir, "calibration.json")
-            key_file_path = os.path.join(experiment_dir, "key.csv")
-            # Save the experiment
-            self.experiment_model.save_experiment(experiment_dir_name,experiment_dir,experiment_file_path)
-            self.experiment_model.create_progress_file(file_name=progress_file_path)
-            self.model.calibration_model.create_calibration_file(calibration_file_path)
-            self.experiment_model.create_key_file(file_name=key_file_path)
+        #     # Define the path for the experiment design JSON file within the new directory
+        #     experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
+        #     progress_file_path = os.path.join(experiment_dir, "progress.json")
+        #     calibration_file_path = os.path.join(experiment_dir, "calibration.json")
+        #     key_file_path = os.path.join(experiment_dir, "key.csv")
+        #     # Save the experiment
+        #     self.experiment_model.save_experiment(experiment_dir_name,experiment_dir,experiment_file_path)
+        #     self.experiment_model.create_progress_file(file_name=progress_file_path)
+        #     self.model.calibration_model.create_calibration_file(calibration_file_path)
+        #     self.experiment_model.create_key_file(file_name=key_file_path)
             #print(f"Experiment data saved in directory: {experiment_dir}")
 
     def experiment_in_progress(self, progress_file_path):
@@ -3679,6 +3758,14 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_droplets'])))
             self.stock_table.setItem(row_position, 4, QTableWidgetItem(str(stock_solution['total_volume'])))
 
+    def complete_experiment_design(self):
+        if self.no_changes:
+            print('No changes made to the experiment design')
+        else:
+            print('Changes made to the experiment design')
+            self.model.load_experiment_from_model()
+            self.no_changes = True
+
     def generate_experiment(self):
         """Generate the experiment by asking the model to calculate it."""
         self.experiment_model.generate_experiment()
@@ -3696,17 +3783,21 @@ class ExperimentDesignDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle the window close event."""
-        self.update_all_model_reagents()  # Update all reagents before closing
+        # self.update_all_model_reagents()  # Update all reagents before closing
         # Add check that there are no missing concentrations
         if self.experiment_model.check_missing_concentrations():
-            response = self.main_window.popup_yes_no("Missing Concentrations","There are missing concentrations. Are you sure you want to close the experiment design window?")
-            if response == '&Yes':
-                self.model.load_experiment_from_model()
-                self.model.export_experiment_key()
-                event.accept()
-            else:
-                event.ignore()
+            self.main_window.popup_message("Missing Concentrations","There are missing concentrations. Please fill in all concentrations before closing the window.")
+            event.ignore()
+            # response = self.main_window.popup_yes_no("Missing Concentrations","There are missing concentrations. Are you sure you want to close the experiment design window?")
+            # if response == '&Yes':
+            #     self.complete_experiment_design()
+            #     event.accept()
+            # else:
+            #     event.ignore()
+        elif self.experiment_model.has_unsaved_changes():
+            self.main_window.popup_message("Unsaved Changes","There are unsaved changes. Please save your changes prior to closing the window.")
+            event.ignore()
         else:
-            self.model.load_experiment_from_model()
+            self.complete_experiment_design()
             event.accept()
         

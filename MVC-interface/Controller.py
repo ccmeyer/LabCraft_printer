@@ -651,10 +651,12 @@ class Controller(QObject):
         """Resets the droplet count for all wells in the well plate for the currently loaded stock solution."""
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
         self.model.well_plate.reset_all_wells_for_stock(active_printer_head.get_stock_id())
+        self.model.experiment_model.create_progress_file()
 
     def reset_all_arrays(self):
         """Resets the droplet count for all wells in the well plate for all stock solutions."""
         self.model.well_plate.reset_all_wells()
+        self.model.experiment_model.create_progress_file()
         self.update_slots_signal.emit()
 
     def check_if_all_completed(self):
