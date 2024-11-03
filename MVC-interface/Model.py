@@ -2730,6 +2730,9 @@ class MachineModel(QObject):
         self.motors_homed = False
         self.current_location = "Unknown"
 
+    def get_current_location(self):
+        return self.current_location
+
     def update_current_location(self, location):
         self.current_location = location
 

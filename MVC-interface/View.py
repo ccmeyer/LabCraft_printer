@@ -821,6 +821,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if self.model.rack_model.get_gripper_printer_head() == None:
             self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
             return
+        if self.model.machine_model.get_current_location() != 'balance':
+            response = self.main_window.popup_yes_no("Must be positioned at the balance","Would you like to move to the balance?")
+            if response == '&No':
+                self.popup_message_signal.emit("Must be positioned at the balance","Please move to the balance before calibrating pressure")
+                return
+            elif response == '&Yes':
+                self.controller.move_to_location('balance',manual=False)
         mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         mass_calibration_dialog.exec()
     
@@ -985,7 +992,10 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         row += 1
 
         self.current_volume_label = QtWidgets.QLabel("Current Volume:")
-        self.current_volume_value = QtWidgets.QLabel(f"{self.model.calibration_model.get_current_printer_head_volume():.2f} uL")
+        current_volume = self.model.calibration_model.get_current_printer_head_volume()
+        if current_volume == None:
+            current_volume = 0
+        self.current_volume_value = QtWidgets.QLabel(f"{current_volume:.2f} uL")
         self.user_input_layout.addWidget(self.current_volume_label, row, 0)
         self.user_input_layout.addWidget(self.current_volume_value, row, 1)
         row += 1
