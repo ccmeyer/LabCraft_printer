@@ -1872,28 +1872,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 self.plate_selection.blockSignals(False)  # Unblock signals
                 return
             else:
-                self.model.clear_experiment()
-                self.model.reload_experiment(plate_name=plate_format)
+                # self.model.clear_experiment()
+                # self.model.reload_experiment(plate_name=plate_format)
+                self.model.load_experiment_from_model(plate_name=plate_format)
         else:
             self.model.well_plate.set_plate_format(plate_format)
     
-    # def on_load_experiment(self):
-    #     """Load an experiment CSV file."""
-    #     # Check if a printer head is picked up
-    #     if self.model.rack_model.gripper_printer_head is not None:
-    #         self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before loading an experiment.")
-    #         return
-    #     # Check if an experiment is already loaded
-    #     if not self.model.reaction_collection.is_empty():
-    #         response = self.main_window.popup_yes_no("Load Experiment", "An experiment is already loaded. Do you want to clear it and load a new one?")
-    #         if response == "&No":
-    #             return
-    #         else:
-    #             self.model.clear_experiment()
-    #     file_path, _ = QFileDialog.getOpenFileName(self, "Open Experiment CSV", "", "CSV Files (*.csv)")
-    #     if file_path:
-    #         self.model.load_experiment_from_file(file_path)
-
     def on_experiment_loaded(self):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
@@ -3641,45 +3625,6 @@ class ExperimentDesignDialog(QDialog):
         """Save the current experiment setup to a new directory."""
         self.update_all_model_reagents()
         self.experiment_model.save_experiment()
-        # # Get the directory where the currently executed script is located
-        # script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # # Define the base directory for experiments relative to the script location
-        # base_experiment_dir = os.path.join(script_dir, "Experiments")
-
-        # # Ensure the base directory exists
-        # if not os.path.exists(base_experiment_dir):
-        #     os.makedirs(base_experiment_dir)
-
-        # # Ask the user to define a name for the new directory
-        # experiment_dir_name, ok = QInputDialog.getText(self, "Experiment Name", "Enter the name for the new experiment directory:")
-        
-        # if ok and experiment_dir_name:
-        #     # Create the full path to the new directory
-        #     experiment_dir = os.path.join(base_experiment_dir, experiment_dir_name)
-            
-        #     # Check if the directory already exists
-        #     if os.path.exists(experiment_dir):
-        #         overwrite = QMessageBox.question(self, "Overwrite Directory?", 
-        #                                         "The directory already exists. Do you want to overwrite it?",
-        #                                         QMessageBox.Yes | QMessageBox.No)
-        #         if overwrite == QMessageBox.No:
-        #             return
-
-        #     # Create the directory
-        #     os.makedirs(experiment_dir, exist_ok=True)
-
-        #     # Define the path for the experiment design JSON file within the new directory
-        #     experiment_file_path = os.path.join(experiment_dir, "experiment_design.json")
-        #     progress_file_path = os.path.join(experiment_dir, "progress.json")
-        #     calibration_file_path = os.path.join(experiment_dir, "calibration.json")
-        #     key_file_path = os.path.join(experiment_dir, "key.csv")
-        #     # Save the experiment
-        #     self.experiment_model.save_experiment(experiment_dir_name,experiment_dir,experiment_file_path)
-        #     self.experiment_model.create_progress_file(file_name=progress_file_path)
-        #     self.model.calibration_model.create_calibration_file(calibration_file_path)
-        #     self.experiment_model.create_key_file(file_name=key_file_path)
-            #print(f"Experiment data saved in directory: {experiment_dir}")
 
     def experiment_in_progress(self, progress_file_path):
         with open(progress_file_path, 'r') as file:
@@ -3721,7 +3666,6 @@ class ExperimentDesignDialog(QDialog):
                 if os.path.exists(calibration_file_path):
                     self.model.calibration_model.load_calibration_data(calibration_file_path)
                 else:
-                    #print(f"No calibration.json file found in the directory: {chosen_dir}")
                     self.model.calibration_model.create_calibration_file(calibration_file_path)
                 
                 progress_file_path = os.path.join(chosen_dir, "progress.json")
@@ -3741,20 +3685,7 @@ class ExperimentDesignDialog(QDialog):
                     self.experiment_model.create_progress_file(file_name=progress_file_path) 
             else:
                 pass
-                #print(f"No experiment_design.json file found in the directory: {chosen_dir}")
     
-    # def optimize_stock_solutions(self):
-    #     self.experiment_model.optimize_stock_solutions()
-    
-    # def update_max_droplets(self, row):
-    #     """Update the maximum droplets for a reagent based on the total droplets available."""
-    #     print(f"\n-------Updating max droplets for row {row}\n")
-    #     max_droplets = self.experiment_model.get_reagent(row)["max_droplets"]
-    #     max_droplets_item = self.reagent_table.cellWidget(row, 6)
-    #     max_droplets_item.blockSignals(True)
-    #     max_droplets_item.setValue(max_droplets)
-    #     max_droplets_item.blockSignals(False)
-    #     self.update_model_reagent(row)
 
     def toggle_manual_entry(self, row):
         """Enable or disable the manual entry field based on mode selection."""

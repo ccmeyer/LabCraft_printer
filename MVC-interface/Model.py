@@ -879,8 +879,7 @@ class ExperimentModel(QObject):
         with open(self.experiment_file_path, 'w') as file:
             json.dump(data_to_save, file, indent=4, default=self.convert_to_serializable)
         print(f"Experiment data saved to {self.experiment_file_path}")
-        # if create_progress:
-        #     self.create_progress_file()
+
         self.reset_unsaved_changes()
 
     def create_progress_file(self,file_name=None):
@@ -889,7 +888,7 @@ class ExperimentModel(QObject):
             self.progress_file_path = file_name
 
         #print(f'Creating progress file at {self.progress_file_path}')
-
+        self.progress_data = {}
         for well in self.well_plate.get_all_wells():
             well_id = well.well_id
             reaction = well.assigned_reaction
@@ -2294,11 +2293,18 @@ class RackModel(QObject):
             slot = self.slots[slot_number]
             printer_head_info = None
             if slot.printer_head is not None:
-                printer_head_info = {
-                    "reagent": slot.printer_head.reagent,
-                    "concentration": slot.printer_head.concentration,
-                    "color": slot.printer_head.color
-                }
+                if slot.printer_head.is_calibration_chip():
+                    printer_head_info = {
+                        "reagent": "Calibration",
+                        "concentration": "--",
+                        "color": slot.printer_head.color
+                    }
+                else:
+                    printer_head_info = {
+                        "reagent": slot.printer_head.reagent,
+                        "concentration": slot.printer_head.concentration,
+                        "color": slot.printer_head.color
+                    }
             return {
                 "slot_number": slot.number,
                 "confirmed": slot.confirmed,
@@ -2947,7 +2953,6 @@ class Model(QObject):
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
             return
-        # if len(self.reaction_collection.get_all_reactions()) > 0:
         self.clear_experiment()
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
@@ -3014,9 +3019,11 @@ class Model(QObject):
         # Create and assign printer heads for each unique pair
         self.printer_head_manager.create_printer_heads(self.stock_solutions)
         for i in range(self.rack_model.get_num_slots()):
-            if not self.rack_model.get_slot_info(i)['printer_head'] is None:
-                print('Skipping slot:',i)
-                continue
+            current_slot = self.rack_model.get_slot_info(i)
+            if current_slot['printer_head'] != None:
+                if current_slot['printer_head']['reagent'] == 'Calibration':
+                    print('Skipping slot:',i)
+                    continue
             if not self.printer_head_manager.assign_printer_head_to_slot(i):
                 break  # Stop assigning if there are no more unassigned printer heads
 
