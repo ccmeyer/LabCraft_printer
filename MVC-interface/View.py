@@ -1913,6 +1913,17 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
             self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
             return
+        if self.model.rack_model.get_gripper_printer_head() != None:
+            print("Gripper is loaded")
+            if not self.model.rack_model.get_gripper_printer_head().is_calibration_chip():
+                self.main_window.popup_message("Calibration Chip Required","Please load the calibration chip into the gripper before calibrating the rack.")
+                return
+            else:
+                print("Calibration chip is loaded")
+        else:
+            print("Gripper is empty")
+            self.main_window.popup_message("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack.")
+            return
         plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
         
         # Execute the dialog and check if the user completes the calibration
@@ -2722,6 +2733,17 @@ class RackBox(QGroupBox):
         if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
             self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
             return
+        if self.model.rack_model.get_gripper_printer_head() != None:
+            print("Gripper is loaded")
+            if not self.model.rack_model.get_gripper_printer_head().is_calibration_chip():
+                self.main_window.popup_message("Calibration Chip Required","Please load the calibration chip into the gripper before calibrating the rack.")
+                return
+            else:
+                print("Calibration chip is loaded")
+        else:
+            print("Gripper is empty")
+            self.main_window.popup_message("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack.")
+            return
         rack_calibration_dialog = RackCalibrationDialog(self.main_window,self.model,self.controller)
         
         # Execute the dialog and check if the user completes the calibration
@@ -2842,7 +2864,10 @@ class RackBox(QGroupBox):
 
         if slot.printer_head:
             printer_head = slot.printer_head
-            complete = printer_head.check_complete(self.model.well_plate)
+            if not printer_head.is_calibration_chip():
+                complete = printer_head.check_complete(self.model.well_plate)
+            else:
+                complete = False
             label.setText(f"{printer_head.get_stock_name(new_line=True)}")
             color = QtGui.QColor(printer_head.color)
             color.setAlphaF(0.7)
@@ -2934,12 +2959,17 @@ class RackBox(QGroupBox):
         for row, printer_head in enumerate(unassigned_printer_heads):
             reagent_name = printer_head.get_reagent_name()
             concencentration = printer_head.get_stock_concentration()
-            complete = printer_head.check_complete(self.model.well_plate)
+            if not printer_head.is_calibration_chip():
+                complete = printer_head.check_complete(self.model.well_plate)
+            else:
+                complete = True
             color = printer_head.get_color()
             color = QtGui.QColor(color)
             color.setAlphaF(0.5)
 
             text_name = f"{reagent_name} - {concencentration} M"
+            if printer_head.is_calibration_chip():
+                text_name = f"Calibration"
             reagent_item = QTableWidgetItem(text_name)
             reagent_item.setTextAlignment(Qt.AlignCenter)
             if complete:
@@ -3482,11 +3512,13 @@ class ExperimentDesignDialog(QDialog):
         stock_solutions_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
         # if not view_only:
         self.update_model_reagent(row_position)
+        self.no_changes = False
 
     def delete_reagent(self, row):
         reagent_name = self.reagent_table.cellWidget(row, 0).text()
         self.experiment_model.delete_reagent(reagent_name)
         self.reagent_table.removeRow(row)
+        self.no_changes = False
 
     def activate_read_only_mode(self,title="Experiment Design (Read-Only)"):
         """Disable all input fields in the table and the rest of the window."""

@@ -1691,7 +1691,7 @@ class PrinterHead(QObject):
     change_color(new_color): Changes the color of the printer head.
     """
     volume_changed_signal = Signal(str) # Signal to notify when the volume of the printer head changes
-    def __init__(self, stock_solution,color='Blue'):
+    def __init__(self, stock_solution,color='Blue',calibration_chip=False):
         super().__init__()
         self.stock_solution = stock_solution
         self.color = color
@@ -1701,6 +1701,7 @@ class PrinterHead(QObject):
         self.effective_resistance = None
         self.bias = None
         self.target_droplet_volume = None
+        self.calibration_chip = calibration_chip
 
     def record_droplet_volume_lost(self,droplet_count):
         if self.target_droplet_volume is not None:
@@ -1717,6 +1718,9 @@ class PrinterHead(QObject):
         self.current_volume += volume
         self.volume_changed_signal.emit(self.stock_solution.get_stock_id())
 
+    def is_calibration_chip(self):
+        return self.calibration_chip
+    
     def get_current_volume(self):
         return self.current_volume
     
@@ -1727,15 +1731,23 @@ class PrinterHead(QObject):
         return self.stock_solution
 
     def get_stock_id(self):
+        if self.stock_solution is None:
+            return 'Calibration'
         return self.stock_solution.get_stock_id()
     
     def get_reagent_name(self):
+        if self.stock_solution is None:
+            return 'Calibration'
         return self.stock_solution.get_reagent_name()
     
     def get_stock_concentration(self):
+        if self.stock_solution is None:
+            return '--'
         return self.stock_solution.get_stock_concentration()
     
     def get_stock_name(self,new_line=False):
+        if self.stock_solution is None:
+            return 'Calibration'
         return self.stock_solution.get_stock_name(new_line=new_line)
 
     def get_color(self):
@@ -1762,7 +1774,8 @@ class PrinterHead(QObject):
                 if not well.check_stock_complete(stock_id):
                     self.mark_incomplete()
                     return False
-        self.mark_complete()
+        if not self.calibration_chip:
+            self.mark_complete()
         return True
 
     def check_calibration_complete(self):
@@ -1792,12 +1805,17 @@ class PrinterHeadManager(QObject):
     - unassigned_printer_heads (list): List of printer heads that have not yet been assigned to any slot.
     """
     volume_changed_signal = Signal()
-    def __init__(self,color_dict):
+    def __init__(self,color_dict,rack_model):
         super().__init__()
         self.print_head_colors = color_dict
+        self.rack_model = rack_model
         self.printer_heads = []
         self.assigned_printer_heads = {}
         self.unassigned_printer_heads = []
+        self.create_calibration_chip()
+        calibration_chip = self.get_calibration_chip()
+        self.swap_printer_head(4,calibration_chip)
+
 
     def create_printer_heads(self, stock_solutions_manager):
         """
@@ -1814,12 +1832,27 @@ class PrinterHeadManager(QObject):
             self.unassigned_printer_heads.append(printer_head)
         #print(f"Created {len(self.printer_heads)} printer heads.")
 
+    def create_calibration_chip(self):
+        '''Create a calibration chip printer head'''
+        calibration_chip = PrinterHead(None,color="#000000",calibration_chip=True)
+        self.printer_heads.append(calibration_chip)
+        self.unassigned_printer_heads.append(calibration_chip)
+        print('Created calibration chip printer head.')
+
+    def get_calibration_chip(self):
+        for printer_head in self.printer_heads:
+            if printer_head.is_calibration_chip():
+                print('Found calibration chip printer head')
+                return printer_head
+        print('No calibration chip printer head found.')
+        return None
+
     def volume_changed(self,stock_id):
         print(f'Volume changed for printer head {stock_id}')
         self.volume_changed_signal.emit()
 
 
-    def assign_printer_head_to_slot(self, slot_number, rack_model):
+    def assign_printer_head_to_slot(self, slot_number):
         """
         Assign an available printer head to a specified slot in the rack.
 
@@ -1832,7 +1865,7 @@ class PrinterHeadManager(QObject):
         """
         if self.unassigned_printer_heads:
             printer_head = self.unassigned_printer_heads.pop(0)
-            rack_model.update_slot_with_printer_head(slot_number, printer_head)
+            self.rack_model.update_slot_with_printer_head(slot_number, printer_head)
             self.assigned_printer_heads[slot_number] = printer_head
             print(f"Assigned printer head '{printer_head.get_stock_id()}' to slot {slot_number}.")
             return True
@@ -1840,17 +1873,22 @@ class PrinterHeadManager(QObject):
             print("No more unassigned printer heads available.")
             return False
 
-    def swap_printer_head(self, slot_number, new_printer_head, rack_model):
+    def swap_printer_head(self, slot_number, new_printer_head):
         """
         Swap the printer head in the specified slot with the provided unassigned printer head.
         """
-        old_printer_head = rack_model.slots[slot_number].printer_head
+        old_printer_head = self.rack_model.slots[slot_number].printer_head
         if old_printer_head:
             self.unassigned_printer_heads.append(old_printer_head)
             self.unassigned_printer_heads.remove(new_printer_head)
-            rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
+            self.rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
             self.assigned_printer_heads[slot_number] = new_printer_head
-            #print(f"Swapped printer head in slot {slot_number} with '{new_printer_head.get_stock_id()}'.")
+            print(f"Swapped printer head in slot {slot_number} with '{new_printer_head.get_stock_id()}'.")
+        else:
+            self.rack_model.update_slot_with_printer_head(slot_number, new_printer_head)
+            self.assigned_printer_heads[slot_number] = new_printer_head
+            self.unassigned_printer_heads.remove(new_printer_head)
+            print(f"No printer head in slot {slot_number} to swap.")
 
 
     def generate_color(self):
@@ -2772,7 +2810,7 @@ class Model(QObject):
         self.well_plate = WellPlate(self.all_plate_data)
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
-        self.printer_head_manager = PrinterHeadManager(self.printer_head_colors)
+        self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
         self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.prediction_model_path,self.resistance_model_path)
         self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
         self.experiment_file_path = None
@@ -2909,8 +2947,8 @@ class Model(QObject):
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
             return
-        if len(self.reaction_collection.get_all_reactions()) > 0:
-            self.clear_experiment()
+        # if len(self.reaction_collection.get_all_reactions()) > 0:
+        self.clear_experiment()
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
         
@@ -2967,13 +3005,19 @@ class Model(QObject):
         self.printer_head_manager.clear_all_printer_heads()
         self.rack_model.clear_all_slots()
         self.experiment_loaded.emit()
+        self.printer_head_manager.create_calibration_chip()
+        calibration_chip = self.printer_head_manager.get_calibration_chip()
+        self.printer_head_manager.swap_printer_head(4,calibration_chip)
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""
         # Create and assign printer heads for each unique pair
         self.printer_head_manager.create_printer_heads(self.stock_solutions)
         for i in range(self.rack_model.get_num_slots()):
-            if not self.printer_head_manager.assign_printer_head_to_slot(i, self.rack_model):
+            if not self.rack_model.get_slot_info(i)['printer_head'] is None:
+                print('Skipping slot:',i)
+                continue
+            if not self.printer_head_manager.assign_printer_head_to_slot(i):
                 break  # Stop assigning if there are no more unassigned printer heads
 
 

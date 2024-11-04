@@ -552,7 +552,7 @@ class Controller(QObject):
 
     def swap_printer_head(self, slot_number, new_printer_head):
         """Handle swapping of printer heads."""
-        self.model.printer_head_manager.swap_printer_head(slot_number, new_printer_head, self.model.rack_model)
+        self.model.printer_head_manager.swap_printer_head(slot_number, new_printer_head)
 
     def swap_printer_heads_between_slots(self, slot_number_1, slot_number_2):
         """
