@@ -215,10 +215,10 @@ void PressureRegulator::adjustPressure() {
     pressureDifference = currentPressure - targetPressure;
 
     maxSpeed = 2000;
-    minSpeed = 350;
+    minSpeed = 300;
 
     // Deadband buffer to avoid small fluctuations causing motor movements
-    if (abs(pressureDifference) <= 1 && !targetReached) {
+    if (abs(pressureDifference) <= 2 && !targetReached) {
         syringeSpeed = 0;
         targetReachedCounter++;
         if (targetReachedCounter >= 20) {
