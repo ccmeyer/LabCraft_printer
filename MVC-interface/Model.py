@@ -1024,7 +1024,7 @@ class ExperimentModel(QObject):
     def create_key_file(self,file_name=None):
         if file_name is not None:
             self.key_file_path = file_name
-        print(f'Creating key file at {file_name}')
+        print(f'Creating key file at {self.key_file_path}')
         print(self.progress_data)
         key_df = self.progress_to_key()
         print(key_df)
@@ -1060,6 +1060,7 @@ class ExperimentModel(QObject):
         """Load all information required to repopulate the model from a JSON file."""
         self.experiment_file_path = filename
         self.experiment_dir_path = experiment_dir
+        self.update_all_paths()
         
         with open(filename, 'r') as file:
             loaded_data = json.load(file)
@@ -1122,6 +1123,38 @@ class ExperimentModel(QObject):
 
                 if well_data["completed"]:
                     well.state_changed.emit(well_id)
+
+    def reset_experiment_model(self):
+        """Reset the experiment model to its initial state."""
+        self.reagents = []
+        temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
+        self.metadata = {
+            "name": temp_name,
+            "replicates": 1,
+            "max_droplets": 50,
+            'droplet_volume': 0.03,
+            'fill_reagent': 'Water',
+            'random_seed': None,
+            'reduction_factor': 1,
+            'start_row':0,
+            'start_col':0
+        }
+        self.stock_solutions = []
+        self.experiment_df = pd.DataFrame()
+        self.complete_lookup_table = pd.DataFrame()
+        self.all_droplet_df = pd.DataFrame()
+
+        self.experiment_dir_path = None
+        self.experiment_file_path = None
+        self.progress_file_path = None
+        self.progress_data = {}
+        self.calibration_file_path = None
+        self.key_file_path = None
+
+        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
+        self.initialize_experiment()
+
+        self.unsaved_changes = False
             
 
 
@@ -3059,7 +3092,7 @@ class Model(QObject):
             reaction_collection.add_reaction(reaction)
         return stock_solutions,reaction_collection
 
-    def load_experiment_from_model(self,plate_name=None):
+    def load_experiment_from_model(self,plate_name=None,load_progress=False):
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
             return
@@ -3087,7 +3120,13 @@ class Model(QObject):
         self.well_plate.assign_reactions_to_wells(all_reactions,start_row=start_row,start_col=start_col)
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
-        self.experiment_model.create_progress_file()
+        self.experiment_model.update_all_paths()
+        if load_progress:
+            print('Loading progress in load experiment from model')
+            self.experiment_model.load_progress()
+        else:
+            print('Creating new progress file from load experiment from model')
+            self.experiment_model.create_progress_file()
         self.experiment_model.create_key_file()
         self.calibration_model.apply_calibrations_to_all_printer_heads()
         self.experiment_loaded.emit()

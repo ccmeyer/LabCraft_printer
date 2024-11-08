@@ -3276,6 +3276,7 @@ class ExperimentDesignDialog(QDialog):
         self.layout = QHBoxLayout(self)
         print('NEW WINDOW')
         self.no_changes = True
+        self.load_progress = False
         
         # Table to hold all reagent information
         self.reagent_table = QTableWidget(0, 13, self)
@@ -3404,10 +3405,15 @@ class ExperimentDesignDialog(QDialog):
         self.randomize_wells_button.toggled.connect(self.update_randomize_wells)                       # Checkable button to specify if the wells should be randomized or not       
         self.button_layout.addWidget(self.randomize_wells_button) 
         
-        # Button to update the table
-        self.update_table_button = QPushButton("Update Table")
-        self.update_table_button.clicked.connect(self.update_all_model_reagents)
-        self.button_layout.addWidget(self.update_table_button)
+        # # Button to update the table
+        # self.update_table_button = QPushButton("Update Table")
+        # self.update_table_button.clicked.connect(self.update_all_model_reagents)
+        # self.button_layout.addWidget(self.update_table_button)
+
+        # Button to create a new experiment
+        self.new_experiment_button = QPushButton("New Experiment")
+        self.new_experiment_button.clicked.connect(self.new_experiment)
+        self.button_layout.addWidget(self.new_experiment_button)
 
         # Button to load an experiment
         self.load_experiment_button = QPushButton("Load Experiment")
@@ -3596,12 +3602,14 @@ class ExperimentDesignDialog(QDialog):
         self.fill_reagent_input.setReadOnly(True)
         self.randomize_wells_button.setDisabled(True)
         self.add_reagent_button.setDisabled(True)
-        self.update_table_button.setDisabled(True)
-        self.load_experiment_button.setDisabled(True)
+        # self.update_table_button.setDisabled(True)
+        # self.load_experiment_button.setDisabled(True)
         self.save_experiment_button.setDisabled(True)
         self.generate_experiment_button.setDisabled(True)
         self.reagent_table.setDisabled(True)
         self.stock_table.setDisabled(True)
+        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white;")
+
 
     def activate_edit_mode(self):
         """Enable all input fields in the table and the rest of the window."""
@@ -3612,12 +3620,14 @@ class ExperimentDesignDialog(QDialog):
         self.fill_reagent_input.setReadOnly(False)
         self.randomize_wells_button.setDisabled(False)
         self.add_reagent_button.setDisabled(False)
-        self.update_table_button.setDisabled(False)
+        # self.update_table_button.setDisabled(False)
         self.load_experiment_button.setDisabled(False)
         self.save_experiment_button.setDisabled(False)
         self.generate_experiment_button.setDisabled(False)
         self.reagent_table.setDisabled(False)
         self.stock_table.setDisabled(False)
+        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
+
 
     def update_model_reagent(self, row,mark_change=True):
         """Update the reagent in the model based on the current row values."""
@@ -3718,6 +3728,14 @@ class ExperimentDesignDialog(QDialog):
                     return True
                 
         return False
+    
+    def new_experiment(self):
+        """Clears all existing experiment design information and data and resets to how the program is at launch"""
+        self.model.clear_experiment()
+        self.experiment_model.reset_experiment_model()
+        self.load_experiment_to_view()
+        self.activate_edit_mode()
+        self.no_changes = False
         
     
     def load_experiment(self):
@@ -3744,6 +3762,7 @@ class ExperimentDesignDialog(QDialog):
                 self.experiment_model.load_experiment(experiment_file_path,chosen_dir)
                 print("\n----Finished model loading----\n")
                 self.load_experiment_to_view()
+                self.no_changes = False
 
                 calibration_file_path = os.path.join(chosen_dir, "calibration.json")
                 if os.path.exists(calibration_file_path):
@@ -3760,12 +3779,18 @@ class ExperimentDesignDialog(QDialog):
                                                     QMessageBox.Yes | QMessageBox.No)
                         if resume == QMessageBox.No:
                             self.experiment_model.create_progress_file(file_name=progress_file_path)
+                            self.load_progress = False
                             return
                         elif resume == QMessageBox.Yes:
                             self.experiment_model.read_progress_file(progress_file_path)
+                            self.load_progress = True
                             self.close()
+                    else:
+                        self.activate_edit_mode()
+
                 else:
                     self.experiment_model.create_progress_file(file_name=progress_file_path) 
+                    self.activate_edit_mode()
             else:
                 pass
     
@@ -3819,7 +3844,7 @@ class ExperimentDesignDialog(QDialog):
             print('No changes made to the experiment design')
         else:
             print('Changes made to the experiment design')
-            self.model.load_experiment_from_model()
+            self.model.load_experiment_from_model(load_progress=self.load_progress)
             self.no_changes = True
 
     def generate_experiment(self):
