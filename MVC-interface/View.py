@@ -1239,7 +1239,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
             self.target_drop_volume_spinbox.setValue(target_volume)
             self.handle_target_drop_volume_change(target_volume)
-            self.controller.update_balance_prediction_models()
+            self.controller.update_balance_prediction_models(target_volume=target_volume)
 
     def handle_target_drop_volume_change(self, value):
         """Handle changes to the target drop volume value. Redraws the volume-pressure plot with a horizontal line at the target volume."""

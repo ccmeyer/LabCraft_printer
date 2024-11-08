@@ -67,9 +67,10 @@ class Balance(QObject):
             self.connected = False
             return False
         
-    def update_prediction_models(self,prediction_model_path,resistance_model_path):
+    def update_prediction_models(self,prediction_model_path,resistance_model_path,target_volume):
         self.prediction_model = joblib.load(prediction_model_path)
         self.resistance_model = joblib.load(resistance_model_path)
+        self.target_volume = target_volume
 
     # def load_prediction_models(self):
     #     """Load the prediction model from the specified file path."""
@@ -131,27 +132,6 @@ class Balance(QObject):
             return self.mass_log[-1]
         else:
             return 0
-
-    # def simulate_mass(self,num_droplets,psi):
-    #     print('Simulating mass')
-    #     # Reference points
-    #     ref_droplets = 100
-    #     ref_points = np.array([
-    #         [1.8, 3],
-    #         [2.2, 4],
-    #     ])
-
-    #     # Calculate the linear fit for the reference points
-    #     coefficients = np.polyfit(ref_points[:, 0], ref_points[:, 1] / ref_droplets, 1)
-    #     # print('Coefficients:',coefficients)
-    #     # Calculate the mass per droplet for the given pressure
-    #     mass_per_droplet = coefficients[0] * psi + coefficients[1]
-    #     # for point in ref_points:
-    #     #     print('Point:',point[0],point[1],coefficients[0] * point[0] + coefficients[1])
-    #     # Calculate the mass for the given number of droplets
-    #     mass = mass_per_droplet * num_droplets
-
-    #     return mass
     
     def simulate_mass(self, num_droplets,pulse_width):
         printer_head = self.model.rack_model.get_gripper_printer_head()
@@ -159,7 +139,10 @@ class Balance(QObject):
         
         if printer_head is not None:
             if current_id not in self.resistance_dict.keys():
-                resistance = np.random.randint(25,45)
+                if self.target_volume > 50:
+                    resistance = np.random.randint(self.target_volume-10,self.target_volume+30)
+                else:
+                    resistance = np.random.randint(self.target_volume-15,self.target_volume+10)
                 self.resistance_dict.update({current_id:resistance})
                 #print(f'Adding simulated resistance: {current_id}-{self.current_resistance}')
             effective_resistance = self.resistance_dict[current_id]

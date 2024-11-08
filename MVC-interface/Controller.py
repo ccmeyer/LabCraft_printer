@@ -94,10 +94,10 @@ class Controller(QObject):
         self.machine.disconnect_balance()
         self.model.machine_model.disconnect_balance()
 
-    def update_balance_prediction_models(self):
+    def update_balance_prediction_models(self,target_volume=40):
         pred_model = self.model.calibration_model.get_selected_model_path()
         resistance_model = self.model.calibration_model.get_selected_resistance_model_path()
-        self.machine.balance.update_prediction_models(pred_model,resistance_model)
+        self.machine.balance.update_prediction_models(pred_model,resistance_model,target_volume)
 
     def pause_commands(self):
         """Pause the machine."""

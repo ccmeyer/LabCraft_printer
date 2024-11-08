@@ -290,7 +290,8 @@ class MassCalibrationModel(QObject):
         elif self.selected_dir is not None:
             return self.model_metadata[self.selected_dir]['model_name']
         else:
-            return self.model_metadata[list(self.model_metadata.keys())[0]]['model_name']
+            return '65um low viscosity'
+            # return self.model_metadata[list(self.model_metadata.keys())[0]]['model_name']
 
     def get_prediction_model_path_from_name(self,name):
         for model_dir in self.model_metadata.keys():
