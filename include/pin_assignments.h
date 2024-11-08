@@ -46,7 +46,7 @@ const int Y_SW_RX = Y_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the s
 // Motor2_1 - X right side - Uses modified wiring green, black, blue, red
 // Motor2_2 - X left side - Uses standard wiring red, blue, green, black
 // Standard control modality
-const bool X_INV_DIR = true; // Invert direction for Motor2_1
+const bool X_INV_DIR = false; // Invert direction for Motor2_1
 const int X_EN_PIN = PG5;      // Enable - EN pin top left
 const int X_DIR_PIN = PG3;     // Direction - DIR pin bottom left
 const int X_STEP_PIN = PF11;    // Step - STP pin second from bottom left
