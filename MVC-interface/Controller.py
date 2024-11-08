@@ -94,6 +94,11 @@ class Controller(QObject):
         self.machine.disconnect_balance()
         self.model.machine_model.disconnect_balance()
 
+    def update_balance_prediction_models(self):
+        pred_model = self.model.calibration_model.get_selected_model_path()
+        resistance_model = self.model.calibration_model.get_selected_resistance_model_path()
+        self.machine.balance.update_prediction_models(pred_model,resistance_model)
+
     def pause_commands(self):
         """Pause the machine."""
         self.machine.pause_commands()
@@ -519,6 +524,7 @@ class Controller(QObject):
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
             self.wait_command()
             self.move_to_location(name,x_offset=True,coords=coords,override=True)
+            # self.model.calibration_model.update_calibration_models(self.model.rack_model.get_gripper_printer_head())
         else:
             #print(f'Error: {error_msg}')
             pass
@@ -578,11 +584,11 @@ class Controller(QObject):
         if printer_head is not None:
             if printer_head.check_calibration_complete():
                 print('Controller: using calibrations to change pulse width')
-                vol, res, target, bias = printer_head.get_prediction_data()
+                vol, res, target, bias, pred_model, resistance_model, resistance_pulse_width = printer_head.get_prediction_data()
                 if expected_volume is not None:
                     #print(f'Controller: using expected volume: {expected_volume}')
                     vol = expected_volume
-                new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias)
+                new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias, prediction_model=pred_model,resistance_pulse_width=resistance_pulse_width)
                 if abs(self.model.machine_model.get_pulse_width() - new_pulse_width) > 2:
                     self.set_pulse_width(new_pulse_width,manual=False)
             

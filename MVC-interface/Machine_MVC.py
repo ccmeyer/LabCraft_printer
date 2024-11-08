@@ -35,11 +35,11 @@ class Balance(QObject):
         if port == 'Virtual':
             print('Connecting to virtual balance')
             self.script_dir = os.path.dirname(os.path.abspath(__file__))
-            self.prediction_model_path = os.path.join(self.script_dir, 'Presets','large_lr_pipeline.pkl')
-            self.resistance_model_path = os.path.join(self.script_dir, 'Presets','large_resistance_pipeline.pkl')
+            # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','large_lr_pipeline.pkl')
+            # self.resistance_model_path = os.path.join(self.script_dir, 'Presets','large_resistance_pipeline.pkl')
             self.prediction_model = None
             self.resistance_model = None
-            self.load_prediction_models()
+            # self.load_prediction_models()
             self.current_resistance = None
             self.current_printer_head_id = None
             self.current_pulse_width = None
@@ -67,10 +67,14 @@ class Balance(QObject):
             self.connected = False
             return False
         
-    def load_prediction_models(self):
-        """Load the prediction model from the specified file path."""
-        self.prediction_model = joblib.load(self.prediction_model_path)
-        self.resistance_model = joblib.load(self.resistance_model_path)
+    def update_prediction_models(self,prediction_model_path,resistance_model_path):
+        self.prediction_model = joblib.load(prediction_model_path)
+        self.resistance_model = joblib.load(resistance_model_path)
+
+    # def load_prediction_models(self):
+    #     """Load the prediction model from the specified file path."""
+    #     self.prediction_model = joblib.load(self.prediction_model_path)
+    #     self.resistance_model = joblib.load(self.resistance_model_path)
         
     def close_connection(self):
         if not self.simulate:
@@ -159,12 +163,15 @@ class Balance(QObject):
                 self.resistance_dict.update({current_id:resistance})
                 #print(f'Adding simulated resistance: {current_id}-{self.current_resistance}')
             effective_resistance = self.resistance_dict[current_id]
-            current_volume, _, _, _ = printer_head.get_prediction_data()
+            current_volume, _, _, _, _, _, _ = printer_head.get_prediction_data()
             input_features = pd.DataFrame({
                 'pulse_width': [pulse_width],
                 'starting_volume': [current_volume],
                 'effective_resistance': [effective_resistance]
             })
+            if self.prediction_model is None:
+                print('Prediction model not loaded')
+                return 0
             predicted_volume = self.prediction_model.predict(input_features)[0]
             mass = predicted_volume * num_droplets / 1000
             error = np.random.normal(0, 0.005)
