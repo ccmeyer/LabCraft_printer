@@ -1,0 +1,7 @@
+{
+    "model_name": "65um low viscosity",
+    "printer_head_type": "65um",
+    "resistance_pulse_width": 4200,
+    "standard_pressure": 2.5,
+    "target_droplet_volume": 40
+}

@@ -991,6 +991,16 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.current_stock_value, row, 1)
         row += 1
 
+        # Add a combo box to select the desired predictive model
+        self.model_label = QtWidgets.QLabel("Predictive Model:")
+        self.model_combobox = QtWidgets.QComboBox()
+        model_names = self.model.calibration_model.get_all_model_names()
+        self.model_combobox.addItems(model_names)
+        self.model_combobox.currentIndexChanged.connect(self.handle_model_change)
+        self.user_input_layout.addWidget(self.model_label, row, 0)
+        self.user_input_layout.addWidget(self.model_combobox, row, 1)
+        row += 1
+
         self.current_volume_label = QtWidgets.QLabel("Current Volume:")
         current_volume = self.model.calibration_model.get_current_printer_head_volume()
         if current_volume == None:
@@ -1022,6 +1032,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.target_drop_volume_spinbox.setSingleStep(1)
         self.target_drop_volume_spinbox.setRange(1, 100)
         self.target_drop_volume_spinbox.setValue(40)
+        self.target_drop_volume_spinbox.valueChanged.connect(self.handle_target_drop_volume_change)
         # self.target_drop_volume_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.target_drop_volume_label, row, 0)
         self.user_input_layout.addWidget(self.target_drop_volume_spinbox, row, 1)
@@ -1171,10 +1182,78 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.model.calibration_model.calibration_complete_signal.connect(self.handle_calibration_complete)
         self.model.calibration_model.change_volume_signal.connect(self.update_volume)
         
+        last_model_name = self.model.calibration_model.get_last_model_name()
+        if last_model_name in model_names:
+            self.model_combobox.setCurrentText(last_model_name)
+        self.handle_model_change(self.model_combobox.currentIndex())
+
         self.update_printing_parameters()
         self.update_volume_pressure_plot()
 
+    def add_horizontal_line(self, y_value, color=QtCore.Qt.black, pen=None):
+        """
+        Adds a horizontal line to the given chart at the specified y_value.
 
+        :param chart: The chart to which the line will be added.
+        :param axisX: The X axis to attach the line to.
+        :param axisY: The Y axis to attach the line to.
+        :param y_value: The y-coordinate at which the line will be drawn.
+        :param color: The color of the line. Default is black.
+        :param pen: Optional QPen object to customize the line's appearance.
+        """
+        line_series = QtCharts.QLineSeries()
+        if pen:
+            line_series.setPen(pen)
+        else:
+            line_series.setColor(color)
+        line_series.append(0, y_value)
+        line_series.append(10000, y_value)
+        self.volume_pressure_chart.addSeries(line_series)
+        line_series.attachAxis(self.volume_pressure_axisX)
+        line_series.attachAxis(self.volume_pressure_axisY)
+
+    def add_target_volume_lines(self,target_volume,tolerance=0.03):
+        line_pen = QtGui.QPen(QtCore.Qt.black)
+        line_pen.setWidth(1)
+        self.add_horizontal_line(target_volume,color=QtCore.Qt.red)
+        self.add_horizontal_line(target_volume*(1+tolerance),color=QtCore.Qt.black,pen=line_pen)
+        self.add_horizontal_line(target_volume*(1-tolerance),color=QtCore.Qt.black,pen=line_pen)
+
+    def handle_model_change(self,index):
+        """Handle changes to the predictive model."""
+        model_name = self.model_combobox.currentText()
+        result = self.model.calibration_model.set_models_by_name(model_name)
+        if not result:
+            self.main_window.popup_message("Model Error","Model not found")
+        else:
+            target_volume, printer_head_type, resistance_pulse_width, standard_pressure = self.model.calibration_model.get_default_values()
+            self.pulse_width_spinbox.blockSignals(True)
+            self.pulse_width_spinbox.setValue(resistance_pulse_width)
+            self.pulse_width_spinbox.blockSignals(False)
+            self.controller.set_pulse_width(resistance_pulse_width,manual=False)
+
+            self.target_pressure_spinbox.blockSignals(True)
+            self.target_pressure_spinbox.setValue(standard_pressure)
+            self.target_pressure_spinbox.blockSignals(False)
+            self.controller.set_absolute_pressure(standard_pressure,manual=False)
+
+            self.target_drop_volume_spinbox.setValue(target_volume)
+            self.handle_target_drop_volume_change(target_volume)
+            self.controller.update_balance_prediction_models()
+
+    def handle_target_drop_volume_change(self, value):
+        """Handle changes to the target drop volume value. Redraws the volume-pressure plot with a horizontal line at the target volume."""
+        current_target_volume = self.target_drop_volume_spinbox.value()
+        # Remove old lines
+        # Remove only the target volume lines
+        lines_to_remove = [series for series in self.volume_pressure_chart.series() if series not in [self.volume_pressure_series, self.linear_fit_series]]
+        for series in lines_to_remove:
+            self.volume_pressure_chart.removeSeries(series)
+        # Add new lines
+        self.add_target_volume_lines(current_target_volume)
+        self.update_volume_pressure_plot()
+
+            
     def handle_target_pressure_change(self, value):
         """Handle changes to the target pressure value."""
         self.controller.set_absolute_pressure(value,manual=True)
@@ -1355,9 +1434,11 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     def update_volume_pressure_plot(self):
         self.volume_pressure_series.clear()
         measurements = self.model.calibration_model.get_measurements()
+        print(f'Measurements:\n{measurements}')
         pressures = []
         volumes = []
         for pressure,pulse_width,droplets, volume in measurements:
+            print(f'Pressure: {pressure}, Pulse Width: {pulse_width}, Droplets: {droplets}, Volume: {volume}')
             self.volume_pressure_series.append(pulse_width, volume)
             pressures.append(pulse_width)
             volumes.append(volume)
@@ -1381,11 +1462,13 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             max_pressure = 3500
         
         if len(volumes) > 0:
-            min_volume = min(volumes) - 5
-            max_volume = max(volumes) + 5
+            min_volume = min(volumes) - 10
+            max_volume = max(volumes) + 10
         else:
-            min_volume = 20
-            max_volume = 60
+            print('No volumes')
+            current_target_volume = self.target_drop_volume_spinbox.value()
+            min_volume = current_target_volume - 20
+            max_volume = current_target_volume + 20
 
         self.volume_pressure_axisX.setRange(min_pressure, max_pressure)
         self.volume_pressure_axisY.setRange(min_volume, max_volume)
