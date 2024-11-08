@@ -711,7 +711,10 @@ class Controller(QObject):
                 print('\nController: Using calibrations during array printing')
                 expected_volume = current_printer_head.get_current_volume()
                 droplet_volume = current_printer_head.get_target_droplet_volume()
-                update_volume = True
+                if current_printer_head.get_current_volume() == None:
+                    update_volume = False
+                else:
+                    update_volume = True
             else:
                 print('\nController: using default pulse width')
                 expected_volume = None
