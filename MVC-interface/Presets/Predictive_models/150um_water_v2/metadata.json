@@ -1,0 +1,7 @@
+{
+    "model_name": "150um low viscosity v2",
+    "printer_head_type": "150um",
+    "resistance_pulse_width": 2800,
+    "standard_pressure": 1,
+    "target_droplet_volume": 40
+}

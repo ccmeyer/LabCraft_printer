@@ -15,6 +15,7 @@ import json
 import os
 import random
 import time
+import shutil
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -3426,6 +3427,11 @@ class ExperimentDesignDialog(QDialog):
         self.save_experiment_button.clicked.connect(self.save_experiment)
         self.button_layout.addWidget(self.save_experiment_button)
 
+        # Button to duplicate the experiment and save it as a new one
+        self.duplicate_experiment_button = QPushButton("Duplicate Experiment")
+        self.duplicate_experiment_button.clicked.connect(self.duplicate_experiment)
+        self.button_layout.addWidget(self.duplicate_experiment_button)
+
         # Button to generate the experiment
         self.generate_experiment_button = QPushButton("Generate Experiment")
         self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
@@ -3448,10 +3454,10 @@ class ExperimentDesignDialog(QDialog):
 
         self.load_experiment_to_view()
 
-        if self.experiment_in_progress(self.experiment_model.progress_file_path):
+        if self.model.rack_model.get_gripper_printer_head() != None:
+            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Unload gripper to edit or create new experiment",fully_restrict=True)
+        elif self.experiment_in_progress(self.experiment_model.progress_file_path):
             self.activate_read_only_mode(title="Experiment Design (Read-Only) - Clear progress to edit")
-        elif self.model.rack_model.get_gripper_printer_head() != None:
-            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Unload gripper to edit")
         else:
             self.activate_edit_mode()
 
@@ -3593,7 +3599,7 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.removeRow(row)
         self.no_changes = False
 
-    def activate_read_only_mode(self,title="Experiment Design (Read-Only)"):
+    def activate_read_only_mode(self,title="Experiment Design (Read-Only)",fully_restrict=False):
         """Disable all input fields in the table and the rest of the window."""
         self.setWindowTitle(title)
         self.experiment_name_input.setReadOnly(True)
@@ -3602,8 +3608,12 @@ class ExperimentDesignDialog(QDialog):
         self.fill_reagent_input.setReadOnly(True)
         self.randomize_wells_button.setDisabled(True)
         self.add_reagent_button.setDisabled(True)
-        # self.update_table_button.setDisabled(True)
-        # self.load_experiment_button.setDisabled(True)
+        if fully_restrict:
+            self.load_experiment_button.setDisabled(True)
+            self.duplicate_experiment_button.setDisabled(True)
+            self.new_experiment_button.setDisabled(True)
+            self.save_experiment_button.setDisabled(True)
+            self.generate_experiment_button.setDisabled(True)
         self.save_experiment_button.setDisabled(True)
         self.generate_experiment_button.setDisabled(True)
         self.reagent_table.setDisabled(True)
@@ -3793,6 +3803,55 @@ class ExperimentDesignDialog(QDialog):
                     self.activate_edit_mode()
             else:
                 pass
+
+    def duplicate_experiment(self):
+        """Open a dialog to duplicate the experiment and save it as a new one.
+        The user can choose a new directory for the duplicated experiment. The dialogue also has a toggle button to 
+        transfer the calibration data from the original experiment to the duplicated one."""
+        # Open a dialog for a new name for the experiment directory
+        new_experiment_name, ok = QInputDialog.getText(self, "New Experiment Name", "Enter a name for the new experiment:")
+        if not ok:
+            return
+        # Get the directory where the currently executed script is located
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Define the path to the new experiment directory
+        experiment_dir = os.path.join(script_dir, "Experiments", new_experiment_name)
+        
+        # Check if the directory already exists
+        if os.path.exists(experiment_dir):
+            overwrite = QMessageBox.question(self, "Overwrite Existing Experiment?", 
+                                            "An experiment with the same name already exists. Do you want to overwrite it?",
+                                            QMessageBox.Yes | QMessageBox.No)
+            # If the user does want to overwrite, delete the existing directory and its contents and create a new one
+            if overwrite == QMessageBox.Yes:
+                shutil.rmtree(experiment_dir)
+                os.makedirs(experiment_dir)
+            else:
+                return
+        else:
+            os.makedirs(experiment_dir)
+        
+        # Ask the user if they would like to transfer the calibration data
+        transfer = QMessageBox.question(self, "Transfer Calibration Data?", 
+                                            "Do you want to transfer the calibration data to the new experiment?",
+                                            QMessageBox.Yes | QMessageBox.No)
+        if transfer == QMessageBox.Yes:
+            copy_calibrations = True
+        else:
+            copy_calibrations = False
+
+        # Execute the duplication in the model
+        self.experiment_model.duplicate_experiment(new_experiment_name, experiment_dir, copy_calibrations=copy_calibrations)
+
+        # Load the duplicated experiment to the view
+        self.load_experiment_to_view()
+
+        # Activate edit mode
+        self.activate_edit_mode()
+
+        # Set the flag to indicate that changes have been made
+        self.no_changes = False
+
     
 
     def toggle_manual_entry(self, row):

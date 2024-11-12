@@ -15,6 +15,7 @@ import random
 import pyDOE3
 import time
 import glob
+import shutil
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -327,6 +328,12 @@ class MassCalibrationModel(QObject):
     def remove_all_calibrations_for_stock(self,):
         """Removes all measurements for the specified stock ID."""
         self.measurements = [m for m in self.measurements if m['stock_id'] != self.current_stock_id]
+        self.calibration_complete_signal.emit()
+        self.save_calibration_data(self.calibration_file_path)
+
+    def remove_all_calibrations(self):
+        """Removes all measurements."""
+        self.measurements = []
         self.calibration_complete_signal.emit()
         self.save_calibration_data(self.calibration_file_path)
 
@@ -960,6 +967,27 @@ class ExperimentModel(QObject):
         self.experiment_dir_path = new_experiment_dir
         self.update_all_paths()
         self.save_experiment()
+        return True
+    
+    def duplicate_experiment(self,new_name,new_experiment_path,copy_calibrations=False):
+        """Copy the experiment design information and create a new experiment directory using the new name.
+        The progress and calibration files are not copied.
+        """
+        # shutil.copytree(self.experiment_dir_path, new_experiment_path)
+        self.metadata['name'] = new_name
+        self.experiment_dir_path = new_experiment_path
+        self.update_all_paths()
+        self.save_experiment()
+        self.create_progress_file()
+        self.create_key_file()
+        if not copy_calibrations:
+            print('Deleting calibration file')
+            self.calibration_model.remove_all_calibrations()
+            self.calibration_model.create_calibration_file(self.calibration_file_path)
+        else:
+            print('Copying calibration file')
+            self.calibration_model.update_calibration_file_path(self.calibration_file_path)
+            self.calibration_model.save_calibration_data(self.calibration_file_path)
         return True
 
     def update_all_paths(self):
