@@ -240,6 +240,7 @@ class MassCalibrationModel(QObject):
 
     def create_calibration_file(self, file_path):
         self.calibration_file_path = file_path
+        self.remove_all_calibrations()
         with open(file_path, 'w') as file:
             json.dump([], file)
         #print(f"Calibration file created at {file_path}")

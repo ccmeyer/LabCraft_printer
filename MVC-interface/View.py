@@ -856,7 +856,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.controller.set_absolute_pressure(pressure)
         
 class MassCalibrationDialog(QtWidgets.QDialog):
-
+    popup_message_signal = QtCore.Signal(str,str)
     def __init__(self, main_window,model,controller):
         super().__init__()
         self.main_window = main_window
@@ -873,6 +873,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.repeat_measurements = 0
         self.pressures_to_screen = []
         self.current_set_pulse_width = 4200
+        self.test_started = False
 
         self.setWindowTitle("Mass Calibration")
         self.resize(1200, 700)
@@ -932,6 +933,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.volume_pressure_chart.addAxis(self.volume_pressure_axisY, QtCore.Qt.AlignLeft)
         self.volume_pressure_series.attachAxis(self.volume_pressure_axisX)
         self.volume_pressure_series.attachAxis(self.volume_pressure_axisY)
+        
+        # Add a series for the last measurement
+        self.last_measurement_series = QtCharts.QScatterSeries()
+        self.last_measurement_series.setColor(QtCore.Qt.red)
+        self.last_measurement_series.setMarkerSize(5.0)
+        self.volume_pressure_chart.addSeries(self.last_measurement_series)
+        self.last_measurement_series.attachAxis(self.volume_pressure_axisX)
+        self.last_measurement_series.attachAxis(self.volume_pressure_axisY)
+
 
         # Create a series for the linear fit
         self.linear_fit_series = QtCharts.QLineSeries()
@@ -1094,57 +1104,57 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
         row += 1
 
-        self.calibrate_button = QtWidgets.QPushButton("Calibrate")
-        self.calibrate_button.clicked.connect(self.initiate_calibration_process)
-        self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
-        row += 1
+        # self.calibrate_button = QtWidgets.QPushButton("Calibrate")
+        # self.calibrate_button.clicked.connect(self.initiate_calibration_process)
+        # self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
+        # row += 1
 
-        self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
-        self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
-        self.pressure_screen_low_spinbox.setDecimals(0)
-        self.pressure_screen_low_spinbox.setSingleStep(10)
-        self.pressure_screen_low_spinbox.setRange(10,7000)
-        self.pressure_screen_low_spinbox.setValue(3500)
-        # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
-        self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
-        row += 1
+        # self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
+        # self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.pressure_screen_low_spinbox.setDecimals(0)
+        # self.pressure_screen_low_spinbox.setSingleStep(10)
+        # self.pressure_screen_low_spinbox.setRange(10,7000)
+        # self.pressure_screen_low_spinbox.setValue(3500)
+        # # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
+        # self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
+        # row += 1
 
-        self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
-        self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
-        self.pressure_screen_high_spinbox.setDecimals(0)
-        self.pressure_screen_high_spinbox.setSingleStep(10)
-        self.pressure_screen_high_spinbox.setRange(10, 7000)
-        self.pressure_screen_high_spinbox.setValue(4500)
-        # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
-        self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
-        row += 1
+        # self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
+        # self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.pressure_screen_high_spinbox.setDecimals(0)
+        # self.pressure_screen_high_spinbox.setSingleStep(10)
+        # self.pressure_screen_high_spinbox.setRange(10, 7000)
+        # self.pressure_screen_high_spinbox.setValue(4500)
+        # # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
+        # self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
+        # row += 1
 
-        self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
-        self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
-        self.repeat_measurement_spinbox.setRange(1, 100)
-        self.repeat_measurement_spinbox.setSingleStep(1)
-        self.repeat_measurement_spinbox.setValue(3)
-        # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
-        self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
-        row += 1
+        # self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
+        # self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
+        # self.repeat_measurement_spinbox.setRange(1, 100)
+        # self.repeat_measurement_spinbox.setSingleStep(1)
+        # self.repeat_measurement_spinbox.setValue(3)
+        # # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
+        # self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
+        # row += 1
         
-        self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
-        self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
-        self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
-        row += 1
+        # self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
+        # self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
+        # self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
+        # row += 1
 
-        self.start_screen_button = QtWidgets.QPushButton("Start Screen")
-        self.start_screen_button.clicked.connect(self.start_screen)
-        self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
-        row += 1
+        # self.start_screen_button = QtWidgets.QPushButton("Start Screen")
+        # self.start_screen_button.clicked.connect(self.start_screen)
+        # self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
+        # row += 1
 
-        self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
-        self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
-        self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
-        row += 1
+        # self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
+        # self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
+        # self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
+        # row += 1
 
         self.remove_last_measurement_button = QtWidgets.QPushButton("Remove Last")
         self.remove_last_measurement_button.clicked.connect(self.remove_last_measurement)
@@ -1182,6 +1192,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.model.calibration_model.initial_mass_captured_signal.connect(self.initiate_calibration_print)
         self.model.calibration_model.calibration_complete_signal.connect(self.handle_calibration_complete)
         self.model.calibration_model.change_volume_signal.connect(self.update_volume)
+        self.popup_message_signal.connect(self.main_window.popup_message)
+
         
         last_model_name = self.model.calibration_model.get_last_model_name()
         if last_model_name in model_names:
@@ -1302,8 +1314,46 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             self.axisX.setRange(0, len(mass_log))
             self.axisY.setRange(min(mass_log) - 0.5, max(mass_log) + 0.5)
 
+    def handle_initiate_test(self):
+        """Sets a flag that a test has started and inactivates all buttons that could interfere with the test."""
+        if self.model.calibration_model.get_current_printer_head_volume() == None:
+            self.popup_message_signal.emit("No Printer Head","Please set the printer head volume before starting a test")
+            return False
+        self.test_started = True
+        # self.calibrate_button.setDisabled(True)
+        # self.repeat_measurement_button.setDisabled(True)
+        # self.start_screen_button.setDisabled(True)
+        self.set_volume_button.setDisabled(True)
+        self.resistance_calibration_button.setDisabled(True)
+        self.predict_pulse_width_button.setDisabled(True)
+        self.predict_pulse_width_no_bias_button.setDisabled(True)
+        self.model_combobox.setDisabled(True)
+        self.target_drop_volume_spinbox.setDisabled(True)
+        self.target_pressure_spinbox.setDisabled(True)
+        self.pulse_width_spinbox.setDisabled(True)
+        self.num_droplets_spinbox.setDisabled(True)
+        return True
+
+    def handle_test_completion(self):
+        """Resets the test started flag and reactivates all buttons that were inactivated."""
+        self.test_started = False
+        # self.calibrate_button.setDisabled(False)
+        # self.repeat_measurement_button.setDisabled(False)
+        # self.start_screen_button.setDisabled(False)
+        self.set_volume_button.setDisabled(False)
+        self.resistance_calibration_button.setDisabled(False)
+        self.predict_pulse_width_button.setDisabled(False)
+        self.predict_pulse_width_no_bias_button.setDisabled(False)
+        self.model_combobox.setDisabled(False)
+        self.target_drop_volume_spinbox.setDisabled(False)
+        self.target_pressure_spinbox.setDisabled(False)
+        self.pulse_width_spinbox.setDisabled(False)
+        self.num_droplets_spinbox.setDisabled(False)
+
     def initiate_resistance_calibration(self):
         """Initiate a measurement of the resistance of the printer head using the standard condition."""
+        if not self.handle_initiate_test():
+            return
         self.label.setText("Started resistance calibration process, waiting for mass stabilization")
         self.controller.check_syringe_position()
         self.controller.set_pulse_width(self.model.calibration_model.standard_pulse_width,manual=False)
@@ -1317,6 +1367,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     
     def evaluate_predicted_pulse_width(self):
         """Evaluate the predicted pulse width for a given volume."""
+        if not self.handle_initiate_test():
+            return
         self.label.setText("Evaluating prediction, waiting for mass stabilization")
         self.controller.check_syringe_position()
         predicted_pulse_width, applied_bias = self.predict_pulse_width()
@@ -1335,6 +1387,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     
     def evaluate_predict_pulse_width_no_bias(self):
         """Evaluate the predicted pulse width for a given volume without bias."""
+        if not self.handle_initiate_test():
+            return
         self.label.setText("Evaluating prediction without bias, waiting for mass stabilization")
         self.controller.check_syringe_position()
         predicted_pulse_width, applied_bias = self.predict_pulse_width_no_bias()
@@ -1354,7 +1408,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.calibrate_button.setDisabled(True)
         # self.repeat_measurement_button.setDisabled(True)
         # self.stop_repeat_measurement_button.setDisabled(False)
-
+        if not self.handle_initiate_test():
+            return
         screen_low = self.pressure_screen_low_spinbox.value()
         screen_high = self.pressure_screen_high_spinbox.value()
         steps = self.repeat_measurement_spinbox.value()
@@ -1377,6 +1432,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.start_screen_button.setDisabled(True)
         # self.calibrate_button.setDisabled(True)
         # self.repeat_measurement_button.setDisabled(True)
+        if not self.handle_initiate_test():
+            return
         self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
         self.repeat_measurements = self.repeat_measurement_spinbox.value()
         pulse_width,applied_bias = self.predict_pulse_width()
@@ -1407,6 +1464,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
     def handle_calibration_complete(self):
         """Handle the completion of the calibration process."""
+        self.handle_test_completion()
         self.update_volume_pressure_plot()
         self.results_value.setText(f"{self.model.calibration_model.get_last_droplet_volume():.2f} nL")
         if self.repeat_measurements > 0:
@@ -1434,6 +1492,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     
     def update_volume_pressure_plot(self):
         self.volume_pressure_series.clear()
+        self.linear_fit_series.clear()
+        self.last_measurement_series.clear()
         measurements = self.model.calibration_model.get_measurements()
         print(f'Measurements:\n{measurements}')
         pressures = []
@@ -1443,6 +1503,10 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             self.volume_pressure_series.append(pulse_width, volume)
             pressures.append(pulse_width)
             volumes.append(volume)
+
+        if len(measurements) > 0:
+            last_measurement = measurements[-1]
+            self.last_measurement_series.append(last_measurement[1],last_measurement[3])
         
         if len(measurements) >= 2 and np.std(pressures) > 0.01:
             # Calculate the linear fit
