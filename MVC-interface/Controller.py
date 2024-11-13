@@ -722,7 +722,7 @@ class Controller(QObject):
 
         current_stock_id = self.model.rack_model.gripper_printer_head.get_stock_id()
         #print(f'Current stock:{current_stock_id}')
-        reaction_wells = self.model.well_plate.get_all_wells_with_reactions()
+        reaction_wells = self.model.well_plate.get_all_wells_with_reactions(fill_by='rows')
         wells_with_droplets = [well for well in reaction_wells if well.get_remaining_droplets(current_stock_id) > 0]
         for i,well in enumerate(wells_with_droplets):
             target_droplets = well.get_remaining_droplets(current_stock_id)
