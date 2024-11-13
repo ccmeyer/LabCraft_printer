@@ -678,7 +678,7 @@ class CommandQueue(QObject):
         self.queue = deque()
         self.completed = deque()
         self.command_number = 0
-        self.max_sent_commands = 3  # Maximum number of commands that can be sent to the machine at once
+        self.max_sent_commands = 8  # Maximum number of commands that can be sent to the machine at once
 
     def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None):
         """Add a command to the queue."""
