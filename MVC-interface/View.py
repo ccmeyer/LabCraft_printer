@@ -828,7 +828,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.popup_message_signal.emit("Must be positioned at the balance","Please move to the balance before calibrating pressure")
                 return
             elif response == '&Yes':
-                self.controller.move_to_location('balance',manual=False)
+                self.controller.move_to_location('balance', manual=False, safe_y=True)
         mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         mass_calibration_dialog.exec()
     

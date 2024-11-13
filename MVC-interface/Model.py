@@ -369,8 +369,13 @@ class MassCalibrationModel(QObject):
             #print(f"No bias measurements found for stock '{stock_id}'")
             return None
         stock_data['total_bias'] = stock_data['bias'] + stock_data['applied_bias']
-        bias = stock_data['total_bias'].iloc[-1]
-        #print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
+        num_measurements = len(stock_data)
+        if num_measurements < 3:
+            bias = stock_data['total_bias'].mean()
+        else:
+            bias = stock_data['total_bias'].iloc[-3:].mean()
+            
+        print(f"Bias for stock '{stock_id}': {bias:.2f} nL")
         return round(bias,2)
     
     def get_target_droplet_volume_for_stock(self,stock_id):
