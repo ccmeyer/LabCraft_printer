@@ -9,7 +9,7 @@
 
 class DropletPrinter {
 public:
-    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int valvePin, TIM_HandleTypeDef* htim, uint32_t channel);
+    DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue, int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel);
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
     void setDuration(unsigned long duration);
@@ -22,7 +22,8 @@ public:
     void exitPrintMode();
 
 private:
-    int valvePin;
+    int printPin;
+    int refuelPin;
     PressureSensor& sensor;
     PressureRegulator& regulator;
     TaskQueue& taskQueue;
@@ -39,11 +40,13 @@ private:
 
     Task printDropletTask;      // Task for printing droplets
 
-    TIM_HandleTypeDef* htim;    // Timer handler for one-pulse mode
-    uint32_t channel;                // Timer channel for one-pulse mode
+    TIM_HandleTypeDef* htimPrint;    // Timer handler for one-pulse mode
+    TIM_HandleTypeDef* htimRefuel;   // Timer handler for refueling chamber
+    uint32_t channelPrint;                // Timer channel for one-pulse mode
+    uint32_t channelRefuel;          // Timer channel for refueling chamber
 
     void printDroplet();        // Method to handle printing a single droplet
-    void configureTimer();      // Method to configure the timer for one-pulse mode
+    void configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration);      // Method to configure the timer for one-pulse mode
     uint32_t convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler);
 };
 

@@ -2,13 +2,15 @@
 #include "GlobalState.h"
 
 // Constructor
-DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int valvePin, TIM_HandleTypeDef* htim, uint32_t channel)
-    : valvePin(valvePin), sensor(sensor), regulator(regulator), taskQueue(taskQueue),htim(htim), channel(channel),
+DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& regulator, TaskQueue& taskQueue,int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel)
+    : printPin(printPin), refuelPin(refuelPin), sensor(sensor), regulator(regulator), taskQueue(taskQueue),htimPrint(htimPrint), htimRefuel(htimRefuel), channelPrint(channelPrint),channelRefuel(channelRefuel),
       frequency(20), interval(50000), duration(3000), pressureTolerance(20), 
       targetDroplets(0), printedDroplets(0), printingComplete(true), resetTriggered(false),
       printDropletTask([this]() { this->printDroplet(); }, 0) {
-    pinMode(valvePin, OUTPUT);
-    digitalWrite(valvePin, LOW); // Ensure the valve is closed initially
+    pinMode(printPin, OUTPUT);
+    pinMode(refuelPin, OUTPUT);
+    digitalWrite(printPin, LOW); // Ensure the print valve is closed initially
+    digitalWrite(refuelPin, LOW); // Ensure the refuel valve is closed initially
 }
 
 // Method to set the printing parameters
@@ -16,7 +18,7 @@ void DropletPrinter::setPrintingParameters(int frequency, unsigned long duration
     this->frequency = frequency;
     this->interval = (1000000L / frequency);
     this->duration = duration;
-    configureTimer();
+    configureTimer(htimRefuel, channelRefuel, duration);
     this->pressureTolerance = pressureTolerance;
 }
 
@@ -24,7 +26,7 @@ void DropletPrinter::setPrintingParameters(int frequency, unsigned long duration
 void DropletPrinter::setDuration(unsigned long duration) {
     this->duration = duration;
     Serial.println("Setting duration");
-    configureTimer();
+    configureTimer(htimRefuel, channelRefuel, duration);
 }
 
 // Method to get the duration
@@ -80,7 +82,7 @@ uint32_t DropletPrinter::convertMicrosecondsToTicks(uint32_t microseconds, uint3
     return (microseconds * (timerClockFrequency / 1e6)) / prescaler;
 }
 // Internal method to configure the timer in one-pulse mode
-void DropletPrinter::configureTimer() {
+void DropletPrinter::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration) {
     TIM_OC_InitTypeDef sConfigOC = {0};
 
     // Convert the pulse duration in microseconds to timer ticks
@@ -88,7 +90,7 @@ void DropletPrinter::configureTimer() {
     // uint32_t timerTicks = 5;
 
     // Configure the timer for one-pulse mode
-    htim->Instance = TIM9;  // Replace TIMx with your timer (e.g., TIM1, TIM2, etc.)
+    // htim->Instance = TIM9;  // Replace TIMx with your timer (e.g., TIM1, TIM2, etc.)
     htim->Init.Period = (timerTicks*2) - 1;  // Set the period (time for one pulse)
     htim->Init.CounterMode = TIM_COUNTERMODE_UP;
     htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -148,9 +150,9 @@ void DropletPrinter::printDroplet() {
     }
 
     // Open the valve to print the droplet
-    configureTimer();
-    HAL_TIM_PWM_Start(htim, channel);  // Start the PWM signal
-    HAL_TIM_OnePulse_Start(htim, channel);  // Start the one-pulse mode
+    configureTimer(htimRefuel, channelRefuel, duration);  // Configure the timer for the print duration
+    HAL_TIM_PWM_Start(htimRefuel, channelRefuel);  // Start the PWM signal
+    HAL_TIM_OnePulse_Start(htimRefuel, channelRefuel);  // Start the one-pulse mode
 
     // Increment the printed droplet count
     printedDroplets++;

@@ -5,7 +5,7 @@
 
 class Gripper {
 public:
-    Gripper(int pumpPin, int valvePin1, int valvePin2, TaskQueue& taskQueue);
+    Gripper(int pumpPin, int valvePin, TaskQueue& taskQueue);
     
     bool isBusy() const;
     void setBusy(bool busy);
@@ -23,8 +23,7 @@ public:
 
 private:
     int pumpPin;
-    int valvePin1;
-    int valvePin2;
+    int valvePin;
     unsigned long lastPumpActivationTime;
     bool pumpActive;
     int refreshTaskCounter;

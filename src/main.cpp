@@ -69,23 +69,25 @@ extern "C" void SystemClock_Config(void)
 
 SystemState currentState = RUNNING; // Define the global state
 IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
-TIM_HandleTypeDef htim9;  // Define your timer handle
+TIM_HandleTypeDef htim9;  // Timer 9 handle for printing droplets
+TIM_HandleTypeDef htim4;  // Timer 4 handle for refueling chamber
+
 
 TaskQueue taskQueue(&hiwdg);
 CommandQueue commandQueue;
-Gripper gripper(pumpPin, pumpValvePin1, pumpValvePin2, taskQueue);
+Gripper gripper(pumpPin, pumpValvePin, taskQueue);
 CustomStepper stepperX(stepperX.DRIVER,X_EN_PIN, X_STEP_PIN, X_DIR_PIN, xstop, taskQueue,X_INV_DIR);
 CustomStepper stepperY(stepperY.DRIVER,Y_EN_PIN, Y_STEP_PIN, Y_DIR_PIN, ystop, taskQueue,Y_INV_DIR);
 CustomStepper stepperZ(stepperZ.DRIVER,Z_EN_PIN, Z_STEP_PIN, Z_DIR_PIN, zstop, taskQueue,Z_INV_DIR);
 CustomStepper stepperP(stepperP.DRIVER,P_EN_PIN, P_STEP_PIN, P_DIR_PIN, pstop, taskQueue,P_INV_DIR);
 PressureSensor pressureSensor(sensorAddress,taskQueue);
 PressureRegulator regulator(stepperP, pressureSensor,taskQueue,printValvePin);
-DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin, &htim9, TIM_CHANNEL_1);
+DropletPrinter printer(pressureSensor, regulator, taskQueue, printPin, refuelPin, &htim9, &htim4, TIM_CHANNEL_1, TIM_CHANNEL_1);
 
 Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, regulator, printer, 115200);
 
 // Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
-void configureGPIOForTimer() {
+void configureGPIOForTimer9() {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     __HAL_RCC_GPIOE_CLK_ENABLE();  // Enable the GPIO clock (replace with the appropriate port)
@@ -97,6 +99,21 @@ void configureGPIOForTimer() {
     GPIO_InitStruct.Alternate = GPIO_AF3_TIM9;  // TIM9 alternate function
 
     HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);  // Replace GPIOA with your GPIO port
+}
+
+// Configure GPIO for TIM4 channel (assuming GPIO PD12 for example)
+void configureGPIOForTimer4() {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOD_CLK_ENABLE();  // Enable the GPIO clock
+
+    GPIO_InitStruct.Pin = GPIO_PIN_12;  // PD12
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
+
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);  // Initialize GPIO pin
 }
 
 void initTimer9() {
@@ -113,12 +130,28 @@ void initTimer9() {
     }
 }
 
+void initTimer4() {
+    htim4.Instance = TIM4;  // Use TIM4
+    htim4.Init.Prescaler = 83;  // Set the prescaler for 1MHz timer clock (84MHz system clock / 84 prescaler)
+    htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim4.Init.Period = 0xFFFF;  // Set a default period
+    htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim4.Init.RepetitionCounter = 0;  // No repetition
+
+    if (HAL_TIM_Base_Init(&htim4) != HAL_OK) {
+        // Initialization error
+        Serial.println("Timer 4 initialization failed");
+    }
+}
 
 void setup() {
     SystemClock_Config();
     
-    configureGPIOForTimer();
+    configureGPIOForTimer9();
     initTimer9();
+
+    configureGPIOForTimer4();
+    initTimer4();
 
     stepperX.setupMotor();
     stepperY.setupMotor();

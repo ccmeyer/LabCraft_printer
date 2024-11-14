@@ -12,11 +12,11 @@ void setupPins()
     pinMode(pumpPin, OUTPUT);
     digitalWrite(pumpPin,LOW);
 
-    pinMode(pumpValvePin1, OUTPUT);
-    digitalWrite(pumpValvePin1,LOW);
+    pinMode(pumpValvePin, OUTPUT);
+    digitalWrite(pumpValvePin,LOW);
     
-    pinMode(pumpValvePin2, OUTPUT);
-    digitalWrite(pumpValvePin2,LOW);
+    // pinMode(pumpValvePin2, OUTPUT);
+    // digitalWrite(pumpValvePin2,LOW);
 
     pinMode(printValvePin, OUTPUT);
     digitalWrite(printValvePin,LOW);
