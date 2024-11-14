@@ -819,6 +819,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
     def calibrate_pressure(self):
+        """Calibrate the pressure for a specific printer head."""
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit("Cannot calibrate pressure","Please wait for the current actions to complete")
+            return
+
         if self.model.rack_model.get_gripper_printer_head() == None:
             self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
             return
@@ -828,23 +833,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.popup_message_signal.emit("Must be positioned at the balance","Please move to the balance before calibrating pressure")
                 return
             elif response == '&Yes':
-                self.controller.move_to_location('balance', manual=False, safe_y=True)
+                self.controller.move_to_location('balance', manual=True, safe_y=True)
         mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         mass_calibration_dialog.exec()
-    
-    # def calibrate_pressure(self):
-    #     """Calibrate the pressure for a specific printer head."""
-    #     if self.model.rack_model.gripper_printer_head is None:
-    #         self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
-    #         return
-        
-    #     self.target_pressure = self.model.machine_model.get_current_pressure()
-    #     pressure_calibration_dialog = PressureCalibrationDialog(self.main_window,self.model,self.controller)
-    #     pressure_calibration_dialog.print_calibration_droplets.connect(self.print_calibration_droplets)
-    #     pressure_calibration_dialog.change_pressure.connect(self.calibration_pressure_change)
-    #     # pressure_calibration_dialog.calibration_complete.connect(self.store_calibrations)
-    #     pressure_calibration_dialog.exec()
-    #     print('Calibrating pressure')
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)
@@ -865,9 +856,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.controller = controller
 
         self.controller.enter_print_mode()
-        
-        # self.current_printer_head = self.model.rack_model.get_gripper_printer_head()
-        # self.current_stock_solution = self.current_printer_head.get_stock_solution()
 
         self.num_calibration_droplets = 50
         self.repeat_measurements = 0
@@ -1027,7 +1015,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.set_volume_spinbox.setSingleStep(10)
         self.set_volume_spinbox.setRange(0, 1000)
         self.set_volume_spinbox.setValue(100)
-        # self.set_volume_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.set_volume_label, row, 0)
         self.user_input_layout.addWidget(self.set_volume_spinbox, row, 1)
         row += 1
@@ -1044,7 +1031,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.target_drop_volume_spinbox.setRange(1, 100)
         self.target_drop_volume_spinbox.setValue(40)
         self.target_drop_volume_spinbox.valueChanged.connect(self.handle_target_drop_volume_change)
-        # self.target_drop_volume_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.target_drop_volume_label, row, 0)
         self.user_input_layout.addWidget(self.target_drop_volume_spinbox, row, 1)
         row += 1
@@ -1075,7 +1061,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.target_pressure_spinbox.setDecimals(2)
         self.target_pressure_spinbox.setSingleStep(0.1)
         self.target_pressure_spinbox.setRange(0, 5)
-        # self.target_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.target_pressure_spinbox.valueChanged.connect(self.handle_target_pressure_change)
         
         self.user_input_layout.addWidget(self.target_pressure_label, row, 0)
@@ -1087,7 +1072,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.pulse_width_spinbox.setRange(10, 10000)
         self.pulse_width_spinbox.setSingleStep(5)
         self.pulse_width_spinbox.setValue(4200)
-        # self.pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.pulse_width_spinbox.valueChanged.connect(self.handle_pulse_width_change)
         self.user_input_layout.addWidget(self.pulse_width_label, row, 0)
         self.user_input_layout.addWidget(self.pulse_width_spinbox, row, 1)
@@ -1098,7 +1082,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox.setRange(1, 100)
         self.num_droplets_spinbox.setSingleStep(5)
         self.num_droplets_spinbox.setValue(50)
-        # self.num_droplets_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.num_droplets_spinbox.valueChanged.connect(self.handle_num_droplets_change)
         self.user_input_layout.addWidget(self.num_droplets_label, row, 0)
         self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
@@ -1404,10 +1387,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
     def start_screen(self):
         """Start the screen for the current stock solution."""
-        # self.start_screen_button.setDisabled(True)
-        # self.calibrate_button.setDisabled(True)
-        # self.repeat_measurement_button.setDisabled(True)
-        # self.stop_repeat_measurement_button.setDisabled(False)
         if not self.handle_initiate_test():
             return
         screen_low = self.pressure_screen_low_spinbox.value()
@@ -1429,9 +1408,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     
     def initiate_repeat_calibration_process(self):
         """Initiate the process of capturing a new measurement."""
-        # self.start_screen_button.setDisabled(True)
-        # self.calibrate_button.setDisabled(True)
-        # self.repeat_measurement_button.setDisabled(True)
         if not self.handle_initiate_test():
             return
         self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
@@ -1555,288 +1531,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.model.calibration_model.change_volume_signal.disconnect(self.update_volume)
         self.controller.exit_print_mode()
         event.accept()
-
-
-class PressureCalibrationDialog(QtWidgets.QDialog):
-    print_calibration_droplets = QtCore.Signal(int)
-    change_pressure = QtCore.Signal(float)
-    calibration_complete = QtCore.Signal()
-    def __init__(self, main_window,model,controller):
-        super().__init__()
-        self.main_window = main_window
-        self.color_dict = self.main_window.color_dict
-        self.model = model
-        self.controller = controller
-
-        self.machine = self.controller.machine
-        self.balance = self.controller.machine.balance
-        self.printer_head = self.model.rack_model.gripper_printer_head
-        self.setWindowTitle("Pressure Calibration")
-        self.resize(800, 400)
-
-        self.init_mass = None
-        self.final_mass = None
-        self.target_mass = 4  # Set your target mass here
-        self.max_pressure_step = 1  # Set your pressure step here
-        self.mass_tolerance = 0.05
-        self.min_pressure = 1.2
-
-        self.mass_log = []
-        self.tolerance = 0.01
-        self.stable_count = 0
-        self.stable = False
-
-        self.psi_max = 4
-        
-        self.layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel("Waiting for stable mass...")
-        self.layout.addWidget(self.label)
-
-        self.charts_layout = QtWidgets.QHBoxLayout()
-
-        # Create a series and chart to display mass over time
-        self.series = QtCharts.QLineSeries()
-        self.series.setColor(QtCore.Qt.white)
-        self.chart = QtCharts.QChart()
-        self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
-        self.chart.addSeries(self.series)
-        # self.chart.createDefaultAxes()
-        self.chart.setTitle("Mass over time")
-
-        self.axisX = QtCharts.QValueAxis()
-        self.axisX.setTickCount(3)
-        self.axisX.setRange(0, 300)
-        self.axisY = QtCharts.QValueAxis()
-        self.axisY.setTitleText("Mass (g)")
-
-        self.chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
-        self.chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
-        self.series.attachAxis(self.axisX)
-        self.series.attachAxis(self.axisY)
-
-        # Create a chart view to display the chart
-        self.chart_view = QtCharts.QChartView(self.chart)
-        self.chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
-        self.chart.legend().hide()  # Hide the legend
-        self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-
-        # Add the chart view to the layout
-        self.charts_layout.addWidget(self.chart_view)
-
-        self.mass_pressure_series = QtCharts.QScatterSeries()
-        self.mass_pressure_series.setColor(QtCore.Qt.white)
-        self.mass_pressure_series.setMarkerSize(3.0)
-        self.mass_pressure_chart = QtCharts.QChart()
-        self.mass_pressure_chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.mass_pressure_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
-        self.mass_pressure_chart.addSeries(self.mass_pressure_series)
-        self.mass_pressure_chart.setTitle("Mass versus Pressure")
-
-        self.mass_pressure_axisX = QtCharts.QValueAxis()
-        self.mass_pressure_axisX.setTitleText("Pressure (psi)")
-        self.mass_pressure_axisY = QtCharts.QValueAxis()
-        self.mass_pressure_axisY.setTitleText("Mass (g)")
-
-        self.mass_pressure_chart.addAxis(self.mass_pressure_axisX, QtCore.Qt.AlignBottom)
-        self.mass_pressure_chart.addAxis(self.mass_pressure_axisY, QtCore.Qt.AlignLeft)
-        self.mass_pressure_series.attachAxis(self.mass_pressure_axisX)
-        self.mass_pressure_series.attachAxis(self.mass_pressure_axisY)
-
-        # Create a series for the linear fit
-        self.linear_fit_series = QtCharts.QLineSeries()
-        self.linear_fit_series.setColor(QtCore.Qt.red)
-        self.mass_pressure_chart.addSeries(self.linear_fit_series)
-        self.linear_fit_series.attachAxis(self.mass_pressure_axisX)
-        self.linear_fit_series.attachAxis(self.mass_pressure_axisY)
-
-        # Create a chart view to display the chart
-        self.mass_pressure_chart_view = QtCharts.QChartView(self.mass_pressure_chart)
-        self.mass_pressure_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
-        self.mass_pressure_chart.legend().hide()  # Hide the legend
-        self.mass_pressure_chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.mass_pressure_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-
-        # Add the chart view to the layout
-        self.charts_layout.addWidget(self.mass_pressure_chart_view)
-
-        self.layout.addLayout(self.charts_layout)
-        self.setLayout(self.layout)
-        # List to store the mass and pressure values from each calibration pass
-        previous_data = self.printer_head.get_calibrations()
-        # print(self.mass_pressure_data)
-        if len(previous_data) >= 2:
-            response = self.main_window.popup_yes_no("Use previous calibration data","Would you like to use the previous calibration data?")
-            if response == '&No':
-                self.mass_pressure_data = []
-            elif response == '&Yes':
-                self.mass_pressure_data = previous_data
-                target_psi = self.calculate_pressure_from_fit(self.target_mass,self.mass_pressure_data)
-                self.machine.set_absolute_pressure(target_psi)
-                self.target_pressure = target_psi
-                self.update_mass_pressure_plot()
-        else:
-            self.mass_pressure_data = []
-
-        self.get_mass_timer = QTimer()
-        self.get_mass_timer.timeout.connect(self.get_recent_mass)
-        self.get_mass_timer.start(50)  # Check balance every 50 msec
-
-        self.printing = False
-        self.print_delay_timer = QTimer()
-        self.print_delay_timer.setSingleShot(True)
-        self.print_delay_timer.timeout.connect(self.end_print_delay)
-    
-    def update_mass_pressure_plot(self):
-        self.mass_pressure_series.clear()
-        for pressure, mass in self.mass_pressure_data:
-            self.mass_pressure_series.append(pressure, mass)
-        
-        if len(self.mass_pressure_data) >= 2:
-            # Calculate the linear fit
-            pressures, masses = zip(*self.mass_pressure_data)
-            slope, intercept = np.polyfit(pressures, masses, 1)
-
-            # Update the linear fit series
-            self.linear_fit_series.clear()
-            min_pressure = min(pressures)
-            max_pressure = max(pressures)
-            self.linear_fit_series.append(min_pressure, min_pressure * slope + intercept)
-            self.linear_fit_series.append(max_pressure, max_pressure * slope + intercept)
-
-        min_pressure = min(pressure for pressure, mass in self.mass_pressure_data) - 0.5
-        max_pressure = max(pressure for pressure, mass in self.mass_pressure_data) + 0.5
-        min_mass = min(mass for pressure, mass in self.mass_pressure_data) - 0.5
-        max_mass = max(mass for pressure, mass in self.mass_pressure_data) + 0.5
-
-        self.mass_pressure_axisX.setRange(min_pressure, max_pressure)
-        self.mass_pressure_axisY.setRange(min_mass, max_mass)
-
-    def get_recent_mass(self):
-        mass = self.balance.get_recent_mass()
-
-        if mass is not None:
-            self.add_mass_to_log(mass)
-            self.update_mass_plot()
-
-            if self.printing:
-                return
-            
-            self.check_stability()
-            
-            if self.stable:
-                self.label.setText("Stable mass detected")
-                self.log_stable_mass(mass)
-
-    def update_mass_plot(self):
-        self.series.clear()
-        for i, mass in enumerate(self.mass_log):
-            self.series.append(i, mass)
-
-        min_mass = min(self.mass_log) - 0.5
-        max_mass = max(self.mass_log) + 0.5
-        self.axisY.setRange(min_mass, max_mass)
-
-    def add_mass_to_log(self, mass):
-        self.mass_log.append(mass)
-        if len(self.mass_log) > 300:
-            self.mass_log.pop(0)
-    
-    def check_stability(self):
-        if len(self.mass_log) > 10:
-            recent_masses = self.mass_log[-10:]
-            std_dev = np.std(recent_masses)
-            if std_dev < self.tolerance:
-                self.stable_count += 1
-            else:
-                self.stable_count = 0
-            if self.stable_count > 10:
-                self.stable = True
-            else:
-                self.stable = False
-        else:
-            self.stable = False
-
-    def log_stable_mass(self, mass):
-
-        if self.init_mass is None:
-            self.init_mass = mass
-            self.label.setText(f"Initial mass: {self.init_mass} g")
-            self.print_droplets()
-
-        elif self.final_mass is None:
-            self.final_mass = mass
-            self.label.setText(f"Final mass: {self.final_mass} g")
-            self.adjust_pressure()
-        else:
-            print("Both initial and final mass have already been measured.")
-            self.init_mass = self.final_mass
-            self.final_mass = None
-
-    def adjust_pressure(self):
-        mass_change = (self.final_mass - self.init_mass)
-        current_psi = self.model.machine_model.get_current_pressure()
-        self.mass_pressure_data.append((current_psi, mass_change))
-        self.update_mass_pressure_plot()
-        
-        #print(f"Mass change: {mass_change} g, Target drop mass: {self.target_mass} g")
-        if abs(mass_change - self.target_mass) < self.mass_tolerance:  # If the droplet mass is close enough to the target
-            self.label.setText("Calibration complete!")
-            print("=== Calibration complete! ===")
-            self.printer_head.add_calibration(self.mass_pressure_data)
-            self.calibration_complete.emit()
-            self.get_mass_timer.stop()
-
-        else:
-            response = self.main_window.popup_yes_no("Pressure Calibration",f"Would you like to adjust the pressure? Current mass change: {mass_change} g, Target drop mass: {self.target_mass} g")
-            if response == '&No':
-                self.get_mass_timer.stop()
-                return
-
-            if len(self.mass_pressure_data) >= 2:
-                # Calculate the linear fit
-                target_psi = self.calculate_pressure_from_fit(self.target_mass,self.mass_pressure_data)
-            else:
-                proportion = mass_change / self.target_mass
-                target_psi = current_psi / proportion
-
-            if target_psi > self.psi_max:
-                target_psi = self.psi_max
-            elif target_psi < self.min_pressure:
-                target_psi = self.min_pressure
-
-            if target_psi - current_psi > self.max_pressure_step:
-                print('Over max pressure step')
-                target_psi = current_psi + self.max_pressure_step
-            elif current_psi - target_psi > self.max_pressure_step:
-                print('Under max pressure step')
-                target_psi = current_psi - self.max_pressure_step
-            self.main_window.popup_message("Pressure Calibration",f"Adjusting pressure from {current_psi} to {target_psi} psi")
-            #print(f"- Adjusting pressure from {current_psi} to {target_psi} psi")
-            self.label.setText(f"Adjusted pressure to {target_psi} psi")
-            self.change_pressure.emit(target_psi)
-            # Here you should add code to adjust the machine's pressure
-            self.init_mass = None
-            self.final_mass = None
-
-    def calculate_pressure_from_fit(self, target_mass,mass_pressure_data):
-        pressures, masses = zip(*mass_pressure_data)
-        slope, intercept = np.polyfit(pressures, masses, 1)
-        target_psi = (target_mass - intercept) / slope
-        return float(target_psi)
-
-    def print_droplets(self):
-        # Add code to print droplets here
-        self.print_calibration_droplets.emit(100)
-        self.printing = True
-        print('--- Start of print delay ---')
-        self.print_delay_timer.start(5000)  # 5 second delay
-
-    def end_print_delay(self):
-        print('--- End of print delay ---')
-        self.printing = False
-
 
 class WellPlateWidget(QtWidgets.QGroupBox):
     def __init__(self, main_window, model, controller):

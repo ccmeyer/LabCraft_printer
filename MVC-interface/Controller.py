@@ -411,6 +411,10 @@ class Controller(QObject):
         """Update the current location."""
         self.model.machine_model.update_current_location(name)
 
+    def check_if_all_completed(self):
+        """Check if all commands have been completed."""
+        return self.machine.check_if_all_completed()
+
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
         if manual == True:
