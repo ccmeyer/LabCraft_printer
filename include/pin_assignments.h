@@ -18,6 +18,7 @@ const int xstop = PG6;  // DIAG0 - J27
 const int ystop = PG9;  // DIAG1 - J29
 const int zstop = PG10; // DIAG2 - J31
 const int pstop = PG11; // DIAG3 - J33
+const int rstop = PG12; // DIAG4 - J35
 
 //==STEPPER MOTOR PINS ===========================================
 
@@ -66,6 +67,18 @@ const int P_STEP_PIN = PG4;    // Step - STP pin second from bottom left
 // UART communication - Requires jumper in JXC between pins 1 and 2 (second from left column, X is for driver number)
 const int P_SW_TX = PC7;        // UART-SoftwareSerial receive pin - Attached to the DRIVERX_CS pins of the motor
 const int P_SW_RX = P_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the same pin as receive
+
+// --DRIVER 4--
+// Standard control modality
+const bool R_INV_DIR = false; // Invert direction for Motor4_1
+const int R_EN_PIN = PG2;      // Enable - EN pin top left
+const int R_DIR_PIN = PF10;     // Direction - DIR pin bottom left
+const int R_STEP_PIN = PF9;    // Step - STP pin second from bottom left
+
+// UART communication - Requires jumper in JXC between pins 1 and 2 (second from left column, X is for driver number)
+const int R_SW_TX = PF2;        // UART-SoftwareSerial receive pin - Attached to the DRIVERX_CS pins of the motor
+const int R_SW_RX = R_SW_TX;    // UART-SoftwareSerial transmit pin - Uses the same pin as receive
+
 
 // --I2C communication--
 // All I2C pins in J73

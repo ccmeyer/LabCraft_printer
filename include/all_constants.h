@@ -15,6 +15,9 @@ uint16_t maxSpeedP = 50*steps_per_mm;
 uint16_t accelerationP = 50*steps_per_mm;
 
 // Pressure sensor variables
+int TCAAddress = 0x70;
+int printPort = 0;
+int refuelPort = 1;
 int sensorAddress = 40;
 float currentPressure;
 const int sdaPin = PB9;

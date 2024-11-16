@@ -5,9 +5,9 @@
 // Constructor
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
 CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
-PressureRegulator& regulator, DropletPrinter& printer, int baudRate)
+PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer, int baudRate)
     : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
-    pressureSensor(pressureSensor), regulator(regulator), printer(printer), baudRate(baudRate), 
+    pressureSensor(pressureSensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), printer(printer), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0),
@@ -78,7 +78,14 @@ void Communication::sendStatus() {
             case P:
                 Serial.print("P:");
                 noInterrupts();
-                Serial.println(regulator.getCurrentPosition());
+                Serial.println(printRegulator.getCurrentPosition());
+                interrupts();
+                statusStep = R;
+                break;
+            case R:
+                Serial.print("R:");
+                noInterrupts();
+                Serial.println(refuelRegulator.getCurrentPosition());
                 interrupts();
                 statusStep = TARGET_X;
                 break;
@@ -106,7 +113,14 @@ void Communication::sendStatus() {
             case TARGET_P:
                 Serial.print("Tar_P:");
                 noInterrupts();
-                Serial.println(regulator.getTargetPosition());
+                Serial.println(printRegulator.getTargetPosition());
+                interrupts();
+                statusStep = TARGET_R;
+                break;
+            case TARGET_R:
+                Serial.print("Tar_R:");
+                noInterrupts();
+                Serial.println(refuelRegulator.getTargetPosition());
                 interrupts();
                 statusStep = GRIPPER;
                 break;
@@ -115,26 +129,47 @@ void Communication::sendStatus() {
                 noInterrupts();
                 Serial.println(gripper.isOpen());
                 interrupts();
-                statusStep = PRESSURE;
+                statusStep = PRESSURE_P;
                 break;
-            case PRESSURE:
-                Serial.print("Pressure:");
+            case PRESSURE_P:
+                Serial.print("Pressure_P:");
                 noInterrupts();
-                Serial.println(round(pressureSensor.getPressure()));
+                Serial.println(round(pressureSensor.getPrintPressure()));
                 interrupts();
-                statusStep = TARGET_PRESSURE;
+                statusStep = PRESSURE_R;
                 break;
-            case TARGET_PRESSURE:
-                Serial.print("Tar_pressure:");
+            case PRESSURE_R:
+                Serial.print("Pressure_R:");
                 noInterrupts();
-                Serial.println(round(regulator.getTargetPressure()));
+                Serial.println(round(pressureSensor.getRefuelPressure()));
                 interrupts();
-                statusStep = PULSE_WIDTH;
+                statusStep = TARGET_PRINT;
                 break;
-            case PULSE_WIDTH:
-                Serial.print("Pulse_width:");
+            case TARGET_PRINT:
+                Serial.print("Tar_print:");
                 noInterrupts();
-                Serial.println(printer.getDuration());
+                Serial.println(round(printRegulator.getTargetPressure()));
+                interrupts();
+                statusStep = TARGET_REFUEL;
+                break;
+            case TARGET_REFUEL:
+                Serial.print("Tar_refuel:");
+                noInterrupts();
+                Serial.println(round(refuelRegulator.getTargetPressure()));
+                interrupts();
+                statusStep = PULSE_WIDTH_PRINT;
+                break;
+            case PULSE_WIDTH_PRINT:
+                Serial.print("Print_width:");
+                noInterrupts();
+                Serial.println(printer.getPrintDuration());
+                interrupts();
+                statusStep = PULSE_WIDTH_REFUEL;
+                break;
+            case PULSE_WIDTH_REFUEL:
+                Serial.print("Refuel_width:");
+                noInterrupts();
+                Serial.println(printer.getRefuelDuration());
                 interrupts();
                 statusStep = MICROS;
                 break;
@@ -221,7 +256,7 @@ void Communication::parseAndAddCommand() {
         stepperY.resetState();
         stepperZ.resetState();
         printer.resetDropletCounts();
-        regulator.resetState();
+        printRegulator.resetState();
         currentCmdNum = 0;
         lastCompletedCmdNum = 0;
         lastAddedCmdNum = 0;
@@ -229,7 +264,7 @@ void Communication::parseAndAddCommand() {
         Serial.println("--Reset");
         startTasks();
         pressureSensor.startReading();
-        regulator.restartRegulation();
+        printRegulator.restartRegulation();
         gripper.resetRefreshCounter();
         Serial.println("--Restarted tasks");
     } else {
@@ -266,7 +301,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() const{
-    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || regulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || printRegulator.isBusy() || printer.isBusy()) {
         return false;
     } else {
         return true;
@@ -289,13 +324,15 @@ void Communication::executeCommand(const Command& cmd) {
             stepperX.enableMotor();
             stepperY.enableMotor();
             stepperZ.enableMotor();
-            regulator.enableRegulator();
+            printRegulator.enableRegulator();
+            refuelRegulator.enableRegulator();
             break;
         case DISABLE_MOTORS:
             stepperX.disableMotor();
             stepperY.disableMotor();
             stepperZ.disableMotor();
-            regulator.disableRegulator();
+            printRegulator.disableRegulator();
+            refuelRegulator.disableRegulator();
             break;
         case RELATIVE_X:
             stepperX.moveRelative(cmd.param1);
@@ -325,7 +362,10 @@ void Communication::executeCommand(const Command& cmd) {
             stepperZ.beginHoming();
             break;
         case HOME_P:
-            regulator.homeSyringe();
+            printRegulator.homeSyringe();
+            break;
+        case HOME_R:
+            refuelRegulator.homeSyringe();
             break;
         case CHANGE_ACCEL:
             stepperX.setAcceleration(cmd.param1);
@@ -337,30 +377,55 @@ void Communication::executeCommand(const Command& cmd) {
             stepperY.resetProperties();
             stepperZ.resetProperties();
             break;
-        case REGULATE_PRESSURE:
-            regulator.beginRegulation();
-            regulator.setTargetPressureAbsolute(1638);
+        case REGULATE_PRESSURE_P:
+            printRegulator.beginRegulation();
+            printRegulator.setTargetPressureAbsolute(8192);
+            break;
+        case REGULATE_PRESSURE_R:
+            refuelRegulator.beginRegulation();
+            refuelRegulator.setTargetPressureAbsolute(8192);
             break;
         case DEREGULATE_PRESSURE:
-            regulator.stopRegulation();
+            printRegulator.stopRegulation();
+            refuelRegulator.stopRegulation();
             break;
-        case RELATIVE_PRESSURE:
-            regulator.setTargetPressureRelative(cmd.param1);
+        case RELATIVE_PRESSURE_P:
+            printRegulator.setTargetPressureRelative(cmd.param1);
             break;
-        case ABSOLUTE_PRESSURE:
-            regulator.setTargetPressureAbsolute(cmd.param1);
+        case ABSOLUTE_PRESSURE_P:
+            printRegulator.setTargetPressureAbsolute(cmd.param1);
+            break;
+        case RELATIVE_PRESSURE_R:
+            refuelRegulator.setTargetPressureRelative(cmd.param1);
+            break;
+        case ABSOLUTE_PRESSURE_R:
+            refuelRegulator.setTargetPressureAbsolute(cmd.param1);
             break;
         case PRINT:
             printer.startPrinting(cmd.param1);
             break;
+        case PRINT_ONLY:
+            printer.deactivateRefuel();
+            printer.startPrinting(cmd.param1);
+            break;
+        case REFUEL_ONLY:
+            printer.deactivatePrint();
+            printer.startPrinting(cmd.param1);
+            break;
         case RESET_P:
-            regulator.resetSyringe();
+            printRegulator.resetSyringe();
+            break;
+        case RESET_R:
+            refuelRegulator.resetSyringe();
             break;
         case WAIT:
             startWaiting(cmd.param1);
             break;
-        case SET_WIDTH:
-            printer.setDuration(cmd.param1);
+        case SET_WIDTH_P:
+            printer.setPrintDuration(cmd.param1);
+            break;
+        case SET_WIDTH_R:
+            printer.setRefuelDuration(cmd.param1);
             break;
         case PRINT_MODE:
             printer.enterPrintMode();

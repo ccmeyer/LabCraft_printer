@@ -18,14 +18,19 @@ enum StatusStep {
     Y,
     Z,
     P,
+    R,
     TARGET_X,
     TARGET_Y,
     TARGET_Z,
     TARGET_P,
+    TARGET_R,
     GRIPPER,
-    PRESSURE,
-    TARGET_PRESSURE,
-    PULSE_WIDTH,
+    PRESSURE_P,
+    PRESSURE_R,
+    TARGET_PRINT,
+    TARGET_REFUEL,
+    PULSE_WIDTH_PRINT,
+    PULSE_WIDTH_REFUEL,
     MICROS
 };
 
@@ -33,7 +38,7 @@ class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
     CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
-    PressureSensor& pressureSensor, PressureRegulator& regulator, DropletPrinter& printer, int baudRate);
+    PressureSensor& pressureSensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer, int baudRate);
 
     void beginSerial();
     void startTasks();
@@ -55,7 +60,8 @@ private:
     CustomStepper& stepperY;  // Reference to the CustomStepper object
     CustomStepper& stepperZ;  // Reference to the CustomStepper object
     PressureSensor& pressureSensor;  // Reference to the PressureSensor object
-    PressureRegulator& regulator;  // Reference to the PressureRegulator object
+    PressureRegulator& printRegulator;  // Reference to the PressureRegulator object
+    PressureRegulator& refuelRegulator;  // Reference to the PressureRegulator object
     DropletPrinter& printer;  // Reference to the DropletPrinter object
     StatusStep statusStep = CYCLE_COUNT;
 

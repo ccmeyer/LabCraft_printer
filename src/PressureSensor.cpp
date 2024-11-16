@@ -2,9 +2,9 @@
 #include <Wire.h>
 
 // Constructor
-PressureSensor::PressureSensor(int sensorAddress, TaskQueue& taskQueue)
-    : sensorAddress(sensorAddress), taskQueue(taskQueue), 
-    readPressureTask([this]() { this->smoothPressure(); }, 0) {}
+PressureSensor::PressureSensor(int TCAAddress, int sensorAddress, TaskQueue& taskQueue)
+    : TCAAddress(TCAAddress), sensorAddress(sensorAddress), taskQueue(taskQueue), 
+    readPressureTask([this]() { this->smoothPressure(); }, 0), switchPortTask([this]() { this-> tcaselect(); }, 0) {}
 
 // Method to begin I2C communication with the pressure sensor
 void PressureSensor::beginCommunication(int sdaPin, int sclPin, int frequency) {
@@ -12,23 +12,47 @@ void PressureSensor::beginCommunication(int sdaPin, int sclPin, int frequency) {
     Wire.setSCL(sclPin);
     Wire.begin();        // Join I2C bus
     Wire.setClock(frequency);
+    tcaselect();        // Select the first i2c port
     // Serial.println("Pressure sensor initialized");
 }
 
-// Method to reset the pressure readings
+// Method to reset the pressure readings for both ports
 void PressureSensor::resetPressure() {
-    for (int thisReading = 0; thisReading < numReadings; thisReading++) {
-        readings[thisReading] = 0;
+    for (int i = 0; i < 2; i++) {
+        for (int thisReading = 0; thisReading < numReadings; thisReading++) {
+            readings[i][thisReading] = 0;
+        }
+        total[i] = 0;
+        average[i] = 0;
+        readIndex[i] = 0;
+        currentPressure[i] = 0;
     }
-    total = 0;
-    average = 0;
-    readIndex = 0;
-    currentPressure = 0;
 }
 
-// Method to get the current pressure value
-float PressureSensor::getPressure() const{
-    return currentPressure;
+// Method to get the current printing pressure value (port 0)
+float PressureSensor::getPrintPressure() const {
+    return currentPressure[0];
+}
+
+// Method to get the current refuel pressure value (port 1)
+float PressureSensor::getRefuelPressure() const {
+    return currentPressure[1];
+}
+
+// Method to set the desired i2c port on the multiplexer
+void PressureSensor::tcaselect() {
+  // Sets the multiplexer to i2c port i
+//   if (port == currentPort && TCAset == true) return;
+ 
+  Wire.beginTransmission(TCAAddress);
+  Wire.write(1 << currentPort);
+  Wire.endTransmission();
+
+  if (currentPort == 0) {
+    currentPort = 1;
+  } else {
+    currentPort = 0;
+  }
 }
 
 // Private method to read raw pressure from the sensor
@@ -46,7 +70,7 @@ void PressureSensor::readPressure() {
     uint8_t pressureState = (p1 & 0b11000000) >> 6;
     uint16_t pressureRaw = ((p1 & 0b00111111) << 8) | p2;
 
-    rawPressure = pressureRaw;
+    rawPressure[currentPort] = pressureRaw;
 }
 
 // Method to set the read interval
@@ -60,27 +84,26 @@ void PressureSensor::smoothPressure() {
         return;
     }
     readPressure();
+    int port = currentPort;
+    total[port] = total[port] - readings[port][readIndex[port]];
+    readings[port][readIndex[port]] = rawPressure[port];
+    total[port] = total[port] + readings[port][readIndex[port]];
+    readIndex[port] = readIndex[port] + 1;
 
-    total = total - readings[readIndex];
-    readings[readIndex] = rawPressure;
-    total = total + readings[readIndex];
-    readIndex = readIndex + 1;
-
-    if (readIndex >= numReadings) {
-        readIndex = 0;
+    if (readIndex[port] >= numReadings) {
+        readIndex[port] = 0;
     }
 
-    average = total / numReadings;
-    currentPressure = average;
+    average[port] = total[port] / numReadings;
+    currentPressure[port] = average[port];
+
+    // Schedule the port switch task
+    switchPortTask.nextExecutionTime = micros() + switchInterval;
+    taskQueue.addTask(switchPortTask);
 
     // Reschedule the task to run again
     readPressureTask.nextExecutionTime = micros() + readInterval;  // Adjust interval as needed
     taskQueue.addTask(readPressureTask);
-}
-
-// Method to set the read interval
-void PressureSensor::setReadInterval(int interval) {
-    readInterval = interval;
 }
 
 // Method to start periodic pressure reading

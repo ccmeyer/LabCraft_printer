@@ -177,9 +177,9 @@ class MassCalibrationModel(QObject):
     
     def initiate_new_measurement(self, measurement_type,calibration_droplets,stock_id=None,starting_volume=None,pulse_width=None,target_pressure=None,target_volume=None,applied_bias=0):
         if pulse_width is None:
-            pulse_width = self.machine_model.get_pulse_width()
+            pulse_width = self.machine_model.get_print_pulse_width()
         if target_pressure is None:
-            target_pressure = self.machine_model.get_target_pressure()
+            target_pressure = self.machine_model.get_target_print_pressure()
         if stock_id is None:
             stock_id = self.current_stock_id
         if starting_volume is None:
@@ -292,7 +292,8 @@ class MassCalibrationModel(QObject):
         elif self.selected_dir is not None:
             return self.model_metadata[self.selected_dir]['model_name']
         else:
-            return '65um low viscosity'
+            # return '65um low viscosity'150um low viscosity
+            return '150um low viscosity'
             # return self.model_metadata[list(self.model_metadata.keys())[0]]['model_name']
 
     def get_prediction_model_path_from_name(self,name):
@@ -2698,7 +2699,7 @@ class MachineModel(QObject):
     balance_state_updated = QtCore.Signal(bool)  # Signal to notify when balance state changes
     motor_state_changed = QtCore.Signal(bool)  # Signal to notify when motor state changes
     regulation_state_changed = QtCore.Signal(bool)  # Signal to notify when pressure regulation state changes
-    pressure_updated = Signal(np.ndarray)  # Signal to emit when pressure readings are updated
+    pressure_updated = Signal()  # Signal to emit when print pressure readings are updated
     printing_parameters_updated = Signal()  # Signal to emit when printing parameters are updated
     ports_updated = Signal(list)  # Signal to notify view of available ports update
     connection_requested = Signal(str, str)  # Signal to request connection
@@ -2720,11 +2721,13 @@ class MachineModel(QObject):
         self.target_y = 0
         self.target_z = 0
         self.target_p = 0
+        self.target_r = 0
 
         self.current_x = 0
         self.current_y = 0
         self.current_z = 0
         self.current_p = 0
+        self.current_r = 0
 
         self.motors_homed = False
         self.current_location = "Unknown"
@@ -2741,16 +2744,22 @@ class MachineModel(QObject):
         self.possible_steps = [2,10,50,250,500,1000,2000]
         self.step_size = self.possible_steps[self.step_num]
 
-        self.current_pressure = 0
-        self.pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
-        self.target_pressure = 0
-        self.pulse_width = 0
+        self.current_print_pressure = 0
+        self.print_pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
+        self.current_refuel_pressure = 0
+        self.refuel_pressure_readings = np.zeros(100)  # Array to store the last 100 pressure readings
+        
+        self.target_print_pressure = 0
+        self.target_refuel_pressure = 0
+        self.print_pulse_width = 0
+        self.refuel_pulse_width = 0
 
-        self.fss = 13107
-        self.psi_offset = 1638
+        self.fss = 6553
+        self.psi_offset = 8192
         self.psi_max = 15
 
-        self.regulating_pressure = False
+        self.regulating_print_pressure = False
+        self.regulating_refuel_pressure = False
 
         self.max_cycle = 0
         self.cycle_count = 0
@@ -2768,8 +2777,9 @@ class MachineModel(QObject):
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
         self.motor_state_changed.emit(self.motors_enabled)
-        self.regulating_pressure = False
-        self.regulation_state_changed.emit(self.regulating_pressure)
+        self.regulating_print_pressure = False
+        self.regulating_refuel_pressure = False
+        self.regulation_state_changed.emit(self.regulating_print_pressure)
         self.reset_home_status()
         self.home_status_signal.emit()
     
@@ -2853,15 +2863,17 @@ class MachineModel(QObject):
         """Toggle the motor state and emit a signal."""
         self.motors_enabled = not self.motors_enabled
         if not self.motors_enabled:
-            self.regulating_pressure = False
-            self.regulation_state_changed.emit(self.regulating_pressure)
+            self.regulating_print_pressure = False
+            self.regulating_refuel_pressure = False
+            self.regulation_state_changed.emit(self.regulating_print_pressure)
         self.motor_state_changed.emit(self.motors_enabled)
         #print(f"Motors {'enabled' if self.motors_enabled else 'disabled'}")
 
     def toggle_regulation_state(self):
         """Toggle the motor state and emit a signal."""
-        self.regulating_pressure = not self.regulating_pressure
-        self.regulation_state_changed.emit(self.regulating_pressure)
+        self.regulating_print_pressure = not self.regulating_print_pressure
+        self.regulating_refuel_pressure = not self.regulating_refuel_pressure
+        self.regulation_state_changed.emit(self.regulating_print_pressure)
         #print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
 
     def update_command_numbers(self, current_command_num, last_completed_command_num):
@@ -2885,6 +2897,9 @@ class MachineModel(QObject):
 
     def update_target_p_motor(self, p):
         self.target_p = int(p)
+    
+    def update_target_r_motor(self, r):
+        self.target_r = int(r)
 
     def update_current_position(self, x, y, z):
         self.current_x = int(x)
@@ -2893,37 +2908,75 @@ class MachineModel(QObject):
 
     def update_current_p_motor(self, p):
         self.current_p = int(p)
+
+    def update_current_r_motor(self, r):
+        self.current_r = int(r)
     
-    def update_target_pressure(self, pressure):
-        self.target_pressure = self.convert_to_psi(pressure)
+    def update_target_print_pressure(self, pressure):
+        self.target_print_pressure = self.convert_to_psi(pressure)
+        self.printing_parameters_updated.emit()
+    
+    def update_target_refuel_pressure(self, pressure):
+        self.target_refuel_pressure = self.convert_to_psi(pressure)
         self.printing_parameters_updated.emit()
 
-    def update_pressure(self, new_pressure):
-        """Update the pressure readings with a new value."""
+    def update_print_pressure(self, new_pressure):
+        """Update the print pressure readings with a new value."""
         # Shift the existing readings and add the new reading
         converted_pressure = self.convert_to_psi(new_pressure)
-        self.current_pressure = converted_pressure
-        self.pressure_readings = np.roll(self.pressure_readings, -1)
-        self.pressure_readings[-1] = converted_pressure
-        self.pressure_updated.emit(self.pressure_readings)
+        self.current_print_pressure = converted_pressure
+        self.print_pressure_readings = np.roll(self.print_pressure_readings, -1)
+        self.print_pressure_readings[-1] = converted_pressure
+        self.pressure_updated.emit()
+
+    def update_refuel_pressure(self,new_pressure):
+        """Update the print pressure readings with a new value."""
+        # Shift the existing readings and add the new reading
+        converted_pressure = self.convert_to_psi(new_pressure)
+        self.current_refuel_pressure = converted_pressure
+        self.refuel_pressure_readings = np.roll(self.refuel_pressure_readings, -1)
+        self.refuel_pressure_readings[-1] = converted_pressure
+        self.pressure_updated.emit()
+
+    def get_print_pressure_readings(self):
+        return self.print_pressure_readings
+    
+    def get_refuel_pressure_readings(self):
+        return self.refuel_pressure_readings
     
     def update_current_micros(self, micros):
         self.current_micros = micros
 
-    def get_current_pressure(self):
-        return self.current_pressure
+    def get_current_print_pressure(self):
+        return self.current_print_pressure
     
-    def get_target_pressure(self):
-        return self.target_pressure
+    def get_current_refuel_pressure(self):
+        return self.current_refuel_pressure
     
-    def get_pulse_width(self):
-        return self.pulse_width
+    def get_target_print_pressure(self):
+        return self.target_print_pressure
+    
+    def get_target_refuel_pressure(self):
+        return self.target_refuel_pressure
+    
+    def get_print_pulse_width(self):
+        return self.print_pulse_width
+
+    def get_refuel_pulse_width(self):
+        return self.refuel_pulse_width
     
     def get_current_p_motor(self):
         return self.current_p
     
-    def update_pulse_width(self,pulse_width):
-        self.pulse_width = int(pulse_width)
+    def get_current_r_motor(self):
+        return self.current_r
+    
+    def update_print_pulse_width(self,pulse_width):
+        self.print_pulse_width = int(pulse_width)
+        self.printing_parameters_updated.emit()
+    
+    def update_refuel_pulse_width(self,pulse_width):
+        self.refuel_pulse_width = int(pulse_width)
         self.printing_parameters_updated.emit()
 
     def update_cycle_count(self,cycle_count):
@@ -3040,21 +3093,29 @@ class Model(QObject):
                                                    status_dict.get('Y', self.machine_model.current_y),
                                                    status_dict.get('Z', self.machine_model.current_z))
         
-        self.machine_model.update_current_p_motor(status_dict.get('P', self.machine_model.current_p))   
+        self.machine_model.update_current_p_motor(status_dict.get('P', self.machine_model.current_p))
+        self.machine_model.update_current_r_motor(status_dict.get('R', self.machine_model.current_r))   
         self.machine_model.update_target_position(status_dict.get('Tar_X', self.machine_model.target_x),
                                                   status_dict.get('Tar_Y', self.machine_model.target_y),
                                                   status_dict.get('Tar_Z', self.machine_model.target_z))
         self.machine_model.update_target_p_motor(status_dict.get('Tar_P', self.machine_model.target_p))
-        if 'Pressure' in status_keys:
-            self.machine_model.update_pressure(status_dict['Pressure'])
-        if 'Tar_pressure' in status_keys:
-            self.machine_model.update_target_pressure(status_dict['Tar_pressure'])
+        self.machine_model.update_target_r_motor(status_dict.get('Tar_R', self.machine_model.target_r))
+        if 'Pressure_P' in status_keys:
+            self.machine_model.update_print_pressure(status_dict['Pressure_P'])
+        if 'Pressure_R' in status_keys:
+            self.machine_model.update_refuel_pressure(status_dict['Pressure_R'])
+        if 'Tar_print' in status_keys:
+            self.machine_model.update_target_print_pressure(status_dict['Tar_print'])
+        if 'Tar_refuel' in status_keys:
+            self.machine_model.update_target_refuel_pressure(status_dict['Tar_refuel'])
         if 'Cycle_count' in status_keys:
             self.machine_model.update_cycle_count(status_dict['Cycle_count'])
         if 'Max_cycle' in status_keys:
             self.machine_model.update_max_cycle(status_dict['Max_cycle'])
-        if 'Pulse_width' in status_keys:
-            self.machine_model.update_pulse_width(status_dict['Pulse_width'])
+        if 'Print_width' in status_keys:
+            self.machine_model.update_print_pulse_width(status_dict['Print_width'])
+        if 'Refuel_width' in status_keys:
+            self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
 

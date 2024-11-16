@@ -7,7 +7,7 @@
 
 class PressureRegulator {
 public:
-    PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue, int valvePin);
+    PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue, int valvePin, int pressurePort);
 
     void setupRegulator();
     void enableRegulator();
@@ -42,6 +42,7 @@ private:
     Task stepTask;                // Task to step the motor
 
     int valvePin;                 // Pin for the pressure regulator valve
+    int pressurePort;             // Port for the pressure sensor
     bool regulatingPressure;      // Flag to indicate if pressure regulation is active
     bool resetInProgress;         // Flag to indicate if the syringe is being reset
     float targetPressure;           // Target pressure to maintain

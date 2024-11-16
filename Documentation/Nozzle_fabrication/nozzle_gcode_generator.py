@@ -1,21 +1,22 @@
-def generate_gcode(rows, columns, intensity, dwell_time, pulses, nozzle_spacing, square_size):
+def generate_gcode(rows, columns, intensity, dwell_time, pulses, pulse_interval, nozzle_spacing, square_size, x_offset=0.0, y_offset=0.0,cut_squares=True):
     gcode = []
 
     # Initialize the laser cutter
     gcode.append("; G-code generated for laser cutting an array of nozzles and surrounding squares")
     gcode.append("G21 ; Set units to millimeters")
     gcode.append("G90 ; Use absolute positioning")
-    gcode.append("M4 ; Enable laser dynamic mode")
+    # gcode.append("M4 ; Enable laser dynamic mode")
 
-    half_square = square_size / 2.0
-    nozzle_offset_x = 0.0  # Nozzle centered in X direction
-    nozzle_offset_y = -half_square + 2.0  # Nozzle 2mm from the top in Y direction
+    # nozzle_offset_x = 1.536
+    # nozzle_offset_y = 2.25
+    nozzle_offset_x = 7.364
+    nozzle_offset_y = 6.65
 
     # Loop through each position in the grid to cut holes
     for i in range(rows):
         for j in range(columns):
-            x_center = j * nozzle_spacing
-            y_center = i * nozzle_spacing
+            x_center = j * nozzle_spacing + x_offset
+            y_center = i * nozzle_spacing + y_offset
 
             x_nozzle = x_center + nozzle_offset_x
             y_nozzle = y_center + nozzle_offset_y
@@ -25,31 +26,31 @@ def generate_gcode(rows, columns, intensity, dwell_time, pulses, nozzle_spacing,
 
             # Fire the laser for the specified number of pulses to cut the hole
             for _ in range(pulses):
-                gcode.append(f"G1 S{intensity} ; Set laser power")
+                gcode.append(f"M3 S{intensity:.3f} ; Set laser power")
+                gcode.append("G1 F1000 ; Set feed rate to 1000 mm/min")
                 gcode.append(f"G4 P{dwell_time:.3f} ; Dwell for specified time")
+                gcode.append("M3 S0 ; Turn off laser between pulses")
                 gcode.append("G1 S0 ; Turn off laser between pulses")
                 gcode.append(f"G4 P{pulse_interval:.3f} ; Dwell between pulses")
 
     # Loop through each position in the grid to cut squares
-    for i in range(rows):
-        for j in range(columns):
-            x_center = j * nozzle_spacing
-            y_center = i * nozzle_spacing
+    if cut_squares:
+        for i in range(rows):
+            for j in range(columns):
+                x_start = j * nozzle_spacing + x_offset
+                y_start = i * nozzle_spacing + y_offset
 
-            x_start = x_center - half_square
-            y_start = y_center - half_square
+                # Move to the starting point of the square
+                gcode.append(f"G0 X{x_start:.3f} Y{y_start:.3f}")
+                gcode.append(f"G1 S{intensity} ; Set laser power")
 
-            # Move to the starting point of the square
-            gcode.append(f"G0 X{x_start:.3f} Y{y_start:.3f}")
-            gcode.append(f"G1 S{intensity} ; Set laser power")
+                # Cut the square
+                gcode.append(f"G1 X{x_start + square_size:.3f} Y{y_start:.3f} ; Cut right")
+                gcode.append(f"G1 X{x_start + square_size:.3f} Y{y_start + square_size:.3f} ; Cut up")
+                gcode.append(f"G1 X{x_start:.3f} Y{y_start + square_size:.3f} ; Cut left")
+                gcode.append(f"G1 X{x_start:.3f} Y{y_start:.3f} ; Cut down")
 
-            # Cut the square
-            gcode.append(f"G1 X{x_start + square_size:.3f} Y{y_start:.3f} ; Cut right")
-            gcode.append(f"G1 X{x_start + square_size:.3f} Y{y_start + square_size:.3f} ; Cut up")
-            gcode.append(f"G1 X{x_start:.3f} Y{y_start + square_size:.3f} ; Cut left")
-            gcode.append(f"G1 X{x_start:.3f} Y{y_start:.3f} ; Cut down")
-
-            gcode.append("G1 S0 ; Turn off laser after cutting the square")
+                gcode.append("G1 S0 ; Turn off laser after cutting the square")
 
     # Finalize the G-code
     gcode.append("M5 ; Disable laser")
@@ -59,20 +60,25 @@ def generate_gcode(rows, columns, intensity, dwell_time, pulses, nozzle_spacing,
 
 # Parameters
 rows = 3  # Number of rows
-columns = 3  # Number of columns
-intensity = 255  # Laser intensity (0-255 for 0%-100% power)
-dwell_time = 0.003  # Dwell time in seconds
-pulse_interval = 0.01  # Dwell time between pulses in seconds
-pulses = 2  # Number of pulses per hole
-nozzle_spacing = 9.0  # Distance between holes in millimeters
-square_size = 9.0  # Size of the square in millimeters
+columns = 5  # Number of columns
+intensity = 3  # Laser intensity (0-1000 for 0%-100% power)
+dwell_time = 1  # Dwell time in milliseconds
+# dwell_time = 0.003  # Dwell time in seconds
+pulse_interval = 10  # Dwell time between pulses in milliseconds
+pulses = 1  # Number of pulses per hole
+nozzle_spacing = 9  # Distance between holes in millimeters
+square_size = 9  # Size of the square in millimeters
+x_offset = 25  # Offset in X direction
+y_offset = -25-9  # Offset in Y direction
+cut_squares = True  # Whether to cut squares around the holes
 
 if __name__ == "__main__":
     # Generate G-code
-    gcode = generate_gcode(rows, columns, intensity, dwell_time, pulses, nozzle_spacing, square_size)
+    gcode = generate_gcode(rows, columns, intensity, dwell_time, pulses, pulse_interval, nozzle_spacing, square_size, x_offset, y_offset,cut_squares=cut_squares)
 
     # Save to a file
-    with open("./laser_cut_nozzles_and_squares.gcode", "w") as file:
+    file_name = f"./dual_M3_{intensity}int_{dwell_time}dwell_{pulses}pul_{rows}x{columns}_cut.gcode"
+    with open(file_name, "w") as file:
         file.write(gcode)
 
-    print("G-code generated and saved to laser_cut_nozzles_and_squares.gcode")
+    print(f"G-code generated and saved to {file_name}")

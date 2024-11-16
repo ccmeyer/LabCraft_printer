@@ -184,13 +184,17 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
 
-        self.shortcut_manager.add_shortcut('1','Set pulse width to 4200', lambda: self.controller.set_pulse_width(4200,manual=True))
-        self.shortcut_manager.add_shortcut('5','Set pressure to 0', lambda: self.controller.set_absolute_pressure(0,manual=True))
-        self.shortcut_manager.add_shortcut('6','Large pressure decrease', lambda: self.controller.set_relative_pressure(-1,manual=True))
-        self.shortcut_manager.add_shortcut('7','Small pressure decrease', lambda: self.controller.set_relative_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('8','Small pressure increase', lambda: self.controller.set_relative_pressure(0.1,manual=True))
-        self.shortcut_manager.add_shortcut('9','Large pressure increase', lambda: self.controller.set_relative_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set pressure to 2.5', lambda: self.controller.set_absolute_pressure(2.5,manual=True))
+        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(1,manual=True))
+        
+        self.shortcut_manager.add_shortcut('5','Set print pressure to 0', lambda: self.controller.set_absolute_print_pressure(0,manual=True))
+        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set print pressure to 2.5', lambda: self.controller.set_absolute_print_pressure(2.5,manual=True))
 
         # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
@@ -203,10 +207,12 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+r','Reset Single Array', lambda: self.reset_single_array())
         self.shortcut_manager.add_shortcut('Shift+e','Reset All Arrays', lambda: self.reset_all_arrays())
 
-        self.shortcut_manager.add_shortcut('c','Print 5 droplets', lambda: self.controller.print_droplets(5))
-        self.shortcut_manager.add_shortcut('v','Print 20 droplets', lambda: self.controller.print_droplets(20))
-        self.shortcut_manager.add_shortcut('b','Print 100 droplets', lambda: self.controller.print_droplets(100))
-        self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_syringe())
+        self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  
+        self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
+        self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
+        self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
+        self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
+        self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_print_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
@@ -548,7 +554,8 @@ class MotorPositionWidget(QGroupBox):
             'X': {'current': QLabel('0'), 'target': QLabel('0')},
             'Y': {'current': QLabel('0'), 'target': QLabel('0')},
             'Z': {'current': QLabel('0'), 'target': QLabel('0')},
-            'P': {'current': QLabel('0'), 'target': QLabel('0')}
+            'P': {'current': QLabel('0'), 'target': QLabel('0')},
+            'R': {'current': QLabel('0'), 'target': QLabel('0')},
         }
 
         row = 1
@@ -622,6 +629,8 @@ class MotorPositionWidget(QGroupBox):
         self.labels['Z']['target'].setText(str(self.model.machine_model.target_z))
         self.labels['P']['current'].setText(str(self.model.machine_model.current_p))
         self.labels['P']['target'].setText(str(self.model.machine_model.target_p))
+        self.labels['R']['current'].setText(str(self.model.machine_model.current_r))
+        self.labels['R']['target'].setText(str(self.model.machine_model.target_r))
 
     def update_step_size(self, new_step_size):
         """Update the spin box with the new step size."""
@@ -686,118 +695,170 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QGridLayout(self)
 
-        self.current_pressure_label = QtWidgets.QLabel("Current Pressure:")  # Create a new QLabel for the current pressure label
-        self.current_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
-        self.target_pressure_label = QtWidgets.QLabel("Target Pressure:")  # Create a new QLabel for the target pressure label
-        self.target_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
-        self.target_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
-        self.target_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
-        self.target_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-        self.target_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.target_pressure_spinbox.valueChanged.connect(self.handle_target_pressure_change)  # Connect value changes to the update_pressure function
+        self.current_print_pressure_label = QtWidgets.QLabel("Print Pressure:")  # Create a new QLabel for the current pressure label
+        self.current_print_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
+        self.target_print_pressure_label = QtWidgets.QLabel("Target Print:")  # Create a new QLabel for the target pressure label
+        self.target_print_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
+        self.target_print_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
+        self.target_print_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
+        self.target_print_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
+        self.target_print_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.target_print_pressure_spinbox.valueChanged.connect(self.handle_target_print_pressure_change)  # Connect value changes to the update_pressure function
 
-        self.layout.addWidget(self.current_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
-        self.layout.addWidget(self.current_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
-        self.layout.addWidget(self.target_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
-        self.layout.addWidget(self.target_pressure_spinbox, 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+        self.layout.addWidget(self.current_print_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
+        self.layout.addWidget(self.current_print_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
+        self.layout.addWidget(self.target_print_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
+        self.layout.addWidget(self.target_print_pressure_spinbox, 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+
+        self.current_refuel_pressure_label = QtWidgets.QLabel("Refuel Pressure:")  # Create a new QLabel for the current pressure label
+        self.current_refuel_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
+        self.target_refuel_pressure_label = QtWidgets.QLabel("Target Refuel:")  # Create a new QLabel for the target pressure label
+        self.target_refuel_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
+        self.target_refuel_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
+        self.target_refuel_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
+        self.target_refuel_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
+        self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.target_refuel_pressure_spinbox.valueChanged.connect(self.handle_target_refuel_pressure_change)  # Connect value changes to the update_pressure function
+
+        self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
+        self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
+        self.layout.addWidget(self.target_refuel_pressure_label, 1, 2)  # Add the QLabel to the layout at position (1, 0)
+        self.layout.addWidget(self.target_refuel_pressure_spinbox, 1, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+
 
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
         self.pressure_regulation_button.setFocusPolicy(QtCore.Qt.NoFocus)
         # self.pressure_regulation_button.setCheckable(True)
         self.pressure_regulation_button.clicked.connect(self.request_toggle_regulation)
-        self.layout.addWidget(self.pressure_regulation_button, 1, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
-        self.update_regulation_button(self.model.machine_model.regulating_pressure)
+        self.layout.addWidget(self.pressure_regulation_button, 2, 0, 1, 4)  # Add the button to the layout at position (2, 0) and make it span 2 columns
+        self.update_regulation_button(self.model.machine_model.regulating_print_pressure)
 
         self.chart = QtCharts.QChart()
         self.chart.setTheme(QtCharts.QChart.ChartThemeDark)
         self.chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['darker_gray']))  # Set the background color to grey
         self.chart_view = QtCharts.QChartView(self.chart)
-        self.series = QtCharts.QLineSeries()
-        self.series.setColor(QtCore.Qt.white)
-        self.chart.addSeries(self.series)
+        
+        self.print_series = QtCharts.QLineSeries()
+        self.print_series.setColor(QtCore.Qt.white)
+        self.chart.addSeries(self.print_series)
 
-        self.target_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-        self.target_pressure_series.setColor(QtCore.Qt.red)  # Set the line color to red
-        self.chart.addSeries(self.target_pressure_series)
+        self.refuel_series = QtCharts.QLineSeries()
+        self.refuel_series.setColor(QtCore.Qt.white)
+        self.chart.addSeries(self.refuel_series)
+
+        self.target_print_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
+        self.target_print_pressure_series.setColor(QtCore.Qt.red)  # Set the line color to red
+        self.chart.addSeries(self.target_print_pressure_series)
+
+        self.target_refuel_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
+        self.target_refuel_pressure_series.setColor(QtCore.Qt.red)
+        self.chart.addSeries(self.target_refuel_pressure_series)
 
         self.axisX = QtCharts.QValueAxis()
         self.axisX.setTickCount(3)
-        self.axisX.setRange(0, len(self.model.machine_model.pressure_readings))
+        self.axisX.setRange(0, len(self.model.machine_model.get_print_pressure_readings()))
         self.axisY = QtCharts.QValueAxis()
         self.axisY.setTitleText("Pressure (psi)")
 
         self.chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
         self.chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
 
-        self.series.attachAxis(self.axisX)
-        self.series.attachAxis(self.axisY)
-        self.target_pressure_series.attachAxis(self.axisX)
-        self.target_pressure_series.attachAxis(self.axisY)
+        self.print_series.attachAxis(self.axisX)
+        self.print_series.attachAxis(self.axisY)
+
+        self.refuel_series.attachAxis(self.axisX)
+        self.refuel_series.attachAxis(self.axisY)
+
+        self.target_print_pressure_series.attachAxis(self.axisX)
+        self.target_print_pressure_series.attachAxis(self.axisY)
+
+        self.target_refuel_pressure_series.attachAxis(self.axisX)
+        self.target_refuel_pressure_series.attachAxis(self.axisY)
 
         self.chart.legend().hide()  # Hide the legend
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.layout.addWidget(self.chart_view, 2, 0,1,4)
+        self.layout.addWidget(self.chart_view, 3, 0,1,4)
 
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
-        self.layout.addWidget(self.calibrate_pressure_button, 3, 0, 2, 2)
+        self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 2, 2)
 
-        self.pulse_width_label = QtWidgets.QLabel("Pulse Width:")
-        self.pulse_width_spinbox = QtWidgets.QSpinBox()
-        self.pulse_width_spinbox.setRange(0, 10000)
-        self.pulse_width_spinbox.setSingleStep(50)
-        self.pulse_width_spinbox.setValue(3000)
-        self.pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.pulse_width_spinbox.valueChanged.connect(self.handle_pulse_width_change)
-        self.layout.addWidget(self.pulse_width_label,3,2,1,1)
-        self.layout.addWidget(self.pulse_width_spinbox,3,3,1,1)
+        self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
+        self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.print_pulse_width_spinbox.setRange(0, 10000)
+        self.print_pulse_width_spinbox.setSingleStep(50)
+        self.print_pulse_width_spinbox.setValue(3000)
+        self.print_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
+        self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
+        self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
 
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
 
-    def handle_target_pressure_change(self, value):
+    def handle_target_print_pressure_change(self, value):
         """Handle changes to the target pressure value."""
         # self.update_target_pressure_input.emit(value)
-        self.controller.set_absolute_pressure(value,manual=True)
+        self.controller.set_absolute_print_pressure(value,manual=True)
 
-    def handle_pulse_width_change(self, value):
+    def handle_target_refuel_pressure_change(self, value):
+        """Handle changes to the target pressure value."""
+        # self.update_target_pressure_input.emit(value)
+        self.controller.set_absolute_refuel_pressure(value,manual=True)
+
+    def handle_print_pulse_width_change(self, value):
         """Handle changes to the pulse width value."""
         # self.update_pulse_width_input.emit(value)
-        self.controller.set_pulse_width(value,manual=True)
+        self.controller.set_print_pulse_width(value,manual=True)
+    
+    def handle_refuel_pulse_width_change(self, value):
+        """Handle changes to the pulse width value."""
+        # self.update_pulse_width_input.emit(value)
+        self.controller.set_refuel_pulse_width(value,manual=True)
 
-    def update_pressure(self, pressure_log):
+    def update_pressure(self):
         """Update the current pressure label and plot with the new pressure values."""
         # Clear previous data
-        self.series.clear()
-        self.target_pressure_series.clear()
+        self.print_series.clear()
+        self.refuel_series.clear()
+        self.target_print_pressure_series.clear()
+
+        print_log = self.model.machine_model.get_print_pressure_readings()
+        refuel_log = self.model.machine_model.get_refuel_pressure_readings()
+        comp_log = list(print_log).copy()
+        comp_log.extend(refuel_log)
 
         # Append new pressure data
-        for i, pressure in enumerate(pressure_log):
-            self.series.append(i, pressure)
+        for i, pressure in enumerate(print_log):
+            self.print_series.append(i, pressure)
+
+        for i, pressure in enumerate(refuel_log):
+            self.refuel_series.append(i, pressure)
 
         # Get the target pressure and append target line points
-        target_pressure = self.model.machine_model.target_pressure
-        self.target_pressure_series.append(0, target_pressure)  # Add lower point of target pressure line
-        self.target_pressure_series.append(len(pressure_log) - 1, target_pressure)  # Add upper point of target pressure line
+        target_print_pressure = self.model.machine_model.get_target_print_pressure()
+        self.target_print_pressure_series.append(0, target_print_pressure)  # Add lower point of target pressure line
+        self.target_print_pressure_series.append(len(print_log) - 1, target_print_pressure)  # Add upper point of target pressure line
 
         # Calculate min and max pressure for y-axis range
-        min_pressure = min([*pressure_log,target_pressure]) - 0.5
-        max_pressure = max([*pressure_log,target_pressure]) + 0.5
+        min_pressure = min([*comp_log,target_print_pressure]) - 0.5
+        max_pressure = max([*comp_log,target_print_pressure]) + 0.5
 
         # Update y-axis range with calculated min and max
         self.axisY.setRange(min_pressure, max_pressure)
 
         # Update the pressure display labels
-        self.current_pressure_value.setText(f"{pressure_log[-1]:.3f}")
+        self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
+        self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
 
-        self.target_pressure_spinbox.blockSignals(True)  # Block signals temporarily
-        self.target_pressure_spinbox.setValue(target_pressure)
-        self.target_pressure_spinbox.blockSignals(False)  # Unblock signals
+        self.target_print_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+        self.target_print_pressure_spinbox.setValue(target_print_pressure)
+        self.target_print_pressure_spinbox.blockSignals(False)  # Unblock signals
 
-        self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(self.model.machine_model.pulse_width)
-        self.pulse_width_spinbox.blockSignals(False)
+        self.print_pulse_width_spinbox.blockSignals(True)
+        self.print_pulse_width_spinbox.setValue(self.model.machine_model.print_pulse_width)
+        self.print_pulse_width_spinbox.blockSignals(False)
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
@@ -844,7 +905,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def calibration_pressure_change(self,pressure):
         print('Pressure changed to:',pressure)
         self.target_pressure = pressure
-        self.controller.set_absolute_pressure(pressure)
+        self.controller.set_absolute_print_pressure(pressure)
         
 class MassCalibrationDialog(QtWidgets.QDialog):
     popup_message_signal = QtCore.Signal(str,str)
@@ -1087,57 +1148,57 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.num_droplets_spinbox, row, 1)
         row += 1
 
-        # self.calibrate_button = QtWidgets.QPushButton("Calibrate")
-        # self.calibrate_button.clicked.connect(self.initiate_calibration_process)
-        # self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
-        # row += 1
+        self.calibrate_button = QtWidgets.QPushButton("Calibrate")
+        self.calibrate_button.clicked.connect(self.initiate_calibration_process)
+        self.user_input_layout.addWidget(self.calibrate_button, row, 0, 1, 2)
+        row += 1
 
-        # self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
-        # self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.pressure_screen_low_spinbox.setDecimals(0)
-        # self.pressure_screen_low_spinbox.setSingleStep(10)
-        # self.pressure_screen_low_spinbox.setRange(10,7000)
-        # self.pressure_screen_low_spinbox.setValue(3500)
-        # # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
-        # self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
-        # row += 1
+        self.pressure_screen_low_label = QtWidgets.QLabel("Screen Low:")
+        self.pressure_screen_low_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_low_spinbox.setDecimals(0)
+        self.pressure_screen_low_spinbox.setSingleStep(10)
+        self.pressure_screen_low_spinbox.setRange(10,7000)
+        self.pressure_screen_low_spinbox.setValue(3500)
+        # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
+        row += 1
 
-        # self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
-        # self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.pressure_screen_high_spinbox.setDecimals(0)
-        # self.pressure_screen_high_spinbox.setSingleStep(10)
-        # self.pressure_screen_high_spinbox.setRange(10, 7000)
-        # self.pressure_screen_high_spinbox.setValue(4500)
-        # # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
-        # self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
-        # row += 1
+        self.pressure_screen_high_label = QtWidgets.QLabel("Screen High:")
+        self.pressure_screen_high_spinbox = QtWidgets.QDoubleSpinBox()
+        self.pressure_screen_high_spinbox.setDecimals(0)
+        self.pressure_screen_high_spinbox.setSingleStep(10)
+        self.pressure_screen_high_spinbox.setRange(10, 7000)
+        self.pressure_screen_high_spinbox.setValue(4500)
+        # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
+        self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
+        row += 1
 
-        # self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
-        # self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
-        # self.repeat_measurement_spinbox.setRange(1, 100)
-        # self.repeat_measurement_spinbox.setSingleStep(1)
-        # self.repeat_measurement_spinbox.setValue(3)
-        # # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
-        # self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
-        # row += 1
+        self.repeat_measurement_label = QtWidgets.QLabel("Repeat Measurements:")
+        self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
+        self.repeat_measurement_spinbox.setRange(1, 100)
+        self.repeat_measurement_spinbox.setSingleStep(1)
+        self.repeat_measurement_spinbox.setValue(3)
+        # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
+        self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
+        row += 1
         
-        # self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
-        # self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
-        # self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
-        # row += 1
+        self.repeat_measurement_button = QtWidgets.QPushButton("Repeat Measurement")
+        self.repeat_measurement_button.clicked.connect(self.initiate_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.repeat_measurement_button, row, 0, 1, 2)
+        row += 1
 
-        # self.start_screen_button = QtWidgets.QPushButton("Start Screen")
-        # self.start_screen_button.clicked.connect(self.start_screen)
-        # self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
-        # row += 1
+        self.start_screen_button = QtWidgets.QPushButton("Start Screen")
+        self.start_screen_button.clicked.connect(self.start_screen)
+        self.user_input_layout.addWidget(self.start_screen_button, row, 0, 1, 2)
+        row += 1
 
-        # self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
-        # self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
-        # self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
-        # row += 1
+        self.stop_repeat_measurement_button = QtWidgets.QPushButton("Stop Repeating")
+        self.stop_repeat_measurement_button.clicked.connect(self.stop_repeat_calibration_process)
+        self.user_input_layout.addWidget(self.stop_repeat_measurement_button, row, 0, 1, 2)
+        row += 1
 
         self.remove_last_measurement_button = QtWidgets.QPushButton("Remove Last")
         self.remove_last_measurement_button.clicked.connect(self.remove_last_measurement)
@@ -1226,12 +1287,12 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             self.pulse_width_spinbox.blockSignals(True)
             self.pulse_width_spinbox.setValue(resistance_pulse_width)
             self.pulse_width_spinbox.blockSignals(False)
-            self.controller.set_pulse_width(resistance_pulse_width,manual=False)
+            self.controller.set_print_pulse_width(resistance_pulse_width,manual=False)
 
             self.target_pressure_spinbox.blockSignals(True)
             self.target_pressure_spinbox.setValue(standard_pressure)
             self.target_pressure_spinbox.blockSignals(False)
-            self.controller.set_absolute_pressure(standard_pressure,manual=False)
+            self.controller.set_absolute_print_pressure(standard_pressure,manual=False)
 
             self.target_drop_volume_spinbox.setValue(target_volume)
             self.handle_target_drop_volume_change(target_volume)
@@ -1252,11 +1313,11 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             
     def handle_target_pressure_change(self, value):
         """Handle changes to the target pressure value."""
-        self.controller.set_absolute_pressure(value,manual=True)
+        self.controller.set_absolute_print_pressure(value,manual=True)
 
     def handle_pulse_width_change(self, value):
         """Handle changes to the pulse width value."""
-        self.controller.set_pulse_width(value,manual=True)
+        self.controller.set_print_pulse_width(value,manual=True)
 
     def handle_num_droplets_change(self, value):
         """Handle changes to the number of droplets value."""
@@ -1265,14 +1326,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     def update_printing_parameters(self):
         """Update the spinboxes with the current printing parameters."""
 
-        self.current_pressure_value.setText(f"{self.model.machine_model.current_pressure:.3f}")
+        self.current_pressure_value.setText(f"{self.model.machine_model.get_current_print_pressure():.3f}")
 
         self.target_pressure_spinbox.blockSignals(True)
-        self.target_pressure_spinbox.setValue(self.model.machine_model.target_pressure)
+        self.target_pressure_spinbox.setValue(self.model.machine_model.get_target_print_pressure())
         self.target_pressure_spinbox.blockSignals(False)
 
         self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(self.model.machine_model.pulse_width)
+        self.pulse_width_spinbox.setValue(self.model.machine_model.get_print_pulse_width())
         self.pulse_width_spinbox.blockSignals(False)
 
     def set_volume(self):
@@ -1338,8 +1399,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         if not self.handle_initiate_test():
             return
         self.label.setText("Started resistance calibration process, waiting for mass stabilization")
-        self.controller.check_syringe_position()
-        self.controller.set_pulse_width(self.model.calibration_model.standard_pulse_width,manual=False)
+        self.controller.check_print_syringe_position()
+        self.controller.set_print_pulse_width(self.model.calibration_model.standard_pulse_width,manual=False)
         self.current_set_pulse_width = self.model.calibration_model.standard_pulse_width
         self.model.calibration_model.initiate_new_measurement('resistance',self.num_calibration_droplets)
         
@@ -1353,14 +1414,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         if not self.handle_initiate_test():
             return
         self.label.setText("Evaluating prediction, waiting for mass stabilization")
-        self.controller.check_syringe_position()
+        self.controller.check_print_syringe_position()
         predicted_pulse_width, applied_bias = self.predict_pulse_width()
         self.current_set_pulse_width = predicted_pulse_width
         target_volume = self.target_drop_volume_spinbox.value()
         self.pulse_width_spinbox.blockSignals(True)
         self.pulse_width_spinbox.setValue(predicted_pulse_width)
         self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_pulse_width(predicted_pulse_width,manual=False)
+        self.controller.set_print_pulse_width(predicted_pulse_width,manual=False)
         self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
 
     def predict_pulse_width_no_bias(self):
@@ -1373,14 +1434,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         if not self.handle_initiate_test():
             return
         self.label.setText("Evaluating prediction without bias, waiting for mass stabilization")
-        self.controller.check_syringe_position()
+        self.controller.check_print_syringe_position()
         predicted_pulse_width, applied_bias = self.predict_pulse_width_no_bias()
         self.current_set_pulse_width = predicted_pulse_width
         target_volume = self.target_drop_volume_spinbox.value()
         self.pulse_width_spinbox.blockSignals(True)
         self.pulse_width_spinbox.setValue(predicted_pulse_width)
         self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_pulse_width(predicted_pulse_width,manual=False,update_model=True)
+        self.controller.set_print_pulse_width(predicted_pulse_width,manual=False,update_model=True)
         self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
 
 
@@ -1401,7 +1462,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         current_screen_pressure = self.pressures_to_screen.pop()
         self.label.setText(f"---Testing {current_screen_pressure} psi, {self.repeat_measurements} remaining---")
         #print(f'Screening pulse widths: {current_screen_pressure}')
-        self.controller.set_pulse_width(current_screen_pressure,manual=False)
+        self.controller.set_print_pulse_width(current_screen_pressure,manual=False)
         self.current_set_pulse_width = current_screen_pressure
         self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,pulse_width=current_screen_pressure)
 
@@ -1415,8 +1476,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         pulse_width,applied_bias = self.predict_pulse_width()
         self.current_set_pulse_width = pulse_width
         target_volume = self.target_drop_volume_spinbox.value()
-        self.controller.set_pulse_width(pulse_width,manual=False)
-        self.controller.check_syringe_position()
+        self.controller.set_print_pulse_width(pulse_width,manual=False)
+        self.controller.check_print_syringe_position()
         self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
         self.repeat_measurements -= 1
 
@@ -1429,7 +1490,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     def initiate_calibration_process(self):
         """Initiate the process of capturing a new measurement."""
         self.label.setText("Started calibration process, waiting for mass stabilization")
-        self.controller.check_syringe_position()
+        self.controller.check_print_syringe_position()
         self.model.calibration_model.initiate_new_measurement('standard',self.num_calibration_droplets)
     
     def initiate_calibration_print(self):
@@ -1451,15 +1512,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
                 #print(f'Screening pressure: {current_screening_pressure}')
                 self.label.setText(f"---Testing {current_screening_pressure} psi, {self.repeat_measurements} remaining---")
                 self.current_set_pulse_width = current_screening_pressure
-                self.controller.set_pulse_width(current_screening_pressure,manual=False)
-                self.controller.check_syringe_position()
+                self.controller.set_print_pulse_width(current_screening_pressure,manual=False)
+                self.controller.check_print_syringe_position()
                 self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,pulse_width=current_screening_pressure)
             else:
                 pulse_width,applied_bias = self.predict_pulse_width()
                 self.current_set_pulse_width = pulse_width
-                self.controller.set_pulse_width(pulse_width,manual=False)
+                self.controller.set_print_pulse_width(pulse_width,manual=False)
                 target_volume = self.target_drop_volume_spinbox.value()
-                self.controller.check_syringe_position()
+                self.controller.check_print_syringe_position()
                 self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
                 self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
         else:

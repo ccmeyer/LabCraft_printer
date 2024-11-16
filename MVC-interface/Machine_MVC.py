@@ -818,8 +818,8 @@ class Machine(QObject):
         self.sent_command = None
         self.error_count = 0
 
-        self.fss = 13107
-        self.psi_offset = 1638
+        self.fss = 6553
+        self.psi_offset = 8192
         self.psi_max = 15
 
         self.simulate_balance = True
@@ -1088,14 +1088,20 @@ class Machine(QObject):
     def reset_acceleration(self,handler=None,kwargs=None,manual=False):
         self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
-    def regulate_pressure(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('REGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    def regulate_print_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('REGULATE_PRESSURE_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def regulate_refuel_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('REGULATE_PRESSURE_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def deregulate_pressure(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('DEREGULATE_PRESSURE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
-    def reset_syringe(self,handler=None,kwargs=None,manual=False):
+    def reset_print_syringe(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def reset_refuel_syringe(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('RESET_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-50000,50000):
@@ -1135,22 +1141,39 @@ class Machine(QObject):
     def convert_to_raw_pressure(self,psi):
         return int((psi / self.psi_max) * self.fss + self.psi_offset)
 
-    def set_relative_pressure(self,psi,handler=None,kwargs=None,manual=False):
+    def set_relative_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
         print('Setting relative pressure:',pressure)
-        if self.check_param_limits(pressure,-1638,13107):
-            return self.add_command_to_queue('RELATIVE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(pressure,-2185,2185):
+            return self.add_command_to_queue('RELATIVE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_relative_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        pressure -= self.psi_offset
+        print('Setting relative pressure:',pressure)
+        if self.check_param_limits(pressure,-2185,2185):
+            return self.add_command_to_queue('RELATIVE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def set_absolute_pressure(self,psi,handler=None,kwargs=None,manual=False):
+    def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute pressure:',pressure)
-        if self.check_param_limits(pressure,-1638,13107):
-            return self.add_command_to_queue('ABSOLUTE_PRESSURE',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        if self.check_param_limits(pressure,7755,10376):
+            return self.add_command_to_queue('ABSOLUTE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        print('Setting absolute pressure:',pressure)
+        if self.check_param_limits(pressure,7755,10376):
+            return self.add_command_to_queue('ABSOLUTE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def set_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+    def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
         if self.check_param_limits(pulse_width,100,10000):
-            return self.add_command_to_queue('SET_WIDTH',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue('SET_WIDTH_P',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_refuel_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+        if self.check_param_limits(pulse_width,100,10000):
+            return self.add_command_to_queue('SET_WIDTH_R',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def enter_print_mode(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -1169,7 +1192,8 @@ class Machine(QObject):
         self.add_command_to_queue('HOME_Z',0,0,0,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_X',0,0,0,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_Y',0,0,0,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_P',0,0,0,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_R',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
         return True
     
     def open_gripper_handler(self,additional_handler=None):
@@ -1211,11 +1235,22 @@ class Machine(QObject):
         self.check_param_limits(droplet_count,1,1000)
         return self.add_command_to_queue('PRINT',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
 
+    def print_only(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
+        return self.add_command_to_queue('PRINT_ONLY',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def refuel_only(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
+        return self.add_command_to_queue('REFUEL_ONLY',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+
     def calibrate_pressure_handler(self):
         self.all_calibration_droplets_printed.emit()
 
-    def get_pulse_width(self):
-        return self.model.machine_model.get_pulse_width()
+    def get_print_pulse_width(self):
+        return self.model.machine_model.get_print_pulse_width()
+
+    def get_refuel_pulse_width(self):
+        return self.model.machine_model.get_refuel_pulse_width()
 
     def print_calibration_droplets(self,num_droplets,manual=False,pulse_width=None):
         print('Machine: Printing calibration droplets')

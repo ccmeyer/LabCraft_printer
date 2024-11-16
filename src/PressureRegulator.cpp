@@ -3,14 +3,14 @@
 #include <Arduino.h>
 
 // Constructor
-PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue,int valvePin)
+PressureRegulator::PressureRegulator(CustomStepper& stepper, PressureSensor& sensor, TaskQueue& taskQueue,int valvePin, int pressurePort)
     : stepper(stepper), sensor(sensor), taskQueue(taskQueue), 
       adjustPressureTask([this]() { this->adjustPressure(); }, 0), 
       resetSyringeTask([this]() { this->resetSyringe(); }, 0), 
       homeSyringeTask([this]() { this->homeSyringeCheck(); }, 0),
       stepTask([this]() { this->stepMotorDirectly(); }, 0),
-      regulatingPressure(false), resetInProgress(false),valvePin(valvePin), targetPressure(1638), 
-      tolerance(10), cutoff(200), homing(false), currentPressure(1638), previousPressure(1638), pressureDifference(0), targetReached(true), syringeSpeed(0), targetReachedCounter(0),
+      regulatingPressure(false), resetInProgress(false),valvePin(valvePin),pressurePort(pressurePort), targetPressure(8192), 
+      tolerance(10), cutoff(200), homing(false), currentPressure(8192), previousPressure(8192), pressureDifference(0), targetReached(true), syringeSpeed(0), targetReachedCounter(0),
       adjustInterval(5000), resetInterval(5000), stepInterval(1000), stepperTaskActive(false), lowerBound(-300), upperBound(25000), maxSpeed(1500), minSpeed(300), motorPosition(0), totalRange(25000) {
         pinMode(valvePin, OUTPUT);
         digitalWrite(valvePin, LOW);
@@ -141,7 +141,7 @@ void PressureRegulator::resetState() {
     targetReached = true;
     targetReachedCounter = 0;
     stepperTaskActive = false;
-    targetPressure = sensor.getPressure();
+    targetPressure = sensor.getPrintPressure();
     setPressureTolerance(10);
     setAdjustInterval(5000);
     stepper.resetState();
@@ -209,8 +209,11 @@ void PressureRegulator::adjustPressure() {
         interrupts();
         return;
     }
-
-    currentPressure = sensor.getPressure();
+    if (pressurePort == 0) {
+        currentPressure = sensor.getPrintPressure();
+    } else {
+        currentPressure = sensor.getRefuelPressure();
+    }
 
     pressureDifference = currentPressure - targetPressure;
 
@@ -274,7 +277,7 @@ void PressureRegulator::stepMotorDirectly() {
         resetSyringe();
         return;
     } else if (stepper.currentPosition() < lowerBound) {
-        setTargetPressureAbsolute(1638);
+        setTargetPressureAbsolute(8192);
         resetSyringe();
         return;
     }

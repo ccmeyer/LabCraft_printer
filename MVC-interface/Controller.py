@@ -303,32 +303,59 @@ class Controller(QObject):
         return True
 
 
-    def set_relative_pressure(self, pressure,manual=False):
+    def set_relative_print_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
         #print(f"Setting relative pressure: {pressure}")
-        self.machine.set_relative_pressure(pressure,manual=manual)
+        self.machine.set_relative_print_pressure(pressure,manual=manual)
 
-    def set_absolute_pressure(self, pressure,manual=False):
+    def set_relative_refuel_pressure(self, pressure,manual=False):
+        """Set the relative pressure for the machine."""
+        #print(f"Setting relative pressure: {pressure}")
+        self.machine.set_relative_refuel_pressure(pressure,manual=manual)
+
+    def set_absolute_print_pressure(self, pressure,manual=False):
         """Set the absolute pressure for the machine."""
         #print(f"Setting absolute pressure: {pressure}")
-        self.machine.set_absolute_pressure(pressure,manual=manual)
+        self.machine.set_absolute_print_pressure(pressure,manual=manual)
 
-    def set_pulse_width(self, pulse_width,manual=False,update_model=False):
+    def set_absolute_refuel_pressure(self, pressure,manual=False):
+        """Set the absolute pressure for the machine."""
+        #print(f"Setting absolute pressure: {pressure}")
+        self.machine.set_absolute_refuel_pressure(pressure,manual=manual)
+
+    def set_print_pulse_width(self, pulse_width,manual=False,update_model=False):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")
         if update_model:
-            self.model.machine_model.update_pulse_width(pulse_width)
-        self.machine.set_pulse_width(pulse_width,manual=manual)
+            self.model.machine_model.update_print_pulse_width(pulse_width)
+        self.machine.set_print_pulse_width(pulse_width,manual=manual)
 
-    def reset_syringe(self):
-        """Reset the syringe."""
-        self.machine.reset_syringe()
+    def set_refuel_pulse_width(self, pulse_width,manual=False,update_model=False):
+        """Set the pulse width for the machine."""
+        #print(f"Setting pulse width: {pulse_width}")
+        if update_model:
+            self.model.machine_model.update_refuel_pulse_width(pulse_width)
+        self.machine.set_refuel_pulse_width(pulse_width,manual=manual)
 
-    def check_syringe_position(self):
+    def reset_print_syringe(self):
+        """Reset the print syringe."""
+        self.machine.reset_print_syringe()
+
+    def reset_refuel_syringe(self):
+        """Reset the refuel syringe."""
+        self.machine.reset_refuel_syringe()
+
+    def check_print_syringe_position(self):
         """Checks the syringe position and resets it if nearly at the limit."""
         current_p = self.model.machine_model.get_current_p_motor()
         if current_p > 22500:
-            self.reset_syringe()
+            self.reset_print_syringe()
+    
+    def check_refuel_syringe_position(self):
+        """Checks the syringe position and resets it if nearly at the limit."""
+        current_r = self.model.machine_model.get_current_r_motor()
+        if current_r > 22500:
+            self.reset_refuel_syringe()
 
     def pause_machine(self):
         """Pause the machine."""
@@ -350,11 +377,13 @@ class Controller(QObject):
 
     def toggle_regulation(self):
         """Slot to toggle the motor state."""
-        if self.model.machine_model.regulating_pressure:
+        if self.model.machine_model.regulating_print_pressure:
             success = self.machine.deregulate_pressure()  # Assuming method exists
+            success_2 = True
         else:
-            success = self.machine.regulate_pressure()  # Assuming method exists
-        if success:
+            success = self.machine.regulate_print_pressure()  # Assuming method exists
+            success_2 = self.machine.regulate_refuel_pressure()
+        if success and success_2:
             self.model.machine_model.toggle_regulation_state()  # Update the model state
 
     def add_reagent_to_slot(self, slot):
@@ -580,7 +609,7 @@ class Controller(QObject):
     
     def print_droplets(self,droplets,handler=None,kwargs=None,manual=False,expected_volume=None):
         """Print a specified number of droplets."""
-        if not self.model.machine_model.regulating_pressure:
+        if not self.model.machine_model.regulating_print_pressure:
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
             print('Cannot print: Pressure regulation is not enabled')
             return
@@ -593,8 +622,8 @@ class Controller(QObject):
                     #print(f'Controller: using expected volume: {expected_volume}')
                     vol = expected_volume
                 new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias, prediction_model=pred_model,resistance_pulse_width=resistance_pulse_width)
-                if abs(self.model.machine_model.get_pulse_width() - new_pulse_width) > 2:
-                    self.set_pulse_width(new_pulse_width,manual=False)
+                if abs(self.model.machine_model.get_print_pulse_width() - new_pulse_width) > 2:
+                    self.set_print_pulse_width(new_pulse_width,manual=False)
             
                 if handler is None:
                     handler = self.volume_update_handler
@@ -605,6 +634,14 @@ class Controller(QObject):
                 print('Controller: using default pulse width')
 
         self.machine.print_droplets(droplets,handler=handler,kwargs=kwargs,manual=manual)
+
+    def print_only(self,droplets,manual=False):
+        """Activate the print valve a specified number of times without refueling."""
+        self.machine.print_only(droplets,manual=manual)
+    
+    def refuel_only(self,droplets,manual=False):
+        """Activate the refuel valve a specified number of times without printing."""
+        self.machine.refuel_only(droplets,manual=manual)
 
     def print_calibration_droplets(self,droplets,manual=False,pulse_width=None):
         """Print a specified number of droplets for calibration."""
@@ -696,7 +733,7 @@ class Controller(QObject):
             print('Cannot print: No printer head is loaded')
             return
         
-        if not self.model.machine_model.regulating_pressure:
+        if not self.model.machine_model.regulating_print_pressure:
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
             print('Cannot print: Pressure regulation is not enabled')
             return

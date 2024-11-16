@@ -21,10 +21,14 @@ void setupPins()
     pinMode(printValvePin, OUTPUT);
     digitalWrite(printValvePin,LOW);
 
+    pinMode(refuelValvePin, OUTPUT);
+    digitalWrite(refuelValvePin,LOW);
+
     pinMode(xstop, INPUT);
     pinMode(ystop, INPUT);
     pinMode(zstop, INPUT);
     pinMode(pstop, INPUT);
+    pinMode(rstop, INPUT);
 }
 
 void blinkLED()

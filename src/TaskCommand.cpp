@@ -138,24 +138,40 @@ CommandType mapCommandType(const char* commandName) {
         return HOME_Z;
     } else if (strcmp(commandName, "HOME_P") == 0) {
         return HOME_P;
+    } else if (strcmp(commandName, "HOME_R") == 0) {
+        return HOME_R;
     } else if (strcmp(commandName, "CHANGE_ACCEL") == 0) {
         return CHANGE_ACCEL;
     } else if (strcmp(commandName, "RESET_ACCEL") == 0) {
         return RESET_ACCEL;
-    } else if (strcmp(commandName, "REGULATE_PRESSURE") == 0) {
-        return REGULATE_PRESSURE;
+    } else if (strcmp(commandName, "REGULATE_PRESSURE_P") == 0) {
+        return REGULATE_PRESSURE_P;
+    } else if (strcmp(commandName, "REGULATE_PRESSURE_R") == 0) {
+        return REGULATE_PRESSURE_R;
     } else if (strcmp(commandName, "DEREGULATE_PRESSURE") == 0) {
         return DEREGULATE_PRESSURE;
-    } else if (strcmp(commandName, "RELATIVE_PRESSURE") == 0) {
-        return RELATIVE_PRESSURE;
-    } else if (strcmp(commandName, "ABSOLUTE_PRESSURE") == 0) {
-        return ABSOLUTE_PRESSURE;
-    } else if (strcmp(commandName, "SET_WIDTH") == 0) {
-        return SET_WIDTH;
+    } else if (strcmp(commandName, "RELATIVE_PRESSURE_P") == 0) {
+        return RELATIVE_PRESSURE_P;
+    } else if (strcmp(commandName, "RELATIVE_PRESSURE_R") == 0) {
+        return RELATIVE_PRESSURE_R;
+    } else if (strcmp(commandName, "ABSOLUTE_PRESSURE_P") == 0) {
+        return ABSOLUTE_PRESSURE_P;
+    } else if (strcmp(commandName, "ABSOLUTE_PRESSURE_R") == 0) {
+        return ABSOLUTE_PRESSURE_R;
+    } else if (strcmp(commandName, "SET_WIDTH_P") == 0) {
+        return SET_WIDTH_P;
+    } else if (strcmp(commandName, "SET_WIDTH_R") == 0) {
+        return SET_WIDTH_R;
     } else if (strcmp(commandName, "PRINT") == 0) {
         return PRINT;
+    } else if (strcmp(commandName, "PRINT_ONLY") == 0) {
+        return PRINT_ONLY;
+    } else if (strcmp(commandName, "REFUEL_ONLY") == 0) {
+        return REFUEL_ONLY;
     } else if (strcmp(commandName, "RESET_P") == 0) {
         return RESET_P;
+    } else if (strcmp(commandName, "RESET_R") == 0) {
+        return RESET_R;
     } else if (strcmp(commandName, "PRINT_MODE") == 0) {
         return PRINT_MODE;
     } else if (strcmp(commandName, "NORMAL_MODE") == 0) {
