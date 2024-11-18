@@ -14,3 +14,4 @@ MVC-interface/*.ipynb
 MVC-interface/Logs/*
 MVC-interface/Presets/Locations.json
 MVC-interface/Presets/Plates.json
+MVC-interface/Presets/Settings.json
