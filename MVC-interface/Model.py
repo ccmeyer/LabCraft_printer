@@ -34,8 +34,8 @@ class MassCalibrationModel(QObject):
 
         self.prediction_model_path = None
         self.prediction_model = None
-        self.resistance_model_path = None
-        self.resistance_model = None
+        # self.resistance_model_path = None
+        # self.resistance_model = None
         self.selected_dir = None
 
         self.current_printer_head = None
@@ -51,6 +51,7 @@ class MassCalibrationModel(QObject):
         self.measurement_stage = 'Complete'
         self.calibration_file_path = None
         self.standard_pulse_width = None
+        self.standard_pressure = None
 
         self.rack_model.gripper_updated.connect(self.update_current_info)
 
@@ -66,7 +67,8 @@ class MassCalibrationModel(QObject):
                     metadata = json.load(file)
                     model_metadata[model_dir] = metadata
             model_names = glob.glob(os.path.join(self.prediction_model_dir, model_dir, "*.pkl"))
-            model_metadata[model_dir]['resistance_dir'] = [model for model in model_names if 'resistance' in model][0]
+            print(f"Model names: {model_names}")
+            # model_metadata[model_dir]['resistance_dir'] = [model for model in model_names if 'resistance' in model][0]
             model_metadata[model_dir]['prediction_dir'] = [model for model in model_names if 'resistance' not in model][0]
 
         print(f"Model metadata loaded: {model_metadata}")
@@ -90,8 +92,8 @@ class MassCalibrationModel(QObject):
     def get_selected_model_path(self):
         return self.prediction_model_path
 
-    def get_selected_resistance_model_path(self):
-        return self.resistance_model_path
+    # def get_selected_resistance_model_path(self):
+    #     return self.resistance_model_path
     
     def set_models_by_name(self,name):
         """Set the prediction and resistance models by name."""
@@ -99,8 +101,9 @@ class MassCalibrationModel(QObject):
             if self.model_metadata[model_dir]['model_name'] == name:
                 self.selected_dir = model_dir
                 self.prediction_model_path = self.model_metadata[model_dir]['prediction_dir']
-                self.resistance_model_path = self.model_metadata[model_dir]['resistance_dir']
+                # self.resistance_model_path = self.model_metadata[model_dir]['resistance_dir']
                 self.standard_pulse_width = self.model_metadata[model_dir]['resistance_pulse_width']
+                self.standard_pressure = self.model_metadata[model_dir]['standard_pressure']
                 self.load_prediction_models()
                 return True
         return False
@@ -175,18 +178,24 @@ class MassCalibrationModel(QObject):
     def is_mass_stable(self):
         return self.mass_stable
     
-    def initiate_new_measurement(self, measurement_type,calibration_droplets,stock_id=None,starting_volume=None,pulse_width=None,target_pressure=None,target_volume=None,applied_bias=0):
-        if pulse_width is None:
-            pulse_width = self.machine_model.get_print_pulse_width()
-        if target_pressure is None:
-            target_pressure = self.machine_model.get_target_print_pressure()
+    def initiate_new_measurement(self, measurement_type,calibration_droplets,stock_id=None,starting_volume=None,print_pulse_width=None,refuel_pulse_width=None,target_print_pressure=None,target_refuel_pressure=None,target_volume=None,applied_bias=0):
+        if print_pulse_width is None:
+            print_pulse_width = self.machine_model.get_print_pulse_width()
+        if refuel_pulse_width is None:
+            refuel_pulse_width = self.machine_model.get_refuel_pulse_width()
+        if target_print_pressure is None:
+            target_print_pressure = self.machine_model.get_target_print_pressure()
+        if target_refuel_pressure is None:
+            target_refuel_pressure = self.machine_model.get_target_refuel_pressure()
+
         if stock_id is None:
             stock_id = self.current_stock_id
         if starting_volume is None:
             starting_volume = self.get_current_printer_head_volume()
 
         if measurement_type == 'resistance':
-            pulse_width = self.standard_pulse_width
+            print_pulse_width = self.standard_pulse_width
+            target_print_pressure = self.standard_pressure
         
         self.current_measurement = {
             'model_name':self.model_metadata[self.selected_dir]['model_name'],
@@ -197,8 +206,10 @@ class MassCalibrationModel(QObject):
             "final_mass": 0,
             "mass_difference": 0,
             "droplet_volume": 0,
-            "pressure": target_pressure,
-            "pulse_width": pulse_width,
+            "print_pressure": target_print_pressure,
+            "print_pulse_width": print_pulse_width,
+            "refuel_pressure": target_refuel_pressure,
+            "refuel_pulse_width": refuel_pulse_width,
             "droplets": calibration_droplets,
             "target_volume": target_volume,
             "syringe_position": self.machine_model.get_current_p_motor(),
@@ -270,16 +281,17 @@ class MassCalibrationModel(QObject):
         model_name = self.get_last_model_name(stock_id=stock_id)
         if model_name is not None:
             prediction_model_path = self.get_prediction_model_path_from_name(model_name)
-            resistance_model_path = self.get_resistance_model_path_from_name(model_name)
-            if prediction_model_path is not None and resistance_model_path is not None:
+            # resistance_model_path = self.get_resistance_model_path_from_name(model_name)
+            if prediction_model_path is not None:
                 prediction_model = joblib.load(prediction_model_path)
-                resistance_model = joblib.load(resistance_model_path)
+                # resistance_model = joblib.load(resistance_model_path)
             resistance_pulse_width = self.get_resistance_pulse_width_from_name(model_name)
+            standard_pressure = self.get_standard_pressure_from_name(model_name)
         printer_head = self.printer_head_manager.get_printer_head_by_id(stock_id)
-        printer_head.set_calibration_data(resistance,bias,target_droplet_volume,prediction_model,resistance_model,resistance_pulse_width)
+        printer_head.set_calibration_data(resistance,bias,target_droplet_volume,prediction_model,resistance_pulse_width)
 
     def get_measurements(self):
-        return [[m['pressure'],m['pulse_width'],m['droplets'],m['droplet_volume']] for m in self.measurements if m['stock_id'] == self.current_stock_id]
+        return [[m['print_pressure'],m['print_pulse_width'],m['refuel_pressure'],m['refuel_pulse_width'],m['droplets'],m['droplet_volume']] for m in self.measurements if m['stock_id'] == self.current_stock_id]
     
     def get_last_model_name(self,stock_id=None):
         if stock_id is None:
@@ -292,8 +304,8 @@ class MassCalibrationModel(QObject):
         elif self.selected_dir is not None:
             return self.model_metadata[self.selected_dir]['model_name']
         else:
-            # return '65um low viscosity'150um low viscosity
-            return '150um low viscosity'
+            # return '65um low viscosity'
+            return '150um dual channel v2'
             # return self.model_metadata[list(self.model_metadata.keys())[0]]['model_name']
 
     def get_prediction_model_path_from_name(self,name):
@@ -302,16 +314,22 @@ class MassCalibrationModel(QObject):
                 return self.model_metadata[model_dir]['prediction_dir']
         return None
 
-    def get_resistance_model_path_from_name(self,name):
-        for model_dir in self.model_metadata.keys():
-            if self.model_metadata[model_dir]['model_name'] == name:
-                return self.model_metadata[model_dir]['resistance_dir']
-        return None
+    # def get_resistance_model_path_from_name(self,name):
+    #     for model_dir in self.model_metadata.keys():
+    #         if self.model_metadata[model_dir]['model_name'] == name:
+    #             return self.model_metadata[model_dir]['resistance_dir']
+    #     return None
 
     def get_resistance_pulse_width_from_name(self,name):
         for model_dir in self.model_metadata.keys():
             if self.model_metadata[model_dir]['model_name'] == name:
                 return self.model_metadata[model_dir]['resistance_pulse_width']
+        return None
+    
+    def get_standard_pressure_from_name(self,name):
+        for model_dir in self.model_metadata.keys():
+            if self.model_metadata[model_dir]['model_name'] == name:
+                return self.model_metadata[model_dir]['standard_pressure']
         return None
 
     def remove_last_measurement(self):
@@ -342,7 +360,7 @@ class MassCalibrationModel(QObject):
     def load_prediction_models(self):
         """Load the prediction model from the specified file path."""
         self.prediction_model = joblib.load(self.prediction_model_path)
-        self.resistance_model = joblib.load(self.resistance_model_path)
+        # self.resistance_model = joblib.load(self.resistance_model_path)
 
     def calculate_resistance_for_stock(self,stock_id):
         stock_measurements = [m for m in self.measurements if m['stock_id'] == stock_id]
@@ -350,13 +368,14 @@ class MassCalibrationModel(QObject):
             #print(f"No measurements found for stock '{stock_id}'")
             return None
         stock_data = pd.DataFrame(stock_measurements)
-        standard_data = stock_data[stock_data['pulse_width'] == self.standard_pulse_width].copy()
+        standard_data = stock_data[(stock_data['print_pulse_width'] == self.standard_pulse_width) & (stock_data['print_pressure'] == self.standard_pressure)].copy()
         if len(standard_data) == 0:
             print(f"No standard measurements found for stock '{stock_id}'")
             return None
-        res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
-        res_df['effective_resistance'] = self.resistance_model.predict(res_df)
-        resistance = res_df['effective_resistance'].mean()
+        # res_df = standard_data[['starting_volume','droplet_volume']].copy().rename(columns={'starting_volume':'resistance_volume','droplet_volume':'resistance'})
+        # res_df['effective_resistance'] = self.resistance_model.predict(res_df)
+        resistance = standard_data['droplet_volume'].mean()
+        print(f"Resistance for stock '{stock_id}': {resistance:.2f} nL")
         #print(f"\nEffective resistance for stock '{stock_id}': {resistance:.2f} nL\n")
         return round(resistance,2)
     
@@ -392,41 +411,44 @@ class MassCalibrationModel(QObject):
         #print(f"Target droplet volume for stock '{stock_id}': {target_droplet_volume:.2f} nL")
         return target_droplet_volume
     
-    def predict_pulse_width_for_droplet(self, target_droplet_volume,calc_bias=True):
+    def predict_pressure_for_droplet(self, target_droplet_volume,calc_bias=True):
         total_volume = self.get_current_printer_head_volume()
         resistance = self.calculate_resistance_for_stock(self.current_stock_id)
         if resistance is None:
-            return self.standard_pulse_width
+            print(f"Resistance for stock '{self.current_stock_id}' is None")
+            return self.standard_pressure,0
         if calc_bias:
             bias = self.calculate_bias(self.current_stock_id)
             if bias is None:
                 bias = 0
         else:
             bias = 0
-        pulse_width = self.predict_pulse_width(total_volume, resistance, target_droplet_volume,bias=bias)
-        #print(f"Required pulse width for {target_droplet_volume} nL droplet: {pulse_width:.2f} µs")
-        return pulse_width, bias
+        pressure = self.predict_pressure(resistance, target_droplet_volume,bias=bias)
+        print(f"Required pressure for {target_droplet_volume} nL droplet: {pressure:.2f} psi")
+        return pressure, bias
     
-    def predict_pulse_width(self, total_volume, effective_resistance, target_droplet_volume,bias=0,prediction_model=None,resistance_pulse_width=None):
+    def predict_pressure(self, effective_resistance, target_droplet_volume,bias=0,prediction_model=None,resistance_pulse_width=None):
         if prediction_model is None:
             prediction_model = self.prediction_model
         if resistance_pulse_width is None:
             standard_pulse_width = self.standard_pulse_width
         else:
             standard_pulse_width = resistance_pulse_width
-        def func(pulse_width):
+        def func(pressure):
             input_features = pd.DataFrame({
-                'pulse_width': [pulse_width],
-                'starting_volume': [total_volume],
+                'pressure':[pressure],
+                'pulse_width': [standard_pulse_width],
                 'effective_resistance': [effective_resistance]
             })
             predicted_volume = prediction_model.predict(input_features)[0] + bias
             return predicted_volume - target_droplet_volume
 
         # Initial guess for pulse width
-        initial_guess = standard_pulse_width
-        pulse_width_solution = fsolve(func, initial_guess)
-        return round(pulse_width_solution[0],0)
+        print(f'Effective resistance: {effective_resistance}, Standard pulse width {standard_pulse_width},Target droplet volume: {target_droplet_volume}, Bias: {bias}')
+        initial_guess = self.standard_pressure
+        pressure_solution = fsolve(func, initial_guess)
+        print(f"Pressure solution: {pressure_solution[0]:.2f} psi, initial guess: {initial_guess:.2f} psi")
+        return round(pressure_solution[0],2)
 
 
 def find_minimal_stock_solutions_backtracking(target_concentrations, max_droplets):
@@ -1872,7 +1894,6 @@ class PrinterHead(QObject):
         self.target_droplet_volume = None
         self.calibration_chip = calibration_chip
         self.predictive_model = None
-        self.resistance_model = None
         self.resistance_pulse_width = None
 
     def record_droplet_volume_lost(self,droplet_count):
@@ -1959,17 +1980,16 @@ class PrinterHead(QObject):
         else:
             return False
     
-    def set_calibration_data(self, resistance, bias, target_droplet_volume,predictive_model,resistance_model,resistance_pulse_width):
+    def set_calibration_data(self, resistance, bias, target_droplet_volume,predictive_model,resistance_pulse_width):
         #print(f'Calibration data set for printer head {self.stock_solution.get_stock_id()}, R:{resistance}, B:{bias}, V:{target_droplet_volume}')
         self.effective_resistance = resistance
         self.bias = bias
         self.target_droplet_volume = target_droplet_volume
         self.predictive_model = predictive_model
-        self.resistance_model = resistance_model
         self.resistance_pulse_width = resistance_pulse_width
 
     def get_prediction_data(self):
-        return self.current_volume,self.effective_resistance, self.target_droplet_volume, self.bias, self.predictive_model, self.resistance_model, self.resistance_pulse_width
+        return self.current_volume,self.effective_resistance, self.target_droplet_volume, self.bias, self.predictive_model, self.resistance_pulse_width
 
 
 class PrinterHeadManager(QObject):

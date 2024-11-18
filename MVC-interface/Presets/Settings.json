@@ -1,7 +1,7 @@
 {
     "BASE_PATH":"./",
-    "MACHINE_PORT":"COM6",
-    "BALANCE_PORT":"COM3",
+    "MACHINE_PORT":"COM3",
+    "BALANCE_PORT":"COM4",
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",
     "DEFAULT_REAGENT":"water",

@@ -212,7 +212,8 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
-        self.shortcut_manager.add_shortcut('Shift+s','Reset Syringe', lambda: self.controller.reset_print_syringe())
+        self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
+        self.shortcut_manager.add_shortcut('Shift+a','Reset Refuel Syringe', lambda: self.controller.reset_refuel_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
 
@@ -794,6 +795,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
         self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
 
+        self.refuel_pulse_width_label = QtWidgets.QLabel("Refuel Pulse Width:")
+        self.refuel_pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.refuel_pulse_width_spinbox.setRange(0, 10000)
+        self.refuel_pulse_width_spinbox.setSingleStep(50)
+        self.refuel_pulse_width_spinbox.setValue(3000)
+        self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.refuel_pulse_width_spinbox.valueChanged.connect(self.handle_refuel_pulse_width_change)
+        self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
+        self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
+
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
 
@@ -855,6 +866,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_print_pressure_spinbox.blockSignals(True)  # Block signals temporarily
         self.target_print_pressure_spinbox.setValue(target_print_pressure)
         self.target_print_pressure_spinbox.blockSignals(False)  # Unblock signals
+
+        self.target_refuel_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+        self.target_refuel_pressure_spinbox.setValue(self.model.machine_model.get_target_refuel_pressure())
+        self.target_refuel_pressure_spinbox.blockSignals(False)  # Unblock signals
 
         self.print_pulse_width_spinbox.blockSignals(True)
         self.print_pulse_width_spinbox.setValue(self.model.machine_model.print_pulse_width)
@@ -1101,14 +1116,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.resistance_calibration_button, row, 0, 1, 2)
         row += 1
 
-        self.predict_pulse_width_button = QtWidgets.QPushButton("Predict pulse")
-        self.predict_pulse_width_button.clicked.connect(self.evaluate_predicted_pulse_width)
-        self.user_input_layout.addWidget(self.predict_pulse_width_button, row, 0, 1, 2)
+        self.predict_pressure_button = QtWidgets.QPushButton("Predict pressure")
+        self.predict_pressure_button.clicked.connect(self.evaluate_predicted_pressure)
+        self.user_input_layout.addWidget(self.predict_pressure_button, row, 0, 1, 2)
         row += 1
 
-        self.predict_pulse_width_no_bias_button = QtWidgets.QPushButton("Predict pulse no bias")
-        self.predict_pulse_width_no_bias_button.clicked.connect(self.evaluate_predict_pulse_width_no_bias)
-        self.user_input_layout.addWidget(self.predict_pulse_width_no_bias_button, row, 0, 1, 2)
+        self.predict_pressure_no_bias_button = QtWidgets.QPushButton("Predict pressure no bias")
+        self.predict_pressure_no_bias_button.clicked.connect(self.evaluate_predict_pressure_no_bias)
+        self.user_input_layout.addWidget(self.predict_pressure_no_bias_button, row, 0, 1, 2)
         row += 1
 
         self.current_pressure_label = QtWidgets.QLabel("Current Pressure:")
@@ -1158,7 +1173,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.pressure_screen_low_spinbox.setDecimals(0)
         self.pressure_screen_low_spinbox.setSingleStep(10)
         self.pressure_screen_low_spinbox.setRange(10,7000)
-        self.pressure_screen_low_spinbox.setValue(3500)
+        self.pressure_screen_low_spinbox.setValue(2300)
         # self.pressure_screen_low_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.pressure_screen_low_label, row, 0)
         self.user_input_layout.addWidget(self.pressure_screen_low_spinbox, row, 1)
@@ -1169,7 +1184,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.pressure_screen_high_spinbox.setDecimals(0)
         self.pressure_screen_high_spinbox.setSingleStep(10)
         self.pressure_screen_high_spinbox.setRange(10, 7000)
-        self.pressure_screen_high_spinbox.setValue(4500)
+        self.pressure_screen_high_spinbox.setValue(2700)
         # self.pressure_screen_high_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.pressure_screen_high_label, row, 0)
         self.user_input_layout.addWidget(self.pressure_screen_high_spinbox, row, 1)
@@ -1179,7 +1194,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.repeat_measurement_spinbox = QtWidgets.QSpinBox()
         self.repeat_measurement_spinbox.setRange(1, 100)
         self.repeat_measurement_spinbox.setSingleStep(1)
-        self.repeat_measurement_spinbox.setValue(3)
+        self.repeat_measurement_spinbox.setValue(5)
         # self.repeat_measurement_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
         self.user_input_layout.addWidget(self.repeat_measurement_label, row, 0)
         self.user_input_layout.addWidget(self.repeat_measurement_spinbox, row, 1)
@@ -1369,8 +1384,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.start_screen_button.setDisabled(True)
         self.set_volume_button.setDisabled(True)
         self.resistance_calibration_button.setDisabled(True)
-        self.predict_pulse_width_button.setDisabled(True)
-        self.predict_pulse_width_no_bias_button.setDisabled(True)
+        self.predict_pressure_button.setDisabled(True)
+        self.predict_pressure_no_bias_button.setDisabled(True)
         self.model_combobox.setDisabled(True)
         self.target_drop_volume_spinbox.setDisabled(True)
         self.target_pressure_spinbox.setDisabled(True)
@@ -1386,8 +1401,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         # self.start_screen_button.setDisabled(False)
         self.set_volume_button.setDisabled(False)
         self.resistance_calibration_button.setDisabled(False)
-        self.predict_pulse_width_button.setDisabled(False)
-        self.predict_pulse_width_no_bias_button.setDisabled(False)
+        self.predict_pressure_button.setDisabled(False)
+        self.predict_pressure_no_bias_button.setDisabled(False)
         self.model_combobox.setDisabled(False)
         self.target_drop_volume_spinbox.setDisabled(False)
         self.target_pressure_spinbox.setDisabled(False)
@@ -1400,51 +1415,59 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             return
         self.label.setText("Started resistance calibration process, waiting for mass stabilization")
         self.controller.check_print_syringe_position()
+        self.controller.check_refuel_syringe_position()
         self.controller.set_print_pulse_width(self.model.calibration_model.standard_pulse_width,manual=False)
+        self.controller.set_absolute_print_pressure(self.model.calibration_model.standard_pressure,manual=False)
         self.current_set_pulse_width = self.model.calibration_model.standard_pulse_width
+        self.current_set_pressure = self.model.calibration_model.standard_pressure
         self.model.calibration_model.initiate_new_measurement('resistance',self.num_calibration_droplets)
         
-    def predict_pulse_width(self):
+    def predict_pressure(self):
         """Predict the pulse width for a given volume."""
         target_volume = self.target_drop_volume_spinbox.value()
-        return self.model.calibration_model.predict_pulse_width_for_droplet(target_volume,calc_bias=True)
+        return self.model.calibration_model.predict_pressure_for_droplet(target_volume,calc_bias=True)
     
-    def evaluate_predicted_pulse_width(self):
+    def evaluate_predicted_pressure(self):
         """Evaluate the predicted pulse width for a given volume."""
         if not self.handle_initiate_test():
             return
         self.label.setText("Evaluating prediction, waiting for mass stabilization")
         self.controller.check_print_syringe_position()
-        predicted_pulse_width, applied_bias = self.predict_pulse_width()
-        self.current_set_pulse_width = predicted_pulse_width
+        self.controller.check_refuel_syringe_position()
+        predicted_pressure, applied_bias = self.predict_pressure()
+        print(f'1:Predicted pressure: {predicted_pressure}, applied bias: {applied_bias}')
+        self.current_set_pressure = predicted_pressure
         target_volume = self.target_drop_volume_spinbox.value()
-        self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(predicted_pulse_width)
-        self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_print_pulse_width(predicted_pulse_width,manual=False)
-        self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+        self.target_pressure_spinbox.blockSignals(True)
+        self.target_pressure_spinbox.setValue(predicted_pressure)
+        self.target_pressure_spinbox.blockSignals(False)
+        # self.pulse_width_spinbox.blockSignals(True)
+        # self.pulse_width_spinbox.setValue(predicted_pressure)
+        # self.pulse_width_spinbox.blockSignals(False)
+        self.controller.set_absolute_print_pressure(predicted_pressure,manual=False)
+        print(f'2:Predicted pressure: {predicted_pressure}, applied bias: {applied_bias}')
+        self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,target_print_pressure=predicted_pressure,target_volume=target_volume,applied_bias=applied_bias)
 
-    def predict_pulse_width_no_bias(self):
+    def predict_pressure_no_bias(self):
         """Predict the pulse width for a given volume without bias."""
         target_volume = self.target_drop_volume_spinbox.value()
-        return self.model.calibration_model.predict_pulse_width_for_droplet(target_volume,calc_bias=False)
+        return self.model.calibration_model.predict_pressure_for_droplet(target_volume,calc_bias=False)
     
-    def evaluate_predict_pulse_width_no_bias(self):
+    def evaluate_predict_pressure_no_bias(self):
         """Evaluate the predicted pulse width for a given volume without bias."""
         if not self.handle_initiate_test():
             return
         self.label.setText("Evaluating prediction without bias, waiting for mass stabilization")
         self.controller.check_print_syringe_position()
-        predicted_pulse_width, applied_bias = self.predict_pulse_width_no_bias()
-        self.current_set_pulse_width = predicted_pulse_width
+        self.controller.check_refuel_syringe_position()
+        predicted_pressure, applied_bias = self.predict_pressure_no_bias()
+        self.current_set_pressure = predicted_pressure
         target_volume = self.target_drop_volume_spinbox.value()
-        self.pulse_width_spinbox.blockSignals(True)
-        self.pulse_width_spinbox.setValue(predicted_pulse_width)
-        self.pulse_width_spinbox.blockSignals(False)
-        self.controller.set_print_pulse_width(predicted_pulse_width,manual=False,update_model=True)
-        self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,pulse_width=predicted_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
-
-
+        self.target_pressure_spinbox.blockSignals(True)
+        self.target_pressure_spinbox.setValue(predicted_pressure)
+        self.target_pressure_spinbox.blockSignals(False)
+        self.controller.set_absolute_print_pressure(predicted_pressure,manual=False,update_model=True)
+        self.model.calibration_model.initiate_new_measurement('predicted',self.num_calibration_droplets,print_pulse_width=predicted_pressure,target_volume=target_volume,applied_bias=applied_bias)
 
     def start_screen(self):
         """Start the screen for the current stock solution."""
@@ -1464,7 +1487,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         #print(f'Screening pulse widths: {current_screen_pressure}')
         self.controller.set_print_pulse_width(current_screen_pressure,manual=False)
         self.current_set_pulse_width = current_screen_pressure
-        self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,pulse_width=current_screen_pressure)
+        self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,print_pulse_width=current_screen_pressure)
 
     
     def initiate_repeat_calibration_process(self):
@@ -1473,12 +1496,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             return
         self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
         self.repeat_measurements = self.repeat_measurement_spinbox.value()
-        pulse_width,applied_bias = self.predict_pulse_width()
-        self.current_set_pulse_width = pulse_width
+        # pulse_width,applied_bias = self.predict_pulse_width()
+        # self.current_set_pulse_width = pulse_width
+        pulse_width = self.current_set_pulse_width
+        applied_bias = 0
         target_volume = self.target_drop_volume_spinbox.value()
-        self.controller.set_print_pulse_width(pulse_width,manual=False)
+        # self.controller.set_print_pulse_width(pulse_width,manual=False)
         self.controller.check_print_syringe_position()
-        self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+        self.controller.check_refuel_syringe_position()
+        self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,print_pulse_width=self.current_set_pulse_width,target_volume=target_volume,applied_bias=applied_bias)
         self.repeat_measurements -= 1
 
     def stop_repeat_calibration_process(self):
@@ -1491,13 +1517,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         """Initiate the process of capturing a new measurement."""
         self.label.setText("Started calibration process, waiting for mass stabilization")
         self.controller.check_print_syringe_position()
+        self.controller.check_refuel_syringe_position()
         self.model.calibration_model.initiate_new_measurement('standard',self.num_calibration_droplets)
     
     def initiate_calibration_print(self):
         """Initiate the printing of calibration droplets."""
         self.label.setText("Printing calibration droplets")
         print('View: Printing calibration droplets')
-        self.controller.print_calibration_droplets(self.num_calibration_droplets,pulse_width=self.current_set_pulse_width)
+        self.controller.print_calibration_droplets(self.num_calibration_droplets)
 
     def handle_calibration_complete(self):
         """Handle the completion of the calibration process."""
@@ -1514,15 +1541,19 @@ class MassCalibrationDialog(QtWidgets.QDialog):
                 self.current_set_pulse_width = current_screening_pressure
                 self.controller.set_print_pulse_width(current_screening_pressure,manual=False)
                 self.controller.check_print_syringe_position()
-                self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,pulse_width=current_screening_pressure)
+                self.controller.check_refuel_syringe_position()
+                self.model.calibration_model.initiate_new_measurement('screen',self.num_calibration_droplets,print_pulse_width=current_screening_pressure)
             else:
-                pulse_width,applied_bias = self.predict_pulse_width()
-                self.current_set_pulse_width = pulse_width
-                self.controller.set_print_pulse_width(pulse_width,manual=False)
+                # pulse_width,applied_bias = self.predict_pulse_width()
+                # self.current_set_pulse_width = pulse_width
+                # self.controller.set_print_pulse_width(pulse_width,manual=False)
+                pulse_width = self.current_set_pulse_width
+                applied_bias = 0
                 target_volume = self.target_drop_volume_spinbox.value()
                 self.controller.check_print_syringe_position()
+                self.controller.check_refuel_syringe_position()
                 self.label.setText(f"---{self.repeat_measurements} measurements remaining---")
-                self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
+                self.model.calibration_model.initiate_new_measurement('repeat',self.num_calibration_droplets,print_pulse_width=pulse_width,target_volume=target_volume,applied_bias=applied_bias)
         else:
             self.label.setText("Calibration complete")
 
@@ -1535,15 +1566,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         print(f'Measurements:\n{measurements}')
         pressures = []
         volumes = []
-        for pressure,pulse_width,droplets, volume in measurements:
-            print(f'Pressure: {pressure}, Pulse Width: {pulse_width}, Droplets: {droplets}, Volume: {volume}')
-            self.volume_pressure_series.append(pulse_width, volume)
-            pressures.append(pulse_width)
+        for print_pressure,print_pulse_width,refuel_pressure,refuel_pulse_width,droplets, volume in measurements:
+            # print(f'Pressure: {pressure}, Pulse Width: {pulse_width}, Droplets: {droplets}, Volume: {volume}')
+            self.volume_pressure_series.append(print_pulse_width, volume)
+            pressures.append(print_pulse_width)
             volumes.append(volume)
 
         if len(measurements) > 0:
             last_measurement = measurements[-1]
-            self.last_measurement_series.append(last_measurement[1],last_measurement[3])
+            self.last_measurement_series.append(last_measurement[1],last_measurement[5])
         
         if len(measurements) >= 2 and np.std(pressures) > 0.01:
             # Calculate the linear fit

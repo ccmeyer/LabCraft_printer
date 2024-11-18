@@ -257,6 +257,7 @@ void Communication::parseAndAddCommand() {
         stepperZ.resetState();
         printer.resetDropletCounts();
         printRegulator.resetState();
+        refuelRegulator.resetState();
         currentCmdNum = 0;
         lastCompletedCmdNum = 0;
         lastAddedCmdNum = 0;
@@ -265,6 +266,7 @@ void Communication::parseAndAddCommand() {
         startTasks();
         pressureSensor.startReading();
         printRegulator.restartRegulation();
+        refuelRegulator.restartRegulation();
         gripper.resetRefreshCounter();
         Serial.println("--Restarted tasks");
     } else {
@@ -301,7 +303,7 @@ void Communication::executeCommandTask() {
 
 // Method to check if the system is free to execute a new command
 bool Communication::checkIfFree() const{
-    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || printRegulator.isBusy() || printer.isBusy()) {
+    if (currentState == PAUSED || waiting || stepperX.isBusy() || stepperY.isBusy() || stepperZ.isBusy() || gripper.isBusy() || printRegulator.isBusy() || refuelRegulator.isBusy() || printer.isBusy()) {
         return false;
     } else {
         return true;

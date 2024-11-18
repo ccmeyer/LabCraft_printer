@@ -96,8 +96,8 @@ class Controller(QObject):
 
     def update_balance_prediction_models(self,target_volume=40):
         pred_model = self.model.calibration_model.get_selected_model_path()
-        resistance_model = self.model.calibration_model.get_selected_resistance_model_path()
-        self.machine.balance.update_prediction_models(pred_model,resistance_model,target_volume)
+        # resistance_model = self.model.calibration_model.get_selected_resistance_model_path()
+        # self.machine.balance.update_prediction_models(pred_model,target_volume)
 
     def pause_commands(self):
         """Pause the machine."""
@@ -354,7 +354,7 @@ class Controller(QObject):
     def check_refuel_syringe_position(self):
         """Checks the syringe position and resets it if nearly at the limit."""
         current_r = self.model.machine_model.get_current_r_motor()
-        if current_r > 22500:
+        if current_r > 18000:
             self.reset_refuel_syringe()
 
     def pause_machine(self):
@@ -617,7 +617,7 @@ class Controller(QObject):
         if printer_head is not None:
             if printer_head.check_calibration_complete():
                 print('Controller: using calibrations to change pulse width')
-                vol, res, target, bias, pred_model, resistance_model, resistance_pulse_width = printer_head.get_prediction_data()
+                vol, res, target, bias, pred_model, resistance_pulse_width = printer_head.get_prediction_data()
                 if expected_volume is not None:
                     #print(f'Controller: using expected volume: {expected_volume}')
                     vol = expected_volume
@@ -643,15 +643,15 @@ class Controller(QObject):
         """Activate the refuel valve a specified number of times without printing."""
         self.machine.refuel_only(droplets,manual=manual)
 
-    def print_calibration_droplets(self,droplets,manual=False,pulse_width=None):
+    def print_calibration_droplets(self,droplets,manual=False,pressure=None):
         """Print a specified number of droplets for calibration."""
         print('Controller: Printing calibration droplets')
-        self.machine.print_calibration_droplets(droplets,manual=manual,pulse_width=pulse_width)
+        self.machine.print_calibration_droplets(droplets,manual=manual,pressure=pressure)
 
     def start_mass_stabilization_timer(self):
         """Create a single shot timer that when triggered it will signal the model to check for the final stable mass."""
         print('Starting mass stabilization timer...')
-        QtCore.QTimer.singleShot(2000, self.model.calibration_model.check_for_final_mass)
+        QtCore.QTimer.singleShot(3000, self.model.calibration_model.check_for_final_mass)
 
 
     def well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):

@@ -1144,26 +1144,26 @@ class Machine(QObject):
     def set_relative_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
-        print('Setting relative pressure:',pressure)
+        print('Setting relative print pressure:',pressure)
         if self.check_param_limits(pressure,-2185,2185):
             return self.add_command_to_queue('RELATIVE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_relative_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         pressure -= self.psi_offset
-        print('Setting relative pressure:',pressure)
+        print('Setting relative refuel pressure:',pressure)
         if self.check_param_limits(pressure,-2185,2185):
             return self.add_command_to_queue('RELATIVE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
-        print('Setting absolute pressure:',pressure)
+        print('Setting absolute print pressure:',pressure)
         if self.check_param_limits(pressure,7755,10376):
             return self.add_command_to_queue('ABSOLUTE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
-        print('Setting absolute pressure:',pressure)
+        print('Setting absolute refuel pressure:',pressure)
         if self.check_param_limits(pressure,7755,10376):
             return self.add_command_to_queue('ABSOLUTE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
@@ -1251,12 +1251,18 @@ class Machine(QObject):
 
     def get_refuel_pulse_width(self):
         return self.model.machine_model.get_refuel_pulse_width()
+    
+    def get_print_pressure(self):
+        return self.model.machine_model.get_print_pressure()
+    
+    def get_refuel_pressure(self):
+        return self.model.machine_model.get_refuel_pressure()
 
-    def print_calibration_droplets(self,num_droplets,manual=False,pulse_width=None):
+    def print_calibration_droplets(self,num_droplets,manual=False,pressure=None):
         print('Machine: Printing calibration droplets')
         if self.balance.simulate:
-            if pulse_width is None:
-                pulse_width = self.get_pulse_width()
-            self.balance_droplets.append([num_droplets,pulse_width])
+            if pressure is None:
+                pressure = self.get_print_pressure()
+            self.balance_droplets.append([num_droplets,pressure])
         self.check_param_limits(num_droplets,1,1000)
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)
