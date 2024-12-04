@@ -1,12 +1,9 @@
 import sys
-from PySide6.QtWidgets import QApplication
-from Machine_MVC import Machine
-from Model import Model
-from Controller import Controller
-from View import MainWindow
-from PySide6.QtCore import QTimer, QPointF
+from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QStyleFactory
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QPixmap
+import os
 
 def set_dark_theme(app):
     app.setStyle(QStyleFactory.create("Fusion"))
@@ -44,6 +41,18 @@ def set_dark_theme(app):
 def main():
     app = QApplication(sys.argv)
 
+    # Create splash screen
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(script_dir, 'Presets','LabCraft_logo.png')
+    pixmap = QPixmap(logo_path)  # Replace with your logo image path
+    splash = QSplashScreen(pixmap)
+    splash.show()
+
+    from Machine_MVC import Machine
+    from Model import Model
+    from Controller import Controller
+    from View import MainWindow
+
     # Initialize components
     model = Model()
     machine = Machine(model)
@@ -52,10 +61,15 @@ def main():
     set_dark_theme(app)
     view = MainWindow(model,controller)
 
-    # Show the main window
-    view.show()
+    # Delay for the splash screen to simulate loading tasks
+    QTimer.singleShot(100, lambda: (splash.finish(view), view.show()))  # 2000 ms = 2 seconds
+
+
+    # # Show the main window
+    # view.show()
 
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     print("Starting application...")
