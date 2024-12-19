@@ -1313,8 +1313,8 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.capturing = False
     
         self.start_camera()
-        self.refuel_camera_model.image_updated_signal.connect(self.update_original_image)
-        self.refuel_camera_model.level_updated_signal.connect(self.update_level_plot)
+        self.refuel_camera_model.update_level_ui_signal.connect(self.update_level_ui)
+        # self.refuel_camera_model.level_updated_signal.connect(self.update_level_plot)
     
         self.model.calibration_model.mass_updated_signal.connect(self.update_mass_time_plot)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_parameters)
@@ -1367,7 +1367,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
             self.camera_timer.stop()
             self.capture_button.setText("Start Capturing Images")
         else:
-            self.camera_timer.start(100)  # Capture every 100 milliseconds
+            self.camera_timer.start(250)  # Capture every 100 milliseconds
             self.capture_button.setText("Stop Capturing Images")
         self.capturing = not self.capturing
     
@@ -1398,7 +1398,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
         return qimage
 
-    def update_original_image(self):
+    def update_level_ui(self):
         # frame = self.refuel_camera_model.get_original_image()
         frame = self.refuel_camera_model.get_level_image()
 
@@ -1410,7 +1410,6 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.image_label.setPixmap(pixmap)
         self.image_label.setScaledContents(True)
 
-    def update_level_plot(self):
         level_log = self.refuel_camera_model.get_level_log()
         self.level_series.clear()
         for i,level in enumerate(level_log):

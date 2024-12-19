@@ -808,7 +808,7 @@ class Controller(QObject):
 
     def capture_refuel_image(self):
         frame = self.refuel_camera.capture_image()
-        self.model.refuel_camera_model.analyze_image(frame)
+        self.model.refuel_camera_model.start_analysis(frame)
 
     def stop_refuel_camera(self):
         self.refuel_camera.stop_camera()
