@@ -1062,14 +1062,51 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setFixedHeight(200)
 
         self.charts_layout.addWidget(self.image_label,1,0,1,1)
 
-        self.level_plot_label = QLabel("No image captured yet.")
-        self.level_plot_label.setAlignment(Qt.AlignCenter)
-        self.level_plot_label.setFixedHeight(200)
+        # Create a series and chart to display channel level over time
+        self.level_series = QtCharts.QLineSeries()
+        self.level_series.setColor(QtCore.Qt.white)
+        self.level_chart = QtCharts.QChart()
+        self.level_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.level_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
+        self.level_chart.addSeries(self.level_series)
+        # self.chart.createDefaultAxes()
+        self.level_chart.setTitle("Level over time")
 
-        self.charts_layout.addWidget(self.level_plot_label,1,1,1,3)
+        self.level_axisX = QtCharts.QValueAxis()
+        self.level_axisX.setTickCount(5)
+        self.level_axisX.setRange(0, 10)
+        self.level_axisY = QtCharts.QValueAxis()
+        self.level_axisY.setRange(0,1)
+        self.level_axisY.setTitleText("Level")
+        self.level_axisY.setTickCount(3)
+
+        self.level_chart.addAxis(self.level_axisX, QtCore.Qt.AlignBottom)
+        self.level_chart.addAxis(self.level_axisY, QtCore.Qt.AlignLeft)
+        self.level_series.attachAxis(self.level_axisX)
+        self.level_series.attachAxis(self.level_axisY)
+
+        # Create a chart view to display the chart
+        self.level_chart_view = QtCharts.QChartView(self.level_chart)
+        self.level_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.level_chart.legend().hide()  # Hide
+        self.level_chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.level_chart_view.setFixedHeight(200)
+        self.level_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # Add the chart view to the layout
+        self.charts_layout.addWidget(self.level_chart_view,1,1,1,3)
+
+        # self.level_plot_figure, self.plot_ax = plt.subplots()
+        # self.plot_canvas = FigureCanvas(self.plot_figure)
+        # self.level_plot_label = QLabel("No image captured yet.")
+        # self.level_plot_label.setAlignment(Qt.AlignCenter)
+        # self.level_plot_label.setFixedHeight(200)
+
+        # self.charts_layout.addWidget(self.level_plot_label,1,1,1,3)
 
 
         row = 0
@@ -1274,6 +1311,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
     
         self.start_camera()
         self.refuel_camera_model.image_updated_signal.connect(self.update_original_image)
+        self.refuel_camera_model.level_updated_signal.connect(self.update_level_plot)
     
         self.model.calibration_model.mass_updated_signal.connect(self.update_mass_time_plot)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_parameters)
@@ -1341,6 +1379,15 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         pixmap = QPixmap.fromImage(qimage)
         self.image_label.setPixmap(pixmap)
         self.image_label.setScaledContents(True)
+
+    def update_level_plot(self):
+        level_log = self.refuel_camera_model.get_level_log()
+        self.level_series.clear()
+        for i,level in enumerate(level_log):
+            self.level_series.append(i,level)
+
+        if len(level_log) > 0:
+            self.level_axisX.setRange(0, len(level_log))
 
     def add_horizontal_line(self, y_value, color=QtCore.Qt.black, pen=None):
         """

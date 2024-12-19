@@ -24,6 +24,8 @@ class RefuelCameraModel(QObject):
     Stores all the data from the refuel camera system
     '''
     image_updated_signal = Signal()
+    level_updated_signal = Signal()
+
     def __init__(self):
         super().__init__()
         self.threshold_value = 120
@@ -31,6 +33,7 @@ class RefuelCameraModel(QObject):
         self.left_bound = 10
         self.right_bound = 30
         self.current_level = None
+        self.level_log = []
         self.stable = False
 
         self.latest_image = None
@@ -210,6 +213,8 @@ class RefuelCameraModel(QObject):
                             largest_peak_x = row_x_values[largest_peak_index+1]
 
                             cv2.line(self.level_image, (0, largest_peak_x), (width, largest_peak_x), (0, 0, 255), 1)
+                            fill_fraction = largest_peak_x / height
+                            self.update_level_log(fill_fraction)
                     else:
                         print('Error: Center index is None')
             else:
@@ -225,6 +230,20 @@ class RefuelCameraModel(QObject):
 
     def get_level_image(self):
         return self.level_image
+
+    def update_level_log(self,level):
+        '''Add a new level to the existing log'''
+        if level > 1 or level < 0:
+            print('Error: level is ',level)
+            return
+        self.level_log.append(level)
+        if len(self.level_log) > 200:
+            self.level_log.pop(0)
+        self.level_updated_signal.emit()
+
+    def get_level_log(self):
+        return self.level_log
+        
     
         
 
