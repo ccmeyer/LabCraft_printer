@@ -4,6 +4,8 @@ from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
 import time
 import numpy as np
+import os
+import serial
 
 
 class Controller(QObject):
@@ -61,9 +63,24 @@ class Controller(QObject):
     def update_available_ports(self):
         # Get a list of all connected COM ports
         ports = comports()
-        port_names = [port.device for port in ports]
-        #print(f"Available ports: {port_names}")
-        self.model.machine_model.update_ports(port_names)
+        active_ports = []
+        
+        for port in ports:
+            port_name = port.device
+            if "ttyAMA" in port_name:
+                continue
+            # Check if the port exists in the /dev directory
+            if os.path.exists(port_name):
+                try:
+                    # Try to open the port to ensure it is active
+                    with serial.Serial(port_name) as ser:
+                        active_ports.append(port_name)
+                except (OSError, serial.SerialException):
+                    # Port exists but cannot be opened (not active)
+                    continue
+
+        # return active_ports
+        self.model.machine_model.update_ports(active_ports)
 
     def connect_machine(self, port):
         """Connect to the machine."""
