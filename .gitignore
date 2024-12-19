@@ -5,6 +5,7 @@
 .vscode/ipch
 __pycache__
 env/
+venv/
 Pyside6_interface/Presets
 Pyside6_interface/Experiments
 Pyside6_interface/Calibrations/droplet_images
