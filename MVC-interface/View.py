@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
-from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush
+from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage
 from PySide6.QtCore import Qt, QTimer, QEventLoop
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -896,22 +896,25 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
-        if not self.controller.check_if_all_completed():
-            self.popup_message_signal.emit("Cannot calibrate pressure","Please wait for the current actions to complete")
-            return
+        # if not self.controller.check_if_all_completed():
+        #     self.popup_message_signal.emit("Cannot calibrate pressure","Please wait for the current actions to complete")
+        #     return
 
-        if self.model.rack_model.get_gripper_printer_head() == None:
-            self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
-            return
-        if self.model.machine_model.get_current_location() != 'balance':
-            response = self.main_window.popup_yes_no("Must be positioned at the balance","Would you like to move to the balance?")
-            if response == '&No':
-                self.popup_message_signal.emit("Must be positioned at the balance","Please move to the balance before calibrating pressure")
-                return
-            elif response == '&Yes':
-                self.controller.move_to_location('balance', manual=True, safe_y=True)
+        # if self.model.rack_model.get_gripper_printer_head() == None:
+        #     self.popup_message_signal.emit("No Printer Head","Please load a printer head before calibrating pressure")
+        #     return
+        # if self.model.machine_model.get_current_location() != 'balance':
+        #     response = self.main_window.popup_yes_no("Must be positioned at the balance","Would you like to move to the balance?")
+        #     if response == '&No':
+        #         self.popup_message_signal.emit("Must be positioned at the balance","Please move to the balance before calibrating pressure")
+        #         return
+        #     elif response == '&Yes':
+        #         self.controller.move_to_location('balance', manual=True, safe_y=True)
         mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         mass_calibration_dialog.exec()
+        # camera_dialog = RefuelCameraWindow(self.main_window,self.model,self.controller)
+        # camera_dialog.exec()
+
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)
@@ -929,6 +932,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
         self.model = model
+        self.refuel_camera_model = self.model.refuel_camera_model
         self.controller = controller
 
         self.controller.enter_print_mode()
@@ -946,7 +950,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.label = QtWidgets.QLabel("Begin the mass calibration")
         self.layout.addWidget(self.label)
 
-        self.charts_layout = QtWidgets.QHBoxLayout()
+        self.charts_layout = QtWidgets.QGridLayout()
 
         # Create a series and chart to display mass over time
         self.series = QtCharts.QLineSeries()
@@ -977,7 +981,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
 
         # Add the chart view to the layout
-        self.charts_layout.addWidget(self.chart_view)
+        self.charts_layout.addWidget(self.chart_view,0,0,1,2)
 
         self.volume_pressure_series = QtCharts.QScatterSeries()
         self.volume_pressure_series.setColor(QtCore.Qt.white)
@@ -1054,7 +1058,19 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.volume_pressure_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
 
         # Add the chart view to the layout
-        self.charts_layout.addWidget(self.volume_pressure_chart_view)
+        self.charts_layout.addWidget(self.volume_pressure_chart_view,0,2,1,2)
+
+        self.image_label = QLabel("No image captured yet.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+
+        self.charts_layout.addWidget(self.image_label,1,0,1,1)
+
+        self.level_plot_label = QLabel("No image captured yet.")
+        self.level_plot_label.setAlignment(Qt.AlignCenter)
+        self.level_plot_label.setFixedHeight(200)
+
+        self.charts_layout.addWidget(self.level_plot_label,1,1,1,3)
+
 
         row = 0
 
@@ -1225,6 +1241,11 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_layout.addWidget(self.remove_all_calibrations_button, row, 0, 1, 2)
         row += 1
 
+        self.capture_button = QPushButton("Start Capturing Images")
+        self.capture_button.clicked.connect(self.toggle_capture)
+        self.user_input_layout.addWidget(self.capture_button, row, 0, 1, 2)
+        row += 1
+
         self.results_label = QtWidgets.QLabel("Calibration Results:")
         self.results_value = QtWidgets.QLabel()
         self.user_input_layout.addWidget(self.results_label, row, 0)
@@ -1238,7 +1259,7 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.user_input_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
 
         # Add the QVBoxLayout to the charts_layout without alignment argument
-        self.charts_layout.addLayout(self.user_input_container_layout)
+        self.charts_layout.addLayout(self.user_input_container_layout,0,4,2,1)
 
         # Set the alignment to top after adding the layout
         self.charts_layout.setAlignment(self.user_input_container_layout, QtCore.Qt.AlignTop)
@@ -1246,6 +1267,14 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.layout.addLayout(self.charts_layout)
         self.setLayout(self.layout)
 
+        # Timer for periodic image capture
+        self.camera_timer = QTimer(self)
+        self.camera_timer.timeout.connect(self.capture_image)
+        self.capturing = False
+    
+        self.start_camera()
+        self.refuel_camera_model.image_updated_signal.connect(self.update_original_image)
+    
         self.model.calibration_model.mass_updated_signal.connect(self.update_mass_time_plot)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_parameters)
         self.model.calibration_model.initial_mass_captured_signal.connect(self.initiate_calibration_print)
@@ -1261,6 +1290,57 @@ class MassCalibrationDialog(QtWidgets.QDialog):
 
         self.update_printing_parameters()
         self.update_volume_pressure_plot()
+
+    def toggle_capture(self):
+        """
+        Starts or stops capturing images based on the button toggle.
+        """
+        if self.capturing:
+            self.camera_timer.stop()
+            self.capture_button.setText("Start Capturing Images")
+        else:
+            self.camera_timer.start(100)  # Capture every 100 milliseconds
+            self.capture_button.setText("Stop Capturing Images")
+        self.capturing = not self.capturing
+    
+    def start_camera(self):
+        self.controller.start_refuel_camera()
+
+    def capture_image(self):
+        self.controller.capture_refuel_image()
+
+    def stop_camera(self):
+        self.controller.stop_refuel_camera()
+
+    def numpy_to_qimage(self,image):
+        """
+        Converts a numpy array (captured image) to a QImage.
+        """
+        height, width, channels = image.shape
+        bytes_per_line = channels * width
+        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        return qimage.rgbSwapped()
+
+    def numpy_to_qimage_grayscale(self,image):
+        """
+        Converts a grayscale numpy array to a QImage.
+        """
+        height, width = image.shape
+        bytes_per_line = width
+        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        return qimage
+
+    def update_original_image(self):
+        # frame = self.refuel_camera_model.get_original_image()
+        frame = self.refuel_camera_model.get_level_image()
+
+        # Convert numpy array to QImage for display
+        qimage = self.numpy_to_qimage(frame)
+
+        # Display original image
+        pixmap = QPixmap.fromImage(qimage)
+        self.image_label.setPixmap(pixmap)
+        self.image_label.setScaledContents(True)
 
     def add_horizontal_line(self, y_value, color=QtCore.Qt.black, pen=None):
         """
@@ -1622,7 +1702,161 @@ class MassCalibrationDialog(QtWidgets.QDialog):
         self.model.calibration_model.calibration_complete_signal.disconnect(self.handle_calibration_complete)
         self.model.calibration_model.change_volume_signal.disconnect(self.update_volume)
         self.controller.exit_print_mode()
+        self.camera_timer.stop()
+        self.stop_camera()
         event.accept()
+
+class RefuelCameraWindow(QtWidgets.QDialog):
+    def __init__(self,main_window,model,controller):
+        super().__init__()
+        self.main_window = main_window
+        self.model = model
+        self.refuel_camera_model = self.model.refuel_camera_model
+        self.controller = controller
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.layout = QGridLayout()
+
+        self.control_layout = QVBoxLayout()
+        self.capture_button = QPushButton("Start Capturing Images")
+        self.capture_button.clicked.connect(self.toggle_capture)
+
+        # self.save_button = QPushButton("Save Current Frame")
+        # self.save_button.clicked.connect(self.save_frame)
+
+        # self.threshold_spinbox = QSpinBox()
+        # self.threshold_spinbox.setRange(0, 255)
+        # self.threshold_spinbox.setValue(120)
+        # self.threshold_spinbox.setSingleStep(5)
+        # self.threshold_spinbox.setPrefix("Threshold: ")
+        # self.threshold_spinbox.valueChanged.connect(self.update_analysis)
+
+        # self.blur_spinbox = QSpinBox()
+        # self.blur_spinbox.setRange(1, 31)  # Allow odd values for Gaussian blur size
+        # self.blur_spinbox.setValue(31)
+        # self.blur_spinbox.setSingleStep(2)
+        # self.blur_spinbox.setPrefix("Blur: ")
+        # self.blur_spinbox.valueChanged.connect(self.update_analysis)
+
+        # self.red_line_spinbox = QSpinBox()
+        # self.red_line_spinbox.setRange(0, 640)  # Assuming cropped image max width
+        # self.red_line_spinbox.setValue(10)
+        # self.red_line_spinbox.setPrefix("Red Line: ")
+        # self.red_line_spinbox.valueChanged.connect(self.update_analysis)
+
+        # self.blue_line_spinbox = QSpinBox()
+        # self.blue_line_spinbox.setRange(0, 640)  # Assuming cropped image max width
+        # self.blue_line_spinbox.setValue(30)
+        # self.blue_line_spinbox.setPrefix("Blue Line: ")
+        # self.blue_line_spinbox.valueChanged.connect(self.update_analysis)
+
+        self.image_label = QLabel("No image captured yet.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+
+        # self.analyzed_image_label = QLabel("No analyzed image yet.")
+        # self.analyzed_image_label.setAlignment(Qt.AlignCenter)
+
+        # self.cropped_image_label = QLabel("No cropped image yet.")
+        # self.cropped_image_label.setAlignment(Qt.AlignCenter)
+
+        # self.plot_figure, self.plot_ax = plt.subplots()
+        # self.plot_canvas = FigureCanvas(self.plot_figure)
+        
+        # self.volume_figure, self.volume_ax = plt.subplots()
+        # self.volume_canvas = FigureCanvas(self.volume_figure)
+        
+        # self.level_cropped_image_label = QLabel("No level cropped image yet.")
+        # self.level_cropped_image_label.setAlignment(Qt.AlignCenter)
+
+        self.control_layout.addWidget(self.capture_button)
+        # self.control_layout.addWidget(self.save_button)
+        # self.control_layout.addWidget(self.threshold_spinbox)
+        # self.control_layout.addWidget(self.blur_spinbox)
+        # self.control_layout.addWidget(self.red_line_spinbox)
+        # self.control_layout.addWidget(self.blue_line_spinbox)
+        self.layout.addLayout(self.control_layout, 0, 0, 2, 1)
+        self.layout.addWidget(self.image_label, 0, 1)
+        # self.layout.addWidget(self.analyzed_image_label, 0, 2)
+        # self.layout.addWidget(self.cropped_image_label, 0, 3)
+        # self.layout.addWidget(self.plot_canvas, 1, 1)
+        # self.layout.addWidget(self.volume_canvas, 1, 2)
+        # self.layout.addWidget(self.level_cropped_image_label, 1, 3)
+
+        self.setLayout(self.layout)
+        self.setWindowTitle("Camera App")
+
+        # Timer for periodic image capture
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.capture_image)
+        self.capturing = False
+
+        self.start_camera()
+
+        self.refuel_camera_model.image_updated_signal.connect(self.update_original_image)
+    
+    def toggle_capture(self):
+        """
+        Starts or stops capturing images based on the button toggle.
+        """
+        if self.capturing:
+            self.timer.stop()
+            self.capture_button.setText("Start Capturing Images")
+        else:
+            self.timer.start(100)  # Capture every 100 milliseconds
+            self.capture_button.setText("Stop Capturing Images")
+        self.capturing = not self.capturing
+
+    def start_camera(self):
+        self.controller.start_refuel_camera()
+
+    def capture_image(self):
+        self.controller.capture_refuel_image()
+
+    def stop_camera(self):
+        self.controller.stop_refuel_camera()
+
+    def numpy_to_qimage(self,image):
+        """
+        Converts a numpy array (captured image) to a QImage.
+        """
+        height, width, channels = image.shape
+        bytes_per_line = channels * width
+        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        return qimage.rgbSwapped()
+
+    def numpy_to_qimage_grayscale(self,image):
+        """
+        Converts a grayscale numpy array to a QImage.
+        """
+        height, width = image.shape
+        bytes_per_line = width
+        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        return qimage
+
+    def update_original_image(self):
+        # frame = self.refuel_camera_model.get_original_image()
+        frame = self.refuel_camera_model.get_level_image()
+
+        # Convert numpy array to QImage for display
+        qimage = self.numpy_to_qimage(frame)
+
+        # Display original image
+        pixmap = QPixmap.fromImage(qimage)
+        self.image_label.setPixmap(pixmap)
+        self.image_label.setScaledContents(True)
+
+
+    def closeEvent(self, event):
+        """Handle the closing of the dialog."""
+        self.timer.stop()
+        self.stop_camera()
+        super().closeEvent(event)
+
+
+
+
 
 class WellPlateWidget(QtWidgets.QGroupBox):
     def __init__(self, main_window, model, controller):

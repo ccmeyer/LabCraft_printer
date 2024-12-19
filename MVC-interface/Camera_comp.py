@@ -112,22 +112,12 @@ def find_largest_prominent_peak(rate_of_change):
         #raise ValueError("No peaks found in rate of change.")
         return None
     largest_peak_index = peaks[np.argmax(np.abs(rate_of_change[peaks]))]
-    # ~ # Find peaks and calculate their prominence and width
-    # ~ peaks, properties = find_peaks(np.abs(rate_of_change), prominence=10, width=2)
-    
-    # ~ if len(peaks) == 0:
-        # ~ raise ValueError("No prominent peaks found in rate of change.")
-
-    # ~ # Rank peaks based on prominence or width
-    # ~ prominences = properties["prominences"]  # Prominence of each peak
-    # ~ widths = properties["widths"]            # Width of each peak
-
-    # ~ # Select the peak with the largest prominence
-    # ~ largest_peak_index = peaks[np.argmax(widths)]
 
     return largest_peak_index
 
-class CameraApp(QWidget):
+
+
+class Camera(QWidget):
     def __init__(self):
         super().__init__()
 
@@ -402,82 +392,9 @@ class CameraApp(QWidget):
 if __name__ == "__main__":
     app = QApplication([])
 
-    window = CameraApp()
+    window = Camera()
     window.resize(1920, 960)  # Adjusted for 2x2 grid layout
     window.show()
 
     app.exec()
     
-# ~ import numpy as np
-# ~ import matplotlib.pyplot as plt
-# ~ from scipy.signal import find_peaks
-
-# ~ def calculate_rate_of_change(x, y):
-    # ~ """
-    # ~ Calculates the rate of change (first derivative) of y with respect to x.
-
-    # ~ Args:
-        # ~ x (np.array): Array of x values.
-        # ~ y (np.array): Array of y values.
-
-    # ~ Returns:
-        # ~ np.array: Rate of change values.
-        # ~ np.array: Midpoint x values where rate of change is calculated.
-    # ~ """
-    # ~ rate_of_change = np.diff(y) / np.diff(x)  # First derivative
-    # ~ mid_x = (x[:-1] + x[1:]) / 2  # Midpoints between consecutive x values
-    # ~ return rate_of_change, mid_x
-
-# ~ def find_largest_peak(rate_of_change):
-    # ~ """
-    # ~ Finds the largest peak (absolute value) in the rate of change.
-
-    # ~ Args:
-        # ~ rate_of_change (np.array): Array of rate of change values.
-
-    # ~ Returns:
-        # ~ int: Index of the largest peak.
-    # ~ """
-    # ~ peaks, _ = find_peaks(np.abs(rate_of_change))  # Find peaks of absolute rate of change
-    # ~ if len(peaks) == 0:
-        # ~ raise ValueError("No peaks found in rate of change.")
-    # ~ largest_peak_index = peaks[np.argmax(np.abs(rate_of_change[peaks]))]
-    # ~ return largest_peak_index
-# ~ # Example Data
-# ~ y = np.array([1014, 980, 941, 910, 910, 884, 856, 812, 786, 807, 820, 806, 791, 796, 814, 819, 814, 826, 848, 814, 783, 778, 777, 776, 779, 782, 776, 766, 755, 705, 633, 567, 637, 901, 1054, 1160, 1177, 1178, 1156, 1168, 1195, 1193, 1161, 1188, 1186, 1188, 1172, 1131, 1142, 1152, 1158, 1112, 1093, 1073, 1065, 1073, 1073, 1045, 1017, 990, 950, 947, 935, 945, 953, 938, 913, 907, 912, 868, 927, 912, 900, 889, 899, 895, 871, 892, 906, 915, 920, 898, 875, 869, 873, 855, 859, 887, 915, 933, 931, 946, 940, 955, 987, 1021, 1009]
-# ~ )
-# ~ x = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96])
-
-
-# ~ # Calculate rate of change
-# ~ rate_of_change, mid_x = calculate_rate_of_change(x, y)
-
-# ~ # Find largest peak in rate of change
-# ~ largest_peak_index = find_largest_peak(rate_of_change)
-# ~ largest_peak_x = mid_x[largest_peak_index]
-
-# ~ # Plot raw data and rate of change
-# ~ plt.figure(figsize=(10, 6))
-
-# ~ # Top plot: Raw data
-# ~ plt.subplot(2, 1, 1)
-# ~ plt.plot(x, y, label="Raw Data", color="black")
-# ~ plt.title("Raw Data")
-# ~ plt.xlabel("X")
-# ~ plt.ylabel("Y")
-
-# ~ # Bottom plot: Rate of change
-# ~ plt.subplot(2, 1, 2)
-# ~ plt.plot(mid_x, rate_of_change, label="Rate of Change", color="blue")
-# ~ plt.scatter(mid_x[largest_peak_index], rate_of_change[largest_peak_index],
-            # ~ color='red', zorder=5, label="Largest Peak")
-# ~ plt.axvline(mid_x[largest_peak_index], color='red', linestyle='--', label="Largest Change")
-# ~ plt.title("Rate of Change with Largest Peak Highlighted")
-# ~ plt.xlabel("X")
-# ~ plt.ylabel("Rate of Change")
-# ~ plt.legend()
-
-# ~ plt.tight_layout()
-# ~ plt.show()
-
-# ~ print(f"Largest change occurs at x = {largest_peak_x:.2f}")

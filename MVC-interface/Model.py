@@ -11,11 +11,222 @@ import itertools
 from itertools import combinations_with_replacement
 import joblib
 from scipy.optimize import minimize, fsolve
+from scipy.signal import find_peaks
 import random
 import pyDOE3
 import time
 import glob
 import shutil
+
+
+class RefuelCameraModel(QObject):
+    '''
+    Stores all the data from the refuel camera system
+    '''
+    image_updated_signal = Signal()
+    def __init__(self):
+        super().__init__()
+        self.threshold_value = 120
+        self.blur_size = 31
+        self.left_bound = 10
+        self.right_bound = 30
+        self.current_level = None
+        self.stable = False
+
+        self.latest_image = None
+        self.level_image = None
+
+    def update_threshold(self, value):
+        self.threshold_value = value
+
+    def update_blur(self, value):
+        self.blur_size = value
+
+    def update_left_bound(self, value):
+        self.left_bound = value
+
+    def update_right_bound(self, value):
+        self.right_bound = value
+
+    def update_current_level(self, level):
+        self.current_level = level
+
+    def find_key_points(self,columns, line_values):
+        """
+        Identifies two low points and the high point between them in the data.
+
+        Args:
+            columns (np.array): The column indices (x-axis values).
+            line_values (np.array): The pixel sum values (y-axis values).
+
+        Returns:
+            tuple: (low1_index, high_index, low2_index)
+                Indices of the first low point, the high point, and the second low point.
+        """
+        # Negate the line_values to find minima using find_peaks
+        inverted_values = -line_values
+        low_points_indices = find_peaks(inverted_values)[0]  # Indices of local minima
+
+        # Find the first two minima (low points)
+        if len(low_points_indices) < 2:
+            # ValueError("Not enough local minima found to identify two low points.")
+            return None,None,None
+
+        low1_index = low_points_indices[0]
+        low2_index = low_points_indices[1]
+
+        # Ensure the first low point comes before the second
+        if low1_index > low2_index:
+            low1_index, low2_index = low2_index, low1_index
+
+        # Find the local maximum (high point) between the two low points
+        high_point_indices = find_peaks(line_values)[0]  # Indices of local maxima
+        high_index = None
+
+        for idx in high_point_indices:
+            if low1_index < idx < low2_index:
+                high_index = idx
+                break
+
+        if high_index is None:
+            raise ValueError("No local maximum found between the two low points.")
+
+        return low1_index, high_index, low2_index
+        
+    def find_low_point(self,rows,row_values):
+        inverted_values = -row_values
+        all_peaks = find_peaks(inverted_values)
+        if len(all_peaks) > 0:
+            if len(all_peaks[0]) > 0:
+                lowest_point = all_peaks[0][0]
+            else:
+                lowest_point = None
+        else:
+            lowest_point = None
+        return lowest_point
+        
+    def calculate_rate_of_change(self,x, y):
+        """
+        Calculates the rate of change (first derivative) of y with respect to x.
+
+        Args:
+            x (np.array): Array of x values.
+            y (np.array): Array of y values.
+
+        Returns:
+            np.array: Rate of change values.
+            np.array: Midpoint x values where rate of change is calculated.
+        """
+        rate_of_change = np.diff(y) / np.diff(x)  # First derivative
+        mid_x = (x[:-1] + x[1:]) / 2  # Midpoints between consecutive x values
+        return rate_of_change
+
+    def find_largest_prominent_peak(self,rate_of_change):
+        """
+        Finds the largest peak based on prominence or width in the rate of change.
+
+        Args:
+            rate_of_change (np.array): Array of rate of change values.
+
+        Returns:
+            int: Index of the largest prominent peak.
+        """
+        peaks, _ = find_peaks(np.abs(rate_of_change))  # Find peaks of absolute rate of change
+        if len(peaks) == 0:
+            #raise ValueError("No peaks found in rate of change.")
+            return None
+        largest_peak_index = peaks[np.argmax(np.abs(rate_of_change[peaks]))]
+
+        return largest_peak_index
+
+    def analyze_image(self,frame):
+        # Resize the image to fit within 640x480 while maintaining aspect ratio
+        frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+
+        # Store the latest frame
+        self.latest_frame = frame
+
+        gray = cv2.cvtColor(self.latest_frame, cv2.COLOR_BGR2GRAY)
+
+        # Ensure blur size is odd
+        if self.blur_size % 2 == 0:
+            self.blur_size += 1
+
+
+        blurred = cv2.GaussianBlur(gray, (self.blur_size, self.blur_size), 0)
+
+        _, thresholded = cv2.threshold(blurred, self.threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Convert the grayscale thresholded image to BGR for color drawing
+        self.thresholded_color = cv2.cvtColor(thresholded, cv2.COLOR_GRAY2BGR)
+
+        # Find contours in the thresholded image
+        contours, _ = cv2.findContours(thresholded, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Identify the largest contour by area
+        largest_contour = max(contours, key=cv2.contourArea) if contours else None
+
+        cropped_image = None
+
+        if largest_contour is not None:
+            x, y, w, h = cv2.boundingRect(largest_contour)
+            cv2.rectangle(self.thresholded_color, (x, y), (x + w, y + h), (0, 0, 255), 2)  # Draw red bounding rectangle
+
+            # Crop the original image based on the bounding rectangle
+            cropped_image = self.latest_frame[y:y + h, x:x + w]
+
+            # Draw vertical lines on the cropped image
+            if cropped_image is not None:
+                self.cropped_image = np.ascontiguousarray(cropped_image)  # Ensure memory is contiguous
+                self.level_image = self.cropped_image.copy()
+                height, width, _ = self.cropped_image.shape
+                red_line_x = np.clip(self.left_bound, 0, width - 1)
+                blue_line_x = np.clip(self.right_bound, 0, width - 1)
+                cv2.line(self.cropped_image, (red_line_x, 0), (red_line_x, height), (0, 0, 255), 1)
+                cv2.line(self.cropped_image, (blue_line_x, 0), (blue_line_x, height), (255, 0, 0), 1)
+
+                # Generate plot data
+                if red_line_x < blue_line_x - 1:  # Ensure there's at least one column between the lines
+                    cropped_gray = cv2.cvtColor(self.cropped_image, cv2.COLOR_BGR2GRAY)
+                    line_values = cropped_gray[:, red_line_x + 1:blue_line_x].sum(axis=0)  # Exclude red_line_x column
+                    columns = np.arange(red_line_x + 1, blue_line_x)
+                    
+                    left_edge_idx, center_idx, right_edge_idx = self.find_key_points(columns, line_values)
+
+                    if center_idx is not None:
+                        buffer_rows = 10
+                        channel_thickness = 3
+                        row_values = np.array(cropped_gray[buffer_rows:-buffer_rows, columns[center_idx]-channel_thickness:columns[center_idx]+channel_thickness].sum(axis=1))
+                        row_x_values = np.array(range(buffer_rows,len(row_values)+buffer_rows))
+                        row_values = row_values.astype(np.int64)  # Cast to safe integer type
+
+                        # Calculate rate of change
+                        rate_of_change = self.calculate_rate_of_change(row_x_values,row_values)
+
+                        # Find largest peak in rate of change
+                        largest_peak_index = self.find_largest_prominent_peak(rate_of_change)
+
+                        if largest_peak_index is not None:
+                            largest_peak_x = row_x_values[largest_peak_index+1]
+
+                            cv2.line(self.level_image, (0, largest_peak_x), (width, largest_peak_x), (0, 0, 255), 1)
+                    else:
+                        print('Error: Center index is None')
+            else:
+                print('Error: No contour')
+        else:
+            print('Error: No contour')
+
+
+        self.image_updated_signal.emit()
+
+    def get_original_image(self):
+        return self.latest_frame
+
+    def get_level_image(self):
+        return self.level_image
+    
+        
 
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
@@ -3071,6 +3282,7 @@ class Model(QObject):
         self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
         self.experiment_file_path = None
+        self.refuel_camera_model = RefuelCameraModel()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
