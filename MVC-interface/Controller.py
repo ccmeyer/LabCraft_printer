@@ -14,11 +14,10 @@ class Controller(QObject):
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
-    def __init__(self, machine, model, refuel_camera):
+    def __init__(self, machine, model):
         super().__init__()
         self.machine = machine
         self.model = model
-        self.refuel_camera = refuel_camera
         self.expected_position = self.model.machine_model.get_current_position_dict()
 
         # Connect the machine's signals to the controller's handlers
@@ -804,12 +803,14 @@ class Controller(QObject):
                 self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             
     def start_refuel_camera(self):
-        self.refuel_camera.start_camera()
+        self.machine.start_refuel_camera()
+        self.machine.refuel_led_on()
 
     def capture_refuel_image(self):
-        frame = self.refuel_camera.capture_image()
+        frame = self.machine.capture_refuel_image()
         self.model.refuel_camera_model.start_analysis(frame)
 
     def stop_refuel_camera(self):
-        self.refuel_camera.stop_camera()
+        self.machine.stop_refuel_camera()
+        self.machine.refuel_led_off()
 

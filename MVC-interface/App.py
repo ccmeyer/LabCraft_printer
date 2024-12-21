@@ -49,7 +49,6 @@ def main():
     splash.show()
 
     from Machine_MVC import Machine
-    from RefuelCamera import RefuelCamera
     from Model import Model
     from Controller import Controller
     from View import MainWindow
@@ -57,8 +56,7 @@ def main():
     # Initialize components
     model = Model()
     machine = Machine(model)
-    refuel_camera = RefuelCamera()
-    controller = Controller(machine, model,refuel_camera)
+    controller = Controller(machine, model)
 
     set_dark_theme(app)
     view = MainWindow(model,controller)

@@ -260,7 +260,7 @@ class RefuelCameraModel(QObject):
             print('Error: level is ',level)
             return
         self.level_log.append(level)
-        if len(self.level_log) > 200:
+        if len(self.level_log) > 100:
             self.level_log.pop(0)
 
     def get_level_log(self):

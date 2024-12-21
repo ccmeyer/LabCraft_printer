@@ -12,6 +12,46 @@ import numpy as np
 import pandas as pd
 import os
 import joblib
+from picamera2 import Picamera2
+import gpiod
+
+class RefuelCamera():
+    def __init__(self):
+        super().__init__()
+        self.led_pin = 17
+        self.chip = gpiod.Chip("gpiochip4")
+        self.line = self.chip.get_line(self.led_pin)
+        self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
+        self.line.set_value(0)
+
+    def start_camera(self):
+        # Initialize Picamera2
+        self.camera = Picamera2()
+        self.camera.configure(self.camera.create_still_configuration(
+            main={"size": self.camera.sensor_resolution, "format": "RGB888"}
+        ))
+        self.camera.start()
+
+    def capture_image(self):
+        return self.camera.capture_array()
+
+    def stop_camera(self):
+        if self.camera:
+            self.camera.stop()
+            self.camera.close()
+
+    def led_on(self):
+        print("---LED ON")
+        self.line.set_value(1)
+
+    def led_off(self):
+        print("---LED OFF")
+        self.line.set_value(0)
+
+    def __del__(self):
+        self.line.set_value(0)
+        self.line.release()
+
 
 class Balance(QObject):
     balance_mass_updated_signal = Signal(float)
@@ -827,6 +867,8 @@ class Machine(QObject):
         self.balance_connected = False
         self.balance_droplets = []
 
+        self.refuel_camera = RefuelCamera()
+
     def begin_communication_timer(self):
         print('Starting communication timer')
         self.communication_timer = QTimer()
@@ -932,6 +974,25 @@ class Machine(QObject):
     
     def is_balance_connected(self):
         return self.balance_connected
+
+    def start_refuel_camera(self):
+        self.refuel_camera.start_camera()
+        return
+
+    def capture_refuel_image(self):
+        return self.refuel_camera.capture_image()
+
+    def stop_refuel_camera(self):
+        self.refuel_camera.stop_camera()
+        return
+
+    def refuel_led_on(self):
+        self.refuel_camera.led_on()
+        return
+
+    def refuel_led_off(self):
+        self.refuel_camera.led_off()
+        return
     
     def update_command_numbers(self,current_command,last_completed):
         self.command_queue.update_command_status(current_command,last_completed)
