@@ -18,6 +18,20 @@ import time
 import glob
 import shutil
 
+class DropletCameraModel(QObject):
+    droplet_image_updated = Signal()
+    def __init__(self):
+        super().__init__()
+        self.latest_image = None
+
+    def get_original_image(self):
+        return self.latest_frame
+    
+    def update_image(self,frame):
+        self.latest_frame = frame
+        self.droplet_image_updated.emit()
+
+
 def find_key_points(columns, line_values):
     """
     Identifies two low points and the high point between them in the data.
@@ -3302,7 +3316,7 @@ class Model(QObject):
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
-        self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_Models')
+        self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')
         # self.resistance_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_resistance_pipeline.pkl')
     
@@ -3324,6 +3338,7 @@ class Model(QObject):
         self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
         self.experiment_file_path = None
         self.refuel_camera_model = RefuelCameraModel()
+        self.droplet_camera_model = DropletCameraModel()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)

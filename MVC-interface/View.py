@@ -910,11 +910,12 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         #         return
         #     elif response == '&Yes':
         #         self.controller.move_to_location('balance', manual=True, safe_y=True)
-        mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
-        mass_calibration_dialog.exec()
+        # mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+        # mass_calibration_dialog.exec()
         # camera_dialog = RefuelCameraWindow(self.main_window,self.model,self.controller)
         # camera_dialog.exec()
-
+        droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
+        droplet_imaging_dialog.exec()
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)
@@ -924,6 +925,89 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         print('Pressure changed to:',pressure)
         self.target_pressure = pressure
         self.controller.set_absolute_print_pressure(pressure)
+
+
+class DropletImagingDialog(QtWidgets.QDialog):
+    def __init__(self, main_window, model, controller):
+        super().__init__()
+        self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+        self.model = model
+        self.controller = controller
+
+        self.start_droplet_camera()
+
+        # Timer for periodic image capture
+        self.camera_timer = QTimer(self)
+        self.camera_timer.timeout.connect(self.capture_image)
+        self.capturing = False
+
+        self.setWindowTitle("Droplet Imaging")
+        self.resize(1200, 700)
+
+        self.layout = QtWidgets.QVBoxLayout()
+        self.label = QtWidgets.QLabel("Begin the droplet imaging")
+        self.layout.addWidget(self.label)
+
+        # Add a button to start the droplet imaging
+        self.capture_button = QtWidgets.QPushButton("Start Imaging")
+        self.capture_button.clicked.connect(self.toggle_capture)
+        self.layout.addWidget(self.capture_button)
+
+        self.image_label = QLabel("No image captured yet.")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.layout.addWidget(self.image_label)
+
+        self.setLayout(self.layout)
+
+        self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
+
+    def numpy_to_qimage(self,image):
+        """
+        Converts a numpy array (captured image) to a QImage.
+        """
+        height, width, channels = image.shape
+        bytes_per_line = channels * width
+        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        return qimage.rgbSwapped()
+
+    def toggle_capture(self):
+        """
+        Starts or stops capturing images based on the button toggle.
+        """
+        if self.capturing:
+            self.camera_timer.stop()
+            self.capture_button.setText("Start Capturing Images")
+        else:
+            self.camera_timer.start(250)  # Capture every 100 milliseconds
+            self.capture_button.setText("Stop Capturing Images")
+        self.capturing = not self.capturing
+    
+
+    def start_droplet_camera(self):
+        print('Starting droplet imaging')
+        self.controller.start_droplet_camera()
+
+    def capture_image(self):
+        self.controller.capture_droplet_image()
+
+    def stop_droplet_camera(self):
+        self.controller.stop_droplet_camera()
+
+    def update_image(self):
+        image = self.model.droplet_camera_model.get_original_image()
+        qimage = self.numpy_to_qimage(image)
+        pixmap = QPixmap.fromImage(qimage)
+        self.image_label.setPixmap(pixmap)
+
+    def closeEvent(self, event):
+        """Handle the closing of the dialog."""
+        self.camera_timer.stop()
+        self.stop_droplet_camera()
+        event.accept()
+
+
+
         
 class MassCalibrationDialog(QtWidgets.QDialog):
     popup_message_signal = QtCore.Signal(str,str)

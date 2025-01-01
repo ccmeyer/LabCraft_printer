@@ -814,3 +814,13 @@ class Controller(QObject):
         self.machine.stop_refuel_camera()
         self.machine.refuel_led_off()
 
+    def start_droplet_camera(self):
+        self.machine.start_droplet_camera()
+
+    def capture_droplet_image(self):
+        frame = self.machine.capture_droplet_image()
+        self.model.droplet_camera_model.update_image(frame)
+
+    def stop_droplet_camera(self):
+        self.machine.stop_droplet_camera()
+

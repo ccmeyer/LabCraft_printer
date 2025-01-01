@@ -15,6 +15,27 @@ import joblib
 from picamera2 import Picamera2
 import gpiod
 
+class DropletCamera():
+    def __init__(self):
+        super().__init__()
+
+
+    def start_camera(self):
+        # Initialize Picamera2
+        self.camera = Picamera2(1)
+        self.camera.configure(self.camera.create_still_configuration(
+            main={"size": self.camera.sensor_resolution}
+        ))
+        self.camera.start()
+
+    def capture_image(self):
+        return self.camera.capture_array()
+
+    def stop_camera(self):
+        if self.camera:
+            self.camera.stop()
+            self.camera.close()
+
 class RefuelCamera():
     def __init__(self):
         super().__init__()
@@ -26,7 +47,7 @@ class RefuelCamera():
 
     def start_camera(self):
         # Initialize Picamera2
-        self.camera = Picamera2()
+        self.camera = Picamera2(0)
         self.camera.configure(self.camera.create_still_configuration(
             main={"size": self.camera.sensor_resolution, "format": "RGB888"}
         ))
@@ -868,6 +889,7 @@ class Machine(QObject):
         self.balance_droplets = []
 
         self.refuel_camera = RefuelCamera()
+        self.droplet_camera = DropletCamera()
 
     def begin_communication_timer(self):
         print('Starting communication timer')
@@ -992,6 +1014,17 @@ class Machine(QObject):
 
     def refuel_led_off(self):
         self.refuel_camera.led_off()
+        return
+    
+    def start_droplet_camera(self):
+        self.droplet_camera.start_camera()
+        return
+    
+    def capture_droplet_image(self):
+        return self.droplet_camera.capture_image()
+    
+    def stop_droplet_camera(self):
+        self.droplet_camera.stop_camera()
         return
     
     def update_command_numbers(self,current_command,last_completed):

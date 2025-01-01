@@ -43,7 +43,6 @@ pytest==8.3.2
 pytest-qt==4.4.0
 python-dateutil==2.9.0.post0
 pytz==2024.1
-pywin32==306
 pyzmq==26.0.3
 scikit-learn==1.5.1
 scipy==1.13.1
