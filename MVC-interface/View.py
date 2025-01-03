@@ -937,6 +937,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.flash_active = False
         self.start_droplet_camera()
+        self.controller.start_read_camera()
 
         # Timer for periodic image capture
         self.camera_timer = QTimer(self)
@@ -1038,6 +1039,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """Handle the closing of the dialog."""
         self.camera_timer.stop()
         self.stop_droplet_camera()
+        self.controller.stop_read_camera()
         event.accept()
 
 

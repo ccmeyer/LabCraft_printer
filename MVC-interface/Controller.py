@@ -824,6 +824,12 @@ class Controller(QObject):
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
 
+    def start_read_camera(self):
+        self.machine.start_read_camera()
+
+    def stop_read_camera(self):
+        self.machine.stop_read_camera()
+
     def trigger_flash(self):
         self.machine.trigger_flash()
 
