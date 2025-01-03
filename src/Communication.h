@@ -7,6 +7,7 @@
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
 #include "DropletPrinter.h"
+#include "Flash.h"
 #include <Arduino.h>
 
 enum StatusStep {
@@ -31,14 +32,16 @@ enum StatusStep {
     TARGET_REFUEL,
     PULSE_WIDTH_PRINT,
     PULSE_WIDTH_REFUEL,
-    MICROS
+    MICROS,
+    FLASHES
 };
 
 class Communication {
 public:
     Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
     CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, 
-    PressureSensor& pressureSensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer, int baudRate);
+    PressureSensor& pressureSensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer,
+    Flash& flash, int baudRate);
 
     void beginSerial();
     void startTasks();
@@ -63,6 +66,7 @@ private:
     PressureRegulator& printRegulator;  // Reference to the PressureRegulator object
     PressureRegulator& refuelRegulator;  // Reference to the PressureRegulator object
     DropletPrinter& printer;  // Reference to the DropletPrinter object
+    Flash& flash;       // Reference to the Flash object
     StatusStep statusStep = CYCLE_COUNT;
 
     int baudRate;

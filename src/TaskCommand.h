@@ -80,6 +80,8 @@ enum CommandType {
     PAUSE,
     RESUME,
     CLEAR_QUEUE,
+    START_READ_CAMERA,
+    STOP_READ_CAMERA,
     UNKNOWN
     // Add more command types as needed
 };

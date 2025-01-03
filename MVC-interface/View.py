@@ -935,6 +935,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model = model
         self.controller = controller
 
+        self.flash_active = False
         self.start_droplet_camera()
 
         # Timer for periodic image capture
@@ -949,10 +950,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.label = QtWidgets.QLabel("Begin the droplet imaging")
         self.layout.addWidget(self.label)
 
+        self.button_layout = QtWidgets.QHBoxLayout()
+
         # Add a button to start the droplet imaging
         self.capture_button = QtWidgets.QPushButton("Start Imaging")
         self.capture_button.clicked.connect(self.toggle_capture)
-        self.layout.addWidget(self.capture_button)
+        self.button_layout.addWidget(self.capture_button)
+
+        # Add a button to trigger a flash
+        self.flash_button = QtWidgets.QPushButton("Trigger Flash")
+        self.flash_button.clicked.connect(self.toggle_flash)
+        self.button_layout.addWidget(self.flash_button)
+
+        # Add a label to show the number of recorded flashes
+        self.flash_count_label = QtWidgets.QLabel("Flashes: 0")
+        self.button_layout.addWidget(self.flash_count_label)
+
+        self.layout.addLayout(self.button_layout)
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
@@ -961,6 +975,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.setLayout(self.layout)
 
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
+        self.model.droplet_camera_model.flash_signal.connect(self.update_flash_count)
 
     def numpy_to_qimage(self,image):
         """
@@ -982,7 +997,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.camera_timer.start(250)  # Capture every 100 milliseconds
             self.capture_button.setText("Stop Capturing Images")
         self.capturing = not self.capturing
+
+    def toggle_flash(self):
+        """
+        Triggers a flash for the droplet imaging.
+        """
+        if self.flash_active:
+            self.controller.stop_flash()
+            self.flash_active = False
+            self.flash_button.setText("Trigger Flash")
+        else:
+            self.controller.trigger_flash()
+            self.flash_active = True
+            self.flash_button.setText("Stop Flash")
     
+    def update_flash_count(self):
+        """
+        Updates the flash count label.
+        """
+        count = self.model.droplet_camera_model.get_num_flashes()
+        self.flash_count_label.setText(f"Flashes: {count}")
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')

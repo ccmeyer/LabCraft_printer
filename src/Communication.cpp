@@ -5,9 +5,10 @@
 // Constructor
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
 CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
-PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer, int baudRate)
+PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer,
+Flash& flash, int baudRate)
     : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
-    pressureSensor(pressureSensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), printer(printer), baudRate(baudRate), 
+    pressureSensor(pressureSensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), printer(printer), flash(flash), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0),
@@ -176,6 +177,11 @@ void Communication::sendStatus() {
             case MICROS:
                 Serial.print("Micros:");
                 Serial.println(micros());
+                statusStep = FLASHES;
+                break;
+            case FLASHES:
+                Serial.print("Flashes:");
+                Serial.println(flash.getNumFlashes());
                 statusStep = CYCLE_COUNT;
                 break;
         }
@@ -428,6 +434,12 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case SET_WIDTH_R:
             printer.setRefuelDuration(cmd.param1);
+            break;
+        case START_READ_CAMERA:
+            flash.startReading();
+            break;
+        case STOP_READ_CAMERA:
+            flash.stopReading();
             break;
         case PRINT_MODE:
             printer.enterPrintMode();

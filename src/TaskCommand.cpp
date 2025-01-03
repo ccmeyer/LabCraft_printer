@@ -184,6 +184,10 @@ CommandType mapCommandType(const char* commandName) {
         return RESUME;
     } else if (strcmp(commandName, "CLEAR_QUEUE") == 0) {
         return CLEAR_QUEUE;
+    } else if (strcmp(commandName, "START_READ_CAMERA") == 0) {
+        return START_READ_CAMERA;
+    } else if (strcmp(commandName, "STOP_READ_CAMERA") == 0) {
+        return STOP_READ_CAMERA;
     } else {
         return UNKNOWN;
     }

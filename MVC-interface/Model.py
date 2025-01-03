@@ -20,9 +20,20 @@ import shutil
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
+    flash_signal = Signal()
     def __init__(self):
         super().__init__()
         self.latest_image = None
+        self.reading = False
+        self.signal = False
+        self.num_flashes = 0
+
+    def get_num_flashes(self):
+        return self.num_flashes
+    
+    def update_num_flashes(self,num):
+        self.num_flashes = num
+        self.flash_signal.emit()
 
     def get_original_image(self):
         return self.latest_frame
@@ -3406,6 +3417,8 @@ class Model(QObject):
             self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
+        if 'FLASHES' in status_keys:
+            self.droplet_camera_model.update_num_flashes(status_dict['FLASHES'])
 
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),

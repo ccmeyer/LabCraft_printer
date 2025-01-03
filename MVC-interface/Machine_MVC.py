@@ -18,6 +18,17 @@ import gpiod
 class DropletCamera():
     def __init__(self):
         super().__init__()
+        self.signal_pin = 27
+        self.chip = gpiod.Chip("gpiochip4")
+        self.line = self.chip.get_line(self.signal_pin)
+        self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
+        self.line.set_value(0)
+
+    def trigger_flash(self):
+        self.line.set_value(1)
+
+    def stop_flash(self):
+        self.line.set_value(0)
 
 
     def start_camera(self):
@@ -1025,6 +1036,14 @@ class Machine(QObject):
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
+        return
+    
+    def trigger_flash(self):
+        self.droplet_camera.trigger_flash()
+        return
+    
+    def stop_flash(self):
+        self.droplet_camera.stop_flash()
         return
     
     def update_command_numbers(self,current_command,last_completed):

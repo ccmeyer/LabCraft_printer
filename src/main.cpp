@@ -61,6 +61,7 @@ extern "C" void SystemClock_Config(void)
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
 #include "DropletPrinter.h"
+#include "Flash.h"
 #include "pin_assignments.h"
 #include "all_constants.h"
 #include "GlobalState.h"
@@ -85,8 +86,8 @@ PressureSensor pressureSensor(TCAAddress, sensorAddress, taskQueue);
 PressureRegulator printRegulator(stepperP, pressureSensor,taskQueue,printValvePin,printPort);
 PressureRegulator refuelRegulator(stepperR, pressureSensor,taskQueue,refuelValvePin,refuelPort);
 DropletPrinter printer(pressureSensor, printRegulator, refuelRegulator, taskQueue, printPin, refuelPin, &htim9, &htim4, TIM_CHANNEL_1, TIM_CHANNEL_1);
-
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, printRegulator, refuelRegulator, printer, 115200);
+Flash flash(flashPin, cameraPin, taskQueue);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, printRegulator, refuelRegulator, printer, flash, 115200);
 
 // Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
 void configureGPIOForTimer9() {
