@@ -188,6 +188,8 @@ CommandType mapCommandType(const char* commandName) {
         return START_READ_CAMERA;
     } else if (strcmp(commandName, "STOP_READ_CAMERA") == 0) {
         return STOP_READ_CAMERA;
+    } else if (strcmp(commandName, "SET_WIDTH_F") == 0) {
+        return SET_WIDTH_F;
     } else {
         return UNKNOWN;
     }

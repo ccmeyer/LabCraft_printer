@@ -1044,6 +1044,9 @@ class Machine(QObject):
     def stop_read_camera(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('STOP_READ_CAMERA',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
+    def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('SET_WIDTH_F',duration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
     def trigger_flash(self):
         self.droplet_camera.trigger_flash()
         return

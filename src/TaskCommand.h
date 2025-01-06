@@ -82,6 +82,7 @@ enum CommandType {
     CLEAR_QUEUE,
     START_READ_CAMERA,
     STOP_READ_CAMERA,
+    SET_WIDTH_F,
     UNKNOWN
     // Add more command types as needed
 };

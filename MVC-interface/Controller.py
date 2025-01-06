@@ -830,6 +830,9 @@ class Controller(QObject):
     def stop_read_camera(self):
         self.machine.stop_read_camera()
 
+    def set_flash_duration(self, duration):
+        self.machine.set_flash_duration(duration)
+
     def trigger_flash(self):
         self.machine.trigger_flash()
 

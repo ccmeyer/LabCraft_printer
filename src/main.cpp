@@ -72,7 +72,7 @@ extern "C" void SystemClock_Config(void)
 SystemState currentState = RUNNING; // Define the global state
 IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
 TIM_HandleTypeDef htim9;  // Timer 9 handle for printing droplets
-TIM_HandleTypeDef htim4;  // Timer 4 handle for refueling chamber
+TIM_HandleTypeDef htim4;  // Timer 4 handle for refueling chamber and flash
 
 
 TaskQueue taskQueue(&hiwdg);
@@ -87,10 +87,13 @@ PressureSensor pressureSensor(TCAAddress, sensorAddress, taskQueue);
 PressureRegulator printRegulator(stepperP, pressureSensor,taskQueue,printValvePin,printPort);
 PressureRegulator refuelRegulator(stepperR, pressureSensor,taskQueue,refuelValvePin,refuelPort);
 DropletPrinter printer(pressureSensor, printRegulator, refuelRegulator, taskQueue, printPin, refuelPin, &htim9, &htim4, TIM_CHANNEL_1, TIM_CHANNEL_1);
-Flash flash(flashPin, cameraPin, taskQueue);
+Flash flash(flashPin, cameraPin, taskQueue,&htim4, TIM_CHANNEL_2);
 Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, printRegulator, refuelRegulator, printer, flash, 115200);
 
-// Configure GPIO for TIM9 channel (assuming GPIO PA2 for example, you should replace with your actual pin)
+/** Configure and initialize the hardware timers for accurate GPIO timing
+ * Refer to the stm32f446re.pdf datasheet, Table 11 for the GPIO alternate functions and timer information
+ */
+// Configure GPIO for TIM9 channel 1
 void configureGPIOForTimer9() {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
@@ -110,9 +113,9 @@ void configureGPIOForTimer4() {
 
     // Enable GPIO clocks for Port D and Port B
     __HAL_RCC_GPIOD_CLK_ENABLE();  // Clock for PD12
-    __HAL_RCC_GPIOB_CLK_ENABLE();  // Clock for PB6
+    __HAL_RCC_GPIOB_CLK_ENABLE();  // Clock for PB7
 
-    // --- Configure PD12 (TIM4 Channel 2) ---
+    // --- Configure PD12 (TIM4 Channel 1) ---
     GPIO_InitStruct.Pin = GPIO_PIN_12;  // PD12
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
     GPIO_InitStruct.Pull = GPIO_NOPULL;     // No pull-up or pull-down
@@ -120,13 +123,13 @@ void configureGPIOForTimer4() {
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);    // Initialize GPIO PD12
 
-    // --- Configure PB6 (TIM4 Channel 1) ---
-    GPIO_InitStruct.Pin = GPIO_PIN_6;  // PB6
+    // --- Configure PB7 (TIM4 Channel 2) ---
+    GPIO_InitStruct.Pin = GPIO_PIN_7;  // PB7
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
-    GPIO_InitStruct.Pull = GPIO_NOPULL;     // No pull-up or pull-down
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;     // No pull-up or pull-down
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);    // Initialize GPIO PB6
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);    // Initialize GPIO PB7
 }
 
 void initTimer9() {

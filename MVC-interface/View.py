@@ -967,6 +967,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_count_label = QtWidgets.QLabel("Flashes: 0")
         self.button_layout.addWidget(self.flash_count_label)
 
+        # Add a spinbox to set the duration of the flash
+        self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
+        self.flash_duration_spinbox = QtWidgets.QSpinBox()
+        self.flash_duration_spinbox.setRange(0, 10000)
+        self.flash_duration_spinbox.setSingleStep(10)
+        self.flash_duration_spinbox.setValue(1800)
+        self.button_layout.addWidget(self.flash_duration_label)
+        self.button_layout.addWidget(self.flash_duration_spinbox)
+
         self.layout.addLayout(self.button_layout)
 
         self.image_label = QLabel("No image captured yet.")
@@ -976,7 +985,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.setLayout(self.layout)
 
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
-        self.model.droplet_camera_model.flash_signal.connect(self.update_flash_count)
+        self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
+        self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
 
     def numpy_to_qimage(self,image):
         """
@@ -1011,13 +1021,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.trigger_flash()
             self.flash_active = True
             self.flash_button.setText("Stop Flash")
-    
-    def update_flash_count(self):
+
+    def set_flash_duration(self, duration):
         """
-        Updates the flash count label.
+        Sets the duration of the flash.
+        """
+        self.controller.set_flash_duration(duration)
+    
+    def update_flash_info(self):
+        """
+        Updates the flash info.
         """
         count = self.model.droplet_camera_model.get_num_flashes()
         self.flash_count_label.setText(f"Flashes: {count}")
+        self.flash_duration_spinbox.blockSignals(True)
+        self.flash_duration_spinbox.setValue(self.model.droplet_camera_model.get_flash_duration())
+        self.flash_duration_spinbox.blockSignals(False)
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')

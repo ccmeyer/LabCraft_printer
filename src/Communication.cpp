@@ -182,8 +182,14 @@ void Communication::sendStatus() {
             case FLASHES:
                 Serial.print("Flashes:");
                 Serial.println(flash.getNumFlashes());
+                statusStep = FLASH_WIDTH;
+                break;
+            case FLASH_WIDTH:
+                Serial.print("Flash_width:");
+                Serial.println(flash.getFlashWidth());
                 statusStep = CYCLE_COUNT;
                 break;
+            
         }
     }
     cycleCounter = 0;
@@ -440,6 +446,9 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case STOP_READ_CAMERA:
             flash.stopReading();
+            break;
+        case SET_WIDTH_F:
+            flash.setFlashDuration(cmd.param1);
             break;
         case PRINT_MODE:
             printer.enterPrintMode();
