@@ -48,20 +48,14 @@ void Flash::readCameraPin() {
     if (reading) {
         busy = true;
         state = digitalRead(cameraPin);
-        if (triggered) {
+        if (state == LOW) {
+            // Camera pin is low indicating no flash
             triggered = false;
-        } else {
+        } else if (state == HIGH && !triggered) {
+            // Camera pin is high indicating flash, avoids duplicate triggers
             triggered = true;
             triggerFlash();
         }
-        // if (state == LOW) {
-        //     // Camera pin is low indicating no flash
-        //     triggered = false;
-        // } else if (state == HIGH && !triggered) {
-        //     // Camera pin is high indicating flash, avoids duplicate triggers
-        //     triggered = true;
-        //     triggerFlash();
-        // }
         checkFlashTask.nextExecutionTime = micros() + readDelay;
         taskQueue.addTask(checkFlashTask);
         busy = false;
@@ -72,9 +66,5 @@ void Flash::readCameraPin() {
 
 // Method to trigger the flash
 void Flash::triggerFlash() {
-    blinkLED();
-    delay(100);
-    blinkLED();
-    delay(100);
     numFlashes++;
 }

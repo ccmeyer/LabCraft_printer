@@ -3417,8 +3417,8 @@ class Model(QObject):
             self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
-        if 'FLASHES' in status_keys:
-            self.droplet_camera_model.update_num_flashes(status_dict['FLASHES'])
+        if 'Flashes' in status_keys:
+            self.droplet_camera_model.update_num_flashes(status_dict['Flashes'])
 
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),

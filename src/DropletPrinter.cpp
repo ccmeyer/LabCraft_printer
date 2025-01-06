@@ -98,6 +98,7 @@ void DropletPrinter::resetDropletCounts() {
 uint32_t DropletPrinter::convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler) {
     return (microseconds * (timerClockFrequency / 1e6)) / prescaler;
 }
+
 // Internal method to configure the timer in one-pulse mode
 void DropletPrinter::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration) {
     TIM_OC_InitTypeDef sConfigOC = {0};
@@ -107,7 +108,6 @@ void DropletPrinter::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, u
     // uint32_t timerTicks = 5;
 
     // Configure the timer for one-pulse mode
-    // htim->Instance = TIM9;  // Replace TIMx with your timer (e.g., TIM1, TIM2, etc.)
     htim->Init.Period = (timerTicks*2) - 1;  // Set the period (time for one pulse)
     htim->Init.CounterMode = TIM_COUNTERMODE_UP;
     htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

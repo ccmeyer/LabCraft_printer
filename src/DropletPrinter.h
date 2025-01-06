@@ -57,6 +57,7 @@ private:
 
     void printDroplet();        // Method to handle printing a single droplet
     void refuelPulse();         // Method to handle refueling the chamber
+    void configureTimerChannel(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration);      // Method to configure the timer for one-pulse mode
     void configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration);      // Method to configure the timer for one-pulse mode
     uint32_t convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler);
 };

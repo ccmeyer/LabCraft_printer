@@ -63,6 +63,7 @@ extern "C" void SystemClock_Config(void)
 #include "DropletPrinter.h"
 #include "Flash.h"
 #include "pin_assignments.h"
+#include "pin_functions.h"
 #include "all_constants.h"
 #include "GlobalState.h"
 #include "stm32f4xx_hal.h"
@@ -104,19 +105,28 @@ void configureGPIOForTimer9() {
     HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);  // Replace GPIOA with your GPIO port
 }
 
-// Configure GPIO for TIM4 channel (assuming GPIO PD12 for example)
 void configureGPIOForTimer4() {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    __HAL_RCC_GPIOD_CLK_ENABLE();  // Enable the GPIO clock
+    // Enable GPIO clocks for Port D and Port B
+    __HAL_RCC_GPIOD_CLK_ENABLE();  // Clock for PD12
+    __HAL_RCC_GPIOB_CLK_ENABLE();  // Clock for PB6
 
+    // --- Configure PD12 (TIM4 Channel 2) ---
     GPIO_InitStruct.Pin = GPIO_PIN_12;  // PD12
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
+    GPIO_InitStruct.Pull = GPIO_NOPULL;     // No pull-up or pull-down
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);    // Initialize GPIO PD12
 
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);  // Initialize GPIO pin
+    // --- Configure PB6 (TIM4 Channel 1) ---
+    GPIO_InitStruct.Pin = GPIO_PIN_6;  // PB6
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
+    GPIO_InitStruct.Pull = GPIO_NOPULL;     // No pull-up or pull-down
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);    // Initialize GPIO PB6
 }
 
 void initTimer9() {
@@ -177,7 +187,6 @@ void setup() {
         Serial.println("Watchdog initialization failed");
     }
     Serial.println("System initialized with watchdog");
-
 }
 
 void loop() {
