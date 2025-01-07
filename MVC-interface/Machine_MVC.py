@@ -15,39 +15,83 @@ import joblib
 from picamera2 import Picamera2
 import gpiod
 
-class DropletCamera():
+class DropletCamera(QObject):
+    image_captured_signal = Signal()
     def __init__(self):
         super().__init__()
         self.signal_pin = 27
+        self.camera = None
         self.chip = gpiod.Chip("gpiochip4")
         self.line = self.chip.get_line(self.signal_pin)
         self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
         self.line.set_value(0)
 
-    def trigger_flash(self):
+        self.exposure_time = 400000
+        self.latest_frame = None
+
+    def start_flash(self):
         self.line.set_value(1)
 
     def stop_flash(self):
         self.line.set_value(0)
 
-
     def start_camera(self):
         # Initialize Picamera2
         self.camera = Picamera2(1)
-        self.camera.configure(self.camera.create_still_configuration(
-            main={"size": self.camera.sensor_resolution}
-        ))
+        self.configure_camera()
         self.camera.start()
 
+    def configure_camera(self):
+        # config = self.camera.create_still_configuration(
+        #     main={"size": self.camera.sensor_resolution}
+        # )
+        config = self.camera.create_still_configuration(
+            main={"size": (640, 480)}
+        )
+        self.camera.configure(config)
+        controls = {
+            "ExposureTime": self.exposure_time,
+        }
+        self.camera.set_controls(controls)
+    
+    def change_exposure_time(self, exposure_time):
+        self.camera.stop()
+        controls = {
+            "ExposureTime": int(exposure_time),
+        }
+        self.camera.set_controls(controls)
+        self.camera.start()
+        print(f"--Camera changed: Exp {exposure_time}")
+
     def capture_image(self):
-        return self.camera.capture_array()
+        self.capture_event.set()
+        self.latest_frame = self.camera.capture_array()
+        return
+    
+    def start_capture_thread(self,save=False):
+        self.capture_event = threading.Event()
+
+        self.capture_thread = threading.Thread(target=self.capture_image)
+        self.capture_thread.start()
+
+        self.capture_event.wait()
+        time.sleep(0.02)
+        self.start_flash()
+
+        self.capture_thread.join()
+        self.stop_flash()
+
+        self.image_captured_signal.emit()
 
     def stop_camera(self):
         if self.camera:
             self.camera.stop()
             self.camera.close()
 
-class RefuelCamera():
+    def get_latest_frame(self):
+        return self.latest_frame
+
+class RefuelCamera(QObject):
     def __init__(self):
         super().__init__()
         self.led_pin = 17
@@ -1032,7 +1076,7 @@ class Machine(QObject):
         return
     
     def capture_droplet_image(self):
-        return self.droplet_camera.capture_image()
+        return self.droplet_camera.start_capture_thread()
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
@@ -1045,7 +1089,11 @@ class Machine(QObject):
         return self.add_command_to_queue('STOP_READ_CAMERA',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('SET_WIDTH_F',duration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        duration = round(duration,-2) # Only allow durations in increments of 100 nsec
+        if duration >= 100:
+            return self.add_command_to_queue('SET_WIDTH_F',duration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        else:
+            print('Duration too low')
 
     def trigger_flash(self):
         self.droplet_camera.trigger_flash()

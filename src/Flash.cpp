@@ -5,7 +5,7 @@
 // Constructor
 Flash::Flash(int flashPin, int cameraPin, TaskQueue& taskQueue, TIM_HandleTypeDef* htimFlash, uint32_t channelFlash) :
     flashPin(flashPin), cameraPin(cameraPin), taskQueue(taskQueue), htimFlash(htimFlash), channelFlash(channelFlash),
-    readDelay(2000), flashDuration(1800), checkFlashTask([this]() { this->readCameraPin(); }, 0) {
+    readDelay(2000), flashDuration(100), checkFlashTask([this]() { this->readCameraPin(); }, 0) {
     pinMode(flashPin, OUTPUT);
     digitalWrite(flashPin, LOW); // Ensure the flash is off initially
     pinMode(cameraPin, INPUT);
@@ -69,17 +69,18 @@ void Flash::readCameraPin() {
     }
 }
 
-// Convert microseconds to timer ticks based on the clock frequency and prescaler
-uint32_t Flash::convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler) {
-    return (microseconds * (timerClockFrequency / 1e6)) / prescaler;
-}
+
 // Internal method to configure the timer in one-pulse mode
 void Flash::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration) {
     TIM_OC_InitTypeDef sConfigOC = {0};
 
-    // Convert the pulse duration in microseconds to timer ticks
-    uint32_t timerTicks = convertMicrosecondsToTicks(duration, 84000000, 84);  // For 84MHz clock and prescaler 84
-    // uint32_t timerTicks = 5;
+    // Calculate ticks based on nanoseconds
+    const uint32_t timerFrequency = 84000000;  // Timer clock = 84 MHz
+    const uint32_t prescaler = 8;
+    const double tickDuration_ns = (1e9 * prescaler) / timerFrequency; // Time per tick in nanoseconds (~95.2 ns)
+
+    // Calculate the number of ticks for the desired duration
+    uint32_t timerTicks = static_cast<uint32_t>(round(duration / tickDuration_ns));
 
     // Configure the timer for one-pulse mode
     htim->Init.Period = (timerTicks*2) - 1;  // Set the period (time for one pulse)

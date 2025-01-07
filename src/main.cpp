@@ -97,15 +97,15 @@ Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepper
 void configureGPIOForTimer9() {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    __HAL_RCC_GPIOE_CLK_ENABLE();  // Enable the GPIO clock (replace with the appropriate port)
+    __HAL_RCC_GPIOE_CLK_ENABLE();  // Enable the GPIO clock (GPIOE for PE5)
 
-    GPIO_InitStruct.Pin = GPIO_PIN_5;  // Replace with the correct pin number for your valve pin
+    GPIO_InitStruct.Pin = GPIO_PIN_5;  // Select the pin number (i.e. GPIO_PIN_5 for PE5)
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF3_TIM9;  // TIM9 alternate function
 
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);  // Replace GPIOA with your GPIO port
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);  // Select the port number (i.e. GPIOE for PE5)
 }
 
 void configureGPIOForTimer4() {
@@ -126,7 +126,7 @@ void configureGPIOForTimer4() {
     // --- Configure PB7 (TIM4 Channel 2) ---
     GPIO_InitStruct.Pin = GPIO_PIN_7;  // PB7
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
-    GPIO_InitStruct.Pull = GPIO_PULLDOWN;     // No pull-up or pull-down
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;     // Set pull-down to avoid unintended flash during startup
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);    // Initialize GPIO PB7

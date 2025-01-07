@@ -34,13 +34,12 @@ private:
     int state = LOW;
     unsigned long readDelay;
 
-    unsigned long flashDuration; // Duration the flash is on (microseconds)
+    unsigned long flashDuration; // Duration the flash is on (nanoseconds, 100nsec resolution)
     bool triggered = false;
     int numFlashes = 0;
 
 
     void readCameraPin();
-    uint32_t convertMicrosecondsToTicks(uint32_t microseconds, uint32_t timerClockFrequency, uint32_t prescaler);
     void configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration);      // Method to configure the timer for one-pulse mode
     void triggerFlash();
 };

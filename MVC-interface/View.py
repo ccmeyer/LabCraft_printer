@@ -953,10 +953,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.button_layout = QtWidgets.QHBoxLayout()
 
-        # Add a button to start the droplet imaging
-        self.capture_button = QtWidgets.QPushButton("Start Imaging")
-        self.capture_button.clicked.connect(self.toggle_capture)
-        self.button_layout.addWidget(self.capture_button)
+        # # Add a button to start the droplet imaging
+        # self.capture_button = QtWidgets.QPushButton("Start Imaging")
+        # self.capture_button.clicked.connect(self.toggle_capture)
+        # self.button_layout.addWidget(self.capture_button)
 
         # Add a button to trigger a flash
         self.flash_button = QtWidgets.QPushButton("Trigger Flash")
@@ -971,8 +971,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
         self.flash_duration_spinbox = QtWidgets.QSpinBox()
         self.flash_duration_spinbox.setRange(0, 10000)
-        self.flash_duration_spinbox.setSingleStep(10)
-        self.flash_duration_spinbox.setValue(1800)
+        self.flash_duration_spinbox.setSingleStep(100)
+        self.flash_duration_spinbox.setValue(100)
         self.button_layout.addWidget(self.flash_duration_label)
         self.button_layout.addWidget(self.flash_duration_spinbox)
 
@@ -997,30 +997,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
         return qimage.rgbSwapped()
 
-    def toggle_capture(self):
-        """
-        Starts or stops capturing images based on the button toggle.
-        """
-        if self.capturing:
-            self.camera_timer.stop()
-            self.capture_button.setText("Start Capturing Images")
-        else:
-            self.camera_timer.start(250)  # Capture every 100 milliseconds
-            self.capture_button.setText("Stop Capturing Images")
-        self.capturing = not self.capturing
+    # def toggle_capture(self):
+    #     """
+    #     Starts or stops capturing images based on the button toggle.
+    #     """
+    #     if self.capturing:
+    #         self.camera_timer.stop()
+    #         self.capture_button.setText("Start Capturing Images")
+    #     else:
+    #         self.camera_timer.start(250)  # Capture every 100 milliseconds
+    #         self.capture_button.setText("Stop Capturing Images")
+    #     self.capturing = not self.capturing
 
     def toggle_flash(self):
         """
         Triggers a flash for the droplet imaging.
         """
-        if self.flash_active:
-            self.controller.stop_flash()
-            self.flash_active = False
-            self.flash_button.setText("Trigger Flash")
-        else:
-            self.controller.trigger_flash()
-            self.flash_active = True
-            self.flash_button.setText("Stop Flash")
+        self.controller.capture_droplet_image()
+        # if self.flash_active:
+        #     self.controller.stop_flash()
+        #     self.flash_active = False
+        #     self.flash_button.setText("Trigger Flash")
+        # else:
+        #     self.controller.start_flash()
+        #     self.flash_active = True
+        #     self.flash_button.setText("Stop Flash")
 
     def set_flash_duration(self, duration):
         """

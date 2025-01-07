@@ -36,6 +36,9 @@ class Controller(QObject):
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
 
         self.model.printer_head_manager.volume_changed_signal.connect(self.update_volumes_in_view)
+        self.machine.droplet_camera.image_captured_signal.connect(self.update_droplet_image)
+
+
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -43,6 +46,7 @@ class Controller(QObject):
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
+        pass
         #print(f"Error occurred: {error_message}")
         # self.error_occurred_signal.emit('Error Occurred',error_message)
 
@@ -818,8 +822,9 @@ class Controller(QObject):
         self.machine.start_droplet_camera()
 
     def capture_droplet_image(self):
-        frame = self.machine.capture_droplet_image()
-        self.model.droplet_camera_model.update_image(frame)
+        self.machine.capture_droplet_image()
+        # frame = self.machine.capture_droplet_image()
+        # self.model.droplet_camera_model.update_image(frame)
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
@@ -833,8 +838,12 @@ class Controller(QObject):
     def set_flash_duration(self, duration):
         self.machine.set_flash_duration(duration)
 
-    def trigger_flash(self):
-        self.machine.trigger_flash()
+    def update_droplet_image(self):
+        frame = self.machine.droplet_camera.get_latest_frame()
+        self.model.droplet_camera_model.update_image(frame)
+
+    def start_flash(self):
+        self.machine.start_flash()
 
     def stop_flash(self):
         self.machine.stop_flash()
