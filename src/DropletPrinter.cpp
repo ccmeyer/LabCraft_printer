@@ -2,9 +2,9 @@
 #include "GlobalState.h"
 
 // Constructor
-DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, TaskQueue& taskQueue,int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel)
-    : printPin(printPin), refuelPin(refuelPin), sensor(sensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), taskQueue(taskQueue),htimPrint(htimPrint), htimRefuel(htimRefuel), channelPrint(channelPrint),channelRefuel(channelRefuel),
-      frequency(20), interval(50000), refuelDelay(25000), printDuration(4200), refuelDuration(4200), pressureTolerance(20), 
+DropletPrinter::DropletPrinter(PressureSensor& sensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, TaskQueue& taskQueue,int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel, Flash& flash)
+    : printPin(printPin), refuelPin(refuelPin), sensor(sensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), taskQueue(taskQueue),htimPrint(htimPrint), htimRefuel(htimRefuel), channelPrint(channelPrint),channelRefuel(channelRefuel), flash(flash),
+      frequency(20), interval(50000), refuelDelay(25000), printDuration(4200), refuelDuration(4200), pressureTolerance(20), flashCurrentDroplet(false), flashLastDroplet(false),
       targetDroplets(0), printedDroplets(0), printingComplete(true), resetTriggered(false), refuelRequested(false),printActive(true),refuelActive(true),
       printDropletTask([this]() { this->printDroplet(); }, 0), refuelTask([this]() { this->refuelPulse(); }, 0) {
     pinMode(printPin, OUTPUT);
@@ -61,6 +61,18 @@ void DropletPrinter::exitPrintMode() {
     refuelRegulator.setAdjustInterval(5000); // Reset the adjust interval to 5ms
     printRegulator.setPressureTolerance(10);
     refuelRegulator.setPressureTolerance(10);
+}
+
+// Method to enter imaging mode
+void DropletPrinter::enterImagingMode() {
+    enterPrintMode();
+    flashLastDroplet = true;
+}
+
+// Method to exit imaging mode
+void DropletPrinter::exitImagingMode() {
+    exitPrintMode();
+    flashLastDroplet = false;
 }
 
 // Method to start printing the specified number of droplets
@@ -190,6 +202,9 @@ void DropletPrinter::printDroplet() {
         configureTimer(htimPrint, channelPrint, printDuration);  // Configure the timer for the print duration
         HAL_TIM_PWM_Start(htimPrint, channelPrint);  // Start the PWM signal
         HAL_TIM_OnePulse_Start(htimPrint, channelPrint);  // Start the one-pulse mode
+    }
+    if (printedDroplets == targetDroplets - 1 && flashLastDroplet) {
+        flash.triggerFlashWithDelay();
     }
 
     refuelRequested = true;  // Request a refuel after printing the droplet

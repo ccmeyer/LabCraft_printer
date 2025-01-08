@@ -3,27 +3,16 @@
 #include "pin_functions.h"
 
 // Constructor
-Flash::Flash(int flashPin, int cameraPin, TaskQueue& taskQueue, TIM_HandleTypeDef* htimFlash, uint32_t channelFlash) :
-    flashPin(flashPin), cameraPin(cameraPin), taskQueue(taskQueue), htimFlash(htimFlash), channelFlash(channelFlash),
-    readDelay(2000), flashDuration(100), checkFlashTask([this]() { this->readCameraPin(); }, 0) {
+Flash::Flash(int flashPin, TaskQueue& taskQueue, TIM_HandleTypeDef* htimFlash, uint32_t channelFlash) :
+    flashPin(flashPin), taskQueue(taskQueue), htimFlash(htimFlash), channelFlash(channelFlash),
+    flashDuration(100), flashDelay(1500) {
     pinMode(flashPin, OUTPUT);
     digitalWrite(flashPin, LOW); // Ensure the flash is off initially
-    pinMode(cameraPin, INPUT);
 }
 
 // Method to check if the flash is busy
 bool Flash::isBusy() const {
     return busy;
-}
-
-// Method to check if the flash is reading
-bool Flash::isReading() const {
-    return reading;
-}
-
-// Method to check if the flash is triggered
-bool Flash::isTriggered() const {
-    return triggered;
 }
 
 // Method to get the number of flashes
@@ -36,39 +25,15 @@ unsigned long Flash::getFlashWidth() const {
     return flashDuration;
 }
 
-// Method to start reading the camera pin
-void Flash::startReading() {
-    reading = true;
-    checkFlashTask.nextExecutionTime = micros();
-    taskQueue.addTask(checkFlashTask);
+// Method to get the flash delay
+unsigned long Flash::getFlashDelay() const {
+    return flashDelay;
 }
 
-// Method to stop reading the camera pin
-void Flash::stopReading() {
-    reading = false;
+// Method to set the flash delay
+void Flash::setFlashDelay(unsigned long delay) {
+    this->flashDelay = delay;
 }
-
-// Method to read the camera pin
-void Flash::readCameraPin() {
-    if (reading) {
-        busy = true;
-        state = digitalRead(cameraPin);
-        if (state == LOW) {
-            // Camera pin is low indicating no flash
-            triggered = false;
-        } else if (state == HIGH && !triggered) {
-            // Camera pin is high indicating flash, avoids duplicate triggers
-            triggered = true;
-            triggerFlash();
-        }
-        checkFlashTask.nextExecutionTime = micros() + readDelay;
-        taskQueue.addTask(checkFlashTask);
-        busy = false;
-    } else {
-        busy = false;
-    }
-}
-
 
 // Internal method to configure the timer in one-pulse mode
 void Flash::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration) {
@@ -84,6 +49,7 @@ void Flash::configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned l
 
     // Configure the timer for one-pulse mode
     htim->Init.Period = (timerTicks*2) - 1;  // Set the period (time for one pulse)
+    // uint32_t timerTicks = 10;
     htim->Init.CounterMode = TIM_COUNTERMODE_UP;
     htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim->Init.RepetitionCounter = 0;       // Only one repetition (single pulse)
@@ -114,8 +80,28 @@ void Flash::setFlashDuration(unsigned long duration) {
 
 // Method to trigger the flash
 void Flash::triggerFlash() {
+
+    // Clear any leftover flags
+    __HAL_TIM_CLEAR_FLAG(htimFlash, TIM_FLAG_CC3);    // Clear capture/compare flag for channel 3
+    __HAL_TIM_CLEAR_FLAG(htimFlash, TIM_FLAG_UPDATE); // Clear update event flag
+
+    // Reset the counter to 0
+    __HAL_TIM_SET_COUNTER(htimFlash, 0);
+
+    // Explicitly enable the timer
+    __HAL_TIM_ENABLE(htimFlash);
+
     configureTimer(htimFlash, channelFlash, flashDuration);
+
     HAL_TIM_PWM_Start(htimFlash, channelFlash);  // Start the PWM signal
     HAL_TIM_OnePulse_Start(htimFlash, channelFlash);  // Start the one-pulse mode
     numFlashes++;
+}
+
+// Method to trigger the flash with a delay
+void Flash::triggerFlashWithDelay() {
+    busy = true;
+    delayMicroseconds(flashDelay);
+    triggerFlash();
+    busy = false;
 }

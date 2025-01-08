@@ -6,9 +6,9 @@
 Communication::Communication(TaskQueue& taskQueue, CommandQueue& commandQueue, Gripper& gripper, 
 CustomStepper& stepperX, CustomStepper& stepperY, CustomStepper& stepperZ, PressureSensor& pressureSensor,
 PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, DropletPrinter& printer,
-Flash& flash, int baudRate)
+Flash& flash, Coordinator& coord, int baudRate)
     : taskQueue(taskQueue), commandQueue(commandQueue), gripper(gripper), stepperX(stepperX), stepperY(stepperY), stepperZ(stepperZ), 
-    pressureSensor(pressureSensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), printer(printer), flash(flash), baudRate(baudRate), 
+    pressureSensor(pressureSensor), printRegulator(printRegulator), refuelRegulator(refuelRegulator), printer(printer), flash(flash), coord(coord), baudRate(baudRate), 
     receiveCommandTask([this]() { this->receiveCommand(); }, 0), 
     sendStatusTask([this]() { this->sendStatus(); }, 0),
     executeCmdTask([this]() { this->executeCommandTask(); }, 0),
@@ -442,10 +442,10 @@ void Communication::executeCommand(const Command& cmd) {
             printer.setRefuelDuration(cmd.param1);
             break;
         case START_READ_CAMERA:
-            flash.startReading();
+            coord.startReading();
             break;
         case STOP_READ_CAMERA:
-            flash.stopReading();
+            coord.stopReading();
             break;
         case SET_WIDTH_F:
             flash.setFlashDuration(cmd.param1);

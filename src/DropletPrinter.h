@@ -4,12 +4,13 @@
 #include "TaskCommand.h"
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
+#include "Flash.h"
 #include <Arduino.h>
 #include "stm32f4xx_hal.h"
 
 class DropletPrinter {
 public:
-    DropletPrinter(PressureSensor& sensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, TaskQueue& taskQueue, int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel);
+    DropletPrinter(PressureSensor& sensor, PressureRegulator& printRegulator, PressureRegulator& refuelRegulator, TaskQueue& taskQueue, int printPin, int refuelPin, TIM_HandleTypeDef* htimPrint, TIM_HandleTypeDef* htimRefuel, uint32_t channelPrint, uint32_t channelRefuel, Flash& flash);
 
     void setPrintingParameters(int frequency, unsigned long duration, int pressureTolerance);
     void setPrintDuration(unsigned long duration);
@@ -24,6 +25,8 @@ public:
     void resetDropletCounts();
     void enterPrintMode();
     void exitPrintMode();
+    void enterImagingMode();
+    void exitImagingMode();
 
 private:
     int printPin;
@@ -32,6 +35,7 @@ private:
     PressureRegulator& printRegulator;
     PressureRegulator& refuelRegulator;
     TaskQueue& taskQueue;
+    Flash& flash;
     
     unsigned long frequency;              // Printing frequency (Hz)
     unsigned long interval;               // Interval between droplets (microseconds)
@@ -46,6 +50,9 @@ private:
     bool printingComplete;      // Flag to indicate if printing is complete
     bool resetTriggered;       // Flag to indicate that the syringe reset has been triggered
     bool refuelRequested;         // Flag to indicate if a refuel is requested
+
+    bool flashLastDroplet;      // Flag to indicate a flash should be triggered after the last droplet
+    bool flashCurrentDroplet;   // Flag to indicate a flash should be triggered after the current droplet
 
     Task printDropletTask;      // Task for printing droplets
     Task refuelTask;            // Task for refueling the chamber

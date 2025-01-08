@@ -21,8 +21,8 @@ const int pstop = PG11; // DIAG3 - J33
 const int rstop = PG12; // DIAG4 - J35
 
 //== CAMERA PINS ===========================================
-const int cameraPin = PB6;  //BL_TOUCH - J43
-const int flashPin = PB7;   //BL_TOUCH - J43
+const int cameraPin = PB6;  //BL_TOUCH - J43 middle pin of 5
+const int flashPin = PB0;   //RGB_LED - J37 middle pin of 3
 
 //==STEPPER MOTOR PINS ===========================================
 

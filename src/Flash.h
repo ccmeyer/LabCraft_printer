@@ -7,39 +7,28 @@
 
 class Flash {
 public:
-    Flash(int flashPin, int cameraPin, TaskQueue& taskQueue, TIM_HandleTypeDef* htimFlash, uint32_t channelFlash);
+    Flash(int flashPin, TaskQueue& taskQueue, TIM_HandleTypeDef* htimFlash, uint32_t channelFlash);
     bool isBusy() const;
-    bool isReading() const;
-    bool isTriggered() const;
     int getNumFlashes() const;
     unsigned long getFlashWidth() const;
     void setFlashDuration(unsigned long duration);
-
-
-    void startReading();
-    void stopReading();
+    unsigned long getFlashDelay() const;
+    void setFlashDelay(unsigned long delay);
+    void triggerFlashWithDelay();
 
 private:
     int flashPin;
-    int cameraPin;
 
     TIM_HandleTypeDef* htimFlash;
     uint32_t channelFlash;
 
     TaskQueue& taskQueue;
-    Task checkFlashTask;
     bool busy = false;
-
-    bool reading = false;
-    int state = LOW;
-    unsigned long readDelay;
-
     unsigned long flashDuration; // Duration the flash is on (nanoseconds, 100nsec resolution)
+    unsigned long flashDelay;   // Delay before the flash is triggered (microseconds)
     bool triggered = false;
     int numFlashes = 0;
 
-
-    void readCameraPin();
     void configureTimer(TIM_HandleTypeDef* htim, uint32_t channel, unsigned long duration);      // Method to configure the timer for one-pulse mode
     void triggerFlash();
 };

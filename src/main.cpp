@@ -62,6 +62,7 @@ extern "C" void SystemClock_Config(void)
 #include "PressureRegulator.h"
 #include "DropletPrinter.h"
 #include "Flash.h"
+#include "Coordinator.h"
 #include "pin_assignments.h"
 #include "pin_functions.h"
 #include "all_constants.h"
@@ -73,7 +74,7 @@ SystemState currentState = RUNNING; // Define the global state
 IWDG_HandleTypeDef hiwdg; // Define the watchdog handle
 TIM_HandleTypeDef htim9;  // Timer 9 handle for printing droplets
 TIM_HandleTypeDef htim4;  // Timer 4 handle for refueling chamber and flash
-
+TIM_HandleTypeDef htim3;  // Timer 3 handle for flash duration
 
 TaskQueue taskQueue(&hiwdg);
 CommandQueue commandQueue;
@@ -86,9 +87,10 @@ CustomStepper stepperR(stepperR.DRIVER,R_EN_PIN, R_STEP_PIN, R_DIR_PIN, rstop, t
 PressureSensor pressureSensor(TCAAddress, sensorAddress, taskQueue);
 PressureRegulator printRegulator(stepperP, pressureSensor,taskQueue,printValvePin,printPort);
 PressureRegulator refuelRegulator(stepperR, pressureSensor,taskQueue,refuelValvePin,refuelPort);
-DropletPrinter printer(pressureSensor, printRegulator, refuelRegulator, taskQueue, printPin, refuelPin, &htim9, &htim4, TIM_CHANNEL_1, TIM_CHANNEL_1);
-Flash flash(flashPin, cameraPin, taskQueue,&htim4, TIM_CHANNEL_2);
-Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, printRegulator, refuelRegulator, printer, flash, 115200);
+Flash flash(flashPin, taskQueue,&htim3, TIM_CHANNEL_3);
+DropletPrinter printer(pressureSensor, printRegulator, refuelRegulator, taskQueue, printPin, refuelPin, &htim9, &htim4, TIM_CHANNEL_1, TIM_CHANNEL_1,flash);
+Coordinator coord(printer, flash, taskQueue, cameraPin);
+Communication comm(taskQueue, commandQueue, gripper, stepperX, stepperY, stepperZ, pressureSensor, printRegulator, refuelRegulator, printer, flash, coord, 115200);
 
 /** Configure and initialize the hardware timers for accurate GPIO timing
  * Refer to the stm32f446re.pdf datasheet, Table 11 for the GPIO alternate functions and timer information
@@ -113,7 +115,6 @@ void configureGPIOForTimer4() {
 
     // Enable GPIO clocks for Port D and Port B
     __HAL_RCC_GPIOD_CLK_ENABLE();  // Clock for PD12
-    __HAL_RCC_GPIOB_CLK_ENABLE();  // Clock for PB7
 
     // --- Configure PD12 (TIM4 Channel 1) ---
     GPIO_InitStruct.Pin = GPIO_PIN_12;  // PD12
@@ -122,14 +123,21 @@ void configureGPIOForTimer4() {
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);    // Initialize GPIO PD12
+}
 
-    // --- Configure PB7 (TIM4 Channel 2) ---
-    GPIO_InitStruct.Pin = GPIO_PIN_7;  // PB7
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;  // Alternate function, push-pull
-    GPIO_InitStruct.Pull = GPIO_PULLDOWN;     // Set pull-down to avoid unintended flash during startup
+// Configure GPIO for TIM3 channel 3
+void configureGPIOForTimer3() {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();  // Enable the GPIO clock (GPIOB for PB0)
+
+    GPIO_InitStruct.Pin = GPIO_PIN_0;  // Select the pin number (i.e. GPIO_PIN_0 for PB0)
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;  // TIM4 alternate function
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);    // Initialize GPIO PB7
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;  // TIM3 alternate function
+
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);  // Select the port number (i.e. GPIOB for PB0)
 }
 
 void initTimer9() {
@@ -139,6 +147,7 @@ void initTimer9() {
     htim9.Init.Period = 0xFFFF;  // Set a default period, can be adjusted later in DropletPrinter class
     htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim9.Init.RepetitionCounter = 0;  // No repetition
+    __HAL_RCC_TIM9_CLK_ENABLE();  // Enable the clock for TIM9
 
     if (HAL_TIM_Base_Init(&htim9) != HAL_OK) {
         // Initialization error
@@ -153,10 +162,26 @@ void initTimer4() {
     htim4.Init.Period = 0xFFFF;  // Set a default period
     htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim4.Init.RepetitionCounter = 0;  // No repetition
+    __HAL_RCC_TIM4_CLK_ENABLE();  // Enable the clock for TIM4
 
     if (HAL_TIM_Base_Init(&htim4) != HAL_OK) {
         // Initialization error
         Serial.println("Timer 4 initialization failed");
+    }
+}
+
+void initTimer3() {
+    htim3.Instance = TIM3;  // Use TIM3
+    htim3.Init.Prescaler = 8-1;  // Prescaler for 10.5 MHz (84000000 / 8)
+    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim3.Init.Period = 0xFFFF;  // Set a default period, can be adjusted later in DropletPrinter class
+    htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim3.Init.RepetitionCounter = 0;  // No repetition
+    __HAL_RCC_TIM3_CLK_ENABLE();  // Enable the clock for TIM3
+
+    if (HAL_TIM_Base_Init(&htim3) != HAL_OK) {
+        // Initialization error
+        Serial.println("Timer initialization failed");
     }
 }
 
@@ -168,6 +193,9 @@ void setup() {
 
     configureGPIOForTimer4();
     initTimer4();
+
+    configureGPIOForTimer3();
+    initTimer3();
 
     stepperX.setupMotor();
     stepperY.setupMotor();

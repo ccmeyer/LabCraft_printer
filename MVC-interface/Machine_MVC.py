@@ -26,7 +26,7 @@ class DropletCamera(QObject):
         self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
         self.line.set_value(0)
 
-        self.exposure_time = 400000
+        self.exposure_time = 1000000
         self.latest_frame = None
 
     def start_flash(self):
