@@ -48,7 +48,9 @@ void Coordinator::readCameraSignal() {
 
 // Method to print a droplet with flash
 void Coordinator::printDropletsWithFlash() {
-    // flash.triggerFlashWithDelay();
-    // printer.resetDropletCounts();
-    printer.startPrinting(dropletCount);
+    if (dropletCount == 0) {
+        flash.triggerFlashWithDelay();
+    } else {
+        printer.startPrinting(dropletCount);
+    }
 }

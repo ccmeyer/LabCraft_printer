@@ -948,25 +948,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.setWindowTitle("Droplet Imaging")
         self.resize(1200, 700)
 
-        self.layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel("Begin the droplet imaging")
-        self.layout.addWidget(self.label)
+        self.layout = QtWidgets.QHBoxLayout()
 
-        self.button_layout = QtWidgets.QHBoxLayout()
+        self.button_layout = QtWidgets.QGridLayout()
 
-        # # Add a button to start the droplet imaging
-        # self.capture_button = QtWidgets.QPushButton("Start Imaging")
-        # self.capture_button.clicked.connect(self.toggle_capture)
-        # self.button_layout.addWidget(self.capture_button)
-
-        # Add a button to trigger a flash
-        self.flash_button = QtWidgets.QPushButton("Trigger Flash")
-        self.flash_button.clicked.connect(self.toggle_flash)
-        self.button_layout.addWidget(self.flash_button)
-
+        row = 0
+    
         # Add a label to show the number of recorded flashes
         self.flash_count_label = QtWidgets.QLabel("Flashes: 0")
-        self.button_layout.addWidget(self.flash_count_label)
+        self.button_layout.addWidget(self.flash_count_label, row, 0, 1, 2)
+        row += 1
 
         # Add a spinbox to set the duration of the flash
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
@@ -974,8 +965,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_spinbox.setRange(0, 10000)
         self.flash_duration_spinbox.setSingleStep(100)
         self.flash_duration_spinbox.setValue(100)
-        self.button_layout.addWidget(self.flash_duration_label)
-        self.button_layout.addWidget(self.flash_duration_spinbox)
+        self.button_layout.addWidget(self.flash_duration_label, row, 0)
+        self.button_layout.addWidget(self.flash_duration_spinbox, row, 1)
+        row += 1
 
         # Add a spinbox to set the delay before the flash
         self.flash_delay_label = QtWidgets.QLabel("Flash Delay (us):")
@@ -983,8 +975,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_delay_spinbox.setRange(0, 10000)
         self.flash_delay_spinbox.setSingleStep(100)
         self.flash_delay_spinbox.setValue(1500)
-        self.button_layout.addWidget(self.flash_delay_label)
-        self.button_layout.addWidget(self.flash_delay_spinbox)
+        self.button_layout.addWidget(self.flash_delay_label, row, 0)
+        self.button_layout.addWidget(self.flash_delay_spinbox, row, 1)
+        row += 1
 
         # Add a spinbox to set the number of droplets to print before imaging
         self.num_droplets_label = QtWidgets.QLabel("Number of droplets:")
@@ -992,8 +985,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox.setRange(0, 20)
         self.num_droplets_spinbox.setSingleStep(1)
         self.num_droplets_spinbox.setValue(1)
-        self.button_layout.addWidget(self.num_droplets_label)
-        self.button_layout.addWidget(self.num_droplets_spinbox)
+        self.button_layout.addWidget(self.num_droplets_label, row, 0)
+        self.button_layout.addWidget(self.num_droplets_spinbox, row, 1)
+        row += 1
 
         # Add a spinbox for exposure time
         self.exposure_time_label = QtWidgets.QLabel("Exposure Time (ms):")
@@ -1001,18 +995,37 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.exposure_time_spinbox.setRange(0, 2000000)
         self.exposure_time_spinbox.setSingleStep(10000)
         self.exposure_time_spinbox.setValue(200000)
-        self.button_layout.addWidget(self.exposure_time_label)
-        self.button_layout.addWidget(self.exposure_time_spinbox)
+        self.button_layout.addWidget(self.exposure_time_label, row, 0)
+        self.button_layout.addWidget(self.exposure_time_spinbox, row, 1)
+        row += 1
+
+        # Add a button to trigger a flash
+        self.flash_button = QtWidgets.QPushButton("Trigger Flash")
+        self.flash_button.clicked.connect(self.toggle_flash)
+        self.button_layout.addWidget(self.flash_button, row, 0, 1, 2)
+        row += 1
 
         # Add a button to toggle whether the captured image should be saved
         self.save_button = QtWidgets.QPushButton("Save Images")
         self.save_button.clicked.connect(self.toggle_saving)
-        self.button_layout.addWidget(self.save_button)
+        self.button_layout.addWidget(self.save_button, row, 0, 1, 2)
+        row += 1
 
-        self.layout.addLayout(self.button_layout)
+        # Add a button for repeated image capture
+        self.repeat_capture_button = QtWidgets.QPushButton("Start Repeated Capture")
+        self.repeat_capture_button.clicked.connect(self.toggle_repeat_capture)
+        self.button_layout.addWidget(self.repeat_capture_button, row, 0, 1, 2)
+        # self.layout.addLayout(self.button_layout)
+
+        self.button_container_layout = QtWidgets.QVBoxLayout()
+        self.button_container_layout.addLayout(self.button_layout)
+        self.button_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
+        self.layout.addLayout(self.button_container_layout)
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setFixedHeight(480)
+        self.image_label.setFixedWidth(640)
         self.layout.addWidget(self.image_label)
 
         self.setLayout(self.layout)
@@ -1033,17 +1046,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
         return qimage.rgbSwapped()
 
-    # def toggle_capture(self):
-    #     """
-    #     Starts or stops capturing images based on the button toggle.
-    #     """
-    #     if self.capturing:
-    #         self.camera_timer.stop()
-    #         self.capture_button.setText("Start Capturing Images")
-    #     else:
-    #         self.camera_timer.start(250)  # Capture every 100 milliseconds
-    #         self.capture_button.setText("Stop Capturing Images")
-    #     self.capturing = not self.capturing
+    def toggle_repeat_capture(self):
+        """
+        Starts or stops capturing images based on the button toggle.
+        """
+        if self.capturing:
+            self.camera_timer.stop()
+            self.repeat_capture_button.setText("Start Repeated Capture")
+        else:
+            self.enter_repeat_capture_mode()
+            self.camera_timer.start(500)  # Capture every 100 milliseconds
+            self.repeat_capture_button.setText("Stop Repeated Capture")
+        self.capturing = not self.capturing
+
+    def enter_repeat_capture_mode(self):
+        """
+        Enters the repeat capture mode.
+        """
+        self.set_exposure_time(200000)
+        self.num_droplets_spinbox.setValue(0)
 
     def toggle_flash(self):
         """
@@ -1068,8 +1089,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.model.droplet_camera_model.start_saving()
             self.saving_active = True
             self.save_button.setText('Saving')
-
-
 
     def set_flash_duration(self, duration):
         """
@@ -1108,6 +1127,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_delay_spinbox.blockSignals(True)
         self.flash_delay_spinbox.setValue(self.model.droplet_camera_model.get_flash_delay())
         self.flash_delay_spinbox.blockSignals(False)
+
+        self.exposure_time_spinbox.blockSignals(True)
+        self.exposure_time_spinbox.setValue(self.model.droplet_camera_model.get_exposure_time())
+        self.exposure_time_spinbox.blockSignals(False)
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')

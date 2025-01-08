@@ -65,6 +65,9 @@ class DropletCameraModel(QObject):
     def update_num_droplets(self,num):
         self.num_droplets = int(num)
         self.flash_signal.emit()
+
+    def get_exposure_time(self):
+        return self.exposure_time
     
     def update_exposure_time(self,exposure_time):
         self.exposure_time = int(exposure_time)

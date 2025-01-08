@@ -1101,8 +1101,7 @@ class Machine(QObject):
             return self.add_command_to_queue('SET_DELAY_F',delay,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
-        if droplets > 0:
-            return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_exposure_time(self, exposure_time):
         return self.droplet_camera.change_exposure_time(exposure_time)
