@@ -31,6 +31,10 @@ class DropletCameraModel(QObject):
         self.flash_delay = 0
         self.num_droplets = 1
         self.exposure_time = 1000000
+        self.save_images = False
+
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.image_dir = os.path.join(self.script_dir, 'Images')
 
     def get_num_flashes(self):
         return self.num_flashes
@@ -62,10 +66,26 @@ class DropletCameraModel(QObject):
 
     def get_original_image(self):
         return self.latest_frame
+
+    def start_saving(self):
+        self.save_images = True
+
+    def stop_saving(self):
+        self.save_images = False
     
     def update_image(self,frame):
         self.latest_frame = frame
         self.droplet_image_updated.emit()
+        if self.save_images:
+            self.save_frame()
+
+    def save_frame(self):
+        if self.latest_frame is not None:
+            os.makedirs(self.image_dir, exist_ok=True)
+
+            save_path = os.path.join(self.image_dir, f"image-{time.strftime("%Y%m%d_%H%M%S")}.png")
+            cv2.imwrite(save_path, self.latest_frame)
+            print(f"Frame saved to {save_path}")
 
 
 def find_key_points(columns, line_values):

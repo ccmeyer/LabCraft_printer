@@ -936,6 +936,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller = controller
 
         self.flash_active = False
+        self.saving_active = False
         self.start_droplet_camera()
         self.controller.start_read_camera()
 
@@ -1003,6 +1004,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.exposure_time_label)
         self.button_layout.addWidget(self.exposure_time_spinbox)
 
+        # Add a button to toggle whether the captured image should be saved
+        self.save_button = QtWidgets.QPushButton("Save Images")
+        self.save_button.clicked.connect(self.toggle_saving)
+        self.button_layout.addWidget(self.save_button)
+
         self.layout.addLayout(self.button_layout)
 
         self.image_label = QLabel("No image captured yet.")
@@ -1052,6 +1058,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         #     self.controller.start_flash()
         #     self.flash_active = True
         #     self.flash_button.setText("Stop Flash")
+    
+    def toggle_saving(self):
+        if self.saving_active:
+            self.model.droplet_camera_model.stop_saving()
+            self.saving_active = False
+            self.save_button.setText('Save Images')
+        else:
+            self.model.droplet_camera_model.start_saving()
+            self.saving_active = True
+            self.save_button.setText('Saving')
+
+
 
     def set_flash_duration(self, duration):
         """
