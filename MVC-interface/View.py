@@ -976,6 +976,33 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.flash_duration_label)
         self.button_layout.addWidget(self.flash_duration_spinbox)
 
+        # Add a spinbox to set the delay before the flash
+        self.flash_delay_label = QtWidgets.QLabel("Flash Delay (us):")
+        self.flash_delay_spinbox = QtWidgets.QSpinBox()
+        self.flash_delay_spinbox.setRange(0, 10000)
+        self.flash_delay_spinbox.setSingleStep(100)
+        self.flash_delay_spinbox.setValue(1500)
+        self.button_layout.addWidget(self.flash_delay_label)
+        self.button_layout.addWidget(self.flash_delay_spinbox)
+
+        # Add a spinbox to set the number of droplets to print before imaging
+        self.num_droplets_label = QtWidgets.QLabel("Number of droplets:")
+        self.num_droplets_spinbox = QtWidgets.QSpinBox()
+        self.num_droplets_spinbox.setRange(0, 20)
+        self.num_droplets_spinbox.setSingleStep(1)
+        self.num_droplets_spinbox.setValue(1)
+        self.button_layout.addWidget(self.num_droplets_label)
+        self.button_layout.addWidget(self.num_droplets_spinbox)
+
+        # Add a spinbox for exposure time
+        self.exposure_time_label = QtWidgets.QLabel("Exposure Time (ms):")
+        self.exposure_time_spinbox = QtWidgets.QSpinBox()
+        self.exposure_time_spinbox.setRange(0, 2000000)
+        self.exposure_time_spinbox.setSingleStep(10000)
+        self.exposure_time_spinbox.setValue(200000)
+        self.button_layout.addWidget(self.exposure_time_label)
+        self.button_layout.addWidget(self.exposure_time_spinbox)
+
         self.layout.addLayout(self.button_layout)
 
         self.image_label = QLabel("No image captured yet.")
@@ -987,6 +1014,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
         self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
+        self.flash_delay_spinbox.valueChanged.connect(self.set_flash_delay)
+        self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
+        self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
 
     def numpy_to_qimage(self,image):
         """
@@ -1028,7 +1058,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Sets the duration of the flash.
         """
         self.controller.set_flash_duration(duration)
+
+    def set_flash_delay(self, delay):
+        """
+        Sets the delay before the flash.
+        """
+        self.controller.set_flash_delay(delay)
     
+    def set_imaging_droplets(self, num_droplets):
+        """
+        Sets the number of droplets to print before imaging.
+        """
+        self.controller.set_imaging_droplets(num_droplets)
+
+    def set_exposure_time(self, exposure_time):
+        """
+        Sets the exposure time for the camera.
+        """
+        self.controller.set_exposure_time(exposure_time)
+
     def update_flash_info(self):
         """
         Updates the flash info.
@@ -1038,6 +1086,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_spinbox.blockSignals(True)
         self.flash_duration_spinbox.setValue(self.model.droplet_camera_model.get_flash_duration())
         self.flash_duration_spinbox.blockSignals(False)
+
+        self.flash_delay_spinbox.blockSignals(True)
+        self.flash_delay_spinbox.setValue(self.model.droplet_camera_model.get_flash_delay())
+        self.flash_delay_spinbox.blockSignals(False)
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')

@@ -3,7 +3,7 @@
 // Constructor
 Coordinator::Coordinator(DropletPrinter& printer, Flash& flash, TaskQueue& taskQueue, int cameraPin)
     : printer(printer), flash(flash), taskQueue(taskQueue), cameraPin(cameraPin), checkSignalTask([this]() { this->readCameraSignal(); }, 0), 
-    triggerDetected(false), reading(false), readDelay(2000) {
+    triggerDetected(false), reading(false), readDelay(2000), dropletCount(1) {
         pinMode(cameraPin, INPUT);
     }
 
@@ -19,6 +19,16 @@ void Coordinator::startReading() {
 void Coordinator::stopReading() {
     reading = false;
     printer.exitImagingMode();
+}
+
+// Method to get the droplet count
+int Coordinator::getDropletCount() const {
+    return dropletCount;
+}
+
+// Method to set the droplet count
+void Coordinator::setDropletCount(int count) {
+    dropletCount = count;
 }
 
 // Method to read the camera signal
@@ -40,5 +50,5 @@ void Coordinator::readCameraSignal() {
 void Coordinator::printDropletsWithFlash() {
     // flash.triggerFlashWithDelay();
     // printer.resetDropletCounts();
-    printer.startPrinting(10);
+    printer.startPrinting(dropletCount);
 }

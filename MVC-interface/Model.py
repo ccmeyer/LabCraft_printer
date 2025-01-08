@@ -28,6 +28,9 @@ class DropletCameraModel(QObject):
         self.signal = False
         self.num_flashes = 0
         self.flash_duration = 0
+        self.flash_delay = 0
+        self.num_droplets = 1
+        self.exposure_time = 1000000
 
     def get_num_flashes(self):
         return self.num_flashes
@@ -41,6 +44,20 @@ class DropletCameraModel(QObject):
     
     def update_flash_duration(self,duration):
         self.flash_duration = int(duration)
+        self.flash_signal.emit()
+
+    def get_flash_delay(self):
+        return self.flash_delay
+    
+    def update_flash_delay(self,delay):
+        self.flash_delay = int(delay)
+        self.flash_signal.emit()
+
+    def get_num_droplets(self):
+        return self.num_droplets
+    
+    def update_num_droplets(self,num):
+        self.num_droplets = int(num)
         self.flash_signal.emit()
 
     def get_original_image(self):
@@ -3429,7 +3446,10 @@ class Model(QObject):
             self.droplet_camera_model.update_num_flashes(status_dict['Flashes'])
         if 'Flash_width' in status_keys:
             self.droplet_camera_model.update_flash_duration(status_dict['Flash_width'])
-
+        if 'Flash_delay' in status_keys:
+            self.droplet_camera_model.update_flash_delay(status_dict['Flash_delay'])
+        if 'Flash_droplets' in status_keys:
+            self.droplet_camera_model.update_num_droplets(status_dict['Flash_droplets'])
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))

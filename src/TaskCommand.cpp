@@ -190,6 +190,10 @@ CommandType mapCommandType(const char* commandName) {
         return STOP_READ_CAMERA;
     } else if (strcmp(commandName, "SET_WIDTH_F") == 0) {
         return SET_WIDTH_F;
+    } else if (strcmp(commandName, "SET_DELAY_F") == 0) {
+        return SET_DELAY_F;
+    } else if (strcmp(commandName, "SET_IMAGE_DROPLETS") == 0) {
+        return SET_IMAGE_DROPLETS;
     } else {
         return UNKNOWN;
     }

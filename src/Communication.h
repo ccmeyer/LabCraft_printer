@@ -35,6 +35,8 @@ enum StatusStep {
     PULSE_WIDTH_REFUEL,
     MICROS,
     FLASH_WIDTH,
+    FLASH_DELAY,
+    FLASH_DROPLETS,
     FLASHES
 };
 

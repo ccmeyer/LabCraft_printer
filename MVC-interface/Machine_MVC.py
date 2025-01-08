@@ -1095,6 +1095,20 @@ class Machine(QObject):
         else:
             print('Duration too low')
 
+    def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False):
+        delay = round(delay,-2)
+        if delay >= 100:
+            return self.add_command_to_queue('SET_DELAY_F',delay,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
+        if droplets > 0:
+            return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def set_exposure_time(self, exposure_time):
+        return self.droplet_camera.change_exposure_time(exposure_time)
+        
+
+
     def trigger_flash(self):
         self.droplet_camera.trigger_flash()
         return

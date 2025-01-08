@@ -838,6 +838,15 @@ class Controller(QObject):
     def set_flash_duration(self, duration):
         self.machine.set_flash_duration(duration)
 
+    def set_flash_delay(self, delay):
+        self.machine.set_flash_delay(delay)
+
+    def set_imaging_droplets(self, num_droplets):
+        self.machine.set_imaging_droplets(num_droplets)
+
+    def set_exposure_time(self, exposure_time):
+        self.machine.set_exposure_time(exposure_time)
+
     def update_droplet_image(self):
         frame = self.machine.droplet_camera.get_latest_frame()
         self.model.droplet_camera_model.update_image(frame)

@@ -187,9 +187,18 @@ void Communication::sendStatus() {
             case FLASH_WIDTH:
                 Serial.print("Flash_width:");
                 Serial.println(flash.getFlashWidth());
+                statusStep = FLASH_DELAY;
+                break;
+            case FLASH_DELAY:
+                Serial.print("Flash_delay:");
+                Serial.println(flash.getFlashDelay());
+                statusStep = FLASH_DROPLETS;
+                break;
+            case FLASH_DROPLETS:
+                Serial.print("Flash_droplets:");
+                Serial.println(coord.getDropletCount());
                 statusStep = CYCLE_COUNT;
                 break;
-            
         }
     }
     cycleCounter = 0;
@@ -449,6 +458,12 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case SET_WIDTH_F:
             flash.setFlashDuration(cmd.param1);
+            break;
+        case SET_DELAY_F:
+            flash.setFlashDelay(cmd.param1);
+            break;
+        case SET_IMAGE_DROPLETS:
+            coord.setDropletCount(cmd.param1);
             break;
         case PRINT_MODE:
             printer.enterPrintMode();

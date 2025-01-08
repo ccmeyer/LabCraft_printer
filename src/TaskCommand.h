@@ -83,6 +83,8 @@ enum CommandType {
     START_READ_CAMERA,
     STOP_READ_CAMERA,
     SET_WIDTH_F,
+    SET_DELAY_F,
+    SET_IMAGE_DROPLETS,
     UNKNOWN
     // Add more command types as needed
 };

@@ -17,11 +17,14 @@ private:
 
     bool reading;
     bool triggerDetected;
+    int dropletCount;
     void printDropletsWithFlash();
     void readCameraSignal();
 
 public:
     Coordinator(DropletPrinter& printer, Flash& flash, TaskQueue& taskQueue, int cameraPin);
+    int getDropletCount() const;
+    void setDropletCount(int count);
     void startReading();
     void stopReading();
     
