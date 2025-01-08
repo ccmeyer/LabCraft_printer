@@ -17,10 +17,12 @@ import pyDOE3
 import time
 import glob
 import shutil
+import csv
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()
+    record_metadata_signal = Signal(str)
     def __init__(self):
         super().__init__()
         self.latest_image = None
@@ -63,6 +65,13 @@ class DropletCameraModel(QObject):
     def update_num_droplets(self,num):
         self.num_droplets = int(num)
         self.flash_signal.emit()
+    
+    def update_exposure_time(self,exposure_time):
+        self.exposure_time = int(exposure_time)
+        self.flash_signal.emit()
+
+    def get_image_metadata(self):
+        return self.num_flashes, self.flash_duration, self.flash_delay, self.num_droplets, self.exposure_time
 
     def get_original_image(self):
         return self.latest_frame
@@ -82,10 +91,11 @@ class DropletCameraModel(QObject):
     def save_frame(self):
         if self.latest_frame is not None:
             os.makedirs(self.image_dir, exist_ok=True)
-
-            save_path = os.path.join(self.image_dir, f"image-{time.strftime("%Y%m%d_%H%M%S")}.png")
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(self.image_dir, f"image-{timestamp}.png")
             cv2.imwrite(save_path, self.latest_frame)
             print(f"Frame saved to {save_path}")
+            self.record_metadata_signal.emit(timestamp)
 
 
 def find_key_points(columns, line_values):
@@ -3399,6 +3409,7 @@ class Model(QObject):
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
         self.location_model.current_location_updated.connect(self.machine_model.update_current_location)
+        self.droplet_camera_model.record_metadata_signal.connect(self.record_image_metadata)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -3622,6 +3633,41 @@ class Model(QObject):
                     continue
             if not self.printer_head_manager.assign_printer_head_to_slot(i):
                 break  # Stop assigning if there are no more unassigned printer heads
+
+    def record_image_metadata(self,timestamp):
+        """Record metadata for the droplet images."""
+        num_flashes, flash_duration, flash_delay, num_droplets, exposure_time = self.droplet_camera_model.get_image_metadata()
+        current_position = self.machine_model.get_current_position_dict()
+        print_width = self.machine_model.get_print_pulse_width()
+        refuel_width = self.machine_model.get_refuel_pulse_width()
+        print_pressure = self.machine_model.get_current_print_pressure()
+        refuel_pressure = self.machine_model.get_current_refuel_pressure()
+
+        file_dir = os.path.join(self.droplet_camera_model.image_dir, "metadata.csv")
+        # Prepare metadata
+        metadata = [
+            timestamp,
+            flash_duration,
+            flash_delay,
+            num_droplets,
+            exposure_time,
+            current_position['X'],
+            current_position['Y'],
+            current_position['Z'],
+            print_width,
+            refuel_width,
+            print_pressure,
+            refuel_pressure,
+        ]
+
+        # Save metadata to CSV
+        file_exists = os.path.isfile(file_dir)
+        with open(file_dir, 'a', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            if not file_exists:  # Write header only once
+                writer.writerow(["timestamp", "flash_duration", "flash_delay", "num_droplets", "exposure_time", "X_position", "Y_position", "Z_position", "print_pulse_width", "refuel_pulse_width", "print_pressure", "refuel_pressure"])
+            writer.writerow(metadata)
+        print(f"Metadata saved to {file_dir}")
 
 
 if __name__ == "__main__":
