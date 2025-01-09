@@ -196,7 +196,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
         self.shortcut_manager.add_shortcut('0','Set print pressure to 2.5', lambda: self.controller.set_absolute_print_pressure(2.5,manual=True))
 
-        # self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
+        self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
         self.shortcut_manager.add_shortcut('l','Move to location', lambda: self.move_to_location(manual=True))
     
@@ -935,6 +935,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model = model
         self.controller = controller
 
+        self.shortcut_manager = ShortcutManager(self)
+        self.setup_shortcuts()
+
         self.flash_active = False
         self.saving_active = False
         self.start_droplet_camera()
@@ -1037,6 +1040,34 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
 
+    def setup_shortcuts(self):
+        """Set up keyboard shortcuts using the shortcut manager."""
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+
+        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(1,manual=True))
+        
+        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
+  
+        self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  
+        self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
+        self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
+        self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
+        self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
+
+    
     def numpy_to_qimage(self,image):
         """
         Converts a numpy array (captured image) to a QImage.

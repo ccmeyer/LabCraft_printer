@@ -494,7 +494,10 @@ class Controller(QObject):
         x_limit = 5500
         safe_height = 3000
         safe_y_value = 3500
-        if (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
+        if (target['Y'] > 9500) or (current['Y'] > 9500 and current['X'] > x_limit):
+            print('Not applying safe Y')
+            
+        elif (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
             #print(f'Crossing x limit: {current['X']} -> {target['X']}')
             safe_y = True
             # direct = False
