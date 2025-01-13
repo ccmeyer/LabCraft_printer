@@ -23,7 +23,7 @@ class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()
     record_metadata_signal = Signal(str)
-    def __init__(self):
+    def __init__(self,steps_conv_path):
         super().__init__()
         self.latest_image = None
         self.reading = False
@@ -32,11 +32,16 @@ class DropletCameraModel(QObject):
         self.flash_duration = 0
         self.flash_delay = 0
         self.num_droplets = 1
-        self.exposure_time = 1000000
+        self.exposure_time = 200000
         self.save_images = False
+        self.image_width = 640
+        self.image_height = 480
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
+        self.steps_conv_path = steps_conv_path
+        self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
+
 
     def get_num_flashes(self):
         return self.num_flashes
@@ -99,6 +104,56 @@ class DropletCameraModel(QObject):
             cv2.imwrite(save_path, self.latest_frame)
             print(f"Frame saved to {save_path}")
             self.record_metadata_signal.emit(timestamp)
+
+    def load_step_calibration(self, json_path):
+        """
+        Reads a JSON file containing calibration info for the droplet printer.
+        Returns intercept_cx, intercept_cy, A, A_inv.
+        """
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        
+        intercept_cx = data["intercept_cx"]
+        intercept_cy = data["intercept_cy"]
+        
+        # Convert the Python list to a NumPy array
+        A = np.array(data["A"])
+        
+        # Compute or store the inverse
+        A_inv = np.linalg.inv(A)
+        
+        return intercept_cx, intercept_cy, A, A_inv
+
+    def compute_stage_move(self, delta_cx, delta_cy):
+        """
+        Given desired changes in (cx, cy), return the necessary (dX, dY, dZ)
+        stage moves that achieve that image-plane shift, using the matrix inverse.
+        
+        This code assumes:
+        delta_cx = A[0,0]*dY + A[0,1]*dZ
+        delta_cy = A[1,0]*dY + A[1,1]*dZ
+        with dX = 0 in this model.
+        """
+        delta_c = np.array([delta_cx, delta_cy])
+        dY, dZ = self.A_inv.dot(delta_c)
+        
+        # For your setup, X was not part of the calibration (coefficient = 0),
+        # so we typically leave it at 0.0
+        dX = 0.0
+        dY = round(dY)
+        dZ = round(dZ)
+        
+        return dX, dY, dZ
+
+    def compute_move_by_fraction(self, x_frac, y_frac):
+        """
+        Given desired fractions of the image size (0.0 to 1.0), return the necessary
+        (dX, dY, dZ) stage moves that achieve that image-plane shift.
+        """
+        delta_cx = x_frac * self.image_width
+        delta_cy = y_frac * self.image_height
+
+        return self.compute_stage_move(delta_cx, delta_cy)
 
 
 def find_key_points(columns, line_values):
@@ -3386,6 +3441,7 @@ class Model(QObject):
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
+        self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','camera_steps_conversion.json')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')
         # self.resistance_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_resistance_pipeline.pkl')
     
@@ -3407,7 +3463,7 @@ class Model(QObject):
         self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
         self.experiment_file_path = None
         self.refuel_camera_model = RefuelCameraModel()
-        self.droplet_camera_model = DropletCameraModel()
+        self.droplet_camera_model = DropletCameraModel(self.pixel_step_conv_path)
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)

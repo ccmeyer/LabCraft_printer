@@ -948,6 +948,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.camera_timer.timeout.connect(self.capture_image)
         self.capturing = False
 
+        # Track whether we are in multi-capture mode:
+        self.multi_capturing = False
+
+        # Stores the steps in the process (positions/moves or captures) in a queue:
+        self.multi_capture_queue = []
+
+        # A timer that processes one step of multi-capture at a time
+        self.multi_capture_timer = QtCore.QTimer(self)
+        self.multi_capture_timer.setInterval(1000)  # e.g. 500 ms per step
+        self.multi_capture_timer.timeout.connect(self.next_multi_capture_step)
+
+
         self.setWindowTitle("Droplet Imaging")
         self.resize(1200, 700)
 
@@ -1019,6 +1031,47 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.repeat_capture_button.clicked.connect(self.toggle_repeat_capture)
         self.button_layout.addWidget(self.repeat_capture_button, row, 0, 1, 2)
         # self.layout.addLayout(self.button_layout)
+        row += 1
+
+        self.multi_start_label = QtWidgets.QLabel("Multi-Capture Start Delay (us):")
+        self.multi_start_spinbox = QtWidgets.QSpinBox()
+        self.multi_start_spinbox.setRange(0, 999999)
+        self.multi_start_spinbox.setSingleStep(100)
+        self.multi_start_spinbox.setValue(4300)
+        self.button_layout.addWidget(self.multi_start_label, row, 0)
+        self.button_layout.addWidget(self.multi_start_spinbox, row, 1)
+        row += 1
+
+        self.multi_end_label = QtWidgets.QLabel("Multi-Capture End Delay (us):")
+        self.multi_end_spinbox = QtWidgets.QSpinBox()
+        self.multi_end_spinbox.setRange(0, 999999)
+        self.multi_end_spinbox.setSingleStep(100)
+        self.multi_end_spinbox.setValue(5200)
+        self.button_layout.addWidget(self.multi_end_label, row, 0)
+        self.button_layout.addWidget(self.multi_end_spinbox, row, 1)
+        row += 1
+
+        self.multi_steps_label = QtWidgets.QLabel("Number of Time Steps:")
+        self.multi_steps_spinbox = QtWidgets.QSpinBox()
+        self.multi_steps_spinbox.setRange(1, 1000)
+        self.multi_steps_spinbox.setValue(10)
+        self.button_layout.addWidget(self.multi_steps_label, row, 0)
+        self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
+        row += 1
+
+        self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
+        self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
+        self.multi_frames_below_spinbox.setRange(0, 100)
+        self.multi_frames_below_spinbox.setValue(5)
+        self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
+        self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
+        row += 1
+
+        # Button to start/stop the multi-capture
+        self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
+        self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
+        self.button_layout.addWidget(self.multi_capture_button, row, 0, 1, 2)
+        row += 1
 
         self.button_container_layout = QtWidgets.QVBoxLayout()
         self.button_container_layout.addLayout(self.button_layout)
@@ -1042,24 +1095,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
-        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
-
-        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-1,manual=True))
-        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
-        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(1,manual=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.move_fraction_of_frame(-0.1,0))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.move_fraction_of_frame(0.1,0))
+        self.shortcut_manager.add_shortcut('Up', 'Move up', lambda: self.move_fraction_of_frame(0,-0.1))
+        self.shortcut_manager.add_shortcut('Down', 'Move down', lambda: self.move_fraction_of_frame(0,0.1))
+        self.shortcut_manager.add_shortcut('Ctrl+Left', 'Move left', lambda: self.move_fraction_of_frame(-1,0))
+        self.shortcut_manager.add_shortcut('Ctrl+Right', 'Move right', lambda: self.move_fraction_of_frame(1,0))
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0,-1))
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0,1))
         
-        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-1,manual=True))
-        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
-        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Z(self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Z(-self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
+
+        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.02,manual=True))
+        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.02,manual=True))
+        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
+        
+        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.02,manual=True))
+        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.02,manual=True))
+        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
   
         self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  
         self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
@@ -1067,6 +1124,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
 
+    def move_fraction_of_frame(self, x_fraction, y_fraction):
+        """
+        Moves the camera frame by a fraction of the frame size.
+        """
+        dX, dY, dZ = self.model.droplet_camera_model.compute_move_by_fraction(x_fraction, y_fraction)
+        self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
     
     def numpy_to_qimage(self,image):
         """
@@ -1086,7 +1149,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.repeat_capture_button.setText("Start Repeated Capture")
         else:
             self.enter_repeat_capture_mode()
-            self.camera_timer.start(500)  # Capture every 100 milliseconds
+            self.camera_timer.start(1000)  # Capture every 100 milliseconds
             self.repeat_capture_button.setText("Stop Repeated Capture")
         self.capturing = not self.capturing
 
@@ -1102,15 +1165,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Triggers a flash for the droplet imaging.
         """
         self.controller.capture_droplet_image()
-        # if self.flash_active:
-        #     self.controller.stop_flash()
-        #     self.flash_active = False
-        #     self.flash_button.setText("Trigger Flash")
-        # else:
-        #     self.controller.start_flash()
-        #     self.flash_active = True
-        #     self.flash_button.setText("Stop Flash")
-    
+
     def toggle_saving(self):
         if self.saving_active:
             self.model.droplet_camera_model.stop_saving()
@@ -1120,6 +1175,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.model.droplet_camera_model.start_saving()
             self.saving_active = True
             self.save_button.setText('Saving')
+
+    def toggle_multi_capture(self):
+        """
+        Toggles the multi-capture process on/off using one button.
+        """
+        if not self.multi_capturing:
+            # START multi-capture
+            self.start_multi_capture()
+        else:
+            # STOP multi-capture
+            self.stop_multi_capture()
 
     def set_flash_duration(self, duration):
         """
@@ -1172,6 +1238,110 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def stop_droplet_camera(self):
         self.controller.stop_droplet_camera()
+
+    def start_multi_capture(self):
+        start_delay = self.multi_start_spinbox.value()
+        end_delay = self.multi_end_spinbox.value()
+        num_steps = self.multi_steps_spinbox.value()
+        frames_below = self.multi_frames_below_spinbox.value()
+
+        if num_steps < 1 or start_delay > end_delay:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Parameters",
+                "Check that end_delay >= start_delay and num_steps > 0."
+            )
+            return
+
+        # Build the time delay list
+        if num_steps == 1:
+            time_delays = [start_delay]
+        else:
+            step_size = (end_delay - start_delay) / (num_steps - 1)
+            time_delays = [int(round(start_delay + i * step_size)) 
+                        for i in range(num_steps)]
+
+        # Clear any old queue
+        self.multi_capture_queue.clear()
+
+        # We'll create a queue of (action, data) items.
+        # For each 'position', we add a set of captures for each time_delay
+        # Then, if not last position, we add a "move" step.
+
+        for position_index in range(frames_below + 1):
+            # Add capture actions for each time in time_delays
+            for delay in time_delays:
+                # We'll store ('capture', delay)
+                self.multi_capture_queue.append(('capture', delay))
+            
+            # Move up after finishing this position, except for the last one
+            if position_index < frames_below:
+                self.multi_capture_queue.append(('move', (0,-1)))
+                # -> This will call self.move_fraction_of_frame(0, 1) when triggered
+                self.multi_capture_queue.append(('skip',0))
+                # -> This gives the machine time to get to the target lcation prior to the next capture
+
+        # Return to the original position
+        self.multi_capture_queue.append(('move', (0,frames_below)))
+
+        # Mark capturing as True and update button text
+        self.multi_capturing = True
+        self.multi_capture_button.setText("Stop Multi-Capture")
+
+        # Start the timer that processes each step
+        self.multi_capture_timer.start()
+
+    def stop_multi_capture(self):
+        self.multi_capture_timer.stop()
+        self.multi_capturing = False
+        self.multi_capture_button.setText("Execute Multi-Capture")
+        self.multi_capture_queue.clear()
+
+    def next_multi_capture_step(self):
+        """
+        Processes the next item in the multi-capture queue (non-blocking).
+        Called periodically by self.multi_capture_timer.
+        """
+        # If we've run out of steps or the user requested stop:
+        if not self.multi_capture_queue or not self.multi_capturing:
+            self.finish_multi_capture()
+            return
+
+        action, data = self.multi_capture_queue.pop(0)  # pop front of list
+
+        if action == 'capture':
+            delay = data
+            # Set spinbox and flash delay
+            self.flash_delay_spinbox.setValue(delay)
+            time.sleep(0.05)
+            # Trigger a capture
+            self.controller.capture_droplet_image()
+
+        elif action == 'move':
+            # data is (x_fraction, y_fraction)
+            (x_fraction, y_fraction) = data
+            self.move_fraction_of_frame(x_fraction, y_fraction)
+
+        elif action == 'skip':
+            return
+
+        # Once this method returns, the UI is free to process events, so it's non-blocking.
+        # We'll pick up the next step on the next timer tick.
+    
+    def finish_multi_capture(self):
+        """
+        Called when the multi-capture sequence is complete or aborted.
+        """
+        self.multi_capture_timer.stop()
+        self.multi_capturing = False
+        self.multi_capture_queue.clear()
+        self.multi_capture_button.setText("Execute Multi-Capture")
+
+        # Optionally show a message that we completed all steps
+        QtWidgets.QMessageBox.information(
+            self,
+            "Multi-Capture Complete",
+            "All requested positions and time delays have been captured."
+        )
 
     def update_image(self):
         image = self.model.droplet_camera_model.get_original_image()

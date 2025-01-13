@@ -26,7 +26,7 @@ class DropletCamera(QObject):
         self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
         self.line.set_value(0)
 
-        self.exposure_time = 1000000
+        self.exposure_time = 200000
         self.latest_frame = None
 
     def start_flash(self):
@@ -36,23 +36,38 @@ class DropletCamera(QObject):
         self.line.set_value(0)
 
     def start_camera(self):
-        # Initialize Picamera2
         self.camera = Picamera2(1)
         self.configure_camera()
         self.camera.start()
 
     def configure_camera(self):
-        # config = self.camera.create_still_configuration(
-        #     main={"size": self.camera.sensor_resolution}
-        # )
-        config = self.camera.create_still_configuration(
-            main={"size": (640, 480)}
+        # Create a "video" configuration to stream frames continuously
+        video_config = self.camera.create_video_configuration(
+            main={
+                "size": (640, 480),
+                "format": "RGB888"  # or "YUV420", etc. as preferred
+            }
         )
-        self.camera.configure(config)
-        controls = {
-            "ExposureTime": self.exposure_time,
-        }
-        self.camera.set_controls(controls)
+        self.camera.configure(video_config)
+
+        # Force a fixed 200 ms exposure
+        self.camera.set_controls({
+            "FrameDurationLimits": (200_000, 200_000),  # (min, max) in µs => 200ms
+            "ExposureTime": 200_000,      # 200 ms
+            "AeEnable": False,            # disable auto-exposure
+            "AwbEnable": False,           # disable auto-white-balance
+            "AnalogueGain": 1.0,          # fixed gain (no auto-gain)
+            # Optional: turn off other enhancements if desired
+            # "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
+        })
+        # config = self.camera.create_still_configuration(
+        #     main={"size": (640, 480)}
+        # )
+        # self.camera.configure(config)
+        # controls = {
+        #     "ExposureTime": self.exposure_time,
+        # }
+        # self.camera.set_controls(controls)
     
     def change_exposure_time(self, exposure_time):
         self.camera.stop()
@@ -75,7 +90,7 @@ class DropletCamera(QObject):
         self.capture_thread.start()
 
         self.capture_event.wait()
-        time.sleep(0.02)
+        time.sleep(0.1)
         self.start_flash()
 
         self.capture_thread.join()
