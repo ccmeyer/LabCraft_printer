@@ -1135,10 +1135,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Converts a numpy array (captured image) to a QImage.
         """
+        if image is None:
+            return QImage()  # return a null QImage if no frame
+
+        # shape should be (height, width, 3)
+        height, width, channels = image.shape
+        if channels != 3:
+            print("Warning: expected 3 channels (RGB), but got", channels)
+            return QImage()
+        
         height, width, channels = image.shape
         bytes_per_line = channels * width
-        qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
-        return qimage.rgbSwapped()
+        qimage = QImage(
+            image,                 # the actual data (byte array)
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format_RGB888  # We assume the data is truly RGB
+        )        
+        return qimage
 
     def toggle_repeat_capture(self):
         """

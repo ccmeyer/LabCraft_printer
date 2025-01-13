@@ -2,6 +2,8 @@ import threading
 import time
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
+from PySide6.QtWidgets import QApplication
+
 from collections import deque
 
 import serial
@@ -29,6 +31,21 @@ class DropletCamera(QObject):
         self.exposure_time = 200000
         self.latest_frame = None
 
+        # We’ll store the “job” IDs returned by PiCamera2’s non-blocking calls
+        self.current_job = None
+
+        # Timers for half-exposure steps
+        self.timer_half = QtCore.QTimer()
+        self.timer_half.setSingleShot(True)
+        self.timer_half.timeout.connect(self._on_half_exposure_timeout)
+
+        self.timer_second_half = QtCore.QTimer()
+        self.timer_second_half.setSingleShot(True)
+        self.timer_second_half.timeout.connect(self._on_second_half_timeout)
+
+    def get_latest_frame(self):
+        return self.latest_frame
+    
     def start_flash(self):
         self.line.set_value(1)
 
@@ -42,69 +59,134 @@ class DropletCamera(QObject):
 
     def configure_camera(self):
         # Create a "video" configuration to stream frames continuously
-        video_config = self.camera.create_video_configuration(
+        video_config = self.camera.create_still_configuration(
             main={
                 "size": (640, 480),
-                "format": "RGB888"  # or "YUV420", etc. as preferred
+                "format": "RGB888",
             }
         )
         self.camera.configure(video_config)
 
         # Force a fixed 200 ms exposure
         self.camera.set_controls({
-            "FrameDurationLimits": (200_000, 200_000),  # (min, max) in µs => 200ms
-            "ExposureTime": 200_000,      # 200 ms
-            "AeEnable": False,            # disable auto-exposure
-            "AwbEnable": False,           # disable auto-white-balance
-            "AnalogueGain": 1.0,          # fixed gain (no auto-gain)
-            # Optional: turn off other enhancements if desired
-            # "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
+            "FrameDurationLimits": (200_000, 200_000),  # 200 ms frame time
+            "ExposureTime": 200_000,
+            "AeEnable": False,
+            "AwbEnable": False,
+            "AnalogueGain": 1.0,
         })
-        # config = self.camera.create_still_configuration(
-        #     main={"size": (640, 480)}
-        # )
-        # self.camera.configure(config)
-        # controls = {
-        #     "ExposureTime": self.exposure_time,
-        # }
-        # self.camera.set_controls(controls)
     
     def change_exposure_time(self, exposure_time):
+        """
+        Adjusts the fixed exposure time on the fly.
+        """
+        if not self.camera:
+            return
         self.camera.stop()
-        controls = {
-            "ExposureTime": int(exposure_time),
-        }
-        self.camera.set_controls(controls)
+        self.camera.set_controls({
+            "FrameDurationLimits": (exposure_time, exposure_time),
+            "ExposureTime": exposure_time,
+            "AeEnable": False,
+            "AwbEnable": False
+        })
         self.camera.start()
-        print(f"--Camera changed: Exp {exposure_time}")
-
-    def capture_image(self):
-        self.capture_event.set()
-        self.latest_frame = self.camera.capture_array()
-        return
-    
-    def start_capture_thread(self,save=False):
-        self.capture_event = threading.Event()
-
-        self.capture_thread = threading.Thread(target=self.capture_image)
-        self.capture_thread.start()
-
-        self.capture_event.wait()
-        time.sleep(0.1)
-        self.start_flash()
-
-        self.capture_thread.join()
-        self.stop_flash()
-
-        self.image_captured_signal.emit()
+        print(f"--Camera changed: Exp {exposure_time} us")
 
     def stop_camera(self):
         if self.camera:
             self.camera.stop()
             self.camera.close()
+            self.camera = None
 
-    def get_latest_frame(self):
-        return self.latest_frame
+    @QtCore.Slot(int)
+    def _schedule_half_timer(self, half_ms):
+        """
+        This slot is guaranteed to run in the main thread (our droplet camera's thread).
+        We start the QTimer here.
+        """
+        self.timer_half.start(half_ms)
+
+    def _skip_frame(self):
+        """
+        Request 1 frame from the pipeline in a non-blocking manner,
+        so we know exactly when the next frame starts.
+        """
+        # We supply a non-blocking "signal_function":
+        self.current_job = self.camera.capture_request(signal_function=self._on_skip_frame_done)
+
+    def _on_skip_frame_done(self, job):
+        """
+        Called when the skip-frame request completes, meaning a new 200ms exposure
+        is just starting in the pipeline.
+        """
+        request = self.camera.wait(job)
+        if request:
+            request.release()  # discard the skip frame
+
+        # Now we wait half the exposure time (100 ms) before setting the GPIO high
+        half_ms = int(self.exposure_time / 2 / 1000)  # 200_000 us => 100 ms
+        
+        # Queue a call to _schedule_half_timer(...) in the main thread
+        QtCore.QMetaObject.invokeMethod(
+            self, 
+            "_schedule_half_timer",           # method name
+            QtCore.Qt.QueuedConnection,       # ensures it runs in self's thread
+            QtCore.Q_ARG(int, half_ms)        # pass the half_ms parameter
+        )
+    
+
+    def _on_half_exposure_timeout(self):
+        """
+        Called ~halfway (100 ms) into the current 200 ms frame.
+        Set the GPIO line high so the flash board knows to flash (once).
+        """
+        self.start_flash()
+
+        # Schedule the second half
+        half_ms = int(self.exposure_time / 4 / 1000) 
+        self.timer_second_half.start(half_ms)
+
+    def _on_second_half_timeout(self):
+        """
+        Called after the second 100 ms, meaning the frame that had the flash
+        should now be finishing. We can capture that frame in a non-blocking manner.
+        """
+        # Next request should contain the lit frame
+        self.current_job = self.camera.capture_request(signal_function=self._on_flash_frame_captured)
+
+    def _on_flash_frame_captured(self, job):
+        """
+        Called when the flash frame request completes. We retrieve the frame,
+        set the GPIO line low so the board can re-arm for future flashes, and emit.
+        """
+        request = self.camera.wait(job)
+        if request:
+            self.latest_frame = request.make_array("main")
+            md = request.get_metadata()  # or req.metadata
+            print("Actual exposure used:", md["ExposureTime"])
+            print("Actual frame duration:", md["FrameDuration"])
+            request.release()
+        else:
+            frame = None
+
+        # Now we can set GPIO low to re-arm the board
+        self.stop_flash()
+
+        # Emit the signal with the new frame
+        self.image_captured_signal.emit()
+
+    def capture_non_blocking(self):
+        """
+        Public method to start the “mid-exposure flash capture” process.
+        1) skip a frame
+        2) half exposure => set GPIO high
+        3) second half => capture request => set GPIO low => emit
+        """
+        if not self.camera:
+            print("Camera not started.")
+            return
+        self._skip_frame()
+
 
 class RefuelCamera(QObject):
     def __init__(self):
@@ -1091,7 +1173,7 @@ class Machine(QObject):
         return
     
     def capture_droplet_image(self):
-        return self.droplet_camera.start_capture_thread()
+        return self.droplet_camera.capture_non_blocking()
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
