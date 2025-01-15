@@ -39,6 +39,8 @@ class DropletCameraModel(QObject):
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
+        self.save_dir = os.path.join(self.script_dir, 'Untitled')
+
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
 
@@ -89,6 +91,9 @@ class DropletCameraModel(QObject):
 
     def stop_saving(self):
         self.save_images = False
+
+    def set_save_directory(self,dir):
+        self.save_dir = os.path.join(self.image_dir, dir)
     
     def update_image(self,frame):
         self.latest_frame = frame
@@ -98,9 +103,9 @@ class DropletCameraModel(QObject):
 
     def save_frame(self):
         if self.latest_frame is not None:
-            os.makedirs(self.image_dir, exist_ok=True)
+            os.makedirs(self.save_dir, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(self.image_dir, f"image-{timestamp}.png")
+            save_path = os.path.join(self.save_dir, f"image-{timestamp}.png")
             cv2.imwrite(save_path, self.latest_frame)
             print(f"Frame saved to {save_path}")
             self.record_metadata_signal.emit(timestamp)
@@ -3702,7 +3707,7 @@ class Model(QObject):
         print_pressure = self.machine_model.get_current_print_pressure()
         refuel_pressure = self.machine_model.get_current_refuel_pressure()
 
-        file_dir = os.path.join(self.droplet_camera_model.image_dir, "metadata.csv")
+        file_dir = os.path.join(self.droplet_camera_model.save_dir, "metadata.csv")
         # Prepare metadata
         metadata = [
             timestamp,
@@ -3720,12 +3725,16 @@ class Model(QObject):
         ]
 
         # Save metadata to CSV
-        file_exists = os.path.isfile(file_dir)
-        with open(file_dir, 'a', newline='') as csv_file:
-            writer = csv.writer(csv_file)
-            if not file_exists:  # Write header only once
+        if not os.path.isfile(file_dir):
+            with open(file_dir, 'w', newline='') as csv_file:
+                writer = csv.writer(csv_file)
                 writer.writerow(["timestamp", "flash_duration", "flash_delay", "num_droplets", "exposure_time", "X_position", "Y_position", "Z_position", "print_pulse_width", "refuel_pulse_width", "print_pressure", "refuel_pressure"])
-            writer.writerow(metadata)
+                writer.writerow(metadata)
+        else:
+            with open(file_dir, 'a', newline='') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(metadata)
+        
         print(f"Metadata saved to {file_dir}")
 
 

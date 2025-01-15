@@ -851,6 +851,9 @@ class Controller(QObject):
         self.machine.set_exposure_time(exposure_time)
         self.model.droplet_camera_model.update_exposure_time(exposure_time)
 
+    def set_save_directory(self, directory):
+        self.model.droplet_camera_model.set_save_directory(directory)      
+
     def update_droplet_image(self):
         frame = self.machine.droplet_camera.get_latest_frame()
         self.model.droplet_camera_model.update_image(frame)

@@ -987,7 +987,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add a spinbox to set the delay before the flash
         self.flash_delay_label = QtWidgets.QLabel("Flash Delay (us):")
         self.flash_delay_spinbox = QtWidgets.QSpinBox()
-        self.flash_delay_spinbox.setRange(0, 10000)
+        self.flash_delay_spinbox.setRange(0, 50000)
         self.flash_delay_spinbox.setSingleStep(100)
         self.flash_delay_spinbox.setValue(1500)
         self.button_layout.addWidget(self.flash_delay_label, row, 0)
@@ -1002,6 +1002,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox.setValue(1)
         self.button_layout.addWidget(self.num_droplets_label, row, 0)
         self.button_layout.addWidget(self.num_droplets_spinbox, row, 1)
+        row += 1
+
+        # Add a spinbox to set the print pulse width
+        self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
+        self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.print_pulse_width_spinbox.setRange(0, 10000)
+        self.print_pulse_width_spinbox.setSingleStep(50)
+        self.print_pulse_width_spinbox.setValue(2500)
+        self.button_layout.addWidget(self.print_pulse_width_label, row, 0)
+        self.button_layout.addWidget(self.print_pulse_width_spinbox, row, 1)
         row += 1
 
         # Add a spinbox for exposure time
@@ -1020,6 +1030,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.flash_button, row, 0, 1, 2)
         row += 1
 
+        # Add line to separate buttons
+        self.button_layout.addWidget(QtWidgets.QLabel(" "), row, 0, 1, 2)
+        row += 1
+
+        # Add text edit box for the directory name to save images in
+        self.save_directory_label = QtWidgets.QLabel("Save Directory:")
+        self.save_directory_edit = QtWidgets.QLineEdit()
+        self.save_directory_edit.setText("Untitled")
+        self.button_layout.addWidget(self.save_directory_label, row, 0)
+        self.button_layout.addWidget(self.save_directory_edit, row, 1)
+        row += 1
+
         # Add a button to toggle whether the captured image should be saved
         self.save_button = QtWidgets.QPushButton("Save Images")
         self.save_button.clicked.connect(self.toggle_saving)
@@ -1035,7 +1057,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.multi_start_label = QtWidgets.QLabel("Multi-Capture Start Delay (us):")
         self.multi_start_spinbox = QtWidgets.QSpinBox()
-        self.multi_start_spinbox.setRange(0, 999999)
+        self.multi_start_spinbox.setRange(0, 50000)
         self.multi_start_spinbox.setSingleStep(100)
         self.multi_start_spinbox.setValue(4300)
         self.button_layout.addWidget(self.multi_start_label, row, 0)
@@ -1044,7 +1066,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.multi_end_label = QtWidgets.QLabel("Multi-Capture End Delay (us):")
         self.multi_end_spinbox = QtWidgets.QSpinBox()
-        self.multi_end_spinbox.setRange(0, 999999)
+        self.multi_end_spinbox.setRange(0, 50000)
         self.multi_end_spinbox.setSingleStep(100)
         self.multi_end_spinbox.setValue(5200)
         self.button_layout.addWidget(self.multi_end_label, row, 0)
@@ -1059,12 +1081,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
         row += 1
 
+        self.frame_shift_label = QtWidgets.QLabel("Percent of frame:")
+        self.frame_shift_spinbox = QtWidgets.QDoubleSpinBox()
+        self.frame_shift_spinbox.setDecimals(1)
+        self.frame_shift_spinbox.setRange(0, 1)
+        self.frame_shift_spinbox.setSingleStep(0.1)
+        self.frame_shift_spinbox.setValue(1)
+        self.button_layout.addWidget(self.frame_shift_label, row, 0)
+        self.button_layout.addWidget(self.frame_shift_spinbox, row, 1)
+        row += 1
+
         self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
         self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
         self.multi_frames_below_spinbox.setRange(0, 100)
         self.multi_frames_below_spinbox.setValue(5)
         self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
         self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
+        row += 1
+
+        # Add spin box for multi-execute timer interval
+        self.multi_timer_interval_label = QtWidgets.QLabel("Timer Interval (ms):")
+        self.multi_timer_interval_spinbox = QtWidgets.QSpinBox()
+        self.multi_timer_interval_spinbox.setRange(0, 10000)
+        self.multi_timer_interval_spinbox.setSingleStep(100)
+        self.multi_timer_interval_spinbox.setValue(500)
+        self.button_layout.addWidget(self.multi_timer_interval_label, row, 0)
+        self.button_layout.addWidget(self.multi_timer_interval_spinbox, row, 1)
         row += 1
 
         # Button to start/stop the multi-capture
@@ -1091,7 +1133,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
         self.flash_delay_spinbox.valueChanged.connect(self.set_flash_delay)
         self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
+        self.save_directory_edit.textChanged.connect(self.set_save_directory)
+        self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
+        self.multi_timer_interval_spinbox.valueChanged.connect(self.set_multi_timer_interval)
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -1104,8 +1149,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0,-1))
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0,1))
         
-        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Z(self.model.machine_model.step_size,manual=True))
-        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Z(-self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_X(self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_X(-self.model.machine_model.step_size,manual=True))
         self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
         self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
@@ -1220,11 +1265,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.controller.set_imaging_droplets(num_droplets)
 
+    def handle_print_pulse_width_change(self, value):
+        """
+        Handles changes to the print pulse width.
+        """
+        self.controller.set_print_pulse_width(value, manual=True)
+
     def set_exposure_time(self, exposure_time):
         """
         Sets the exposure time for the camera.
         """
         self.controller.set_exposure_time(exposure_time)
+
+    def set_multi_timer_interval(self, interval):
+        """
+        Sets the interval for the multi-capture timer.
+        """
+        self.multi_capture_timer.setInterval(interval)
+
+    def set_save_directory(self, directory):
+        """
+        Sets the directory to save images in.
+        """
+        self.controller.set_save_directory(directory)
 
     def update_flash_info(self):
         """
@@ -1259,6 +1322,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         end_delay = self.multi_end_spinbox.value()
         num_steps = self.multi_steps_spinbox.value()
         frames_below = self.multi_frames_below_spinbox.value()
+        shift_percent = self.frame_shift_spinbox.value()
 
         if num_steps < 1 or start_delay > end_delay:
             QtWidgets.QMessageBox.warning(
@@ -1290,13 +1354,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             
             # Move up after finishing this position, except for the last one
             if position_index < frames_below:
-                self.multi_capture_queue.append(('move', (0,-1)))
+                self.multi_capture_queue.append(('move', (0,-shift_percent)))
                 # -> This will call self.move_fraction_of_frame(0, 1) when triggered
                 self.multi_capture_queue.append(('skip',0))
                 # -> This gives the machine time to get to the target lcation prior to the next capture
 
         # Return to the original position
-        self.multi_capture_queue.append(('move', (0,frames_below)))
+        self.multi_capture_queue.append(('move', (0,frames_below*shift_percent)))
 
         # Mark capturing as True and update button text
         self.multi_capturing = True
