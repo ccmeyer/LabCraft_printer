@@ -54,6 +54,8 @@ class DropletCamera(QObject):
 
     def start_camera(self):
         self.camera = Picamera2(1)
+        print(f'--- Modes:{self.camera.sensor_modes}')
+        print(f'--- Resolution:{self.camera.sensor_resolution}')
         self.configure_camera()
         self.camera.start()
 
@@ -61,7 +63,7 @@ class DropletCamera(QObject):
         # Create a "video" configuration to stream frames continuously
         video_config = self.camera.create_still_configuration(
             main={
-                "size": (640, 480),
+                "size": self.camera.sensor_resolution,
                 "format": "RGB888",
             }
         )

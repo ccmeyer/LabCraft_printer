@@ -1109,6 +1109,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.multi_timer_interval_spinbox, row, 1)
         row += 1
 
+        # Add spin box for replicate images of each condition
+        self.multi_replicate_label = QtWidgets.QLabel("Replicate Images:")
+        self.multi_replicate_spinbox = QtWidgets.QSpinBox()
+        self.multi_replicate_spinbox.setRange(1, 100)
+        self.multi_replicate_spinbox.setValue(1)
+        self.button_layout.addWidget(self.multi_replicate_label, row, 0)
+        self.button_layout.addWidget(self.multi_replicate_spinbox, row, 1)
+        row += 1
+
         # Button to start/stop the multi-capture
         self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
         self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
@@ -1149,8 +1158,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0,-1))
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0,1))
         
-        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_X(self.model.machine_model.step_size,manual=True))
-        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_X(-self.model.machine_model.step_size,manual=True))
+        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_X(2,manual=True))
+        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_X(-2,manual=True))
+        self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_X(10,manual=True))
+        self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_X(-10,manual=True))
         self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
         self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
@@ -1323,6 +1334,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         num_steps = self.multi_steps_spinbox.value()
         frames_below = self.multi_frames_below_spinbox.value()
         shift_percent = self.frame_shift_spinbox.value()
+        replicates = self.multi_replicate_spinbox.value()
 
         if num_steps < 1 or start_delay > end_delay:
             QtWidgets.QMessageBox.warning(
@@ -1350,7 +1362,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             # Add capture actions for each time in time_delays
             for delay in time_delays:
                 # We'll store ('capture', delay)
-                self.multi_capture_queue.append(('capture', delay))
+                for replicate in range(replicates):
+                    self.multi_capture_queue.append(('capture', delay))
             
             # Move up after finishing this position, except for the last one
             if position_index < frames_below:
@@ -1423,10 +1436,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def update_image(self):
+        # 1) Get the full-resolution image from the model
         image = self.model.droplet_camera_model.get_original_image()
+        if image is None:
+            # Optionally clear the label or show a placeholder
+            self.image_label.clear()
+            self.image_label.setText("No image captured yet.")
+            return
+
+        # 2) Convert it to QImage
         qimage = self.numpy_to_qimage(image)
+
+        # 3) Convert QImage -> QPixmap
         pixmap = QPixmap.fromImage(qimage)
-        self.image_label.setPixmap(pixmap)
+
+        # 4) Scale the pixmap to fit inside the label (640x480), preserving aspect ratio
+        scaled_pixmap = pixmap.scaled(
+            self.image_label.width(),
+            self.image_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation  # for smoother resizing
+        )
+
+        # 5) Set the scaled pixmap
+        self.image_label.setPixmap(scaled_pixmap)
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
