@@ -933,6 +933,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
         self.model = model
+        self.droplet_camera_model = model.droplet_camera_model
         self.controller = controller
 
         self.shortcut_manager = ShortcutManager(self)
@@ -956,7 +957,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # A timer that processes one step of multi-capture at a time
         self.multi_capture_timer = QtCore.QTimer(self)
-        self.multi_capture_timer.setInterval(1000)  # e.g. 500 ms per step
+        self.multi_capture_timer.setInterval(500)  # e.g. 500 ms per step
         self.multi_capture_timer.timeout.connect(self.next_multi_capture_step)
 
 
@@ -979,7 +980,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_spinbox = QtWidgets.QSpinBox()
         self.flash_duration_spinbox.setRange(0, 10000)
         self.flash_duration_spinbox.setSingleStep(100)
-        self.flash_duration_spinbox.setValue(100)
+        self.flash_duration_spinbox.setValue(self.droplet_camera_model.flash_duration)
         self.button_layout.addWidget(self.flash_duration_label, row, 0)
         self.button_layout.addWidget(self.flash_duration_spinbox, row, 1)
         row += 1
@@ -989,7 +990,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_delay_spinbox = QtWidgets.QSpinBox()
         self.flash_delay_spinbox.setRange(0, 50000)
         self.flash_delay_spinbox.setSingleStep(100)
-        self.flash_delay_spinbox.setValue(1500)
+        self.flash_delay_spinbox.setValue(self.droplet_camera_model.flash_delay)
         self.button_layout.addWidget(self.flash_delay_label, row, 0)
         self.button_layout.addWidget(self.flash_delay_spinbox, row, 1)
         row += 1
@@ -999,7 +1000,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.num_droplets_spinbox = QtWidgets.QSpinBox()
         self.num_droplets_spinbox.setRange(0, 20)
         self.num_droplets_spinbox.setSingleStep(1)
-        self.num_droplets_spinbox.setValue(1)
+        self.num_droplets_spinbox.setValue(self.droplet_camera_model.num_droplets)
         self.button_layout.addWidget(self.num_droplets_label, row, 0)
         self.button_layout.addWidget(self.num_droplets_spinbox, row, 1)
         row += 1
@@ -1009,7 +1010,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
         self.print_pulse_width_spinbox.setRange(0, 10000)
         self.print_pulse_width_spinbox.setSingleStep(50)
-        self.print_pulse_width_spinbox.setValue(2500)
+        self.print_pulse_width_spinbox.setValue(self.model.machine_model.get_print_pulse_width())
         self.button_layout.addWidget(self.print_pulse_width_label, row, 0)
         self.button_layout.addWidget(self.print_pulse_width_spinbox, row, 1)
         row += 1
@@ -1019,7 +1020,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.exposure_time_spinbox = QtWidgets.QSpinBox()
         self.exposure_time_spinbox.setRange(0, 2000000)
         self.exposure_time_spinbox.setSingleStep(10000)
-        self.exposure_time_spinbox.setValue(200000)
+        self.exposure_time_spinbox.setValue(self.droplet_camera_model.exposure_time)
         self.button_layout.addWidget(self.exposure_time_label, row, 0)
         self.button_layout.addWidget(self.exposure_time_spinbox, row, 1)
         row += 1
@@ -1037,7 +1038,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add text edit box for the directory name to save images in
         self.save_directory_label = QtWidgets.QLabel("Save Directory:")
         self.save_directory_edit = QtWidgets.QLineEdit()
-        self.save_directory_edit.setText("Untitled")
+        self.save_directory_edit.setText(self.droplet_camera_model.dir_name)
         self.button_layout.addWidget(self.save_directory_label, row, 0)
         self.button_layout.addWidget(self.save_directory_edit, row, 1)
         row += 1
@@ -1094,7 +1095,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
         self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
         self.multi_frames_below_spinbox.setRange(0, 100)
-        self.multi_frames_below_spinbox.setValue(5)
+        self.multi_frames_below_spinbox.setValue(0)
         self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
         self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
         row += 1
@@ -1147,6 +1148,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
         self.multi_timer_interval_spinbox.valueChanged.connect(self.set_multi_timer_interval)
 
+        self.set_exposure_time(self.droplet_camera_model.exposure_time)
+        self.set_flash_delay(self.droplet_camera_model.flash_delay)
+        self.set_flash_duration(self.droplet_camera_model.flash_duration)
+        self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
+        
+
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
         self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.move_fraction_of_frame(-0.1,0))
@@ -1165,13 +1172,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
         self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.02,manual=True))
-        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.02,manual=True))
+        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.01,manual=True))
+        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.01,manual=True))
         self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
         
         self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.02,manual=True))
-        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.02,manual=True))
+        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.01,manual=True))
+        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.01,manual=True))
         self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
   
         self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  

@@ -15,6 +15,7 @@ from scipy.signal import find_peaks
 import random
 import pyDOE3
 import time
+from datetime import datetime
 import glob
 import shutil
 import csv
@@ -29,17 +30,18 @@ class DropletCameraModel(QObject):
         self.reading = False
         self.signal = False
         self.num_flashes = 0
-        self.flash_duration = 0
-        self.flash_delay = 0
+        self.flash_duration = 1000
+        self.flash_delay = 5000
         self.num_droplets = 1
         self.exposure_time = 200000
         self.save_images = False
-        self.image_width = 640
-        self.image_height = 480
+        self.image_width = 1456
+        self.image_height = 1088
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
-        self.save_dir = os.path.join(self.script_dir, 'Untitled')
+        self.dir_name = "Untitled"
+        self.save_dir = os.path.join(self.script_dir, self.dir_name)
 
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
@@ -93,7 +95,8 @@ class DropletCameraModel(QObject):
         self.save_images = False
 
     def set_save_directory(self,dir):
-        self.save_dir = os.path.join(self.image_dir, dir)
+        self.dir_name = dir
+        self.save_dir = os.path.join(self.image_dir, self.dir_name)
     
     def update_image(self,frame):
         self.latest_frame = frame
@@ -104,7 +107,8 @@ class DropletCameraModel(QObject):
     def save_frame(self):
         if self.latest_frame is not None:
             os.makedirs(self.save_dir, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            # Record the timestamp for when the image was captured including milliseconds
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
             save_path = os.path.join(self.save_dir, f"image-{timestamp}.png")
             cv2.imwrite(save_path, self.latest_frame)
             print(f"Frame saved to {save_path}")
