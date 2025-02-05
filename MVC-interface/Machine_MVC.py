@@ -165,8 +165,8 @@ class DropletCamera(QObject):
         if request:
             self.latest_frame = request.make_array("main")
             md = request.get_metadata()  # or req.metadata
-            print("Actual exposure used:", md["ExposureTime"])
-            print("Actual frame duration:", md["FrameDuration"])
+            # print("Actual exposure used:", md["ExposureTime"])
+            # print("Actual frame duration:", md["FrameDuration"])
             request.release()
         else:
             frame = None

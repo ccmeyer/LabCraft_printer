@@ -19,6 +19,8 @@ from datetime import datetime
 import glob
 import shutil
 import csv
+import math
+import matplotlib.pyplot as plt
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
@@ -27,16 +29,23 @@ class DropletCameraModel(QObject):
     def __init__(self,steps_conv_path):
         super().__init__()
         self.latest_image = None
+        self.analyzed_image = None
         self.reading = False
         self.signal = False
         self.num_flashes = 0
         self.flash_duration = 1000
         self.flash_delay = 5000
         self.num_droplets = 1
-        self.exposure_time = 200000
-        self.save_images = False
+        self.exposure_time = 100000
+        self.analysis_active = False
+        self.saving_active = False
         self.image_width = 1456
         self.image_height = 1088
+
+        self.intensity_threshold = 150
+        self.circularity_threshold = 1.15
+        self.min_area_threshold = 10
+        self.edge_margin = 10
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
@@ -86,13 +95,35 @@ class DropletCameraModel(QObject):
         return self.num_flashes, self.flash_duration, self.flash_delay, self.num_droplets, self.exposure_time
 
     def get_original_image(self):
-        return self.latest_frame
+        if self.analysis_active:
+            return self.analyzed_image
+        else:
+            return self.latest_frame
 
     def start_saving(self):
-        self.save_images = True
+        self.saving_active = True
 
     def stop_saving(self):
-        self.save_images = False
+        self.saving_active = False
+
+    def start_analyzing(self):
+        self.analysis_active = True
+        self.update_image(self.latest_frame)
+
+    def stop_analyzing(self):
+        self.analysis_active = False
+        self.update_image(self.latest_frame)
+
+    def set_analysis_parameters(self,intensity_threshold,circularity_threshold,min_area_threshold,edge_margin):
+        self.intensity_threshold = intensity_threshold
+        self.circularity_threshold = circularity_threshold
+        self.min_area_threshold = min_area_threshold
+        self.edge_margin = edge_margin
+        self.update_image(self.latest_frame)
+        print(f'Updated analysis parameters: {self.intensity_threshold}, {self.circularity_threshold}, {self.min_area_threshold}, {self.edge_margin}')
+
+    def get_analysis_parameters(self):
+        return self.intensity_threshold, self.circularity_threshold, self.min_area_threshold, self.edge_margin
 
     def set_save_directory(self,dir):
         self.dir_name = dir
@@ -100,9 +131,233 @@ class DropletCameraModel(QObject):
     
     def update_image(self,frame):
         self.latest_frame = frame
+        if self.analysis_active:
+            print('Analyzing...')
+            results, self.analyzed_image = self.analyze_droplets(
+                frame,
+                intensity_threshold=self.intensity_threshold,
+                circularity_threshold=self.circularity_threshold,
+                min_area_threshold=self.min_area_threshold,
+                edge_margin=self.edge_margin
+            )
         self.droplet_image_updated.emit()
-        if self.save_images:
+        if self.saving_active:
             self.save_frame()
+
+    def compute_tenengrad_variance(self, gray, mask=None):
+        """
+        Computes the Tenengrad variance (a focus metric) in the grayscale image.
+        Optionally applies a 'mask' to limit focus measurement to a region.
+        A higher variance indicates sharper focus (steeper gradients).
+        """
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = cv2.magnitude(sobel_x ** 2, sobel_y ** 2)
+
+        if mask is not None:
+            masked_vals = gradient_magnitude[mask > 0]
+            variance = np.var(masked_vals)
+        else:
+            variance = np.var(gradient_magnitude)
+        return variance
+
+
+    def identify_droplet(self, gray):
+        """
+        Finds the largest contour in the grayscale image after thresholding,
+        and returns a minEnclosingCircle for that contour if it exists.
+        Otherwise returns None.
+        """
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 50, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            c = max(contours, key=cv2.contourArea)
+            ((x, y), r) = cv2.minEnclosingCircle(c)
+            return (int(x), int(y), int(r))
+        else:
+            return None
+            
+    def create_ring_mask(self, shape, center_x, center_y, inner_radius, outer_radius):
+        """
+        Creates a 'ring-shaped' mask in a binary array of 'shape' (H,W).
+        The ring is defined between inner_radius and outer_radius around (center_x, center_y).
+        """
+        mask = np.zeros(shape, dtype=np.uint8)
+        center = (center_x, center_y)
+        cv2.circle(mask, center, outer_radius, 255, -1)
+        cv2.circle(mask, center, inner_radius, 0, -1)
+        return mask
+
+    def calc_droplet_focus(self, image, threshold=50):
+        """
+        Computes a focus metric (Tenengrad variance) around the largest droplet
+        by creating a ring mask near the droplet boundary.
+        Returns None if no droplet found.
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        droplet_info = self.identify_droplet(gray)
+        if droplet_info is None:
+            return None
+        droplet_x, droplet_y, droplet_radius = droplet_info
+        # Expand/shrink radius by 10 px to define the ring
+        mask = self.create_ring_mask(gray.shape, droplet_x, droplet_y,
+                                max(0, droplet_radius - 10),
+                                droplet_radius + 10)
+        return self.compute_tenengrad_variance(gray, mask)
+
+    def analyze_droplets(
+        self,
+        image,
+        um_per_pixel=1.545,
+        intensity_threshold=150,
+        circularity_threshold=1.15,
+        min_area_threshold=10,
+        edge_margin=10,
+    ):
+        """
+        Analyzes the droplet(s) in image. 
+        Returns a list of droplet dictionaries, one for each detected droplet.
+
+        Each droplet dict includes (among others):
+        - 'near_edge_contour': bool (True if the contour bounding box touches the image edge)
+        - 'near_edge_ellipse': bool (True if the ellipse bounding box touches the image edge)
+        - 'warning': string with any caution messages (near edge, low circularity, etc.)
+
+        If 'debug=True', displays intermediary images (original, threshold, final with contour).
+        """
+        if image is None:
+            print(f"No image was provided for droplet analysis.")
+            return [], None
+
+        # 1) Compute focus metric
+        focus = self.calc_droplet_focus(image, intensity_threshold)
+
+        # 2) Convert to grayscale and threshold
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, intensity_threshold, 255, cv2.THRESH_BINARY_INV)[1]
+
+        # 3) Find contours
+        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        imgH, imgW = gray.shape[:2]
+
+        droplet_results = []
+        droplet_id = 0
+        annotated = image.copy()
+
+        for i, cnt in enumerate(contours):
+            area_px = cv2.contourArea(cnt)
+            if area_px < min_area_threshold:
+                continue
+
+            perimeter_px = cv2.arcLength(cnt, True)
+            if perimeter_px < 1:
+                continue
+
+            # (A) Basic geometry
+            circularity = (4.0 * math.pi * area_px) / (perimeter_px ** 2)
+            radius_px = math.sqrt(area_px / math.pi)
+            radius_um = radius_px * um_per_pixel
+            volume_um3 = (4.0/3.0) * math.pi * (radius_um ** 3)
+            volume_nL = volume_um3 * 1e-6
+
+            # (B) Fit ellipse if possible
+            major_axis_um = None
+            minor_axis_um = None
+            angle_deg = None
+            center_ellipse = None
+            ellipse_volume_nL = None
+            radius_ratio = None
+
+            if len(cnt) >= 5:
+                ellipse = cv2.fitEllipse(cnt)
+                (xc, yc), (MA, ma), angle = ellipse
+                major_axis_um = MA * um_per_pixel
+                minor_axis_um = ma * um_per_pixel
+                angle_deg = angle
+                center_ellipse = (xc, yc)
+                # Approx sphere volume from "average" radius of major/minor
+                ellipse_radius_um = ((major_axis_um / 2.0) + (minor_axis_um / 2.0)) / 2.0
+                ellipse_volume_um3 = (4.0/3.0) * math.pi * (ellipse_radius_um ** 3)
+                ellipse_volume_nL = ellipse_volume_um3 * 1e-6
+                radius_ratio = (minor_axis_um / major_axis_um) if major_axis_um != 0 else None
+            else:
+                continue
+
+            # (C) Edge Check
+            near_edge_ellipse = False
+            if center_ellipse is not None:
+                ex, ey = center_ellipse
+                rx = MA / 2.0
+                ry = ma / 2.0
+                left   = ex - rx
+                right  = ex + rx
+                top    = ey - ry
+                bottom = ey + ry
+                near_edge_ellipse = (
+                    (left <= edge_margin) or 
+                    (right >= (imgW - edge_margin)) or
+                    (top <= edge_margin) or
+                    (bottom >= (imgH - edge_margin))
+                )
+
+            # (D) Warnings
+            warning_msg = []
+            if radius_ratio > circularity_threshold:
+                warning_msg.append(f"Circularity={radius_ratio:.2f} > threshold={circularity_threshold}")
+            if near_edge_ellipse:
+                warning_msg.append("Droplet is near image edge; volume may be inaccurate.")
+
+            droplet_info = {
+                "droplet_id": droplet_id,
+                "circularity": circularity,
+                "circularity_ellipse": radius_ratio,
+                "ellipse_volume_nL": ellipse_volume_nL,
+                "ellipse_center_px": center_ellipse,
+                "focus": focus,
+                "near_edge_ellipse": near_edge_ellipse,
+                "warning": "; ".join(warning_msg) if warning_msg else None
+            }
+            if near_edge_ellipse:
+                continue
+            
+            droplet_results.append(droplet_info)
+
+            # (E) Annotated image
+            
+            cv2.drawContours(annotated, [cnt], -1, (0,255,0), 2)
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Add number to the top right of the droplet
+            cv2.putText(annotated, str(droplet_id), (x+w, y), cv2.FONT_HERSHEY_SIMPLEX,1, (0, 0, 255), 2)
+            
+            if ellipse_volume_nL is not None:
+                cv2.putText(annotated, f"{ellipse_volume_nL:.2f} nL", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            
+            if radius_ratio is not None:
+                cv2.putText(annotated, f"{radius_ratio:.2f}", (x, y-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            
+            if focus is not None:
+                cv2.putText(annotated, f"{focus / 1e9:.2f}*10^9", (x, y-55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            
+            # bounding rect
+            cv2.rectangle(
+                annotated, (x, y), (x+w, y+h), (255,0,0), 2
+            )
+
+            # If ellipse
+            if center_ellipse is not None:
+                cv2.ellipse(annotated, ellipse, (255, 0, 255), 2)
+
+            droplet_id += 1
+
+        # # Sort largest droplet first
+        # droplet_results.sort(key=lambda d: d["area_pixels"], reverse=True)
+
+        return droplet_results, annotated
+
+
 
     def save_frame(self):
         if self.latest_frame is not None:

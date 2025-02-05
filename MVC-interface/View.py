@@ -189,12 +189,12 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(1,manual=True))
         
-        self.shortcut_manager.add_shortcut('5','Set print pressure to 0', lambda: self.controller.set_absolute_print_pressure(0,manual=True))
+        self.shortcut_manager.add_shortcut('5','Set refuel pressure to 0.', lambda: self.controller.set_absolute_refuel_pressure(0.3,manual=True))
         self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-1,manual=True))
         self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
         self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
-        self.shortcut_manager.add_shortcut('0','Set print pressure to 2.5', lambda: self.controller.set_absolute_print_pressure(2.5,manual=True))
+        self.shortcut_manager.add_shortcut('0','Set print pressure to 0.6', lambda: self.controller.set_absolute_print_pressure(0.6,manual=True))
 
         self.shortcut_manager.add_shortcut('Shift+s','Save new location', lambda: self.add_new_location())
         self.shortcut_manager.add_shortcut('Shift+d','Modify location', lambda: self.modify_location())
@@ -783,7 +783,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
-        self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 2, 2)
+        self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 1, 2)
+
+        self.droplet_imager_button = QtWidgets.QPushButton("Imager")
+        self.droplet_imager_button.clicked.connect(self.droplet_imager)
+        self.layout.addWidget(self.droplet_imager_button, 5, 0, 1, 2)
 
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
@@ -910,10 +914,15 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         #         return
         #     elif response == '&Yes':
         #         self.controller.move_to_location('balance', manual=True, safe_y=True)
-        # mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
-        # mass_calibration_dialog.exec()
+        mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+        mass_calibration_dialog.exec()
         # camera_dialog = RefuelCameraWindow(self.main_window,self.model,self.controller)
         # camera_dialog.exec()
+        # droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
+        # droplet_imaging_dialog.exec()
+
+    def droplet_imager(self):
+        """Open the droplet imager dialog."""
         droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
 
@@ -941,6 +950,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.flash_active = False
         self.saving_active = False
+        self.analysis_active = False
         self.start_droplet_camera()
         self.controller.start_read_camera()
 
@@ -979,7 +989,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
         self.flash_duration_spinbox = QtWidgets.QSpinBox()
         self.flash_duration_spinbox.setRange(0, 10000)
-        self.flash_duration_spinbox.setSingleStep(100)
+        self.flash_duration_spinbox.setSingleStep(1000)
         self.flash_duration_spinbox.setValue(self.droplet_camera_model.flash_duration)
         self.button_layout.addWidget(self.flash_duration_label, row, 0)
         self.button_layout.addWidget(self.flash_duration_spinbox, row, 1)
@@ -1060,7 +1070,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_start_spinbox = QtWidgets.QSpinBox()
         self.multi_start_spinbox.setRange(0, 50000)
         self.multi_start_spinbox.setSingleStep(100)
-        self.multi_start_spinbox.setValue(4300)
+        self.multi_start_spinbox.setValue(15000)
         self.button_layout.addWidget(self.multi_start_label, row, 0)
         self.button_layout.addWidget(self.multi_start_spinbox, row, 1)
         row += 1
@@ -1069,7 +1079,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_end_spinbox = QtWidgets.QSpinBox()
         self.multi_end_spinbox.setRange(0, 50000)
         self.multi_end_spinbox.setSingleStep(100)
-        self.multi_end_spinbox.setValue(5200)
+        self.multi_end_spinbox.setValue(15000)
         self.button_layout.addWidget(self.multi_end_label, row, 0)
         self.button_layout.addWidget(self.multi_end_spinbox, row, 1)
         row += 1
@@ -1077,7 +1087,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_steps_label = QtWidgets.QLabel("Number of Time Steps:")
         self.multi_steps_spinbox = QtWidgets.QSpinBox()
         self.multi_steps_spinbox.setRange(1, 1000)
-        self.multi_steps_spinbox.setValue(10)
+        self.multi_steps_spinbox.setValue(1)
         self.button_layout.addWidget(self.multi_steps_label, row, 0)
         self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
         row += 1
@@ -1114,7 +1124,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_replicate_label = QtWidgets.QLabel("Replicate Images:")
         self.multi_replicate_spinbox = QtWidgets.QSpinBox()
         self.multi_replicate_spinbox.setRange(1, 100)
-        self.multi_replicate_spinbox.setValue(1)
+        self.multi_replicate_spinbox.setValue(10)
         self.button_layout.addWidget(self.multi_replicate_label, row, 0)
         self.button_layout.addWidget(self.multi_replicate_spinbox, row, 1)
         row += 1
@@ -1123,6 +1133,56 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
         self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
         self.button_layout.addWidget(self.multi_capture_button, row, 0, 1, 2)
+        row += 1
+
+        # Button to toggle analysis of captured images
+        self.analyze_button = QtWidgets.QPushButton("Analyze Images")
+        self.analyze_button.clicked.connect(self.toggle_analyzing)
+        self.button_layout.addWidget(self.analyze_button, row, 0, 1, 2)
+        row += 1
+
+        intensity_threshold, circularity_threshold, min_area, edge_margin = self.droplet_camera_model.get_analysis_parameters()
+        print(f'Analysis parameters: {min_area}, {intensity_threshold}, {circularity_threshold}, {edge_margin}')
+        
+        # Add a spin box to set the min area threshold for the analysis
+        self.min_area_label = QtWidgets.QLabel("Min Area Threshold:")
+        self.min_area_spinbox = QtWidgets.QSpinBox()
+        self.min_area_spinbox.setRange(0, 10000000)
+        self.min_area_spinbox.setSingleStep(1000)
+        self.min_area_spinbox.setValue(min_area)
+        self.button_layout.addWidget(self.min_area_label, row, 0)
+        self.button_layout.addWidget(self.min_area_spinbox, row, 1)
+        row += 1
+
+        # Add a spin box to set the intensity threshold for the analysis
+        self.intensity_threshold_label = QtWidgets.QLabel("Intensity Threshold:")
+        self.intensity_threshold_spinbox = QtWidgets.QSpinBox()
+        self.intensity_threshold_spinbox.setRange(0, 255)
+        self.intensity_threshold_spinbox.setSingleStep(10)
+        self.intensity_threshold_spinbox.setValue(intensity_threshold)
+        self.button_layout.addWidget(self.intensity_threshold_label, row, 0)
+        self.button_layout.addWidget(self.intensity_threshold_spinbox, row, 1)
+        row += 1
+
+        # Add a spin box to set the circularity threshold for the analysis
+        self.circularity_threshold_label = QtWidgets.QLabel("Circularity Threshold:")
+        self.circularity_threshold_spinbox = QtWidgets.QDoubleSpinBox()
+        self.circularity_threshold_spinbox.setDecimals(2)
+        self.circularity_threshold_spinbox.setRange(0, 2)
+        self.circularity_threshold_spinbox.setSingleStep(0.1)
+        self.circularity_threshold_spinbox.setValue(circularity_threshold)
+        self.button_layout.addWidget(self.circularity_threshold_label, row, 0)
+        self.button_layout.addWidget(self.circularity_threshold_spinbox, row, 1)
+        row += 1
+
+        # Add a spin box to set the edge margin for the analysis
+        self.edge_margin_label = QtWidgets.QLabel("Edge Margin:")
+        self.edge_margin_spinbox = QtWidgets.QSpinBox()
+        self.edge_margin_spinbox.setRange(0, 1000)
+        self.edge_margin_spinbox.setSingleStep(5)
+        self.edge_margin_spinbox.setValue(edge_margin)
+        self.button_layout.addWidget(self.edge_margin_label, row, 0)
+        self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
         row += 1
 
         self.button_container_layout = QtWidgets.QVBoxLayout()
@@ -1147,6 +1207,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
         self.multi_timer_interval_spinbox.valueChanged.connect(self.set_multi_timer_interval)
+        self.min_area_spinbox.valueChanged.connect(self.update_analysis_parameters)
+        self.intensity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
+        self.circularity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
+        self.edge_margin_spinbox.valueChanged.connect(self.update_analysis_parameters)
 
         self.set_exposure_time(self.droplet_camera_model.exposure_time)
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
@@ -1253,6 +1317,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.model.droplet_camera_model.start_saving()
             self.saving_active = True
             self.save_button.setText('Saving')
+
+    def toggle_analyzing(self):
+        """
+        Toggles whether the model should analyze the captured images.
+        """
+        if self.analysis_active:
+            self.model.droplet_camera_model.stop_analyzing()
+            self.analysis_active = False
+            self.analyze_button.setText('Analyze Images')
+        else:
+            self.model.droplet_camera_model.start_analyzing()
+            self.analysis_active = True
+            self.analyze_button.setText('Analyzing')
+
+    def update_analysis_parameters(self):
+        """
+        Updates the analysis parameters.
+        """
+        intensity_threshold = self.intensity_threshold_spinbox.value()
+        circularity_threshold = self.circularity_threshold_spinbox.value()
+        min_area = self.min_area_spinbox.value()
+        edge_margin = self.edge_margin_spinbox.value()
+        self.model.droplet_camera_model.set_analysis_parameters(intensity_threshold, circularity_threshold, min_area, edge_margin)
+
 
     def toggle_multi_capture(self):
         """
