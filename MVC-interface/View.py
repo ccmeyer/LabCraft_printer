@@ -1185,6 +1185,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
         row += 1
 
+        # Add a button to trigger the nozzle position calibration
+        self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
+        self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
+        self.button_layout.addWidget(self.calibrate_nozzle_button, row, 0, 1, 2)
+        row += 1
+
+        # Add a label that updates with the state of the calibration
+        self.stageLabel = QtWidgets.QLabel("Status: Idle")
+        self.button_layout.addWidget(self.stageLabel, row, 0, 1, 2)
+        row += 1
+
+
         self.button_container_layout = QtWidgets.QVBoxLayout()
         self.button_container_layout.addLayout(self.button_layout)
         self.button_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
@@ -1211,6 +1223,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.intensity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
         self.circularity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
         self.edge_margin_spinbox.valueChanged.connect(self.update_analysis_parameters)
+
+        # Connect the model's calibration stage signal to update the UI.
+        self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
+
 
         self.set_exposure_time(self.droplet_camera_model.exposure_time)
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
@@ -1340,7 +1356,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         min_area = self.min_area_spinbox.value()
         edge_margin = self.edge_margin_spinbox.value()
         self.model.droplet_camera_model.set_analysis_parameters(intensity_threshold, circularity_threshold, min_area, edge_margin)
-
 
     def toggle_multi_capture(self):
         """
@@ -1496,10 +1511,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         action, data = self.multi_capture_queue.pop(0)  # pop front of list
 
         if action == 'capture':
-            delay = data
-            # Set spinbox and flash delay
-            self.flash_delay_spinbox.setValue(delay)
-            time.sleep(0.05)
+            if delay is not None:
+                delay = data
+                # Set spinbox and flash delay
+                self.flash_delay_spinbox.setValue(delay)
+                time.sleep(0.05)
             # Trigger a capture
             self.controller.capture_droplet_image()
 
@@ -1510,6 +1526,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         elif action == 'skip':
             return
+
+        elif action == 'droplet':
+            self.num_droplets_spinbox.setValue(data)
+
 
         # Once this method returns, the UI is free to process events, so it's non-blocking.
         # We'll pick up the next step on the next timer tick.
@@ -1529,6 +1549,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Multi-Capture Complete",
             "All requested positions and time delays have been captured."
         )
+
+    def toggle_start_nozzle_calibration(self):
+        """
+        Toggles whether the nozzle calibration should be started.
+        """
+        if self.model.calibration_manager.is_calibrating:
+            self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
+            self.controller.stop_calibration()
+        else:
+            self.calibrate_nozzle_button.setText("Stop Calibration")
+            self.controller.start_nozzle_calibration()
+
+    def update_stage(self, stage):
+        """
+        Updates the stage label based on the calibration stage.
+        """
+        self.stageLabel.setText(f"Status: {stage}")
+
 
     def update_image(self):
         # 1) Get the full-resolution image from the model

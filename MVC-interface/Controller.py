@@ -20,6 +20,9 @@ class Controller(QObject):
         self.model = model
         self.expected_position = self.model.machine_model.get_current_position_dict()
 
+        # This variable will temporarily hold the callback for the next capture.
+        self.pending_capture_callback = None
+
         # Connect the machine's signals to the controller's handlers
         self.machine.status_updated.connect(self.handle_status_update)
         self.machine.error_occurred.connect(self.handle_error)
@@ -36,7 +39,11 @@ class Controller(QObject):
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
 
         self.model.printer_head_manager.volume_changed_signal.connect(self.update_volumes_in_view)
-        self.machine.droplet_camera.image_captured_signal.connect(self.update_droplet_image)
+        
+        self.model.calibration_manager.captureImageRequested.connect(self.handle_capture_request)
+        self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
+        self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
+        self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
 
 
 
@@ -249,26 +256,43 @@ class Controller(QObject):
         """Set the relative coordinates for the machine."""
         #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z'] + z}):
+            new_position = {
+                'X': self.expected_position['X'] + x,
+                'Y': self.expected_position['Y'] + y,
+                'Z': self.expected_position['Z'] + z
+            }
+            if self.check_collision(self.expected_position, new_position):
                 print('Collision detected')
                 return False
-        
-        # If moving up in Z, do Z first
+
+        # Build list of commands based on the order dictated by z.
+        # Each element is a tuple: (axis, value)
+        commands = []
         if z < 0:
             if z != 0:
-                self.machine.set_relative_Z(z, manual=manual, handler=handler)
+                commands.append(('Z', z))
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+                commands.append(('Y', y))
             if x != 0:
-                self.machine.set_relative_X(x, manual=manual, handler=handler)
+                commands.append(('X', x))
         else:
-            # If moving down in Z, do X and Y first, then Z
             if y != 0:
-                self.machine.set_relative_Y(y, manual=manual, handler=handler)
+                commands.append(('Y', y))
             if x != 0:
-                self.machine.set_relative_X(x, manual=manual, handler=handler)
+                commands.append(('X', x))
             if z != 0:
-                self.machine.set_relative_Z(z, manual=manual, handler=handler)
+                commands.append(('Z', z))
+
+        # Execute the commands in order, attaching the callback only to the last one.
+        for i, (axis, value) in enumerate(commands):
+            is_last = (i == len(commands) - 1)
+            current_handler = handler if is_last else None
+            if axis == 'X':
+                self.machine.set_relative_X(value, manual=manual, handler=current_handler)
+            elif axis == 'Y':
+                self.machine.set_relative_Y(value, manual=manual, handler=current_handler)
+            elif axis == 'Z':
+                self.machine.set_relative_Z(value, manual=manual, handler=current_handler)
 
         # Update the expected position
         self.expected_position['X'] += x
@@ -824,10 +848,13 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
-    def capture_droplet_image(self):
+    def capture_droplet_image(self, callback=None):
+        """
+        Initiates a non-blocking image capture. If a callback is provided,
+        it will be invoked with the captured frame once the capture completes.
+        """
+        self.pending_capture_callback = callback
         self.machine.capture_droplet_image()
-        # frame = self.machine.capture_droplet_image()
-        # self.model.droplet_camera_model.update_image(frame)
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
@@ -844,8 +871,8 @@ class Controller(QObject):
     def set_flash_delay(self, delay):
         self.machine.set_flash_delay(delay)
 
-    def set_imaging_droplets(self, num_droplets):
-        self.machine.set_imaging_droplets(num_droplets)
+    def set_imaging_droplets(self, num_droplets, callback=None):
+        self.machine.set_imaging_droplets(num_droplets,handler=callback)
 
     def set_exposure_time(self, exposure_time):
         self.machine.set_exposure_time(exposure_time)
@@ -854,9 +881,42 @@ class Controller(QObject):
     def set_save_directory(self, directory):
         self.model.droplet_camera_model.set_save_directory(directory)      
 
-    def update_droplet_image(self):
+    def handle_capture_request(self, callback):
+        # Start the non-blocking capture process, then invoke the callback with the captured image.
+        self.capture_droplet_image(callback=callback)
+
+    def handle_move_request(self, move_vector, callback):
+        # Perform the move command then call the callback.
+        dX, dY, dZ = move_vector
+        self.set_relative_coordinates(dX, dY, dZ, manual=False,handler=callback)
+
+    def handle_droplet_change_request(self, num_droplets,callback):
+        self.set_imaging_droplets(num_droplets,callback=callback)
+
+    @QtCore.Slot()
+    def _on_image_captured(self):
+        """
+        This slot is called when the droplet camera emits its image_captured_signal.
+        It retrieves the latest frame, updates the model (and view), and if a
+        callback is waiting, calls it.
+        """
         frame = self.machine.droplet_camera.get_latest_frame()
+        # Update the model and/or view (assuming your model has such a method)
         self.model.droplet_camera_model.update_image(frame)
+        
+        # If a callback was set for the capture, call it.
+        if self.pending_capture_callback:
+            callback = self.pending_capture_callback
+            self.pending_capture_callback = None  # Clear for future captures.
+            callback(frame)
+
+    def start_nozzle_calibration(self):
+        # Tell the Model to start the nozzle calibration.
+        self.model.start_nozzle_calibration()
+
+    def stop_calibration(self):
+        # Tell the Model to stop the calibration.
+        self.model.stop_calibration()
 
     def start_flash(self):
         self.machine.start_flash()

@@ -22,6 +22,148 @@ import csv
 import math
 import matplotlib.pyplot as plt
 
+class CalibrationManager(QtCore.QObject):
+    # Signal to communicate stage changes to the view.
+    calibrationStageChanged = QtCore.Signal(str)
+
+    # Signals that the calibration process uses to request actions.
+    captureImageRequested = QtCore.Signal(object)  # expects a callback function
+    moveRequested = QtCore.Signal(object, object)    # expects a move_vector and a callback
+    dropletChangeRequested = QtCore.Signal(int,object)  # expects a number of droplets
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.steps = []
+        self.current_step_index = 0
+        self.is_calibrating = False
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.process_current_step)
+    
+    def add_step(self, step):
+        self.steps.append(step)
+        # You can connect the step's stage signal to your manager's signal.
+        step.stageChanged.connect(self.calibrationStageChanged)
+    
+    def start(self):
+        if self.steps:
+            self.current_step_index = 0
+            self.timer.start(50)
+            self.is_calibrating = True
+        else:
+            print("No calibration steps defined.")
+    
+    def process_current_step(self):
+        if self.current_step_index < len(self.steps):
+            current_step = self.steps[self.current_step_index]
+            current_step.process()
+            if current_step.is_complete:
+                print(f"Step '{current_step.name}' complete.")
+                self.current_step_index += 1
+        else:
+            self.timer.stop()
+            self.is_calibrating = False
+            self.calibrationStageChanged.emit("Calibration complete")
+
+    def stop(self):
+        self.timer.stop()
+        self.current_step_index = 0
+        self.steps = []
+        self.is_calibrating = False
+        self.calibrationStageChanged.emit("Calibration stopped")
+
+class BaseCalibrationStep(QtCore.QObject):
+    # Signal to update the current stage text.
+    stageChanged = QtCore.Signal(str)
+    
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.is_complete = False
+        self.stage = None  # To be managed by the subclass.
+    
+    def process(self):
+        raise NotImplementedError("Subclasses must implement process().")
+        
+class NozzlePositionStep(BaseCalibrationStep):
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__("Nozzle Positioning", parent)
+        self.calibration_manager = calibration_manager
+        self.model = model
+        self.droplet_model = self.model.droplet_camera_model
+        self.stage = "prepare_background"
+        self.background_image = None
+        self.droplet_image = None
+    
+    def process(self):
+        if self.stage == "prepare_background":
+            self.stageChanged.emit("Preparing background image")
+            self.calibration_manager.dropletChangeRequested.emit(0,self.background_setup_complete)
+            self.stage = "waiting_background_setup"
+
+        elif self.stage == "capture_background":
+            self.stageChanged.emit("Capturing background image")
+            # Emit a signal to request a background image.
+            self.calibration_manager.captureImageRequested.emit(self.background_captured)
+            self.stage = "waiting_background"
+
+        elif self.stage == "prepare_droplet":
+            self.stageChanged.emit("Preparing droplet image")
+            self.calibration_manager.dropletChangeRequested.emit(1, self.droplet_setup_complete)
+            self.stage = "waiting_droplet_setup"
+            
+        elif self.stage == "capture_droplet":
+            self.stageChanged.emit("Capturing droplet image")
+            self.calibration_manager.captureImageRequested.emit(self.droplet_captured)
+            self.stage = "waiting_droplet"
+            
+        elif self.stage == "analyze":
+            self.stageChanged.emit("Analyzing image")
+            center, focus, _ = self.droplet_model.identify_nozzle(self.background_image, self.droplet_image)
+            if center is None:
+                self.stageChanged.emit("No nozzle found, retrying")
+                self.stage = "prepare_background"
+            else:
+                if not self.is_centered(center):
+                    move_vector = self.calculate_move(center)
+                    self.stageChanged.emit("Adjusting nozzle position")
+                    self.calibration_manager.moveRequested.emit(move_vector, self.move_complete)
+                    self.stage = "waiting_move"
+                else:
+                    self.stageChanged.emit("Nozzle centered")
+                    self.is_complete = True
+
+    def background_setup_complete(self):
+        self.stage = "capture_background"
+
+    def background_captured(self, image):
+        self.background_image = image
+        self.stage = "prepare_droplet"
+
+    def droplet_setup_complete(self):
+        self.stage = "capture_droplet"
+
+    def droplet_captured(self, image):
+        self.droplet_image = image
+        self.stage = "analyze"
+
+    def move_complete(self):
+        self.stage = "prepare_background"
+
+    def is_centered(self, center):
+        img_width, img_height = self.droplet_model.get_image_size()
+        ideal_center = (img_width // 2, img_height // 2)
+        tolerance = 0.05  # 5% tolerance
+        return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
+                abs(center[1] - ideal_center[1]) <= tolerance * img_height)
+
+    def calculate_move(self, center):
+        img_width, img_height = self.droplet_model.get_image_size()
+        ideal_center = (img_width // 2, img_height // 2)
+        delta_cx = ideal_center[0] - center[0]
+        delta_cy = ideal_center[1] - center[1]
+        steps_x, steps_y, steps_z = self.droplet_model.compute_stage_move(delta_cx, delta_cy)
+        return (steps_x, steps_y, steps_z)
+
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()
@@ -55,6 +197,8 @@ class DropletCameraModel(QObject):
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
 
+    def get_image_size(self):
+        return self.image_width, self.image_height
 
     def get_num_flashes(self):
         return self.num_flashes
@@ -356,6 +500,74 @@ class DropletCameraModel(QObject):
         # droplet_results.sort(key=lambda d: d["area_pixels"], reverse=True)
 
         return droplet_results, annotated
+
+    def identify_nozzle(self, background,image):
+
+        if image is None:
+            print('Image is None')
+            return None, None, image
+        
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if background is None:
+            print('Background image is None')
+            # Diff equals the inverse of the image
+            diff = cv2.bitwise_not(image_gray)
+
+        else:
+            background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
+
+            # Compute the absolute difference between the background and the image
+            diff = cv2.absdiff(background_gray, image_gray)
+
+        # Apply a threshold to the difference image
+        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Check if there are any contours
+        if len(contours) == 0:
+            print('No contours detected')
+            # Add text in the middle of the screen saying no contours detected
+            cv2.putText(image, 'No contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+            return None, None, image
+
+        # Determine if there are mutliple large contours
+        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000]
+        if len(large_contours) > 1:
+            print('Multiple large contours detected')
+            cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
+            # Add text in the middle of the screen saying multiple large contours detected
+            cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return None, None, image
+
+        # Find the largest contour and identify the center
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        # Detect if the contour is in contact with the edge of the image
+
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        center = (x + w//2, y + h//2)
+        if x == 0 or y == 0 or x+w == image.shape[1] or y+h == image.shape[0]:
+            print('Contour is in contact with the edge of the image')
+
+        focus = self.compute_tenengrad_variance(image_gray)
+
+        # Draw the contour
+        cv2.drawContours(image, [largest_contour], -1, (0, 255, 0), 2)
+
+        # Draw the bounding box
+        cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
+
+        # Draw the center
+        cv2.circle(image, center, 10, (0, 0, 255), -1)
+
+        # Add the center coordinates and focus value to the bottom right of the nozzle
+        cv2.putText(image, f'Center: {center}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(image, f'Focus: {focus}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        return center, focus, image
 
 
 
@@ -3728,6 +3940,7 @@ class Model(QObject):
         self.experiment_file_path = None
         self.refuel_camera_model = RefuelCameraModel()
         self.droplet_camera_model = DropletCameraModel(self.pixel_step_conv_path)
+        self.calibration_manager = CalibrationManager()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -3995,6 +4208,14 @@ class Model(QObject):
                 writer.writerow(metadata)
         
         print(f"Metadata saved to {file_dir}")
+
+    def start_nozzle_calibration(self):
+        nozzle_step = NozzlePositionStep(self.calibration_manager, self)
+        self.calibration_manager.add_step(nozzle_step)
+        self.calibration_manager.start()
+
+    def stop_calibration(self):
+        self.calibration_manager.stop()
 
 
 if __name__ == "__main__":
