@@ -889,6 +889,7 @@ class Controller(QObject):
         # Perform the move command then call the callback.
         dX, dY, dZ = move_vector
         self.set_relative_coordinates(dX, dY, dZ, manual=False,handler=callback)
+        print('Controller: Move request handled')
 
     def handle_droplet_change_request(self, num_droplets,callback):
         self.set_imaging_droplets(num_droplets,callback=callback)
@@ -912,11 +913,11 @@ class Controller(QObject):
 
     def start_nozzle_calibration(self):
         # Tell the Model to start the nozzle calibration.
-        self.model.start_nozzle_calibration()
+        self.model.calibration_manager.start_nozzle_calibration()
 
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
-        self.model.stop_calibration()
+        self.model.calibration_manager.stop()
 
     def start_flash(self):
         self.machine.start_flash()

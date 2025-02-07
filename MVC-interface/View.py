@@ -1554,10 +1554,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Toggles whether the nozzle calibration should be started.
         """
-        if self.model.calibration_manager.is_calibrating:
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
             self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
             self.controller.stop_calibration()
         else:
+            print('Starting calibration')
             self.calibrate_nozzle_button.setText("Stop Calibration")
             self.controller.start_nozzle_calibration()
 

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
+from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
 import heapq
 import os
@@ -22,147 +23,216 @@ import csv
 import math
 import matplotlib.pyplot as plt
 
-class CalibrationManager(QtCore.QObject):
-    # Signal to communicate stage changes to the view.
-    calibrationStageChanged = QtCore.Signal(str)
+class CalibrationManager(QObject):
+    # Signal to update the current stage text (used by the view).
+    calibrationStageChanged = Signal(str)
 
-    # Signals that the calibration process uses to request actions.
-    captureImageRequested = QtCore.Signal(object)  # expects a callback function
-    moveRequested = QtCore.Signal(object, object)    # expects a move_vector and a callback
-    dropletChangeRequested = QtCore.Signal(int,object)  # expects a number of droplets
+    # Signals used for calibration actions.
+    captureImageRequested = Signal(object)   # expects a callback function
+    moveRequested = Signal(object, object)     # expects a move_vector and a callback
+    dropletChangeRequested = Signal(int, object) # expects number of droplets and a callback
+
+    # These signals will be used to drive the state machine transitions.
+    dropletChangeCompleted = Signal()
+    captureCompleted = Signal()
+    moveCompleted = Signal()
     
-    def __init__(self, parent=None):
+    def __init__(self,model, parent=None):
         super().__init__(parent)
-        self.steps = []
-        self.current_step_index = 0
-        self.is_calibrating = False
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.process_current_step)
-    
-    def add_step(self, step):
-        self.steps.append(step)
-        # You can connect the step's stage signal to your manager's signal.
-        step.stageChanged.connect(self.calibrationStageChanged)
-    
-    def start(self):
-        if self.steps:
-            self.current_step_index = 0
-            self.timer.start(50)
-            self.is_calibrating = True
-        else:
-            print("No calibration steps defined.")
-    
-    def process_current_step(self):
-        if self.current_step_index < len(self.steps):
-            current_step = self.steps[self.current_step_index]
-            current_step.process()
-            if current_step.is_complete:
-                print(f"Step '{current_step.name}' complete.")
-                self.current_step_index += 1
-        else:
-            self.timer.stop()
-            self.is_calibrating = False
-            self.calibrationStageChanged.emit("Calibration complete")
+        self.activeCalibration = None
+        self.model = model
+
+    def start_nozzle_calibration(self):
+        # Create and start the nozzle calibration process.
+        self.activeCalibration = NozzleCalibrationProcess(self, self.model)
+        self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
+        self.activeCalibration.start()
 
     def stop(self):
-        self.timer.stop()
-        self.current_step_index = 0
-        self.steps = []
-        self.is_calibrating = False
+        if self.activeCalibration is not None:
+            self.activeCalibration.stop()
+            self.activeCalibration = None
         self.calibrationStageChanged.emit("Calibration stopped")
 
-class BaseCalibrationStep(QtCore.QObject):
+    # Helper methods to be used as callbacks in the QStateMachine transitions.
+    @Slot()
+    def emitDropletChangeCompleted(self):
+        self.dropletChangeCompleted.emit()
+
+    @Slot()
+    def emitCaptureCompleted(self):
+        self.captureCompleted.emit()
+
+    @Slot()
+    def emitMoveCompleted(self):
+        self.moveCompleted.emit()
+        print('Emit Move completed called')
+
+class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
-    stageChanged = QtCore.Signal(str)
-    
-    def __init__(self, name, parent=None):
-        super().__init__(parent)
-        self.name = name
-        self.is_complete = False
-        self.stage = None  # To be managed by the subclass.
-    
-    def process(self):
-        raise NotImplementedError("Subclasses must implement process().")
-        
-class NozzlePositionStep(BaseCalibrationStep):
+    stageChanged = Signal(str)
+
     def __init__(self, calibration_manager, model, parent=None):
-        super().__init__("Nozzle Positioning", parent)
+        """
+        calibration_manager: Reference to the CalibrationManager (providing action signals)
+        model: Provides methods like image analysis and stage conversion.
+        """
+        super().__init__(parent)
         self.calibration_manager = calibration_manager
         self.model = model
-        self.droplet_model = self.model.droplet_camera_model
-        self.stage = "prepare_background"
+        # The state machine will govern the asynchronous flow.
+        self.state_machine = QStateMachine(self)
+
+    def start(self):
+        """Start the calibration process by starting the state machine."""
+        self.state_machine.start()
+
+    def stop(self):
+        """Stop the state machine if needed."""
+        self.state_machine.stop()
+        self.stageChanged.emit("Calibration stopped")
+
+class NozzleCalibrationProcess(BaseCalibrationProcess):
+    # Define signals to trigger transitions from analyze state.
+    nozzleCentered = Signal()
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+        # Store captured images locally.
         self.background_image = None
         self.droplet_image = None
-    
-    def process(self):
-        if self.stage == "prepare_background":
-            self.stageChanged.emit("Preparing background image")
-            self.calibration_manager.dropletChangeRequested.emit(0,self.background_setup_complete)
-            self.stage = "waiting_background_setup"
 
-        elif self.stage == "capture_background":
-            self.stageChanged.emit("Capturing background image")
-            # Emit a signal to request a background image.
-            self.calibration_manager.captureImageRequested.emit(self.background_captured)
-            self.stage = "waiting_background"
+        # Define states
+        self.state_prepare_background = QState()
+        self.state_capture_background = QState()
+        self.state_prepare_droplet = QState()
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_final = QFinalState()
 
-        elif self.stage == "prepare_droplet":
-            self.stageChanged.emit("Preparing droplet image")
-            self.calibration_manager.dropletChangeRequested.emit(1, self.droplet_setup_complete)
-            self.stage = "waiting_droplet_setup"
-            
-        elif self.stage == "capture_droplet":
-            self.stageChanged.emit("Capturing droplet image")
-            self.calibration_manager.captureImageRequested.emit(self.droplet_captured)
-            self.stage = "waiting_droplet"
-            
-        elif self.stage == "analyze":
-            self.stageChanged.emit("Analyzing image")
-            center, focus, _ = self.droplet_model.identify_nozzle(self.background_image, self.droplet_image)
-            if center is None:
-                self.stageChanged.emit("No nozzle found, retrying")
-                self.stage = "prepare_background"
+        # Connect on-entry actions
+        self.state_prepare_background.entered.connect(self.onPrepareBackground)
+        self.state_capture_background.entered.connect(self.onCaptureBackground)
+        self.state_prepare_droplet.entered.connect(self.onPrepareDroplet)
+        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyze)
+
+        # Create transitions using QSignalTransition:
+        # Transition: prepare_background -> capture_background
+        t1 = QSignalTransition() 
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2dropletChangeCompleted()")  # Use the normalized signature here.
+        t1.setTargetState(self.state_capture_background)
+        self.state_prepare_background.addTransition(t1)
+
+        # Transition: capture_background -> prepare_droplet (when background capture is complete)
+        t2 = QSignalTransition()
+        t2.setSenderObject(self.calibration_manager)
+        t2.setSignal(b"2captureCompleted()")  # Use the normalized signature here.
+        t2.setTargetState(self.state_prepare_droplet)
+        self.state_capture_background.addTransition(t2)
+
+        # Transition: prepare_droplet -> capture_droplet
+        t3 = QSignalTransition()
+        t3.setSenderObject(self.calibration_manager)
+        t3.setSignal(b"2dropletChangeCompleted()")  # Use the normalized signature here.
+        t3.setTargetState(self.state_capture_droplet)
+        self.state_prepare_droplet.addTransition(t3)
+
+        # Transition: capture_droplet -> analyze
+        t4 = QSignalTransition()
+        t4.setSenderObject(self.calibration_manager)
+        t4.setSignal(b"2captureCompleted()")  # Use the normalized signature here.
+        t4.setTargetState(self.state_analyze)
+        self.state_capture_droplet.addTransition(t4)
+
+        # In the analyze state we decide whether to move or finish:
+        # If nozzle is centered:
+        t5 = QSignalTransition()
+        t5.setSenderObject(self)
+        t5.setSignal(b"2nozzleCentered()")  # Use the normalized signature here.
+        t5.setTargetState(self.state_final)
+        self.state_analyze.addTransition(t5)
+        # If nozzle is off-center, we need to move:
+        # After moving, restart the process (or re-check alignment)
+        t6 = QSignalTransition()
+        t6.setSenderObject(self.calibration_manager)
+        t6.setSignal(b"2moveCompleted()")  # Use the normalized signature here.
+        t6.setTargetState(self.state_prepare_background)
+        self.state_analyze.addTransition(t6)
+
+        # Add states to the state machine
+        self.state_machine.addState(self.state_prepare_background)
+        self.state_machine.addState(self.state_capture_background)
+        self.state_machine.addState(self.state_prepare_droplet)
+        self.state_machine.addState(self.state_capture_droplet)
+        self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_final)
+
+        # Set the initial state
+        self.state_machine.setInitialState(self.state_prepare_background)
+
+    @Slot()
+    def onPrepareBackground(self):
+        self.stageChanged.emit("Preparing background (0 droplets)")
+        # Request to change droplet settings (0 droplets). The callback emits a signal.
+        self.calibration_manager.dropletChangeRequested.emit(0, self.calibration_manager.emitDropletChangeCompleted)
+
+    @Slot()
+    def onCaptureBackground(self):
+        self.stageChanged.emit("Capturing background image")
+        # Request a background capture. Use a calibration process callback to store the image.
+        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+
+    @Slot()
+    def onPrepareDroplet(self):
+        self.stageChanged.emit("Preparing droplet image (1 droplet)")
+        self.calibration_manager.dropletChangeRequested.emit(1, self.calibration_manager.emitDropletChangeCompleted)
+
+    @Slot()
+    def onCaptureDroplet(self):
+        self.stageChanged.emit("Capturing droplet image")
+        # Request a droplet capture. Use a callback that stores the droplet image.
+        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
+    @Slot()
+    def onAnalyze(self):
+        self.stageChanged.emit("Analyzing images")
+        # Use the locally stored images.
+        bg = self.background_image
+        dr = self.droplet_image
+        center, focus, _ = self.model.droplet_camera_model.identify_nozzle(bg, dr)
+        if center is None:
+            self.stageChanged.emit("No nozzle found, restarting")
+            # Restart process by emitting the droplet change completed signal.
+            self.calibration_manager.emitDropletChangeCompleted()
+        else:
+            if not self.isCentered(center):
+                img_width, img_height = self.model.droplet_camera_model.get_image_size()
+                target = (img_width // 2, img_height // 2)
+                move_vector = self.model.droplet_camera_model.calculate_move_to_target(center,target)
+                self.stageChanged.emit("Nozzle off-center; moving machine")
+                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+                print('Move requested')
             else:
-                if not self.is_centered(center):
-                    move_vector = self.calculate_move(center)
-                    self.stageChanged.emit("Adjusting nozzle position")
-                    self.calibration_manager.moveRequested.emit(move_vector, self.move_complete)
-                    self.stage = "waiting_move"
-                else:
-                    self.stageChanged.emit("Nozzle centered")
-                    self.is_complete = True
+                self.stageChanged.emit("Nozzle centered")
+                self.nozzleCentered.emit()
 
-    def background_setup_complete(self):
-        self.stage = "capture_background"
-
-    def background_captured(self, image):
-        self.background_image = image
-        self.stage = "prepare_droplet"
-
-    def droplet_setup_complete(self):
-        self.stage = "capture_droplet"
-
-    def droplet_captured(self, image):
-        self.droplet_image = image
-        self.stage = "analyze"
-
-    def move_complete(self):
-        self.stage = "prepare_background"
-
-    def is_centered(self, center):
-        img_width, img_height = self.droplet_model.get_image_size()
+    def isCentered(self, center):
+        img_width, img_height = self.model.droplet_camera_model.get_image_size()
         ideal_center = (img_width // 2, img_height // 2)
-        tolerance = 0.05  # 5% tolerance
+        tolerance = 0.05
         return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
                 abs(center[1] - ideal_center[1]) <= tolerance * img_height)
 
-    def calculate_move(self, center):
-        img_width, img_height = self.droplet_model.get_image_size()
-        ideal_center = (img_width // 2, img_height // 2)
-        delta_cx = ideal_center[0] - center[0]
-        delta_cy = ideal_center[1] - center[1]
-        steps_x, steps_y, steps_z = self.droplet_model.compute_stage_move(delta_cx, delta_cy)
-        return (steps_x, steps_y, steps_z)
+    # Callbacks to store images in the calibration process
+    def handleBackgroundCaptured(self, image):
+        self.background_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def handleDropletCaptured(self, image):
+        self.droplet_image = image
+        self.calibration_manager.emitCaptureCompleted()
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
@@ -569,8 +639,6 @@ class DropletCameraModel(QObject):
 
         return center, focus, image
 
-
-
     def save_frame(self):
         if self.latest_frame is not None:
             os.makedirs(self.save_dir, exist_ok=True)
@@ -630,6 +698,12 @@ class DropletCameraModel(QObject):
         delta_cy = y_frac * self.image_height
 
         return self.compute_stage_move(delta_cx, delta_cy)
+    
+    def calculate_move_to_target(self, current, target):
+        delta_cx = target[0] - current[0]
+        delta_cy = target[1] - current[1]
+        steps_x, steps_y, steps_z = self.compute_stage_move(delta_cx, delta_cy)
+        return (steps_x, steps_y, steps_z)
 
 
 def find_key_points(columns, line_values):
@@ -3940,7 +4014,7 @@ class Model(QObject):
         self.experiment_file_path = None
         self.refuel_camera_model = RefuelCameraModel()
         self.droplet_camera_model = DropletCameraModel(self.pixel_step_conv_path)
-        self.calibration_manager = CalibrationManager()
+        self.calibration_manager = CalibrationManager(self)
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -4209,13 +4283,13 @@ class Model(QObject):
         
         print(f"Metadata saved to {file_dir}")
 
-    def start_nozzle_calibration(self):
-        nozzle_step = NozzlePositionStep(self.calibration_manager, self)
-        self.calibration_manager.add_step(nozzle_step)
-        self.calibration_manager.start()
+    # def start_nozzle_calibration(self):
+    #     nozzle_step = NozzlePositionStep(self.calibration_manager, self)
+    #     self.calibration_manager.add_step(nozzle_step)
+    #     self.calibration_manager.start()
 
-    def stop_calibration(self):
-        self.calibration_manager.stop()
+    # def stop_calibration(self):
+    #     self.calibration_manager.stop()
 
 
 if __name__ == "__main__":
