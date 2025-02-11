@@ -915,6 +915,10 @@ class Controller(QObject):
         # Tell the Model to start the nozzle calibration.
         self.model.calibration_manager.start_nozzle_calibration()
 
+    def start_nozzle_focus_calibration(self):
+        # Tell the Model to start the nozzle calibration.
+        self.model.calibration_manager.start_nozzle_focus_calibration()
+
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
         self.model.calibration_manager.stop()

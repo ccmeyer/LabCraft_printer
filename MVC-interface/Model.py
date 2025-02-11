@@ -44,7 +44,13 @@ class CalibrationManager(QObject):
 
     def start_nozzle_calibration(self):
         # Create and start the nozzle calibration process.
-        self.activeCalibration = NozzleCalibrationProcess(self, self.model)
+        self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
+        self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
+        self.activeCalibration.start()
+
+    def start_nozzle_focus_calibration(self):
+        # Create and start the nozzle focus calibration process.
+        self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
         self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
         self.activeCalibration.start()
 
@@ -72,6 +78,10 @@ class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
     stageChanged = Signal(str)
 
+    # Signals to indicate overall process completion or failure.
+    calibrationCompleted = Signal()
+    calibrationError = Signal(str)
+
     def __init__(self, calibration_manager, model, parent=None):
         """
         calibration_manager: Reference to the CalibrationManager (providing action signals)
@@ -92,7 +102,7 @@ class BaseCalibrationProcess(QObject):
         self.state_machine.stop()
         self.stageChanged.emit("Calibration stopped")
 
-class NozzleCalibrationProcess(BaseCalibrationProcess):
+class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     # Define signals to trigger transitions from analyze state.
     nozzleCentered = Signal()
 
@@ -229,6 +239,142 @@ class NozzleCalibrationProcess(BaseCalibrationProcess):
     def handleBackgroundCaptured(self, image):
         self.background_image = image
         self.calibration_manager.emitCaptureCompleted()
+
+    def handleDropletCaptured(self, image):
+        self.droplet_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
+    nozzleFocused = Signal()
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+        # List to store (focus, X position) measurements.
+        self.focus_values = []   
+        self.droplet_image = None
+        self.direction = 1            # +1 or -1 indicating movement direction.
+        self.initial_step_size = 4    # Initial step size.
+        self.step_size = self.initial_step_size # Current step size.
+        self.noise_threshold = 500000 # Minimum focus difference to consider significant.
+        self.baseline_focus = 1e6     # Minimum focus value to consider in focus.
+        self.min_step_size = 1        # Minimum allowed step size.
+        self.max_step_size = 12           # Maximum number of steps to take.
+        self.best_focus = None        # Best (maximum) focus seen so far.
+        self.best_X = None            # X position corresponding to the best focus.
+        self.in_fine_search = False   # Flag to indicate fine search mode.
+        
+        self.timeout_counter = 0              # Number of steps taken so far.   
+        self.max_timeout = 5       # Maximum number of steps before quitting the calibration.
+        
+        # Define states.
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_final = QFinalState()
+
+        # Connect on-entry actions.
+        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyze)
+
+        # Transition from capture to analyze:
+        t1 = QSignalTransition()
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2captureCompleted()")
+        t1.setTargetState(self.state_analyze)
+        self.state_capture_droplet.addTransition(t1)
+
+        # Transition in analyze: if focused, go to final state.
+        t2 = QSignalTransition()
+        t2.setSenderObject(self)
+        t2.setSignal(b"2nozzleFocused()")
+        t2.setTargetState(self.state_final)
+        self.state_analyze.addTransition(t2)
+        # Otherwise, after a move, loop back to capture.
+        t3 = QSignalTransition()
+        t3.setSenderObject(self.calibration_manager)
+        t3.setSignal(b"2moveCompleted()")
+        t3.setTargetState(self.state_capture_droplet)
+        self.state_analyze.addTransition(t3)
+
+        # Add states to the state machine.
+        self.state_machine.addState(self.state_capture_droplet)
+        self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_final)
+        self.state_machine.setInitialState(self.state_capture_droplet)
+
+    @Slot()
+    def onCaptureDroplet(self):
+        self.stageChanged.emit("Capturing droplet image")
+        # Request a capture; when complete, handleDropletCaptured will be called.
+        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
+    @Slot()
+    def onAnalyze(self):
+        self.stageChanged.emit("Analyzing image")
+        img = self.droplet_image
+        focus = self.model.droplet_camera_model.compute_tenengrad_variance(img)
+        if focus is None:
+            if self.timeout_counter >= self.max_timeout:
+                self.stageChanged.emit("No droplet found, calibration failed")
+                self.calibration_manager.emitCaptureCompleted()
+            self.stageChanged.emit("No droplet found, restarting capture")
+            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+            self.timeout_counter += 1
+            return
+
+        # Get current position (assuming movement along the X-axis for focus).
+        X_pos, Y_pos, Z_pos = self.model.machine_model.get_current_position()
+        # Store this measurement.
+        self.focus_values.append((focus, X_pos))
+        print(f'Focus: {focus:.2f} at X: {X_pos}')
+
+        self.stageChanged.emit(f"Focus: {focus:.2f} at X: {X_pos}")
+
+        # Update best focus if this is the highest seen so far.
+        if self.best_focus is None or focus > self.best_focus:
+            self.best_focus = focus
+            self.best_X = X_pos
+
+        # If only one measurement exists, take an initial step in the current direction.
+        if len(self.focus_values) == 1:
+            move_vector = (self.direction * self.step_size, 0, 0)
+            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+            return
+
+        # Compare the current focus with the previous measurement.
+        prev_focus, prev_X = self.focus_values[-2]
+        delta = focus - prev_focus
+
+        if len(self.focus_values) == 2:
+            # If the focus has improved, continue in the same direction.
+            if delta > 0:
+                move_vector = (self.direction * self.step_size, 0, 0)
+                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+            # If the focus has decreased, reverse direction and move.
+            else:
+                self.direction = -self.direction
+                move_vector = (self.direction * self.step_size, 0, 0)
+                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+            return
+        # If the current focus is lower than the best focus (by more than the noise threshold),
+        # then we've passed the peak.
+        if focus < self.best_focus - self.noise_threshold:
+            move_vector = (self.best_X - X_pos, 0, 0)
+            self.stageChanged.emit("Peak reached; moving to best focus position")
+            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+            self.nozzleFocused.emit()
+            return
+
+        # Otherwise, if the improvement from the previous step is marginal, increase step size.
+        if abs(delta) < self.noise_threshold:
+            self.step_size = max(round(self.step_size * 0.5, 0), self.min_step_size)
+            self.stageChanged.emit("Small improvement; increasing step size")
+        else:
+            self.step_size = self.initial_step_size
+            self.stageChanged.emit("Focus improved; continuing in same direction")
+
+        # Continue moving in the same direction.
+        move_vector = (self.direction * self.step_size, 0, 0)
+        self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
 
     def handleDropletCaptured(self, image):
         self.droplet_image = image
