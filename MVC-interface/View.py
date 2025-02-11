@@ -1218,6 +1218,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
+        
+        self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
+        
         self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
         self.flash_delay_spinbox.valueChanged.connect(self.set_flash_delay)
         self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
@@ -1636,6 +1639,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
         # 5) Set the scaled pixmap
+        self.image_label.setPixmap(scaled_pixmap)
+
+    def display_analyzed_image(self, image):
+        """
+        Display the analyzed image.
+        """
+        qimage = self.numpy_to_qimage(image)
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_pixmap = pixmap.scaled(
+            self.image_label.width(),
+            self.image_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
         self.image_label.setPixmap(scaled_pixmap)
 
     def closeEvent(self, event):

@@ -26,8 +26,13 @@ import matplotlib.pyplot as plt
 class CalibrationManager(QObject):
     # Signal to update the current stage text (used by the view).
     calibrationStageChanged = Signal(str)
+
+    # Signals to indicate overall process completion or failure.
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
+
+    # Signal to update the presented image in the view.
+    analyzedImageUpdated = Signal(object)
 
     # Signals used for calibration actions.
     captureImageRequested = Signal(object)   # expects a callback function
@@ -88,6 +93,7 @@ class CalibrationManager(QObject):
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
             self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
+            self.activeCalibration.presentImageSignal.connect(self.onPresentImage)
             self.activeCalibration.start()
 
     def stop(self):
@@ -166,6 +172,10 @@ class CalibrationManager(QObject):
         if self.calibration_file_path:
             self.save_calibration_data(self.calibration_file_path)
 
+    @Slot(object)
+    def onPresentImage(self, image):
+        self.analyzedImageUpdated.emit(image)
+
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
     stageChanged = Signal(str)
@@ -173,7 +183,11 @@ class BaseCalibrationProcess(QObject):
     # Signals to indicate overall process completion or failure.
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
+
     calibrationDataUpdated = Signal(dict)
+
+    # Signal to update the presented image in the view.
+    presentImageSignal = Signal(object)
 
     def __init__(self, calibration_manager, model, parent=None):
         """
@@ -313,7 +327,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Use the locally stored images.
         bg = self.background_image
         dr = self.droplet_image
-        center, focus, _ = self.model.droplet_camera_model.identify_nozzle(bg, dr)
+        center, focus, image = self.model.droplet_camera_model.identify_nozzle(bg, dr)
 
         if center is None:
             self.stageChanged.emit("No nozzle found, restarting")
@@ -331,6 +345,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 print('Move requested')
             else:
                 self.stageChanged.emit("Nozzle centered")
+                self.presentImageSignal.emit(image)
                 self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'center': center, 'machine_position': machine_position}})
                 self.nozzleCentered.emit()
 
@@ -892,7 +907,7 @@ class DropletCameraModel(QObject):
 
         # Add the center coordinates and focus value to the bottom right of the nozzle
         cv2.putText(image, f'Center: {center}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.putText(image, f'Focus: {focus}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(image, f'Focus: {focus:.2f}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         return center, focus, image
 
