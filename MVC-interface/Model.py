@@ -43,6 +43,34 @@ class CalibrationManager(QObject):
         super().__init__(parent)
         self.activeCalibration = None
         self.model = model
+        self.data = {}
+
+        self.calibration_file_path = None
+
+    def create_calibration_file(self, file_path):
+        self.calibration_file_path = file_path
+        self.remove_all_calibrations()
+        with open(file_path, 'w') as file:
+            json.dump(self.data, file)
+
+    def update_calibration_file_path(self, file_path):
+        self.calibration_file_path = file_path
+
+    def save_calibration_data(self, file_path):
+        """Save the calibration data as a JSON file."""
+        with open(file_path, 'w') as file:
+            json.dump(self.data, file, indent=4)
+
+    def load_calibration_data(self, file_path):
+        """Load the calibration data from a JSON file."""
+        self.calibration_file_path = file_path
+        with open(file_path, 'r') as file:
+            self.data = json.load(file)
+
+    def remove_all_calibrations(self):
+        """Removes all measurements."""
+        self.data = {}
+        self.save_calibration_data(self.calibration_file_path)
 
     def start_nozzle_calibration(self):
         # Create and start the nozzle calibration process.
@@ -59,6 +87,7 @@ class CalibrationManager(QObject):
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
+            self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
             self.activeCalibration.start()
 
     def stop(self):
@@ -67,6 +96,27 @@ class CalibrationManager(QObject):
             self.activeCalibration = None
         self.calibrationStageChanged.emit("Calibration stopped")
         self.calibrationError.emit("Calibration terminated by user")
+
+    def get_current_settings(self):
+        num_flashes, flash_duration, flash_delay, num_droplets, exposure_time = self.model.droplet_camera_model.get_image_metadata()
+        current_position = self.model.machine_model.get_current_position_dict()
+        print_width = self.model.machine_model.get_print_pulse_width()
+        refuel_width = self.model.machine_model.get_refuel_pulse_width()
+        print_pressure = self.model.machine_model.get_current_print_pressure()
+        refuel_pressure = self.model.machine_model.get_current_refuel_pressure()
+        return {
+            "num_flashes": num_flashes,
+            "flash_duration": flash_duration,
+            "flash_delay": flash_delay,
+            "num_droplets": num_droplets,
+            "exposure_time": exposure_time,
+            "current_position": current_position,
+            "print_width": print_width,
+            "refuel_width": refuel_width,
+            "print_pressure": print_pressure,
+            "refuel_pressure": refuel_pressure
+        }
+
 
     # Helper methods to be used as callbacks in the QStateMachine transitions.
     @Slot()
@@ -97,6 +147,25 @@ class CalibrationManager(QObject):
         self.activeCalibration = None
         self.calibrationError.emit(error_message)
 
+    @Slot(dict)
+    def onCalibrationDataUpdated(self, data):
+        # data should be structured as {measurements:{}, result:{}}
+        # Append new run data to existing list if present.
+
+        phase = self.activeCalibration.phase_name
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["timestamp"] = timestamp
+        settings = self.get_current_settings()
+        data["settings"] = settings
+        if phase in self.data:
+            self.data[phase].append(data)
+        else:
+            self.data[phase] = [data]
+
+        # Save to file if a path is set.
+        if self.calibration_file_path:
+            self.save_calibration_data(self.calibration_file_path)
+
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
     stageChanged = Signal(str)
@@ -104,6 +173,7 @@ class BaseCalibrationProcess(QObject):
     # Signals to indicate overall process completion or failure.
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
+    calibrationDataUpdated = Signal(dict)
 
     def __init__(self, calibration_manager, model, parent=None):
         """
@@ -115,6 +185,7 @@ class BaseCalibrationProcess(QObject):
         self.model = model
         # The state machine will govern the asynchronous flow.
         self.state_machine = QStateMachine(self)
+        self.phase_name = None
 
     def start(self):
         """Start the calibration process by starting the state machine."""
@@ -135,6 +206,9 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
+
+        self.phase_name = "nozzle_position"
+        self.measurements = []  # Store (X, Y, Z) coordinates of machine and corresponding center XY positions in image.
         # Store captured images locally.
         self.background_image = None
         self.droplet_image = None
@@ -240,11 +314,14 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         bg = self.background_image
         dr = self.droplet_image
         center, focus, _ = self.model.droplet_camera_model.identify_nozzle(bg, dr)
+
         if center is None:
             self.stageChanged.emit("No nozzle found, restarting")
             # Restart process by emitting the droplet change completed signal.
             self.calibration_manager.emitDropletChangeCompleted()
         else:
+            machine_position = self.model.machine_model.get_current_position_dict()
+            self.measurements.append((machine_position, center))
             if not self.isCentered(center):
                 img_width, img_height = self.model.droplet_camera_model.get_image_size()
                 target = (img_width // 2, img_height // 2)
@@ -254,6 +331,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 print('Move requested')
             else:
                 self.stageChanged.emit("Nozzle centered")
+                self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'center': center, 'machine_position': machine_position}})
                 self.nozzleCentered.emit()
 
     def isCentered(self, center):
@@ -277,6 +355,9 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
+
+        self.phase_name = "nozzle_focus"
+
         # List to store (focus, X position) measurements.
         self.focus_values = []   
         self.droplet_image = None
@@ -390,6 +471,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             move_vector = (self.best_X - X_pos, 0, 0)
             self.stageChanged.emit("Peak reached; moving to best focus position")
             self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+            self.calibrationDataUpdated.emit({'measurements': self.focus_values, 'result': {'best_focus': self.best_focus, 'best_X': self.best_X}})
             self.nozzleFocused.emit()
             return
 
@@ -1701,10 +1783,10 @@ class ExperimentModel(QObject):
     update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
     unsaved_changes_signal = Signal() # Signal to notify when there are unsaved changes
 
-    def __init__(self,well_plate,calibration_model):
+    def __init__(self,well_plate,calibration_manager):
         super().__init__()
         self.well_plate = well_plate
-        self.calibration_model = calibration_model
+        self.calibration_manager = calibration_manager
         self.reagents = []
         temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
         self.metadata = {
@@ -2096,7 +2178,7 @@ class ExperimentModel(QObject):
         self.save_experiment()
         self.create_progress_file()
         self.create_key_file()
-        self.calibration_model.create_calibration_file(self.calibration_file_path)
+        self.calibration_manager.create_calibration_file(self.calibration_file_path)
 
     def rename_experiment(self,new_name):
         """Rename the experiment directory and update the metadata."""
@@ -2126,12 +2208,12 @@ class ExperimentModel(QObject):
         self.create_key_file()
         if not copy_calibrations:
             print('Deleting calibration file')
-            self.calibration_model.remove_all_calibrations()
-            self.calibration_model.create_calibration_file(self.calibration_file_path)
+            self.calibration_manager.remove_all_calibrations()
+            self.calibration_manager.create_calibration_file(self.calibration_file_path)
         else:
             print('Copying calibration file')
-            self.calibration_model.update_calibration_file_path(self.calibration_file_path)
-            self.calibration_model.save_calibration_data(self.calibration_file_path)
+            self.calibration_manager.update_calibration_file_path(self.calibration_file_path)
+            self.calibration_manager.save_calibration_data(self.calibration_file_path)
         return True
 
     def update_all_paths(self):
@@ -2141,7 +2223,7 @@ class ExperimentModel(QObject):
         self.experiment_file_path = os.path.join(self.experiment_dir_path, "experiment_design.json")
         self.progress_file_path = os.path.join(self.experiment_dir_path, "progress.json")
         self.calibration_file_path = os.path.join(self.experiment_dir_path, "calibration.json")
-        self.calibration_model.update_calibration_file_path(self.calibration_file_path)
+        self.calibration_manager.update_calibration_file_path(self.calibration_file_path)
         self.key_file_path = os.path.join(self.experiment_dir_path, "key.csv")
 
     def save_experiment(self,create_progress=True):
@@ -4185,11 +4267,11 @@ class Model(QObject):
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
         self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
-        self.experiment_model = ExperimentModel(self.well_plate,self.calibration_model)
         self.experiment_file_path = None
         self.refuel_camera_model = RefuelCameraModel()
         self.droplet_camera_model = DropletCameraModel(self.pixel_step_conv_path)
         self.calibration_manager = CalibrationManager(self)
+        self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -4371,7 +4453,7 @@ class Model(QObject):
             print('Creating new progress file from load experiment from model')
             self.experiment_model.create_progress_file()
         self.experiment_model.create_key_file()
-        self.calibration_model.apply_calibrations_to_all_printer_heads()
+        # self.calibration_model.apply_calibrations_to_all_printer_heads()
         self.experiment_loaded.emit()
 
     def reload_experiment(self, plate_name=None):
