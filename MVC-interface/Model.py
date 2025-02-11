@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 class CalibrationManager(QObject):
     # Signal to update the current stage text (used by the view).
     calibrationStageChanged = Signal(str)
+    calibrationCompleted = Signal()
+    calibrationError = Signal(str)
 
     # Signals used for calibration actions.
     captureImageRequested = Signal(object)   # expects a callback function
@@ -45,20 +47,26 @@ class CalibrationManager(QObject):
     def start_nozzle_calibration(self):
         # Create and start the nozzle calibration process.
         self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
-        self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
-        self.activeCalibration.start()
+        self.start_active_calibration()
 
     def start_nozzle_focus_calibration(self):
         # Create and start the nozzle focus calibration process.
         self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
-        self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
-        self.activeCalibration.start()
+        self.start_active_calibration()
+
+    def start_active_calibration(self):
+        if self.activeCalibration is not None:
+            self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
+            self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
+            self.activeCalibration.calibrationError.connect(self.onCalibrationError)
+            self.activeCalibration.start()
 
     def stop(self):
         if self.activeCalibration is not None:
             self.activeCalibration.stop()
             self.activeCalibration = None
         self.calibrationStageChanged.emit("Calibration stopped")
+        self.calibrationError.emit("Calibration terminated by user")
 
     # Helper methods to be used as callbacks in the QStateMachine transitions.
     @Slot()
@@ -73,6 +81,21 @@ class CalibrationManager(QObject):
     def emitMoveCompleted(self):
         self.moveCompleted.emit()
         print('Emit Move completed called')
+
+    # Slots to handle calibration completion or error.
+    @Slot()
+    def onCalibrationCompleted(self):
+        self.calibrationStageChanged.emit("Calibration completed successfully")
+        # Optionally, do cleanup or reset activeCalibration.
+        self.activeCalibration = None
+        self.calibrationCompleted.emit()
+
+    @Slot(str)
+    def onCalibrationError(self, error_message):
+        self.calibrationStageChanged.emit("Calibration error: " + error_message)
+        # Optionally, do cleanup or reset activeCalibration.
+        self.activeCalibration = None
+        self.calibrationError.emit(error_message)
 
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
@@ -102,6 +125,10 @@ class BaseCalibrationProcess(QObject):
         self.state_machine.stop()
         self.stageChanged.emit("Calibration stopped")
 
+    def onCalibrationCompleted(self):
+        """Emit the completion signal."""
+        self.calibrationCompleted.emit()
+
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     # Define signals to trigger transitions from analyze state.
     nozzleCentered = Signal()
@@ -126,6 +153,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_prepare_droplet.entered.connect(self.onPrepareDroplet)
         self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
 
         # Create transitions using QSignalTransition:
         # Transition: prepare_background -> capture_background
@@ -274,6 +302,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         # Connect on-entry actions.
         self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
 
         # Transition from capture to analyze:
         t1 = QSignalTransition()
@@ -366,7 +395,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         # Otherwise, if the improvement from the previous step is marginal, increase step size.
         if abs(delta) < self.noise_threshold:
-            self.step_size = max(round(self.step_size * 0.5, 0), self.min_step_size)
+            self.step_size = min(self.step_size * 2, self.max_step_size)
             self.stageChanged.emit("Small improvement; increasing step size")
         else:
             self.step_size = self.initial_step_size

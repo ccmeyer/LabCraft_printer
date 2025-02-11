@@ -1232,7 +1232,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # Connect the model's calibration stage signal to update the UI.
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
-
+        self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
+        self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
 
         self.set_exposure_time(self.droplet_camera_model.exposure_time)
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
@@ -1555,6 +1556,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Multi-Capture Complete",
             "All requested positions and time delays have been captured."
         )
+
+    def on_calibration_completed(self):
+        """
+        Called when the calibration process is completed.
+        """
+        self.update_stage("Calibration Completed")
+        self.reset_calibration_buttons()
+
+    def on_calibration_error(self, error_message):
+        """
+        Called when the calibration process encounters an error.
+        """
+        self.update_stage("Calibration Error")
+        self.reset_calibration_buttons()
+        QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
+
+    def reset_calibration_buttons(self):
+        """
+        Resets the calibration buttons to their default state.
+        """
+        self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
+        self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
 
     def toggle_start_nozzle_calibration(self):
         """
