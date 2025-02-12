@@ -78,7 +78,7 @@ class DropletCamera(QObject):
             "AnalogueGain": 1.0,
         })
     
-    def change_exposure_time(self, exposure_time):
+    def change_exposure_time(self, exposure_time, handler=None):
         """
         Adjusts the fixed exposure time on the fly.
         """
@@ -93,6 +93,8 @@ class DropletCamera(QObject):
         })
         self.camera.start()
         print(f"--Camera changed: Exp {exposure_time} us")
+        if handler is not None:
+            handler()
 
     def stop_camera(self):
         if self.camera:
@@ -1202,10 +1204,8 @@ class Machine(QObject):
     def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def set_exposure_time(self, exposure_time):
-        return self.droplet_camera.change_exposure_time(exposure_time)
-        
-
+    def set_exposure_time(self, exposure_time, handler=None):
+        return self.droplet_camera.change_exposure_time(exposure_time,handler=handler)
 
     def trigger_flash(self):
         self.droplet_camera.trigger_flash()

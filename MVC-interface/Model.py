@@ -37,10 +37,13 @@ class CalibrationManager(QObject):
     # Signals used for calibration actions.
     captureImageRequested = Signal(object)   # expects a callback function
     moveRequested = Signal(object, object)     # expects a move_vector and a callback
-    dropletChangeRequested = Signal(int, object) # expects number of droplets and a callback
+    changeSettingsRequested = Signal(dict, object) # expects settings and a callback
+    # dropletChangeRequested = Signal(int, object) # expects number of droplets and a callback
+    # flashDelayChangeRequested = Signal(int, object) # expects flash delay and a callback
 
     # These signals will be used to drive the state machine transitions.
-    dropletChangeCompleted = Signal()
+    # dropletChangeCompleted = Signal()
+    settingsChangeCompleted = Signal()
     captureCompleted = Signal()
     moveCompleted = Signal()
     
@@ -87,6 +90,11 @@ class CalibrationManager(QObject):
         self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
+    def start_droplet_emergence_calibration(self):
+        # Create and start the droplet emergence calibration process.
+        self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
     def start_active_calibration(self):
         if self.activeCalibration is not None:
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
@@ -125,9 +133,16 @@ class CalibrationManager(QObject):
 
 
     # Helper methods to be used as callbacks in the QStateMachine transitions.
+    # @Slot()
+    # def emitDropletChangeCompleted(self):
+    #     self.dropletChangeCompleted.emit()
+
+    # @Slot()
+    # def emitFlashDelayChangeCompleted(self):
+    #     self.flashDelayChangeCompleted.emit()
     @Slot()
-    def emitDropletChangeCompleted(self):
-        self.dropletChangeCompleted.emit()
+    def emitSettingsChangeCompleted(self):
+        self.settingsChangeCompleted.emit()
 
     @Slot()
     def emitCaptureCompleted(self):
@@ -247,7 +262,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Transition: prepare_background -> capture_background
         t1 = QSignalTransition() 
         t1.setSenderObject(self.calibration_manager)
-        t1.setSignal(b"2dropletChangeCompleted()")  # Use the normalized signature here.
+        t1.setSignal(b"2settingsChangeCompleted()")  # Use the normalized signature here.
         t1.setTargetState(self.state_capture_background)
         self.state_prepare_background.addTransition(t1)
 
@@ -261,7 +276,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Transition: prepare_droplet -> capture_droplet
         t3 = QSignalTransition()
         t3.setSenderObject(self.calibration_manager)
-        t3.setSignal(b"2dropletChangeCompleted()")  # Use the normalized signature here.
+        t3.setSignal(b"2settingsChangeCompleted()")  # Use the normalized signature here.
         t3.setTargetState(self.state_capture_droplet)
         self.state_prepare_droplet.addTransition(t3)
 
@@ -302,7 +317,10 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     def onPrepareBackground(self):
         self.stageChanged.emit("Preparing background (0 droplets)")
         # Request to change droplet settings (0 droplets). The callback emits a signal.
-        self.calibration_manager.dropletChangeRequested.emit(0, self.calibration_manager.emitDropletChangeCompleted)
+        settings = {
+            "num_droplets": 0,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
     @Slot()
     def onCaptureBackground(self):
@@ -313,7 +331,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onPrepareDroplet(self):
         self.stageChanged.emit("Preparing droplet image (1 droplet)")
-        self.calibration_manager.dropletChangeRequested.emit(1, self.calibration_manager.emitDropletChangeCompleted)
+        # Request to change droplet settings (1 droplet). The callback emits a signal.
+        settings = {
+            "num_droplets": 1,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
     @Slot()
     def onCaptureDroplet(self):
@@ -505,6 +527,182 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     def handleDropletCaptured(self, image):
         self.droplet_image = image
         self.calibration_manager.emitCaptureCompleted()
+
+class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
+    # Custom signals for state transitions.
+    continueSearch = Signal()
+    dropletDetected = Signal()
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "droplet_emergence"
+        
+        # Set initial binary search bounds for the flash delay (in microseconds, for example).
+        self.lower_delay = 2000
+        self.upper_delay = 10000  # Adjust as appropriate.
+        self.candidate_delay = 3000  # Initial guess.
+        
+        # Store the background image (captured once) and the droplet image.
+        self.background_image = None
+        self.droplet_image = None
+        
+        # Target contour area range.
+        self.min_area = 1000
+        self.max_area = 2000
+
+        # Store all measurements, includes the delay and the computed area.
+        self.measurements = []
+
+
+
+        # Define states.
+        self.state_prepare_background = QState()
+        self.state_capture_background = QState()
+        self.state_set_delay = QState()
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_final = QFinalState()
+
+        # Connect on-entry actions.
+        self.state_prepare_background.entered.connect(self.onPrepareBackground)
+        self.state_capture_background.entered.connect(self.onCaptureBackground)
+        self.state_set_delay.entered.connect(self.onSetDelay)
+        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+
+        # Transitions:
+
+        # 0. Prepare background -> capture background.
+        t0 = QSignalTransition()
+        t0.setSenderObject(self.calibration_manager)
+        t0.setSignal(b"2settingsChangeCompleted()")
+        t0.setTargetState(self.state_capture_background)
+        self.state_prepare_background.addTransition(t0)
+
+        # 1. After capturing the background, transition to set_delay.
+        t1 = QSignalTransition()
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2captureCompleted()")  # from background capture.
+        t1.setTargetState(self.state_set_delay)
+        self.state_capture_background.addTransition(t1)
+        
+        # 2. After setting the flash delay, transition to capture droplet.
+        t2 = QSignalTransition()
+        t2.setSenderObject(self.calibration_manager)
+        t2.setSignal(b"2settingsChangeCompleted()")  # assume calibration_manager emits this after setting delay.
+        t2.setTargetState(self.state_capture_droplet)
+        self.state_set_delay.addTransition(t2)
+        
+        # 3. After capturing the droplet image, transition to analyze.
+        t3 = QSignalTransition()
+        t3.setSenderObject(self.calibration_manager)
+        t3.setSignal(b"2captureCompleted()")
+        t3.setTargetState(self.state_analyze)
+        self.state_capture_droplet.addTransition(t3)
+        
+        # 4a. In analyze, if the computed area is within the target range, signal success.
+        t4 = QSignalTransition()
+        t4.setSenderObject(self)
+        t4.setSignal(b"2dropletDetected()")
+        t4.setTargetState(self.state_final)
+        self.state_analyze.addTransition(t4)
+        
+        # 4b. Otherwise, signal to continue the binary search.
+        t5 = QSignalTransition()
+        t5.setSenderObject(self)
+        t5.setSignal(b"2continueSearch()")
+        t5.setTargetState(self.state_set_delay)
+        self.state_analyze.addTransition(t5)
+        
+        # Add states to the state machine.
+        self.state_machine.addState(self.state_prepare_background)
+        self.state_machine.addState(self.state_capture_background)
+        self.state_machine.addState(self.state_set_delay)
+        self.state_machine.addState(self.state_capture_droplet)
+        self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_final)
+        
+        # Set the initial state.
+        self.state_machine.setInitialState(self.state_prepare_background)
+
+    @Slot()
+    def onPrepareBackground(self):
+        self.stageChanged.emit("Preparing background image")
+        # Request to change droplet settings (0 droplets).
+        settings = {
+            "num_droplets": 0,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onCaptureBackground(self):
+        self.stageChanged.emit("Capturing background image")
+        # Capture the background image.
+        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+
+    @Slot()
+    def onSetDelay(self):
+        self.stageChanged.emit(f"Setting flash delay to {self.candidate_delay} μs")
+        # Request to set the flash delay to candidate_delay.
+        settings = {
+            "flash_delay": self.candidate_delay,
+            "num_droplets": 1
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onCaptureDroplet(self):
+        self.stageChanged.emit("Capturing droplet image")
+        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
+    @Slot()
+    def onAnalyze(self):
+        self.stageChanged.emit("Analyzing droplet image")
+        # Compute the bounding rectangle area from the difference image.
+        area, image = self.model.droplet_camera_model.calc_bounding_rect_area(self.background_image, self.droplet_image)
+        self.stageChanged.emit(f"Rectangle area: {area}")
+        self.measurements.append((self.candidate_delay, area))
+        
+        # If the area is within target range, we consider it a success.
+        if area is not None and self.min_area <= area <= self.max_area:
+            self.stageChanged.emit("Target area reached")
+            self.presentImageSignal.emit(image)
+            self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'area': area, 'flash_delay': self.candidate_delay}})
+            self.emitDropletDetected()
+        else:
+            # Update the binary search bounds:
+            if area is None or area < self.min_area:
+                # Too little area: droplet hasn't begun emerging.
+                self.lower_delay = self.candidate_delay
+            else:
+                # Too much area: droplet is too advanced.
+                self.upper_delay = self.candidate_delay
+            # Compute new candidate.
+            new_candidate = int((self.lower_delay + self.upper_delay) / 2)
+            self.stageChanged.emit(f"Adjusting flash delay from {self.candidate_delay} to {new_candidate}")
+            self.candidate_delay = new_candidate
+            self.emitContinueSearch()
+
+    @Slot()
+    def onCalibrationCompleted(self):
+        self.stageChanged.emit("Droplet emergence calibration complete")
+        self.calibrationCompleted.emit()
+
+    def handleBackgroundCaptured(self, image):
+        self.background_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def handleDropletCaptured(self, image):
+        self.droplet_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def emitContinueSearch(self):
+        # Emit the custom signal to trigger the transition.
+        self.continueSearch.emit()
+
+    def emitDropletDetected(self):
+        self.dropletDetected.emit()
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
@@ -910,6 +1108,35 @@ class DropletCameraModel(QObject):
         cv2.putText(image, f'Focus: {focus:.2f}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         return center, focus, image
+    
+    def calc_bounding_rect_area(self, background, image):
+        """
+        Computes the area of the bounding rectangle around the largest contour in the image.
+        """
+        if image is None:
+            return None,image
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if background is None:
+            diff = cv2.bitwise_not(gray)
+        else:
+            background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(background_gray, gray)
+
+        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if len(contours) == 0:
+            print('No contours detected')
+            return None, image
+
+        largest_contour = max(contours, key=cv2.contourArea)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+
+        cv2.drawContours(image, [largest_contour], -1, (0, 255, 0), 2)
+        cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        cv2.putText(image, f'Area: {w*h}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        return w * h, image
 
     def save_frame(self):
         if self.latest_frame is not None:

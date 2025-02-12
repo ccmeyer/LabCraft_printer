@@ -42,10 +42,9 @@ class Controller(QObject):
         
         self.model.calibration_manager.captureImageRequested.connect(self.handle_capture_request)
         self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
-        self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
+        # self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
+        self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
-
-
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -358,29 +357,29 @@ class Controller(QObject):
         #print(f"Setting relative pressure: {pressure}")
         self.machine.set_relative_refuel_pressure(pressure,manual=manual)
 
-    def set_absolute_print_pressure(self, pressure,manual=False):
+    def set_absolute_print_pressure(self, pressure,handler=None, manual=False):
         """Set the absolute pressure for the machine."""
         #print(f"Setting absolute pressure: {pressure}")
-        self.machine.set_absolute_print_pressure(pressure,manual=manual)
+        self.machine.set_absolute_print_pressure(pressure,manual=manual,handler=handler)
 
-    def set_absolute_refuel_pressure(self, pressure,manual=False):
+    def set_absolute_refuel_pressure(self, pressure, handler=None, manual=False):
         """Set the absolute pressure for the machine."""
         #print(f"Setting absolute pressure: {pressure}")
-        self.machine.set_absolute_refuel_pressure(pressure,manual=manual)
+        self.machine.set_absolute_refuel_pressure(pressure,manual=manual,handler=handler)
 
-    def set_print_pulse_width(self, pulse_width,manual=False,update_model=False):
+    def set_print_pulse_width(self, pulse_width,handler=None, manual=False,update_model=False):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")
         if update_model:
             self.model.machine_model.update_print_pulse_width(pulse_width)
-        self.machine.set_print_pulse_width(pulse_width,manual=manual)
+        self.machine.set_print_pulse_width(pulse_width,manual=manual,handler=handler)
 
-    def set_refuel_pulse_width(self, pulse_width,manual=False,update_model=False):
+    def set_refuel_pulse_width(self, pulse_width, handler=None, manual=False,update_model=False):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")
         if update_model:
             self.model.machine_model.update_refuel_pulse_width(pulse_width)
-        self.machine.set_refuel_pulse_width(pulse_width,manual=manual)
+        self.machine.set_refuel_pulse_width(pulse_width,manual=manual,handler=handler)
 
     def reset_print_syringe(self):
         """Reset the print syringe."""
@@ -865,17 +864,17 @@ class Controller(QObject):
     def stop_read_camera(self):
         self.machine.stop_read_camera()
 
-    def set_flash_duration(self, duration):
-        self.machine.set_flash_duration(duration)
+    def set_flash_duration(self, duration,callback=None):
+        self.machine.set_flash_duration(duration, handler=callback)
 
-    def set_flash_delay(self, delay):
-        self.machine.set_flash_delay(delay)
+    def set_flash_delay(self, delay,callback=None):
+        self.machine.set_flash_delay(delay, handler=callback)
 
     def set_imaging_droplets(self, num_droplets, callback=None):
         self.machine.set_imaging_droplets(num_droplets,handler=callback)
 
-    def set_exposure_time(self, exposure_time):
-        self.machine.set_exposure_time(exposure_time)
+    def set_exposure_time(self, exposure_time,callback=None):
+        self.machine.set_exposure_time(exposure_time,handler=callback)
         self.model.droplet_camera_model.update_exposure_time(exposure_time)
 
     def set_save_directory(self, directory):
@@ -891,8 +890,34 @@ class Controller(QObject):
         self.set_relative_coordinates(dX, dY, dZ, manual=False,handler=callback)
         print('Controller: Move request handled')
 
-    def handle_droplet_change_request(self, num_droplets,callback):
-        self.set_imaging_droplets(num_droplets,callback=callback)
+    # def handle_droplet_change_request(self, num_droplets,callback):
+    #     self.set_imaging_droplets(num_droplets,callback=callback)
+
+    def handle_settings_change_request(self, settings, callback):
+        # Update the settings in the model and machine.
+        num_settings = len(settings)
+        current_call_back = None
+        for i, (key, value) in enumerate(settings.items()):
+            if i == num_settings - 1:
+                current_call_back = callback
+            if key == 'num_droplets':
+                self.set_imaging_droplets(value,callback=current_call_back)
+            elif key == 'flash_duration':
+                self.set_flash_duration(value, callback=current_call_back)
+            elif key == 'flash_delay':
+                self.set_flash_delay(value, callback=current_call_back)
+            elif key == 'exposure_time':
+                self.set_exposure_time(value, callback=current_call_back)
+            elif key == 'print_pulse_width':
+                self.set_print_pulse_width(value, handler=current_call_back)
+            elif key == 'refuel_pulse_width':
+                self.set_refuel_pulse_width(value, handler=current_call_back)
+            elif key == 'print_pressure':
+                self.set_absolute_print_pressure(value, handler=current_call_back)
+            elif key == 'refuel_pressure':
+                self.set_absolute_refuel_pressure(value, handler=current_call_back)
+            else:
+                print(f'Unknown setting: {key}')
 
     @QtCore.Slot()
     def _on_image_captured(self):
@@ -912,12 +937,16 @@ class Controller(QObject):
             callback(frame)
 
     def start_nozzle_calibration(self):
-        # Tell the Model to start the nozzle calibration.
+        # Tell the Model to start the nozzle position calibration.
         self.model.calibration_manager.start_nozzle_calibration()
 
     def start_nozzle_focus_calibration(self):
-        # Tell the Model to start the nozzle calibration.
+        # Tell the Model to start the nozzle focus calibration.
         self.model.calibration_manager.start_nozzle_focus_calibration()
+
+    def start_droplet_emergence_calibration(self):
+        # Tell the Model to start the droplet emergence calibration.
+        self.model.calibration_manager.start_droplet_emergence_calibration()
 
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
