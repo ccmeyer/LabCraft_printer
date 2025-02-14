@@ -972,7 +972,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
 
         self.setWindowTitle("Droplet Imaging")
-        self.resize(1200, 800)
+        self.resize(1200, 900)
 
         self.layout = QtWidgets.QHBoxLayout()
 
@@ -1207,6 +1207,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
         self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
+        row += 1
+
+        # Add a button to trigger the droplet trajectory calibration
+        self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
+        self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
+        self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
         row += 1
 
         # Add a label that updates with the state of the calibration
@@ -1595,6 +1601,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
         self.calibrate_pressure_button.setText("Calibrate Pressure")
+        self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -1647,6 +1654,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_pressure_button.setText("Stop Calibration")
             self.controller.start_pressure_calibration()
+
+    def toggle_start_trajectory_calibration(self):
+        """
+        Toggles whether the droplet trajectory calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_trajectory_button.setText("Stop Calibration")
+            self.controller.start_trajectory_calibration()
 
     def update_stage(self, stage):
         """

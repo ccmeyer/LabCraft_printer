@@ -55,6 +55,11 @@ class CalibrationManager(QObject):
         self.model = model
         self.data = {}
 
+        # Variables to store data across the calibration process.
+        self.background_image = None
+        self.nozzle_center = None
+        self.droplet_trajectory_vector = None
+
         self.calibration_file_path = None
 
     def create_calibration_file(self, file_path):
@@ -100,6 +105,11 @@ class CalibrationManager(QObject):
     def start_pressure_calibration(self):
         # Create and start the pressure calibration process.
         self.activeCalibration = PressureCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_trajectory_calibration(self):
+        # Create and start the trajectory calibration process.
+        self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_active_calibration(self):
@@ -168,7 +178,24 @@ class CalibrationManager(QObject):
         else:
             print("Not in initial position")
             return False
+        
+    def set_background_image(self,background):
+        self.background_image = background
 
+    def set_nozzle_center(self,center):
+        self.nozzle_center = center
+
+    def set_trajectory_vector(self,vector):
+        self.droplet_trajectory_vector = vector
+
+    def get_background_image(self):
+        return self.background_image
+    
+    def get_nozzle_center(self):
+        return self.nozzle_center
+
+    def get_trajectory_vector(self):
+        return self.droplet_trajectory_vector
 
     # Helper methods to be used as callbacks in the QStateMachine transitions.
     @Slot()
@@ -772,7 +799,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.transition_found = False
         self.direction = 1  # 1 for increasing pressure, -1 for decreasing.
         # We'll consider the droplet acceptable only if exactly 1 droplet is seen and its area is below this threshold.
-        self.nozzle_droplet_threshold = 5000
+        self.nozzle_droplet_threshold = 10000
 
         # Store images.
         self.background_image = None
@@ -1114,8 +1141,167 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.continueSearch.emit()
 
     def emitDropletDetected(self):
+        self.calibration_manager.set_background_image(self.background_image)
+        self.calibration_manager.set_nozzle_center(self.nozzle_center)
         self.dropletDetected.emit()
 
+class TrajectoryCalibrationProcess(BaseCalibrationProcess):
+    # Custom signals for state transitions.
+    continueTrajectory = Signal()       # To trigger capture of next droplet image.
+    trajectoryCalculated = Signal()       # To trigger transition from trajectory analysis to final.
+    trajectoryFinalized = Signal()        # To indicate that final trajectory analysis is complete.
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "trajectory_calibration"
+        
+        # Use information passed from previous calibrations:
+        # (Assume these were set by the pressure calibration process and passed to the model.)
+        self.import_calibration_data()
+
+        # Number of droplet images to capture.
+        self.num_images = 3
+        self.image_counter = 0
+        
+        # Lists to store droplet analysis results.
+        self.droplet_positions = []  # List of (x, y) positions.
+        self.droplet_focus = []      # List of focus values.
+        self.annotated_images = []   # Annotated images for record.
+        
+        # Define states.
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_trajectory_analysis = QState()
+        self.state_final = QFinalState()
+        
+        # Connect on-entry actions.
+        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_trajectory_analysis.entered.connect(self.onTrajectoryAnalysis)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+        
+        # Create transitions.
+        # Transition: After capturing a droplet image, move to analysis.
+        t1 = QSignalTransition()
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2captureCompleted()")
+        t1.setTargetState(self.state_analyze)
+        self.state_capture_droplet.addTransition(t1)
+        
+        # Transition: In the analysis state, decide whether to capture the next image or perform trajectory analysis.
+        t2 = QSignalTransition()
+        t2.setSenderObject(self)
+        t2.setSignal(b"2continueTrajectory()")
+        t2.setTargetState(self.state_capture_droplet)
+        self.state_analyze.addTransition(t2)
+        
+        t3 = QSignalTransition()
+        t3.setSenderObject(self)
+        t3.setSignal(b"2trajectoryCalculated()")
+        t3.setTargetState(self.state_trajectory_analysis)
+        self.state_analyze.addTransition(t3)
+        
+        # Transition: After trajectory analysis, move to final state.
+        t4 = QSignalTransition()
+        t4.setSenderObject(self)
+        t4.setSignal(b"2trajectoryFinalized()")
+        t4.setTargetState(self.state_final)
+        self.state_trajectory_analysis.addTransition(t4)
+        
+        # Add states to the state machine.
+        self.state_machine.addState(self.state_capture_droplet)
+        self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_trajectory_analysis)
+        self.state_machine.addState(self.state_final)
+        
+        # Set the initial state.
+        self.state_machine.setInitialState(self.state_capture_droplet)
+    
+    def import_calibration_data(self):
+        self.nozzle_center = self.calibration_manager.get_nozzle_center()  
+        self.background_image = self.calibration_manager.get_background_image()
+        if self.nozzle_center is None or self.background_image is None:
+            self.calibrationError.emit("Must complete pressure calibration first")
+            return
+    @Slot()
+    def onCaptureDroplet(self):
+        self.stageChanged.emit(f"Capturing droplet image {self.image_counter + 1} of {self.num_images}")
+        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+    
+    def handleDropletCaptured(self, image):
+        self.droplet_image = image
+        self.calibration_manager.emitCaptureCompleted()
+    
+    @Slot()
+    def onAnalyze(self):
+        self.stageChanged.emit(f"Analyzing droplet image {self.image_counter + 1}")
+        # Assume the model's droplet camera model provides a method that analyzes the droplet.
+        # For example, identify_droplet(image, background, nozzle_center) returns (center, focus, annotated_image)
+        droplets, focus, annotated_image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center)
+        if droplets is None:
+            self.stageChanged.emit("No droplet detected, recapturing image")
+            self.emitContinueTrajectory()  # Retry capturing.
+            return
+        droplet_count = len(droplets) if droplets is not None else 0
+        if droplet_count > 1:
+            self.stageChanged.emit("Multiple droplets detected, recapturing image")
+            self.emitContinueTrajectory()
+            return
+        # If not the first droplet, overlay the previous droplet centers.
+        for pos in self.droplet_positions:
+            cv2.circle(annotated_image, pos, 5, (0, 255, 255), -1)
+        # Draw the current droplet center.
+        droplet_center = droplets[0]
+        cv2.circle(annotated_image, droplet_center, 10, (0, 0, 255), -1)
+        self.presentImageSignal.emit(annotated_image)
+        # Record the measurement.
+        self.droplet_positions.append(droplet_center)
+        self.droplet_focus.append(focus)
+        self.annotated_images.append(annotated_image)
+        self.image_counter += 1
+        
+        if self.image_counter < self.num_images:
+            self.emitContinueTrajectory()
+        else:
+            self.emitTrajectoryCalculated()
+    
+    @Slot()
+    def onTrajectoryAnalysis(self):
+        self.stageChanged.emit("Performing final trajectory analysis")
+        # Compute mean and standard deviation of droplet positions.
+        positions = np.array(self.droplet_positions)  # shape (n,2)
+        mean_pos = list(np.mean(positions, axis=0).astype(int))
+        std_dev = np.std(positions, axis=0)
+        # Annotate the final image.
+        final_image = self.annotated_images[-1].copy()
+        for pos in self.droplet_positions:
+            cv2.circle(final_image, pos, 5, (255, 0, 0), -1)
+        cv2.circle(final_image, mean_pos, 8, (0, 255, 0), -1)
+        cv2.line(final_image, self.nozzle_center, mean_pos, (0, 255, 255), 2)
+        self.presentImageSignal.emit(final_image)
+        # Package results.
+        results = {
+            'droplet_positions': self.droplet_positions,
+            'mean_position': mean_pos,
+            'std_dev': std_dev.tolist(),
+            'trajectory_vector': (mean_pos[0] - self.nozzle_center[0], mean_pos[1] - self.nozzle_center[1])
+        }
+        self.calibrationDataUpdated.emit({'measurements': self.droplet_positions, 'result': results})
+        self.emitTrajectoryFinalized()
+    
+    def emitContinueTrajectory(self):
+        self.continueTrajectory.emit()
+    
+    def emitTrajectoryCalculated(self):
+        self.trajectoryCalculated.emit()
+    
+    def emitTrajectoryFinalized(self):
+        self.trajectoryFinalized.emit()
+    
+    @Slot()
+    def onCalibrationCompleted(self):
+        self.stageChanged.emit("Trajectory calibration complete")
+        self.calibrationCompleted.emit()
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
