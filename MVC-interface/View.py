@@ -1203,6 +1203,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_emergence_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger the pressure calibration
+        self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
+        self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
+        self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
+        row += 1
+
         # Add a label that updates with the state of the calibration
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         self.button_layout.addWidget(self.stageLabel, row, 0, 1, 2)
@@ -1588,6 +1594,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
+        self.calibrate_pressure_button.setText("Calibrate Pressure")
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -1627,6 +1634,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
+
+    def toggle_start_pressure_calibration(self):
+        """
+        Toggles whether the pressure calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_pressure_button.setText("Calibrate Pressure")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_pressure_button.setText("Stop Calibration")
+            self.controller.start_pressure_calibration()
 
     def update_stage(self, stage):
         """

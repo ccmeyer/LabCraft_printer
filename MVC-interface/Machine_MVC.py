@@ -922,23 +922,20 @@ class CommandQueue(QObject):
         return None
 
     def update_command_status(self, current_executing_command, last_completed_command):
-        """Update command statuses based on the machine's current state."""
         if current_executing_command is None or last_completed_command is None:
             print('No commands to update')
             return
-        for command in self.queue:
+        # Iterate over a copy of the queue.
+        for command in list(self.queue):
             if command.status == "Sent" and command.command_number == int(current_executing_command):
                 command.mark_as_executing()
             if command.command_number <= int(last_completed_command):
                 command.mark_as_completed()
 
-        # Remove completed commands from the queue
+        # Now remove completed commands.
         while self.queue and self.queue[0].status == "Completed":
             completed_command = self.queue.popleft()
-            # print(f"Command '{completed_command.command_type}' completed and removed from queue.")
             self.completed.append(completed_command)
-
-            # Remove oldest commands from the completed deque if it exceeds 100
             if len(self.completed) > 100:
                 self.completed.popleft()
 

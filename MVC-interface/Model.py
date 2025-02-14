@@ -22,6 +22,8 @@ import shutil
 import csv
 import math
 import matplotlib.pyplot as plt
+from enum import Enum
+
 
 class CalibrationManager(QObject):
     # Signal to update the current stage text (used by the view).
@@ -95,6 +97,11 @@ class CalibrationManager(QObject):
         self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
+    def start_pressure_calibration(self):
+        # Create and start the pressure calibration process.
+        self.activeCalibration = PressureCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
     def start_active_calibration(self):
         if self.activeCalibration is not None:
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
@@ -131,15 +138,39 @@ class CalibrationManager(QObject):
             "refuel_pressure": refuel_pressure
         }
 
+    # Methods to retrieve calibration data.
+    def get_centered_nozzle_position(self):
+        """ Goes through the data dictionary to retrieve the coordinates of the nozzle"""
+        if "nozzle_position" in self.data:
+            position_data = self.data["nozzle_position"]
+            # Take the result from the last entry
+            return position_data[-1]["result"]
+        else:
+            # If no nozzle calibration is available, end the process and emit a warning.
+            print("No nozzle position calibration available")
+            return None
+        
+    def get_emergence_time(self):
+        """ Goes through the data dictionary to retrieve the flash delay for droplet emergence"""
+        if "droplet_emergence" in self.data:
+            emergence_data = self.data["droplet_emergence"]
+            # Take the result from the last entry
+            return emergence_data[-1]["result"]["flash_delay"]
+        else:
+            # If no droplet emergence calibration is available, end the process and emit a warning.
+            print("No droplet emergence calibration available")
+            return None
+        
+    def is_in_initial_position(self):
+        """ Goes through the data dictionary to check if the nozzle is in the initial position"""
+        if "pressure_calibration" in self.data:
+            return True
+        else:
+            print("Not in initial position")
+            return False
+
 
     # Helper methods to be used as callbacks in the QStateMachine transitions.
-    # @Slot()
-    # def emitDropletChangeCompleted(self):
-    #     self.dropletChangeCompleted.emit()
-
-    # @Slot()
-    # def emitFlashDelayChangeCompleted(self):
-    #     self.flashDelayChangeCompleted.emit()
     @Slot()
     def emitSettingsChangeCompleted(self):
         self.settingsChangeCompleted.emit()
@@ -539,7 +570,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         
         # Set initial binary search bounds for the flash delay (in microseconds, for example).
         self.lower_delay = 2000
-        self.upper_delay = 10000  # Adjust as appropriate.
+        self.upper_delay = 5000  # Adjust as appropriate.
         self.candidate_delay = 3000  # Initial guess.
         
         # Store the background image (captured once) and the droplet image.
@@ -703,6 +734,388 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     def emitDropletDetected(self):
         self.dropletDetected.emit()
+
+class PressureCalibrationProcess(BaseCalibrationProcess):
+    """
+    A calibration process to identify the highest pressure that yields a single droplet
+    (with a small nozzle droplet area) at a fixed pulse width. Instead of a pure binary
+    search, this process mimics a manual calibration: it increases pressure in large
+    steps (coarse search) until the droplet condition becomes unacceptable, then switches
+    to a fine search (small steps) to home in on the optimum pressure.
+    """
+    # Custom signals for state transitions.
+    continueSearch = Signal()
+    nozzleDetected = Signal()
+    dropletDetected = Signal()
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "pressure_calibration"
+
+        self.nozzle_position = None
+        self.start_delay = None
+        self.start_delay_offset = self.model.machine_model.get_print_pulse_width() - 500
+
+        # Set initial binary search bounds for pressure (in psi, for example).
+        self.lower_pressure = 0.4   # example minimum pressure
+        self.upper_pressure = 1.2   # example maximum pressure
+        # Start with a candidate near the lower bound.
+        self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
+        # Convergence threshold for binary search (if needed).
+        self.pressure_threshold = 0.01
+
+        # New variables for two-phase search.
+        self.coarse_search = True
+        self.coarse_step = 0.1
+        self.fine_step = 0.02
+        self.last_acceptable_pressure = None
+        self.transition_found = False
+        self.direction = 1  # 1 for increasing pressure, -1 for decreasing.
+        # We'll consider the droplet acceptable only if exactly 1 droplet is seen and its area is below this threshold.
+        self.nozzle_droplet_threshold = 5000
+
+        # Store images.
+        self.background_image = None
+        self.droplet_image = None
+
+        # Measurements: list of tuples (pressure, droplet_count, nozzle_area).
+        self.measurements = []
+
+        self.counter = 0
+        self.final_condition_found = False
+
+        # Define states.
+        self.state_initial_position = QState()
+        self.state_prepare_background = QState()
+        self.state_capture_background = QState()
+        self.state_set_delay = QState()
+        self.state_capture_nozzle = QState()
+        self.state_analyze_nozzle = QState()
+        self.state_set_pressure = QState()
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_final = QFinalState()
+
+        # Connect on-entry actions.
+        self.state_initial_position.entered.connect(self.onInitialPosition)
+        self.state_prepare_background.entered.connect(self.onPrepareBackground)
+        self.state_capture_background.entered.connect(self.onCaptureBackground)
+        self.state_set_delay.entered.connect(self.onSetDelay)
+        self.state_capture_nozzle.entered.connect(self.onCaptureNozzle)
+        self.state_analyze_nozzle.entered.connect(self.onAnalyzeNozzle)
+        self.state_set_pressure.entered.connect(self.onSetPressure)
+        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+
+        # Create transitions.
+        # Transition: Initial position -> prepare background.
+        t0 = QSignalTransition()
+        t0.setSenderObject(self.calibration_manager)
+        t0.setSignal(b"2moveCompleted()")
+        t0.setTargetState(self.state_prepare_background)
+        self.state_initial_position.addTransition(t0)
+
+        # Transition: Prepare background -> capture background.
+        t1 = QSignalTransition()
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2settingsChangeCompleted()")
+        t1.setTargetState(self.state_capture_background)
+        self.state_prepare_background.addTransition(t1)
+
+        # Transition: Capture background -> set delay.
+        t2 = QSignalTransition()
+        t2.setSenderObject(self.calibration_manager)
+        t2.setSignal(b"2captureCompleted()")
+        t2.setTargetState(self.state_set_delay)
+        self.state_capture_background.addTransition(t2)
+
+        # Transition: Set delay -> capture nozzle.
+        t3 = QSignalTransition()
+        t3.setSenderObject(self.calibration_manager)
+        t3.setSignal(b"2settingsChangeCompleted()")
+        t3.setTargetState(self.state_capture_nozzle)
+        self.state_set_delay.addTransition(t3)
+
+        # Transition: Capture nozzle -> analyze nozzle.
+        t4 = QSignalTransition()
+        t4.setSenderObject(self.calibration_manager)
+        t4.setSignal(b"2captureCompleted()")
+        t4.setTargetState(self.state_analyze_nozzle)
+        self.state_capture_nozzle.addTransition(t4)
+
+        # Transition: Analyze nozzle -> set pressure.
+        t5 = QSignalTransition()
+        t5.setSenderObject(self)
+        t5.setSignal(b"2nozzleDetected()")
+        t5.setTargetState(self.state_set_pressure)
+        self.state_analyze_nozzle.addTransition(t5)
+
+        # Transition: Set pressure -> capture droplet.
+        t6 = QSignalTransition()
+        t6.setSenderObject(self.calibration_manager)
+        t6.setSignal(b"2settingsChangeCompleted()")
+        t6.setTargetState(self.state_capture_droplet)
+        self.state_set_pressure.addTransition(t6)
+
+        # Transition: Capture droplet -> analyze.
+        t7 = QSignalTransition()
+        t7.setSenderObject(self.calibration_manager)
+        t7.setSignal(b"2captureCompleted()")
+        t7.setTargetState(self.state_analyze)
+        self.state_capture_droplet.addTransition(t7)
+
+        # Transition: Analyze -> set pressure (continue search).
+        t8 = QSignalTransition()
+        t8.setSenderObject(self)
+        t8.setSignal(b"2continueSearch()")
+        t8.setTargetState(self.state_set_pressure)
+        self.state_analyze.addTransition(t8)
+
+        # Transition: Analyze -> final (droplet detected).
+        t9 = QSignalTransition()
+        t9.setSenderObject(self)
+        t9.setSignal(b"2dropletDetected()")
+        t9.setTargetState(self.state_final)
+        self.state_analyze.addTransition(t9)
+
+        # Add states to the state machine.
+        self.state_machine.addState(self.state_initial_position)
+        self.state_machine.addState(self.state_prepare_background)
+        self.state_machine.addState(self.state_capture_background)
+        self.state_machine.addState(self.state_set_delay)
+        self.state_machine.addState(self.state_capture_nozzle)
+        self.state_machine.addState(self.state_analyze_nozzle)
+        self.state_machine.addState(self.state_set_pressure)
+        self.state_machine.addState(self.state_capture_droplet)
+        self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_final)
+
+        # Set the initial state.
+        self.state_machine.setInitialState(self.state_initial_position)
+
+    @Slot()
+    def onInitialPosition(self):
+        self.stageChanged.emit("Moving to initial position")
+        in_initial_position = self.calibration_manager.is_in_initial_position()
+        if in_initial_position:
+            self.calibration_manager.emitMoveCompleted()
+        else:
+            self.nozzle_position = self.calibration_manager.get_centered_nozzle_position()
+            if self.nozzle_position is None:
+                self.calibrationError.emit("No nozzle position calibration available")
+                print("No nozzle position calibration available")
+                return
+            move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(self.nozzle_position['center'])
+            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+
+    @Slot()
+    def onPrepareBackground(self):
+        self.stageChanged.emit("Preparing background (0 droplets)")
+        settings = {"num_droplets": 0}
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onCaptureBackground(self):
+        self.stageChanged.emit("Capturing background image")
+        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+
+    @Slot()
+    def onSetDelay(self):
+        self.stageChanged.emit("Setting flash delay to start time")
+        self.start_delay = self.calibration_manager.get_emergence_time()
+        if self.start_delay is None:
+            self.calibrationError.emit("No start time available")
+            print("No start time available")
+            return
+        settings = {"flash_delay": self.start_delay, "num_droplets": 1}
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onCaptureNozzle(self):
+        self.stageChanged.emit("Capturing nozzle image")
+        self.calibration_manager.captureImageRequested.emit(self.handleNozzleCaptured)
+
+    @Slot()
+    def onAnalyzeNozzle(self):
+        self.stageChanged.emit("Analyzing nozzle image")
+        nozzle_center, focus, image = self.model.droplet_camera_model.identify_nozzle(self.background_image, self.nozzle_image)
+        if nozzle_center is None:
+            self.calibrationError.emit("No nozzle detected")
+            print("No nozzle detected")
+            return
+        self.presentImageSignal.emit(image)
+        self.nozzle_center = nozzle_center
+        self.stageChanged.emit(f"Nozzle center: {nozzle_center}")
+        self.emitNozzleDetected()
+
+    @Slot()
+    def onSetPressure(self):
+        self.stageChanged.emit(f"Setting pressure to {self.candidate_pressure:.2f}")
+        settings = {
+            "print_pressure": self.candidate_pressure,
+            "flash_delay": self.start_delay + self.start_delay_offset,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onCaptureDroplet(self):
+        self.stageChanged.emit("Capturing droplet image at set pressure")
+        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
+    def evaluate_condition(self,droplet_count, nozzle_area, threshold):
+        if droplet_count == 0:
+            return "TOO_LOW"
+        elif droplet_count == 1:
+            if nozzle_area is not None and nozzle_area <= threshold:
+                return "ACCEPTABLE"
+            else:
+                return "TOO_HIGH"
+        else:
+            return "TOO_HIGH"
+
+    # Then you can have a dispatch dictionary:
+    def handle_too_low(self):
+        self.stageChanged.emit("Condition TOO_LOW: increasing pressure")
+        if self.initial_state == "TOO_LOW":
+            if self.coarse_search:
+                print("increase by coarse step")
+                self.candidate_pressure += self.coarse_step
+            else:
+                print("increase by fine step")
+                self.candidate_pressure += self.fine_step
+        else:
+            if self.coarse_search:
+                print("--- Transition found, now increasing pressure")
+                self.transition_found = True
+                self.coarse_search = False
+                self.candidate_pressure = self.candidate_pressure + self.fine_step
+            else:
+                print("Still back tracking - increase by fine step")
+                self.candidate_pressure += self.fine_step
+        self.emitContinueSearch()
+
+    def handle_acceptable(self):
+        self.stageChanged.emit("Condition ACCEPTABLE: recording pressure")
+        self.last_acceptable_pressure = self.candidate_pressure
+        if self.initial_state == 'TOO_LOW':
+            if self.coarse_search:
+                print("Still increasing by coarse step")
+                self.candidate_pressure += self.coarse_step
+            # If the transition has already been found and a new acceptable pressure is found
+            # end the calibration process
+            elif self.transition_found:
+                print("Final condition found")
+                self.emitDropletDetected()
+            else:
+                print("SHOULD NOT OCCUR - increase by fine step")
+                self.candidate_pressure += self.fine_step
+        else:
+            if self.coarse_search:
+                print("--- Transition found, now increasing pressure")
+                self.transition_found = True
+                self.coarse_search = False
+                self.candidate_pressure = self.candidate_pressure + self.fine_step
+            else:
+                print("Back tracking - increase by fine step")
+                self.candidate_pressure += self.fine_step
+        self.emitContinueSearch()
+
+    def handle_too_high(self):
+        self.stageChanged.emit("Condition TOO_HIGH: decreasing pressure")
+        if self.initial_state == 'TOO_HIGH':
+            if self.coarse_search:
+                print("Still too high, decreasing pressure coarsely")
+                self.candidate_pressure -= self.coarse_step
+            # Indicates that it has already found the transition and so it should revert to the last 
+            # acceptable pressure
+            elif self.transition_found:
+                print("Final condition found, new unacceptable pressure")
+                if self.last_acceptable_pressure is not None:
+                    print("Last acceptable pressure found")
+                    self.final_condition_found = True
+                    self.candidate_pressure = self.last_acceptable_pressure
+                else:
+                    print("No last acceptable pressure found")
+                    self.candidate_pressure -= self.fine_step
+                
+            else:
+                print("SHOULD NOT OCCUR - decrease by fine step")
+                self.candidate_pressure -= self.fine_step
+        else:
+            if self.coarse_search:
+                print("--- Transition found, now decreasing pressure")
+                self.transition_found = True
+                self.coarse_search = False
+                self.candidate_pressure = self.candidate_pressure - self.fine_step
+
+            else:
+                print("Still decreasing looking for acceptable condition")
+                self.candidate_pressure -= self.fine_step
+        self.emitContinueSearch()
+
+    dispatch = {
+        "TOO_LOW": handle_too_low,
+        "ACCEPTABLE": handle_acceptable,
+        "TOO_HIGH": handle_too_high,
+    }
+
+    @Slot()
+    def onAnalyze(self):
+        self.stageChanged.emit("Analyzing droplet image")
+        droplets, nozzle_area, image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center)
+        droplet_count = len(droplets) if droplets is not None else 0
+        self.measurements.append((self.candidate_pressure, droplet_count, nozzle_area))
+        self.presentImageSignal.emit(image)
+        self.stageChanged.emit(f"Pressure: {self.candidate_pressure:.2f}, Droplet count: {droplet_count}, Nozzle area: {nozzle_area}")
+        print(f"Counter: {self.counter}, Pressure: {self.candidate_pressure:.2f}, Droplet count: {droplet_count}, Nozzle area: {nozzle_area}")
+        if self.final_condition_found:
+            self.stageChanged.emit("Final condition found")
+            print("Final condition found")
+            self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
+            self.emitDropletDetected()
+            return
+
+        outcome = self.evaluate_condition(droplet_count, nozzle_area, self.nozzle_droplet_threshold)
+        
+        if self.counter == 0:
+            if outcome == 'TOO_HIGH':
+                self.initial_state = 'TOO_HIGH'
+                print('--- Initial state: TOO_HIGH ---')
+            else:
+                self.initial_state = 'TOO_LOW'
+                print('--- Initial state: TOO_LOW ---')
+        
+        self.dispatch[outcome](self)
+        self.counter += 1
+
+    @Slot()
+    def onCalibrationCompleted(self):
+        self.stageChanged.emit("Pressure calibration complete")
+        self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
+        self.calibrationCompleted.emit()
+
+    def handleBackgroundCaptured(self, image):
+        self.background_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def handleNozzleCaptured(self, image):
+        self.nozzle_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def handleDropletCaptured(self, image):
+        self.droplet_image = image
+        self.calibration_manager.emitCaptureCompleted()
+
+    def emitNozzleDetected(self):
+        self.nozzleDetected.emit()
+
+    def emitContinueSearch(self):
+        self.continueSearch.emit()
+
+    def emitDropletDetected(self):
+        self.dropletDetected.emit()
+
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
@@ -1041,12 +1454,14 @@ class DropletCameraModel(QObject):
 
         return droplet_results, annotated
 
-    def identify_nozzle(self, background,image):
-
+    def calc_diff_image(self,image, background):
+        """
+        Compute the difference image between the image and the background.
+        """
         if image is None:
             print('Image is None')
-            return None, None, image
-        
+            return None, None
+
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         if background is None:
             print('Background image is None')
@@ -1059,6 +1474,14 @@ class DropletCameraModel(QObject):
             # Compute the absolute difference between the background and the image
             diff = cv2.absdiff(background_gray, image_gray)
 
+        return image_gray,diff
+
+    def identify_nozzle(self, background,image):
+
+        image_gray, diff = self.calc_diff_image(image, background)
+        if diff is None:
+            return None, None, image
+        
         # Apply a threshold to the difference image
         _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
 
@@ -1113,15 +1536,9 @@ class DropletCameraModel(QObject):
         """
         Computes the area of the bounding rectangle around the largest contour in the image.
         """
-        if image is None:
-            return None,image
-
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        if background is None:
-            diff = cv2.bitwise_not(gray)
-        else:
-            background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
-            diff = cv2.absdiff(background_gray, gray)
+        image_gray, diff = self.calc_diff_image(image, background)
+        if diff is None:
+            return None, image
 
         _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1137,6 +1554,66 @@ class DropletCameraModel(QObject):
         cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
         cv2.putText(image, f'Area: {w*h}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         return w * h, image
+    
+    def identify_droplets(self,image, background, nozzle_center,min_area=1000):
+        """
+        Identifies the number of droplets and their locations in the image.
+        - Uses the background image to compute the difference image.
+        - Uses the nozzle to identify what contours are still in contact with the nozzle.
+        - Excludes all contours that are above the nozzle as these are reflections in the image.
+        """
+
+        image_gray, diff = self.calc_diff_image(image, background)
+        if diff is None:
+            print('Difference image is None')
+            return None, None, None
+
+        # Apply a threshold to the difference image
+        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Check if there are any contours
+        if len(contours) == 0:
+            print('No contours detected')
+            return None, None, None
+
+        # Identify the droplets
+        droplets = []
+        large_contours = [contour for contour in contours if cv2.contourArea(contour) > min_area]
+        cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
+        
+        nozzle_droplet_area = 0
+        for contour in large_contours:
+            x, y, w, h = cv2.boundingRect(contour)
+
+            # Check if the nozzle center is inside the bounding box
+            if x < nozzle_center[0] < x+w and y < nozzle_center[1] < y+h:
+                # print('Nozzle is inside the bounding box')
+                cv2.circle(image, nozzle_center, 10, (255, 0, 0), -1)
+                # Calculate the area of the bounding box
+                area = w * h
+                # Add text to the bottom right of the bounding box
+                cv2.putText(image, f'Area: {area}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                nozzle_droplet_area = max(nozzle_droplet_area, area)
+                continue
+
+            # Check if the contour is above the nozzle
+            if y < nozzle_center[1]:
+                print('Contour is above the nozzle')
+                continue
+            droplet_center = (x + w//2, y + h//2)
+            droplets.append(droplet_center)
+
+            # Draw the bounding box
+            cv2.rectangle(image, (x, y), (x+w, y+h), (0, 0, 255), 2)
+            cv2.circle(image, droplet_center, 10, (0, 0, 255), -1)
+
+            # Add the droplet count to the top left of the image
+            cv2.putText(image, f'Droplet count: {len(droplets)}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        return droplets, nozzle_droplet_area, image
 
     def save_frame(self):
         if self.latest_frame is not None:
@@ -1203,6 +1680,10 @@ class DropletCameraModel(QObject):
         delta_cy = target[1] - current[1]
         steps_x, steps_y, steps_z = self.compute_stage_move(delta_cx, delta_cy)
         return (steps_x, steps_y, steps_z)
+
+    def calculate_move_to_top_center(self, current,offset=50):
+        target = (self.image_width//2, offset)
+        return self.calculate_move_to_target(current, target)
 
 
 def find_key_points(columns, line_values):
