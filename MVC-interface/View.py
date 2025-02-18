@@ -972,7 +972,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
 
         self.setWindowTitle("Droplet Imaging")
-        self.resize(1200, 900)
+        self.resize(1200, 1000)
 
         self.layout = QtWidgets.QHBoxLayout()
 
@@ -1191,6 +1191,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_nozzle_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to move the machine to position the nozzle in the center of the screen
+        self.center_nozzle_button = QtWidgets.QPushButton("Center Nozzle")
+        self.center_nozzle_button.clicked.connect(self.center_nozzle)
+        self.button_layout.addWidget(self.center_nozzle_button, row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger the nozzle focus calibration
         self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
         self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
@@ -1215,6 +1221,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger the droplet search calibration
+        self.calibrate_search_button = QtWidgets.QPushButton("Calibrate Droplet Search")
+        self.calibrate_search_button.clicked.connect(self.toggle_start_search_calibration)
+        self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
+        row += 1
+
         # Add a label that updates with the state of the calibration
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         self.button_layout.addWidget(self.stageLabel, row, 0, 1, 2)
@@ -1226,11 +1238,62 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
         self.layout.addLayout(self.button_container_layout)
 
+        # Add vertical layout for the image and analysis below it
+        self.analysis_layout = QtWidgets.QVBoxLayout()
+
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setFixedHeight(480)
         self.image_label.setFixedWidth(640)
-        self.layout.addWidget(self.image_label)
+        self.analysis_layout.addWidget(self.image_label)
+
+        # Create a container widget for the motor position labels.
+        self.diff_widget = QWidget()
+        # Create a grid layout for the diff labels and set its alignment to top left.
+        self.diff_layout = QGridLayout(self.diff_widget)
+        self.diff_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+                # Add column headers
+        motor_label = QLabel('Motor')
+        current_label = QLabel('Current')
+        target_label = QLabel('Diff')
+        motor_label.setAlignment(Qt.AlignCenter)
+        current_label.setAlignment(Qt.AlignCenter)
+        target_label.setAlignment(Qt.AlignCenter)
+
+        self.diff_layout.addWidget(motor_label, 0, 0)
+        self.diff_layout.addWidget(current_label, 0, 1)
+        self.diff_layout.addWidget(target_label, 0, 2)
+
+        # Labels to display motor positions.
+        self.diff_labels = {
+            'X': {'current': QLabel('0'), 'diff': QLabel('0')},
+            'Y': {'current': QLabel('0'), 'diff': QLabel('0')},
+            'Z': {'current': QLabel('0'), 'diff': QLabel('0')},
+        }
+
+        row = 1
+        for motor, positions in self.diff_labels.items():
+            # Create a fixed-size motor label.
+            motor_label = QLabel(motor)
+            motor_label.setAlignment(Qt.AlignCenter)
+            motor_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            # Set fixed size policies for current and diff labels.
+            positions['current'].setAlignment(Qt.AlignCenter)
+            positions['current'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            positions['diff'].setAlignment(Qt.AlignCenter)
+            positions['diff'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            
+            self.diff_layout.addWidget(motor_label, row, 0)
+            self.diff_layout.addWidget(positions['current'], row, 1)
+            self.diff_layout.addWidget(positions['diff'], row, 2)
+            row += 1
+
+        # Add the diff_widget (which now contains the grid of labels) to the analysis layout.
+        self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
+
+        # Finally, add the analysis_layout to your main layout.
+        self.layout.addLayout(self.analysis_layout)
 
         self.setLayout(self.layout)
 
@@ -1255,6 +1318,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
+
+        self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
 
         self.set_exposure_time(self.droplet_camera_model.exposure_time)
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
@@ -1602,6 +1667,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
         self.calibrate_pressure_button.setText("Calibrate Pressure")
         self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
+        self.calibrate_search_button.setText("Calibrate Droplet Search")
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -1668,11 +1734,35 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_trajectory_button.setText("Stop Calibration")
             self.controller.start_trajectory_calibration()
 
+    def toggle_start_search_calibration(self):
+        """
+        Toggles whether the droplet search calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_search_button.setText("Calibrate Droplet Search")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_search_button.setText("Stop Calibration")
+            self.controller.start_droplet_search_calibration()
+
     def update_stage(self, stage):
         """
         Updates the stage label based on the calibration stage.
         """
         self.stageLabel.setText(f"Status: {stage}")
+
+    def center_nozzle(self):
+        self.controller.center_nozzle_in_camera(position='top')
+
+    def update_position_diffs(self, current_dict, position_diff_dict):
+        """
+        Updates the current position and position difference labels.
+        """
+        for motor, positions in self.diff_labels.items():
+            positions['current'].setText(str(current_dict[motor]))
+            positions['diff'].setText(str(position_diff_dict[motor]))
 
 
     def update_image(self):

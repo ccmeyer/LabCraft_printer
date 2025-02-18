@@ -299,53 +299,57 @@ class Controller(QObject):
         self.expected_position['Z'] += z
         return True
 
-    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None,override=False):
+    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, override=False):
         """Set the absolute coordinates for the machine."""
-        #print(f"Setting absolute coordinates: x={x}, y={y}, z={z}")
-        #print(f"Expected position: {self.expected_position}")
-
+        new_position = {'X': x, 'Y': y, 'Z': z}
+        # Check for collisions if not overriding.
         if not override:
-            if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': z}):
-                print('---Collision detected---')
+            if self.check_collision(self.expected_position, new_position):
+                print('Collision detected')
                 return False
+
+        commands = []
+        current = self.expected_position
+
+        # Determine the order of moves based on Z change.
+        if current['Z'] != z:
+            if z < current['Z']:
+                # Moving up: move Z first, then Y, then X.
+                if z != current['Z']:
+                    commands.append(('Z', z))
+                if y != current['Y']:
+                    commands.append(('Y', y))
+                if x != current['X']:
+                    commands.append(('X', x))
             else:
-                print('Safe')
-        
-        if self.expected_position['Z'] != z:
-            print('Z changed')
-            # Move up first if needed
-            if z < self.expected_position['Z']:
-                print('Moving up first')
-                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
-                # Move Y first if it's different
-                if self.expected_position['Y'] != y:
-                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
-                # Move X if it's different
-                if self.expected_position['X'] != x:
-                    self.machine.set_absolute_X(x, manual=manual, handler=handler)
-            else:
-                print('Moving down last')
-                # Move Y first if it's different
-                if self.expected_position['Y'] != y:
-                    self.machine.set_absolute_Y(y, manual=manual, handler=handler)
-                # Move X if it's different
-                if self.expected_position['X'] != x:
-                    self.machine.set_absolute_X(x, manual=manual, handler=handler)
-                # Finally, move Z down if needed
-                self.machine.set_absolute_Z(z, manual=manual, handler=handler)
+                # Moving down: move Y first, then X, then Z.
+                if y != current['Y']:
+                    commands.append(('Y', y))
+                if x != current['X']:
+                    commands.append(('X', x))
+                if z != current['Z']:
+                    commands.append(('Z', z))
         else:
-            print('Z did not change')
-            # If Z doesn't need to change, move X and Y as needed
-            if self.expected_position['Y'] != y:
-                self.machine.set_absolute_Y(y, manual=manual, handler=handler)
-            if self.expected_position['X'] != x:
-                self.machine.set_absolute_X(x, manual=manual, handler=handler)
+            # Z is unchanged, so only X and Y need updating.
+            if y != current['Y']:
+                commands.append(('Y', y))
+            if x != current['X']:
+                commands.append(('X', x))
 
-        # Update the expected position
+        # Execute the commands in order, attaching the callback only to the last one.
+        for i, (axis, value) in enumerate(commands):
+            is_last = (i == len(commands) - 1)
+            current_handler = handler if is_last else None
+            if axis == 'X':
+                self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
+            elif axis == 'Y':
+                self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
+            elif axis == 'Z':
+                self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+
+        # Update the expected position.
         self.update_expected_position(x=x, y=y, z=z)
-
         return True
-
 
     def set_relative_print_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -956,6 +960,10 @@ class Controller(QObject):
         # Tell the Model to start the trajectory calibration.
         self.model.calibration_manager.start_trajectory_calibration()
 
+    def start_droplet_search_calibration(self):
+        # Tell the Model to start the droplet search calibration.
+        self.model.calibration_manager.start_droplet_search_calibration()
+
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
         self.model.calibration_manager.stop()
@@ -965,4 +973,21 @@ class Controller(QObject):
 
     def stop_flash(self):
         self.machine.stop_flash()
+
+    def center_nozzle_in_camera(self,position=None,callback=None):
+        centered_nozzle_position = self.model.calibration_manager.get_nozzle_center()
+        # Create a copy of the centered nozzle position
+        target_position = centered_nozzle_position.copy()
+        if target_position is None:
+            print('Nozzle center not found')
+            return
+        if position == 'top':
+            current = self.model.droplet_camera_model.get_center_in_pixels()
+            move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=50)
+            dX, dY, dZ = move_vector
+            target_position['X'] += dX
+            target_position['Y'] += dY
+            target_position['Z'] += dZ
+
+        self.set_absolute_coordinates(target_position['X'],target_position['Y'],target_position['Z'],handler=callback)
 
