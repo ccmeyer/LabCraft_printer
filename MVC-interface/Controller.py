@@ -42,6 +42,7 @@ class Controller(QObject):
         
         self.model.calibration_manager.captureImageRequested.connect(self.handle_capture_request)
         self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
+        self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
         # self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
@@ -892,6 +893,15 @@ class Controller(QObject):
         # Perform the move command then call the callback.
         dX, dY, dZ = move_vector
         self.set_relative_coordinates(dX, dY, dZ, manual=False,handler=callback)
+        print('Controller: Move request handled')
+
+    def handle_absolute_move_request(self, target_position, callback):
+        # Perform the move command then call the callback.
+        if type(target_position) == tuple or type(target_position) == list:
+            target = {'X': target_position[0], 'Y': target_position[1], 'Z': target_position[2]}
+        else:
+            target = target_position.copy()
+        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=False,handler=callback)
         print('Controller: Move request handled')
 
     # def handle_droplet_change_request(self, num_droplets,callback):
