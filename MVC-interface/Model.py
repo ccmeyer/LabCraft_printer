@@ -392,6 +392,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
 
         # Define states
+        self.state_initial_position = QState()
         self.state_prepare_background = QState()
         self.state_capture_background = QState()
         self.state_prepare_droplet = QState()
@@ -400,6 +401,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_final = QFinalState()
 
         # Connect on-entry actions
+        self.state_initial_position.entered.connect(self.onInitialPosition)
         self.state_prepare_background.entered.connect(self.onPrepareBackground)
         self.state_capture_background.entered.connect(self.onCaptureBackground)
         self.state_prepare_droplet.entered.connect(self.onPrepareDroplet)
@@ -408,6 +410,14 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
         # Create transitions using QSignalTransition:
+
+        # Transition: Move to initial position -> prepare_background
+        t0 = QSignalTransition()
+        t0.setSenderObject(self.calibration_manager)
+        t0.setSignal(b"2moveCompleted()")  # Use the normalized signature here.
+        t0.setTargetState(self.state_prepare_background)
+        self.state_initial_position.addTransition(t0)
+
         # Transition: prepare_background -> capture_background
         t1 = QSignalTransition() 
         t1.setSenderObject(self.calibration_manager)
@@ -452,6 +462,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze.addTransition(t6)
 
         # Add states to the state machine
+        self.state_machine.addState(self.state_initial_position)
         self.state_machine.addState(self.state_prepare_background)
         self.state_machine.addState(self.state_capture_background)
         self.state_machine.addState(self.state_prepare_droplet)
@@ -460,7 +471,16 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.addState(self.state_final)
 
         # Set the initial state
-        self.state_machine.setInitialState(self.state_prepare_background)
+        self.state_machine.setInitialState(self.state_initial_position)
+
+    @Slot()
+    def onInitialPosition(self):
+        self.stageChanged.emit("Moving to initial position")
+        # Get the location of the camera in the location model
+        initial_position = self.model.location_model.get_location_dict('camera')
+        move_vector = (initial_position['X'], initial_position['Y'], initial_position['Z'])
+        self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+
 
     @Slot()
     def onPrepareBackground(self):
@@ -468,6 +488,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Request to change droplet settings (0 droplets). The callback emits a signal.
         settings = {
             "num_droplets": 0,
+            "flash_delay": 3800
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
