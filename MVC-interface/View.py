@@ -1227,6 +1227,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger all calibrations
+        self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
+        self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
+        self.button_layout.addWidget(self.calibrate_all_button, row, 0, 1, 2)
+        row += 1
+
         # Add a label that updates with the state of the calibration
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         self.button_layout.addWidget(self.stageLabel, row, 0, 1, 2)
@@ -1317,6 +1323,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Connect the model's calibration stage signal to update the UI.
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
+        self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
 
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
@@ -1650,12 +1657,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.update_stage("Calibration Completed")
         self.reset_calibration_buttons()
 
+    def on_calibration_queue_completed(self):
+        """
+        Called when the calibration queue is completed.
+        """
+        self.update_stage("Calibration Queue Completed")
+        self.reset_calibration_buttons()
+        self.calibrate_all_button.setText("Calibrate All")
+
     def on_calibration_error(self, error_message):
         """
         Called when the calibration process encounters an error.
         """
         self.update_stage("Calibration Error")
         self.reset_calibration_buttons()
+        self.calibrate_all_button.setText("Calibrate All")
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
 
     def reset_calibration_buttons(self):
@@ -1746,6 +1762,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_search_button.setText("Stop Calibration")
             self.controller.start_droplet_search_calibration()
+
+    def toggle_start_all_calibration(self):
+        """
+        Toggles whether all calibrations should be started.
+        """
+        if len(self.model.calibration_manager.calibration_queue) > 0 or self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_all_button.setText("Calibrate All")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_all_button.setText("Stop Calibration")
+            self.controller.start_all_calibrations()
 
     def update_stage(self, stage):
         """

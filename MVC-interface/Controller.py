@@ -974,6 +974,10 @@ class Controller(QObject):
         # Tell the Model to start the droplet search calibration.
         self.model.calibration_manager.start_droplet_search_calibration()
 
+    def start_all_calibrations(self):
+        # Tell the Model to start all calibrations.
+        self.model.calibration_manager.add_all_calibrations_to_queue()
+
     def stop_calibration(self):
         # Tell the Model to stop the calibration.
         self.model.calibration_manager.stop()

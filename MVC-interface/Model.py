@@ -40,6 +40,7 @@ class CalibrationManager(QObject):
     # Signals to indicate overall process completion or failure.
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
+    calibrationQueueCompleted = Signal()
 
     # Signal to update the presented image in the view.
     analyzedImageUpdated = Signal(object)
@@ -47,26 +48,23 @@ class CalibrationManager(QObject):
     # Signals used for calibration actions.
     captureImageRequested = Signal(object)   # expects a callback function
     moveRequested = Signal(object, object)     # expects a move_vector and a callback
-    moveAbsoluteRequested = Signal(object, object)     # expects a move_vector with absolute coordinates and a callback
-    changeSettingsRequested = Signal(dict, object) # expects settings and a callback
-    # dropletChangeRequested = Signal(int, object) # expects number of droplets and a callback
-    # flashDelayChangeRequested = Signal(int, object) # expects flash delay and a callback
+    moveAbsoluteRequested = Signal(object, object)  # expects a move_vector with absolute coordinates and a callback
+    changeSettingsRequested = Signal(dict, object)  # expects settings and a callback
 
     # These signals will be used to drive the state machine transitions.
-    # dropletChangeCompleted = Signal()
     settingsChangeCompleted = Signal()
     captureCompleted = Signal()
     moveCompleted = Signal()
 
-    position_diff_dict_signal = Signal(dict,dict)
+    position_diff_dict_signal = Signal(dict, dict)
     
-    def __init__(self,model, parent=None):
+    def __init__(self, model, parent=None):
         super().__init__(parent)
         self.activeCalibration = None
         self.model = model
         self.data = {}
 
-        # Variables to store data across the calibration process.
+        # Variables to store calibration data across the process.
         self.background_image = None
         self.nozzle_center = None
         self.nozzle_center_image_position = None
@@ -75,6 +73,9 @@ class CalibrationManager(QObject):
         self.intermediate_droplet_position = None
 
         self.calibration_file_path = None
+
+        # New: a queue to hold calibration process instances.
+        self.calibration_queue = []
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
 
@@ -90,7 +91,7 @@ class CalibrationManager(QObject):
     def save_calibration_data(self, file_path):
         """Save the calibration data as a JSON file."""
         with open(file_path, 'w') as file:
-            json.dump(self.data, file, indent=4,default=numpy_encoder)
+            json.dump(self.data, file, indent=4, default=numpy_encoder)
 
     def load_calibration_data(self, file_path):
         """Load the calibration data from a JSON file."""
@@ -101,38 +102,79 @@ class CalibrationManager(QObject):
     def remove_all_calibrations(self):
         """Removes all measurements."""
         self.data = {}
-        self.save_calibration_data(self.calibration_file_path)
+        if self.calibration_file_path:
+            self.save_calibration_data(self.calibration_file_path)
 
+    # --- Methods to start individual calibration processes ---
     def start_nozzle_calibration(self):
-        # Create and start the nozzle calibration process.
         self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_nozzle_focus_calibration(self):
-        # Create and start the nozzle focus calibration process.
         self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_droplet_emergence_calibration(self):
-        # Create and start the droplet emergence calibration process.
         self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_pressure_calibration(self):
-        # Create and start the pressure calibration process.
         self.activeCalibration = PressureCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_trajectory_calibration(self):
-        # Create and start the trajectory calibration process.
         self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
     def start_droplet_search_calibration(self):
-        # Create and start the droplet search calibration process.
         self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
+    # --- Queue-related methods ---
+    def add_all_calibrations_to_queue(self):
+        self.add_calibration_to_queue('nozzle_position')
+        self.add_calibration_to_queue('nozzle_focus')
+        self.add_calibration_to_queue('droplet_emergence')
+        self.add_calibration_to_queue('pressure')
+        self.add_calibration_to_queue('trajectory')
+        self.add_calibration_to_queue('droplet_search')
+
+        self.start_calibration_queue()
+
+    def add_calibration_to_queue(self, calibration_name):
+        """Add a calibration process instance to the queue."""
+        self.calibration_queue.append(calibration_name)
+
+    def add_calibration_queue(self, calibration_list):
+        """Add a list of calibration process names to the queue."""
+        self.calibration_queue.extend(calibration_list)
+
+    def clear_calibration_queue(self):
+        """Clear the calibration queue."""
+        self.calibration_queue = []
+
+    def start_calibration_queue(self):
+        """Start processing the queue sequentially."""
+        if len(self.calibration_queue) > 0:
+            next_calibration = self.calibration_queue.pop(0)
+            if next_calibration == 'nozzle_position':
+                self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
+            elif next_calibration == 'nozzle_focus':
+                self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
+            elif next_calibration == 'droplet_emergence':
+                self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
+            elif next_calibration == 'pressure':
+                self.activeCalibration = PressureCalibrationProcess(self, self.model)
+            elif next_calibration == 'trajectory':
+                self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
+            elif next_calibration == 'droplet_search':
+                self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
+            self.start_active_calibration()
+        else:
+            self.calibrationStageChanged.emit("No calibrations in queue.")
+            self.calibrationQueueCompleted.emit()
+
+    # --- Start active calibration (used by individual start functions and queue processing) ---
     def start_active_calibration(self):
         if self.activeCalibration is not None:
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
@@ -146,6 +188,8 @@ class CalibrationManager(QObject):
         if self.activeCalibration is not None:
             self.activeCalibration.stop()
             self.activeCalibration = None
+        if len(self.calibration_queue) > 0:
+            self.clear_calibration_queue()
         self.calibrationStageChanged.emit("Calibration stopped")
         self.calibrationError.emit("Calibration terminated by user")
 
@@ -171,51 +215,44 @@ class CalibrationManager(QObject):
 
     # Methods to retrieve calibration data.
     def get_centered_nozzle_position(self):
-        """ Goes through the data dictionary to retrieve the coordinates of the nozzle"""
         if "nozzle_position" in self.data:
             position_data = self.data["nozzle_position"]
-            # Take the result from the last entry
             return position_data[-1]["result"]
         else:
-            # If no nozzle calibration is available, end the process and emit a warning.
             print("No nozzle position calibration available")
             return None
         
     def get_emergence_time(self):
-        """ Goes through the data dictionary to retrieve the flash delay for droplet emergence"""
         if "droplet_emergence" in self.data:
             emergence_data = self.data["droplet_emergence"]
-            # Take the result from the last entry
             return emergence_data[-1]["result"]["flash_delay"]
         else:
-            # If no droplet emergence calibration is available, end the process and emit a warning.
             print("No droplet emergence calibration available")
             return None
         
     def is_in_initial_position(self):
-        """ Goes through the data dictionary to check if the nozzle is in the initial position"""
         if "pressure_calibration" in self.data:
             return True
         else:
             print("Not in initial position")
             return False
         
-    def set_background_image(self,background):
+    def set_background_image(self, background):
         self.background_image = background
 
-    def set_nozzle_center(self,center):
+    def set_nozzle_center(self, center):
         self.nozzle_center = center
 
-    def set_nozzle_center_image_position(self,center):
+    def set_nozzle_center_image_position(self, center):
         self.nozzle_center_image_position = center
 
-    def set_trajectory_vector(self,vector):
+    def set_trajectory_vector(self, vector):
         self.droplet_trajectory_vector = vector
 
-    def set_min_start_delay(self,delay):
+    def set_min_start_delay(self, delay):
         self.min_start_delay = delay
 
-    def set_intermediate_droplet_position(self,position):
+    def set_intermediate_droplet_position(self, position):
         self.intermediate_droplet_position = position
 
     def get_background_image(self):
@@ -246,9 +283,9 @@ class CalibrationManager(QObject):
             for key in diff_dict:
                 diff_dict[key] = 0
         
-        self.position_diff_dict_signal.emit(current_dict,diff_dict)
+        self.position_diff_dict_signal.emit(current_dict, diff_dict)
 
-    # Helper methods to be used as callbacks in the QStateMachine transitions.
+    # Helper methods for callbacks in QStateMachine transitions.
     @Slot()
     def emitSettingsChangeCompleted(self):
         self.settingsChangeCompleted.emit()
@@ -266,22 +303,27 @@ class CalibrationManager(QObject):
     @Slot()
     def onCalibrationCompleted(self):
         self.calibrationStageChanged.emit("Calibration completed successfully")
-        # Optionally, do cleanup or reset activeCalibration.
         self.activeCalibration = None
         self.calibrationCompleted.emit()
+        # If there are more calibrations in the queue, start the next one.
+        if len(self.calibration_queue) > 0:
+            self.calibrationStageChanged.emit("Starting next calibration in queue...")
+            self.start_calibration_queue()
+        else:
+            self.calibrationQueueCompleted.emit()
 
     @Slot(str)
     def onCalibrationError(self, error_message):
         self.calibrationStageChanged.emit("Calibration error: " + error_message)
-        # Optionally, do cleanup or reset activeCalibration.
         self.activeCalibration = None
         self.calibrationError.emit(error_message)
+        # Stop the queue on error.
+        if len(self.calibration_queue) > 0:
+            self.calibrationStageChanged.emit("Calibration queue stopped due to error")
+            self.clear_calibration_queue()
 
     @Slot(dict)
     def onCalibrationDataUpdated(self, data):
-        # data should be structured as {measurements:{}, result:{}}
-        # Append new run data to existing list if present.
-
         phase = self.activeCalibration.phase_name
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         data["timestamp"] = timestamp
@@ -291,8 +333,6 @@ class CalibrationManager(QObject):
             self.data[phase].append(data)
         else:
             self.data[phase] = [data]
-
-        # Save to file if a path is set.
         if self.calibration_file_path:
             self.save_calibration_data(self.calibration_file_path)
 
@@ -523,6 +563,8 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.best_X = None            # X position corresponding to the best focus.
         self.in_fine_search = False   # Flag to indicate fine search mode.
         
+        self.final_nozzle_position = None   # Store the final nozzle position.
+
         self.timeout_counter = 0              # Number of steps taken so far.   
         self.max_timeout = 5       # Maximum number of steps before quitting the calibration.
         
@@ -623,6 +665,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit("Peak reached; moving to best focus position")
             self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
             self.calibrationDataUpdated.emit({'measurements': self.focus_values, 'result': {'best_focus': self.best_focus, 'best_X': self.best_X}})
+            self.final_nozzle_position = {"X": self.best_X, "Y": Y_pos, "Z": Z_pos}
             self.nozzleFocused.emit()
             return
 
@@ -641,6 +684,11 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     def handleDropletCaptured(self, image):
         self.droplet_image = image
         self.calibration_manager.emitCaptureCompleted()
+    
+    def onCalibrationCompleted(self):
+        """Emit the completion signal."""
+        self.calibration_manager.set_nozzle_center(self.final_nozzle_position)
+        self.calibrationCompleted.emit()
 
 class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     # Custom signals for state transitions.
@@ -666,8 +714,6 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
         # Store all measurements, includes the delay and the computed area.
         self.measurements = []
-
-
 
         # Define states.
         self.state_prepare_background = QState()
@@ -980,17 +1026,31 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onInitialPosition(self):
         self.stageChanged.emit("Moving to initial position")
-        in_initial_position = self.calibration_manager.is_in_initial_position()
-        if in_initial_position:
-            self.calibration_manager.emitMoveCompleted()
-        else:
-            self.nozzle_position = self.calibration_manager.get_centered_nozzle_position()
-            if self.nozzle_position is None:
-                self.calibrationError.emit("No nozzle position calibration available")
-                print("No nozzle position calibration available")
-                return
-            move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(self.nozzle_position['center'])
-            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        centered_nozzle_position = self.calibration_manager.get_nozzle_center()
+        # Create a copy of the centered nozzle position
+        target_position = centered_nozzle_position.copy()
+        if target_position is None:
+            print('Nozzle center not found')
+            self.calibrationError.emit("Nozzle center not found")
+            return
+
+        current = self.model.droplet_camera_model.get_center_in_pixels()
+        move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=50)
+        dX, dY, dZ = move_vector
+        target_position['X'] += dX
+        target_position['Y'] += dY
+        target_position['Z'] += dZ
+        absolute_move_vector = (target_position['X'], target_position['Y'],target_position['Z'])
+
+        self.calibration_manager.moveAbsoluteRequested.emit(absolute_move_vector, self.calibration_manager.emitMoveCompleted)
+
+        # self.nozzle_position = self.calibration_manager.get_centered_nozzle_position()
+        # if self.nozzle_position is None:
+        #     self.calibrationError.emit("No nozzle position calibration available")
+        #     print("No nozzle position calibration available")
+        #     return
+        # move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(self.nozzle_position['center'])
+        # self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
 
     @Slot()
     def onPrepareBackground(self):
@@ -1431,6 +1491,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # Tolerance for centering the droplet (in pixels).
         self.center_tolerance = 100  
         
+        # Variables for focus adjustment.
+        self.focus_threshold = 5000000  # The focus value must exceed this number
+        self.focus_step_size = 2
+        self.focus_direction = 1  # 1 for increasing focus, -1 for decreasing.
+        self.direction_counter = 0  # Counter to track focus direction changes.
+        self.last_focus = None
+
         # Measurements for trajectory (if desired, could store focus values, droplet center, etc.).
         self.measurements = []  # e.g., list of (flash_delay, droplet_center, focus)
 
@@ -1537,6 +1604,12 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t9.setSignal(b"2continueCharacterization()")
         t9.setTargetState(self.state_capture_droplet)
         self.state_characterization.addTransition(t9)
+        # If the droplet is not in focus, move the machine and recapture the droplet image.
+        t10 = QSignalTransition()
+        t10.setSenderObject(self.calibration_manager)
+        t10.setSignal(b"2moveCompleted()")
+        t10.setTargetState(self.state_capture_droplet)
+        self.state_characterization.addTransition(t10)
 
         # 8. In analyze characterization state:
         # If the droplets were found to be circular, emit dropletCharacterized to transition to final state.
@@ -1602,13 +1675,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onMoveToTarget(self):
         self.stageChanged.emit("Moving to target position based on trajectory")
-        # Calculate target using trajectory info.
-        # target_pos = self.target_position
-        # Command the machine to move to target position.
-        # Switches the current and target positions to calculate the move vector.
-
         move_vector = self.target_position
-        # move_vector = self.model.droplet_camera_model.calculate_move_to_target(target_pos, self.nozzle_center)
         print(f"Move vector: {move_vector}")
         self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
 
@@ -1698,15 +1765,35 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             return
         print(f"{self.image_counter}:Droplet characteristics: {droplet_characteristics}")
         self.presentImageSignal.emit(annotated_image)
-        self.circularity_values.append(droplet_characteristics["circularity_ellipse"])
-        self.droplet_positions.append(droplet_characteristics["center"])
-        self.droplet_focus.append(droplet_characteristics["focus"])
-        self.droplet_volumes.append(droplet_characteristics["volume"])
-        self.image_counter += 1
-        if self.image_counter < self.num_images:
-            self.emitContinueCharacterization()
+
+        if droplet_characteristics['focus'] < self.focus_threshold:
+            if self.last_focus is not None:
+                if droplet_characteristics['focus'] < self.last_focus:
+                    self.focus_direction *= -1
+                    self.direction_counter += 1
+                    if self.direction_counter > 10:
+                        print("Focus direction changed too many times, aborting")
+                        self.calibrationError.emit("Unable to focus on the droplet")
+                        return
+                    elif self.direction_counter > 2:
+                        print("Focus direction changed too many times, increasing step size")
+                        self.focus_step_size = 4
+            self.last_focus = droplet_characteristics['focus']
+            move_vector = (self.focus_step_size * self.focus_direction, 0, 0)
+            self.stageChanged.emit(f"Focus too low: {droplet_characteristics['focus']}, moving by {move_vector}")
+            print(f"Focus too low: {droplet_characteristics['focus']}")
+            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
         else:
-            self.emitInitiateAnalyzeCharacterization()
+            self.focus_step_size = 2
+            self.circularity_values.append(droplet_characteristics["circularity_ellipse"])
+            self.droplet_positions.append(droplet_characteristics["center"])
+            self.droplet_focus.append(droplet_characteristics["focus"])
+            self.droplet_volumes.append(droplet_characteristics["volume"])
+            self.image_counter += 1
+            if self.image_counter < self.num_images - 1:
+                self.emitContinueCharacterization()
+            else:
+                self.emitInitiateAnalyzeCharacterization()
 
     @Slot()
     def onAnalyzeCharacterization(self):
@@ -1736,11 +1823,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def onCalibrationCompleted(self):
         # After centering, perform final trajectory analysis.
         self.stageChanged.emit("Trajectory calibration complete")
-        # Compute the mean droplet position.
-        measurements = self.measurements[1:]  # Exclude the first measurement.
-        centers = [m["center"] for m in measurements]
-        mean_center = tuple(np.mean(centers, axis=0).astype(int))
-        std_center = np.std(centers, axis=0).tolist()
+
+        mean_center = tuple(np.mean(self.droplet_positions, axis=0).astype(int))
+        std_center = np.std(self.droplet_positions, axis=0).tolist()
         # Compute trajectory vector from nozzle to mean droplet position.
         machine_position = self.model.machine_model.get_current_position_dict()
         droplet_machine_position = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(mean_center, machine_position)
@@ -1751,7 +1836,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         final_image = self.annotate_final_image(mean_center)
         self.presentImageSignal.emit(final_image)
         results = {
-            "droplet_positions": centers,
+            "droplet_positions": self.droplet_positions,
             "mean_position": droplet_machine_position,
             "std_dev": std_center,
             "trajectory_vector": trajectory_vector,
@@ -1762,14 +1847,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         velocity_axis, velocity_total = self.model.droplet_camera_model.calculate_velocity(intermediate_delay, intermediate_position, self.current_delay, droplet_machine_position)
         print(f"Velocity axis: {velocity_axis}, Velocity total: {velocity_total}")
 
-        self.calibrationDataUpdated.emit({"measurements": measurements, "result": results})
+        self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": results})
         self.calibrationCompleted.emit()
 
     def annotate_final_image(self, mean_center):
         # Copy the last annotated image and overlay all droplet positions, the mean, and a line.
         final_img = self.droplet_image.copy()
-        for m in self.measurements[1:]:
-            pos = m["center"]
+        print("Annotating final image")
+        for pos in self.droplet_positions:
+            print(f"Position: {pos}")
             cv2.circle(final_img, pos, 5, (255, 0, 0), -1)
         cv2.circle(final_img, mean_center, 8, (0, 255, 0), -1)
         # cv2.line(final_img, self.nozzle_center, mean_center, (0, 255, 255), 2)
@@ -2385,12 +2471,17 @@ class DropletCameraModel(QObject):
         perimeter = cv2.arcLength(largest_contour, True)
         circularity = (4 * math.pi * area) / (perimeter ** 2)
 
+        if len(largest_contour) < 5:
+            print('Not enough points to fit an ellipse')
+            cv2.putText(image, 'Not enough points to fit an ellipse', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return None, image
+
         # Fit an ellipse to the contour
         ellipse = cv2.fitEllipse(largest_contour)
         (xc, yc), (MA, ma), angle = ellipse
         major_axis_um = MA * um_per_pixel
         minor_axis_um = ma * um_per_pixel
-        center_ellipse = (xc, yc)
+        center_ellipse = (int(xc), int(yc))
         ellipse_circularity = minor_axis_um / major_axis_um
         ellipse_radius_um = ((major_axis_um / 2.0) + (minor_axis_um / 2.0)) / 2.0
         ellipse_volume_um3 = (4.0/3.0) * math.pi * (ellipse_radius_um ** 3)
