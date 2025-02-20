@@ -337,6 +337,13 @@ class Controller(QObject):
             if x != current['X']:
                 commands.append(('X', x))
 
+        # If no commands are needed, execute the handler and return.
+        if len(commands) == 0:
+            if handler is not None:
+                handler()
+            self.update_expected_position(x=x, y=y, z=z)
+            return True
+
         # Execute the commands in order, attaching the callback only to the last one.
         for i, (axis, value) in enumerate(commands):
             is_last = (i == len(commands) - 1)

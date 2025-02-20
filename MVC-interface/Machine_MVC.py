@@ -1194,7 +1194,7 @@ class Machine(QObject):
             print('Duration too low')
 
     def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False):
-        delay = round(delay,-2)
+        delay = round(delay,0)
         if delay >= 100:
             return self.add_command_to_queue('SET_DELAY_F',delay,0,0,handler=handler,kwargs=kwargs,manual=manual)
 

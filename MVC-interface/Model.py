@@ -544,7 +544,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     def isCentered(self, center):
         img_width, img_height = self.model.droplet_camera_model.get_image_size()
         ideal_center = (img_width // 2, img_height // 2)
-        tolerance = 0.05
+        tolerance = 0.01
         return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
                 abs(center[1] - ideal_center[1]) <= tolerance * img_height)
 
@@ -841,7 +841,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def onAnalyze(self):
         self.stageChanged.emit("Analyzing droplet image")
         # Compute the bounding rectangle area from the difference image.
-        area, image = self.model.droplet_camera_model.calc_bounding_rect_area(self.background_image, self.droplet_image)
+        area, center, image = self.model.droplet_camera_model.calc_bounding_rect_area(self.background_image, self.droplet_image)
         self.stageChanged.emit(f"Rectangle area: {area}")
         self.measurements.append((self.candidate_delay, area))
         
@@ -849,6 +849,11 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         if area is not None and self.min_area <= area <= self.max_area:
             self.stageChanged.emit("Target area reached")
             self.presentImageSignal.emit(image)
+
+            machine_position = self.model.machine_model.get_current_position_dict()
+            nozzle_machine_position = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(center, machine_position)
+
+            self.calibration_manager.set_nozzle_center(nozzle_machine_position)
             self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'area': area, 'flash_delay': self.candidate_delay}})
             self.emitDropletDetected()
         else:
@@ -922,7 +927,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.transition_found = False
         self.direction = 1  # 1 for increasing pressure, -1 for decreasing.
         # We'll consider the droplet acceptable only if exactly 1 droplet is seen and its area is below this threshold.
-        self.nozzle_droplet_threshold = 10000
+        self.nozzle_droplet_threshold = 8000
 
         # Store images.
         self.background_image = None
@@ -1289,6 +1294,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     continueTrajectory = Signal()       # To trigger capture of next droplet image.
     trajectoryCalculated = Signal()       # To trigger transition from trajectory analysis to final.
     trajectoryFinalized = Signal()        # To indicate that final trajectory analysis is complete.
+    changePressure = Signal()             # To trigger a change in pressure.
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -1299,8 +1305,14 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.import_calibration_data()
 
         # Number of droplet images to capture.
-        self.num_images = 3
+        self.num_images = 5
         self.image_counter = 0
+
+        # Variables to change pressure
+        self.pressure_step = 0.02
+        self.max_pressure = 1.2
+        self.min_pressure = 0.3
+        self.new_pressure = None
         
         # Lists to store droplet analysis results.
         self.droplet_positions = []  # List of (x, y) positions.
@@ -1310,12 +1322,14 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         # Define states.
         self.state_capture_droplet = QState()
         self.state_analyze = QState()
+        self.state_change_pressure = QState()
         self.state_trajectory_analysis = QState()
         self.state_final = QFinalState()
         
         # Connect on-entry actions.
         self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
+        self.state_change_pressure.entered.connect(self.onChangePressure)
         self.state_trajectory_analysis.entered.connect(self.onTrajectoryAnalysis)
         self.state_final.entered.connect(self.onCalibrationCompleted)
         
@@ -1339,6 +1353,19 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         t3.setSignal(b"2trajectoryCalculated()")
         t3.setTargetState(self.state_trajectory_analysis)
         self.state_analyze.addTransition(t3)
+
+        # If no droplets or multiple droplets are identified then change the pressure and recapture
+        t0 = QSignalTransition()
+        t0.setSenderObject(self)
+        t0.setSignal(b"2changePressure()")
+        t0.setTargetState(self.state_change_pressure)
+        self.state_analyze.addTransition(t0)
+        
+        t01 = QSignalTransition()
+        t01.setSenderObject(self.calibration_manager)
+        t01.setSignal(b"2settingsChangeCompleted()")
+        t01.setTargetState(self.state_capture_droplet)
+        self.state_change_pressure.addTransition(t01)
         
         # Transition: After trajectory analysis, move to final state.
         t4 = QSignalTransition()
@@ -1350,6 +1377,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         # Add states to the state machine.
         self.state_machine.addState(self.state_capture_droplet)
         self.state_machine.addState(self.state_analyze)
+        self.state_machine.addState(self.state_change_pressure)
         self.state_machine.addState(self.state_trajectory_analysis)
         self.state_machine.addState(self.state_final)
         
@@ -1378,14 +1406,34 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         # Assume the model's droplet camera model provides a method that analyzes the droplet.
         # For example, identify_droplet(image, background, nozzle_center) returns (center, focus, annotated_image)
         droplets, focus, annotated_image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center_image_position)
-        if droplets is None:
-            self.stageChanged.emit("No droplet detected, recapturing image")
-            self.emitContinueTrajectory()  # Retry capturing.
+        if droplets is None or len(droplets) == 0:
+            current_pressure = self.model.machine_model.get_current_print_pressure()
+            self.new_pressure = current_pressure + self.pressure_step
+            if self.new_pressure > self.max_pressure:
+                self.calibrationError.emit("Maximum pressure reached")
+                return
+
+            self.stageChanged.emit(f"No droplet detected, increasing pressure to {self.new_pressure}")
+            print(f"No droplet detected, increasing pressure to {self.new_pressure}")
+            self.emitChangePressure()
             return
         droplet_count = len(droplets) if droplets is not None else 0
         if droplet_count > 1:
-            self.stageChanged.emit("Multiple droplets detected, recapturing image")
-            self.emitContinueTrajectory()
+            current_pressure = self.model.machine_model.get_current_print_pressure()
+            self.new_pressure = current_pressure - self.pressure_step
+            if self.new_pressure < self.min_pressure:
+                self.calibrationError.emit("Minimum pressure reached")
+                return
+            self.stageChanged.emit(f"Multiple droplets detected, decreasing pressure to {self.new_pressure}")
+            print(f"Multiple droplets detected, decreasing pressure to {self.new_pressure}")
+            
+            # Reset the droplet positions and focus values for the new pressure.
+            self.droplet_positions = []
+            self.droplet_focus = []
+            self.annotated_images = []
+            self.image_counter = 0
+            
+            self.emitChangePressure()
             return
         # If not the first droplet, overlay the previous droplet centers.
         for pos in self.droplet_positions:
@@ -1404,6 +1452,14 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.emitContinueTrajectory()
         else:
             self.emitTrajectoryCalculated()
+
+    @Slot()
+    def onChangePressure(self):
+        self.stageChanged.emit("Changing pressure")
+        settings = {
+            "print_pressure": self.new_pressure,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
     
     @Slot()
     def onTrajectoryAnalysis(self):
@@ -1441,6 +1497,9 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     def emitContinueTrajectory(self):
         self.continueTrajectory.emit()
     
+    def emitChangePressure(self):
+        self.changePressure.emit()
+    
     def emitTrajectoryCalculated(self):
         self.trajectoryCalculated.emit()
     
@@ -1465,6 +1524,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     """
     # Custom signals for state transitions.
     continueSearch = Signal()
+    restartSearch = Signal()    # To restart the flash delay screen with a shift in position
+    changePressure = Signal()   # To trigger a change in pressure
     dropletFound = Signal()  # Emitted when a droplet is detected (but may not be centered)
     dropletCentered = Signal()  # Emitted when the droplet is centered within tolerance
     continueCharacterization = Signal()  # Emitted to continue droplet characterization
@@ -1482,7 +1543,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
 
         # Variables for characterization
-        self.num_images = 5
+        self.num_images = 20
         self.image_counter = 0
         self.circularity_threshold = 1.15  # Example threshold for circularity.
         self.droplet_positions = []  # List of droplet positions.
@@ -1495,17 +1556,19 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
         # Set the target distance from the nozzle (in pixels).
         self.desired_distance = 2000 # example in pixels
-        
+        self.correction_offset = 0  # Offset to shift the target position (in Y motor steps).
+        self.offset_counter = 0  # Counter to track the number of corrections.
+
         # Compute target machine position.
-        self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance)
+        # self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance)
         
-        print(f"Nozzle center: {self.nozzle_center_machine}, Target position: {self.target_position}")
-        print(f"Desired distance: {self.desired_distance}, Trajectory vector: {self.trajectory_vector}")
+        # print(f"Nozzle center: {self.nozzle_center_machine}, Target position: {self.target_position}")
+        # print(f"Desired distance: {self.desired_distance}, Trajectory vector: {self.trajectory_vector}")
 
         
         # Flash delay search parameters.
         self.initial_delay_offset = 5000
-        self.delay_range = (self.min_start_delay + self.initial_delay_offset, self.min_start_delay + 15000)  # adjust range as needed.
+        self.delay_range = (self.min_start_delay + self.initial_delay_offset, self.min_start_delay + 25000)  # adjust range as needed.
         self.delay_step_size = 2000  # adjust step size as needed.
         self.current_delay = self.min_start_delay + self.initial_delay_offset
         
@@ -1522,6 +1585,12 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # Measurements for trajectory (if desired, could store focus values, droplet center, etc.).
         self.measurements = []  # e.g., list of (flash_delay, droplet_center, focus)
 
+        # Variables to change pressure
+        self.pressure_step = 0.02
+        self.max_pressure = 1.2
+        self.min_pressure = 0.3
+        self.new_pressure = None
+
         # Define states.
         self.state_move_to_target = QState()
         self.state_prepare_background = QState()
@@ -1531,6 +1600,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze = QState()
         self.state_center = QState()
         self.state_characterization = QState()
+        self.state_change_pressure = QState()
         self.state_analyze_characterization = QState()
         self.state_continue_move_to_target = QState()
         self.state_final = QFinalState()
@@ -1544,6 +1614,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze.entered.connect(self.onAnalyze)
         self.state_center.entered.connect(self.onCenter)
         self.state_characterization.entered.connect(self.onCharacterization)
+        self.state_change_pressure.entered.connect(self.onChangePressure)
         self.state_analyze_characterization.entered.connect(self.onAnalyzeCharacterization)
         self.state_continue_move_to_target.entered.connect(self.onContinueMoveToTarget)
         self.state_final.entered.connect(self.onCalibrationCompleted)
@@ -1597,6 +1668,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t5.setSignal(b"2dropletFound()")
         t5.setTargetState(self.state_center)
         self.state_analyze.addTransition(t5)
+        # If the range of delays are exhausted, move the target position and restart the search
+        t51 = QSignalTransition()
+        t51.setSenderObject(self)
+        t51.setSignal(b"2restartSearch()")
+        t51.setTargetState(self.state_move_to_target)
+        self.state_analyze.addTransition(t51)
+
 
         # 6. In center state:
         # If droplet is centered within tolerance, emit dropletCentered to transition to droplet characterization.
@@ -1632,6 +1710,19 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t10.setTargetState(self.state_capture_droplet)
         self.state_characterization.addTransition(t10)
 
+        # If multiplet droplets are found the pressure needs to change and the process needs to restart
+        t11 = QSignalTransition()
+        t11.setSenderObject(self)
+        t11.setSignal(b"2changePressure()")
+        t11.setTargetState(self.state_change_pressure)
+        self.state_characterization.addTransition(t11)
+
+        t12 = QSignalTransition()
+        t12.setSenderObject(self.calibration_manager)
+        t12.setSignal(b"2settingsChangeCompleted()")
+        t12.setTargetState(self.state_capture_droplet)
+        self.state_change_pressure.addTransition(t12)
+
         # 8. In analyze characterization state:
         # If the droplets were found to be circular, emit dropletCharacterized to transition to final state.
         t10 = QSignalTransition()
@@ -1655,6 +1746,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.addState(self.state_analyze)
         self.state_machine.addState(self.state_center)
         self.state_machine.addState(self.state_characterization)
+        self.state_machine.addState(self.state_change_pressure)
         self.state_machine.addState(self.state_analyze_characterization)
         self.state_machine.addState(self.state_continue_move_to_target)
         self.state_machine.addState(self.state_final)
@@ -1672,13 +1764,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Must complete previous calibration first")
             return
 
-    def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance):
+    def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance,horizontal_offset=0):
         # Convert nozzle_center from dict of motor positions to array of positions
         nozzle_center = np.array([nozzle_center['X'], nozzle_center['Y'], nozzle_center['Z']])
         
         # Compute the offset by normalizing the trajectory vector and scaling by desired_distance.
         nozzle = np.array(nozzle_center, dtype=float)
         vec = np.array(trajectory_vector, dtype=float)
+        # # Invert the Y axis to match the image coordinates
+        # vec[1] = -vec[1]
         norm = np.linalg.norm(vec)
         if norm == 0:
             offset = np.array([0,0,0])
@@ -1690,12 +1784,21 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         print(f"Offset: {offset}, Type: {type(offset)}")
 
         target = nozzle + offset
+
+        # If the Y component is negative add the offset to the Y component
+        if vec[1] > 0:
+            target[1] -= horizontal_offset
+        else:
+            target[1] += horizontal_offset
         print(f"Target position: {target}, Type: {type(target)}")
         return tuple(target.astype(int))
 
     @Slot()
     def onMoveToTarget(self):
         self.stageChanged.emit("Moving to target position based on trajectory")
+        self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance,horizontal_offset=self.correction_offset)
+        print(f"Move vector: {self.target_position}")
+
         move_vector = self.target_position
         print(f"Move vector: {move_vector}")
         self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
@@ -1732,7 +1835,20 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit("No droplet contour detected, trying next delay")
             # Increment flash delay and try again.
             self.current_delay += self.delay_step_size  # Increment delay; adjust step as needed.
-            self.emitContinueSearch()
+            if self.current_delay <= self.delay_range[1]:
+                self.emitContinueSearch()
+            else:
+                if self.offset_counter < 3:
+                    self.stageChanged.emit("Delay range exhausted, moving machine and restarting search")
+                    self.current_delay = self.min_start_delay
+                    self.correction_offset += 30
+                    # self.delay_step_size = 1000
+                    self.offset_counter += 1
+                    self.emitRestartSearch()
+                else:
+                    self.stageChanged.emit("Delay range exhausted, unable to find droplet")
+                    self.calibrationError.emit("Unable to find droplet")
+
         else:
             # Identify the bounding box of the contour and use its center.
             x, y, w, h = cv2.boundingRect(droplet_contour)
@@ -1784,6 +1900,24 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit("Droplet capture failed, recapturing")
             self.emitContinueCharacterization()
             return
+        elif droplet_characteristics == 'Multiple':
+            current_pressure = self.model.machine_model.get_current_print_pressure()
+            self.new_pressure = current_pressure - self.pressure_step
+            if self.new_pressure < self.min_pressure:
+                self.calibrationError.emit("Minimum pressure reached")
+                return
+            self.stageChanged.emit(f"Multiple droplets detected, decreasing pressure to {self.new_pressure}")
+            print(f"Multiple droplets detected, decreasing pressure to {self.new_pressure}")
+            
+            # Reset the droplet positions and focus values for the new pressure.
+            self.droplet_positions = []
+            self.droplet_focus = []
+            self.circularity_values = []
+            self.droplet_volumes = []
+            self.image_counter = 0
+
+            self.emitChangePressure()
+            return
         print(f"{self.image_counter}:Droplet characteristics: {droplet_characteristics}")
         self.presentImageSignal.emit(annotated_image)
 
@@ -1800,6 +1934,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                         print("Focus direction changed too many times, increasing step size")
                         self.focus_step_size = 4
             self.last_focus = droplet_characteristics['focus']
+
+            # Scale the step size based on the focus value.
+            if droplet_characteristics['focus'] < 1000000:
+                self.focus_step_size = 10
+            elif droplet_characteristics['focus'] < 300000:
+                self.focus_step_size = 4
+            else:
+                self.focus_step_size = 2
+
             move_vector = (self.focus_step_size * self.focus_direction, 0, 0)
             self.stageChanged.emit(f"Focus too low: {droplet_characteristics['focus']}, moving by {move_vector}")
             print(f"Focus too low: {droplet_characteristics['focus']}")
@@ -1811,10 +1954,19 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.droplet_focus.append(droplet_characteristics["focus"])
             self.droplet_volumes.append(droplet_characteristics["volume"])
             self.image_counter += 1
-            if self.image_counter < self.num_images - 1:
+            if self.image_counter < self.num_images:
                 self.emitContinueCharacterization()
             else:
                 self.emitInitiateAnalyzeCharacterization()
+
+    @Slot()
+    def onChangePressure(self):
+        self.stageChanged.emit("Changing pressure")
+        settings = {
+            "print_pressure": self.new_pressure,
+        }
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+    
 
     @Slot()
     def onAnalyzeCharacterization(self):
@@ -1855,7 +2007,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         print(f"Trajectory results: {trajectory_vector}")
         # Annotate final image.
         final_image = self.annotate_final_image(mean_center)
-        self.presentImageSignal.emit(final_image)
         results = {
             "droplet_positions": self.droplet_positions,
             "mean_position": droplet_machine_position,
@@ -1867,7 +2018,16 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         intermediate_position = self.calibration_manager.get_intermediate_droplet_position()
         velocity_axis, velocity_total = self.model.droplet_camera_model.calculate_velocity(intermediate_delay, intermediate_position, self.current_delay, droplet_machine_position)
         print(f"Velocity axis: {velocity_axis}, Velocity total: {velocity_total}")
+        # Calculate the mean and cv of droplet volumes.
+        mean_volume = np.mean(self.droplet_volumes)
+        cv_volume = (np.std(self.droplet_volumes) / mean_volume) * 100
 
+        # Put text saying the mean and CV volume on the final image.
+        cv2.putText(final_image, f"Mean volume: {mean_volume:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(final_image, f"CV volume: {cv_volume:.2f}%", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        self.presentImageSignal.emit(final_image)
+
+        print(f"Mean volume: {mean_volume}, CV volume: {cv_volume}")
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": results})
         self.calibrationCompleted.emit()
 
@@ -1894,12 +2054,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.nozzle_image = image
         self.calibration_manager.emitCaptureCompleted()
 
-    def emitNozzleDetected(self):
-        self.nozzleDetected.emit()
-
     def emitContinueSearch(self):
         self.continueSearch.emit()
 
+    def emitRestartSearch(self):
+        self.restartSearch.emit()
+
+    def emitChangePressure(self):
+        self.changePressure.emit()
+    
     def emitDropletFound(self):
         self.dropletFound.emit()
 
@@ -2338,22 +2501,23 @@ class DropletCameraModel(QObject):
         """
         image_gray, diff = self.calc_diff_image(image, background)
         if diff is None:
-            return None, image
+            return None, None, image
 
         _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if len(contours) == 0:
             print('No contours detected')
-            return None, image
+            return None, None, image
 
         largest_contour = max(contours, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(largest_contour)
+        center = (x + w//2, y + h//2)
 
         cv2.drawContours(image, [largest_contour], -1, (0, 255, 0), 2)
         cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
         cv2.putText(image, f'Area: {w*h}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        return w * h, image
+        return w * h, center, image
     
     def identify_droplets(self,image, background, nozzle_center,min_area=1000):
         """
@@ -2392,8 +2556,9 @@ class DropletCameraModel(QObject):
             if x < nozzle_center[0] < x+w and y < nozzle_center[1] < y+h:
                 # print('Nozzle is inside the bounding box')
                 cv2.circle(image, nozzle_center, 10, (255, 0, 0), -1)
-                # Calculate the area of the bounding box
-                area = w * h
+                # Calculate the area of the bounding box, but only include the area that is below the nozzle center
+                area = (y + h - nozzle_center[1]) * w
+
                 # Add text to the bottom right of the bounding box
                 cv2.putText(image, f'Area: {area}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 nozzle_droplet_area = max(nozzle_droplet_area, area)
@@ -2482,7 +2647,7 @@ class DropletCameraModel(QObject):
             cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
             # Add text in the middle of the screen saying multiple large contours detected
             cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            return None, image
+            return "Multiple", image
 
         # Find the largest contour
         largest_contour = max(contours, key=cv2.contourArea)
@@ -2620,7 +2785,7 @@ class DropletCameraModel(QObject):
         center = self.get_center_in_pixels()
         dX, dY, dZ = self.calculate_move_to_target(center, pixel_position)
         machine_pos["X"] += dX
-        machine_pos["Y"] += dY
+        machine_pos["Y"] -= dY
         machine_pos["Z"] += dZ
         return machine_pos
 
