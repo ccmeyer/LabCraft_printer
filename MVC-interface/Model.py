@@ -59,13 +59,16 @@ class MassCalibrationModel(QObject):
         Each model is stored in a separate directory, with the metadata stored in a JSON file.
         The path to the predictive model and the resistance model are stored in the metadata."""
         model_metadata = {}
+        print(f"Prediction model dir: {self.prediction_model_dir}")
         for model_dir in os.listdir(self.prediction_model_dir):
+            print(f"Model dir: {model_dir}")
             metadata_path = os.path.join(self.prediction_model_dir, model_dir, "metadata.json")
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r') as file:
                     metadata = json.load(file)
                     model_metadata[model_dir] = metadata
             model_names = glob.glob(os.path.join(self.prediction_model_dir, model_dir, "*.pkl"))
+            print(f"Model names: {model_names}")
             model_metadata[model_dir]['resistance_dir'] = [model for model in model_names if 'resistance' in model][0]
             model_metadata[model_dir]['prediction_dir'] = [model for model in model_names if 'resistance' not in model][0]
 
@@ -2977,7 +2980,7 @@ class Model(QObject):
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
-        self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_Models')
+        self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')
         # self.resistance_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_resistance_pipeline.pkl')
     
