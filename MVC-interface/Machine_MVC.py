@@ -1032,8 +1032,10 @@ class Machine(QObject):
         self.sent_command = None
         self.error_count = 0
 
-        self.fss = 6553
-        self.psi_offset = 8192
+        # self.fss = 6553
+        # self.psi_offset = 8192
+        self.fss = 13107
+        self.psi_offset = 1638
         self.psi_max = 15
 
         self.simulate_balance = True

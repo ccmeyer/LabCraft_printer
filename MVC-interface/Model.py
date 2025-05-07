@@ -13,6 +13,8 @@ from itertools import combinations_with_replacement
 import joblib
 from scipy.optimize import minimize, fsolve
 from scipy.signal import find_peaks
+from skimage.metrics import structural_similarity as ssim
+
 import random
 import pyDOE3
 import time
@@ -2894,94 +2896,231 @@ def find_largest_prominent_peak(rate_of_change):
 
 class ImageAnalysisThread(QThread):
     # Define signals to send results back to the main thread
-    analysis_done = Signal(object, object)  # Send analyzed image and result
+    # analysis_done = Signal(object,object,object,object)  # Send original, thresholded, and analyzed image and result
+    analysis_done = Signal(object, object, object)  # Send original, and annotated image and detected level
 
-    def __init__(self, frame, blur_size, threshold_value, left_bound, right_bound, parent=None):
+    def __init__(self, image, offset, width, threshold, prominence, empty_cutoff, last_row, parent=None):
         super().__init__(parent)
-        self.blur_size = blur_size
-        self.threshold_value = threshold_value
-        self.left_bound = left_bound
-        self.right_bound = right_bound
-        self.original_frame = frame
-        self.level_image = None
+        self.offset = offset
+        self.width = width
+        self.threshold = threshold
+        self.prominence = prominence
+        self.empty_cutoff = empty_cutoff
+        self.last_row = last_row
+        self.original_image = image
+        self.annotated_image = None
         self.level_data = None
 
     def run(self):
         # Perform image analysis
         self.analyze_image()
         # Emit results
-        self.analysis_done.emit(self.level_image, self.level_data)
+        self.analysis_done.emit(self.original_image, self.annotated_image, self.level_data)
+
+    def find_printer_head(self,cur_img, threshold_value=50):
+        """
+        Given a current image, this function detects the printer head in the image.
+        It returns the bounding box coordinates of the detected printer head.
+        """
+        cur_gray = cv2.cvtColor(cur_img, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(cur_gray, threshold_value, 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Filter contours based on area
+        cnts = [c for c in cnts if cv2.contourArea(c) > 1000]
+        # Filter contours based on location in the image
+        cnts = [c for c in cnts if cv2.boundingRect(c)[0] > 100 and cv2.boundingRect(c)[0] < 400]
+
+        if len(cnts) == 0:
+            print("No contours found.")
+            return None, None, None, None
+        big = max(cnts, key=cv2.contourArea)
+        # 3C) Get its bounding box (this is the full printer head)
+        x, y, w, h = cv2.boundingRect(big)
+        return x, y, w, h
+
+    def get_channel_bounds(self,cur_img, x, y, w, h, left_offset=40, channel_width=30):
+        """
+        Given the bounding box coordinates of the printer head, this function identifies the channel area.
+        It returns the bounding box coordinates of the detected channel area.
+        """
+        # Identify the channel area using the sides of the bounding box
+        x0 = x + left_offset
+        return x0, y, channel_width, h
+
+    # def get_channel_bounds(self,ref_img,cur_img, side_margin=0,bottom_margin=0,top_margin=20):
+    #     """
+    #     Given a reference image and a current image, this function detects the channel in the current image
+    #     by comparing it to the reference image. It returns the bounding box coordinates of the detected channel.
+    #     """
+    #     # 1) Grayscale + blur to match your ref
+    #     ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+    #     ref_blur = cv2.GaussianBlur(ref_gray, (5,5), 0)
+
+    #     # 2A) Grayscale + blur to match your ref
+    #     cur_gray = cv2.cvtColor(cur_img, cv2.COLOR_BGR2GRAY)
+    #     cur_blur = cv2.GaussianBlur(cur_gray, (5,5), 0)
+
+    #     # 2B) Absolute difference highlights only pixels that changed (i.e. fluid)
+    #     diff = cv2.absdiff(cur_blur, ref_blur)
+    #     self.diff_image = diff.copy()
+
+    #     # 2C) Threshold to get a clean binary mask
+    #     _, mask = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)  
+        
+    #     # 3A) Morphological opening to kill speckles
+    #     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+    #     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    #     # 3B) Find contours, pick the biggest one
+    #     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    #     if len(cnts) == 0:
+    #         print("No contours found")
+    #         return None, None, None, None
+
+    #     # calculate the bounding rectangle of each contour and remove any that are wider than 50 pixels
+    #     cnts = [cnt for cnt in cnts if cv2.boundingRect(cnt)[2] < 30]
+    #     if len(cnts) == 0:
+    #         print("No contours fit the criteria")
+    #         return None, None, None, None
+    #     big = max(cnts, key=cv2.contourArea)
+
+    #     # 3C) Get its bounding box (this will sit inside your channel)
+    #     x, y, w, h = cv2.boundingRect(big)
+
+    #     x0 = max(0, x - side_margin)
+    #     # y0 = max(0, y - top_margin)
+    #     y0 = top_margin
+    #     x1 = min(cur_img.shape[1], x + w + side_margin)
+    #     y1 = min(cur_img.shape[0], y + h + bottom_margin)
+
+    #     return x0, y0, x1 - x0, y1 - y0
+
+    def get_channel_profile(self,image, x0, y0, w, h):
+        """
+        Extracts the channel profile from the image.
+        """
+        crop = image[y0:y0+h, x0:x0+w]              # 1. crop to channel  
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5,5), 0)    # 2. smooth out noise  
+
+        profile = blur.mean(axis=1)
+        return profile
+
+
+    def detect_meniscus_row(self,profile,
+                        last_row=None,
+                        fluid_darker=True,
+                        search_band=None,
+                        min_prominence=8):
+        """
+        profile       : 1-D numpy array of mean‐intensities per row
+        last_row      : previous detection (for temporal smoothing / disambiguation)
+        fluid_darker  : True if liquid is darker than air (so meniscus is a downward step)
+        search_band   : (row_min, row_max)  to restrict valid meniscus locations
+        min_prominence: threshold to reject small bumps
+        
+        returns meniscus_row  (index into `profile` where the level sits)
+        """
+        # 1) gradient
+        grad = np.diff(profile)
+
+        # 2) orient so meniscus becomes a *peak* in `sig`
+        sig = -grad if fluid_darker else grad
+
+        # 3) find all peaks above a certain prominence
+        peaks, props = find_peaks(sig, prominence=min_prominence)
+
+        # 4) if we have a band, throw away peaks outside it
+        if search_band is not None:
+            lo, hi = search_band
+            mask = (peaks >= lo) & (peaks < hi)
+            peaks = peaks[mask]
+            for k in list(props):
+                props[k] = props[k][mask]
+
+        # 5) if any candidates remain, pick best
+        if len(peaks):
+            # a) if tracking over time, pick the one nearest last_row
+            if last_row is not None:
+                idx = np.argmin(np.abs(peaks - last_row))
+                # plt.plot(peaks[idx], sig[peaks[idx]], "o", color="red", label="Best Peak")
+                # plt.show()
+                return peaks[idx]
+            # b) otherwise pick the most prominent
+            best = np.argmax(props["prominences"])
+
+            return peaks[best]
+        if last_row is not None:
+            if last_row < len(profile) -20 and last_row > 20 and min_prominence > 4:
+                print(f"No peaks with {min_prominence}, trying again with {min_prominence-1}")
+                # If we have a last row, we can try to find the meniscus row again with a lower prominence
+                # This is useful if the meniscus is not very pronounced
+                return self.detect_meniscus_row(profile,
+                            last_row=last_row,
+                            fluid_darker=fluid_darker,
+                            search_band=search_band,
+                            min_prominence=min_prominence-1)
+
+        # 6) If no peaks were found, return None
+        print("No peaks found")
+        return None
+
+    def check_fill_state(self,image,x0,y0,w0,h0,empty_cutoff=0.15):
+        """
+        When no peaks are found, this function checks the profile to determine if the channel is empty or full.
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        square_start = y0 + h0 - w0 - 30
+        square_end = square_start + w0
+        channel_patch = gray[square_start:square_end, x0:x0+w0]
+        reference_patch = gray[square_start:square_end, x0+w0+5:x0+2*w0+5]
+        score, _ = ssim(channel_patch, reference_patch, full=True)
+        print(f"SSIM score: {score}")
+
+        if score < empty_cutoff:
+            print("Channel is empty.")
+            return h0 - 3
+        else:
+            print("Channel is full.")
+            return 3
 
     def analyze_image(self):
-        frame = self.original_frame.copy()
+        self.original_image = cv2.rotate(self.original_image, cv2.ROTATE_180)
+        cur_img = self.original_image.copy()
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Ensure blur size is odd
-        if self.blur_size % 2 == 0:
-            self.blur_size += 1
-
-
-        frame = cv2.GaussianBlur(frame, (self.blur_size, self.blur_size), 0)
-
-        _, frame = cv2.threshold(frame, self.threshold_value, 255, cv2.THRESH_BINARY)
-
-        # Find contours in the thresholded image
-        contours, _ = cv2.findContours(frame, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Identify the largest contour by area
-        largest_contour = max(contours, key=cv2.contourArea) if contours else None
-
-        cropped_image = None
-
-        if largest_contour is not None:
-            x, y, w, h = cv2.boundingRect(largest_contour)
-
-            # Crop the original image based on the bounding rectangle
-            frame = self.original_frame[y:y + h, x:x + w]
-
-            # Draw vertical lines on the cropped image
-            if frame is not None:
-                frame = np.ascontiguousarray(frame)  # Ensure memory is contiguous
-                self.level_image = frame.copy()
-                height, width, _ = frame.shape
-                red_line_x = np.clip(self.left_bound, 0, width - 1)
-                blue_line_x = np.clip(self.right_bound, 0, width - 1)
-
-                # Generate plot data
-                if red_line_x < blue_line_x - 1:  # Ensure there's at least one column between the lines
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    line_values = frame[:, red_line_x + 1:blue_line_x].sum(axis=0)  # Exclude red_line_x column
-                    columns = np.arange(red_line_x + 1, blue_line_x)
-                    
-                    left_edge_idx, center_idx, right_edge_idx = find_key_points(columns, line_values)
-
-                    if center_idx is not None:
-                        buffer_rows = 10
-                        channel_thickness = 3
-                        row_values = np.array(frame[buffer_rows:-buffer_rows, columns[center_idx]-channel_thickness:columns[center_idx]+channel_thickness].sum(axis=1))
-                        row_x_values = np.array(range(buffer_rows,len(row_values)+buffer_rows))
-                        row_values = row_values.astype(np.int64)  # Cast to safe integer type
-
-                        # Calculate rate of change
-                        rate_of_change = calculate_rate_of_change(row_x_values,row_values)
-
-                        # Find largest peak in rate of change
-                        largest_peak_index = find_largest_prominent_peak(rate_of_change)
-
-                        if largest_peak_index is not None:
-                            largest_peak_x = row_x_values[largest_peak_index+1]
-
-                            cv2.line(self.level_image, (0, largest_peak_x), (width, largest_peak_x), (0, 0, 255), 1)
-                            self.level_data = 1- (largest_peak_x / height)
-                    else:
-                        print('Error: Center index is None')
-            else:
-                print('Error: No contour')
+        x,y,w,h = self.find_printer_head(cur_img, threshold_value=self.threshold)
+        if x is None or y is None or w is None or h is None:
+            print("Printer head not found, using default values")
+            self.annotated_image = cur_img.copy()
+            self.level_data = None
+            return
         else:
-            print('Error: No contour')
+            x0, y0, w0, h0 = self.get_channel_bounds(cur_img, x, y, w, h, left_offset=self.offset, channel_width=self.width)
 
-        return
+        profile = self.get_channel_profile(cur_img, x0, y0, w0, h0)
+
+        meniscus_row = self.detect_meniscus_row(profile,
+                            last_row=self.last_row,
+                            fluid_darker=False,
+                            search_band=(0,h0-30),
+                            min_prominence=self.prominence)
+
+        if meniscus_row is None:
+            meniscus_row = self.check_fill_state(cur_img, x0, y0, w0, h0, empty_cutoff=self.empty_cutoff)
+        level_y = y0 + meniscus_row
+
+        cv2.line(cur_img, (x0, level_y), (x0 + w0, level_y), (0, 0, 255), 2)  # Red line
+        cv2.rectangle(cur_img, (x0, y0), (x0 + w0, y0 + h0), (255, 0, 0), 2)  # Blue rectangle
+        # Draw the printer head bounding box
+        cv2.rectangle(cur_img, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Green rectangle
+
+        self.annotated_image = cur_img.copy()
+
+        # Calculate level data by calculating the difference between the meniscus row and the bottom of the channel
+        self.level_data = h0 - meniscus_row
 
 class RefuelCameraModel(QObject):
     '''
@@ -2992,16 +3131,17 @@ class RefuelCameraModel(QObject):
 
     def __init__(self):
         super().__init__()
-        self.threshold_value = 120
-        self.blur_size = 31
-        self.left_bound = 10
-        self.right_bound = 30
+        self.offset = None
+        self.width = None
+        self.threshold = None
+        self.prominence = None
+        self.empty_cutoff = None
+
         self.current_level = None
         self.level_log = []
         self.stable = False
-
-        self.latest_image = None
-        self.level_image = None
+        self.original_image = None
+        self.annotated_image = None
 
     def update_threshold(self, value):
         self.threshold_value = value
@@ -3015,46 +3155,58 @@ class RefuelCameraModel(QObject):
     def update_right_bound(self, value):
         self.right_bound = value
 
+    def update_analysis_parameters(self, offset, width, threshold, prom, empty_cutoff):
+        self.offset = offset
+        self.width = width
+        self.threshold = threshold
+        self.prominence = prom
+        self.empty_cutoff = empty_cutoff
+
     def update_current_level(self, level):
         self.current_level = level
 
     def start_analysis(self, frame):
         # Resize the image to fit within 640x480 while maintaining aspect ratio
         frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
-        self.analysis_thread = ImageAnalysisThread(frame, self.blur_size, self.threshold_value, self.left_bound, self.right_bound)
+        if len(self.level_log) > 0:
+            last_level = self.level_log[-1]
+        else:
+            last_level = None
+        self.analysis_thread = ImageAnalysisThread(frame, self.offset, self.width, self.threshold, self.prominence, self.empty_cutoff,last_level)
         self.analysis_thread.analysis_done.connect(self.update_ui_with_analysis)
         self.analysis_thread.start()
 
-    def update_ui_with_analysis(self, level_image, level_data):
-        # self.latest_image = analyzed_images
-        if level_image is not None:
-            self.level_image = level_image
+    # def update_ui_with_analysis(self, original_image, thresholded_image, level_image, level_data):
+    def update_ui_with_analysis(self, original_image, annotated_image, level_data):
+        # self.original_image = analyzed_images
+        if original_image is not None:
+            self.original_image = original_image
+        if annotated_image is not None:
+            self.annotated_image = annotated_image
         if level_data is not None:
             self.update_current_level(level_data)
             self.update_level_log(level_data)
         self.update_level_ui_signal.emit()
 
     def get_original_image(self):
-        return self.latest_frame
+        return self.original_image
 
-    def get_level_image(self):
-        return self.level_image
+    def get_annotated_image(self):
+        return self.annotated_image
 
     def update_level_log(self,level):
         '''Add a new level to the existing log'''
-        if level > 1 or level < 0:
-            print('Error: level is ',level)
-            return
         self.level_log.append(level)
         if len(self.level_log) > 100:
             self.level_log.pop(0)
 
     def get_level_log(self):
         return self.level_log
+
+    def get_current_level(self):
+        return self.current_level
         
     
-        
-
 class MassCalibrationModel(QObject):
     mass_updated_signal = Signal()
     initial_mass_captured_signal = Signal()
@@ -5812,8 +5964,10 @@ class MachineModel(QObject):
         self.print_pulse_width = 0
         self.refuel_pulse_width = 0
 
-        self.fss = 6553
-        self.psi_offset = 8192
+        # self.fss = 6553
+        # self.psi_offset = 8192
+        self.fss = 13107
+        self.psi_offset = 1638
         self.psi_max = 15
 
         self.regulating_print_pressure = False

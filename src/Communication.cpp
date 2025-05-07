@@ -402,11 +402,11 @@ void Communication::executeCommand(const Command& cmd) {
             break;
         case REGULATE_PRESSURE_P:
             printRegulator.beginRegulation();
-            printRegulator.setTargetPressureAbsolute(8192);
+            printRegulator.setTargetPressureRelative(0);
             break;
         case REGULATE_PRESSURE_R:
             refuelRegulator.beginRegulation();
-            refuelRegulator.setTargetPressureAbsolute(8192);
+            refuelRegulator.setTargetPressureRelative(0);
             break;
         case DEREGULATE_PRESSURE:
             printRegulator.stopRegulation();

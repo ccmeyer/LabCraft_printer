@@ -5,8 +5,8 @@ from PySide6.QtWidgets import (
     QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
-from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage
-from PySide6.QtCore import Qt, QTimer, QEventLoop
+from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
+from PySide6.QtCore import Qt, QTimer, QEventLoop, Signal, Slot
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -16,6 +16,8 @@ import os
 import random
 import time
 import shutil
+from datetime import datetime
+import cv2
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -212,7 +214,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
-        self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
+        # self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
         self.shortcut_manager.add_shortcut('Shift+a','Reset Refuel Syringe', lambda: self.controller.reset_refuel_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
@@ -914,10 +916,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         #         return
         #     elif response == '&Yes':
         #         self.controller.move_to_location('balance', manual=True, safe_y=True)
-        mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
-        mass_calibration_dialog.exec()
-        # camera_dialog = RefuelCameraWindow(self.main_window,self.model,self.controller)
-        # camera_dialog.exec()
+        # mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+        # mass_calibration_dialog.exec()
+        camera_dialog = RefuelCameraWindow(self.main_window,self.model,self.controller)
+        camera_dialog.exec()
         # droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
         # droplet_imaging_dialog.exec()
 
@@ -2705,82 +2707,133 @@ class RefuelCameraWindow(QtWidgets.QDialog):
     def __init__(self,main_window,model,controller):
         super().__init__()
         self.main_window = main_window
+        self.color_dict = self.main_window.color_dict
+
         self.model = model
         self.refuel_camera_model = self.model.refuel_camera_model
         self.controller = controller
 
+        self.shortcut_manager = ShortcutManager(self)
+        self.setup_shortcuts()
+
+        self.controller.enter_print_mode()
+
         self.init_ui()
 
     def init_ui(self):
+        self.setWindowTitle("Refuel Camera")
+        self.resize(1200, 700)
+
         self.layout = QGridLayout()
 
         self.control_layout = QVBoxLayout()
         self.capture_button = QPushButton("Start Capturing Images")
         self.capture_button.clicked.connect(self.toggle_capture)
 
-        # self.save_button = QPushButton("Save Current Frame")
-        # self.save_button.clicked.connect(self.save_frame)
+        self.save_button = QPushButton("Save Current Frame")
+        self.save_button.clicked.connect(self.save_frame)
 
-        # self.threshold_spinbox = QSpinBox()
-        # self.threshold_spinbox.setRange(0, 255)
-        # self.threshold_spinbox.setValue(120)
-        # self.threshold_spinbox.setSingleStep(5)
-        # self.threshold_spinbox.setPrefix("Threshold: ")
-        # self.threshold_spinbox.valueChanged.connect(self.update_analysis)
+        # self.reference_button = QPushButton("Set Reference Image")
+        # self.reference_button.clicked.connect(self.set_reference_image)
 
-        # self.blur_spinbox = QSpinBox()
-        # self.blur_spinbox.setRange(1, 31)  # Allow odd values for Gaussian blur size
-        # self.blur_spinbox.setValue(31)
-        # self.blur_spinbox.setSingleStep(2)
-        # self.blur_spinbox.setPrefix("Blur: ")
-        # self.blur_spinbox.valueChanged.connect(self.update_analysis)
+        self.offset_spinbox = QSpinBox()
+        self.offset_spinbox.setRange(0, 100)  # Assuming cropped image max width
+        self.offset_spinbox.setValue(40)
+        self.offset_spinbox.setSingleStep(2)
+        self.offset_spinbox.setPrefix("Left Offset: ")
+        self.offset_spinbox.valueChanged.connect(self.update_analysis)
 
-        # self.red_line_spinbox = QSpinBox()
-        # self.red_line_spinbox.setRange(0, 640)  # Assuming cropped image max width
-        # self.red_line_spinbox.setValue(10)
-        # self.red_line_spinbox.setPrefix("Red Line: ")
-        # self.red_line_spinbox.valueChanged.connect(self.update_analysis)
+        self.width_spinbox = QSpinBox()
+        self.width_spinbox.setRange(0, 200)
+        self.width_spinbox.setValue(20)
+        self.width_spinbox.setSingleStep(2)
+        self.width_spinbox.setPrefix("Channel width: ")
+        self.width_spinbox.valueChanged.connect(self.update_analysis)
 
-        # self.blue_line_spinbox = QSpinBox()
-        # self.blue_line_spinbox.setRange(0, 640)  # Assuming cropped image max width
-        # self.blue_line_spinbox.setValue(30)
-        # self.blue_line_spinbox.setPrefix("Blue Line: ")
-        # self.blue_line_spinbox.valueChanged.connect(self.update_analysis)
+        self.threshold_spinbox = QSpinBox()
+        self.threshold_spinbox.setRange(5, 250)  # Assuming cropped image max width
+        self.threshold_spinbox.setValue(50)
+        self.threshold_spinbox.setSingleStep(5)
+        self.threshold_spinbox.setPrefix("Threshold: ")
+        self.threshold_spinbox.valueChanged.connect(self.update_analysis)
+
+        self.prom_spinbox = QSpinBox()
+        self.prom_spinbox.setRange(2, 20)  # Assuming cropped image max height
+        self.prom_spinbox.setValue(4)
+        self.prom_spinbox.setSingleStep(1)
+        self.prom_spinbox.setPrefix("Prominence: ")
+        self.prom_spinbox.valueChanged.connect(self.update_analysis)
+
+        self.empty_cutoff = QDoubleSpinBox()
+        self.empty_cutoff.setDecimals(2)
+        self.empty_cutoff.setRange(0.0, 2.0)
+        self.empty_cutoff.setValue(0.25)
+        self.empty_cutoff.setSingleStep(0.05)
+        self.empty_cutoff.setPrefix("Empty Cutoff: ")
+        self.empty_cutoff.valueChanged.connect(self.update_analysis)
+
+        # Label to show the current level reading
+        self.level_label = QLabel("Current Level: N/A")
+        self.level_label.setAlignment(Qt.AlignCenter)
+        self.level_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.level_label.setFixedHeight(30)
+        self.level_label.setFixedWidth(200)
+        self.level_label.setStyleSheet("background-color: lightgray; border: 1px solid black;")
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setFixedWidth(640)
+        self.image_label.setFixedHeight(480)
 
-        # self.analyzed_image_label = QLabel("No analyzed image yet.")
-        # self.analyzed_image_label.setAlignment(Qt.AlignCenter)
+        # Add a plot to show the level over time
+        self.level_series = QtCharts.QLineSeries()
+        self.level_series.setColor(QtCore.Qt.white)
+        self.level_chart = QtCharts.QChart()
+        self.level_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.level_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
+        self.level_chart.addSeries(self.level_series)
+        # self.level_chart.createDefaultAxes()
+        self.level_chart.setTitle("Refuel level over time")
 
-        # self.cropped_image_label = QLabel("No cropped image yet.")
-        # self.cropped_image_label.setAlignment(Qt.AlignCenter)
+        self.axisX = QtCharts.QValueAxis()
+        self.axisX.setTickCount(3)
+        self.axisX.setRange(0, 100)
+        self.axisX.setTitleText("Time (s)")
+        self.axisY = QtCharts.QValueAxis()
+        self.axisY.setTickCount(3)
+        self.axisY.setRange(0, 250)
+        self.axisY.setTitleText("Level")
 
-        # self.plot_figure, self.plot_ax = plt.subplots()
-        # self.plot_canvas = FigureCanvas(self.plot_figure)
-        
-        # self.volume_figure, self.volume_ax = plt.subplots()
-        # self.volume_canvas = FigureCanvas(self.volume_figure)
-        
-        # self.level_cropped_image_label = QLabel("No level cropped image yet.")
-        # self.level_cropped_image_label.setAlignment(Qt.AlignCenter)
+        self.level_chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
+        self.level_chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
+        self.level_series.attachAxis(self.axisX)
+        self.level_series.attachAxis(self.axisY)
+
+        # Create a chart view to display the chart
+        self.level_chart_view = QtCharts.QChartView(self.level_chart)
+        self.level_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
+        self.level_chart.legend().hide()  # Hide
+        self.level_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.level_chart_view.setFixedSize(640, 240)
+
 
         self.control_layout.addWidget(self.capture_button)
-        # self.control_layout.addWidget(self.save_button)
-        # self.control_layout.addWidget(self.threshold_spinbox)
-        # self.control_layout.addWidget(self.blur_spinbox)
-        # self.control_layout.addWidget(self.red_line_spinbox)
-        # self.control_layout.addWidget(self.blue_line_spinbox)
+        self.control_layout.addWidget(self.save_button)
+        # self.control_layout.addWidget(self.reference_button)
+        self.control_layout.addWidget(self.offset_spinbox)
+        self.control_layout.addWidget(self.width_spinbox)
+        self.control_layout.addWidget(self.threshold_spinbox)
+        self.control_layout.addWidget(self.prom_spinbox)
+        self.control_layout.addWidget(self.empty_cutoff)
+        self.control_layout.addWidget(self.level_label)
+
+
         self.layout.addLayout(self.control_layout, 0, 0, 2, 1)
         self.layout.addWidget(self.image_label, 0, 1)
-        # self.layout.addWidget(self.analyzed_image_label, 0, 2)
-        # self.layout.addWidget(self.cropped_image_label, 0, 3)
+        self.layout.addWidget(self.level_chart_view, 1, 1)
         # self.layout.addWidget(self.plot_canvas, 1, 1)
-        # self.layout.addWidget(self.volume_canvas, 1, 2)
-        # self.layout.addWidget(self.level_cropped_image_label, 1, 3)
 
         self.setLayout(self.layout)
-        self.setWindowTitle("Camera App")
 
         # Timer for periodic image capture
         self.timer = QTimer(self)
@@ -2788,9 +2841,37 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.capturing = False
 
         self.start_camera()
+        self.update_analysis()
 
-        self.refuel_camera_model.image_updated_signal.connect(self.update_original_image)
-    
+        self.refuel_camera_model.update_level_ui_signal.connect(self.update_refuel_ui)
+
+    def setup_shortcuts(self):
+        """Set up keyboard shortcuts using the shortcut manager."""
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+
+        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(1,manual=True))
+        
+        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-1,manual=True))
+        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
+        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
+        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(1,manual=True))
+  
+        self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  
+        self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
+        self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
+        self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
+        self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
+
     def toggle_capture(self):
         """
         Starts or stops capturing images based on the button toggle.
@@ -2799,7 +2880,7 @@ class RefuelCameraWindow(QtWidgets.QDialog):
             self.timer.stop()
             self.capture_button.setText("Start Capturing Images")
         else:
-            self.timer.start(100)  # Capture every 100 milliseconds
+            self.timer.start(500)  # Capture every 100 milliseconds
             self.capture_button.setText("Stop Capturing Images")
         self.capturing = not self.capturing
 
@@ -2811,6 +2892,19 @@ class RefuelCameraWindow(QtWidgets.QDialog):
 
     def stop_camera(self):
         self.controller.stop_refuel_camera()
+
+    def save_frame(self):
+        """
+        Saves the current frame to a file.
+        """
+        original_image = self.refuel_camera_model.get_original_image()
+        if original_image is not None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"./MVC-interface/Images/Refuel/refuel_frame_{timestamp}.png"
+            cv2.imwrite(filename, original_image)
+            print(f"Frame saved as {filename}")
+        else:
+            print("No image captured yet.")
 
     def numpy_to_qimage(self,image):
         """
@@ -2830,23 +2924,64 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
         return qimage
 
-    def update_original_image(self):
-        # frame = self.refuel_camera_model.get_original_image()
-        frame = self.refuel_camera_model.get_level_image()
+    def update_refuel_ui(self):
+        annotated_image = self.refuel_camera_model.get_annotated_image()
 
         # Convert numpy array to QImage for display
-        qimage = self.numpy_to_qimage(frame)
+        qimage = self.numpy_to_qimage(annotated_image)
 
         # Display original image
         pixmap = QPixmap.fromImage(qimage)
         self.image_label.setPixmap(pixmap)
         self.image_label.setScaledContents(True)
 
+        level = self.refuel_camera_model.get_current_level()
+        if level is not None:
+            self.level_label.setText(f"Current Level: {level:.1f}")
+        else:
+            self.level_label.setText("Current Level: N/A")
+
+        # Update the level chart
+        self.update_level_chart()
+
+    def update_level_chart(self):
+        """
+        Update the level chart with the current level data.
+        """
+        level_log = self.refuel_camera_model.get_level_log()
+        # if len(level_log) > 0:
+        #     self.level_axisY.setRange(min(level_log) - 1, max(level_log) + 1)
+        # else:
+        #     self.level_axisY.setRange(0, 100)
+        
+        # Clear the series and add new data
+        self.level_series.clear()
+        for i, level in enumerate(level_log):
+            self.level_series.append(i, level)
+        # Update the X axis range based on the number of data points
+        if len(level_log) > 0:
+            self.axisX.setRange(0, len(level_log) - 1)
+        else:
+            self.axisX.setRange(0, 100)
+
+
+    def update_analysis(self):
+        """
+        Update the analysis parameters based on the spinbox values.
+        """
+        offset = self.offset_spinbox.value()
+        width = self.width_spinbox.value()
+        threshold = self.threshold_spinbox.value()
+        prom = self.prom_spinbox.value()
+        empty_cutoff = self.empty_cutoff.value()
+        # Update the model with the new parameters
+        self.refuel_camera_model.update_analysis_parameters(offset, width, threshold, prom, empty_cutoff)
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         self.timer.stop()
         self.stop_camera()
+        self.controller.exit_print_mode()
         super().closeEvent(event)
 
 

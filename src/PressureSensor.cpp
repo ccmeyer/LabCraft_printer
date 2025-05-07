@@ -31,12 +31,12 @@ void PressureSensor::resetPressure() {
 
 // Method to get the current printing pressure value (port 0)
 float PressureSensor::getPrintPressure() const {
-    return currentPressure[0];
+    return currentPressure[1];
 }
 
 // Method to get the current refuel pressure value (port 1)
 float PressureSensor::getRefuelPressure() const {
-    return currentPressure[1];
+    return currentPressure[0];
 }
 
 // Method to set the desired i2c port on the multiplexer
