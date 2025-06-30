@@ -41,6 +41,7 @@ TAG_DROP_REMAIN   = 0x31
 TAG_ACTIVE_P      = 0x40
 TAG_ACTIVE_R      = 0x41
 TAG_CMD_DEPTH     = 0x50
+TAG_LAST_CMD      = 0x51
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -58,6 +59,7 @@ TAG_MAP = {
     TAG_ACTIVE_P:     ("print_active", 2, False),
     TAG_ACTIVE_R:     ("refuel_active",2, False),
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
+    TAG_LAST_CMD:     ("Last_completed", 2, False),
 }
 
 CMD_MAP = {
@@ -69,6 +71,11 @@ CMD_MAP = {
     'HOME_Z': 0x07,
     'ENABLE_MOTORS': 0x08,
     'DISABLE_MOTORS': 0x09,
+    'ABSOLUTE_X': 0x0A,
+    'ABSOLUTE_Y': 0x0B,
+    'ABSOLUTE_Z': 0x0C,
+    'RELATIVE_XYZ': 0x0D,
+    'ABSOLUTE_XYZ': 0x0E,
 
     'OPEN_GRIPPER': 0x10,
     'CLOSE_GRIPPER': 0x11,
@@ -313,6 +320,31 @@ class CommandQueue(QObject):
         self.command_number = 0
         self.queue_updated.emit()
 
+class DisconnectWorker(QThread):
+    finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+
+    def run(self):
+        self.parent.gripper_off()
+        self.parent.disable_motors()
+        self.parent.deregulate_print_pressure()
+        self.parent.deregulate_refuel_pressure()
+
+        # Continuously check until all tasks are completed
+        timeout_counter = 0
+        while not self.parent.check_if_all_completed():
+            timeout_counter += 1
+            time.sleep(0.1)
+            if timeout_counter > 100:
+                print('Timeout disconnecting from machine')
+                break
+
+        self.parent.clear_command_queue()
+        time.sleep(1)
+        self.finished.emit()
 
 class Machine(QObject):
     """
@@ -337,26 +369,83 @@ class Machine(QObject):
         self.command_queue = CommandQueue()
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
+        
+        self.fss = 13107
+        self.psi_offset = 1638
+        self.psi_max = 15
 
+        self.execution_timer = None
+        self.sent_command = None
+
+
+    def connect_board(self,port):
         try:
             self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
+            if self.ser.is_open:
+                self.begin_status_thread()
+                self.begin_execution_timer()
+
+                self.machine_connected_signal.emit(True)
+                print(f"Serial port opened successfully: {self.ser.name}")
+            else:
+                print("Failed to open serial port.")
+                self.machine_connected_signal.emit(False)
         except Exception as e:
             print(f"Failed to open serial port: {e}")
+    
+    def reset_board(self):
+        print('Resetting board')
+        self.command_queue.clear_queue()
+        self.stop_execution_timer()
+        self.stop_status_thread()
+        
+    def disconnect_handler(self):
+        self.reset_board()
+        if self.ser is not None:
+            self.ser.close()
+            self.ser = None
+            self.port = None
+        self.disconnect_complete_signal.emit()
 
+    def disconnect_board(self, error=False):
+        print('--------Disconnecting from machine---------')
+        if not error:
+            self.worker = DisconnectWorker(self)
+            self.worker.finished.connect(self.disconnect_handler)
+            self.worker.start()
+        else:
+            self.disconnect_handler()
+    
+    def begin_status_thread(self):
+        """
+        Start the status thread to listen for incoming data from the machine.
+        """
         self.status_thread = StatusThread(self.ser)
         self.status_thread.status_received.connect(self.update_status)
         # self.status_thread.error.connect(self.on_error)
         self.status_thread.start()
-        self.execution_timer = None
-        self.sent_command = None
 
-        self.begin_execution_timer()
+    def stop_status_thread(self):
+        """
+        Stop the status thread.
+        """
+        if self.status_thread is not None:
+            self.status_thread.requestInterruption()
+            self.status_thread.wait(200)
+            self.status_thread = None
+            print('Status thread stopped')
+        else:
+            print('No status thread to stop')
 
     def begin_execution_timer(self):
         print('Starting execution timer')
         self.execution_timer = QTimer()
         self.execution_timer.timeout.connect(self.send_next_command)
         self.execution_timer.start(90)  # Update every 100 ms
+
+    def stop_execution_timer(self):
+        print('Stopping execution timer')
+        self.execution_timer.stop()
 
     def update_status(self, data):
         """
@@ -487,7 +576,9 @@ class Machine(QObject):
     
     def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-50000,50000):
-            return self.add_command_to_queue('ABSOLUTE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+            sign = 1 if x >= 0 else 0
+            x = abs(x)
+            return self.add_command_to_queue('ABSOLUTE_X', sign, x, 30000, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(y,-50000,50000):
@@ -497,7 +588,9 @@ class Machine(QObject):
     
     def set_absolute_Y(self, y, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(y,-50000,50000):
-            return self.add_command_to_queue('ABSOLUTE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+            sign = 1 if y >= 0 else 0
+            y = abs(y)
+            return self.add_command_to_queue('ABSOLUTE_Y', sign, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(z,-50000,50000):
@@ -506,7 +599,9 @@ class Machine(QObject):
     
     def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(z,-50000,50000):
-            return self.add_command_to_queue('ABSOLUTE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+            sign = 1 if z >= 0 else 0
+            z = abs(z)
+            return self.add_command_to_queue('ABSOLUTE_Z', sign, z, 30000, handler=handler, kwargs=kwargs, manual=manual)
     
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
@@ -514,7 +609,7 @@ class Machine(QObject):
         
     def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
-            return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+            return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
         
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
@@ -575,10 +670,10 @@ class Machine(QObject):
         if handler == None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
+        self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
         return True
     
     def open_gripper_handler(self,additional_handler=None):

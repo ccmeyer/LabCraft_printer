@@ -481,6 +481,7 @@ class ConnectionWidget(QGroupBox):
 
     def update_machine_connect_button(self, machine_connected):
         """Update the machine connect button text and color based on the connection state."""
+        print(f"---Machine connected: {machine_connected}")
         if machine_connected:
             self.machine_connect_button.setText("Disconnect")
             self.machine_connect_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")

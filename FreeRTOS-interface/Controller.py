@@ -123,8 +123,10 @@ class Controller(QObject):
     def update_machine_connection_status(self, status):
         """Update the machine connection status."""
         if status:
+            print("Controller: Machine connected successfully.")
             self.model.machine_model.connect_machine()
         else:
+            print("Controller: Failed to connect to the machine.")
             self.model.machine_model.disconnect_machine()
 
     def get_machine_port(self):
@@ -365,15 +367,17 @@ class Controller(QObject):
             return True
 
         # Execute the commands in order, attaching the callback only to the last one.
-        for i, (axis, value) in enumerate(commands):
-            is_last = (i == len(commands) - 1)
-            current_handler = handler if is_last else None
-            if axis == 'X':
-                self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
-            elif axis == 'Y':
-                self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
-            elif axis == 'Z':
-                self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+        self.machine.set_absolute_coordinates(x,y,z, manual=manual, handler=handler)
+        
+        # for i, (axis, value) in enumerate(commands):
+        #     is_last = (i == len(commands) - 1)
+        #     current_handler = handler if is_last else None
+        #     if axis == 'X':
+        #         self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
+        #     elif axis == 'Y':
+        #         self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
+        #     elif axis == 'Z':
+        #         self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
 
         # Update the expected position.
         self.update_expected_position(x=x, y=y, z=z)
@@ -522,75 +526,87 @@ class Controller(QObject):
 
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
-        if manual == True:
-            status = self.machine.check_if_all_completed()
-            if status == False:
-                print('Cannot move: Commands are still running')
-                return
-        if coords != None:
-            target = coords.copy()
-        else:
-            original_target = self.model.location_model.get_location_dict(name)
-            target = original_target.copy()
-        if x_offset:
-            #print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
-            target['X'] += 2500
-
-        if z_offset:
-            target['Z'] -= 10000
-        # Use expected position instead of current position from the model
+        original_target = self.model.location_model.get_location_dict(name)
+        target = original_target.copy()
         current = self.expected_position
 
-        up_first = False
         if direct and current['Z'] > target['Z']:
             up_first = True
             self.set_absolute_Z(target['Z'])
-
-        x_limit = 5500
-        safe_height = 3000
-        safe_y_value = 3500
-        if (target['Y'] > 9500) or (current['Y'] > 9500 and current['X'] > x_limit):
-            print('Not applying safe Y')
-            
-        elif (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
-            #print(f'Crossing x limit: {current['X']} -> {target['X']}')
-            safe_y = True
-            # direct = False
-
-        if not direct and not safe_y:
-            print('Not direct, not safe-y')
-            self.set_absolute_Z(safe_height,override=override)
-            self.set_absolute_Y(target['Y'],override=override)
-            self.set_absolute_X(target['X'],override=override)
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-
-        elif not direct and safe_y:
-            print('Not direct, safe-y')
-            self.set_absolute_Z(safe_height,override=override)
-            self.set_absolute_Y(safe_y_value,override=override)
-            self.set_absolute_X(target['X'],override=override)
-            self.set_absolute_Y(target['Y'],override=override)
-            self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-        elif direct and safe_y:
-            if up_first:
-                self.set_absolute_Z(target['Z'],override=override)
-                self.set_absolute_Y(safe_y_value,override=override)
-                self.set_absolute_X(target['X'],override=override)
-                self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name),override=override)
-            else:
-                self.set_absolute_Y(safe_y_value,override=override)
-                self.set_absolute_X(target['X'],override=override)
-                self.set_absolute_Y(target['Y'],override=override)
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
+            self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
         else:
-            if up_first:
-                self.set_absolute_Z(target['Z'],override=override)
-                self.set_absolute_Y(target['Y'],override=override)
-                self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name),override=override)
-            else:
-                self.set_absolute_Y(target['Y'],override=override)
-                self.set_absolute_X(target['X'],override=override)
-                self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
+            up_first = False
+            self.set_absolute_coordinates(target['X'], target['Y'], 0, manual=manual, override=override)
+            self.set_absolute_Z(target['Z'])
+        # if manual == True:
+        #     status = self.machine.check_if_all_completed()
+        #     if status == False:
+        #         print('Cannot move: Commands are still running')
+        #         return
+        # if coords != None:
+        #     target = coords.copy()
+        # else:
+        #     original_target = self.model.location_model.get_location_dict(name)
+        #     target = original_target.copy()
+        # if x_offset:
+        #     #print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
+        #     target['X'] += 2500
+
+        # if z_offset:
+        #     target['Z'] -= 10000
+        # # Use expected position instead of current position from the model
+        # current = self.expected_position
+
+        # up_first = False
+        # if direct and current['Z'] > target['Z']:
+        #     up_first = True
+        #     self.set_absolute_Z(target['Z'])
+
+        # x_limit = 5500
+        # safe_height = 3000
+        # safe_y_value = 3500
+        # if (target['Y'] > 9500) or (current['Y'] > 9500 and current['X'] > x_limit):
+        #     print('Not applying safe Y')
+            
+        # elif (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
+        #     #print(f'Crossing x limit: {current['X']} -> {target['X']}')
+        #     safe_y = True
+        #     # direct = False
+
+        # if not direct and not safe_y:
+        #     print('Not direct, not safe-y')
+        #     self.set_absolute_Z(safe_height,override=override)
+        #     self.set_absolute_Y(target['Y'],override=override)
+        #     self.set_absolute_X(target['X'],override=override)
+        #     self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
+
+        # elif not direct and safe_y:
+        #     print('Not direct, safe-y')
+        #     self.set_absolute_Z(safe_height,override=override)
+        #     self.set_absolute_Y(safe_y_value,override=override)
+        #     self.set_absolute_X(target['X'],override=override)
+        #     self.set_absolute_Y(target['Y'],override=override)
+        #     self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
+        # elif direct and safe_y:
+        #     if up_first:
+        #         self.set_absolute_Z(target['Z'],override=override)
+        #         self.set_absolute_Y(safe_y_value,override=override)
+        #         self.set_absolute_X(target['X'],override=override)
+        #         self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name),override=override)
+        #     else:
+        #         self.set_absolute_Y(safe_y_value,override=override)
+        #         self.set_absolute_X(target['X'],override=override)
+        #         self.set_absolute_Y(target['Y'],override=override)
+        #         self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
+        # else:
+        #     if up_first:
+        #         self.set_absolute_Z(target['Z'],override=override)
+        #         self.set_absolute_Y(target['Y'],override=override)
+        #         self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name),override=override)
+        #     else:
+        #         self.set_absolute_Y(target['Y'],override=override)
+        #         self.set_absolute_X(target['X'],override=override)
+        #         self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
 
         # self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
     
