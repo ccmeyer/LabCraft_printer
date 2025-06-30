@@ -48,7 +48,7 @@ def main():
     splash = QSplashScreen(pixmap)
     splash.show()
 
-    from Machine_MVC import Machine
+    from Machine_FreeRTOS import Machine
     from Model import Model
     from Controller import Controller
     from View import MainWindow

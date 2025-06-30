@@ -1,5 +1,6 @@
 import threading
 import time
+import struct
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from PySide6.QtWidgets import QApplication
@@ -59,6 +60,38 @@ TAG_MAP = {
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
 }
 
+CMD_MAP = {
+    'RELATIVE_X': 0x02,
+    'RELATIVE_Y': 0x03,
+    'RELATIVE_Z': 0x04,
+    'HOME_X': 0x05,
+    'HOME_Y': 0x06,
+    'HOME_Z': 0x07,
+    'ENABLE_MOTORS': 0x08,
+    'DISABLE_MOTORS': 0x09,
+
+    'OPEN_GRIPPER': 0x10,
+    'CLOSE_GRIPPER': 0x11,
+    'GRIPPER_OFF': 0x12,
+
+    'DISPENSE': 0x22,
+    
+    'ABSOLUTE_PRESSURE_P': 0xE0,
+    'ABSOLUTE_PRESSURE_R': 0xE1,
+    'HOME_PRINT': 0xE2,
+    'HOME_REFUEL': 0xE3,
+    'REGULATE_PRESSURE_P': 0xE8,
+    'DEREGULATE_PRESSURE_P': 0xE9,
+    'REGULATE_PRESSURE_R': 0xEA,
+    'DEREGULATE_PRESSURE_R': 0xEB,
+    'RELATIVE_PRESSURE_P': 0xEC,
+    'RELATIVE_PRESSURE_R': 0xED,
+
+    'PAUSE': 0xF0,
+    'RESUME': 0xF1,
+    'CLEAR_QUEUE': 0xF2,
+}
+
 def crc16_x25(data: bytes) -> int:
     crc = 0xFFFF
     for b in data:
@@ -100,7 +133,7 @@ def parse_tlv_payload(payload: bytes) -> dict:
 
 class StatusThread(QThread):
     status_received = Signal(dict)  # emit parsed status data
-    error = Signal(str)
+    # error = Signal(str)
 
     def __init__(self, ser):
         super().__init__()
@@ -137,13 +170,148 @@ class StatusThread(QThread):
                     data = parse_tlv_payload(payload[1:])  # skip the CMD byte
                     # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
                     # hand it off to your UI:
+                    # print(f"Received status data: {data}")
                     self.status_received.emit(data)
 
                 else:
                     # ignore or show other async messages
                     pass
         except Exception as e:
-            self.error.emit(f"Reader thread error: {e}")
+            # self.error.emit(f"Reader thread error: {e}")
+            print(f"Reader thread error: {e}")
+
+
+class Command:
+    """
+    Represents a command to be sent to the machine.
+    
+    Attributes:
+    command_number (int): The number of the command.
+    command_type (str): The type of the command.
+    param1: The first parameter of the command.
+    param2: The second parameter of the command.
+    param3: The third parameter of the command.
+    handler (function, optional): The handler function for the command.
+    kwargs (dict, optional): Additional keyword arguments for the handler function.
+    """
+    def __init__(self, command_number, command_type, param1, param2, param3, handler=None, kwargs=None):
+        self.command_number = command_number
+        self.command_type = command_type
+        self.command_code = CMD_MAP.get(command_type, None)
+        if self.command_code is None:
+            raise ValueError(f"Invalid command type: {command_type}")
+        self.param1 = int(param1)
+        self.param2 = int(param2)
+        self.param3 = int(param3)
+        self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
+        self.payload = struct.pack(">BBHHH",
+                                   self.command_code & 0xFF,
+                                   self.command_number & 0xFF,
+                                   self.param1 & 0xFFFF,
+                                   self.param2 & 0xFFFF,
+                                   self.param3 & 0xFFFF)
+        self.header = bytes([START_BYTE, len(self.payload)])
+        self.crc    = crc16_x25(self.payload)
+        self.tail   = struct.pack("<H", self.crc)
+        self.frame  = self.header + self.payload + self.tail
+        self.status = "Added"
+        self.timestamp = time.time()
+        self.handler = handler
+        self.kwargs = kwargs if kwargs is not None else {}
+
+    def mark_as_sent(self):
+        self.status = "Sent"
+
+    def mark_as_executing(self):
+        self.status = "Executing"
+
+    def mark_as_completed(self):
+        self.status = "Completed"
+        self.execute_handler()
+
+    def get_number(self):
+        return self.command_number
+
+    def get_command(self):
+        return self.signal
+
+    def get_timestamp(self):
+        return self.timestamp
+
+    def execute_handler(self):
+        if self.handler is not None:
+            self.handler(**self.kwargs)
+
+
+class CommandQueue(QObject):
+    """
+    Represents a queue of commands to be sent to the machine.
+    Uses deque to store the commands.
+    Completed commands are transferred to the completed queue.
+    """
+    queue_updated = Signal()  # Signal to emit when the queue is updated
+    commands_completed = Signal()  # Signal to emit when all commands are completed
+
+    def __init__(self):
+        super().__init__()  # Initialize the QObject
+        self.queue = deque()
+        self.completed = deque()
+        self.command_number = 0
+        self.max_sent_commands = 8  # Maximum number of commands that can be sent to the machine at once
+
+    def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None):
+        """Add a command to the queue."""
+        
+        
+        self.command_number += 1
+        # print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
+        #print(f'Adding command: {command_type} {param1} {param2} {param3}')
+        command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
+        self.queue.append(command)
+        return command
+
+    def get_number_of_sent_commands(self):
+        """Returns the number of commands that have been sent to the machine."""
+        return len([command for command in self.queue if command.status == "Sent"])
+
+    def get_next_command(self):
+        """Send the next command to the machine if the buffer allows."""
+        if self.queue and self.get_number_of_sent_commands() < self.max_sent_commands:
+            for command in self.queue:
+                if command.status == "Added":
+                    command.mark_as_sent()
+                    return command
+        return None
+
+    def update_command_status(self, current_executing_command, last_completed_command):
+        if current_executing_command is None or last_completed_command is None:
+            print('No commands to update')
+            return
+        # Iterate over a copy of the queue.
+        for command in list(self.queue):
+            if command.status == "Sent" and command.command_number == int(current_executing_command):
+                command.mark_as_executing()
+            if command.command_number <= int(last_completed_command):
+                command.mark_as_completed()
+
+        # Now remove completed commands.
+        while self.queue and self.queue[0].status == "Completed":
+            completed_command = self.queue.popleft()
+            self.completed.append(completed_command)
+            if len(self.completed) > 100:
+                self.completed.popleft()
+
+        if len(self.queue) == 0:
+            self.commands_completed.emit()
+
+        self.queue_updated.emit()
+
+    def clear_queue(self):
+        """Clear the command queue."""
+        self.queue.clear()
+        self.completed.clear()
+        self.command_number = 0
+        self.queue_updated.emit()
 
 
 class Machine(QObject):
@@ -153,8 +321,20 @@ class Machine(QObject):
     the command queue.
     """
     status_updated = Signal(dict)  # Signal to emit status updates
-    def __init__(self):
+    command_sent = Signal(dict)    # Signal to emit when a command is sent
+    error_occurred = Signal(str)   # Signal to emit errors
+    homing_completed = Signal()    # Signal to emit when homing is completed
+    gripper_open = Signal()      # Signal to emit when the gripper is opened
+    gripper_closed = Signal()    # Signal to emit when the gripper is closed
+    gripper_on_signal = Signal()        # Signal to emit when the gripper is turned on
+    gripper_off_signal = Signal()       # Signal to emit when the gripper is turned off
+    disconnect_complete_signal = Signal()  # Signal to stop timers
+    machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
+    all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
+
+    def __init__(self,model):
         super().__init__()
+        self.command_queue = CommandQueue()
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
 
@@ -164,6 +344,278 @@ class Machine(QObject):
             print(f"Failed to open serial port: {e}")
 
         self.status_thread = StatusThread(self.ser)
-        self.status_thread.status_updated.connect(self.update_status)
-        self.status_thread.error.connect(self.on_error)
+        self.status_thread.status_received.connect(self.update_status)
+        # self.status_thread.error.connect(self.on_error)
         self.status_thread.start()
+        self.execution_timer = None
+        self.sent_command = None
+
+        self.begin_execution_timer()
+
+    def begin_execution_timer(self):
+        print('Starting execution timer')
+        self.execution_timer = QTimer()
+        self.execution_timer.timeout.connect(self.send_next_command)
+        self.execution_timer.start(90)  # Update every 100 ms
+
+    def update_status(self, data):
+        """
+        Update the status of the machine with the received data.
+        """
+        if isinstance(data, dict):
+            self.status_updated.emit(data)
+        else:
+            print(f"Received non-dict status data: {data}")
+
+    def update_command_numbers(self,current_command,last_completed):
+        self.command_queue.update_command_status(current_command,last_completed)
+
+    def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False):
+        """Add a command to the queue."""
+        # if self.board is None:
+        #     print('No board connected')
+        #     return False
+        # if manual:
+        #     completed = self.check_if_all_completed()
+        #     if not completed:
+        #         print('Cannot add manual command while commands are in queue')
+        #         return False
+        return self.command_queue.add_command(command_type, param1, param2, param3, handler, kwargs)
+    
+    def check_if_all_completed(self):
+        """Check if all commands have been completed."""
+        if len(self.command_queue.queue) == 0:
+            return True
+        return False
+    
+    def get_remaining_commands(self):
+        return len(self.command_queue.queue)
+    
+    def send_next_command(self):
+        """
+        Send the next command in the queue to the machine.
+        """
+        command = self.command_queue.get_next_command()
+        if command:
+            try:
+                self.ser.write(command.frame)
+                command.mark_as_sent()
+                print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
+            except Exception as e:
+                print(f"Failed to send command: {e}")
+                self.error_occurred.emit(f"Failed to send command: {e}")
+        # else:
+        #     print("No commands to send or maximum sent commands reached.")
+    
+    def send_command_to_board(self, command):
+        """Send a command to the board."""
+        self.ser.write(command.frame)
+        self.ser.flush()
+        self.command_sent.emit({"command": command.get_command()})
+        return True
+    
+    def pause_commands(self):
+        print('Pausing commands')
+        new_command = Command(0, 'PAUSE', 0, 0, 0)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending pause command')
+        self.send_command_to_board(new_command)
+    
+    def resume_commands(self):
+        print('Resuming commands')
+        new_command = Command(0, 'RESUME', 0, 0, 0)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending resume command')
+        self.send_command_to_board(new_command)
+
+    def clear_command_queue(self,handler=None):
+        print('Clearing command queue')
+        new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0, handler=handler)
+        if self.sent_command is not None:
+            print('Overriding command:',self.sent_command.get_command())
+        print('Sending clear command')
+        self.send_command_to_board(new_command)
+        self.command_queue.clear_queue()
+
+    def check_param_limits(self,param,min_val,max_val):
+        if param >= min_val and param <= max_val:
+            return True
+        else:
+            self.error_occurred.emit(f'Parameter out of range: {param} not in ({min_val},{max_val})')
+            return False
+
+    def enable_motors(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('ENABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def disable_motors(self,handler=None,kwargs=None,manual=False):
+        outcome = self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
+        self.add_command_to_queue('GRIPPER_OFF',0,0,0)
+        return outcome
+    
+    def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
+        if self.check_param_limits(acceleration,1,50000):
+            return self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def reset_acceleration(self,handler=None,kwargs=None,manual=False):
+        self.add_command_to_queue('RESET_ACCEL',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def regulate_print_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('REGULATE_PRESSURE_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def regulate_refuel_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('REGULATE_PRESSURE_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def deregulate_print_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('DEREGULATE_PRESSURE_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def deregulate_refuel_pressure(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('DEREGULATE_PRESSURE_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def reset_print_syringe(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('RESET_P',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def reset_refuel_syringe(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('RESET_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(x,-50000,50000):
+            # calculate direction
+            direction = 1 if x >= 0 else 0
+            return self.add_command_to_queue('RELATIVE_X', direction, abs(x), 30000, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(x,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_X', x, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(y,-50000,50000):
+            # calculate direction
+            direction = 1 if y >= 0 else 0
+            return self.add_command_to_queue('RELATIVE_Y', direction, abs(y), 30000, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_Y(self, y, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(y,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_Y', y, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(z,-50000,50000):
+            direction = 1 if z >= 0 else 0
+            return self.add_command_to_queue('RELATIVE_Z', direction, abs(z), 30000, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_Z', z, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        
+    def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+            return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+        
+    def convert_to_psi(self,pressure):
+        return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
+    
+    def convert_to_raw_pressure(self,psi):
+        return int((psi / self.psi_max) * self.fss + self.psi_offset)
+
+    def set_relative_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        pressure -= self.psi_offset
+        print('Setting relative print pressure:',pressure)
+        if self.check_param_limits(pressure,-2185,2185):
+            sign = 1 if pressure >= 0 else 0
+            pressure = abs(pressure)
+            return self.add_command_to_queue('RELATIVE_PRESSURE_P',sign,pressure,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_relative_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        pressure -= self.psi_offset
+        print('Setting relative refuel pressure:',pressure)
+        if self.check_param_limits(pressure,-2185,2185):
+            sign = 1 if pressure >= 0 else 0
+            pressure = abs(pressure)
+            return self.add_command_to_queue('RELATIVE_PRESSURE_R',sign, pressure, 0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        print('Setting absolute print pressure:',pressure)
+        if self.check_param_limits(pressure,0,10376):
+            return self.add_command_to_queue('ABSOLUTE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
+        pressure = self.convert_to_raw_pressure(psi)
+        print('Setting absolute refuel pressure:',pressure)
+        if self.check_param_limits(pressure,0,10376):
+            return self.add_command_to_queue('ABSOLUTE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+        if self.check_param_limits(pulse_width,100,10000):
+            return self.add_command_to_queue('SET_WIDTH_P',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+        
+    def set_refuel_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+        if self.check_param_limits(pulse_width,100,10000):
+            return self.add_command_to_queue('SET_WIDTH_R',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def enter_print_mode(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def exit_print_mode(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('NORMAL_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def home_motor_handler(self):
+        self.homed = True
+        self.location = 'Home'
+        self.homing_completed.emit()
+
+    def home_motors(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            handler = self.home_motor_handler
+        self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
+        return True
+    
+    def open_gripper_handler(self,additional_handler=None):
+        if additional_handler is not None:
+            additional_handler()
+        self.gripper_open.emit()
+
+    def open_gripper(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            new_handler = self.open_gripper_handler
+        else:
+            new_handler = lambda: self.open_gripper_handler(handler)
+        return self.add_command_to_queue('OPEN_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
+    
+    def close_gripper_handler(self,additional_handler=None):
+        if additional_handler is not None:
+            additional_handler()
+        self.gripper_closed.emit()
+
+    def close_gripper(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            new_handler = self.close_gripper_handler
+        else:
+            new_handler = lambda: self.close_gripper_handler(handler)
+        return self.add_command_to_queue('CLOSE_GRIPPER',0,0,0,handler=new_handler,kwargs=kwargs,manual=manual)
+        
+    def gripper_off_handler(self):
+        self.gripper_off_signal.emit()
+
+    def gripper_off(self,handler=None,kwargs=None,manual=False):
+        if handler == None:
+            handler = self.gripper_off_handler
+        return self.add_command_to_queue('GRIPPER_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def wait_command(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('WAIT',200,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
+        return self.add_command_to_queue('DISPENSE',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)

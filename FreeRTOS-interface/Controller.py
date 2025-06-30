@@ -454,8 +454,8 @@ class Controller(QObject):
     def toggle_regulation(self):
         """Slot to toggle the motor state."""
         if self.model.machine_model.regulating_print_pressure:
-            success = self.machine.deregulate_pressure()  # Assuming method exists
-            success_2 = True
+            success = self.machine.deregulate_print_pressure()  # Assuming method exists
+            success_2 = self.machine.deregulate_refuel_pressure()
         else:
             success = self.machine.regulate_print_pressure()  # Assuming method exists
             success_2 = self.machine.regulate_refuel_pressure()

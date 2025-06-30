@@ -1137,18 +1137,18 @@ class Machine(QObject):
         else:
             print('Connecting to machine at port:',port)
             try:
-                self.board = serial.Serial(port, baudrate=115200,timeout=2)
+                self.board = serial.Serial('/dev/ttyAMA0', baudrate=115200,timeout=2)
                 if not self.board.is_open:  # Add this line
                     self.error_occurred.emit('Could not open port')
                     raise serial.SerialException('Could not open port')  # Add this line
                 
                 time.sleep(0.2)  # Give some time for the device to respond
                 # Read the response
-                response = self.board.read_all().decode('ascii').strip()
-                if 'Cycle_count' not in response:  # Check if the response matches the expected handshake
-                    raise serial.SerialException(f'Unexpected response from machine: {response}')
+                # response = self.board.read_all().decode('ascii').strip()
+                # if 'Cycle_count' not in response:  # Check if the response matches the expected handshake
+                #     raise serial.SerialException(f'Unexpected response from machine: {response}')
 
-                self.initial_reset_board()
+                # self.initial_reset_board()
                 self.machine_connected_signal.emit(True)
                 self.simulate = False
                 self.port = port
@@ -1159,9 +1159,11 @@ class Machine(QObject):
                 self.machine_connected_signal.emit(False)
                 self.port = None
                 return False
+        print('Machine connected successfully')
         self.get_status_update()
         self.begin_communication_timer()
         self.begin_execution_timer()
+        print('Connected to machine at port:',port)
         return True
     
     def reset_handler(self):
@@ -1310,64 +1312,64 @@ class Machine(QObject):
 
         return result
 
-    def run(self):
-        try:
-            while not self.isInterruptionRequested():
-                # print("Interrupted:", self.isInterruptionRequested())
-                b = self.ser.read(1)
-                if not b or b[0] != START_BYTE:
-                    print("Start byte not received, waiting...")
-                    continue
-                L = self.ser.read(1)
-                if len(L)!=1:
-                    print("Length byte not received, waiting...")
-                    continue
-                length = L[0]
-                payload = self.ser.read(length)
-                if len(payload)!=length:
-                    print("Payload length mismatch, waiting...")
-                    continue
-                tail = self.ser.read(2)
-                if len(tail)!=2:
-                    print("CRC tail not received, waiting...")
-                    continue
-                rec_crc = tail[0] | (tail[1]<<8)
-                if rec_crc != self.crc16_x25(payload):
-                    self.status_received.emit("! CRC ERROR on incoming frame")
-                    continue
-                cmd = payload[0]
-                if cmd == CMD_STATUS and len(payload)>=9:
-                    # instead of unpacking fixed fields, do:
-                    data = self.parse_tlv_payload(payload[1:])  # skip the CMD byte
-                    # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
-                    # hand it off to your UI:
-                    self.status_received.emit(data)
+    # def run(self):
+    #     try:
+    #         while not self.isInterruptionRequested():
+    #             # print("Interrupted:", self.isInterruptionRequested())
+    #             b = self.ser.read(1)
+    #             if not b or b[0] != START_BYTE:
+    #                 print("Start byte not received, waiting...")
+    #                 continue
+    #             L = self.ser.read(1)
+    #             if len(L)!=1:
+    #                 print("Length byte not received, waiting...")
+    #                 continue
+    #             length = L[0]
+    #             payload = self.ser.read(length)
+    #             if len(payload)!=length:
+    #                 print("Payload length mismatch, waiting...")
+    #                 continue
+    #             tail = self.ser.read(2)
+    #             if len(tail)!=2:
+    #                 print("CRC tail not received, waiting...")
+    #                 continue
+    #             rec_crc = tail[0] | (tail[1]<<8)
+    #             if rec_crc != self.crc16_x25(payload):
+    #                 self.status_received.emit("! CRC ERROR on incoming frame")
+    #                 continue
+    #             cmd = payload[0]
+    #             if cmd == CMD_STATUS and len(payload)>=9:
+    #                 # instead of unpacking fixed fields, do:
+    #                 data = self.parse_tlv_payload(payload[1:])  # skip the CMD byte
+    #                 # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
+    #                 # hand it off to your UI:
+    #                 self.status_received.emit(data)
 
-                else:
-                    # ignore or show other async messages
-                    pass
-        except Exception as e:
-            self.error.emit(f"Reader thread error: {e}")
+    #             else:
+    #                 # ignore or show other async messages
+    #                 pass
+    #     except Exception as e:
+    #         self.error.emit(f"Reader thread error: {e}")
 
     def get_status_update(self):
         """Get a status update from the control board."""
         try:
             while not self.isInterruptionRequested():
                 # print("Interrupted:", self.isInterruptionRequested())
-                b = self.ser.read(1)
+                b = self.board.read(1)
                 if not b or b[0] != START_BYTE:
                     print("Start byte not received, waiting...")
                     continue
-                L = self.ser.read(1)
+                L = self.board.read(1)
                 if len(L)!=1:
                     print("Length byte not received, waiting...")
                     continue
                 length = L[0]
-                payload = self.ser.read(length)
+                payload = self.board.read(length)
                 if len(payload)!=length:
                     print("Payload length mismatch, waiting...")
                     continue
-                tail = self.ser.read(2)
+                tail = self.board.read(2)
                 if len(tail)!=2:
                     print("CRC tail not received, waiting...")
                     continue
@@ -1393,6 +1395,8 @@ class Machine(QObject):
             if self.error_count > 100:
                 print('------- Automatic disconnect -------')
                 self.disconnect_board(error=True)
+        except serial.SerialException as e:
+            print(f"Serial error: {e}")
 
     #     if self.board is not None:
     #         if self.simulate:

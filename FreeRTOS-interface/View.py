@@ -4339,8 +4339,8 @@ class BoardStatusBox(QGroupBox):
             'Location': QLabel('Unknown'),
             'Cycle Count': QLabel('0'),
             'Current Micros': QLabel('0'),
-            'Mass': QLabel('0'),
-            'Stable': QLabel('False')
+            # 'Mass': QLabel('0'),
+            # 'Stable': QLabel('False')
         }
 
         row = 0
@@ -4361,8 +4361,8 @@ class BoardStatusBox(QGroupBox):
         self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Current Micros'].setText(str(self.model.machine_model.current_micros))
-        self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
-        self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
+        # self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
+        # self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
 
 class ShortcutTableWidget(QGroupBox):
     """
