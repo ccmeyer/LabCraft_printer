@@ -17,3 +17,7 @@ MVC-interface/Logs/*
 MVC-interface/Presets/Locations.json
 MVC-interface/Presets/Plates.json
 MVC-interface/Presets/Settings.json
+FreeRTOS-interface/*.ipynb
+FreeRTOS-interface/Images/*
+FreeRTOS-interface/Logs/*
+FreeRTOS-interface/Experiments
