@@ -4327,7 +4327,7 @@ class BoardStatusBox(QGroupBox):
         self.model.location_model.locations_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
         self.model.machine_model.home_status_signal.connect(self.update_status)
-        self.model.calibration_model.mass_updated_signal.connect(self.update_status)
+        # self.model.calibration_model.mass_updated_signal.connect(self.update_status)
     
     def init_ui(self):
         """Initialize the user interface."""

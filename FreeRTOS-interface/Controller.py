@@ -35,7 +35,7 @@ class Controller(QObject):
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 
-        self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
+        # self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
 
         self.model.printer_head_manager.volume_changed_signal.connect(self.update_volumes_in_view)
@@ -54,7 +54,10 @@ class Controller(QObject):
         self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
         self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
-        self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+        try:
+            self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+        except AttributeError:
+            print("Droplet camera not initialized or image_captured_signal not available.")
     
     def disconnect_droplet_camera_signals(self):
         self.model.calibration_manager.captureImageRequested.disconnect()

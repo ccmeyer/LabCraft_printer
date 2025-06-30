@@ -14,8 +14,52 @@ import numpy as np
 import pandas as pd
 import os
 import joblib
-from picamera2 import Picamera2
-import gpiod
+try:
+    from picamera2 import Picamera2
+    import gpiod
+except ImportError:
+    print("Running on a non-Raspberry Pi system or missing required libraries. Camera and GPIO functionality will be unavailable.")
+    Picamera2 = None
+    gpiod = None
+
+START_BYTE = 0xAA
+CMD_STATUS = 0x02
+
+# TLV tag constants; must match firmware
+TAG_LED_TOTAL     = 0x10
+TAG_LED_REMAIN    = 0x11
+TAG_PRINT_P       = 0x12
+TAG_REFUEL_P      = 0x13
+TAG_X_POS         = 0x20
+TAG_Y_POS         = 0x21
+TAG_Z_POS         = 0x22
+TAG_P_POS         = 0x23
+TAG_R_POS         = 0x24
+TAG_DROP_TOTAL    = 0x30
+TAG_DROP_REMAIN   = 0x31
+TAG_ACTIVE_P      = 0x40
+TAG_ACTIVE_R      = 0x41
+TAG_CMD_DEPTH     = 0x50
+
+# Map tags → (field name, length_in_bytes, signed?)
+TAG_MAP = {
+    TAG_LED_TOTAL:    ("led_total",    2, False),
+    TAG_LED_REMAIN:   ("led_remain",   2, False),
+    TAG_PRINT_P:      ("Pressure_P",2, False),
+    TAG_REFUEL_P:     ("Pressure_R",2,False),
+    TAG_X_POS:        ("X",        4, True),
+    TAG_Y_POS:        ("Y",        4, True),
+    TAG_Z_POS:        ("Z",        4, True),
+    TAG_P_POS:        ("P",        4, True),
+    TAG_R_POS:        ("R",        4, True),
+    TAG_DROP_TOTAL:   ("drop_total",   4, False),
+    TAG_DROP_REMAIN:  ("drop_remain",  4, False),
+    TAG_ACTIVE_P:     ("print_active", 2, False),
+    TAG_ACTIVE_R:     ("refuel_active",2, False),
+    TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
+}
+
+
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
@@ -1034,24 +1078,32 @@ class Machine(QObject):
         self.sent_command = None
         self.error_count = 0
 
-        # self.fss = 6553
-        # self.psi_offset = 8192
-        self.fss = 13107
-        self.psi_offset = 1638
-        self.psi_max = 15
+        # # self.fss = 6553
+        # # self.psi_offset = 8192
+        # self.fss = 13107
+        # self.psi_offset = 1638
+        # self.psi_max = 15
 
         self.simulate_balance = True
         self.balance = Balance(self,self.model)
         self.balance_connected = False
         self.balance_droplets = []
 
-        self.refuel_camera = RefuelCamera()
-        self.droplet_camera = DropletCamera()
+        try:
+            self.refuel_camera = RefuelCamera()
+        except Exception as e:
+            print(f'Error initializing refuel camera: {e}')
+            self.refuel_camera = None
+        try:
+            self.droplet_camera = DropletCamera()
+        except Exception as e:
+            print(f'Error initializing droplet camera: {e}')
+            self.droplet_camera = None
 
     def begin_communication_timer(self):
         print('Starting communication timer')
         self.communication_timer = QTimer()
-        self.communication_timer.timeout.connect(self.request_status_update)
+        self.communication_timer.timeout.connect(self.get_status_update)
         self.communication_timer.start(5)  # Update every 100 ms
 
     def begin_execution_timer(self):
@@ -1107,7 +1159,7 @@ class Machine(QObject):
                 self.machine_connected_signal.emit(False)
                 self.port = None
                 return False
-        self.request_status_update()
+        self.get_status_update()
         self.begin_communication_timer()
         self.begin_execution_timer()
         return True
@@ -1219,61 +1271,182 @@ class Machine(QObject):
     def update_command_numbers(self,current_command,last_completed):
         self.command_queue.update_command_status(current_command,last_completed)
 
-    def request_status_update(self):
-        """Send a request to the control board for a status update."""
-        if self.board is not None:
-            if self.simulate:
-                status_string = self.board.get_current_state()
-            else:
-                try:
-                    if self.board.in_waiting > 0:
-                        status_string = self.board.readline().decode('utf-8').strip()
-                        # print('Status string:',status_string)
-                    else:
-                        status_string = ''
-                except Exception as e:
-                    status_string = ''
-                    self.error_occurred.emit(f'Error reading from machine\n Error: {e}')
-                    self.error_count += 1
-                    if self.error_count > 100:
-                        print('------- Automatic disconnect -------')
-                        self.disconnect_board(error=True)
-            try:
-                if status_string == '':
-                    # print('No status string received')
-                    return
-                status_dict = self.parse_status_string(status_string)
-                if status_dict == {}:
-                    return
-                self.status_updated.emit(status_dict)  # Emit the status update signal
-                self.error_count = 0
-            except ValueError as e:
-                self.error_occurred.emit(f"Error parsing status string: {str(e)}-{status_string}")
-            except Exception as e:
-                self.error_occurred.emit(f"Unexpected error: {str(e)}-{status_string}")
-                self.error_count += 1
-                if self.error_count > 100:
-                    print('------- Automatic disconnect -------')
-                    self.disconnect_board(error=True)
+    def crc16_x25(self,data: bytes) -> int:
+        crc = 0xFFFF
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc & 0xFFFF
 
-    def parse_status_string(self, status_string):
-        """Convert status string into a dictionary."""
-        if not status_string:
-            raise ValueError("Status string is empty")
-        
-        if "DEBUG" in status_string:
-            # print('Status string:',status_string)
-            return {}
+    def parse_tlv_payload(self,payload: bytes) -> dict:
+        """
+        Walk the payload as tag‐len‐value, return a dict name->value.
+        Unknown tags are skipped.
+        """
+        idx = 0
+        result = {}
+        while idx + 2 <= len(payload):
+            tag    = payload[idx];    idx += 1
+            length = payload[idx];    idx += 1
+            if idx + length > len(payload):
+                break  # malformed/truncated
+            raw = payload[idx:idx+length]
+            idx += length
 
-        status_dict = {}
-        # for item in status_string.split(','):
+            entry = TAG_MAP.get(tag)
+            if not entry:
+                continue  # unknown tag
+            name, expected_len, signed = entry
+            if expected_len != length:
+                # length mismatch; skip or handle as error
+                continue
+
+            value = int.from_bytes(raw, byteorder="little", signed=signed)
+            result[name] = value
+
+        return result
+
+    def run(self):
         try:
-            key, value = status_string.split(':')
-            status_dict[key] = value
-        except ValueError:
-            raise ValueError(f"Malformed item in status string: {status_string}")
+            while not self.isInterruptionRequested():
+                # print("Interrupted:", self.isInterruptionRequested())
+                b = self.ser.read(1)
+                if not b or b[0] != START_BYTE:
+                    print("Start byte not received, waiting...")
+                    continue
+                L = self.ser.read(1)
+                if len(L)!=1:
+                    print("Length byte not received, waiting...")
+                    continue
+                length = L[0]
+                payload = self.ser.read(length)
+                if len(payload)!=length:
+                    print("Payload length mismatch, waiting...")
+                    continue
+                tail = self.ser.read(2)
+                if len(tail)!=2:
+                    print("CRC tail not received, waiting...")
+                    continue
+                rec_crc = tail[0] | (tail[1]<<8)
+                if rec_crc != self.crc16_x25(payload):
+                    self.status_received.emit("! CRC ERROR on incoming frame")
+                    continue
+                cmd = payload[0]
+                if cmd == CMD_STATUS and len(payload)>=9:
+                    # instead of unpacking fixed fields, do:
+                    data = self.parse_tlv_payload(payload[1:])  # skip the CMD byte
+                    # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
+                    # hand it off to your UI:
+                    self.status_received.emit(data)
 
-        return status_dict
+                else:
+                    # ignore or show other async messages
+                    pass
+        except Exception as e:
+            self.error.emit(f"Reader thread error: {e}")
+
+    def get_status_update(self):
+        """Get a status update from the control board."""
+        try:
+            while not self.isInterruptionRequested():
+                # print("Interrupted:", self.isInterruptionRequested())
+                b = self.ser.read(1)
+                if not b or b[0] != START_BYTE:
+                    print("Start byte not received, waiting...")
+                    continue
+                L = self.ser.read(1)
+                if len(L)!=1:
+                    print("Length byte not received, waiting...")
+                    continue
+                length = L[0]
+                payload = self.ser.read(length)
+                if len(payload)!=length:
+                    print("Payload length mismatch, waiting...")
+                    continue
+                tail = self.ser.read(2)
+                if len(tail)!=2:
+                    print("CRC tail not received, waiting...")
+                    continue
+                rec_crc = tail[0] | (tail[1]<<8)
+                if rec_crc != self.crc16_x25(payload):
+                    self.status_updated.emit("! CRC ERROR on incoming frame")
+                    continue
+                cmd = payload[0]
+                if cmd == CMD_STATUS and len(payload)>=9:
+                    # instead of unpacking fixed fields, do:
+                    data = self.parse_tlv_payload(payload[1:])  # skip the CMD byte
+                    # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
+                    # hand it off to your UI:
+                    self.status_updated.emit(data)
+
+                else:
+                    # ignore or show other async messages
+                    pass
+        except Exception as e:
+            self.error_occurred.emit(f"Reader thread error: {e}")
+            # self.error_occurred.emit(f"Unexpected error: {str(e)}-{status_string}")
+            self.error_count += 1
+            if self.error_count > 100:
+                print('------- Automatic disconnect -------')
+                self.disconnect_board(error=True)
+
+    #     if self.board is not None:
+    #         if self.simulate:
+    #             status_string = self.board.get_current_state()
+    #         else:
+    #             try:
+    #                 if self.board.in_waiting > 0:
+    #                     status_string = self.board.readline().decode('utf-8').strip()
+    #                     # print('Status string:',status_string)
+    #                 else:
+    #                     status_string = ''
+    #             except Exception as e:
+    #                 status_string = ''
+    #                 self.error_occurred.emit(f'Error reading from machine\n Error: {e}')
+    #                 self.error_count += 1
+    #                 if self.error_count > 100:
+    #                     print('------- Automatic disconnect -------')
+    #                     self.disconnect_board(error=True)
+    #         try:
+    #             if status_string == '':
+    #                 # print('No status string received')
+    #                 return
+    #             status_dict = self.parse_status_string(status_string)
+    #             if status_dict == {}:
+    #                 return
+    #             self.status_updated.emit(status_dict)  # Emit the status update signal
+    #             self.error_count = 0
+    #         except ValueError as e:
+    #             self.error_occurred.emit(f"Error parsing status string: {str(e)}-{status_string}")
+    #         except Exception as e:
+    #             self.error_occurred.emit(f"Unexpected error: {str(e)}-{status_string}")
+    #             self.error_count += 1
+    #             if self.error_count > 100:
+    #                 print('------- Automatic disconnect -------')
+    #                 self.disconnect_board(error=True)
+
+    # def parse_status_string(self, status_string):
+    #     """Convert status string into a dictionary."""
+    #     if not status_string:
+    #         raise ValueError("Status string is empty")
+        
+    #     if "DEBUG" in status_string:
+    #         # print('Status string:',status_string)
+    #         return {}
+
+    #     status_dict = {}
+    #     # for item in status_string.split(','):
+    #     try:
+    #         key, value = status_string.split(':')
+    #         status_dict[key] = value
+    #     except ValueError:
+    #         raise ValueError(f"Malformed item in status string: {status_string}")
+
+    #     return status_dict
 
     def check_if_all_completed(self):
         """Check if all commands have been completed."""

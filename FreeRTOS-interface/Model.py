@@ -6265,7 +6265,8 @@ class Model(QObject):
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
-        self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
+
+        # self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_file_path = None
         self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
         self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
