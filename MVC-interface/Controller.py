@@ -40,12 +40,29 @@ class Controller(QObject):
 
         self.model.printer_head_manager.volume_changed_signal.connect(self.update_volumes_in_view)
         
+        self.connect_droplet_camera_signals()
+        # self.model.calibration_manager.captureImageRequested.connect(self.handle_capture_request)
+        # self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
+        # self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
+        # # self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
+        # self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
+        # self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+
+    def connect_droplet_camera_signals(self):
+        """Connect the droplet camera signals to the controller."""
         self.model.calibration_manager.captureImageRequested.connect(self.handle_capture_request)
         self.model.calibration_manager.moveRequested.connect(self.handle_move_request)
         self.model.calibration_manager.moveAbsoluteRequested.connect(self.handle_absolute_move_request)
-        # self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+    
+    def disconnect_droplet_camera_signals(self):
+        self.model.calibration_manager.captureImageRequested.disconnect()
+        self.model.calibration_manager.moveRequested.disconnect()
+        self.model.calibration_manager.moveAbsoluteRequested.disconnect()
+        self.model.calibration_manager.changeSettingsRequested.disconnect()
+        self.machine.droplet_camera.image_captured_signal.disconnect()
+
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -517,7 +534,7 @@ class Controller(QObject):
             target['X'] += 2500
 
         if z_offset:
-            target['Z'] -= 18000
+            target['Z'] -= 10000
         # Use expected position instead of current position from the model
         current = self.expected_position
 
@@ -913,11 +930,17 @@ class Controller(QObject):
 
     # def handle_droplet_change_request(self, num_droplets,callback):
     #     self.set_imaging_droplets(num_droplets,callback=callback)
+    def intermediate_callback(self):
+        """
+        A simple callback function that can be used to handle intermediate results.
+        This is just a placeholder and can be customized as needed.
+        """
+        print(f'Intermediate result')
 
     def handle_settings_change_request(self, settings, callback):
         # Update the settings in the model and machine.
         num_settings = len(settings)
-        current_call_back = None
+        current_call_back = self.intermediate_callback  # Default callback for intermediate settings.
         for i, (key, value) in enumerate(settings.items()):
             if i == num_settings - 1:
                 current_call_back = callback
@@ -927,6 +950,7 @@ class Controller(QObject):
                 self.set_flash_duration(value, callback=current_call_back)
             elif key == 'flash_delay':
                 self.set_flash_delay(value, callback=current_call_back)
+                print(f'--Setting flash delay: {value}')
             elif key == 'exposure_time':
                 self.set_exposure_time(value, callback=current_call_back)
             elif key == 'print_pulse_width':
@@ -934,6 +958,7 @@ class Controller(QObject):
             elif key == 'refuel_pulse_width':
                 self.set_refuel_pulse_width(value, handler=current_call_back)
             elif key == 'print_pressure':
+                print(f'--Setting print pressure: {value}')
                 self.set_absolute_print_pressure(value, handler=current_call_back)
             elif key == 'refuel_pressure':
                 self.set_absolute_refuel_pressure(value, handler=current_call_back)
@@ -1004,11 +1029,13 @@ class Controller(QObject):
             return
         if position == 'top':
             current = self.model.droplet_camera_model.get_center_in_pixels()
-            move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=50)
+            print(f'-Current center in pixels: {current}')
+            move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=150)
+            print(f'-Move vector to top center: {move_vector}')
             dX, dY, dZ = move_vector
             target_position['X'] += dX
             target_position['Y'] += dY
             target_position['Z'] += dZ
-
+        print(f'-Centering nozzle at position: {target_position}')
         self.set_absolute_coordinates(target_position['X'],target_position['Y'],target_position['Z'],handler=callback)
 

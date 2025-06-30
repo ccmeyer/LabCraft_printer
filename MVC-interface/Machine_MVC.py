@@ -21,7 +21,7 @@ class DropletCamera(QObject):
     image_captured_signal = Signal()
     def __init__(self):
         super().__init__()
-        self.signal_pin = 27
+        self.signal_pin = 17
         self.camera = None
         self.chip = gpiod.Chip("gpiochip4")
         self.line = self.chip.get_line(self.signal_pin)
@@ -166,6 +166,8 @@ class DropletCamera(QObject):
         request = self.camera.wait(job)
         if request:
             self.latest_frame = request.make_array("main")
+            self.latest_frame = cv2.rotate(self.latest_frame, cv2.ROTATE_90_CLOCKWISE)
+
             md = request.get_metadata()  # or req.metadata
             # print("Actual exposure used:", md["ExposureTime"])
             # print("Actual frame duration:", md["FrameDuration"])
@@ -195,7 +197,7 @@ class DropletCamera(QObject):
 class RefuelCamera(QObject):
     def __init__(self):
         super().__init__()
-        self.led_pin = 17
+        self.led_pin = 27
         self.chip = gpiod.Chip("gpiochip4")
         self.line = self.chip.get_line(self.led_pin)
         self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
@@ -1439,13 +1441,13 @@ class Machine(QObject):
     def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute print pressure:',pressure)
-        if self.check_param_limits(pressure,7755,10376):
+        if self.check_param_limits(pressure,0,10376):
             return self.add_command_to_queue('ABSOLUTE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute refuel pressure:',pressure)
-        if self.check_param_limits(pressure,7755,10376):
+        if self.check_param_limits(pressure,0,10376):
             return self.add_command_to_queue('ABSOLUTE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):

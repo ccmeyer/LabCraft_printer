@@ -2,7 +2,7 @@
 import gpiod
 import time
 
-BOOT_PIN, RESET_PIN = 16, 20
+BOOT_PIN, RESET_PIN = 24, 23
 PULSE_DURATION = 5
 
 class DfuControl:
