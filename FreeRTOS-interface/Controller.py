@@ -441,6 +441,14 @@ class Controller(QObject):
         """Pause the machine."""
         self.machine.pause_machine()
 
+    def LED_on(self):
+        """Turn on the LED."""
+        self.machine.LED_on()
+        
+    def LED_off(self):
+        """Turn off the LED."""
+        self.machine.LED_off()
+
     def home_machine(self):
         """Home the machine."""
         print("Homing machine...")

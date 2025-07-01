@@ -31,17 +31,28 @@ TAG_LED_TOTAL     = 0x10
 TAG_LED_REMAIN    = 0x11
 TAG_PRINT_P       = 0x12
 TAG_REFUEL_P      = 0x13
+TAG_TAR_PRINT_P   = 0x14
+TAG_TAR_REFUEL_P  = 0x15
 TAG_X_POS         = 0x20
 TAG_Y_POS         = 0x21
 TAG_Z_POS         = 0x22
 TAG_P_POS         = 0x23
 TAG_R_POS         = 0x24
+TAG_TAR_X_POS      = 0x25
+TAG_TAR_Y_POS      = 0x26
+TAG_TAR_Z_POS      = 0x27
+TAG_TAR_P_POS      = 0x28
+TAG_TAR_R_POS      = 0x29
 TAG_DROP_TOTAL    = 0x30
 TAG_DROP_REMAIN   = 0x31
+TAG_PRINT_PW     = 0x32
+TAG_REFUEL_PW    = 0x33
+TAG_DISP_FREQ     = 0x34
 TAG_ACTIVE_P      = 0x40
 TAG_ACTIVE_R      = 0x41
 TAG_CMD_DEPTH     = 0x50
 TAG_LAST_CMD      = 0x51
+TAG_CURR_CMD     = 0x52
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -49,17 +60,27 @@ TAG_MAP = {
     TAG_LED_REMAIN:   ("led_remain",   2, False),
     TAG_PRINT_P:      ("Pressure_P",2, False),
     TAG_REFUEL_P:     ("Pressure_R",2,False),
+    TAG_TAR_PRINT_P:  ("Tar_print",2, False),
+    TAG_TAR_REFUEL_P: ("Tar_refuel",2, False),
     TAG_X_POS:        ("X",        4, True),
     TAG_Y_POS:        ("Y",        4, True),
     TAG_Z_POS:        ("Z",        4, True),
     TAG_P_POS:        ("P",        4, True),
     TAG_R_POS:        ("R",        4, True),
+    TAG_TAR_X_POS:    ("Tar_X", 4, True),
+    TAG_TAR_Y_POS:    ("Tar_Y", 4, True),
+    TAG_TAR_Z_POS:    ("Tar_Z", 4, True),
+    TAG_TAR_P_POS:    ("Tar_P", 4, True),
+    TAG_TAR_R_POS:    ("Tar_R", 4, True),
     TAG_DROP_TOTAL:   ("drop_total",   4, False),
     TAG_DROP_REMAIN:  ("drop_remain",  4, False),
+    TAG_PRINT_PW:     ("Print_width",  2, False),
+    TAG_REFUEL_PW:    ("Refuel_width", 2, False),
     TAG_ACTIVE_P:     ("print_active", 2, False),
     TAG_ACTIVE_R:     ("refuel_active",2, False),
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
     TAG_LAST_CMD:     ("Last_completed", 2, False),
+    TAG_CURR_CMD:     ("Current_command", 2, False),
 }
 
 CMD_MAP = {
@@ -82,6 +103,12 @@ CMD_MAP = {
     'GRIPPER_OFF': 0x12,
 
     'DISPENSE': 0x22,
+
+    'LED_ON': 0x30,
+    'LED_OFF': 0x31,
+
+    'SET_WIDTH_P': 0XD0,
+    'SET_WIDTH_R': 0xD1,
     
     'ABSOLUTE_PRESSURE_P': 0xE0,
     'ABSOLUTE_PRESSURE_R': 0xE1,
@@ -93,6 +120,7 @@ CMD_MAP = {
     'DEREGULATE_PRESSURE_R': 0xEB,
     'RELATIVE_PRESSURE_P': 0xEC,
     'RELATIVE_PRESSURE_R': 0xED,
+
 
     'PAUSE': 0xF0,
     'RESUME': 0xF1,
@@ -714,3 +742,9 @@ class Machine(QObject):
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
         return self.add_command_to_queue('DISPENSE',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def LED_on(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('LED_ON',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def LED_off(self,handler=None,kwargs=None,manual=False):
+        return self.add_command_to_queue('LED_OFF',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
