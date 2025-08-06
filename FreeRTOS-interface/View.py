@@ -223,6 +223,9 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
         self.shortcut_manager.add_shortcut('Shift+1','LED On', lambda: self.controller.LED_on())
         self.shortcut_manager.add_shortcut('Shift+2','LED Off', lambda: self.controller.LED_off())
+        self.shortcut_manager.add_shortcut('Shift+3','Start Refuel Camera', lambda: self.controller.start_refuel_camera())
+        self.shortcut_manager.add_shortcut('Shift+4','Stop Refuel Camera', lambda: self.controller.stop_refuel_camera())
+
 
     def make_transparent_icon(self):
         transparent_image = QtGui.QImage(1, 1, QtGui.QImage.Format_ARGB32)
