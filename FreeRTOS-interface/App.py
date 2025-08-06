@@ -48,17 +48,15 @@ def main():
     splash = QSplashScreen(pixmap)
     splash.show()
 
-    from Machine_FreeRTOS import Machine, CameraThread
+    from Machine_FreeRTOS import Machine
     from Model import Model
     from Controller import Controller
     from View import MainWindow
 
     # Initialize components
     model = Model()
-    cam_thread = CameraThread()
-    cam_thread.start()
 
-    machine = Machine(model,cam_thread)
+    machine = Machine(model)
     controller = Controller(machine, model)
 
     set_dark_theme(app)

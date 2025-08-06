@@ -23,10 +23,10 @@ except ImportError:
     Picamera2 = None
     gpiod = None
 
-class CameraThread(QThread):
-    def run(self):
-        # start this thread’s Qt event loop
-        self.exec_()
+# class CameraThread(QThread):
+#     def run(self):
+#         # start this thread’s Qt event loop
+#         self.exec_()
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
@@ -43,34 +43,28 @@ class DropletCamera(QObject):
         self.current_job = None
         self.latest_frame = None
 
-    # def start_camera(self):
-    #     self.camera = Picamera2(1)
-    #     cfg = self.camera.create_still_configuration(
-    #         main={"size": self.camera.sensor_resolution, "format": "RGB888"}
-    #     )
-    #     self.camera.configure(cfg)
-    #     self.camera.set_controls({
-    #         "FrameDurationLimits": (self.exposure_time, self.exposure_time),
-    #         "ExposureTime": self.exposure_time,
-    #         "AeEnable": False,
-    #         "AwbEnable": False,
-    #         "AnalogueGain": 1.0,
-    #     })
-    #     self.camera.start()
-    
-    @Slot()
     def start_camera(self):
-        # This runs **inside** CameraThread’s event loop.
         self.camera = Picamera2(1)
         cfg = self.camera.create_still_configuration(
-            main={"size": self.camera.sensor_resolution,
-                  "format": "RGB888"})
+            main={"size": self.camera.sensor_resolution, "format": "RGB888"}
+        )
         self.camera.configure(cfg)
         self.camera.set_controls({
             "FrameDurationLimits": (self.exposure_time, self.exposure_time),
             "ExposureTime": self.exposure_time,
-            "AeEnable": False, "AwbEnable": False})
+            "AeEnable": False,
+            "AwbEnable": False,
+            "AnalogueGain": 1.0,
+        })
         self.camera.start()
+
+        self.timer_half = QTimer(self)
+        self.timer_half.setSingleShot(True)
+        self.timer_half.timeout.connect(self._on_half_exposure)
+
+        self.timer_final = QTimer(self)
+        self.timer_final.setSingleShot(True)
+        self.timer_final.timeout.connect(self._on_final_exposure)
 
     def stop_camera(self):
         if hasattr(self, "camera"):
@@ -113,18 +107,24 @@ class DropletCamera(QObject):
         if req:
             req.release()
 
-        # 2) schedule flash at half the exposure
-        half_ms = int(self.exposure_time / 2 / 1000)
-        QTimer.singleShot(half_ms, self._do_flash_and_capture)
+        # # 2) schedule flash at half the exposure
+        # half_ms = int(self.exposure_time / 2 / 1000)
+        # QTimer.singleShot(half_ms, self._do_flash_and_capture)
+        # 2) Schedule the flash at half the exposure
+        half_ms = int(self.exposure_time / 2 / 1000)  # e.g. 200000µs → 100ms
+        self.timer_half.start(half_ms)
 
     def _do_flash_and_capture(self):
         # 3) trigger flash
         self.start_flash()
 
-        # 4) schedule the actual capture at end of exposure
-        full_ms = int(self.exposure_time / 1000)
-        QTimer.singleShot(full_ms - int(10),  # small lead to ensure capture starts *before* exposure wraps
-                           self._capture_frame)
+        # # 4) schedule the actual capture at end of exposure
+        # full_ms = int(self.exposure_time / 1000)
+        # QTimer.singleShot(full_ms - int(10),  # small lead to ensure capture starts *before* exposure wraps
+        #                    self._capture_frame)
+        full_ms = int(self.exposure_time / 1000)  # exposure length in ms
+        lead_ms = 10                              # capture 10ms before end
+        self.timer_final.start(full_ms - lead_ms)
 
     def _capture_frame(self):
         # 5) Issue the non-blocking capture for the flashed frame
@@ -702,7 +702,7 @@ class Machine(QObject):
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
 
-    def __init__(self,model,camera_thread):
+    def __init__(self,model):
         super().__init__()
         self.command_queue = CommandQueue()
         self.baud = 115200  # Default baud rate for serial communication
@@ -714,26 +714,12 @@ class Machine(QObject):
 
         self.execution_timer = None
         self.sent_command = None
-        self.camera_thread = camera_thread
+
         try:
             self.droplet_camera = DropletCamera()
-            self.droplet_camera.moveToThread(self.camera_thread)
-
-            # 5) Once moved, invoke init in the camera’s thread context
-            from PySide6.QtCore import QMetaObject, Qt
-            QMetaObject.invokeMethod(
-                self.droplet_camera,
-                "start_camera",            # must be a @Slot in DropletCamera
-                Qt.QueuedConnection
-            )
         except Exception as e:
-            print(f"Error initializing droplet camera: {e}")
+            print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
-        # try:
-        #     self.droplet_camera = DropletCamera()
-        # except Exception as e:
-        #     print(f'Error initializing droplet camera: {e}')
-        #     self.droplet_camera = None
 
 
     def connect_board(self,port):
