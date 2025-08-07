@@ -313,8 +313,8 @@ CMD_MAP = {
     'ABSOLUTE_X': 0x0A,
     'ABSOLUTE_Y': 0x0B,
     'ABSOLUTE_Z': 0x0C,
-    'RELATIVE_XYZ': 0x0D,
-    'ABSOLUTE_XYZ': 0x0E,
+    'RELATIVE_XY': 0x0D,
+    'ABSOLUTE_XY': 0x0E,
 
     'OPEN_GRIPPER': 0x10,
     'CLOSE_GRIPPER': 0x11,
@@ -499,31 +499,6 @@ class Command:
         self.timestamp = time.time()
         self.handler   = handler
         self.kwargs    = kwargs or {}
-
-    # def __init__(self, command_number, command_type, param1, param2, param3, handler=None, kwargs=None):
-    #     self.command_number = command_number
-    #     self.command_type = command_type
-    #     self.command_code = CMD_MAP.get(command_type, None)
-    #     if self.command_code is None:
-    #         raise ValueError(f"Invalid command type: {command_type}")
-    #     self.param1 = int(param1)
-    #     self.param2 = int(param2)
-    #     self.param3 = int(param3)
-    #     self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
-    #     self.payload = struct.pack(">BBHHH",
-    #                                self.command_code & 0xFF,
-    #                                self.command_number & 0xFF,
-    #                                self.param1 & 0xFFFF,
-    #                                self.param2 & 0xFFFF,
-    #                                self.param3 & 0xFFFF)
-    #     self.header = bytes([START_BYTE, len(self.payload)])
-    #     self.crc    = crc16_x25(self.payload)
-    #     self.tail   = struct.pack("<H", self.crc)
-    #     self.frame  = self.header + self.payload + self.tail
-    #     self.status = "Added"
-    #     self.timestamp = time.time()
-    #     self.handler = handler
-    #     self.kwargs = kwargs if kwargs is not None else {}
 
     def mark_as_sent(self):
         self.status = "Sent"
@@ -879,6 +854,20 @@ class Machine(QObject):
     def reset_refuel_syringe(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('RESET_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
+    def set_absolute_XY(self, x, y, handler=None, kwargs=None, manual=False):
+        """
+        Set absolute X and Y positions.
+        """
+        if self.check_param_limits(x,0,80000) and self.check_param_limits(y,0,60000):
+            sign_x = 1 if x >= 0 else 0
+            sign_y = 1 if y >= 0 else 0
+            x = abs(x)
+            y = abs(y)
+            return self.add_command_to_queue('ABSOLUTE_XY', sign_x, x, sign_y, y, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Absolute X or Y position out of range: X={x}, Y={y}')
+            return False
+    
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-80000,80000):
             # calculate direction
@@ -932,13 +921,13 @@ class Machine(QObject):
             print(f'Absolute Z position {z} out of range (0, 100000)')
             return False
 
-    def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
-            return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
+    # def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+    #     if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+    #         return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
         
-    def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
-            return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
+    # def set_absolute_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
+    #     if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
+    #         return self.add_command_to_queue('ABSOLUTE_XYZ', x, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
         
     def convert_to_psi(self,pressure):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)

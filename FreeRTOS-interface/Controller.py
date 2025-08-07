@@ -196,6 +196,17 @@ class Controller(QObject):
         self.machine.set_relative_Z(z,manual=manual,handler=handler)
         self.expected_position['Z'] += z
         return True
+    
+    def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
+        """Set the absolute X and Y coordinates for the machine."""
+        if not override:
+            if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': self.expected_position['Z']}):
+                print('Collision detected')
+                return False
+        #print(f"Setting absolute XY: {x}, {y}")
+        self.machine.set_absolute_XY(x, y, manual=manual, handler=handler)
+        self.update_expected_position(x=x, y=y)
+        return True
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
         """Set the absolute X coordinate for the machine."""
@@ -321,67 +332,154 @@ class Controller(QObject):
         self.expected_position['Y'] += y
         self.expected_position['Z'] += z
         return True
-
+    
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, override=False):
-        """Set the absolute coordinates for the machine."""
+        """Set the absolute coordinates for the machine, using XY moves when possible."""
         new_position = {'X': x, 'Y': y, 'Z': z}
-        # Check for collisions if not overriding.
-        if not override:
-            if self.check_collision(self.expected_position, new_position):
-                print('Collision detected')
-                return False
 
-        commands = []
-        current = self.expected_position
+        # 1) collision check
+        if not override and self.check_collision(self.expected_position, new_position):
+            print('Collision detected')
+            return False
 
-        # Determine the order of moves based on Z change.
-        if current['Z'] != z:
-            if z < current['Z']:
-                # Moving up: move Z first, then Y, then X.
-                if z != current['Z']:
-                    commands.append(('Z', z))
-                if y != current['Y']:
-                    commands.append(('Y', y))
-                if x != current['X']:
-                    commands.append(('X', x))
+        # 2) build the ordered list of single-axis moves
+        cmds = []
+        cur = self.expected_position
+        # if Z is changing, handle Z ordering specially
+        if cur['Z'] != z:
+            if z < cur['Z']:
+                # up: Z, then Y, then X
+                if z != cur['Z']: cmds.append(('Z', z))
+                if y != cur['Y']:   cmds.append(('Y', y))
+                if x != cur['X']:   cmds.append(('X', x))
             else:
-                # Moving down: move Y first, then X, then Z.
-                if y != current['Y']:
-                    commands.append(('Y', y))
-                if x != current['X']:
-                    commands.append(('X', x))
-                if z != current['Z']:
-                    commands.append(('Z', z))
+                # down: Y, X, Z
+                if y != cur['Y']:   cmds.append(('Y', y))
+                if x != cur['X']:   cmds.append(('X', x))
+                if z != cur['Z']:   cmds.append(('Z', z))
         else:
-            # Z is unchanged, so only X and Y need updating.
-            if y != current['Y']:
-                commands.append(('Y', y))
-            if x != current['X']:
-                commands.append(('X', x))
+            # Z unchanged: maybe both X and Y
+            if y != cur['Y']: cmds.append(('Y', y))
+            if x != cur['X']: cmds.append(('X', x))
 
-        # If no commands are needed, execute the handler and return.
-        if len(commands) == 0:
-            if handler is not None:
-                handler()
+        # 3) nothing to do
+        if not cmds:
+            if handler: handler()
             self.update_expected_position(x=x, y=y, z=z)
             return True
 
-        # Execute the commands in order, attaching the callback only to the last one.
-        # self.machine.set_absolute_coordinates(x,y,z, manual=manual, handler=handler)
-        
-        for i, (axis, value) in enumerate(commands):
-            is_last = (i == len(commands) - 1)
-            current_handler = handler if is_last else None
-            if axis == 'X':
-                self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
-            elif axis == 'Y':
-                self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
-            elif axis == 'Z':
-                self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+        # 4) collapse any contiguous X+Y into one XY
+        combined = []
+        i = 0
+        while i < len(cmds):
+            axis, val = cmds[i]
+            if axis in ('X', 'Y'):
+                # start a block
+                block = {axis: val}
+                i += 1
+                # collect any immediately following Y/X
+                while i < len(cmds) and cmds[i][0] in ('X', 'Y'):
+                    a, v = cmds[i]
+                    block[a] = v
+                    i += 1
+                # if both X and Y present, emit XY
+                if 'X' in block and 'Y' in block:
+                    combined.append(('XY', (block['X'], block['Y'])))
+                else:
+                    # only one axis in block
+                    if 'X' in block: combined.append(('X', block['X']))
+                    if 'Y' in block: combined.append(('Y', block['Y']))
+            else:
+                # Z or other
+                combined.append((axis, val))
+                i += 1
 
-        # Update the expected position.
+        # 5) dispatch
+        for idx, (axis, val) in enumerate(combined):
+            is_last = (idx == len(combined) - 1)
+            cb = handler if is_last else None
+
+            if axis == 'XY':
+                x_val, y_val = val
+                self.machine.set_absolute_XY(x_val, y_val,
+                                            manual=manual,
+                                            handler=cb)
+            elif axis == 'X':
+                self.machine.set_absolute_X(val,
+                                        manual=manual,
+                                        handler=cb)
+            elif axis == 'Y':
+                self.machine.set_absolute_Y(val,
+                                        manual=manual,
+                                        handler=cb)
+            elif axis == 'Z':
+                self.machine.set_absolute_Z(val,
+                                        manual=manual,
+                                        handler=cb)
+            else:
+                # unexpected
+                raise ValueError(f"Unknown axis {axis}")
+
+        # 6) update expected
         self.update_expected_position(x=x, y=y, z=z)
         return True
+    # def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, override=False):
+    #     """Set the absolute coordinates for the machine."""
+    #     new_position = {'X': x, 'Y': y, 'Z': z}
+    #     # Check for collisions if not overriding.
+    #     if not override:
+    #         if self.check_collision(self.expected_position, new_position):
+    #             print('Collision detected')
+    #             return False
+
+    #     commands = []
+    #     current = self.expected_position
+
+    #     # Determine the order of moves based on Z change.
+    #     if current['Z'] != z:
+    #         if z < current['Z']:
+    #             # Moving up: move Z first, then Y, then X.
+    #             if z != current['Z']:
+    #                 commands.append(('Z', z))
+    #             if y != current['Y']:
+    #                 commands.append(('Y', y))
+    #             if x != current['X']:
+    #                 commands.append(('X', x))
+    #         else:
+    #             # Moving down: move Y first, then X, then Z.
+    #             if y != current['Y']:
+    #                 commands.append(('Y', y))
+    #             if x != current['X']:
+    #                 commands.append(('X', x))
+    #             if z != current['Z']:
+    #                 commands.append(('Z', z))
+    #     else:
+    #         # Z is unchanged, so only X and Y need updating.
+    #         if y != current['Y']:
+    #             commands.append(('Y', y))
+    #         if x != current['X']:
+    #             commands.append(('X', x))
+
+    #     # If no commands are needed, execute the handler and return.
+    #     if len(commands) == 0:
+    #         if handler is not None:
+    #             handler()
+    #         self.update_expected_position(x=x, y=y, z=z)
+    #         return True
+
+    #     for i, (axis, value) in enumerate(commands):
+    #         is_last = (i == len(commands) - 1)
+    #         current_handler = handler if is_last else None
+    #         if axis == 'X':
+    #             self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
+    #         elif axis == 'Y':
+    #             self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
+    #         elif axis == 'Z':
+    #             self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+
+    #     # Update the expected position.
+    #     self.update_expected_position(x=x, y=y, z=z)
+    #     return True
 
     def set_relative_print_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -534,93 +632,28 @@ class Controller(QObject):
 
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
+        safe_z = 3000
+        current_location = self.model.machine_model.get_current_location()
+        if 'camera' in [current_location, name]:
+            print(f'Must move up to safe height before moving to {name} from {current_location}')
+            self.set_absolute_Z(safe_z, manual=manual, override=override)
         original_target = self.model.location_model.get_location_dict(name)
         target = original_target.copy()
-        current = self.expected_position
 
-        if direct and current['Z'] > target['Z']:
-            up_first = True
-            print(f'Moving up first to Z: {target["Z"]}')
-            self.set_absolute_Z(target['Z'])
-            self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
-        else:
-            up_first = False
-            print('Moving directly to above target coordinates')
-            self.set_absolute_coordinates(target['X'], target['Y'], current['Z'], manual=manual, override=override)
-            print(f'Moving down to Z: {target["Z"]}')
-            self.set_absolute_Z(target['Z'])
-        # if manual == True:
-        #     status = self.machine.check_if_all_completed()
-        #     if status == False:
-        #         print('Cannot move: Commands are still running')
-        #         return
-        # if coords != None:
-        #     target = coords.copy()
-        # else:
-        #     original_target = self.model.location_model.get_location_dict(name)
-        #     target = original_target.copy()
-        # if x_offset:
-        #     #print(f'Applying X offset:{target['X']} -> {target['X'] + 2500}')
-        #     target['X'] += 2500
+        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
 
-        # if z_offset:
-        #     target['Z'] -= 10000
-        # # Use expected position instead of current position from the model
-        # current = self.expected_position
-
-        # up_first = False
         # if direct and current['Z'] > target['Z']:
         #     up_first = True
+        #     print(f'Moving up first to Z: {target["Z"]}')
+        #     self.set_absolute_Z(target['Z'])
+        #     self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
+        # else:
+        #     up_first = False
+        #     print('Moving directly to above target coordinates')
+        #     self.set_absolute_coordinates(target['X'], target['Y'], current['Z'], manual=manual, override=override)
+        #     print(f'Moving down to Z: {target["Z"]}')
         #     self.set_absolute_Z(target['Z'])
 
-        # x_limit = 5500
-        # safe_height = 3000
-        # safe_y_value = 3500
-        # if (target['Y'] > 9500) or (current['Y'] > 9500 and current['X'] > x_limit):
-        #     print('Not applying safe Y')
-            
-        # elif (current['X'] > x_limit and target['X'] < x_limit) or (current['X'] < x_limit and target['X'] > x_limit):
-        #     #print(f'Crossing x limit: {current['X']} -> {target['X']}')
-        #     safe_y = True
-        #     # direct = False
-
-        # if not direct and not safe_y:
-        #     print('Not direct, not safe-y')
-        #     self.set_absolute_Z(safe_height,override=override)
-        #     self.set_absolute_Y(target['Y'],override=override)
-        #     self.set_absolute_X(target['X'],override=override)
-        #     self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-
-        # elif not direct and safe_y:
-        #     print('Not direct, safe-y')
-        #     self.set_absolute_Z(safe_height,override=override)
-        #     self.set_absolute_Y(safe_y_value,override=override)
-        #     self.set_absolute_X(target['X'],override=override)
-        #     self.set_absolute_Y(target['Y'],override=override)
-        #     self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-        # elif direct and safe_y:
-        #     if up_first:
-        #         self.set_absolute_Z(target['Z'],override=override)
-        #         self.set_absolute_Y(safe_y_value,override=override)
-        #         self.set_absolute_X(target['X'],override=override)
-        #         self.set_absolute_Y(target['Y'],handler=lambda: self.update_location_handler(name),override=override)
-        #     else:
-        #         self.set_absolute_Y(safe_y_value,override=override)
-        #         self.set_absolute_X(target['X'],override=override)
-        #         self.set_absolute_Y(target['Y'],override=override)
-        #         self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-        # else:
-        #     if up_first:
-        #         self.set_absolute_Z(target['Z'],override=override)
-        #         self.set_absolute_Y(target['Y'],override=override)
-        #         self.set_absolute_X(target['X'],handler=lambda: self.update_location_handler(name),override=override)
-        #     else:
-        #         self.set_absolute_Y(target['Y'],override=override)
-        #         self.set_absolute_X(target['X'],override=override)
-        #         self.set_absolute_Z(target['Z'],handler=lambda: self.update_location_handler(name),override=override)
-
-        # self.update_expected_position(x=target['X'], y=target['Y'], z=target['Z'])
-    
     def open_gripper(self,handler=None):
         """Open the gripper."""
         self.machine.open_gripper(handler=handler)
