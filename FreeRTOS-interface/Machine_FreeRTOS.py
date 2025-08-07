@@ -134,7 +134,7 @@ class DropletCamera(QObject):
             request.release()  # discard the skip frame
 
         # Now we wait half the exposure time (100 ms) before setting the GPIO high
-        half_ms = int(self.exposure_time / 4 / 1000)  # 200_000 us => 100 ms
+        half_ms = int(self.exposure_time * 2 / 5 / 1000)  # 200_000 us => 100 ms
         
         # Queue a call to _schedule_half_timer(...) in the main thread
         QtCore.QMetaObject.invokeMethod(
@@ -153,7 +153,7 @@ class DropletCamera(QObject):
         self.start_flash()
 
         # Schedule the second half
-        half_ms = int(self.exposure_time / 2 / 1000)
+        half_ms = int(self.exposure_time * 3 / 5 / 1000)
         lead_ms = 10  # capture 10 ms before the end of the exposure 
         self.timer_second_half.start(half_ms - lead_ms)
 
@@ -176,10 +176,11 @@ class DropletCamera(QObject):
             self.latest_frame = cv2.rotate(self.latest_frame, cv2.ROTATE_90_CLOCKWISE)
 
             md = request.get_metadata()  # or req.metadata
-            # print("Actual exposure used:", md["ExposureTime"])
-            # print("Actual frame duration:", md["FrameDuration"])
+            print("Actual exposure used:", md["ExposureTime"])
+            print("Actual frame duration:", md["FrameDuration"])
             request.release()
         else:
+            print("--- Failed to capture frame.")
             frame = None
 
         # Now we can set GPIO low to re-arm the board
@@ -320,6 +321,8 @@ CMD_MAP = {
     'GRIPPER_OFF': 0x12,
 
     'DISPENSE': 0x22,
+    'DISPENSE_PRINT': 0x23,
+    'DISPENSE_REFUEL': 0x24,
 
     'LED_ON': 0x30,
     'LED_OFF': 0x31,
@@ -836,40 +839,58 @@ class Machine(QObject):
         return self.add_command_to_queue('RESET_R',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
         
     def set_relative_X(self, x, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(x,-50000,50000):
+        if self.check_param_limits(x,-80000,80000):
             # calculate direction
             direction = 1 if x >= 0 else 0
             return self.add_command_to_queue('RELATIVE_X', direction, abs(x), 30000, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Relative X position {x} out of range (-80000, 80000)')
+            return False
     
     def set_absolute_X(self, x, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(x,-50000,50000):
+        if self.check_param_limits(x,0,80000):
             sign = 1 if x >= 0 else 0
             x = abs(x)
             return self.add_command_to_queue('ABSOLUTE_X', sign, x, 30000, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Absolute X position {x} out of range (0, 80000)')
+            return False
     
     def set_relative_Y(self, y, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(y,-50000,50000):
+        if self.check_param_limits(y,-60000,60000):
             # calculate direction
             direction = 1 if y >= 0 else 0
             return self.add_command_to_queue('RELATIVE_Y', direction, abs(y), 30000, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Relative Y position {y} out of range (-60000, 60000)')
+            return False
     
     def set_absolute_Y(self, y, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(y,-50000,50000):
+        if self.check_param_limits(y,0,60000):
             sign = 1 if y >= 0 else 0
             y = abs(y)
             return self.add_command_to_queue('ABSOLUTE_Y', sign, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Absolute Y position {y} out of range (0, 60000)')
+            return False
     
     def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(z,-50000,50000):
+        if self.check_param_limits(z,-100000,100000):
             direction = 1 if z >= 0 else 0
             return self.add_command_to_queue('RELATIVE_Z', direction, abs(z), 30000, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Relative Z position {z} out of range (-100000, 100000)')
+            return False
     
     def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(z,-50000,50000):
+        if self.check_param_limits(z,0,100000):
             sign = 1 if z >= 0 else 0
             z = abs(z)
             return self.add_command_to_queue('ABSOLUTE_Z', sign, z, 30000, handler=handler, kwargs=kwargs, manual=manual)
-    
+        else:
+            print(f'Absolute Z position {z} out of range (0, 100000)')
+            return False
+
     def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):
         if self.check_param_limits(x,-50000,50000) and self.check_param_limits(y,-50000,50000) and self.check_param_limits(z,-50000,50000):
             return self.add_command_to_queue('RELATIVE_XYZ', x, y, z, handler=handler, kwargs=kwargs, manual=manual)
@@ -1041,3 +1062,11 @@ class Machine(QObject):
 
     def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def print_only(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
+        return self.add_command_to_queue('DISPENSE_PRINT',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+
+    def refuel_only(self,droplet_count,handler=None,kwargs=None,manual=False):
+        self.check_param_limits(droplet_count,1,1000)
+        return self.add_command_to_queue('DISPENSE_REFUEL',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
