@@ -456,30 +456,80 @@ class Command:
     handler (function, optional): The handler function for the command.
     kwargs (dict, optional): Additional keyword arguments for the handler function.
     """
-    def __init__(self, command_number, command_type, param1, param2, param3, handler=None, kwargs=None):
+
+    TAG_P1 = 0x01
+    TAG_P2 = 0x02
+    TAG_P3 = 0x03
+
+    def __init__(self, command_number, command_type, param1, param2, param3,
+                 handler=None, kwargs=None):
         self.command_number = command_number
-        self.command_type = command_type
-        self.command_code = CMD_MAP.get(command_type, None)
-        if self.command_code is None:
-            raise ValueError(f"Invalid command type: {command_type}")
+        self.command_type   = command_type
+        self.command_code   = CMD_MAP[command_type]
         self.param1 = int(param1)
         self.param2 = int(param2)
         self.param3 = int(param3)
-        self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
-        self.payload = struct.pack(">BBHHH",
-                                   self.command_code & 0xFF,
-                                   self.command_number & 0xFF,
-                                   self.param1 & 0xFFFF,
-                                   self.param2 & 0xFFFF,
-                                   self.param3 & 0xFFFF)
+
+        # — build TLV payload —
+        p = bytearray()
+        # 1) cmd byte + seq
+        p.append(self.command_code & 0xFF)
+        p.append(self.command_number & 0xFF)
+
+        # 2) P1 always two bytes
+        p.append(self.TAG_P1); p.append(2)
+        p.extend(struct.pack("<H", self.param1 & 0xFFFF))
+
+        # 3) P2 can be either 2 or 4 bytes
+        if self.param2 <= 0xFFFF:
+            p.append(self.TAG_P2); p.append(2)
+            p.extend(struct.pack("<H", self.param2))
+        else:
+            p.append(self.TAG_P2); p.append(4)
+            p.extend(struct.pack("<I", self.param2))
+
+        # 4) P3 always two bytes
+        p.append(self.TAG_P3); p.append(2)
+        p.extend(struct.pack("<H", self.param3 & 0xFFFF))
+
+        self.payload = bytes(p)
+
+        # 5) wrap in header/CRC/footer
         self.header = bytes([START_BYTE, len(self.payload)])
         self.crc    = crc16_x25(self.payload)
         self.tail   = struct.pack("<H", self.crc)
         self.frame  = self.header + self.payload + self.tail
+
+        # other metadata...
         self.status = "Added"
         self.timestamp = time.time()
-        self.handler = handler
-        self.kwargs = kwargs if kwargs is not None else {}
+        self.handler   = handler
+        self.kwargs    = kwargs or {}
+
+    # def __init__(self, command_number, command_type, param1, param2, param3, handler=None, kwargs=None):
+    #     self.command_number = command_number
+    #     self.command_type = command_type
+    #     self.command_code = CMD_MAP.get(command_type, None)
+    #     if self.command_code is None:
+    #         raise ValueError(f"Invalid command type: {command_type}")
+    #     self.param1 = int(param1)
+    #     self.param2 = int(param2)
+    #     self.param3 = int(param3)
+    #     self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
+    #     self.payload = struct.pack(">BBHHH",
+    #                                self.command_code & 0xFF,
+    #                                self.command_number & 0xFF,
+    #                                self.param1 & 0xFFFF,
+    #                                self.param2 & 0xFFFF,
+    #                                self.param3 & 0xFFFF)
+    #     self.header = bytes([START_BYTE, len(self.payload)])
+    #     self.crc    = crc16_x25(self.payload)
+    #     self.tail   = struct.pack("<H", self.crc)
+    #     self.frame  = self.header + self.payload + self.tail
+    #     self.status = "Added"
+    #     self.timestamp = time.time()
+    #     self.handler = handler
+    #     self.kwargs = kwargs if kwargs is not None else {}
 
     def mark_as_sent(self):
         self.status = "Sent"
