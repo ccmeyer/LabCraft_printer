@@ -350,7 +350,8 @@ CMD_MAP = {
     'DEREGULATE_PRESSURE_R': 0xEB,
     'RELATIVE_PRESSURE_P': 0xEC,
     'RELATIVE_PRESSURE_R': 0xED,
-
+    'RESET_P': 0xEE,
+    'RESET_R': 0xEF,
 
     'PAUSE': 0xF0,
     'RESUME': 0xF1,

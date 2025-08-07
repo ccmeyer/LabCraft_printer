@@ -218,13 +218,15 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
         # self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
-        self.shortcut_manager.add_shortcut('Shift+a','Reset Refuel Syringe', lambda: self.controller.reset_refuel_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.pause_machine())
         self.shortcut_manager.add_shortcut('Shift+1','LED On', lambda: self.controller.LED_on())
         self.shortcut_manager.add_shortcut('Shift+2','LED Off', lambda: self.controller.LED_off())
         self.shortcut_manager.add_shortcut('Shift+3','Start Refuel Camera', lambda: self.controller.start_refuel_camera())
         self.shortcut_manager.add_shortcut('Shift+4','Stop Refuel Camera', lambda: self.controller.stop_refuel_camera())
+        self.shortcut_manager.add_shortcut('Shift+5','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
+        self.shortcut_manager.add_shortcut('Shift+6','Reset Refuel Syringe', lambda: self.controller.reset_refuel_syringe())
+
 
 
     def make_transparent_icon(self):
