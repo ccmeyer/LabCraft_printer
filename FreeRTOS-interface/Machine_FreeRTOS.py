@@ -479,25 +479,16 @@ class Command:
         p.append(self.command_code & 0xFF)
         p.append(self.command_number & 0xFF)
 
-        # 2) P1 always two bytes
-        p.append(self.TAG_P1); p.append(2)
-        p.extend(struct.pack("<H", self.param1 & 0xFFFF))
-
-        # 3) P2 can be either 2 or 4 bytes
-        if self.param2 <= 0xFFFF:
-            p.append(self.TAG_P2); p.append(2)
-            p.extend(struct.pack("<H", self.param2))
-        else:
-            p.append(self.TAG_P2); p.append(4)
-            p.extend(struct.pack("<I", self.param2))
-
-        # 4) P3 always two bytes
-        p.append(self.TAG_P3); p.append(2)
-        p.extend(struct.pack("<H", self.param3 & 0xFFFF))
+        for tag, val in ((self.TAG_P1, self.param1),
+                 (self.TAG_P2, self.param2),
+                 (self.TAG_P3, self.param3)):
+            p.append(tag)
+            p.append(4)
+            p.extend(struct.pack("<I", val & 0xFFFFFFFF))
 
         self.payload = bytes(p)
 
-        # 5) wrap in header/CRC/footer
+        # 2) wrap in header/CRC/footer
         self.header = bytes([START_BYTE, len(self.payload)])
         self.crc    = crc16_x25(self.payload)
         self.tail   = struct.pack("<H", self.crc)
