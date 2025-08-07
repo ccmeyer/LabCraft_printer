@@ -332,8 +332,8 @@ class Controller(QObject):
         self.expected_position['Y'] += y
         self.expected_position['Z'] += z
         return True
-    
-    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, override=False):
+
+    def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set the absolute coordinates for the machine, using XY moves when possible."""
         new_position = {'X': x, 'Y': y, 'Z': z}
 
@@ -596,6 +596,10 @@ class Controller(QObject):
         """Modify the location information."""
         self.model.location_model.update_location(name,*self.model.machine_model.get_current_position())
 
+    # def update_current_location(self, name):
+    #     """Update the current location to the specified name."""
+    #     self.model.machine_model.update_current_location(name)
+    
     def print_locations(self):
         """Print the saved locations."""
         print(self.model.location_model.get_all_locations())
@@ -624,7 +628,8 @@ class Controller(QObject):
     
     def update_location_handler(self,name):
         """Update the current location."""
-        self.model.machine_model.update_current_location(name)
+        # self.model.machine_model.update_current_location(name)
+        self.model.location_model.update_current_location(name)
 
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
@@ -640,7 +645,7 @@ class Controller(QObject):
         original_target = self.model.location_model.get_location_dict(name)
         target = original_target.copy()
 
-        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
+        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
 
         # if direct and current['Z'] > target['Z']:
         #     up_first = True

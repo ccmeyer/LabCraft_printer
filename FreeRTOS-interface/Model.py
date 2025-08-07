@@ -5835,6 +5835,13 @@ class LocationModel(QObject):
             pass
             #print(f"Location '{name}' not found.")
 
+    def update_current_location(self,name):
+        if name in self.locations:
+            self.current_location_updated.emit(name)
+            print(f"Current location updated to '{name}'.")
+        else:
+            pass
+
     def update_location_coords(self, name, coords):
         """Update an existing location by name."""
         if name in self.locations:
