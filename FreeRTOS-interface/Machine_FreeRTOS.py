@@ -499,6 +499,8 @@ class Command:
         self.timestamp = time.time()
         self.handler   = handler
         self.kwargs    = kwargs or {}
+        self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
+
 
     def mark_as_sent(self):
         self.status = "Sent"
@@ -859,11 +861,7 @@ class Machine(QObject):
         Set absolute X and Y positions.
         """
         if self.check_param_limits(x,0,80000) and self.check_param_limits(y,0,60000):
-            sign_x = 1 if x >= 0 else 0
-            sign_y = 1 if y >= 0 else 0
-            x = abs(x)
-            y = abs(y)
-            return self.add_command_to_queue('ABSOLUTE_XY', sign_x, x, sign_y, y, handler=handler, kwargs=kwargs, manual=manual)
+            return self.add_command_to_queue('ABSOLUTE_XY', x, y, 30000, handler=handler, kwargs=kwargs, manual=manual)
         else:
             print(f'Absolute X or Y position out of range: X={x}, Y={y}')
             return False

@@ -634,6 +634,7 @@ class Controller(QObject):
         """Move to the saved location."""
         safe_z = 3000
         current_location = self.model.machine_model.get_current_location()
+        print(f'Moving to location: {name} from {current_location}')
         if 'camera' in [current_location, name]:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
