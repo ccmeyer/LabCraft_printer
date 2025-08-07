@@ -403,19 +403,23 @@ class Controller(QObject):
                 x_val, y_val = val
                 self.machine.set_absolute_XY(x_val, y_val,
                                             manual=manual,
-                                            handler=cb)
+                                            handler=cb,
+                                            kwargs=kwargs)
             elif axis == 'X':
                 self.machine.set_absolute_X(val,
                                         manual=manual,
-                                        handler=cb)
+                                        handler=cb,
+                                        kwargs=kwargs)
             elif axis == 'Y':
                 self.machine.set_absolute_Y(val,
                                         manual=manual,
-                                        handler=cb)
+                                        handler=cb,
+                                        kwargs=kwargs)
             elif axis == 'Z':
                 self.machine.set_absolute_Z(val,
                                         manual=manual,
-                                        handler=cb)
+                                        handler=cb,
+                                        kwargs=kwargs)
             else:
                 # unexpected
                 raise ValueError(f"Unknown axis {axis}")
@@ -626,7 +630,7 @@ class Controller(QObject):
         """Update the expected position with the current position."""
         self.expected_position = self.model.machine_model.get_current_position_dict()
     
-    def update_location_handler(self,name):
+    def update_location_handler(self,name=None):
         """Update the current location."""
         # self.model.machine_model.update_current_location(name)
         self.model.location_model.update_current_location(name)
