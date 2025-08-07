@@ -367,17 +367,17 @@ class Controller(QObject):
             return True
 
         # Execute the commands in order, attaching the callback only to the last one.
-        self.machine.set_absolute_coordinates(x,y,z, manual=manual, handler=handler)
+        # self.machine.set_absolute_coordinates(x,y,z, manual=manual, handler=handler)
         
-        # for i, (axis, value) in enumerate(commands):
-        #     is_last = (i == len(commands) - 1)
-        #     current_handler = handler if is_last else None
-        #     if axis == 'X':
-        #         self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
-        #     elif axis == 'Y':
-        #         self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
-        #     elif axis == 'Z':
-        #         self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+        for i, (axis, value) in enumerate(commands):
+            is_last = (i == len(commands) - 1)
+            current_handler = handler if is_last else None
+            if axis == 'X':
+                self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
+            elif axis == 'Y':
+                self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
+            elif axis == 'Z':
+                self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
 
         # Update the expected position.
         self.update_expected_position(x=x, y=y, z=z)
@@ -540,11 +540,14 @@ class Controller(QObject):
 
         if direct and current['Z'] > target['Z']:
             up_first = True
+            print(f'Moving up first to Z: {target["Z"]}')
             self.set_absolute_Z(target['Z'])
             self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
         else:
             up_first = False
-            self.set_absolute_coordinates(target['X'], target['Y'], 0, manual=manual, override=override)
+            print('Moving directly to above target coordinates')
+            self.set_absolute_coordinates(target['X'], target['Y'], current['Z'], manual=manual, override=override)
+            print(f'Moving down to Z: {target["Z"]}')
             self.set_absolute_Z(target['Z'])
         # if manual == True:
         #     status = self.machine.check_if_all_completed()

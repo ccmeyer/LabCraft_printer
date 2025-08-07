@@ -1042,7 +1042,7 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
 
-        self.controller.enter_print_mode()
+        # self.controller.enter_print_mode()
 
         self.init_ui()
 
@@ -1307,6 +1307,6 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         """Handle the closing of the dialog."""
         self.timer.stop()
         self.stop_camera()
-        self.controller.exit_print_mode()
+        # self.controller.exit_print_mode()
         super().closeEvent(event)
 
