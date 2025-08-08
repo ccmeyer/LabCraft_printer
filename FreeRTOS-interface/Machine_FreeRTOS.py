@@ -243,6 +243,7 @@ class RefuelCamera(QObject):
 
 START_BYTE = 0xAA
 CMD_STATUS = 0x02
+CLEAR_QUEUE = 0xF2
 HELLO       = 0xF3
 HELLO_ACK   = 0xF4
 GOODBYE     = 0xF5
@@ -378,14 +379,6 @@ def crc16_x25(data: bytes) -> int:
                 crc >>= 1
     return crc & 0xFFFF
 
-
-# def build_frame(cmd: int, seq: int=0) -> bytes:
-#     payload = bytes([cmd & 0xFF, seq & 0xFF])
-#     header  = bytes([START_BYTE, len(payload)])
-#     crc     = crc16_x25(payload)
-#     tail    = struct.pack("<H", crc)
-#     return header + payload + tail
-
 def build_frame(cmd, seq=0):
     payload = bytes([cmd, seq])
     header  = bytes([START_BYTE, len(payload)])
@@ -420,6 +413,46 @@ def parse_tlv_payload(payload: bytes) -> dict:
         result[name] = value
 
     return result
+
+class AckListener(QThread):
+    """Listens on self.ser for a specific ack_code byte, within timeout."""
+    ackReceived = Signal()
+    timeout     = Signal()
+
+    def __init__(self, ser, ack_code: int, timeout_s: float = 1.0, parent=None):
+        super().__init__(parent)
+        self.ser      = ser
+        self.ack_code = ack_code
+        self.timeout  = timeout_s
+
+    def run(self):
+        deadline = time.time() + self.timeout
+        # Flush any pending bytes so we start fresh
+        try:
+            self.ser.reset_input_buffer()
+        except:
+            pass
+
+        while time.time() < deadline:
+            hdr = self.ser.read(2)
+            if len(hdr) != 2 or hdr[0] != START_BYTE:
+                continue
+            length = hdr[1]
+            payload = self.ser.read(length)
+            if len(payload) != length:
+                continue
+            tail = self.ser.read(2)
+            if len(tail) != 2:
+                continue
+            rec_crc = tail[0] | (tail[1] << 8)
+            if rec_crc != crc16_x25(payload):
+                continue
+            # Found one valid frame
+            if payload and payload[0] == self.ack_code:
+                self.ackReceived.emit()
+                return
+        # timed out
+        self.timeout.emit()
 
 class StatusThread(QThread):
     status_received = Signal(dict)  # emit parsed status data
@@ -715,55 +748,83 @@ class Machine(QObject):
         except Exception as e:
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
-
-    def connect_board(self,port):
-        # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
+    def connect_board(self, port):
         try:
-            dev = '/dev/ttyAMA0'
-            self.ser = serial.Serial(dev, self.baud, timeout=0.1)
+            self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
 
-            # send HELLO frame
+            # send HELLO
             frame = build_frame(HELLO, seq=0)
-            self.ser.reset_input_buffer()
             self.ser.write(frame)
 
-            # wait up to 1s for HELLO_ACK; read full framed packets
-            deadline = time.time() + 1.0
-            got_ack = False
-            while time.time() < deadline:
-                hdr = self.ser.read(2)
-                if len(hdr) != 2 or hdr[0] != START_BYTE:
-                    continue
-                length = hdr[1]
-                payload = self.ser.read(length)
-                if len(payload) != length:
-                    continue
-                tail = self.ser.read(2)
-                if len(tail) != 2:
-                    continue
-                rec_crc = tail[0] | (tail[1] << 8)
-                if rec_crc != crc16_x25(payload):
-                    continue
-                if payload and payload[0] == HELLO_ACK:
-                    got_ack = True
-                    # start threads/timers after successful handshake
-                    self.begin_status_thread()
-                    self.begin_log_thread()
-                    self.begin_execution_timer()
+            # spin up an AckListener for HELLO_ACK
+            self.helloListener = AckListener(self.ser, ack_code=HELLO_ACK, timeout_s=1.0)
+            self.helloListener.ackReceived.connect(self._on_hello_ack)
+            self.helloListener.timeout.connect(lambda: self.machine_connected_signal.emit(False))
+            self.helloListener.start()
 
-                    self.machine_connected_signal.emit(True)
-                    print(f"Connected to {self.ser.name}")
-                    break
-                if not got_ack:
-                    raise TimeoutError("No HELLO_ACK")
-
-            else:
-                raise IOError("Port not open")
         except Exception as e:
             print(f"Connection error: {e}")
             self.machine_connected_signal.emit(False)
+
+    @Slot()
+    def _on_hello_ack(self):
+        # safely start the rest of your threads now
+        self.begin_status_thread()
+        self.begin_log_thread()
+        self.begin_execution_timer()
+        self.machine_connected_signal.emit(True)
+        print(f"Connected to {self.ser.name}")
+        self.helloListener = None  # allow it to clean up
+    # def connect_board(self,port):
+    #     # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
+    #     try:
+    #         dev = '/dev/ttyAMA0'
+    #         self.ser = serial.Serial(dev, self.baud, timeout=0.1)
+    #         if not self.ser.is_open:
+    #             raise IOError("Port not open")
+
+    #         # send HELLO frame
+    #         frame = build_frame(HELLO, seq=0)
+    #         self.ser.reset_input_buffer()
+    #         self.ser.write(frame)
+
+    #         # wait up to 1s for HELLO_ACK; read full framed packets
+    #         deadline = time.time() + 1.0
+    #         got_ack = False
+    #         while time.time() < deadline:
+    #             hdr = self.ser.read(2)
+    #             if len(hdr) != 2 or hdr[0] != START_BYTE:
+    #                 continue
+    #             length = hdr[1]
+    #             payload = self.ser.read(length)
+    #             if len(payload) != length:
+    #                 continue
+    #             tail = self.ser.read(2)
+    #             if len(tail) != 2:
+    #                 continue
+    #             rec_crc = tail[0] | (tail[1] << 8)
+    #             if rec_crc != crc16_x25(payload):
+    #                 continue
+    #             if payload and payload[0] == HELLO_ACK:
+    #                 got_ack = True
+    #                 # start threads/timers after successful handshake
+    #                 self.begin_status_thread()
+    #                 self.begin_log_thread()
+    #                 self.begin_execution_timer()
+
+    #                 self.machine_connected_signal.emit(True)
+    #                 print(f"Connected to {self.ser.name}")
+    #                 break
+    #             if not got_ack:
+    #                 raise TimeoutError("No HELLO_ACK")
+
+    #         else:
+    #             raise IOError("Port not open")
+    #     except Exception as e:
+    #         print(f"Connection error: {e}")
+    #         self.machine_connected_signal.emit(False)
 
     # def connect_board(self,port):
     #     try:
@@ -795,6 +856,25 @@ class Machine(QObject):
             self.port = None
         self.disconnect_complete_signal.emit()
 
+    def disconnect_board(self, error=False):
+        if not self.ser:
+            self.disconnect_handler()
+            return
+
+        # send GOODBYE
+        self.ser.write(build_frame(GOODBYE, seq=0))
+
+        # listen for BYE_ACK
+        self.byeListener = AckListener(self.ser, ack_code=BYE_ACK, timeout_s=1.0)
+        self.byeListener.ackReceived.connect(lambda: self._finalize_disconnect())
+        self.byeListener.timeout.connect(lambda: self._finalize_disconnect())
+        self.byeListener.start()
+
+    def _finalize_disconnect(self):
+        # stop threads, close, etc.
+        self.disconnect_handler()
+        self.byeListener = None
+
     # def disconnect_board(self, error=False):
     #     print('--------Disconnecting from machine---------')
     #     if not error:
@@ -804,47 +884,47 @@ class Machine(QObject):
     #     else:
     #         self.disconnect_handler()
 
-    def disconnect_board(self, error=False):
-        print('--------Disconnecting from machine---------')
-        if not self.ser:
-            self.disconnect_handler()
-            return
-        try:
-            # stop any timers/threads that might read from the same port (optional if present)
-            if hasattr(self, 'execution_timer') and self.execution_timer:
-                try: self.stop_execution_timer()
-                except Exception: pass
-            if hasattr(self, 'status_thread') and self.status_thread:
-                try: self.stop_status_thread()
-                except Exception: pass
-            if hasattr(self, 'log_reader') and self.log_reader:
-                try: self.stop_log_thread()
-                except Exception: pass
+    # def disconnect_board(self, error=False):
+    #     print('--------Disconnecting from machine---------')
+    #     if not self.ser:
+    #         self.disconnect_handler()
+    #         return
+    #     try:
+    #         # stop any timers/threads that might read from the same port (optional if present)
+    #         if hasattr(self, 'execution_timer') and self.execution_timer:
+    #             try: self.stop_execution_timer()
+    #             except Exception: pass
+    #         if hasattr(self, 'status_thread') and self.status_thread:
+    #             try: self.stop_status_thread()
+    #             except Exception: pass
+    #         if hasattr(self, 'log_reader') and self.log_reader:
+    #             try: self.stop_log_thread()
+    #             except Exception: pass
 
-            # send GOODBYE and wait for BYE_ACK
-            self.ser.reset_input_buffer()
-            self.ser.write(build_frame(GOODBYE, seq=0))
-            deadline = time.time() + 1.0
-            while time.time() < deadline:
-                hdr = self.ser.read(2)
-                if len(hdr) != 2 or hdr[0] != START_BYTE:
-                    continue
-                length = hdr[1]
-                payload = self.ser.read(length)
-                if len(payload) != length:
-                    continue
-                tail = self.ser.read(2)
-                if len(tail) != 2:
-                    continue
-                rec_crc = tail[0] | (tail[1] << 8)
-                if rec_crc != crc16_x25(payload):
-                    continue
-                if payload and payload[0] == BYE_ACK:
-                    break
-        except Exception as e:
-            print(f"Error during disconnect handshake: {e}")
-        finally:
-            self.disconnect_handler()
+    #         # send GOODBYE and wait for BYE_ACK
+    #         self.ser.reset_input_buffer()
+    #         self.ser.write(build_frame(GOODBYE, seq=0))
+    #         deadline = time.time() + 1.0
+    #         while time.time() < deadline:
+    #             hdr = self.ser.read(2)
+    #             if len(hdr) != 2 or hdr[0] != START_BYTE:
+    #                 continue
+    #             length = hdr[1]
+    #             payload = self.ser.read(length)
+    #             if len(payload) != length:
+    #                 continue
+    #             tail = self.ser.read(2)
+    #             if len(tail) != 2:
+    #                 continue
+    #             rec_crc = tail[0] | (tail[1] << 8)
+    #             if rec_crc != crc16_x25(payload):
+    #                 continue
+    #             if payload and payload[0] == BYE_ACK:
+    #                 break
+    #     except Exception as e:
+    #         print(f"Error during disconnect handshake: {e}")
+    #     finally:
+    #         self.disconnect_handler()
     
     def begin_status_thread(self):
         """
@@ -980,46 +1060,71 @@ class Machine(QObject):
         print('Sending resume command')
         self.send_command_to_board(new_command)
 
-    def clear_command_queue(self,handler=None):
+    def clear_command_queue(self, handler=None):
         print('Clearing command queue')
-        new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0, handler=handler)
-        if self.sent_command is not None:
-            print('Overriding command:',self.sent_command.get_command())
-        print('Sending clear command')
-        self.ser.reset_input_buffer()  # clear any pending input
-        self.send_command_to_board(new_command)
-        # now block until CLEAR_ACK arrives
-        deadline = time.time() + 2.0
-        got_ack = False
-        while time.time() < deadline:
-            hdr = self.ser.read(2)
-            if len(hdr) != 2 or hdr[0] != START_BYTE:
-                continue
-            length = hdr[1]
-            payload = self.ser.read(length)
-            if len(payload) != length:
-                continue
-            tail = self.ser.read(2)
-            if len(tail) != 2:
-                continue
-            rec_crc = tail[0] | (tail[1] << 8)
-            if rec_crc != crc16_x25(payload):
-                continue
-            if payload and payload[0] == CLEAR_ACK:
-                got_ack = True
-                print("\nCLEAR_ACK received, command queue cleared.\n")
-                break
-        # while True:
-        #     frame = self.read_frame()    # your existing read-header/payload/CRC
-        #     if frame.payload[0] == CLEAR_ACK:
-        #         break
-        if not got_ack:
-            print("No CLEAR_ACK received, command queue may not be cleared.")
+        # send CLEAR
+        frame = build_frame(CLEAR_QUEUE, seq=0)
+        self.ser.write(frame)
+
+        # listen for CLEAR_ACK
+        self.clearListener = AckListener(self.ser, ack_code=CLEAR_ACK, timeout_s=2.0)
+        self.clearListener.ackReceived.connect(lambda: self._on_clear_ack(handler))
+        self.clearListener.timeout.connect(lambda: self._on_clear_ack(handler, timed_out=True))
+        self.clearListener.start()
+
+    def _on_clear_ack(self, handler=None, timed_out=False):
+        if timed_out:
+            print("No CLEAR_ACK received, proceeding anyway.")
         else:
-            self.command_queue.clear_queue()
-        # if handler is not None:
-        #     handler()
-        # self.command_queue.clear_queue()
+            print("CLEAR_ACK received, command queue cleared.")
+
+        # Clear Python side queue & notify UI
+        self.command_queue.clear_queue()
+        if handler:
+            handler()
+
+        self.clearListener = None
+
+    # def clear_command_queue(self,handler=None):
+    #     print('Clearing command queue')
+    #     new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0, handler=handler)
+    #     if self.sent_command is not None:
+    #         print('Overriding command:',self.sent_command.get_command())
+    #     print('Sending clear command')
+    #     self.ser.reset_input_buffer()  # clear any pending input
+    #     self.send_command_to_board(new_command)
+    #     # now block until CLEAR_ACK arrives
+    #     deadline = time.time() + 2.0
+    #     got_ack = False
+    #     while time.time() < deadline:
+    #         hdr = self.ser.read(2)
+    #         if len(hdr) != 2 or hdr[0] != START_BYTE:
+    #             continue
+    #         length = hdr[1]
+    #         payload = self.ser.read(length)
+    #         if len(payload) != length:
+    #             continue
+    #         tail = self.ser.read(2)
+    #         if len(tail) != 2:
+    #             continue
+    #         rec_crc = tail[0] | (tail[1] << 8)
+    #         if rec_crc != crc16_x25(payload):
+    #             continue
+    #         if payload and payload[0] == CLEAR_ACK:
+    #             got_ack = True
+    #             print("\nCLEAR_ACK received, command queue cleared.\n")
+    #             break
+    #     # while True:
+    #     #     frame = self.read_frame()    # your existing read-header/payload/CRC
+    #     #     if frame.payload[0] == CLEAR_ACK:
+    #     #         break
+    #     if not got_ack:
+    #         print("No CLEAR_ACK received, command queue may not be cleared.")
+    #     else:
+    #         self.command_queue.clear_queue()
+    #     # if handler is not None:
+    #     #     handler()
+    #     # self.command_queue.clear_queue()
 
     def check_param_limits(self,param,min_val,max_val):
         if param >= min_val and param <= max_val:
