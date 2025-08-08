@@ -719,7 +719,7 @@ class Machine(QObject):
     def connect_board(self,port):
         # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
         try:
-            dev = port or '/dev/ttyAMA0'
+            dev = '/dev/ttyAMA0'
             self.ser = serial.Serial(dev, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
@@ -986,6 +986,7 @@ class Machine(QObject):
         if self.sent_command is not None:
             print('Overriding command:',self.sent_command.get_command())
         print('Sending clear command')
+        self.ser.reset_input_buffer()  # clear any pending input
         self.send_command_to_board(new_command)
         # now block until CLEAR_ACK arrives
         deadline = time.time() + 2.0
@@ -1004,7 +1005,7 @@ class Machine(QObject):
             rec_crc = tail[0] | (tail[1] << 8)
             if rec_crc != crc16_x25(payload):
                 continue
-            if payload and payload[0] == HELLO_ACK:
+            if payload and payload[0] == CLEAR_ACK:
                 got_ack = True
                 print("\nCLEAR_ACK received, command queue cleared.\n")
                 break
@@ -1016,8 +1017,8 @@ class Machine(QObject):
             print("No CLEAR_ACK received, command queue may not be cleared.")
         else:
             self.command_queue.clear_queue()
-            if handler is not None:
-                handler()
+        # if handler is not None:
+        #     handler()
         # self.command_queue.clear_queue()
 
     def check_param_limits(self,param,min_val,max_val):
