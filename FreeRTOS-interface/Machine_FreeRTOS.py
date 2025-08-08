@@ -775,10 +775,6 @@ class Machine(QObject):
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
 
-        self.reader = SerialReader(self.ser)
-        self.reader.status_received.connect(self.update_status)
-        self.reader.ackReceived.connect(self._on_any_ack)
-        self.reader.start()
 
     def _on_any_ack(self, cmd_code):
         if cmd_code == HELLO_ACK:
@@ -793,6 +789,11 @@ class Machine(QObject):
             self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
+            
+            self.reader = SerialReader(self.ser)
+            self.reader.status_received.connect(self.update_status)
+            self.reader.ackReceived.connect(self._on_any_ack)
+            self.reader.start()
 
             # send HELLO
             frame = build_frame(HELLO, seq=0)
@@ -811,7 +812,7 @@ class Machine(QObject):
     @Slot()
     def _on_hello_ack(self):
         # safely start the rest of your threads now
-        self.begin_status_thread()
+        # self.begin_status_thread()
         self.begin_log_thread()
         self.begin_execution_timer()
         self.machine_connected_signal.emit(True)
@@ -885,7 +886,8 @@ class Machine(QObject):
         print('Resetting board')
         self.command_queue.clear_queue()
         self.stop_execution_timer()
-        self.stop_status_thread()
+        self.stop_reader_thread()
+        # self.stop_status_thread()
         self.stop_log_thread()
         
     def disconnect_handler(self):
@@ -905,15 +907,15 @@ class Machine(QObject):
         self.ser.write(build_frame(GOODBYE, seq=0))
 
         # listen for BYE_ACK
-        self.byeListener = AckListener(self.ser, ack_code=BYE_ACK, timeout_s=1.0)
-        self.byeListener.ackReceived.connect(lambda: self._finalize_disconnect())
-        self.byeListener.timeout.connect(lambda: self._finalize_disconnect())
-        self.byeListener.start()
+        # self.byeListener = AckListener(self.ser, ack_code=BYE_ACK, timeout_s=1.0)
+        # self.byeListener.ackReceived.connect(lambda: self._finalize_disconnect())
+        # self.byeListener.timeout.connect(lambda: self._finalize_disconnect())
+        # self.byeListener.start()
 
-    def _finalize_disconnect(self):
+    def _on_goodbye_ack(self):
         # stop threads, close, etc.
         self.disconnect_handler()
-        self.byeListener = None
+        # self.byeListener = None
 
     # def disconnect_board(self, error=False):
     #     print('--------Disconnecting from machine---------')
@@ -986,6 +988,18 @@ class Machine(QObject):
             print('Status thread stopped')
         else:
             print('No status thread to stop')
+
+    def stop_reader_thread(self):
+        """
+        Stop the serial reader thread.
+        """
+        if self.reader is not None:
+            self.reader.requestInterruption()
+            self.reader.wait(200)
+            self.reader = None
+            print('Serial reader thread stopped')
+        else:
+            print('No serial reader thread to stop')
 
     def begin_log_thread(self):
         """
@@ -1107,10 +1121,10 @@ class Machine(QObject):
         self.ser.write(frame)
 
         # listen for CLEAR_ACK
-        self.clearListener = AckListener(self.ser, ack_code=CLEAR_ACK, timeout_s=2.0)
-        self.clearListener.ackReceived.connect(lambda: self._on_clear_ack(handler))
-        self.clearListener.timeout.connect(lambda: self._on_clear_ack(handler, timed_out=True))
-        self.clearListener.start()
+        # self.clearListener = AckListener(self.ser, ack_code=CLEAR_ACK, timeout_s=2.0)
+        # self.clearListener.ackReceived.connect(lambda: self._on_clear_ack(handler))
+        # self.clearListener.timeout.connect(lambda: self._on_clear_ack(handler, timed_out=True))
+        # self.clearListener.start()
 
     def _on_clear_ack(self, handler=None, timed_out=False):
         if timed_out:
