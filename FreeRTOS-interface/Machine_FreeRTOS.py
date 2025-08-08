@@ -243,6 +243,10 @@ class RefuelCamera(QObject):
 
 START_BYTE = 0xAA
 CMD_STATUS = 0x02
+HELLO       = 0xF3
+HELLO_ACK   = 0xF4
+GOODBYE     = 0xF5
+BYE_ACK     = 0xF6
 
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
@@ -368,6 +372,14 @@ def crc16_x25(data: bytes) -> int:
             else:
                 crc >>= 1
     return crc & 0xFFFF
+
+
+def build_frame(cmd: int, seq: int=0) -> bytes:
+    payload = bytes([cmd & 0xFF, seq & 0xFF])
+    header  = bytes([START_BYTE, len(payload)])
+    crc     = crc16_x25(payload)
+    tail    = struct.pack("<H", crc)
+    return header + payload + tail
 
 def parse_tlv_payload(payload: bytes) -> dict:
     """
@@ -666,21 +678,51 @@ class Machine(QObject):
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
 
-
-    def connect_board(self,port):
+    def connect_board(self):
         try:
-            self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
             if self.ser.is_open:
+                # handshake
+                frame = build_frame(HELLO, seq=0)
+                self.ser.reset_input_buffer()
+                self.ser.write(frame)
+                # wait for ACK
+                start = time.time()
+                while time.time() - start < 1.0:
+                    resp = self.ser.read(5)  # header(2)+payload(2)+CRC(2)=6, but we know len=2
+                    if len(resp) >= 6 and resp[2] == HELLO_ACK:
+                        print("HELLO_ACK received")
+                        break
+                else:
+                    print("HELLO handshake failed")
+                    self.ser.close()
+                    self.machine_connected_signal.emit(False)
+                    return
+
                 self.begin_status_thread()
                 self.begin_execution_timer()
-
                 self.machine_connected_signal.emit(True)
-                print(f"Serial port opened successfully: {self.ser.name}")
+                print(f"Connected to {self.ser.name}")
             else:
-                print("Failed to open serial port.")
-                self.machine_connected_signal.emit(False)
+                raise IOError("Port not open")
         except Exception as e:
-            print(f"Failed to open serial port: {e}")
+            print(f"Connection error: {e}")
+            self.machine_connected_signal.emit(False)
+
+    # def connect_board(self,port):
+    #     try:
+    #         self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
+    #         if self.ser.is_open:
+    #             self.begin_status_thread()
+    #             self.begin_execution_timer()
+
+    #             self.machine_connected_signal.emit(True)
+    #             print(f"Serial port opened successfully: {self.ser.name}")
+    #         else:
+    #             print("Failed to open serial port.")
+    #             self.machine_connected_signal.emit(False)
+    #     except Exception as e:
+    #         print(f"Failed to open serial port: {e}")
     
     def reset_board(self):
         print('Resetting board')
@@ -696,9 +738,18 @@ class Machine(QObject):
             self.port = None
         self.disconnect_complete_signal.emit()
 
+    # def disconnect_board(self, error=False):
+    #     print('--------Disconnecting from machine---------')
+    #     if not error:
+    #         self.worker = DisconnectWorker(self)
+    #         self.worker.finished.connect(self.disconnect_handler)
+    #         self.worker.start()
+    #     else:
+    #         self.disconnect_handler()
+
     def disconnect_board(self, error=False):
         print('--------Disconnecting from machine---------')
-        if not error:
+        if self.ser and not error:
             self.worker = DisconnectWorker(self)
             self.worker.finished.connect(self.disconnect_handler)
             self.worker.start()
