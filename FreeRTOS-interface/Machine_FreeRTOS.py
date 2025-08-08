@@ -414,95 +414,6 @@ def parse_tlv_payload(payload: bytes) -> dict:
 
     return result
 
-# class AckListener(QThread):
-#     """Listens on self.ser for a specific ack_code byte, within timeout."""
-#     ackReceived = Signal()
-#     timeout     = Signal()
-
-#     def __init__(self, ser, ack_code: int, timeout_s: float = 1.0, parent=None):
-#         super().__init__(parent)
-#         self.ser      = ser
-#         self.ack_code = ack_code
-#         self.timeout_s  = timeout_s
-
-#     def run(self):
-#         deadline = time.time() + self.timeout_s
-#         # Flush any pending bytes so we start fresh
-#         try:
-#             self.ser.reset_input_buffer()
-#         except:
-#             pass
-
-#         while time.time() < deadline:
-#             hdr = self.ser.read(2)
-#             if len(hdr) != 2 or hdr[0] != START_BYTE:
-#                 continue
-#             length = hdr[1]
-#             payload = self.ser.read(length)
-#             if len(payload) != length:
-#                 continue
-#             tail = self.ser.read(2)
-#             if len(tail) != 2:
-#                 continue
-#             rec_crc = tail[0] | (tail[1] << 8)
-#             if rec_crc != crc16_x25(payload):
-#                 continue
-#             # Found one valid frame
-#             if payload and payload[0] == self.ack_code:
-#                 self.ackReceived.emit()
-#                 return
-#         # timed out
-#         self.timeout.emit()
-
-# class StatusThread(QThread):
-#     status_received = Signal(dict)  # emit parsed status data
-#     # error = Signal(str)
-
-#     def __init__(self, ser):
-#         super().__init__()
-#         self.ser = ser
-
-#     def run(self):
-#         try:
-#             while not self.isInterruptionRequested():
-#                 # print("Interrupted:", self.isInterruptionRequested())
-#                 b = self.ser.read(1)
-#                 if not b or b[0] != START_BYTE:
-#                     # print("Start byte not received, waiting...")
-#                     continue
-#                 L = self.ser.read(1)
-#                 if len(L)!=1:
-#                     # print("Length byte not received, waiting...")
-#                     continue
-#                 length = L[0]
-#                 payload = self.ser.read(length)
-#                 if len(payload)!=length:
-#                     # print("Payload length mismatch, waiting...")
-#                     continue
-#                 tail = self.ser.read(2)
-#                 if len(tail)!=2:
-#                     # print("CRC tail not received, waiting...")
-#                     continue
-#                 rec_crc = tail[0] | (tail[1]<<8)
-#                 if rec_crc != crc16_x25(payload):
-#                     self.status_received.emit("! CRC ERROR on incoming frame")
-#                     continue
-#                 cmd = payload[0]
-#                 if cmd == CMD_STATUS and len(payload)>=9:
-#                     # instead of unpacking fixed fields, do:
-#                     data = parse_tlv_payload(payload[1:])  # skip the CMD byte
-#                     # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
-#                     # hand it off to your UI:
-#                     # print(f"Received status data: {data}")
-#                     self.status_received.emit(data)
-
-#                 else:
-#                     # ignore or show other async messages
-#                     pass
-#         except Exception as e:
-#             # self.error.emit(f"Reader thread error: {e}")
-#             print(f"Reader thread error: {e}")
-
 class SerialReader(QThread):
     status_received = Signal(dict)
     ackReceived     = Signal(int)
@@ -755,6 +666,7 @@ class Machine(QObject):
         self.command_queue = CommandQueue()
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
+        self.reader = None
         
         self.fss = 13107
         self.psi_offset = 1638
@@ -765,6 +677,7 @@ class Machine(QObject):
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
+        self._connection_attempts = 0
 
         try:
             self.refuel_camera = RefuelCamera()
@@ -822,24 +735,14 @@ class Machine(QObject):
             # Stray ack (no one is waiting) — optional: log it
             # print(f"Stray ACK {cmd_code}")
             pass
-    # def _on_any_ack(self, cmd_code):
-    #     if cmd_code == HELLO_ACK:
-    #         self._on_hello_ack()
-    #     elif cmd_code == BYE_ACK:
-    #         self._on_goodbye_ack()
-    #     elif cmd_code == CLEAR_ACK:
-    #         self._on_clear_ack()
-    
+
     def connect_board(self, port):
         try:
             self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
             
-            self.reader = SerialReader(self.ser)
-            self.reader.status_received.connect(self.update_status)
-            self.reader.ackReceived.connect(self._on_any_ack)
-            self.reader.start()
+            self.begin_reader_thread()
 
             # send HELLO
             frame = build_frame(HELLO, seq=0)
@@ -862,90 +765,24 @@ class Machine(QObject):
         self.begin_execution_timer()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
+        self._connection_attempts = 0  # reset attempts on success
 
     def _hello_timeout(self):
-        print("No HELLO_ACK — giving up or retrying…")
-        # Optionally retry HELLO here, or close port and signal failure.
-    
-    # @Slot()
-    # def _on_hello_ack(self):
-    #     # safely start the rest of your threads now
-    #     self.begin_log_thread()
-    #     self.begin_execution_timer()
-    #     self.machine_connected_signal.emit(True)
-    #     print(f"Connected to {self.ser.name}")
+        self.machine_connected_signal.emit(False)
+        # Retry to connect
+        if self._connection_attempts < 3:
+            self._connection_attempts += 1
+            print(f"Retrying connection ({self._connection_attempts}/3)…")
+            self.connect_board(self.port)
+        else:
+            print("Max connection attempts reached. Please check the machine.")
+            self.machine_connected_signal.emit(False)
 
-        # self.helloListener = None  # allow it to clean up
-    # def connect_board(self,port):
-    #     # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
-    #     try:
-    #         dev = '/dev/ttyAMA0'
-    #         self.ser = serial.Serial(dev, self.baud, timeout=0.1)
-    #         if not self.ser.is_open:
-    #             raise IOError("Port not open")
-
-    #         # send HELLO frame
-    #         frame = build_frame(HELLO, seq=0)
-    #         self.ser.reset_input_buffer()
-    #         self.ser.write(frame)
-
-    #         # wait up to 1s for HELLO_ACK; read full framed packets
-    #         deadline = time.time() + 1.0
-    #         got_ack = False
-    #         while time.time() < deadline:
-    #             hdr = self.ser.read(2)
-    #             if len(hdr) != 2 or hdr[0] != START_BYTE:
-    #                 continue
-    #             length = hdr[1]
-    #             payload = self.ser.read(length)
-    #             if len(payload) != length:
-    #                 continue
-    #             tail = self.ser.read(2)
-    #             if len(tail) != 2:
-    #                 continue
-    #             rec_crc = tail[0] | (tail[1] << 8)
-    #             if rec_crc != crc16_x25(payload):
-    #                 continue
-    #             if payload and payload[0] == HELLO_ACK:
-    #                 got_ack = True
-    #                 # start threads/timers after successful handshake
-    #                 self.begin_status_thread()
-    #                 self.begin_log_thread()
-    #                 self.begin_execution_timer()
-
-    #                 self.machine_connected_signal.emit(True)
-    #                 print(f"Connected to {self.ser.name}")
-    #                 break
-    #             if not got_ack:
-    #                 raise TimeoutError("No HELLO_ACK")
-
-    #         else:
-    #             raise IOError("Port not open")
-    #     except Exception as e:
-    #         print(f"Connection error: {e}")
-    #         self.machine_connected_signal.emit(False)
-
-    # def connect_board(self,port):
-    #     try:
-    #         self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
-    #         if self.ser.is_open:
-    #             self.begin_status_thread()
-    #             self.begin_execution_timer()
-
-    #             self.machine_connected_signal.emit(True)
-    #             print(f"Serial port opened successfully: {self.ser.name}")
-    #         else:
-    #             print("Failed to open serial port.")
-    #             self.machine_connected_signal.emit(False)
-    #     except Exception as e:
-    #         print(f"Failed to open serial port: {e}")
-    
     def reset_board(self):
         print('Resetting board')
         self.command_queue.clear_queue()
         self.stop_execution_timer()
         self.stop_reader_thread()
-        # self.stop_status_thread()
         self.stop_log_thread()
         
     def disconnect_handler(self):
@@ -972,88 +809,22 @@ class Machine(QObject):
             on_timeout=lambda: self._on_goodbye_ack()  # proceed anyway
         )
 
-        # listen for BYE_ACK
-        # self.byeListener = AckListener(self.ser, ack_code=BYE_ACK, timeout_s=1.0)
-        # self.byeListener.ackReceived.connect(lambda: self._finalize_disconnect())
-        # self.byeListener.timeout.connect(lambda: self._finalize_disconnect())
-        # self.byeListener.start()
-
     def _on_goodbye_ack(self):
         # stop threads, close, etc.
         self.disconnect_handler()
-        # self.byeListener = None
 
-    # def disconnect_board(self, error=False):
-    #     print('--------Disconnecting from machine---------')
-    #     if not error:
-    #         self.worker = DisconnectWorker(self)
-    #         self.worker.finished.connect(self.disconnect_handler)
-    #         self.worker.start()
-    #     else:
-    #         self.disconnect_handler()
-
-    # def disconnect_board(self, error=False):
-    #     print('--------Disconnecting from machine---------')
-    #     if not self.ser:
-    #         self.disconnect_handler()
-    #         return
-    #     try:
-    #         # stop any timers/threads that might read from the same port (optional if present)
-    #         if hasattr(self, 'execution_timer') and self.execution_timer:
-    #             try: self.stop_execution_timer()
-    #             except Exception: pass
-    #         if hasattr(self, 'status_thread') and self.status_thread:
-    #             try: self.stop_status_thread()
-    #             except Exception: pass
-    #         if hasattr(self, 'log_reader') and self.log_reader:
-    #             try: self.stop_log_thread()
-    #             except Exception: pass
-
-    #         # send GOODBYE and wait for BYE_ACK
-    #         self.ser.reset_input_buffer()
-    #         self.ser.write(build_frame(GOODBYE, seq=0))
-    #         deadline = time.time() + 1.0
-    #         while time.time() < deadline:
-    #             hdr = self.ser.read(2)
-    #             if len(hdr) != 2 or hdr[0] != START_BYTE:
-    #                 continue
-    #             length = hdr[1]
-    #             payload = self.ser.read(length)
-    #             if len(payload) != length:
-    #                 continue
-    #             tail = self.ser.read(2)
-    #             if len(tail) != 2:
-    #                 continue
-    #             rec_crc = tail[0] | (tail[1] << 8)
-    #             if rec_crc != crc16_x25(payload):
-    #                 continue
-    #             if payload and payload[0] == BYE_ACK:
-    #                 break
-    #     except Exception as e:
-    #         print(f"Error during disconnect handshake: {e}")
-    #     finally:
-    #         self.disconnect_handler()
-    
-    def begin_status_thread(self):
+    def begin_reader_thread(self):
         """
-        Start the status thread to listen for incoming data from the machine.
+        Start the serial reader thread to read data from the machine.
         """
-        # self.status_thread = StatusThread(self.ser)
-        # self.status_thread.status_received.connect(self.update_status)
-        # self.status_thread.error.connect(self.on_error)
-        # self.status_thread.start()
-
-    def stop_status_thread(self):
-        """
-        Stop the status thread.
-        """
-        if self.status_thread is not None:
-            self.status_thread.requestInterruption()
-            self.status_thread.wait(200)
-            self.status_thread = None
-            print('Status thread stopped')
+        if self.reader is None:
+            self.reader = SerialReader(self.ser)
+            self.reader.status_received.connect(self.update_status)
+            self.reader.ackReceived.connect(self._on_any_ack)
+            self.reader.start()
+            print('Serial reader thread started')
         else:
-            print('No status thread to stop')
+            print('Serial reader thread already running')
 
     def stop_reader_thread(self):
         """
@@ -1208,47 +979,6 @@ class Machine(QObject):
             handler()
 
         self.begin_execution_timer()
-
-    # def clear_command_queue(self,handler=None):
-    #     print('Clearing command queue')
-    #     new_command = Command(0, 'CLEAR_QUEUE', 0, 0, 0, handler=handler)
-    #     if self.sent_command is not None:
-    #         print('Overriding command:',self.sent_command.get_command())
-    #     print('Sending clear command')
-    #     self.ser.reset_input_buffer()  # clear any pending input
-    #     self.send_command_to_board(new_command)
-    #     # now block until CLEAR_ACK arrives
-    #     deadline = time.time() + 2.0
-    #     got_ack = False
-    #     while time.time() < deadline:
-    #         hdr = self.ser.read(2)
-    #         if len(hdr) != 2 or hdr[0] != START_BYTE:
-    #             continue
-    #         length = hdr[1]
-    #         payload = self.ser.read(length)
-    #         if len(payload) != length:
-    #             continue
-    #         tail = self.ser.read(2)
-    #         if len(tail) != 2:
-    #             continue
-    #         rec_crc = tail[0] | (tail[1] << 8)
-    #         if rec_crc != crc16_x25(payload):
-    #             continue
-    #         if payload and payload[0] == CLEAR_ACK:
-    #             got_ack = True
-    #             print("\nCLEAR_ACK received, command queue cleared.\n")
-    #             break
-    #     # while True:
-    #     #     frame = self.read_frame()    # your existing read-header/payload/CRC
-    #     #     if frame.payload[0] == CLEAR_ACK:
-    #     #         break
-    #     if not got_ack:
-    #         print("No CLEAR_ACK received, command queue may not be cleared.")
-    #     else:
-    #         self.command_queue.clear_queue()
-    #     # if handler is not None:
-    #     #     handler()
-    #     # self.command_queue.clear_queue()
 
     def check_param_limits(self,param,min_val,max_val):
         if param >= min_val and param <= max_val:
