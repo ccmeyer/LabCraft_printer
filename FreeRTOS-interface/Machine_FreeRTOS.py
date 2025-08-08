@@ -414,94 +414,120 @@ def parse_tlv_payload(payload: bytes) -> dict:
 
     return result
 
-class AckListener(QThread):
-    """Listens on self.ser for a specific ack_code byte, within timeout."""
-    ackReceived = Signal()
-    timeout     = Signal()
+# class AckListener(QThread):
+#     """Listens on self.ser for a specific ack_code byte, within timeout."""
+#     ackReceived = Signal()
+#     timeout     = Signal()
 
-    def __init__(self, ser, ack_code: int, timeout_s: float = 1.0, parent=None):
+#     def __init__(self, ser, ack_code: int, timeout_s: float = 1.0, parent=None):
+#         super().__init__(parent)
+#         self.ser      = ser
+#         self.ack_code = ack_code
+#         self.timeout_s  = timeout_s
+
+#     def run(self):
+#         deadline = time.time() + self.timeout_s
+#         # Flush any pending bytes so we start fresh
+#         try:
+#             self.ser.reset_input_buffer()
+#         except:
+#             pass
+
+#         while time.time() < deadline:
+#             hdr = self.ser.read(2)
+#             if len(hdr) != 2 or hdr[0] != START_BYTE:
+#                 continue
+#             length = hdr[1]
+#             payload = self.ser.read(length)
+#             if len(payload) != length:
+#                 continue
+#             tail = self.ser.read(2)
+#             if len(tail) != 2:
+#                 continue
+#             rec_crc = tail[0] | (tail[1] << 8)
+#             if rec_crc != crc16_x25(payload):
+#                 continue
+#             # Found one valid frame
+#             if payload and payload[0] == self.ack_code:
+#                 self.ackReceived.emit()
+#                 return
+#         # timed out
+#         self.timeout.emit()
+
+# class StatusThread(QThread):
+#     status_received = Signal(dict)  # emit parsed status data
+#     # error = Signal(str)
+
+#     def __init__(self, ser):
+#         super().__init__()
+#         self.ser = ser
+
+#     def run(self):
+#         try:
+#             while not self.isInterruptionRequested():
+#                 # print("Interrupted:", self.isInterruptionRequested())
+#                 b = self.ser.read(1)
+#                 if not b or b[0] != START_BYTE:
+#                     # print("Start byte not received, waiting...")
+#                     continue
+#                 L = self.ser.read(1)
+#                 if len(L)!=1:
+#                     # print("Length byte not received, waiting...")
+#                     continue
+#                 length = L[0]
+#                 payload = self.ser.read(length)
+#                 if len(payload)!=length:
+#                     # print("Payload length mismatch, waiting...")
+#                     continue
+#                 tail = self.ser.read(2)
+#                 if len(tail)!=2:
+#                     # print("CRC tail not received, waiting...")
+#                     continue
+#                 rec_crc = tail[0] | (tail[1]<<8)
+#                 if rec_crc != crc16_x25(payload):
+#                     self.status_received.emit("! CRC ERROR on incoming frame")
+#                     continue
+#                 cmd = payload[0]
+#                 if cmd == CMD_STATUS and len(payload)>=9:
+#                     # instead of unpacking fixed fields, do:
+#                     data = parse_tlv_payload(payload[1:])  # skip the CMD byte
+#                     # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
+#                     # hand it off to your UI:
+#                     # print(f"Received status data: {data}")
+#                     self.status_received.emit(data)
+
+#                 else:
+#                     # ignore or show other async messages
+#                     pass
+#         except Exception as e:
+#             # self.error.emit(f"Reader thread error: {e}")
+#             print(f"Reader thread error: {e}")
+
+class SerialReader(QThread):
+    status_received = Signal(dict)
+    ackReceived     = Signal(int)
+
+    def __init__(self, ser, parent=None):
         super().__init__(parent)
-        self.ser      = ser
-        self.ack_code = ack_code
-        self.timeout  = timeout_s
-
-    def run(self):
-        deadline = time.time() + self.timeout
-        # Flush any pending bytes so we start fresh
-        try:
-            self.ser.reset_input_buffer()
-        except:
-            pass
-
-        while time.time() < deadline:
-            hdr = self.ser.read(2)
-            if len(hdr) != 2 or hdr[0] != START_BYTE:
-                continue
-            length = hdr[1]
-            payload = self.ser.read(length)
-            if len(payload) != length:
-                continue
-            tail = self.ser.read(2)
-            if len(tail) != 2:
-                continue
-            rec_crc = tail[0] | (tail[1] << 8)
-            if rec_crc != crc16_x25(payload):
-                continue
-            # Found one valid frame
-            if payload and payload[0] == self.ack_code:
-                self.ackReceived.emit()
-                return
-        # timed out
-        self.timeout.emit()
-
-class StatusThread(QThread):
-    status_received = Signal(dict)  # emit parsed status data
-    # error = Signal(str)
-
-    def __init__(self, ser):
-        super().__init__()
         self.ser = ser
 
     def run(self):
-        try:
-            while not self.isInterruptionRequested():
-                # print("Interrupted:", self.isInterruptionRequested())
-                b = self.ser.read(1)
-                if not b or b[0] != START_BYTE:
-                    # print("Start byte not received, waiting...")
-                    continue
-                L = self.ser.read(1)
-                if len(L)!=1:
-                    # print("Length byte not received, waiting...")
-                    continue
-                length = L[0]
-                payload = self.ser.read(length)
-                if len(payload)!=length:
-                    # print("Payload length mismatch, waiting...")
-                    continue
-                tail = self.ser.read(2)
-                if len(tail)!=2:
-                    # print("CRC tail not received, waiting...")
-                    continue
-                rec_crc = tail[0] | (tail[1]<<8)
-                if rec_crc != crc16_x25(payload):
-                    self.status_received.emit("! CRC ERROR on incoming frame")
-                    continue
-                cmd = payload[0]
-                if cmd == CMD_STATUS and len(payload)>=9:
-                    # instead of unpacking fixed fields, do:
-                    data = parse_tlv_payload(payload[1:])  # skip the CMD byte
-                    # now `data` is a dict like {"led_total": 123, "pos_x": 456, …}
-                    # hand it off to your UI:
-                    # print(f"Received status data: {data}")
-                    self.status_received.emit(data)
+        while not self.isInterruptionRequested():
+            hdr = self.ser.read(2)
+            if len(hdr)!=2 or hdr[0]!=START_BYTE: continue
+            length = hdr[1]
+            payload = self.ser.read(length)
+            tail = self.ser.read(2)
+            rec_crc = tail[0] | (tail[1]<<8)
+            if crc16_x25(payload)!=rec_crc: continue
 
-                else:
-                    # ignore or show other async messages
-                    pass
-        except Exception as e:
-            # self.error.emit(f"Reader thread error: {e}")
-            print(f"Reader thread error: {e}")
+            cmd = payload[0]
+            if cmd == CMD_STATUS:
+                data = parse_tlv_payload(payload[1:])
+                self.status_received.emit(data)
+            else:
+                # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
+                self.ackReceived.emit(cmd)
 
 class LogReader(QThread):
     lineReceived = Signal(str)
@@ -748,6 +774,20 @@ class Machine(QObject):
         except Exception as e:
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
+
+        self.reader = SerialReader(self.ser)
+        self.reader.status_received.connect(self.update_status)
+        self.reader.ackReceived.connect(self._on_any_ack)
+        self.reader.start()
+
+    def _on_any_ack(self, cmd_code):
+        if cmd_code == HELLO_ACK:
+            self._on_hello_ack()
+        elif cmd_code == BYE_ACK:
+            self._on_goodbye_ack()
+        elif cmd_code == CLEAR_ACK:
+            self._on_clear_ack()
+    
     def connect_board(self, port):
         try:
             self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
@@ -758,11 +798,11 @@ class Machine(QObject):
             frame = build_frame(HELLO, seq=0)
             self.ser.write(frame)
 
-            # spin up an AckListener for HELLO_ACK
-            self.helloListener = AckListener(self.ser, ack_code=HELLO_ACK, timeout_s=1.0)
-            self.helloListener.ackReceived.connect(self._on_hello_ack)
-            self.helloListener.timeout.connect(lambda: self.machine_connected_signal.emit(False))
-            self.helloListener.start()
+            # # spin up an AckListener for HELLO_ACK
+            # self.helloListener = AckListener(self.ser, ack_code=HELLO_ACK, timeout_s=1.0)
+            # self.helloListener.ackReceived.connect(self._on_hello_ack)
+            # self.helloListener.timeout.connect(lambda: self.machine_connected_signal.emit(False))
+            # self.helloListener.start()
 
         except Exception as e:
             print(f"Connection error: {e}")
@@ -930,10 +970,10 @@ class Machine(QObject):
         """
         Start the status thread to listen for incoming data from the machine.
         """
-        self.status_thread = StatusThread(self.ser)
-        self.status_thread.status_received.connect(self.update_status)
+        # self.status_thread = StatusThread(self.ser)
+        # self.status_thread.status_received.connect(self.update_status)
         # self.status_thread.error.connect(self.on_error)
-        self.status_thread.start()
+        # self.status_thread.start()
 
     def stop_status_thread(self):
         """
