@@ -360,6 +360,10 @@ CMD_MAP = {
     'PAUSE': 0xF0,
     'RESUME': 0xF1,
     'CLEAR_QUEUE': 0xF2,
+    'HELLO'       : 0xF3,
+    'HELLO_ACK'   : 0xF4,
+    'GOODBYE'     : 0xF5,
+    'BYE_ACK'     : 0xF6
 }
 
 def crc16_x25(data: bytes) -> int:
@@ -423,20 +427,20 @@ class StatusThread(QThread):
                 # print("Interrupted:", self.isInterruptionRequested())
                 b = self.ser.read(1)
                 if not b or b[0] != START_BYTE:
-                    print("Start byte not received, waiting...")
+                    # print("Start byte not received, waiting...")
                     continue
                 L = self.ser.read(1)
                 if len(L)!=1:
-                    print("Length byte not received, waiting...")
+                    # print("Length byte not received, waiting...")
                     continue
                 length = L[0]
                 payload = self.ser.read(length)
                 if len(payload)!=length:
-                    print("Payload length mismatch, waiting...")
+                    # print("Payload length mismatch, waiting...")
                     continue
                 tail = self.ser.read(2)
                 if len(tail)!=2:
-                    print("CRC tail not received, waiting...")
+                    # print("CRC tail not received, waiting...")
                     continue
                 rec_crc = tail[0] | (tail[1]<<8)
                 if rec_crc != crc16_x25(payload):
@@ -458,6 +462,35 @@ class StatusThread(QThread):
             # self.error.emit(f"Reader thread error: {e}")
             print(f"Reader thread error: {e}")
 
+class LogReader(QThread):
+    lineReceived = Signal(str)
+
+    def __init__(self, baud=115200, parent=None):
+        super().__init__(parent)
+        log_port = "/dev/ttyUSB0"
+        self.ser = serial.Serial(log_port, baud, timeout=1)
+        self._running = True
+        print(f"LogReader initialized on {log_port} at {baud} baud")
+
+    def run(self):
+        """Continuously read lines and emit them."""
+        while self._running:
+            try:
+                line = self.ser.readline()
+                if line:
+                    # decode to str, strip trailing CR/LF
+                    text = line.decode('ascii',errors="ignore").rstrip("\r\n")
+                    # text = re.sub(r'[^\x20-\x7E]', '', text)  # remove ANSI escape codes
+                    # text = line.decode(errors="replace").rstrip("\r\n")
+                    self.lineReceived.emit(text)
+            except serial.SerialException:
+                break
+    
+    def stop(self):
+        self._running = False
+        self.wait(200)
+        if self.ser.is_open:
+            self.ser.close()
 
 class Command:
     """
@@ -678,29 +711,41 @@ class Machine(QObject):
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
 
-    def connect_board(self):
+    def connect_board(self,port):
         try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
             if self.ser.is_open:
                 # handshake
-                frame = build_frame(HELLO, seq=0)
-                self.ser.reset_input_buffer()
-                self.ser.write(frame)
-                # wait for ACK
-                start = time.time()
-                while time.time() - start < 1.0:
-                    resp = self.ser.read(5)  # header(2)+payload(2)+CRC(2)=6, but we know len=2
-                    if len(resp) >= 6 and resp[2] == HELLO_ACK:
-                        print("HELLO_ACK received")
-                        break
-                else:
-                    print("HELLO handshake failed")
-                    self.ser.close()
-                    self.machine_connected_signal.emit(False)
-                    return
+                # new_command = Command(0, 'HELLO', 0, 0, 0)
+                # if self.sent_command is not None:
+                #     print('Overriding command:',self.sent_command.get_command())
+                # print('Sending Hello command')
+                # self.send_command_to_board(new_command)
+                # frame = build_frame(HELLO, seq=0)
+                # self.ser.reset_input_buffer()
+                # self.ser.write(frame)
+                # # wait for ACK
+                # start = time.time()
+                # while time.time() - start < 5.0:
+                #     resp = self.ser.read(5)  # header(2)+payload(2)+CRC(2)=6, but we know len=2
+                #     print(f"Received response: {resp}")
+                #     if len(resp) >= 6 and resp[2] == HELLO_ACK:
+                #         print("HELLO_ACK received")
+                #         break
+                    # else:
+                    #     print("HELLO handshake failed")
+                    #     self.ser.close()
+                    #     self.machine_connected_signal.emit(False)
+                    #     return
 
                 self.begin_status_thread()
+                self.begin_log_thread()
                 self.begin_execution_timer()
+                new_command = Command(0, 'HELLO', 0, 0, 0)
+                if self.sent_command is not None:
+                    print('Overriding command:',self.sent_command.get_command())
+                print('Sending Hello command')
+                self.send_command_to_board(new_command)
                 self.machine_connected_signal.emit(True)
                 print(f"Connected to {self.ser.name}")
             else:
@@ -729,6 +774,7 @@ class Machine(QObject):
         self.command_queue.clear_queue()
         self.stop_execution_timer()
         self.stop_status_thread()
+        self.stop_log_thread()
         
     def disconnect_handler(self):
         self.reset_board()
@@ -777,6 +823,26 @@ class Machine(QObject):
         else:
             print('No status thread to stop')
 
+    def begin_log_thread(self):
+        """
+        Start the log reader thread to read logs from the machine.
+        """
+        self.log_reader = LogReader(self.baud)
+        self.log_reader.lineReceived.connect(self.on_log_line_received)
+        self.log_reader.start()
+
+    def stop_log_thread(self):
+        """
+        Stop the log reader thread.
+        """
+        if self.log_reader is not None:
+            self.log_reader.stop()
+            self.log_reader.wait(200)
+            self.log_reader = None
+            print('Log reader thread stopped')
+        else:
+            print('No log reader thread to stop')
+
     def begin_execution_timer(self):
         print('Starting execution timer')
         self.execution_timer = QTimer()
@@ -795,6 +861,16 @@ class Machine(QObject):
             self.status_updated.emit(data)
         else:
             print(f"Received non-dict status data: {data}")
+    
+    def on_log_line_received(self, line):
+        """
+        Handle a line received from the log reader.
+        """
+        # Here you can process the log line, e.g., print it or emit a signal
+        if "HELLO_ACK" in line:
+            print("HELLO_ACK received, machine is ready.")
+            self.machine_connected_signal.emit(True)
+        print(f"Log line received: {line}")
 
     def update_command_numbers(self,current_command,last_completed):
         self.command_queue.update_command_status(current_command,last_completed)
@@ -841,6 +917,7 @@ class Machine(QObject):
         self.ser.write(command.frame)
         self.ser.flush()
         self.command_sent.emit({"command": command.get_command()})
+        print(f"Sent command: {command.get_command()}")
         return True
     
     def pause_commands(self):
