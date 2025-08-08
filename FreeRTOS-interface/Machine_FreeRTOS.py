@@ -378,11 +378,18 @@ def crc16_x25(data: bytes) -> int:
     return crc & 0xFFFF
 
 
-def build_frame(cmd: int, seq: int=0) -> bytes:
-    payload = bytes([cmd & 0xFF, seq & 0xFF])
+# def build_frame(cmd: int, seq: int=0) -> bytes:
+#     payload = bytes([cmd & 0xFF, seq & 0xFF])
+#     header  = bytes([START_BYTE, len(payload)])
+#     crc     = crc16_x25(payload)
+#     tail    = struct.pack("<H", crc)
+#     return header + payload + tail
+
+def build_frame(cmd, seq=0):
+    payload = bytes([cmd, seq])
     header  = bytes([START_BYTE, len(payload)])
-    crc     = crc16_x25(payload)
-    tail    = struct.pack("<H", crc)
+    c       = crc16_x25(payload)
+    tail    = struct.pack("<H", c)
     return header + payload + tail
 
 def parse_tlv_payload(payload: bytes) -> dict:
@@ -478,10 +485,7 @@ class LogReader(QThread):
             try:
                 line = self.ser.readline()
                 if line:
-                    # decode to str, strip trailing CR/LF
                     text = line.decode('ascii',errors="ignore").rstrip("\r\n")
-                    # text = re.sub(r'[^\x20-\x7E]', '', text)  # remove ANSI escape codes
-                    # text = line.decode(errors="replace").rstrip("\r\n")
                     self.lineReceived.emit(text)
             except serial.SerialException:
                 break
@@ -721,31 +725,36 @@ class Machine(QObject):
                 #     print('Overriding command:',self.sent_command.get_command())
                 # print('Sending Hello command')
                 # self.send_command_to_board(new_command)
-                # frame = build_frame(HELLO, seq=0)
-                # self.ser.reset_input_buffer()
-                # self.ser.write(frame)
-                # # wait for ACK
-                # start = time.time()
-                # while time.time() - start < 5.0:
-                #     resp = self.ser.read(5)  # header(2)+payload(2)+CRC(2)=6, but we know len=2
-                #     print(f"Received response: {resp}")
-                #     if len(resp) >= 6 and resp[2] == HELLO_ACK:
-                #         print("HELLO_ACK received")
-                #         break
-                    # else:
-                    #     print("HELLO handshake failed")
-                    #     self.ser.close()
-                    #     self.machine_connected_signal.emit(False)
-                    #     return
+                frame = build_frame(HELLO, seq=0)
+                self.ser.reset_input_buffer()
+                self.ser.write(frame)
+
+                # 2) wait up to 1s for HELLO_ACK
+                deadline = time.time() + 1.0
+                while time.time() < deadline:
+                    hdr = self.ser.read(2)
+                    if len(hdr) < 2 or hdr[0] != START_BYTE:
+                        print("Start byte not received, waiting...")
+                        continue
+                    length = hdr[1]
+                    body = self.ser.read(length + 2)  # payload + CRC
+                    if len(body) < length+2:
+                        print("Payload length mismatch, waiting...")
+                        continue
+                    if body[0] == HELLO_ACK:
+                        print("HELLO_ACK received")
+                        break
+                else:
+                    raise TimeoutError("No HELLO_ACK")
 
                 self.begin_status_thread()
                 self.begin_log_thread()
                 self.begin_execution_timer()
-                new_command = Command(0, 'HELLO', 0, 0, 0)
-                if self.sent_command is not None:
-                    print('Overriding command:',self.sent_command.get_command())
-                print('Sending Hello command')
-                self.send_command_to_board(new_command)
+                # new_command = Command(0, 'HELLO', 0, 0, 0)
+                # if self.sent_command is not None:
+                #     print('Overriding command:',self.sent_command.get_command())
+                # print('Sending Hello command')
+                # self.send_command_to_board(new_command)
                 self.machine_connected_signal.emit(True)
                 print(f"Connected to {self.ser.name}")
             else:
