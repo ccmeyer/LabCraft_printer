@@ -247,6 +247,7 @@ HELLO       = 0xF3
 HELLO_ACK   = 0xF4
 GOODBYE     = 0xF5
 BYE_ACK     = 0xF6
+CLEAR_ACK   = 0xF7
 
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
@@ -986,7 +987,38 @@ class Machine(QObject):
             print('Overriding command:',self.sent_command.get_command())
         print('Sending clear command')
         self.send_command_to_board(new_command)
-        self.command_queue.clear_queue()
+        # now block until CLEAR_ACK arrives
+        deadline = time.time() + 2.0
+        got_ack = False
+        while time.time() < deadline:
+            hdr = self.ser.read(2)
+            if len(hdr) != 2 or hdr[0] != START_BYTE:
+                continue
+            length = hdr[1]
+            payload = self.ser.read(length)
+            if len(payload) != length:
+                continue
+            tail = self.ser.read(2)
+            if len(tail) != 2:
+                continue
+            rec_crc = tail[0] | (tail[1] << 8)
+            if rec_crc != crc16_x25(payload):
+                continue
+            if payload and payload[0] == HELLO_ACK:
+                got_ack = True
+                print("\nCLEAR_ACK received, command queue cleared.\n")
+                break
+        # while True:
+        #     frame = self.read_frame()    # your existing read-header/payload/CRC
+        #     if frame.payload[0] == CLEAR_ACK:
+        #         break
+        if not got_ack:
+            print("No CLEAR_ACK received, command queue may not be cleared.")
+        else:
+            self.command_queue.clear_queue()
+            if handler is not None:
+                handler()
+        # self.command_queue.clear_queue()
 
     def check_param_limits(self,param,min_val,max_val):
         if param >= min_val and param <= max_val:
