@@ -716,42 +716,48 @@ class Machine(QObject):
             self.droplet_camera = None
 
     def connect_board(self,port):
+        # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
         try:
-            self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
-            if self.ser.is_open:
-                # handshake: send HELLO and wait for HELLO_ACK
-                frame = build_frame(HELLO, seq=0)
-                self.ser.reset_input_buffer()
-                self.ser.write(frame)
+            dev = port or '/dev/ttyAMA0'
+            self.ser = serial.Serial(dev, self.baud, timeout=0.1)
+            if not self.ser.is_open:
+                raise IOError("Port not open")
 
-                # wait up to 1s for HELLO_ACK; read exact frames (header, payload, CRC)
-                deadline = time.time() + 1.0
-                while time.time() < deadline:
-                    hdr = self.ser.read(2)
-                    if len(hdr) != 2 or hdr[0] != START_BYTE:
-                        continue
-                    length = hdr[1]
-                    payload = self.ser.read(length)
-                    if len(payload) != length:
-                        continue
-                    tail = self.ser.read(2)
-                    if len(tail) != 2:
-                        continue
-                    rec_crc = tail[0] | (tail[1] << 8)
-                    if rec_crc != crc16_x25(payload):
-                        continue
-                    if payload and payload[0] == HELLO_ACK:
-                        break
-                else:
+            # send HELLO frame
+            frame = build_frame(HELLO, seq=0)
+            self.ser.reset_input_buffer()
+            self.ser.write(frame)
+
+            # wait up to 1s for HELLO_ACK; read full framed packets
+            deadline = time.time() + 1.0
+            got_ack = False
+            while time.time() < deadline:
+                hdr = self.ser.read(2)
+                if len(hdr) != 2 or hdr[0] != START_BYTE:
+                    continue
+                length = hdr[1]
+                payload = self.ser.read(length)
+                if len(payload) != length:
+                    continue
+                tail = self.ser.read(2)
+                if len(tail) != 2:
+                    continue
+                rec_crc = tail[0] | (tail[1] << 8)
+                if rec_crc != crc16_x25(payload):
+                    continue
+                if payload and payload[0] == HELLO_ACK:
+                    got_ack = True
+                    # start threads/timers after successful handshake
+                    self.begin_status_thread()
+                    self.begin_log_thread()
+                    self.begin_execution_timer()
+
+                    self.machine_connected_signal.emit(True)
+                    print(f"Connected to {self.ser.name}")
+                    break
+                if not got_ack:
                     raise TimeoutError("No HELLO_ACK")
 
-                # start threads/timers after successful handshake
-                self.begin_status_thread()
-                self.begin_log_thread()
-                self.begin_execution_timer()
-
-                self.machine_connected_signal.emit(True)
-                print(f"Connected to {self.ser.name}")
             else:
                 raise IOError("Port not open")
         except Exception as e:
@@ -799,49 +805,44 @@ class Machine(QObject):
 
     def disconnect_board(self, error=False):
         print('--------Disconnecting from machine---------')
-        if self.ser:
-            try:
-                # Stop sending further commands while we handshake
-                if self.execution_timer:
-                    self.stop_execution_timer()
-                # Avoid race with status/log readers consuming BYE_ACK
-                if hasattr(self, 'status_thread') and self.status_thread:
-                    self.stop_status_thread()
-                if hasattr(self, 'log_reader') and self.log_reader:
-                    self.stop_log_thread()
+        if not self.ser:
+            self.disconnect_handler()
+            return
+        try:
+            # stop any timers/threads that might read from the same port (optional if present)
+            if hasattr(self, 'execution_timer') and self.execution_timer:
+                try: self.stop_execution_timer()
+                except Exception: pass
+            if hasattr(self, 'status_thread') and self.status_thread:
+                try: self.stop_status_thread()
+                except Exception: pass
+            if hasattr(self, 'log_reader') and self.log_reader:
+                try: self.stop_log_thread()
+                except Exception: pass
 
-                # Send GOODBYE and wait for BYE_ACK
-                frame = build_frame(GOODBYE, seq=0)
-                self.ser.reset_input_buffer()
-                self.ser.write(frame)
-
-                deadline = time.time() + 1.0
-                got_ack = False
-                while time.time() < deadline:
-                    hdr = self.ser.read(2)
-                    if len(hdr) != 2 or hdr[0] != START_BYTE:
-                        continue
-                    length = hdr[1]
-                    payload = self.ser.read(length)
-                    if len(payload) != length:
-                        continue
-                    tail = self.ser.read(2)
-                    if len(tail) != 2:
-                        continue
-                    rec_crc = tail[0] | (tail[1] << 8)
-                    if rec_crc != crc16_x25(payload):
-                        continue
-                    if payload and payload[0] == BYE_ACK:
-                        got_ack = True
-                        break
-                if not got_ack:
-                    print('Timeout waiting for BYE_ACK; proceeding to disconnect')
-            except Exception as e:
-                print(f"Error during disconnect handshake: {e}")
-            finally:
-                # Now tear down and close
-                self.disconnect_handler()
-        else:
+            # send GOODBYE and wait for BYE_ACK
+            self.ser.reset_input_buffer()
+            self.ser.write(build_frame(GOODBYE, seq=0))
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                hdr = self.ser.read(2)
+                if len(hdr) != 2 or hdr[0] != START_BYTE:
+                    continue
+                length = hdr[1]
+                payload = self.ser.read(length)
+                if len(payload) != length:
+                    continue
+                tail = self.ser.read(2)
+                if len(tail) != 2:
+                    continue
+                rec_crc = tail[0] | (tail[1] << 8)
+                if rec_crc != crc16_x25(payload):
+                    continue
+                if payload and payload[0] == BYE_ACK:
+                    break
+        except Exception as e:
+            print(f"Error during disconnect handshake: {e}")
+        finally:
             self.disconnect_handler()
     
     def begin_status_thread(self):
