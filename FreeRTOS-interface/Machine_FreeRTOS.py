@@ -763,6 +763,9 @@ class Machine(QObject):
         self.execution_timer = None
         self.sent_command = None
 
+        # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
+        self._pending_acks = {}
+
         try:
             self.refuel_camera = RefuelCamera()
         except Exception as e:
@@ -775,14 +778,57 @@ class Machine(QObject):
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
 
+    def _start_ack_wait(self, ack_code: int, timeout_ms: int,
+                        on_ok: callable, on_timeout: callable):
+        """Begin waiting for a specific ack_code with a one-shot timer."""
+        # If a previous wait exists for this ack, cancel it
+        self._cancel_ack_wait(ack_code)
 
-    def _on_any_ack(self, cmd_code):
-        if cmd_code == HELLO_ACK:
-            self._on_hello_ack()
-        elif cmd_code == BYE_ACK:
-            self._on_goodbye_ack()
-        elif cmd_code == CLEAR_ACK:
-            self._on_clear_ack()
+        t = QTimer(self)
+        t.setSingleShot(True)
+        # capture ack_code in lambda so we can look up the right entry
+        t.timeout.connect(lambda: self._ack_timeout(ack_code))
+        self._pending_acks[ack_code] = {"timer": t, "ok": on_ok, "to": on_timeout}
+        t.start(timeout_ms)
+
+    def _ack_timeout(self, ack_code: int):
+        entry = self._pending_acks.pop(ack_code, None)
+        if not entry:
+            return
+        # timer already fired
+        try:
+            entry["to"]()  # on_timeout
+        finally:
+            # make sure we don’t leak the timer
+            entry["timer"].deleteLater()
+
+    def _cancel_ack_wait(self, ack_code: int):
+        entry = self._pending_acks.pop(ack_code, None)
+        if entry:
+            entry["timer"].stop()
+            entry["timer"].deleteLater()
+
+    @Slot(int)
+    def _on_any_ack(self, cmd_code: int):
+        """Called from SerialReader; fan-out to the right waiter (if any)."""
+        entry = self._pending_acks.pop(cmd_code, None)
+        if entry:
+            entry["timer"].stop()
+            try:
+                entry["ok"]()  # on_ok
+            finally:
+                entry["timer"].deleteLater()
+        else:
+            # Stray ack (no one is waiting) — optional: log it
+            # print(f"Stray ACK {cmd_code}")
+            pass
+    # def _on_any_ack(self, cmd_code):
+    #     if cmd_code == HELLO_ACK:
+    #         self._on_hello_ack()
+    #     elif cmd_code == BYE_ACK:
+    #         self._on_goodbye_ack()
+    #     elif cmd_code == CLEAR_ACK:
+    #         self._on_clear_ack()
     
     def connect_board(self, port):
         try:
@@ -799,25 +845,37 @@ class Machine(QObject):
             frame = build_frame(HELLO, seq=0)
             self.ser.write(frame)
 
-            # # spin up an AckListener for HELLO_ACK
-            # self.helloListener = AckListener(self.ser, ack_code=HELLO_ACK, timeout_s=1.0)
-            # self.helloListener.ackReceived.connect(self._on_hello_ack)
-            # self.helloListener.timeout.connect(lambda: self.machine_connected_signal.emit(False))
-            # self.helloListener.start()
+                    # Send HELLO and wait up to 1000 ms for HELLO_ACK
+            self.ser.write(build_frame(HELLO, seq=0))
+            self._start_ack_wait(
+                HELLO_ACK, 1000,
+                on_ok=self._on_hello_ack,
+                on_timeout=lambda: self._hello_timeout()
+            )
 
         except Exception as e:
             print(f"Connection error: {e}")
             self.machine_connected_signal.emit(False)
-
     @Slot()
     def _on_hello_ack(self):
-        # safely start the rest of your threads now
-        # self.begin_status_thread()
         self.begin_log_thread()
         self.begin_execution_timer()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
-        self.helloListener = None  # allow it to clean up
+
+    def _hello_timeout(self):
+        print("No HELLO_ACK — giving up or retrying…")
+        # Optionally retry HELLO here, or close port and signal failure.
+    
+    # @Slot()
+    # def _on_hello_ack(self):
+    #     # safely start the rest of your threads now
+    #     self.begin_log_thread()
+    #     self.begin_execution_timer()
+    #     self.machine_connected_signal.emit(True)
+    #     print(f"Connected to {self.ser.name}")
+
+        # self.helloListener = None  # allow it to clean up
     # def connect_board(self,port):
     #     # Open serial and perform HELLO/HELLO_ACK handshake before starting any threads
     #     try:
@@ -902,9 +960,17 @@ class Machine(QObject):
         if not self.ser:
             self.disconnect_handler()
             return
-
+        # Optionally pause the execution timer so nothing else writes during bye
+        if hasattr(self, 'execution_timer') and self.execution_timer:
+            try: self.stop_execution_timer()
+            except Exception: pass
         # send GOODBYE
         self.ser.write(build_frame(GOODBYE, seq=0))
+        self._start_ack_wait(
+            BYE_ACK, 1000,
+            on_ok=self._on_goodbye_ack,
+            on_timeout=lambda: self._on_goodbye_ack()  # proceed anyway
+        )
 
         # listen for BYE_ACK
         # self.byeListener = AckListener(self.ser, ack_code=BYE_ACK, timeout_s=1.0)
@@ -1116,15 +1182,19 @@ class Machine(QObject):
 
     def clear_command_queue(self, handler=None):
         print('Clearing command queue')
+
+        if hasattr(self, 'execution_timer') and self.execution_timer:
+            try: self.stop_execution_timer()
+            except Exception: pass
+
+        self._start_ack_wait(
+            CLEAR_ACK, 2000,
+            on_ok=lambda: self._on_clear_ack(handler, timed_out=False),
+            on_timeout=lambda: self._on_clear_ack(handler, timed_out=True)
+        )        
         # send CLEAR
         frame = build_frame(CLEAR_QUEUE, seq=0)
         self.ser.write(frame)
-
-        # listen for CLEAR_ACK
-        # self.clearListener = AckListener(self.ser, ack_code=CLEAR_ACK, timeout_s=2.0)
-        # self.clearListener.ackReceived.connect(lambda: self._on_clear_ack(handler))
-        # self.clearListener.timeout.connect(lambda: self._on_clear_ack(handler, timed_out=True))
-        # self.clearListener.start()
 
     def _on_clear_ack(self, handler=None, timed_out=False):
         if timed_out:
@@ -1137,7 +1207,7 @@ class Machine(QObject):
         if handler:
             handler()
 
-        self.clearListener = None
+        self.begin_execution_timer()
 
     # def clear_command_queue(self,handler=None):
     #     print('Clearing command queue')
