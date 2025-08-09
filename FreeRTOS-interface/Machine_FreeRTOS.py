@@ -788,6 +788,11 @@ class Machine(QObject):
         )
 
     def _on_goodbye_ack(self):
+        try:
+            time.sleep(0.05)
+            self.ser.reset_input_buffer()
+        except Exception:
+            pass
         # stop threads, close, etc.
         self.disconnect_handler()
 
