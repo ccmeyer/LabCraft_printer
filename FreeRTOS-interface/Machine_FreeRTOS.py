@@ -365,7 +365,8 @@ CMD_MAP = {
     'HELLO'       : 0xF3,
     'HELLO_ACK'   : 0xF4,
     'GOODBYE'     : 0xF5,
-    'BYE_ACK'     : 0xF6
+    'BYE_ACK'     : 0xF6,
+    'CLEAR_ACK'   : 0xF7
 }
 
 def crc16_x25(data: bytes) -> int:
@@ -428,7 +429,9 @@ class SerialReader(QThread):
             if len(hdr)!=2 or hdr[0]!=START_BYTE: continue
             length = hdr[1]
             payload = self.ser.read(length)
+            if len(payload) != length: continue
             tail = self.ser.read(2)
+            if len(tail) != 2: continue
             rec_crc = tail[0] | (tail[1]<<8)
             if crc16_x25(payload)!=rec_crc: continue
 
@@ -617,32 +620,6 @@ class CommandQueue(QObject):
         self.completed.clear()
         self.command_number = 0
         self.queue_updated.emit()
-
-class DisconnectWorker(QThread):
-    finished = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent = parent
-
-    def run(self):
-        self.parent.gripper_off()
-        self.parent.disable_motors()
-        self.parent.deregulate_print_pressure()
-        self.parent.deregulate_refuel_pressure()
-
-        # Continuously check until all tasks are completed
-        timeout_counter = 0
-        while not self.parent.check_if_all_completed():
-            timeout_counter += 1
-            time.sleep(0.1)
-            if timeout_counter > 100:
-                print('Timeout disconnecting from machine')
-                break
-
-        self.parent.clear_command_queue()
-        time.sleep(1)
-        self.finished.emit()
 
 class Machine(QObject):
     """
@@ -874,6 +851,19 @@ class Machine(QObject):
         Update the status of the machine with the received data.
         """
         if isinstance(data, dict):
+            if getattr(self, "_waiting_for_post_clear_status", False):
+                depth = data.get("cmd_depth", 0)
+                curr  = data.get("Current_command", 0)
+                last  = data.get("Last_completed", 0)
+                if depth == 0 and curr == 0 and last == 0:
+                    self._waiting_for_post_clear_status = False
+                    self._tx_paused = False
+                    self.begin_execution_timer()
+                elif time.time() > getattr(self, "_wait_for_clear_status_deadline", 0):
+                    # fallback: don’t block forever
+                    self._waiting_for_post_clear_status = False
+                    self._tx_paused = False
+                    self.begin_execution_timer()
             self.status_updated.emit(data)
         else:
             print(f"Received non-dict status data: {data}")
@@ -972,14 +962,19 @@ class Machine(QObject):
         # Optionally pause TX for safety while waiting
         self._tx_paused = True
 
+        try: self.ser.reset_input_buffer()
+        except Exception: pass
+
+        # send CLEAR
+        frame = build_frame(CLEAR_QUEUE, seq=0)
+        self._write_frame(frame)
+
         self._start_ack_wait(
             CLEAR_ACK, 2000,
             on_ok=lambda: self._on_clear_ack(handler, timed_out=False),
             on_timeout=lambda: self._on_clear_ack(handler, timed_out=True)
         )        
-        # send CLEAR
-        frame = build_frame(CLEAR_QUEUE, seq=0)
-        self._write_frame(frame)
+
 
     def _on_clear_ack(self, handler=None, timed_out=False):
         if timed_out:
@@ -990,6 +985,10 @@ class Machine(QObject):
         # Clear Python side queue & notify UI
         self.command_queue.clear_queue()
         self._tx_paused = False
+
+        self._wait_for_clear_status_deadline = time.time() + 0.5  # 500 ms fallback
+        self._waiting_for_post_clear_status = True
+
         if handler:
             handler()
 
