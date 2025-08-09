@@ -70,6 +70,10 @@ uint16_t Comm::crc16(const uint8_t* data, uint16_t len) {
 
 void Comm::begin() {
     _instance = this;
+
+    // Create TX mutex
+    _txMutex = xSemaphoreCreateMutex();
+
     // arm the HAL RX interrupt for 1 byte
     HAL_UART_Receive_IT(_huart, &_rxByte, 1);
 
@@ -129,6 +133,18 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 	  }
 	  break;
   }
+}
+
+void Comm::setStatusPaused(bool p) {
+    _statusPaused = p;
+}
+
+static void uart_tx_lock(UART_HandleTypeDef* huart, SemaphoreHandle_t mtx) {
+    // take forever; we’re in task context
+    xSemaphoreTake(mtx, portMAX_DELAY);
+}
+static void uart_tx_unlock(SemaphoreHandle_t mtx) {
+    xSemaphoreGive(mtx);
 }
 
 void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
@@ -219,10 +235,14 @@ void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
   uint8_t header[2]  = { START_BYTE, 2 };
   uint16_t crc       = crc16(payload, 2);
   uint8_t tail[2]    = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
+
+  // lock the TX mutex
+  uart_tx_lock(_huart, _txMutex);
   // block‐send directly on UART2:
   HAL_UART_Transmit(_huart, header, 2, HAL_MAX_DELAY);
   HAL_UART_Transmit(_huart, payload, 2, HAL_MAX_DELAY);
   HAL_UART_Transmit(_huart, tail, 2, HAL_MAX_DELAY);
+  uart_tx_unlock(_txMutex);
 }
 
 // ——— STATUS TASK ———
@@ -239,14 +259,16 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
 {
     uint8_t  header[2] = { 0xAA, (uint8_t)len };
     uint16_t crc = Comm::crc16(payload, len);
+    uint8_t tail[2] = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
 
+    uart_tx_lock(huart, _txMutex);
     // send header
     HAL_UART_Transmit(huart, header, 2, HAL_MAX_DELAY);
     // send payload
     HAL_UART_Transmit(huart, (uint8_t*)payload, len, HAL_MAX_DELAY);
     // send crc
-    uint8_t tail[2] = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
     HAL_UART_Transmit(huart, tail, 2, HAL_MAX_DELAY);
+    uart_tx_unlock(_txMutex);
 }
 
 // Give your enum a real name:
@@ -263,6 +285,7 @@ void Comm::statusTask() {
 //	Chunk chunk = CHUNK_0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50));
+        if (_statusPaused) continue;
 
         switch (chunk) {
         	case CHUNK_0: {

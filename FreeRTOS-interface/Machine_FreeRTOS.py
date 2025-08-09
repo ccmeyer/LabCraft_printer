@@ -2,7 +2,7 @@ import threading
 import time
 import struct
 from PySide6 import QtCore, QtWidgets, QtGui
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtWidgets import QApplication
 
 from collections import deque
@@ -438,6 +438,7 @@ class SerialReader(QThread):
                 self.status_received.emit(data)
             else:
                 # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
+                print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
                 self.ackReceived.emit(cmd)
 
 class LogReader(QThread):
@@ -678,6 +679,8 @@ class Machine(QObject):
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
         self._connection_attempts = 0
+        self._tx_mutex = QMutex()
+        self._tx_paused = False
 
         try:
             self.refuel_camera = RefuelCamera()
@@ -744,12 +747,8 @@ class Machine(QObject):
             
             self.begin_reader_thread()
 
-            # send HELLO
-            frame = build_frame(HELLO, seq=0)
-            self.ser.write(frame)
-
-                    # Send HELLO and wait up to 1000 ms for HELLO_ACK
-            self.ser.write(build_frame(HELLO, seq=0))
+            # Send HELLO and wait up to 1000 ms for HELLO_ACK
+            self._write_frame(build_frame(HELLO, seq=0))
             self._start_ack_wait(
                 HELLO_ACK, 1000,
                 on_ok=self._on_hello_ack,
@@ -802,7 +801,9 @@ class Machine(QObject):
             try: self.stop_execution_timer()
             except Exception: pass
         # send GOODBYE
-        self.ser.write(build_frame(GOODBYE, seq=0))
+        frame = build_frame(GOODBYE, seq=0)
+        self._write_frame(frame)
+
         self._start_ack_wait(
             BYE_ACK, 1000,
             on_ok=self._on_goodbye_ack,
@@ -911,14 +912,31 @@ class Machine(QObject):
     def get_remaining_commands(self):
         return len(self.command_queue.queue)
     
+    def _write_frame(self, frame: bytes):
+        with QMutexLocker(self._tx_mutex):
+            self.ser.write(frame)
+            self.ser.flush()
+
+    def send_command_to_board(self, command):
+        """Send a command to the board."""
+        # self.ser.write(command.frame)
+        # self.ser.flush()
+        self._write_frame(command.frame)
+        self.command_sent.emit({"command": command.get_command()})
+        print(f"Sent command: {command.get_command()}")
+        return True
+
     def send_next_command(self):
         """
         Send the next command in the queue to the machine.
         """
+        if getattr(self, "_tx_paused", False):
+            return
         command = self.command_queue.get_next_command()
         if command:
             try:
-                self.ser.write(command.frame)
+                # self.ser.write(command.frame)
+                self.send_command_to_board(command)
                 command.mark_as_sent()
                 print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
             except Exception as e:
@@ -927,13 +945,6 @@ class Machine(QObject):
         # else:
         #     print("No commands to send or maximum sent commands reached.")
     
-    def send_command_to_board(self, command):
-        """Send a command to the board."""
-        self.ser.write(command.frame)
-        self.ser.flush()
-        self.command_sent.emit({"command": command.get_command()})
-        print(f"Sent command: {command.get_command()}")
-        return True
     
     def pause_commands(self):
         print('Pausing commands')
@@ -958,6 +969,9 @@ class Machine(QObject):
             try: self.stop_execution_timer()
             except Exception: pass
 
+        # Optionally pause TX for safety while waiting
+        self._tx_paused = True
+
         self._start_ack_wait(
             CLEAR_ACK, 2000,
             on_ok=lambda: self._on_clear_ack(handler, timed_out=False),
@@ -965,7 +979,7 @@ class Machine(QObject):
         )        
         # send CLEAR
         frame = build_frame(CLEAR_QUEUE, seq=0)
-        self.ser.write(frame)
+        self._write_frame(frame)
 
     def _on_clear_ack(self, handler=None, timed_out=False):
         if timed_out:
@@ -975,6 +989,7 @@ class Machine(QObject):
 
         # Clear Python side queue & notify UI
         self.command_queue.clear_queue()
+        self._tx_paused = False
         if handler:
             handler()
 

@@ -205,12 +205,19 @@ void Orchestrator::_run() {
 		  }
 	  }
 	  if (_clearRequested) {
+        // Silence status briefly to reduce traffic during reset (optional)
+        Comm::instance()->setStatusPaused(true);
+
         cancelCurrent();
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
-		_paused = false;
-		_clearRequested = false;
-		Logger::instance()->log("--Cleared--\r\n");
+        _paused = false;
+        _clearRequested = false;
+        Logger::instance()->log("--Cleared--\r\n");
+
+        // small grace period then resume status
+        vTaskDelay(pdMS_TO_TICKS(20));
+        Comm::instance()->setStatusPaused(false);
 	  }
 
 	if (_paused) {
