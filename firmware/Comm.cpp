@@ -97,6 +97,8 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
   if (!c || huart != c->_huart) return;
 
   uint8_t b = c->_rxByte;
+  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+
   switch (c->_rxState) {
 	case Comm::WAIT_START:
 	  if (b == Comm::START_BYTE)
@@ -114,6 +116,7 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 	  break;
 
 	case Comm::WAIT_DATA:
+//		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	  c->_rxBuf[c->_rxIdx++] = b;
 	  if (c->_rxIdx >= c->_rxLen + 2) {
 		// got full payload + CRC
@@ -129,19 +132,26 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 }
 
 void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
+    // Must have at least cmd+seq
+    if (len < 2) {
+        return;
+    }
+
     // 1) basic header
     Orchestrator::Command oc;
     oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
     oc.seq = buf[1];
 
+//    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
     // 2) default all params to zero
     oc.p1 = 0;  oc.p2 = 0;  oc.p3 = 0;
 
     // 3) TLV decode
     int idx = 2;
-    while (idx < len) {
+    while (idx + 1 < len) {
         uint8_t tag = buf[idx++];
         uint8_t l   = buf[idx++];
+        if (idx + l > len) break; // bounds check
         uint32_t v  = 0;
         // little-endian assemble
         for (int i = 0; i < l; ++i) {
@@ -156,10 +166,53 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
     }
 
     // 4) dispatch
+    auto orch = Orchestrator::instance();
+    if (!orch) {
+        // Orchestrator not ready yet; ignore safely (no ACK from here)
+        return;
+    }
     BaseType_t woken = pdFALSE;
-    Orchestrator::instance()->enqueueFromISR(oc, &woken);
+    orch->enqueueFromISR(oc, &woken);
     portYIELD_FROM_ISR(woken);
 }
+
+void Comm::resetReceiveState() {
+    _rxState = WAIT_START;
+    _rxIdx   = 0;
+}
+
+//void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
+//    // 1) basic header
+//    Orchestrator::Command oc;
+//    oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
+//    oc.seq = buf[1];
+//
+//    // 2) default all params to zero
+//    oc.p1 = 0;  oc.p2 = 0;  oc.p3 = 0;
+//
+//    // 3) TLV decode
+//    int idx = 2;
+//    while (idx < len) {
+//        uint8_t tag = buf[idx++];
+//        uint8_t l   = buf[idx++];
+//        uint32_t v  = 0;
+//        // little-endian assemble
+//        for (int i = 0; i < l; ++i) {
+//            v |= uint32_t(buf[idx++]) << (8 * i);
+//        }
+//        switch (tag) {
+//          case TAG_P1: oc.p1 = v; break;
+//          case TAG_P2: oc.p2 = v; break;
+//          case TAG_P3: oc.p3 = v; break;
+//          default: /* ignore unknown tags */ break;
+//        }
+//    }
+//
+//    // 4) dispatch
+//    BaseType_t woken = pdFALSE;
+//    Orchestrator::instance()->enqueueFromISR(oc, &woken);
+//    portYIELD_FROM_ISR(woken);
+//}
 
 void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
   uint8_t payload[2] = { cmd, seq };

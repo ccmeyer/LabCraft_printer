@@ -61,41 +61,24 @@ extern "C" void MX_ORCH_Init()
 BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigherPriorityTaskWoken) {
 	// special commands — handle immediately
     switch (cmd.cmd) {
-		case CMD_HELLO:
-		  // Reset any stale state
+		case CMD_HELLO: {
+		  // Reset any stale state and request HELLO_ACK
 		  _paused = false; _pauseRequested = false;
 		  _resumeRequested = false; _clearRequested = false;
+		  _inFlight = cmd;                 // capture seq/cmd for ACK
 		  _acknowledgeRequested = true;
+	      if (pxHigherPriorityTaskWoken) *pxHigherPriorityTaskWoken = pdTRUE; // wake task to send ACK
 
 		  return pdFALSE;
-//    	case CMD_HELLO: {
-//          // 1) reset internal state
-////			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-////			vTaskDelay(500);
-////			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-////			vTaskDelay(500);
-////			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-////			vTaskDelay(500);
-////			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-////			vTaskDelay(500);
-//		  _acknowledgeRequested = true;
-////          _paused = false;
-////          _pauseRequested = false;
-////          _resumeRequested = false;
-////          _clearRequested = true;
-//          // 2) send HELLO_ACK
-////          Comm::instance()->sendCommandByte(CMD_HELLO_ACK, cmd.seq);
-//          return pdFALSE;   // don’t enqueue
-//        }
-//        case CMD_GOODBYE: {
-//          // 1) pause everything
-//          _paused = true;
-//          _pauseRequested = true;
-//          _clearRequested = true;
-//          // 2) send BYE_ACK
-////          Comm::instance()->sendCommandByte(CMD_BYE_ACK, cmd.seq);
-//          return pdFALSE;
-//        }
+		}
+		case CMD_GOODBYE: {
+		  // Pause activity and request BYE_ACK (sent from task loop)
+		  _paused = true;
+		  _pauseRequested = true;
+		  _inFlight = cmd;                 // capture seq/cmd for ACK
+		  _acknowledgeRequested = true;
+		  return pdFALSE;
+		}
         case CMD_PAUSE:
 		  // request a pause
 		  _paused = true;
@@ -105,7 +88,9 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		  _resumeRequested = true;
 		  return pdFALSE;
       case CMD_CLEAR: {
+//    	  xQueueReset(_cmdQueue);
     	  _clearRequested = true;
+    	  _acknowledgeRequested = true;
         // inject these at head so they fire immediately
         return pdFALSE;
       }
@@ -119,6 +104,9 @@ void Orchestrator::pauseCurrent() {
   Logger::instance()->log("pauseCurrent\r\n");
   Gantry::instance()->pauseXYZMotors();
   Printer::instance()->pauseDispense();
+  xEventGroupClearBits(_doneEvents,
+      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
+      BIT_STEPPER3_DONE|BIT_PRINTING_DONE);
 }
 
 void Orchestrator::resumeCurrent() {
@@ -127,15 +115,15 @@ void Orchestrator::resumeCurrent() {
   Printer::instance()->resumeDispense();
 }
 void Orchestrator::cancelCurrent() {
-  Logger::instance()->log("cancelCurrent\r\n");
+//  Logger::instance()->log("cancelCurrent\r\n");
   Gantry::instance()->cancelXYZMotors();
   Printer::instance()->cancelDispense();
 }
 
-void Orchestrator::clearQueue() {
-	xQueueReset(_cmdQueue);
-	Logger::instance()->log("Reset\r\n");
-}
+//void Orchestrator::clearQueue() {
+//	xQueueReset(_cmdQueue);
+//	Logger::instance()->log("Reset\r\n");
+//}
 
 void Orchestrator::_taskEntry(void* pv) {
   static_cast<Orchestrator*>(pv)->_run();
@@ -166,10 +154,32 @@ bool Orchestrator::waitForBit(EventBits_t bit) {
 void Orchestrator::_run() {
   for (;;) {
 	  if (_acknowledgeRequested) {
-
-		  Comm::instance()->sendCommandByte(CMD_HELLO_ACK, 0);
-		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+          // Reply with appropriate ACK using the same sequence number
+          uint8_t seq = _inFlight.seq;
+          uint8_t ack = 0;
+          switch (_inFlight.cmd) {
+            case CMD_HELLO:{
+            	ack = CMD_HELLO_ACK;
+            	MX_LEDSTRIP_FadeTo(100,2000);
+            	break;
+            }
+            case CMD_GOODBYE: {
+            	ack = CMD_BYE_ACK;
+            	MX_LEDSTRIP_FadeTo(0,500);
+            	break;
+            }
+            case CMD_CLEAR:{
+            	ack = CMD_CLEAR_ACK;
+            	break;
+            }
+            default: break;
+          }
+          if (ack != 0) {
+            Comm::instance()->sendCommandByte(ack, seq);
+          }
 		  _acknowledgeRequested = false;
+//		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+
 	  }
 	  if (_pauseRequested) {
 		    Logger::instance()->log("Run\r\n");
@@ -196,29 +206,25 @@ void Orchestrator::_run() {
 	  }
 	  if (_clearRequested) {
         cancelCurrent();
-		clearQueue();
+        xQueueReset(_cmdQueue);
+        Comm::instance()->resetReceiveState();
 		_paused = false;
 		_clearRequested = false;
+		Logger::instance()->log("--Cleared--\r\n");
 	  }
 
 	if (_paused) {
 	  vTaskDelay(pdMS_TO_TICKS(50));
 	  continue;
 	}
-//	if (_paused) {
-//	  // if we’re paused we just defer this command until later
-////	  xQueueSendToFront(_cmdQueue, &cmd, 0);
-//	  vTaskDelay(pdMS_TO_TICKS(10));
-//	  continue;
-//	}
 
     Command cmd;
     // 1) always block here until there’s anything in the queue
-    if (xQueueReceive(_cmdQueue, &cmd, portMAX_DELAY) != pdPASS)
-      continue;
-    // remember which one is in flight
-    _inFlight = cmd;
-	executeCommand(cmd);
+    if (xQueueReceive(_cmdQueue, &cmd, pdMS_TO_TICKS(50)) == pdPASS){
+        // We got a real command—execute it
+        _inFlight = cmd;
+        executeCommand(cmd);
+    }
   }
 }
 
@@ -462,13 +468,6 @@ void Orchestrator::executeCommand(const Command &cmd) {
         default:
           // unknown—ignore
       	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-      	vTaskDelay(500);
-      	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-      	vTaskDelay(500);
-      	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-      	vTaskDelay(500);
-      	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-      	vTaskDelay(500);
           break;
       }
   _lastExecutedCmdNum = cmd.seq;
