@@ -60,6 +60,7 @@ extern "C" void MX_ORCH_Init()
 
 BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigherPriorityTaskWoken) {
 	// special commands — handle immediately
+
     switch (cmd.cmd) {
 		case CMD_HELLO: {
 		  // Reset any stale state and request HELLO_ACK
@@ -72,10 +73,10 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		  return pdFALSE;
 		}
 		case CMD_GOODBYE: {
-		  // Pause activity and request BYE_ACK (sent from task loop)
+		  _inFlight = cmd;                 // capture seq/cmd for ACK
 		  _paused = true;
 		  _pauseRequested = true;
-		  _inFlight = cmd;                 // capture seq/cmd for ACK
+		  _clearRequested = true;
 		  _acknowledgeRequested = true;
 		  return pdFALSE;
 		}
@@ -89,6 +90,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		  return pdFALSE;
       case CMD_CLEAR: {
 //    	  xQueueReset(_cmdQueue);
+		  _inFlight = cmd;                 // capture seq/cmd for ACK
     	  _clearRequested = true;
     	  _acknowledgeRequested = true;
         // inject these at head so they fire immediately
@@ -119,11 +121,6 @@ void Orchestrator::cancelCurrent() {
   Gantry::instance()->cancelXYZMotors();
   Printer::instance()->cancelDispense();
 }
-
-//void Orchestrator::clearQueue() {
-//	xQueueReset(_cmdQueue);
-//	Logger::instance()->log("Reset\r\n");
-//}
 
 void Orchestrator::_taskEntry(void* pv) {
   static_cast<Orchestrator*>(pv)->_run();
@@ -156,29 +153,31 @@ void Orchestrator::_run() {
 	  if (_acknowledgeRequested) {
           // Reply with appropriate ACK using the same sequence number
           uint8_t seq = _inFlight.seq;
-          uint8_t ack = 0;
           switch (_inFlight.cmd) {
             case CMD_HELLO:{
-            	ack = CMD_HELLO_ACK;
-            	MX_LEDSTRIP_FadeTo(100,2000);
+            	Comm::instance()->sendCommandByte(CMD_HELLO_ACK, seq);
+                // Then resume status & cosmetic stuff
+                Comm::instance()->setStatusPaused(false);
+            	MX_LEDSTRIP_FadeTo(100,500);
             	break;
             }
             case CMD_GOODBYE: {
-            	ack = CMD_BYE_ACK;
+            	Comm::instance()->setStatusPaused(true);
+            	Comm::instance()->sendCommandByte(CMD_BYE_ACK, seq);
+            	// Start next session clean
+            	Comm::instance()->resetReceiveState();
             	MX_LEDSTRIP_FadeTo(0,500);
             	break;
             }
             case CMD_CLEAR:{
-            	ack = CMD_CLEAR_ACK;
+            	Comm::instance()->setStatusPaused(true);
+            	Comm::instance()->sendCommandByte(CMD_CLEAR_ACK, seq);
             	break;
             }
             default: break;
           }
-          if (ack != 0) {
-            Comm::instance()->sendCommandByte(ack, seq);
-          }
+
 		  _acknowledgeRequested = false;
-//		  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
 	  }
 	  if (_pauseRequested) {
@@ -211,6 +210,12 @@ void Orchestrator::_run() {
         cancelCurrent();
         xQueueReset(_cmdQueue);
         Comm::instance()->resetReceiveState();
+
+        _currentCmdNum = 0;
+        _lastExecutedCmdNum = 0;
+        xEventGroupClearBits(_doneEvents,
+            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE);
+
         _paused = false;
         _clearRequested = false;
         Logger::instance()->log("--Cleared--\r\n");
@@ -553,3 +558,4 @@ extern "C" void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin) {
 //	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	Orchestrator::instance()->flashNotifyFromISR(GPIO_Pin);
 }
+s

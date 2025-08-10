@@ -46,6 +46,9 @@ static constexpr uint8_t TAG_P1 = 0x01;
 static constexpr uint8_t TAG_P2 = 0x02;
 static constexpr uint8_t TAG_P3 = 0x03;
 
+
+
+
 // bring in the LED queue getter
 //extern "C" QueueHandle_t MX_LED_GetQueue();
 
@@ -92,15 +95,41 @@ extern "C" void MX_COMM_Init(UART_HandleTypeDef* huart) {
     comm.begin();
 }
 
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
+    auto c = Comm::instance();
+    if (!c || huart != c->_huart) return;
+
+    // Stop whatever the HAL thinks it's doing
+    HAL_UART_AbortReceive_IT(huart);
+    HAL_UART_AbortTransmit_IT(huart);
+
+    // Clear common error flags (HAL/series specific; this works on F4 HAL)
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+
+    // Reset our parser
+    c->resetReceiveState();
+
+    // Try to re-arm RX; if busy, set a flag to retry from task context
+    if (HAL_UART_Receive_IT(huart, &c->_rxByte, 1) != HAL_OK) {
+        c->_needRxRearm = true;   // new volatile flag on Comm
+    }
+}
+
 // This is invoked by HAL when the UART Rx completes
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 	auto c = Comm::instance();
-  // re-arm always
-  HAL_UART_Receive_IT(huart, &c->_rxByte, 1);
 
   if (!c || huart != c->_huart) return;
 
   uint8_t b = c->_rxByte;
+
+  if (HAL_UART_Receive_IT(huart, &c->_rxByte, 1) != HAL_OK) {
+    c->_needRxRearm = true;
+  }
+
   HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
   switch (c->_rxState) {
@@ -139,14 +168,6 @@ void Comm::setStatusPaused(bool p) {
     _statusPaused = p;
 }
 
-static void uart_tx_lock(UART_HandleTypeDef* huart, SemaphoreHandle_t mtx) {
-    // take forever; we’re in task context
-    xSemaphoreTake(mtx, portMAX_DELAY);
-}
-static void uart_tx_unlock(SemaphoreHandle_t mtx) {
-    xSemaphoreGive(mtx);
-}
-
 void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
     // Must have at least cmd+seq
     if (len < 2) {
@@ -158,7 +179,6 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
     oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
     oc.seq = buf[1];
 
-//    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
     // 2) default all params to zero
     oc.p1 = 0;  oc.p2 = 0;  oc.p3 = 0;
 
@@ -195,55 +215,25 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
 void Comm::resetReceiveState() {
     _rxState = WAIT_START;
     _rxIdx   = 0;
+    _rxLen = 0;
 }
 
-//void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
-//    // 1) basic header
-//    Orchestrator::Command oc;
-//    oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
-//    oc.seq = buf[1];
-//
-//    // 2) default all params to zero
-//    oc.p1 = 0;  oc.p2 = 0;  oc.p3 = 0;
-//
-//    // 3) TLV decode
-//    int idx = 2;
-//    while (idx < len) {
-//        uint8_t tag = buf[idx++];
-//        uint8_t l   = buf[idx++];
-//        uint32_t v  = 0;
-//        // little-endian assemble
-//        for (int i = 0; i < l; ++i) {
-//            v |= uint32_t(buf[idx++]) << (8 * i);
-//        }
-//        switch (tag) {
-//          case TAG_P1: oc.p1 = v; break;
-//          case TAG_P2: oc.p2 = v; break;
-//          case TAG_P3: oc.p3 = v; break;
-//          default: /* ignore unknown tags */ break;
-//        }
-//    }
-//
-//    // 4) dispatch
-//    BaseType_t woken = pdFALSE;
-//    Orchestrator::instance()->enqueueFromISR(oc, &woken);
-//    portYIELD_FROM_ISR(woken);
-//}
-
 void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
+	if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+		return; // last resort: skip; you could log here
+	}
   uint8_t payload[2] = { cmd, seq };
   uint8_t header[2]  = { START_BYTE, 2 };
   uint16_t crc       = crc16(payload, 2);
   uint8_t tail[2]    = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
 
-  // lock the TX mutex
-  uart_tx_lock(_huart, _txMutex);
   // block‐send directly on UART2:
   HAL_UART_Transmit(_huart, header, 2, HAL_MAX_DELAY);
   HAL_UART_Transmit(_huart, payload, 2, HAL_MAX_DELAY);
   HAL_UART_Transmit(_huart, tail, 2, HAL_MAX_DELAY);
-  uart_tx_unlock(_txMutex);
+  xSemaphoreGive(_txMutex);
 }
+
 
 // ——— STATUS TASK ———
 
@@ -257,19 +247,22 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
                       const uint8_t* payload,
                       size_t        len)
 {
+	if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+		return; // last resort: skip; you could log here
+	}
     uint8_t  header[2] = { 0xAA, (uint8_t)len };
     uint16_t crc = Comm::crc16(payload, len);
     uint8_t tail[2] = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
 
-    uart_tx_lock(huart, _txMutex);
     // send header
     HAL_UART_Transmit(huart, header, 2, HAL_MAX_DELAY);
     // send payload
     HAL_UART_Transmit(huart, (uint8_t*)payload, len, HAL_MAX_DELAY);
     // send crc
     HAL_UART_Transmit(huart, tail, 2, HAL_MAX_DELAY);
-    uart_tx_unlock(_txMutex);
+    xSemaphoreGive(_txMutex);
 }
+
 
 // Give your enum a real name:
 enum Chunk : int {
@@ -285,6 +278,12 @@ void Comm::statusTask() {
 //	Chunk chunk = CHUNK_0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50));
+
+        if (_needRxRearm) {
+          if (HAL_UART_Receive_IT(_huart, &_rxByte, 1) == HAL_OK) {
+            _needRxRearm = false;
+          }
+        }
         if (_statusPaused) continue;
 
         switch (chunk) {
