@@ -249,6 +249,7 @@ HELLO_ACK   = 0xF4
 GOODBYE     = 0xF5
 BYE_ACK     = 0xF6
 CLEAR_ACK   = 0xF7
+BYE_DONE    = 0xF8
 
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
@@ -366,7 +367,8 @@ CMD_MAP = {
     'HELLO_ACK'   : 0xF4,
     'GOODBYE'     : 0xF5,
     'BYE_ACK'     : 0xF6,
-    'CLEAR_ACK'   : 0xF7
+    'CLEAR_ACK'   : 0xF7,
+    'BYE_DONE'    : 0xF8
 }
 
 def crc16_x25(data: bytes) -> int:
@@ -718,6 +720,7 @@ class Machine(QObject):
 
     def connect_board(self, port):
         try:
+            self.port = port
             self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
@@ -783,15 +786,26 @@ class Machine(QObject):
 
         self._start_ack_wait(
             BYE_ACK, 1000,
-            on_ok=self._on_goodbye_ack,
-            on_timeout=lambda: self._on_goodbye_ack()  # proceed anyway
+            on_ok=lambda: self._on_goodbye_ack_and_wait_done(),
+            on_timeout=lambda: self._on_goodbye_ack_and_wait_done()  # proceed anyway
         )
 
-    def _on_goodbye_ack(self):
+    def _on_goodbye_ack_and_wait_done(self):
+        # Second wait: BYE_DONE (shutdown finished). If it never arrives, proceed anyway.
+        print('Goodbye acknowledged, waiting for shutdown confirmation...')
+        self._start_ack_wait(
+            BYE_DONE, 3000,                   # adjust timeout to your shutdown worst-case
+            on_ok=self._on_goodbye_done,
+            on_timeout=self._on_goodbye_done  # proceed anyway after timeout
+        )
+
+    def _on_goodbye_done(self):
         try:
             time.sleep(0.05)
             self.ser.reset_input_buffer()
+            print('Goodbye acknowledged, machine disconnected.')
         except Exception:
+            print('Error during goodbye acknowledgment.')
             pass
         # stop threads, close, etc.
         self.disconnect_handler()
