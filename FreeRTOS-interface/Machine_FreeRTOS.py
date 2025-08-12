@@ -338,6 +338,9 @@ CMD_MAP = {
     'SET_WIDTH_F': 0x41,
     'SET_IMAGE_DROPLETS': 0x42,
 
+    'WAIT': 0x50,
+    'CHANGE_ACCEL': 0x51,
+
     'START_READ_CAMERA': 0xC0,
     'STOP_READ_CAMERA': 0xC1,
     'SET_WIDTH_F' : 0xC2,
@@ -1100,20 +1103,20 @@ class Machine(QObject):
             return False
     
     def set_relative_Z(self, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(z,-100000,100000):
+        if self.check_param_limits(z,-130000,130000):
             direction = 1 if z >= 0 else 0
             return self.add_command_to_queue('RELATIVE_Z', direction, abs(z), 30000, handler=handler, kwargs=kwargs, manual=manual)
         else:
-            print(f'Relative Z position {z} out of range (-100000, 100000)')
+            print(f'Relative Z position {z} out of range (-130000, 130000)')
             return False
     
     def set_absolute_Z(self, z, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(z,0,100000):
+        if self.check_param_limits(z,0,130000):
             sign = 1 if z >= 0 else 0
             z = abs(z)
             return self.add_command_to_queue('ABSOLUTE_Z', sign, z, 30000, handler=handler, kwargs=kwargs, manual=manual)
         else:
-            print(f'Absolute Z position {z} out of range (0, 100000)')
+            print(f'Absolute Z position {z} out of range (0, 130000)')
             return False
 
     # def set_relative_coordinates(self, x, y, z, handler=None, kwargs=None, manual=False):

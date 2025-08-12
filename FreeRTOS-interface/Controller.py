@@ -642,14 +642,19 @@ class Controller(QObject):
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
         """Move to the saved location."""
         safe_z = 3000
+
         current_location = self.model.machine_model.get_current_location()
         print(f'Moving to location: {name} from {current_location}')
         if 'camera' in [current_location, name]:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
-        original_target = self.model.location_model.get_location_dict(name)
+        if coords is not None:
+            original_target = coords
+        else:
+            original_target = self.model.location_model.get_location_dict(name)
         target = original_target.copy()
-
+        if x_offset:
+            target['X'] += x_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
 
         # if direct and current['Z'] > target['Z']:
@@ -679,7 +684,7 @@ class Controller(QObject):
     def test_print_wait(self):
         """Test the print wait command."""
         self.print_droplets(10)
-        self.wait_command()
+        # self.wait_command()
         self.print_droplets(10)
     
     def pick_up_handler(self,slot):
@@ -696,16 +701,16 @@ class Controller(QObject):
         is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
         if is_valid:
             self.open_gripper()
-            self.wait_command()
+            # self.wait_command()
             #print(f'Picking up printer head from slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
-            self.move_to_location(name,x_offset=True,coords=coords)
+            self.move_to_location(name,x_offset=8000,coords=coords)
 
             self.move_to_location(name,coords=coords,override=True)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
-            self.wait_command()
-            self.move_to_location(name,x_offset=True,coords=coords,override=True)
+            # self.wait_command()
+            self.move_to_location(name,x_offset=3000,coords=coords,override=True)
             # self.model.calibration_model.update_calibration_models(self.model.rack_model.get_gripper_printer_head())
         else:
             #print(f'Error: {error_msg}')
@@ -727,13 +732,13 @@ class Controller(QObject):
             #print(f'Dropping off printer head to slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
-            self.move_to_location(name,x_offset=True,coords=coords)
+            self.move_to_location(name,x_offset=3000,coords=coords)
             self.move_to_location(name,coords=coords,override=True)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
-            self.wait_command()
-            self.move_to_location(name,x_offset=True,coords=coords,override=True)
+            # self.wait_command()
+            self.move_to_location(name,x_offset=8000,coords=coords,override=True)
             self.close_gripper()
-            self.wait_command()
+            # self.wait_command()
         else:
             #print(f'Error: {error_msg}')
             pass
@@ -815,8 +820,8 @@ class Controller(QObject):
         def finalize_printing():
             if update_volume:
                 self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
-            self.machine.reset_acceleration()
-            self.exit_print_mode()
+            # self.machine.reset_acceleration()
+            # self.exit_print_mode()
             self.move_to_location('pause')
             self.move_to_location('pause',z_offset=True)
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
@@ -888,12 +893,12 @@ class Controller(QObject):
             return
         
         self.close_gripper()
-        self.wait_command()
+        # self.wait_command()
 
         self.move_to_location('pause',z_offset=True)
         self.move_to_location('pause')
-        self.machine.change_acceleration(16000)
-        self.enter_print_mode()
+        # self.machine.change_acceleration(16000)
+        # self.enter_print_mode()
 
         current_printer_head = self.model.rack_model.get_gripper_printer_head()
         if current_printer_head is not None:
