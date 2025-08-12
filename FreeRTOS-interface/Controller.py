@@ -332,9 +332,9 @@ class Controller(QObject):
         self.expected_position['Y'] += y
         self.expected_position['Z'] += z
         return True
-
+    
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
-        """Set the absolute coordinates for the machine, using XY moves when possible."""
+        """Set absolute coordinates; always use XY for any X/Y movement."""
         new_position = {'X': x, 'Y': y, 'Z': z}
 
         # 1) collision check
@@ -342,146 +342,152 @@ class Controller(QObject):
             print('Collision detected')
             return False
 
-        # 2) build the ordered list of single-axis moves
-        cmds = []
-        cur = self.expected_position
-        # if Z is changing, handle Z ordering specially
-        if cur['Z'] != z:
-            if z < cur['Z']:
-                # up: Z, then Y, then X
-                if z != cur['Z']: cmds.append(('Z', z))
-                if y != cur['Y']:   cmds.append(('Y', y))
-                if x != cur['X']:   cmds.append(('X', x))
-            else:
-                # down: Y, X, Z
-                if y != cur['Y']:   cmds.append(('Y', y))
-                if x != cur['X']:   cmds.append(('X', x))
-                if z != cur['Z']:   cmds.append(('Z', z))
+        cur = dict(self.expected_position)
+        needs_xy = (x != cur['X']) or (y != cur['Y'])
+        needs_z  = (z != cur['Z'])
+
+        # 2) plan ordering: if moving "up", do Z first; otherwise XY first, then Z
+        moves = []
+        if needs_z and z < cur['Z']:
+            # up first
+            moves.append(('Z', z))
+            if needs_xy:
+                moves.append(('XY', (x, y)))
         else:
-            # Z unchanged: maybe both X and Y
-            if y != cur['Y']: cmds.append(('Y', y))
-            if x != cur['X']: cmds.append(('X', x))
+            # XY first (if any), then Z (if any)
+            if needs_xy:
+                moves.append(('XY', (x, y)))
+            if needs_z:
+                moves.append(('Z', z))
 
         # 3) nothing to do
-        if not cmds:
-            if handler: handler()
+        if not moves:
+            if handler:
+                handler()
             self.update_expected_position(x=x, y=y, z=z)
             return True
 
-        # 4) collapse any contiguous X+Y into one XY
-        combined = []
-        i = 0
-        while i < len(cmds):
-            axis, val = cmds[i]
-            if axis in ('X', 'Y'):
-                # start a block
-                block = {axis: val}
-                i += 1
-                # collect any immediately following Y/X
-                while i < len(cmds) and cmds[i][0] in ('X', 'Y'):
-                    a, v = cmds[i]
-                    block[a] = v
-                    i += 1
-                # if both X and Y present, emit XY
-                if 'X' in block and 'Y' in block:
-                    combined.append(('XY', (block['X'], block['Y'])))
-                else:
-                    # only one axis in block
-                    if 'X' in block: combined.append(('X', block['X']))
-                    if 'Y' in block: combined.append(('Y', block['Y']))
-            else:
-                # Z or other
-                combined.append((axis, val))
-                i += 1
-
-        # 5) dispatch
-        for idx, (axis, val) in enumerate(combined):
-            is_last = (idx == len(combined) - 1)
+        # 4) dispatch (XY is used even if only one axis actually changes)
+        for idx, (axis, val) in enumerate(moves):
+            is_last = (idx == len(moves) - 1)
             cb = handler if is_last else None
 
             if axis == 'XY':
                 x_val, y_val = val
-                self.machine.set_absolute_XY(x_val, y_val,
-                                            manual=manual,
-                                            handler=cb,
-                                            kwargs=kwargs)
-            elif axis == 'X':
-                self.machine.set_absolute_X(val,
-                                        manual=manual,
-                                        handler=cb,
-                                        kwargs=kwargs)
-            elif axis == 'Y':
-                self.machine.set_absolute_Y(val,
-                                        manual=manual,
-                                        handler=cb,
-                                        kwargs=kwargs)
+                self.machine.set_absolute_XY(
+                    x_val, y_val,
+                    manual=manual,
+                    handler=cb,
+                    kwargs=kwargs
+                )
+                cur['X'], cur['Y'] = x_val, y_val
             elif axis == 'Z':
-                self.machine.set_absolute_Z(val,
-                                        manual=manual,
-                                        handler=cb,
-                                        kwargs=kwargs)
+                self.machine.set_absolute_Z(
+                    val,
+                    manual=manual,
+                    handler=cb,
+                    kwargs=kwargs
+                )
+                cur['Z'] = val
             else:
-                # unexpected
                 raise ValueError(f"Unknown axis {axis}")
 
-        # 6) update expected
+        # 5) update expected end position
         self.update_expected_position(x=x, y=y, z=z)
         return True
-    # def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, override=False):
-    #     """Set the absolute coordinates for the machine."""
+
+    # def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
+    #     """Set the absolute coordinates for the machine, using XY moves when possible."""
     #     new_position = {'X': x, 'Y': y, 'Z': z}
-    #     # Check for collisions if not overriding.
-    #     if not override:
-    #         if self.check_collision(self.expected_position, new_position):
-    #             print('Collision detected')
-    #             return False
 
-    #     commands = []
-    #     current = self.expected_position
+    #     # 1) collision check
+    #     if not override and self.check_collision(self.expected_position, new_position):
+    #         print('Collision detected')
+    #         return False
 
-    #     # Determine the order of moves based on Z change.
-    #     if current['Z'] != z:
-    #         if z < current['Z']:
-    #             # Moving up: move Z first, then Y, then X.
-    #             if z != current['Z']:
-    #                 commands.append(('Z', z))
-    #             if y != current['Y']:
-    #                 commands.append(('Y', y))
-    #             if x != current['X']:
-    #                 commands.append(('X', x))
+    #     # 2) build the ordered list of single-axis moves
+    #     cmds = []
+    #     cur = self.expected_position
+    #     # if Z is changing, handle Z ordering specially
+    #     if cur['Z'] != z:
+    #         if z < cur['Z']:
+    #             # up: Z, then Y, then X
+    #             if z != cur['Z']: cmds.append(('Z', z))
+    #             if y != cur['Y']:   cmds.append(('Y', y))
+    #             if x != cur['X']:   cmds.append(('X', x))
     #         else:
-    #             # Moving down: move Y first, then X, then Z.
-    #             if y != current['Y']:
-    #                 commands.append(('Y', y))
-    #             if x != current['X']:
-    #                 commands.append(('X', x))
-    #             if z != current['Z']:
-    #                 commands.append(('Z', z))
+    #             # down: Y, X, Z
+    #             if y != cur['Y']:   cmds.append(('Y', y))
+    #             if x != cur['X']:   cmds.append(('X', x))
+    #             if z != cur['Z']:   cmds.append(('Z', z))
     #     else:
-    #         # Z is unchanged, so only X and Y need updating.
-    #         if y != current['Y']:
-    #             commands.append(('Y', y))
-    #         if x != current['X']:
-    #             commands.append(('X', x))
+    #         # Z unchanged: maybe both X and Y
+    #         if y != cur['Y']: cmds.append(('Y', y))
+    #         if x != cur['X']: cmds.append(('X', x))
 
-    #     # If no commands are needed, execute the handler and return.
-    #     if len(commands) == 0:
-    #         if handler is not None:
-    #             handler()
+    #     # 3) nothing to do
+    #     if not cmds:
+    #         if handler: handler()
     #         self.update_expected_position(x=x, y=y, z=z)
     #         return True
 
-    #     for i, (axis, value) in enumerate(commands):
-    #         is_last = (i == len(commands) - 1)
-    #         current_handler = handler if is_last else None
-    #         if axis == 'X':
-    #             self.machine.set_absolute_X(value, manual=manual, handler=current_handler)
-    #         elif axis == 'Y':
-    #             self.machine.set_absolute_Y(value, manual=manual, handler=current_handler)
-    #         elif axis == 'Z':
-    #             self.machine.set_absolute_Z(value, manual=manual, handler=current_handler)
+    #     # 4) collapse any contiguous X+Y into one XY
+    #     combined = []
+    #     i = 0
+    #     while i < len(cmds):
+    #         axis, val = cmds[i]
+    #         if axis in ('X', 'Y'):
+    #             # start a block
+    #             block = {axis: val}
+    #             i += 1
+    #             # collect any immediately following Y/X
+    #             while i < len(cmds) and cmds[i][0] in ('X', 'Y'):
+    #                 a, v = cmds[i]
+    #                 block[a] = v
+    #                 i += 1
+    #             # if both X and Y present, emit XY
+    #             if 'X' in block and 'Y' in block:
+    #                 combined.append(('XY', (block['X'], block['Y'])))
+    #             else:
+    #                 # only one axis in block
+    #                 if 'X' in block: combined.append(('X', block['X']))
+    #                 if 'Y' in block: combined.append(('Y', block['Y']))
+    #         else:
+    #             # Z or other
+    #             combined.append((axis, val))
+    #             i += 1
 
-    #     # Update the expected position.
+    #     # 5) dispatch
+    #     for idx, (axis, val) in enumerate(combined):
+    #         is_last = (idx == len(combined) - 1)
+    #         cb = handler if is_last else None
+
+    #         if axis == 'XY':
+    #             x_val, y_val = val
+    #             self.machine.set_absolute_XY(x_val, y_val,
+    #                                         manual=manual,
+    #                                         handler=cb,
+    #                                         kwargs=kwargs)
+    #         elif axis == 'X':
+    #             self.machine.set_absolute_X(val,
+    #                                     manual=manual,
+    #                                     handler=cb,
+    #                                     kwargs=kwargs)
+    #         elif axis == 'Y':
+    #             self.machine.set_absolute_Y(val,
+    #                                     manual=manual,
+    #                                     handler=cb,
+    #                                     kwargs=kwargs)
+    #         elif axis == 'Z':
+    #             self.machine.set_absolute_Z(val,
+    #                                     manual=manual,
+    #                                     handler=cb,
+    #                                     kwargs=kwargs)
+    #         else:
+    #             # unexpected
+    #             raise ValueError(f"Unknown axis {axis}")
+
+    #     # 6) update expected
     #     self.update_expected_position(x=x, y=y, z=z)
     #     return True
 
