@@ -380,6 +380,41 @@ class BaseCalibrationProcess(QObject):
         """Emit the completion signal."""
         self.calibrationCompleted.emit()
 
+    # ---------- timeouts ----------
+    def _start_timeout(self, msec, *, err_msg=None, on_timeout=None, name=None):
+        """
+        Start a one-shot timeout. If it fires, either call `on_timeout()` or emit calibrationError(err_msg).
+        Returns the QTimer so you can cancel it when the awaited event arrives.
+        """
+        t = QTimer(self)
+        t.setSingleShot(True)
+
+        def _fire():
+            # auto-remove from tracking
+            try:
+                self._active_timers.discard(t)
+            except Exception:
+                pass
+            if on_timeout is not None:
+                on_timeout()
+            elif err_msg:
+                self.calibrationError.emit(err_msg)
+
+        t.timeout.connect(_fire)
+        t.start(int(msec))
+        self._active_timers.add(t)
+        return t
+
+    def _cancel_timeout(self, timer):
+        """Stop and dispose a timer started by _start_timeout."""
+        if timer is None:
+            return
+        try:
+            timer.stop()
+            timer.deleteLater()
+        finally:
+            self._active_timers.discard(timer)
+
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     # Define signals to trigger transitions from analyze state.
     nozzleCentered = Signal()
@@ -513,6 +548,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCaptureDroplet(self):
         self.stageChanged.emit("Capturing droplet image")
+        # Start a 10-second guard for capture
+        self._cap_timeout = self._start_timeout(
+            10_000,
+            err_msg="Droplet capture timed out"
+        )
         # Request a droplet capture. Use a callback that stores the droplet image.
         self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
 
@@ -523,11 +563,12 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         bg = self.background_image
         dr = self.droplet_image
         center, focus, image = self.model.droplet_camera_model.identify_nozzle(bg, dr)
-
+        print(f'Identified nozzle at: {center}, focus: {focus}')
         if center is None:
             self.stageChanged.emit("No nozzle found, restarting")
             # Restart process by emitting the droplet change completed signal.
-            self.calibration_manager.emitDropletChangeCompleted()
+            # self.calibration_manager.emitDropletChangeCompleted()
+            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
         else:
             machine_position = self.model.machine_model.get_current_position_dict()
             self.measurements.append((machine_position, center))
@@ -563,6 +604,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     def handleDropletCaptured(self, image):
         self.droplet_image = image
+
+        # cancel the guard
+        self._cancel_timeout(self._cap_timeout)
+        self._cap_timeout = None
+
         self.calibration_manager.emitCaptureCompleted()
 
 class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
@@ -638,7 +684,8 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     def onAnalyze(self):
         self.stageChanged.emit("Analyzing image")
         img = self.droplet_image
-        focus = self.model.droplet_camera_model.compute_tenengrad_variance(img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        focus = self.model.droplet_camera_model.compute_tenengrad_variance(gray)
         if focus is None:
             if self.timeout_counter >= self.max_timeout:
                 self.stageChanged.emit("No droplet found, calibration failed")
@@ -845,6 +892,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Analyzing droplet image")
         # Compute the bounding rectangle area from the difference image.
         area, center, image = self.model.droplet_camera_model.calc_bounding_rect_area(self.background_image, self.droplet_image)
+        print(f"Computed area: {area}, center: {center}")
         self.stageChanged.emit(f"Rectangle area: {area}")
         self.measurements.append((self.candidate_delay, area))
         
@@ -868,7 +916,11 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 # Too much area: droplet is too advanced.
                 self.upper_delay = self.candidate_delay
             # Compute new candidate.
-            new_candidate = int((self.lower_delay + self.upper_delay) / 2)
+            # new_candidate = int((self.lower_delay + self.upper_delay) / 2)
+            new_candidate = (self.lower_delay + self.upper_delay)//2
+            if new_candidate == self.candidate_delay or self.upper_delay - self.lower_delay < 50:
+                self.calibrationError.emit("Emergence binary search stalled")
+                return
             self.stageChanged.emit(f"Adjusting flash delay from {self.candidate_delay} to {new_candidate}")
             self.candidate_delay = new_candidate
             self.emitContinueSearch()
@@ -912,11 +964,11 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         self.nozzle_position = None
         self.start_delay = None
-        self.start_delay_offset = self.model.machine_model.get_print_pulse_width() - 500
+        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() - 500, 0)
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
-        self.upper_pressure = 1.2   # example maximum pressure
+        self.upper_pressure = 0.8   # example maximum pressure
         # Start with a candidate near the lower bound.
         self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
         # Convergence threshold for binary search (if needed).
@@ -940,6 +992,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.measurements = []
 
         self.counter = 0
+        self.max_iterations = 20
         self.final_condition_found = False
 
         # Define states.
@@ -1130,7 +1183,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     def onSetPressure(self):
         self.stageChanged.emit(f"Setting pressure to {self.candidate_pressure:.2f}")
         settings = {
-            "flash_delay": self.start_delay + self.start_delay_offset,
+            "flash_delay": max(0, int(self.start_delay + self.start_delay_offset)),
             "print_pressure": self.candidate_pressure,
         }
         print(f"Requesting settings change: {settings}")
@@ -1268,6 +1321,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         
         self.dispatch[outcome](self)
         self.counter += 1
+        if self.counter >= self.max_iterations:
+            self.calibrationError.emit("Pressure search did not converge")
+            return
 
     @Slot()
     def onCalibrationCompleted(self):
@@ -1416,7 +1472,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit(f"Analyzing droplet image {self.image_counter + 1}")
         # Assume the model's droplet camera model provides a method that analyzes the droplet.
         # For example, identify_droplet(image, background, nozzle_center) returns (center, focus, annotated_image)
-        droplets, focus, annotated_image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center_image_position)
+        droplets, nozzle_area, annotated_image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center_image_position)
         if droplets is None or len(droplets) == 0:
             current_pressure = self.model.machine_model.get_current_print_pressure()
             self.new_pressure = current_pressure + self.pressure_step
@@ -1440,7 +1496,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             
             # Reset the droplet positions and focus values for the new pressure.
             self.droplet_positions = []
-            self.droplet_focus = []
+            # self.droplet_focus = []
             self.annotated_images = []
             self.image_counter = 0
             
@@ -1455,7 +1511,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.presentImageSignal.emit(annotated_image)
         # Record the measurement.
         self.droplet_positions.append(droplet_center)
-        self.droplet_focus.append(focus)
+        # self.droplet_focus.append(focus)
         self.annotated_images.append(annotated_image)
         self.image_counter += 1
         
@@ -1775,44 +1831,104 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Must complete previous calibration first")
             return
 
-    def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance,horizontal_offset=0):
-        # Convert nozzle_center from dict of motor positions to array of positions
-        nozzle_center = np.array([nozzle_center['X'], nozzle_center['Y'], nozzle_center['Z']])
+    # def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance,horizontal_offset=0):
+    #     # Convert nozzle_center from dict of motor positions to array of positions
+    #     nozzle_center = np.array([nozzle_center['X'], nozzle_center['Y'], nozzle_center['Z']])
         
-        # Compute the offset by normalizing the trajectory vector and scaling by desired_distance.
-        nozzle = np.array(nozzle_center, dtype=float)
-        vec = np.array(trajectory_vector, dtype=float)
-        # # Invert the Y axis to match the image coordinates
-        # vec[1] = -vec[1]
-        norm = np.linalg.norm(vec)
-        if norm == 0:
-            offset = np.array([0,0,0])
-        else:
-            offset = (vec / norm) * desired_distance
-        print(f"Nozzle: {nozzle}, Type: {type(nozzle)}")
-        print(f"Trajectory vector: {vec}, Type: {type(vec)}")
-        print(f"Normalized vector: {norm}, Type: {type(norm)}")
-        print(f"Offset: {offset}, Type: {type(offset)}")
+    #     # Compute the offset by normalizing the trajectory vector and scaling by desired_distance.
+    #     nozzle = np.array(nozzle_center, dtype=float)
+    #     vec = np.array(trajectory_vector, dtype=float)
+    #     # # Invert the Y axis to match the image coordinates
+    #     # vec[1] = -vec[1]
+    #     norm = np.linalg.norm(vec)
+    #     if norm == 0:
+    #         offset = np.array([0,0,0])
+    #     else:
+    #         offset = (vec / norm) * desired_distance
+    #     print(f"Nozzle: {nozzle}, Type: {type(nozzle)}")
+    #     print(f"Trajectory vector: {vec}, Type: {type(vec)}")
+    #     print(f"Normalized vector: {norm}, Type: {type(norm)}")
+    #     print(f"Offset: {offset}, Type: {type(offset)}")
 
-        target = nozzle + offset
+    #     target = nozzle + offset
 
-        # If the Y component is negative add the offset to the Y component
-        if vec[1] > 0:
-            target[1] -= horizontal_offset
-        else:
-            target[1] += horizontal_offset
-        print(f"Target position: {target}, Type: {type(target)}")
-        return tuple(target.astype(int))
+    #     # If the Y component is negative add the offset to the Y component
+    #     if vec[1] > 0:
+    #         target[1] -= horizontal_offset
+    #     else:
+    #         target[1] += horizontal_offset
+    #     print(f"Target position: {target}, Type: {type(target)}")
+    #     return tuple(target.astype(int))
+
+    def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance_px, horizontal_offset_steps=0):
+        """
+        Choose a target point 'desired_distance_px' pixels away from the nozzle
+        along the droplet direction, then convert that pixel offset to machine steps
+        using the image Jacobian A (2x2 mapping [dX,dZ] -> [delta_cx, delta_cy]).
+
+        Args:
+            nozzle_center: dict {"X","Y","Z"} in machine steps (or mm mapped to steps)
+            trajectory_vector: tuple/list (dX, dY, dZ) in machine steps
+            desired_distance_px: scalar distance in pixels along the droplet direction
+            horizontal_offset_steps: extra Y offset in *machine steps* (focus axis)
+
+        Returns:
+            (X_target, Y_target, Z_target) in machine steps (ints)
+        """
+        # Access camera calibration matrices
+        A     = self.model.droplet_camera_model.A      # shape (2,2) maps [dX,dZ] -> [delta_cx, delta_cy]
+        A_inv = self.model.droplet_camera_model.A_inv  # inverse
+
+        # Use only X/Z for image-plane mapping (Y is focus-only in this model)
+        vx, _, vz = trajectory_vector
+        v_xz = np.array([float(vx), float(vz)], dtype=float)
+
+        # If trajectory has no X/Z component, bail out to a trivial target
+        if np.linalg.norm(v_xz) < 1e-9:
+            X = int(round(nozzle_center["X"]))
+            Y = int(round(nozzle_center["Y"] + horizontal_offset_steps))
+            Z = int(round(nozzle_center["Z"]))
+            return (X, Y, Z)
+
+        # Image-plane direction (in pixels) produced by moving along v_xz
+        dir_px = A @ v_xz  # shape (2,)
+        norm_px = np.linalg.norm(dir_px)
+        if norm_px < 1e-9:
+            # Degenerate mapping; fall back to pure +X pixel direction
+            dir_px = np.array([1.0, 0.0], dtype=float)
+            norm_px = 1.0
+
+        # Unit direction in pixels
+        u_px = dir_px / norm_px
+
+        # Desired pixel delta along the droplet direction
+        delta_px = desired_distance_px * u_px  # shape (2,)
+
+        # Convert desired pixel delta back to machine steps (X,Z)
+        dX_dZ = A_inv @ delta_px               # shape (2,)
+        dX, dZ = dX_dZ[0], dX_dZ[1]
+
+        # Compose target in machine space (add optional Y offset in steps)
+        X = int(round(nozzle_center["X"] + dX))
+        Y = int(round(nozzle_center["Y"] + horizontal_offset_steps))
+        Z = int(round(nozzle_center["Z"] + dZ))
+        return (X, Y, Z)
 
     @Slot()
     def onMoveToTarget(self):
         self.stageChanged.emit("Moving to target position based on trajectory")
-        self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance,horizontal_offset=self.correction_offset)
+        # self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance,horizontal_offset=self.correction_offset)
+        self.target_position = self.calculate_target_position(
+            self.nozzle_center_machine,
+            self.trajectory_vector,           # (dX, dY, dZ) in steps
+            self.desired_distance,            # pixels
+            horizontal_offset_steps=self.correction_offset  # this is *steps*
+        )
         print(f"Move vector: {self.target_position}")
 
         move_vector = self.target_position
         print(f"Move vector: {move_vector}")
-        self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        self.calibration_manager.moveAbsoluteRequested.emit(self.target_position, self.calibration_manager.emitMoveCompleted)
 
     @Slot()
     def onPrepareBackground(self):
@@ -2221,15 +2337,17 @@ class DropletCameraModel(QObject):
         Optionally applies a 'mask' to limit focus measurement to a region.
         A higher variance indicates sharper focus (steeper gradients).
         """
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        gradient_magnitude = cv2.magnitude(sobel_x ** 2, sobel_y ** 2)
+        Gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        Gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        # gradient_magnitude = cv2.magnitude(sobel_x ** 2, sobel_y ** 2)
 
-        if mask is not None:
-            masked_vals = gradient_magnitude[mask > 0]
-            variance = np.var(masked_vals)
-        else:
-            variance = np.var(gradient_magnitude)
+        # if mask is not None:
+        #     masked_vals = gradient_magnitude[mask > 0]
+        #     variance = np.var(masked_vals)
+        # else:
+        #     variance = np.var(gradient_magnitude)
+        G2 = Gx*Gx + Gy*Gy
+        variance = np.var(G2 if mask is None else G2[mask > 0])
         return variance
 
 
