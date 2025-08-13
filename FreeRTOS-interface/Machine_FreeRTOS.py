@@ -22,6 +22,7 @@ except ImportError:
     print("Running on a non-Raspberry Pi system or missing required libraries. Camera and GPIO functionality will be unavailable.")
     Picamera2 = None
     gpiod = None
+    
 def _make_output_line(chip_name, offset, initial=0, consumer="droplet_trigger"):
     if hasattr(gpiod, "LineSettings"):  # libgpiod v2
         chip = gpiod.Chip(chip_name)
@@ -50,9 +51,8 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
     """
     Returns an object with:
       .event_wait(timeout_s: float) -> bool
-      .event_consume() -> None  (consume the next rising edge)
+      .event_consume() -> None
       .release()
-    Uses pulldown bias if available.
     """
     if hasattr(gpiod, "LineSettings"):  # libgpiod v2
         chip = gpiod.Chip(chip_name)
@@ -65,12 +65,9 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
             pass
         req = chip.request_lines(consumer=consumer, config={offset: ls})
         class InV2:
-            def event_wait(self, timeout):
-                return req.wait_edge_events(timeout)
-            def event_consume(self):
-                _ = req.read_edge_events()
-            def release(self):
-                req.release()
+            def event_wait(self, timeout): return req.wait_edge_events(timeout)
+            def event_consume(self): _ = req.read_edge_events()
+            def release(self): req.release()
         return InV2()
     else:  # libgpiod v1
         chip = gpiod.Chip(chip_name)
@@ -80,69 +77,66 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
             flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
         line.request(consumer=consumer, type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
         class InV1:
-            def event_wait(self, timeout):
-                return line.event_wait(timeout)
-            def event_consume(self):
-                _ = line.event_read()
-            def release(self):
-                line.release()
+            def event_wait(self, timeout): return line.event_wait(timeout)
+            def event_consume(self): _ = line.event_read()
+            def release(self): line.release()
         return InV1()
 
-# ---------- DropletCamera: grabber-driven flash detection ----------
+# ---------- DropletCamera: grabber-driven flash detection with time gating ----------
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
 
     def __init__(self):
         super().__init__()
-        # >>> Adjust for your wiring <<<
-        self.trigger_pin_out_bcm = 17   # Pi -> MCU trigger (existing)
-        self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack (22/26/27 fine)
+        # >>> wiring <<<
+        self.trigger_pin_out_bcm = 17   # Pi -> MCU trigger
+        self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack
 
-        self._chip_name = "gpiochip4"   # Pi 5 user GPIOs (as in your setup)
+        self._chip_name = "gpiochip4"
         self._trig_line = _make_output_line(self._chip_name, self.trigger_pin_out_bcm, initial=0)
         self._edge_in   = _make_rising_edge_input(self._chip_name, self.flash_fired_in_bcm)
 
-        # Camera + state
+        # camera
         self.camera = None
         self.exposure_time = 200_000  # us
         self.latest_frame = None
 
-        # Ring buffer of recent frames: (arr, md, t_done_ns, mean)
+        # ring buffer of recent frames: (arr, md, t_done_ns, mean)
         self._buf = deque(maxlen=16)
 
-        # Grabber thread coordination
+        # grabber thread + state
         self._lock = threading.Lock()
         self._cv   = threading.Condition(self._lock)
         self._grab_thread = None
         self._grab_running = False
 
-        # Capture state (owned under _lock, read by grabber)
+        # capture state (all under _lock)
         self._cap_active      = False
         self._cap_id          = 0
-        self._cap_start_len   = 0     # buffer length at arm time
-        self._cap_deadline    = 0.0   # monotonic seconds
-        self._cap_max_new     = 4     # how many *new* frames to inspect post-ack
+        self._cap_deadline    = 0.0
+        self._cap_max_new     = 6     # allow up to 6 post-arm frames
         self._cap_seen        = 0
         self._cap_threshold   = 9999.0
-        self._cap_brightest   = None  # (arr, md, t_done_ns, mean)
-        self._cap_emit_rotate = True  # keep your 90° CW rotate
+        self._cap_brightest   = None  # among post-arm frames
+        self._cap_emit_rotate = True
+        self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
 
-        # Threshold tuning (simple and robust)
-        self.k_sigma   = 4.0     # std devs above baseline
-        self.min_delta = 25.0    # absolute increase in mean
-        self.max_wait_s = 0.8    # hard stop after ack
+        # threshold tuning
+        self.k_sigma   = 4.0
+        self.min_delta = 25.0
+        self.max_wait_s = 1.0
 
-    # --- GPIO helpers ---
+    # --- GPIO ---
     def _trigger_high(self): self._trig_line.set_value(1)
     def _trigger_low(self):  self._trig_line.set_value(0)
 
-    # --- Camera lifecycle ---
+    # --- camera lifecycle ---
     def start_camera(self):
-        self.camera = Picamera2(1)  # global-shutter cam index
+        self.camera = Picamera2(1)
         vid_cfg = self.camera.create_video_configuration(
             main={"size": self.camera.sensor_resolution, "format": "RGB888"},
-            buffer_count=3  # small queue reduces latency
+            buffer_count=3
         )
         self.camera.configure(vid_cfg)
         self.camera.set_controls({
@@ -181,57 +175,52 @@ class DropletCamera(QObject):
         if handler:
             handler()
 
-    # --- Background grabber: sole consumer of capture_request() ---
+    # --- grabber (sole consumer of capture_request) ---
     def _grabber(self):
         while self._grab_running and self.camera:
             req = self.camera.capture_request()
             if req is None:
                 continue
-            t_done_ns = time.monotonic_ns()
+            t_done_ns = time.monotonic_ns()  # completion time (local monotonic)
             try:
                 md  = req.get_metadata()
                 arr = req.make_array("main")
             finally:
                 req.release()
             mean = float(np.mean(arr))
-            print(f'{mean}')
+            print(f"{mean}")  # your debug
 
             with self._cv:
-                # Append to ring
                 self._buf.append((arr, md, t_done_ns, mean))
 
-                # If armed, evaluate immediately
                 if self._cap_active:
-                    # Count only frames that arrived after we armed
-                    if len(self._buf) > self._cap_start_len:
+                    # time-gated: only evaluate frames strictly after arming time
+                    if t_done_ns > self._cap_arm_ns:
                         self._cap_seen += 1
 
-                        # Track brightest seen while armed (fallback)
+                        # track brightest among post-arm frames
                         if (self._cap_brightest is None) or (mean > self._cap_brightest[3]):
                             self._cap_brightest = (arr, md, t_done_ns, mean)
 
-                        # First frame crossing threshold wins
+                        # first above-threshold wins
                         if mean >= self._cap_threshold:
-                            print(f"[Capture] cap_id={self._cap_id} mean={mean:.1f} threshold={self._cap_threshold:.1f}")
+                            print(f"[Capture] cap_id={self._cap_id} mean={mean:.1f} thr={self._cap_threshold:.1f}")
                             self._complete_capture_locked(arr, md, mean, reason="threshold")
                         elif (self._cap_seen >= self._cap_max_new) or (time.monotonic() > self._cap_deadline):
-                            # No threshold hit within limits → fallback to brightest
+                            # fallback to brightest seen post-arm
                             if self._cap_brightest is not None:
                                 b_arr, b_md, _b_t, b_mean = self._cap_brightest
                                 self._complete_capture_locked(b_arr, b_md, b_mean, reason="fallback")
                             else:
-                                # Extremely unlikely: no frames arrived post-arm
                                 self._complete_capture_locked(arr, md, mean, reason="last_resort")
 
-                # Wake any waiter (mostly for tests/logging)
                 self._cv.notify_all()
 
-    # --- Complete a capture (emit + clear state) ---
+    # --- finalize one capture ---
     def _complete_capture_locked(self, arr, md, mean, reason):
-        # Clear armed state first to prevent double-emits
         self._cap_active = False
+        self._trigger_low()  # drop trigger now that we have a frame
 
-        # Rotate if desired
         if self._cap_emit_rotate:
             arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
 
@@ -240,85 +229,72 @@ class DropletCamera(QObject):
               f"Exp(us)={md.get('ExposureTime') if md else None} "
               f"FrameDur(us)={md.get('FrameDuration') if md else None}")
 
-        # Emit from grabber thread — Qt will queue to the GUI thread
+        # Emit from grabber thread (Qt will deliver safely)
         self.image_captured_signal.emit()
 
-    # --- Baseline from recent frames before arming ---
-    def _compute_baseline_locked(self, N=4):
-        # Take last N frames currently in the buffer
-        tail = list(self._buf)[-N:]
-        if not tail:
-            return 0.0, 0.0
-        vals = np.array([rec[3] for rec in tail], dtype=float)
+    # --- helpers ---
+    def _baseline_before_ns_locked(self, cutoff_ns, N=4):
+        """Compute baseline mean/std from the last up-to-N frames with t_done_ns < cutoff_ns."""
+        vals = []
+        for arr, md, t_done_ns, mean in reversed(self._buf):
+            if t_done_ns < cutoff_ns:
+                vals.append(mean)
+                if len(vals) >= N:
+                    break
+        if len(vals) < 2:
+            tail = [m for (_a,_m,_t,m) in list(self._buf)[-N:]]
+            vals = tail if tail else [0.0, 0.0]
+        vals = np.array(vals, dtype=float)
         return float(np.mean(vals)), float(np.std(vals))
 
-    # --- Public API ---
+    # --- public API ---
     def get_latest_frame(self):
         return self.latest_frame
 
-    def capture_non_blocking(self, max_new_frames=4, timeout_s=1):
+    def capture_non_blocking(self, max_new_frames=6, timeout_s=1):
         """
-        Arms the grabber to return the first post-ack frame whose mean brightness
-        crosses a threshold computed from the pre-ack baseline. If none crosses within
-        max_new_frames or timeout_s, returns the brightest among the new frames.
+        Waits for the MCU ack (briefly), arms detection (time-gated),
+        then the grabber returns the first post-arm frame that crosses threshold,
+        or the brightest of the next few frames.
         """
         if not self.camera:
             print("Camera not started.")
             return
 
-        # Drain stale edges so we only react to the next flash
+        # drain stale edges
         while self._edge_in.event_wait(0):
             self._edge_in.event_consume()
 
-        # Snapshot buffer length now — frames arriving after this are "new"
-        with self._lock:
-            start_len_snapshot = len(self._buf)
-
-        # Raise trigger to MCU
+        # raise trigger to MCU
         self._trigger_high()
 
-        # Wait for the ack edge in a short-lived helper thread, then arm
-        def _wait_and_arm():
-            if not self._edge_in.event_wait(timeout_s):
-                print("Timed out waiting for flash-fired edge.")
-                # Still lower trigger to re-arm MCU
-                self._trigger_low()
-                return
-            self._edge_in.event_consume()
-            # Baseline from frames already in the buffer
-            with self._cv:
-                base_mean, base_std = self._compute_baseline_locked(N=4)
-                threshold = base_mean + self.k_sigma * max(base_std, 1.0) + self.min_delta
+        # wait for ack synchronously (simpler & safer)
+        if not self._edge_in.event_wait(timeout_s):
+            print("Timed out waiting for flash-fired edge.")
+            self._trigger_low()
+            return
+        self._edge_in.event_consume()
 
-                # Arm capture
-                self._cap_id        += 1
-                self._cap_active     = True
-                self._cap_start_len  = len(self._buf)  # "new frames" start here
-                self._cap_deadline   = time.monotonic() + timeout_s
-                self._cap_max_new    = max_new_frames
-                self._cap_seen       = 0
-                self._cap_threshold  = threshold
-                self._cap_brightest  = None
+        # arm immediately: record arm time BEFORE computing baseline
+        arm_ns = time.monotonic_ns()
 
-                print(f"[Arm] cap_id={self._cap_id} base_mean={base_mean:.1f} "
-                      f"base_std={base_std:.1f} threshold={threshold:.1f} "
-                      f"buf_len={self._cap_start_len}")
+        with self._cv:
+            base_mean, base_std = self._baseline_before_ns_locked(arm_ns, N=4)
+            threshold = base_mean + self.k_sigma * max(base_std, 1.0) + self.min_delta
 
-            # Done arming; leave trigger high until we finish (MCU will re-arm on low)
-            # The grabber will choose a frame and emit; then we drop the trigger.
-            # To ensure we always drop it, start a watcher thread:
-            def _drop_when_done(cap_id, deadline):
-                while time.monotonic() < deadline:
-                    with self._lock:
-                        active = self._cap_active and (self._cap_id == cap_id)
-                    if not active:
-                        break
-                    time.sleep(0.002)
-                self._trigger_low()
-            threading.Thread(target=_drop_when_done, args=(self._cap_id, time.monotonic()+timeout_s+0.2), daemon=True).start()
+            self._cap_id         += 1
+            self._cap_active      = True
+            self._cap_arm_ns      = arm_ns              # <<< time gate starts here
+            self._cap_deadline    = time.monotonic() + timeout_s
+            self._cap_max_new     = max_new_frames
+            self._cap_seen        = 0
+            self._cap_threshold   = threshold
+            self._cap_brightest   = None
 
-        threading.Thread(target=_wait_and_arm, daemon=True).start()
-
+            print(f"[Arm] cap_id={self._cap_id} base_mean={base_mean:.1f} "
+                  f"base_std={base_std:.1f} threshold={threshold:.1f} "
+                  f"arm_ns={arm_ns}")
+            
 # class DropletCamera(QObject):
 #     image_captured_signal = Signal()
 #     def __init__(self):
