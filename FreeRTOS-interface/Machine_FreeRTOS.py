@@ -52,9 +52,9 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
     """
     Returns an object with:
       .event_wait(timeout_s: int) -> bool
-      .read_ts_ns() -> int nanoseconds timestamp of the edge
+      .read_ts_ns() -> int nanoseconds timestamp of the last rising edge
       .release()
-    Bias pull-down is enabled if possible.
+    Enables pull-down bias if available.
     """
     if hasattr(gpiod, "LineSettings"):  # libgpiod v2
         chip = gpiod.Chip(chip_name)
@@ -74,27 +74,36 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
                 evs = req.read_edge_events()
                 if not evs:
                     return None
-                # libgpiod v2 edge events have .timestamp_ns
+                # v2 events expose .timestamp_ns
                 return int(evs[-1].timestamp_ns)
             def release(self):
                 req.release()
         return InV2()
+
     else:  # libgpiod v1
         chip = gpiod.Chip(chip_name)
         line = chip.get_line(offset)
         flags = 0
         if hasattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_DOWN"):
             flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
-        line.request(consumer=consumer, type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
+        line.request(consumer=consumer,
+                     type=gpiod.LINE_REQ_EV_RISING_EDGE,
+                     flags=flags)
 
         class InV1:
             def event_wait(self, timeout):
                 return line.event_wait(timeout)
             def read_ts_ns(self):
                 ev = line.event_read()
-                # v1 LineEvent exposes .timestamp in nanoseconds
-                ts = getattr(ev, "timestamp", None)
-                return int(ts) if ts is not None else None
+                # v1 exposes .sec and .nsec on the LineEvent
+                sec  = getattr(ev, "sec",  None)
+                nsec = getattr(ev, "nsec", None)
+                if sec is None or nsec is None:
+                    print("Warning: LineEvent missing sec/nsec; using timestamp if available.")
+                    # Some third-party bindings expose .timestamp (ns); try it too.
+                    ts = getattr(ev, "timestamp", None)
+                    return int(ts) if ts is not None else None
+                return int(sec) * 1_000_000_000 + int(nsec)
             def release(self):
                 line.release()
         return InV1()
