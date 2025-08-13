@@ -24,9 +24,6 @@ except ImportError:
     gpiod = None
 
 def _make_output_line(chip_name, offset, initial=0, consumer="droplet_trigger"):
-    """
-    Return an object with .set_value(v) and .release(), compatible with gpiod v1 or v2.
-    """
     if hasattr(gpiod, "LineSettings"):  # libgpiod v2
         chip = gpiod.Chip(chip_name)
         ls = gpiod.LineSettings()
@@ -53,19 +50,17 @@ def _make_output_line(chip_name, offset, initial=0, consumer="droplet_trigger"):
 
 def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
     """
-    Return an object with:
-      .event_wait(timeout_s: float) -> bool
-      .event_read() -> event (opaque)
+    Returns an object with:
+      .event_wait(timeout_s: int) -> bool
+      .read_ts_ns() -> int nanoseconds timestamp of the edge
       .release()
-    Uses pulldown bias if available.
-    Works on libgpiod v1 and v2.
+    Bias pull-down is enabled if possible.
     """
     if hasattr(gpiod, "LineSettings"):  # libgpiod v2
         chip = gpiod.Chip(chip_name)
         ls = gpiod.LineSettings()
         ls.direction = gpiod.LineDirection.INPUT
         ls.edge_detection = gpiod.LineEdge.RISING
-        # Try to enable pulldown bias if kernel/board supports it
         try:
             ls.bias = gpiod.LineBias.PULL_DOWN
         except Exception:
@@ -74,11 +69,13 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
 
         class InV2:
             def event_wait(self, timeout):
-                # timeout in seconds (float)
                 return req.wait_edge_events(timeout)
-            def event_read(self):
+            def read_ts_ns(self):
                 evs = req.read_edge_events()
-                return evs[0] if evs else None
+                if not evs:
+                    return None
+                # libgpiod v2 edge events have .timestamp_ns
+                return int(evs[-1].timestamp_ns)
             def release(self):
                 req.release()
         return InV2()
@@ -88,46 +85,41 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
         flags = 0
         if hasattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_DOWN"):
             flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
-        line.request(consumer=consumer,
-                     type=gpiod.LINE_REQ_EV_RISING_EDGE,
-                     flags=flags)
+        line.request(consumer=consumer, type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
 
         class InV1:
             def event_wait(self, timeout):
                 return line.event_wait(timeout)
-            def event_read(self):
-                return line.event_read()
+            def read_ts_ns(self):
+                ev = line.event_read()
+                # v1 LineEvent exposes .timestamp in nanoseconds
+                ts = getattr(ev, "timestamp", None)
+                return int(ts) if ts is not None else None
             def release(self):
                 line.release()
         return InV1()
+
+# ---------- DropletCamera ----------
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
 
     def __init__(self):
         super().__init__()
-        # >>> Adjust these two to your wiring <<<
+        # >>> Adjust to your wiring <<<
         self.trigger_pin_out_bcm = 17   # Pi -> MCU trigger (existing)
-        self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack (choose 22, 26, or 27)
+        self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack (e.g. 22 or 26 or 27)
 
         self.camera = None
-        self.exposure_time = 200_000  # us
+        self.exposure_time = 200_000  # microseconds
         self.latest_frame = None
 
-        # Pi 5 commonly exposes the user GPIOs on "gpiochip4" (as you used before)
+        # On Pi 5, user GPIOs typically live on gpiochip4 in your setup
         self._chip_name = "gpiochip4"
 
-        # Output line (trigger to MCU)
+        # GPIO lines
         self._trig_line = _make_output_line(self._chip_name, self.trigger_pin_out_bcm, initial=0)
-
-        # Rising-edge input (flash fired from MCU)
         self._edge_in = _make_rising_edge_input(self._chip_name, self.flash_fired_in_bcm)
-
-        # Optional ring buffer
-        self._frame_q = deque(maxlen=3)
-        self._grab_thread = None
-        self._grab_running = False
-        self._grab_lock = threading.Lock()
 
     # --- GPIO helpers ---
     def _trigger_high(self):
@@ -138,10 +130,11 @@ class DropletCamera(QObject):
 
     # --- Camera lifecycle ---
     def start_camera(self):
-        self.camera = Picamera2(1)  # your global-shutter camera index
+        # Use a small buffer_count to keep the queue shallow (reduces risk of stale frames)
+        self.camera = Picamera2(1)  # global shutter cam index
         vid_cfg = self.camera.create_video_configuration(
             main={"size": self.camera.sensor_resolution, "format": "RGB888"},
-            buffer_count=4
+            buffer_count=2
         )
         self.camera.configure(vid_cfg)
         self.camera.set_controls({
@@ -153,26 +146,12 @@ class DropletCamera(QObject):
         })
         self.camera.start()
 
-        # Optional continuous grabber
-        self._grab_running = True
-        self._grab_thread = threading.Thread(target=self._grabber, daemon=True)
-        self._grab_thread.start()
-
     def stop_camera(self):
-        self._grab_running = False
-        if self._grab_thread:
-            self._grab_thread.join(timeout=1.0)
-            self._grab_thread = None
-
         if self.camera:
             self.camera.stop()
             self.camera.close()
             self.camera = None
-
         self._trigger_low()
-        # release lines if you want (optional)
-        # self._edge_in.release()
-        # self._trig_line.release()
 
     def change_exposure_time(self, exposure_time_us, handler=None):
         self.exposure_time = int(exposure_time_us)
@@ -186,91 +165,101 @@ class DropletCamera(QObject):
         if handler:
             handler()
 
-    # --- Frame grabbing (optional) ---
-    def _grabber(self):
-        while self._grab_running and self.camera:
-            req = self.camera.capture_request()
-            if req is None:
-                continue
-            try:
-                arr = req.make_array("main")
-                md  = req.get_metadata()
-            finally:
-                req.release()
-            with self._grab_lock:
-                self._frame_q.append((arr, md))
-
-    def _pick_brightest(self, frames):
-        best = None
-        best_val = -1.0
-        for arr, md in frames:
-            val = float(np.mean(arr))
-            if val > best_val:
-                best = (arr, md)
-                best_val = val
-        return best
+    # --- Exposure window check ---
+    @staticmethod
+    def _flash_in_exposure(md, flash_ts_ns, fudge_ns=500_000):
+        """
+        Returns True if flash timestamp (ns) falls inside this frame's exposure window.
+        Uses libcamera metadata:
+          - SensorTimestamp: start of exposure, in ns
+          - ExposureTime: exposure length, in us
+        Adds +/- fudge to absorb tiny timing skew.
+        """
+        if md is None:
+            return False
+        t0 = md.get("SensorTimestamp", None)  # ns
+        et_us = md.get("ExposureTime", None)  # us
+        if t0 is None or et_us is None:
+            return False
+        t1 = int(t0) + int(et_us) * 1000
+        return (int(t0) - fudge_ns) <= int(flash_ts_ns) <= (t1 + fudge_ns)
 
     # --- Public API ---
     def get_latest_frame(self):
         return self.latest_frame
 
     def capture_non_blocking(self):
-        """
-        Robust sequence:
-        1) Raise trigger to MCU.
-        2) Wait for MCU 'flash fired' rising edge (actual event time).
-        3) Immediately capture the next one or two completed frames and pick the lit one.
-        4) Lower trigger.
-        5) Emit signal with the chosen frame.
-        """
         if not self.camera:
             print("Camera not started.")
             return
 
-        # Drain stale events so we only react to the next flash
-        while self._edge_in.event_wait(0.0):
-            _ = self._edge_in.event_read()
+        # Drain any stale edges so we only react to the NEW flash
+        while self._edge_in.event_wait(0):
+            _ = self._edge_in.read_ts_ns()
 
-        # Tell MCU to start its imaging sequence
+        # Tell MCU to start its sequence
         self._trigger_high()
 
-        # Wait for actual flash-fired edge (MCU asserts this in its TIM compare ISR)
-        if not self._edge_in.event_wait(1.0):  # seconds
+        # Wait for the MCU 'flash fired' edge (TIM compare ISR)
+        if not self._edge_in.event_wait(1):  # seconds
             print("Timed out waiting for flash-fired edge.")
             self._trigger_low()
             return
-        _ = self._edge_in.event_read()
+        flash_ts_ns = self._edge_in.read_ts_ns()
+        if flash_ts_ns is None:
+            print("No timestamp read for flash edge.")
+            self._trigger_low()
+            return
 
-        # Grab the next two completed frames, pick the bright one
-        frames = []
-        for _i in range(2):
+        # Now pull frames until we find one whose exposure window contains the flash timestamp.
+        # With 200 ms exposure, this should be either the *next* frame or the one after.
+        chosen_arr = None
+        chosen_md = None
+
+        # We’ll examine up to 4 frames (very conservative), or 0.6 s timeout guard.
+        deadline = time.monotonic() + 0.6
+        checks = 0
+        frames_seen = []
+
+        while time.monotonic() < deadline and checks < 4:
             req = self.camera.capture_request()
             if req is None:
                 continue
             try:
-                arr = req.make_array("main")
-                md  = req.get_metadata()
+                md = req.get_metadata()
+                arr = req.make_array("main")  # copy array so we can release request
             finally:
                 req.release()
-            frames.append((arr, md))
 
-        with self._grab_lock:
-            if self._frame_q:
-                frames.append(self._frame_q[-1])
+            frames_seen.append((arr, md))
+            checks += 1
 
-        if not frames:
-            print("No frames retrieved after flash.")
-            self._trigger_low()
-            return
+            if self._flash_in_exposure(md, flash_ts_ns):
+                chosen_arr, chosen_md = arr, md
+                break
 
-        chosen_arr, md = self._pick_brightest(frames)
-        chosen_arr = cv2.rotate(chosen_arr, cv2.ROTATE_90_CLOCKWISE)
+        # Fallbacks: if no exact match (should be rare), pick the brightest among what we saw.
+        if chosen_arr is None and frames_seen:
+            # Brightness heuristic fallback
+            best = max(frames_seen, key=lambda am: float(np.mean(am[0])))
+            chosen_arr, chosen_md = best
 
+        # Lower the trigger to let MCU re-arm
         self._trigger_low()
 
+        if chosen_arr is None:
+            print("No suitable frame found after flash.")
+            return
+
+        # Optional orientation
+        chosen_arr = cv2.rotate(chosen_arr, cv2.ROTATE_90_CLOCKWISE)
+
         self.latest_frame = chosen_arr
-        if md:
-            print(f"ExposureTime(us)={md.get('ExposureTime')} FrameDuration(us)={md.get('FrameDuration')}")
+        if chosen_md:
+            print(f"Chosen frame: ExposureTime(us)={chosen_md.get('ExposureTime')}, "
+                  f"FrameDuration(us)={chosen_md.get('FrameDuration')}, "
+                  f"SensorTimestamp(ns)={chosen_md.get('SensorTimestamp')}, "
+                  f"FlashEdge(ns)={flash_ts_ns}")
         self.image_captured_signal.emit()
 
 # class DropletCamera(QObject):
@@ -1148,7 +1137,7 @@ class Machine(QObject):
         if "HELLO_ACK" in line:
             print("HELLO_ACK received, machine is ready.")
             self.machine_connected_signal.emit(True)
-        print(f"Log line received: {line}")
+        # print(f"Log line received: {line}")
 
     def update_command_numbers(self,current_command,last_completed):
         self.command_queue.update_command_status(current_command,last_completed)
