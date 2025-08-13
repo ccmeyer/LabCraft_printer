@@ -645,13 +645,13 @@ class Controller(QObject):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False,ignore_safe_height=False):
         """Move to the saved location."""
         safe_z = 3000
 
         current_location = self.model.machine_model.get_current_location()
         print(f'Moving to location: {name} from {current_location}')
-        if 'camera' in [current_location, name]:
+        if 'camera' in [current_location, name] and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
         if coords is not None:
@@ -713,10 +713,10 @@ class Controller(QObject):
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=8000,coords=coords)
 
-            self.move_to_location(name,coords=coords,override=True)
+            self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
             # self.wait_command()
-            self.move_to_location(name,x_offset=3000,coords=coords,override=True)
+            self.move_to_location(name,x_offset=3000,coords=coords,override=True,ignore_safe_height=True)
             # self.model.calibration_model.update_calibration_models(self.model.rack_model.get_gripper_printer_head())
         else:
             #print(f'Error: {error_msg}')
@@ -739,10 +739,10 @@ class Controller(QObject):
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=3000,coords=coords)
-            self.move_to_location(name,coords=coords,override=True)
+            self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
             # self.wait_command()
-            self.move_to_location(name,x_offset=8000,coords=coords,override=True)
+            self.move_to_location(name,x_offset=8000,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper()
             # self.wait_command()
         else:
