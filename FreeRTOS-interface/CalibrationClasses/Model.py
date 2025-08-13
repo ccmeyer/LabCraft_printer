@@ -2102,10 +2102,10 @@ class DropletCameraModel(QObject):
         self.reading = False
         self.signal = False
         self.num_flashes = 0
-        self.flash_duration = 2000
-        self.flash_delay = 1000
+        self.flash_duration = 1000
+        self.flash_delay = 5000
         self.num_droplets = 1
-        self.exposure_time = 100000
+        self.exposure_time = 20000
         self.analysis_active = False
         self.saving_active = False
         self.image_width = 1088

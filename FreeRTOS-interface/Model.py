@@ -5840,7 +5840,8 @@ class LocationModel(QObject):
             self.current_location_updated.emit(name)
             print(f"Current location updated to '{name}'.")
         else:
-            pass
+            self.current_location_updated.emit('Unknown')
+            print(f'-New location {name} not found')
 
     def update_location_coords(self, name, coords):
         """Update an existing location by name."""
@@ -6255,7 +6256,7 @@ class Model(QObject):
         self.settings_path = os.path.join(self.script_dir, 'Presets','Settings.json')
         self.obstacles_path = os.path.join(self.script_dir, 'Presets','Obstacles.json')
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
-        self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250530.json')
+        self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
         # self.prediction_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_lr_pipeline.pkl')
         # self.resistance_model_path = os.path.join(self.script_dir, 'Presets','150um_50per_large_resistance_pipeline.pkl')
     

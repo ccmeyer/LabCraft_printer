@@ -99,7 +99,7 @@ class DropletCamera(QObject):
 
         # camera
         self.camera = None
-        self.exposure_time = 200_000  # us
+        self.exposure_time = 20_000  # us
         self.latest_frame = None
 
         # ring buffer of recent frames: (arr, md, t_done_ns, mean)
@@ -188,7 +188,7 @@ class DropletCamera(QObject):
             finally:
                 req.release()
             mean = float(np.mean(arr))
-            print(f"{mean}")  # your debug
+            # print(f"{mean}")  # your debug
 
             with self._cv:
                 self._buf.append((arr, md, t_done_ns, mean))
