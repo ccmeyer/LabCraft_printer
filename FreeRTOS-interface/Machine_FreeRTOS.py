@@ -655,6 +655,10 @@ TAG_ACTIVE_R      = 0x41
 TAG_CMD_DEPTH     = 0x50
 TAG_LAST_CMD      = 0x51
 TAG_CURR_CMD     = 0x52
+TAG_FLASH_NUM	   = 0x60
+TAG_FLASH_WIDTH   = 0x61
+TAG_FLASH_DELAY   = 0x62
+TAG_FLASH_DROPS   = 0x63
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -680,6 +684,12 @@ TAG_MAP = {
     TAG_REFUEL_PW:    ("Refuel_width", 2, False),
     TAG_ACTIVE_P:     ("print_active", 2, False),
     TAG_ACTIVE_R:     ("refuel_active",2, False),
+
+    TAG_FLASH_NUM:    ("Flashes", 4, False),
+    TAG_FLASH_WIDTH:  ("Flash_width", 4, False),
+    TAG_FLASH_DELAY:  ("Flash_delay", 4, False),
+    TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
+
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
     TAG_LAST_CMD:     ("Last_completed", 2, False),
     TAG_CURR_CMD:     ("Current_command", 2, False),
