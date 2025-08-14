@@ -1013,6 +1013,16 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         # We'll consider the droplet acceptable only if exactly 1 droplet is seen and its area is below this threshold.
         self.nozzle_droplet_threshold = 8000
 
+        # ----- adaptive step & anti-oscillation tuning -----
+        self.pw_ref_us = 1500            # reference PW for scaling coarse step
+        self.min_step  = max(0.5*self.fine_step, 0.005)  # psi, floor for adaptive step
+        self.max_step  = max(self.coarse_step, 0.15)     # psi, ceiling for adaptive step
+
+        # when we flip across the boundary (e.g., TOO_LOW ↔ NEAR) in bracket phase,
+        # immediately switch to REFINE using these bounds
+        self._last_outcome  = None
+        self._last_pressure = None
+
         # Store images.
         self.background_image = None
         self.droplet_image = None
@@ -1273,27 +1283,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         debug["median_area"] = med_area
         return (1, med_area, debug)
 
-    # def evaluate_condition(self,droplet_count, nozzle_area, threshold):
-    #     """Return one of: 'TOO_LOW', 'ACCEPTABLE', 'BORDERLINE', 'TOO_HIGH'."""
-    #     if droplet_count == 0:
-    #         return "TOO_LOW"
-    #     if droplet_count >= 2:
-    #         return "TOO_HIGH"
-
-    #     # droplet_count == 1
-    #     if nozzle_area is None:
-    #         return "TOO_HIGH"
-
-    #     low = threshold * (1.0 - self.hysteresis_frac)
-    #     high = threshold * (1.0 + self.hysteresis_frac)
-
-    #     if nozzle_area <= low:
-    #         return "ACCEPTABLE"
-    #     elif nozzle_area <= high:
-    #         return "BORDERLINE"   # treat as acceptable during bracketing
-    #     else:
-    #         return "TOO_HIGH"
-
     def _clamp(self, p):
         return max(self.lower_pressure, min(self.upper_pressure, p))
 
@@ -1327,92 +1316,67 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             return "BORDERLINE"
         else:
             return "NEAR"
+        
+    def _pw_scaled_coarse(self) -> float:
+        """Shrink coarse step at higher pulse widths (where pressure is 'more sensitive')."""
+        try:
+            pw = max(int(self.model.machine_model.get_print_pulse_width()), 1)
+        except Exception:
+            pw = self.pw_ref_us
+        # scale ~ 1/sqrt(PW); clamp so we don't go crazy small/large
+        scale = (self.pw_ref_us / float(pw)) ** 0.5
+        scale = max(0.25, min(2.0, scale))
+        return self.coarse_step * scale
+    
+    def _adaptive_step(self, outcome: str, nozzle_area) -> float:
+        """
+        Outcome-informed step:
+        - TOO_LOW:
+            very low area  -> big step up
+            low area       -> medium step up
+            near threshold -> small step up
+        - ACCEPTABLE/BORDERLINE: small/medium step up (still bracketing)
+        - NEAR: small step down (close above boundary)
+        - TOO_HIGH: medium/big step down
+        """
+        base = self._pw_scaled_coarse()
 
-    # Then you can have a dispatch dictionary:
-    def handle_too_low(self):
-        self.stageChanged.emit("Condition TOO_LOW: increasing pressure")
-        if self.initial_state == "TOO_LOW":
-            if self.coarse_search:
-                print("increase by coarse step")
-                self.candidate_pressure += self.coarse_step
-            else:
-                print("increase by fine step")
-                self.candidate_pressure += self.fine_step
+        # compute bands once
+        low_band  = self.nozzle_droplet_threshold * (1.0 - self.hysteresis_frac)
+        high_band = self.nozzle_droplet_threshold * (1.0 + self.hysteresis_frac)
+        area = 0.0 if nozzle_area is None else float(nozzle_area)
+
+        if outcome == "TOO_LOW":
+            # how "dry" is the nozzle?
+            if area < 0.5 * low_band:      mult = 1.6    # far below → bigger push
+            elif area < 0.9 * low_band:    mult = 1.0    # moderately below
+            else:                          mult = 0.6    # almost there → smaller step
+        elif outcome in ("ACCEPTABLE", "BORDERLINE"):
+            mult = 0.8                      # keep moving up, but gently
+        elif outcome == "NEAR":
+            mult = 0.5                      # just above acceptable → small step down
+        elif outcome == "TOO_HIGH":
+            # if we ever see >=2, we're clearly high
+            mult = 1.3
         else:
-            if self.coarse_search:
-                print("--- Transition found, now increasing pressure")
-                self.transition_found = True
-                self.coarse_search = False
-                self.candidate_pressure = self.candidate_pressure + self.fine_step
-            else:
-                print("Still back tracking - increase by fine step")
-                self.candidate_pressure += self.fine_step
+            mult = 1.0
+
+        step = base * mult
+        # clamp to configured bounds
+        return max(self.min_step, min(self.max_step, step))
+
+    def _switch_to_refine(self, lo: float, hi: float):
+        """Enter refine with [lo, hi] and jump to the midpoint."""
+        self.bracket_lo = max(self.lower_pressure, min(self.upper_pressure, lo))
+        self.bracket_hi = max(self.lower_pressure, min(self.upper_pressure, hi))
+        if self.bracket_lo > self.bracket_hi:
+            self.bracket_lo, self.bracket_hi = self.bracket_hi, self.bracket_lo
+        self.phase = "refine"
+        self.candidate_pressure = 0.5 * (self.bracket_lo + self.bracket_hi)
+        print(f"[P-Cal] Anti-oscillation → REFINE: lo={self.bracket_lo:.3f} hi={self.bracket_hi:.3f} "
+            f"mid={self.candidate_pressure:.3f}")
         self.emitContinueSearch()
-
-    def handle_acceptable(self):
-        self.stageChanged.emit("Condition ACCEPTABLE: recording pressure")
-        self.last_acceptable_pressure = self.candidate_pressure
-        if self.initial_state == 'TOO_LOW':
-            if self.coarse_search:
-                print("Still increasing by coarse step")
-                self.candidate_pressure += self.coarse_step
-            # If the transition has already been found and a new acceptable pressure is found
-            # end the calibration process
-            elif self.transition_found:
-                print("Final condition found")
-                self.emitDropletDetected()
-            else:
-                print("SHOULD NOT OCCUR - increase by fine step")
-                self.candidate_pressure += self.fine_step
-        else:
-            if self.coarse_search:
-                print("--- Transition found, now increasing pressure")
-                self.transition_found = True
-                self.coarse_search = False
-                self.candidate_pressure = self.candidate_pressure + self.fine_step
-            else:
-                print("Back tracking - increase by fine step")
-                self.candidate_pressure += self.fine_step
-        self.emitContinueSearch()
-
-    def handle_too_high(self):
-        self.stageChanged.emit("Condition TOO_HIGH: decreasing pressure")
-        if self.initial_state == 'TOO_HIGH':
-            if self.coarse_search:
-                print("Still too high, decreasing pressure coarsely")
-                self.candidate_pressure -= self.coarse_step
-            # Indicates that it has already found the transition and so it should revert to the last 
-            # acceptable pressure
-            elif self.transition_found:
-                print("Final condition found, new unacceptable pressure")
-                if self.last_acceptable_pressure is not None:
-                    print("Last acceptable pressure found")
-                    self.final_condition_found = True
-                    self.candidate_pressure = self.last_acceptable_pressure
-                else:
-                    print("No last acceptable pressure found")
-                    self.candidate_pressure -= self.fine_step
-                
-            else:
-                print("SHOULD NOT OCCUR - decrease by fine step")
-                self.candidate_pressure -= self.fine_step
-        else:
-            if self.coarse_search:
-                print("--- Transition found, now decreasing pressure")
-                self.transition_found = True
-                self.coarse_search = False
-                self.candidate_pressure = self.candidate_pressure - self.fine_step
-
-            else:
-                print("Still decreasing looking for acceptable condition")
-                self.candidate_pressure -= self.fine_step
-        self.emitContinueSearch()
-
-    dispatch = {
-        "TOO_LOW": handle_too_low,
-        "ACCEPTABLE": handle_acceptable,
-        "TOO_HIGH": handle_too_high,
-    }
+        self.counter += 1
 
     @Slot()
     def onAnalyze(self):
@@ -1448,105 +1412,98 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # classify with hysteresis-aware evaluator
         outcome = self.evaluate_condition(agg_count, agg_area, self.nozzle_droplet_threshold)
-        one_drop = (outcome in ("ACCEPTABLE", "BORDERLINE", "NEAR"))
         acceptable = (outcome in ("ACCEPTABLE", "BORDERLINE"))
+        one_drop   = (outcome in ("ACCEPTABLE", "BORDERLINE", "NEAR"))
 
-        # -------- Phase 1: build a bracket quickly and switch to refine --------
+        # --------- Anti-oscillation guard (BRACKET only) ----------
+        # If we flip across the boundary in back-to-back steps (TOO_LOW ↔ NEAR/TOO_HIGH),
+        # stop coarse stepping and enter REFINE immediately with those two points.
+        if self.phase == "bracket" and self._last_outcome is not None:
+            flipped_low_to_highish = (self._last_outcome == "TOO_LOW" and outcome in ("NEAR", "TOO_HIGH"))
+            flipped_highish_to_low = (self._last_outcome in ("NEAR", "TOO_HIGH") and outcome == "TOO_LOW")
+            if flipped_low_to_highish or flipped_highish_to_low:
+                lo = self.last_too_low_pressure if self.last_too_low_pressure is not None else (
+                    min(self._last_pressure, self.candidate_pressure))
+                hi = max(self._last_pressure, self.candidate_pressure)
+                self._switch_to_refine(lo, hi)
+                # update "last" bookkeeping and return
+                self._last_outcome  = outcome
+                self._last_pressure = self.candidate_pressure
+                if self.counter >= self.max_iterations:
+                    self.calibrationError.emit("Pressure search did not converge (anti-oscillation)")
+                return
+
+        # -------------------- Phase 1: BRACKET --------------------
         if self.phase == "bracket":
             if outcome == "TOO_LOW":
-                # remember and step up coarsely
                 self.last_too_low_pressure = self.candidate_pressure
-                self.candidate_pressure = self._clamp(self.candidate_pressure + self.coarse_step)
-                print(f"[P-Cal] TOO_LOW → stepping up to {self.candidate_pressure:.3f}")
+                step = self._adaptive_step(outcome, agg_area)
+                self.candidate_pressure = self._clamp(self.candidate_pressure + step)
+                print(f"[P-Cal] TOO_LOW → +{step:.3f} → {self.candidate_pressure:.3f}")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
                     self.calibrationError.emit("Pressure search did not converge (too low region)")
+                self._last_outcome  = outcome
+                self._last_pressure = self.candidate_pressure
                 return
-            
+
             if acceptable:
-                # record highest acceptable and keep stepping up until we hit NEAR/TOO_HIGH
+                # keep the *highest acceptable* as lo; continue stepping up, but adaptively
                 if (self.bracket_lo is None) or (self.candidate_pressure > self.bracket_lo):
                     self.bracket_lo = self.candidate_pressure
-                self.last_one_pressure = self.candidate_pressure  # seen a clean 1-drop
-                self.candidate_pressure = self._clamp(self.candidate_pressure + self.coarse_step)
-                print(f"[P-Cal] ACCEPTABLE/BORDERLINE → step up to {self.candidate_pressure:.3f} "
-                    f"(lo now {self.bracket_lo:.3f})")
+                step = self._adaptive_step(outcome, agg_area)
+                self.candidate_pressure = self._clamp(self.candidate_pressure + step)
+                print(f"[P-Cal] {outcome} → +{step:.3f} → {self.candidate_pressure:.3f} (lo={self.bracket_lo:.3f})")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
                     self.calibrationError.emit("Pressure search did not converge (bracket acceptable climb)")
+                self._last_outcome  = outcome
+                self._last_pressure = self.candidate_pressure
                 return
 
-            if one_drop or (outcome == "TOO_HIGH"):
-                # first time we see any 1-drop → set hi and seed lo, then REFINE
-                self.bracket_hi = self.candidate_pressure
-                if self.bracket_lo is None:
-                    # We never saw acceptable yet—step down to find it coarsely
-                    self.candidate_pressure = self._clamp(self.candidate_pressure - self.coarse_step)
-                    print(f"[P-Cal] {outcome} but no ACCEPTABLE yet → stepping down to {self.candidate_pressure:.3f}")
+            # outcome == NEAR or TOO_HIGH → we’re at/above the upper boundary
+            self.bracket_hi = self.candidate_pressure
+            if self.bracket_lo is None:
+                # No acceptable yet: if we have a recorded TOO_LOW, use it; otherwise step down adaptively.
+                if self.last_too_low_pressure is not None:
+                    self._switch_to_refine(self.last_too_low_pressure, self.bracket_hi)
+                else:
+                    step = self._adaptive_step(outcome, agg_area)
+                    self.candidate_pressure = self._clamp(self.candidate_pressure - step)
+                    print(f"[P-Cal] {outcome} (no lo yet) → -{step:.3f} → {self.candidate_pressure:.3f}")
                     self.emitContinueSearch()
                     self.counter += 1
                     if self.counter >= self.max_iterations:
                         self.calibrationError.emit("Pressure search did not converge (no acceptable found)")
-                    return
-
-                # We have lo and hi → switch to refine (fine steps toward the boundary)
-                self.phase = "refine"
-                self.candidate_pressure = 0.5 * (self.bracket_lo + self.bracket_hi)
-                print(f"[P-Cal] BRACKET→REFINE: lo={self.bracket_lo:.3f} hi={self.bracket_hi:.3f} "
-                    f"→ mid={self.candidate_pressure:.3f} (hit {outcome})")
-                self.emitContinueSearch()
-                self.counter += 1
-                if self.counter >= self.max_iterations:
-                    self.calibrationError.emit("Pressure search did not converge (switching to refine)")
+                self._last_outcome  = outcome
+                self._last_pressure = self.candidate_pressure
                 return
 
-            # outcome == TOO_HIGH (>=2 droplets)
-            # if self.last_one_pressure is not None:
-            #     # we’ve seen 1-drop before; refine between last too-low and that 1-drop
-            #     self.bracket_hi = self.last_one_pressure
-            #     if self.last_too_low_pressure is not None:
-            #         self.bracket_lo = self.last_too_low_pressure
-            #     else:
-            #         self.bracket_lo = self._clamp(self.bracket_hi - self.coarse_step)
+            # We have both lo and hi → enter REFINE right away.
+            self._switch_to_refine(self.bracket_lo, self.bracket_hi)
+            self._last_outcome  = outcome
+            self._last_pressure = self.candidate_pressure
+            if self.counter >= self.max_iterations:
+                self.calibrationError.emit("Pressure search did not converge (switching to refine)")
+            return
 
-            #     self.phase = "refine"
-            #     self.candidate_pressure = 0.5 * (self.bracket_lo + self.bracket_hi)
-            #     print(f"[P-Cal] TOO_HIGH but seen ONE_DROP before → REFINE: "
-            #         f"lo={self.bracket_lo:.3f} hi={self.bracket_hi:.3f} mid={self.candidate_pressure:.3f}")
-            #     self.emitContinueSearch()
-            #     self.counter += 1
-            #     if self.counter >= self.max_iterations:
-            #         self.calibrationError.emit("Pressure search did not converge (post-high → refine)")
-            #     return
-            # else:
-            #     # haven’t seen a one-drop yet; step down to find it
-            #     self.candidate_pressure = self._clamp(self.candidate_pressure - self.coarse_step)
-            #     print(f"[P-Cal] TOO_HIGH with no ONE_DROP yet → stepping down to {self.candidate_pressure:.3f}")
-            #     self.emitContinueSearch()
-            #     self.counter += 1
-            #     if self.counter >= self.max_iterations:
-            #         self.calibrationError.emit("Pressure search did not converge (too high region)")
-            #     return
-
-        # -------- Phase 2: refine with bisection until hi-lo <= threshold --------
+        # -------------------- Phase 2: REFINE (bisection to highest acceptable) --------------------
         if self.phase == "refine":
             if acceptable:
-                # still acceptable → move lo up (we want the highest acceptable)
                 self.bracket_lo = max(self.bracket_lo, self.candidate_pressure) if self.bracket_lo is not None else self.candidate_pressure
             else:
-                # NEAR (1 drop but large area) or TOO_HIGH (multi-drops) → move hi down
                 self.bracket_hi = min(self.bracket_hi, self.candidate_pressure) if self.bracket_hi is not None else self.candidate_pressure
 
             if (self.bracket_lo is not None) and (self.bracket_hi is not None):
                 gap = self.bracket_hi - self.bracket_lo
                 print(f"[P-Cal] REFINE: lo={self.bracket_lo:.3f} hi={self.bracket_hi:.3f} gap={gap:.4f}")
                 if gap <= self.pressure_threshold:
-                    # **return the HIGHEST pressure that still satisfies acceptance**
+                    # return the HIGHEST acceptable
                     self.candidate_pressure = self.bracket_lo
                     self.final_condition_found = True
-                    self.stageChanged.emit("Final condition found (bisection converged to highest acceptable)")
+                    self.stageChanged.emit("Final condition found (bisection → highest acceptable)")
                     self.calibrationDataUpdated.emit({
                         'measurements': self.measurements,
                         'result': {'pressure': self.candidate_pressure}
@@ -1554,53 +1511,24 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                     self.emitDropletDetected()
                     return
 
-                # continue bisection (fine downward moves from NEAR/TOO_HIGH happen automatically)
                 self.candidate_pressure = 0.5 * (self.bracket_lo + self.bracket_hi)
                 print(f"[P-Cal] Next mid={self.candidate_pressure:.3f}")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
-                    # fall back to best available bound; choose lo (our goal)
                     if self.bracket_lo is not None:
                         self.candidate_pressure = self.bracket_lo
                         self.final_condition_found = True
                         self.emitDropletDetected()
                     else:
                         self.calibrationError.emit("Pressure search did not converge (refine phase)")
+                self._last_outcome  = outcome
+                self._last_pressure = self.candidate_pressure
                 return
-        
-    # @Slot()
-    # def onAnalyze(self):
-    #     self.stageChanged.emit("Analyzing droplet image")
-    #     print("Analyzing droplet image")
-    #     droplets, nozzle_area, image = self.model.droplet_camera_model.identify_droplets(self.droplet_image, self.background_image, self.nozzle_center)
-    #     droplet_count = len(droplets) if droplets is not None else 0
-    #     self.measurements.append((self.candidate_pressure, droplet_count, nozzle_area))
-    #     self.presentImageSignal.emit(image)
-    #     self.stageChanged.emit(f"Pressure: {self.candidate_pressure:.2f}, Droplet count: {droplet_count}, Nozzle area: {nozzle_area}")
-    #     print(f"Counter: {self.counter}, Pressure: {self.candidate_pressure:.2f}, Droplet count: {droplet_count}, Nozzle area: {nozzle_area}")
-    #     if self.final_condition_found:
-    #         self.stageChanged.emit("Final condition found")
-    #         print("Final condition found")
-    #         self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
-    #         self.emitDropletDetected()
-    #         return
 
-    #     outcome = self.evaluate_condition(droplet_count, nozzle_area, self.nozzle_droplet_threshold)
-        
-    #     if self.counter == 0:
-    #         if outcome == 'TOO_HIGH':
-    #             self.initial_state = 'TOO_HIGH'
-    #             print('--- Initial state: TOO_HIGH ---')
-    #         else:
-    #             self.initial_state = 'TOO_LOW'
-    #             print('--- Initial state: TOO_LOW ---')
-        
-    #     self.dispatch[outcome](self)
-    #     self.counter += 1
-    #     if self.counter >= self.max_iterations:
-    #         self.calibrationError.emit("Pressure search did not converge")
-    #         return
+        # Bookkeeping if we somehow fell through
+        self._last_outcome  = outcome
+        self._last_pressure = self.candidate_pressure
 
     @Slot()
     def onCalibrationCompleted(self):
