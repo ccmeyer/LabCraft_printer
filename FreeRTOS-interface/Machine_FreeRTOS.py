@@ -121,7 +121,11 @@ class DropletCamera(QObject):
         self._cap_brightest   = None  # among post-arm frames
         self._cap_emit_rotate = True
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
-
+        
+        self._cap_done = threading.Event()      # set when _complete_capture_locked runs
+        self._cap_result = None                 # dict with mean/threshold/reason, and the image
+        self._emit_on_complete = True           # gate emitting during retries
+        
         # threshold tuning
         self.k_sigma   = 4.0
         self.min_delta = 25.0
@@ -225,12 +229,24 @@ class DropletCamera(QObject):
             arr = cv2.rotate(arr, cv2.ROTATE_90_CLOCKWISE)
 
         self.latest_frame = arr
+        self._cap_result = {
+            "arr": arr,
+            "md": md,
+            "mean": float(mean),
+            "reason": str(reason),
+            "threshold": float(self._cap_threshold),
+            "cap_id": int(self._cap_id),
+        }
+        self._cap_done.set()
         print(f"[Chosen] mean={mean:.1f} reason={reason} "
               f"Exp(us)={md.get('ExposureTime') if md else None} "
               f"FrameDur(us)={md.get('FrameDuration') if md else None}")
 
-        # Emit from grabber thread (Qt will deliver safely)
-        self.image_captured_signal.emit()
+        # Only emit if allowed (wrappers will re-emit after a successful retry)
+        if self._emit_on_complete:
+            self.image_captured_signal.emit()
+        # # Emit from grabber thread (Qt will deliver safely)
+        # self.image_captured_signal.emit()
 
     # --- helpers ---
     def _baseline_before_ns_locked(self, cutoff_ns, N=4):
@@ -251,11 +267,10 @@ class DropletCamera(QObject):
     def get_latest_frame(self):
         return self.latest_frame
 
-    def capture_non_blocking(self, max_new_frames=6, timeout_s=1):
+    def capture_non_blocking(self, max_new_frames=6, timeout_s=1, *, emit_signal=True):
         """
-        Waits for the MCU ack (briefly), arms detection (time-gated),
-        then the grabber returns the first post-arm frame that crosses threshold,
-        or the brightest of the next few frames.
+        Arms a single attempt. The grabber will complete it and either emit
+        image_captured_signal (if emit_signal=True) or just set _cap_result/_cap_done.
         """
         if not self.camera:
             print("Camera not started.")
@@ -272,6 +287,12 @@ class DropletCamera(QObject):
         if not self._edge_in.event_wait(timeout_s):
             print("Timed out waiting for flash-fired edge.")
             self._trigger_low()
+                    # mark a failure result so wrappers can see it
+            with self._cv:
+                self._cap_active = False
+                self._cap_result = {"arr": None, "md": None, "mean": 0.0,
+                                    "reason": "edge_timeout", "threshold": 0.0, "cap_id": self._cap_id}
+                self._cap_done.set()
             return
         self._edge_in.event_consume()
 
@@ -290,11 +311,93 @@ class DropletCamera(QObject):
             self._cap_seen        = 0
             self._cap_threshold   = threshold
             self._cap_brightest   = None
+            self._emit_on_complete = bool(emit_signal) 
+
+            # clear the completion latch for this attempt
+            self._cap_done.clear()
+            self._cap_result = None
 
             print(f"[Arm] cap_id={self._cap_id} base_mean={base_mean:.1f} "
                   f"base_std={base_std:.1f} threshold={threshold:.1f} "
                   f"arm_ns={arm_ns}")
             
+    def capture_with_retry_sync(
+        self,
+        attempts=3,
+        *,
+        max_new_frames=6,
+        attempt_timeout_s=1,
+        small_sleep_between=0.02,
+    ) -> np.ndarray:
+        """
+        Block until we get a 'threshold' capture or exhaust attempts.
+        Returns the final image (numpy array) on success.
+        Raises RuntimeError on failure.
+        """
+        last_reason = None
+
+        for i in range(attempts):
+            # For each attempt, suppress automatic emission; we'll emit once on success.
+            self.capture_non_blocking(max_new_frames=max_new_frames,
+                                    timeout_s=attempt_timeout_s,
+                                    emit_signal=False)
+
+            # Wait for the grabber to select a frame or report edge timeout.
+            # Allow a tiny grace beyond attempt_timeout_s to cover scheduling jitter.
+            waited = self._cap_done.wait(attempt_timeout_s + 0.2)
+            if not waited:
+                last_reason = "attempt_timeout"
+                print(f"[Retry] attempt {i+1}/{attempts} timed out waiting for completion")
+            else:
+                res = self._cap_result or {}
+                last_reason = res.get("reason", "unknown")
+                print(f"[Retry] attempt {i+1}/{attempts} result reason={last_reason} "
+                    f"mean={res.get('mean')} thr={res.get('threshold')}")
+
+                # success criterion: first frame that *crossed* threshold
+                if last_reason == "threshold" and self.latest_frame is not None:
+                    # emit once here for compatibility with existing slots
+                    self.image_captured_signal.emit()
+                    return self.latest_frame
+
+            # not acceptable → try again unless we’re out of attempts
+            if i < attempts - 1:
+                time.sleep(small_sleep_between)
+
+        # all attempts failed: signal and error
+        msg = f"Flash capture failed after {attempts} attempts (last_reason={last_reason})"
+        self.capture_failed_signal.emit(msg)
+        raise RuntimeError(msg)
+    
+    def capture_with_retry_async(
+        self,
+        attempts=3,
+        *,
+        max_new_frames=6,
+        attempt_timeout_s=1.0,
+        small_sleep_between=0.02,
+    ):
+        """
+        Start a capture with internal retries. On success, emits image_captured_signal once.
+        On failure, emits capture_failed_signal(str). Returns immediately.
+        """
+        def _runner():
+            try:
+                self.capture_with_retry_sync(
+                    attempts=attempts,
+                    max_new_frames=max_new_frames,
+                    attempt_timeout_s=attempt_timeout_s,
+                    small_sleep_between=small_sleep_between,
+                )
+                # success path already emitted image_captured_signal inside sync wrapper
+            except Exception as e:
+                # already emitted capture_failed_signal inside sync wrapper,
+                # but in case of other errors, emit here too
+                self.capture_failed_signal.emit(str(e))
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+
 # class DropletCamera(QObject):
 #     image_captured_signal = Signal()
 #     def __init__(self):
@@ -1533,7 +1636,8 @@ class Machine(QObject):
         return
     
     def capture_droplet_image(self):
-        return self.droplet_camera.capture_non_blocking()
+        # return self.droplet_camera.capture_non_blocking()
+        return self.droplet_camera.capture_with_retry_async(attempts=3, attempt_timeout_s=1)
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
