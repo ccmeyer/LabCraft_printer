@@ -86,6 +86,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
 
 class DropletCamera(QObject):
     image_captured_signal = Signal()
+    capture_failed_signal = Signal(str)  # emits error message on failure
 
     def __init__(self):
         super().__init__()
@@ -302,7 +303,8 @@ class DropletCamera(QObject):
         with self._cv:
             base_mean, base_std = self._baseline_before_ns_locked(arm_ns, N=4)
             threshold = base_mean + self.k_sigma * max(base_std, 1.0) + self.min_delta
-
+            threshold = min(threshold, 150.0)  # cap at 150 for RGB
+            
             self._cap_id         += 1
             self._cap_active      = True
             self._cap_arm_ns      = arm_ns              # <<< time gate starts here

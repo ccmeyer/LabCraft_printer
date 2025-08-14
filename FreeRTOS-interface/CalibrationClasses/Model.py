@@ -977,7 +977,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         self.nozzle_position = None
         self.start_delay = None
-        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 500, 0)
+        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 1000, 0)
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
@@ -997,6 +997,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # Convergence threshold for binary search (if needed).
         self.pressure_threshold = 0.01  # stop when hi-lo <= this
+        self.hysteresis_frac = 0.10
 
         # New variables for two-phase search.
         self.coarse_search = True
