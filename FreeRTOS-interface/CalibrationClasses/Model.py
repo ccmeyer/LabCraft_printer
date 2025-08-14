@@ -366,6 +366,7 @@ class BaseCalibrationProcess(QObject):
         # The state machine will govern the asynchronous flow.
         self.state_machine = QStateMachine(self)
         self.phase_name = None
+        self._active_timers = set()
 
     def start(self):
         """Start the calibration process by starting the state machine."""
@@ -373,6 +374,15 @@ class BaseCalibrationProcess(QObject):
 
     def stop(self):
         """Stop the state machine if needed."""
+        # Cancel all active timers.
+        for t in list(self._active_timers):
+            try:
+                t.stop()
+                t.deleteLater()
+            except Exception:
+                pass
+            finally:
+                self._active_timers.discard(t)
         self.state_machine.stop()
         self.stageChanged.emit("Calibration stopped")
 
@@ -964,7 +974,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         self.nozzle_position = None
         self.start_delay = None
-        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() - 500, 0)
+        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 500, 0)
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
@@ -1182,8 +1192,11 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onSetPressure(self):
         self.stageChanged.emit(f"Setting pressure to {self.candidate_pressure:.2f}")
+        new_flash_delay = max(0, int(self.start_delay + self.start_delay_offset))
+        print(f"New flash delay: {new_flash_delay}")
         settings = {
-            "flash_delay": max(0, int(self.start_delay + self.start_delay_offset)),
+            "flash_delay": new_flash_delay,
+            "num_droplets": 1,
             "print_pressure": self.candidate_pressure,
         }
         print(f"Requesting settings change: {settings}")
