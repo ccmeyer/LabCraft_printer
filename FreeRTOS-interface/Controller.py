@@ -969,13 +969,13 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
-    # def capture_droplet_image(self, callback=None):
-    #     """
-    #     Initiates a non-blocking image capture. If a callback is provided,
-    #     it will be invoked with the captured frame once the capture completes.
-    #     """
-    #     self.pending_capture_callback = callback
-    #     self.machine.capture_droplet_image()
+    def capture_droplet_image(self, callback=None):
+        """
+        Initiates a non-blocking image capture. If a callback is provided,
+        it will be invoked with the captured frame once the capture completes.
+        """
+        # self.pending_capture_callback = callback
+        self.machine.capture_droplet_image()
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
