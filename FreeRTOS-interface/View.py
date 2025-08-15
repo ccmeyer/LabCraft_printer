@@ -3379,13 +3379,13 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self._updating = False
 
         # Reasonable UI limits
-        self._speed_min  = 500       # Hz
-        self._speed_max  = 80000     # Hz
-        self._speed_step = 100       # Hz
+        self._speed_min  = 1000       # Hz
+        self._speed_max  = 100000     # Hz
+        self._speed_step = 1000       # Hz
 
         self._acc_min    = 1000      # steps/s^2
-        self._acc_max    = 100000    # steps/s^2
-        self._acc_step   = 1000      # steps/s^2
+        self._acc_max    = 140000    # steps/s^2
+        self._acc_step   = 10000      # steps/s^2
 
         self._axis_rows = [
             ("X", 0),

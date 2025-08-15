@@ -696,12 +696,12 @@ TAG_MAP = {
     TAG_FLASH_DELAY:  ("Flash_delay", 4, False),
     TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
 
-    TAG_X_MAX_HZ:     ("X_max_hz", 2, False),
-    TAG_Y_MAX_HZ:     ("Y_max_hz", 2, False),
-    TAG_Z_MAX_HZ:     ("Z_max_hz", 2, False),
-    TAG_X_ACCEL:      ("X_accel", 2, False),
-    TAG_Y_ACCEL:      ("Y_accel", 2, False),
-    TAG_Z_ACCEL:      ("Z_accel", 2, False),
+    TAG_X_MAX_HZ:     ("X_max_hz", 4, False),
+    TAG_Y_MAX_HZ:     ("Y_max_hz", 4, False),
+    TAG_Z_MAX_HZ:     ("Z_max_hz", 4, False),
+    TAG_X_ACCEL:      ("X_accel", 4, False),
+    TAG_Y_ACCEL:      ("Y_accel", 4, False),
+    TAG_Z_ACCEL:      ("Z_accel", 4, False),
 
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
     TAG_LAST_CMD:     ("Last_completed", 4, False),
@@ -734,9 +734,9 @@ CMD_MAP = {
     'LED_ON': 0x30,
     'LED_OFF': 0x31,
 
-    'CMD_SET_AXIS_MAXSPEED': 0x40,
-    'CMD_SET_AXIS_ACCEL': 0x41,
-    'CMD_SET_AXIS_PROFILE': 0x42,
+    'SET_AXIS_MAXSPEED': 0x40,
+    'SET_AXIS_ACCEL': 0x41,
+    'SET_AXIS_PROFILE': 0x42,
 
     'WAIT': 0x50,
     'CHANGE_ACCEL': 0x51,
