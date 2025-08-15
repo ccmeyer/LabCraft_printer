@@ -691,8 +691,8 @@ TAG_MAP = {
     TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
 
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
-    TAG_LAST_CMD:     ("Last_completed", 2, False),
-    TAG_CURR_CMD:     ("Current_command", 2, False),
+    TAG_LAST_CMD:     ("Last_completed", 4, False),
+    TAG_CURR_CMD:     ("Current_command", 4, False),
 }
 
 CMD_MAP = {
@@ -982,29 +982,65 @@ class CommandQueue(QObject):
                     command.mark_as_sent()
                     return command
         return None
-
+    
     def update_command_status(self, current_executing_command, last_completed_command):
-        if current_executing_command is None or last_completed_command is None:
-            print('No commands to update')
+        if current_executing_command is None and last_completed_command is None:
             return
-        # Iterate over a copy of the queue.
-        for command in list(self.queue):
-            if command.status == "Sent" and command.command_number == int(current_executing_command):
-                command.mark_as_executing()
-            if command.command_number <= int(last_completed_command):
-                command.mark_as_completed()
 
-        # Now remove completed commands.
+        curr = int(current_executing_command or -1)
+        last = int(last_completed_command  or -1)
+
+        # 1) Complete everything <= last (this is the main truth)
+        for cmd in list(self.queue):
+            if cmd.status in ("Sent", "Executing") and cmd.command_number <= last:
+                cmd.mark_as_completed()
+
+        # 2) Optionally mark one command in (last, curr] as Executing
+        #    (if multiple were executed between status ticks, this might be empty)
+        if curr >= 0 and curr > last:
+            # pick the smallest Sent command > last
+            cand = None
+            for cmd in self.queue:
+                if cmd.status == "Sent" and last < cmd.command_number <= curr:
+                    cand = cmd
+                    break
+            if cand:
+                cand.mark_as_executing()
+
+        # Trim completed
         while self.queue and self.queue[0].status == "Completed":
             completed_command = self.queue.popleft()
             self.completed.append(completed_command)
             if len(self.completed) > 100:
                 self.completed.popleft()
 
-        if len(self.queue) == 0:
+        if not self.queue:
             self.commands_completed.emit()
 
         self.queue_updated.emit()
+
+    # def update_command_status(self, current_executing_command, last_completed_command):
+    #     if current_executing_command is None or last_completed_command is None:
+    #         print('No commands to update')
+    #         return
+    #     # Iterate over a copy of the queue.
+    #     for command in list(self.queue):
+    #         if command.status == "Sent" and command.command_number == int(current_executing_command):
+    #             command.mark_as_executing()
+    #         if command.command_number <= int(last_completed_command):
+    #             command.mark_as_completed()
+
+    #     # Now remove completed commands.
+    #     while self.queue and self.queue[0].status == "Completed":
+    #         completed_command = self.queue.popleft()
+    #         self.completed.append(completed_command)
+    #         if len(self.completed) > 100:
+    #             self.completed.popleft()
+
+    #     if len(self.queue) == 0:
+    #         self.commands_completed.emit()
+
+    #     self.queue_updated.emit()
 
     def clear_queue(self):
         """Clear the command queue."""
