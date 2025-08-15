@@ -3410,7 +3410,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         layout.setHorizontalSpacing(14)
         layout.setVerticalSpacing(10)
 
-        # Optional header row for clarity
+        # Header row
         hdr_axis = QtWidgets.QLabel("Axis")
         hdr_spd  = QtWidgets.QLabel("Max Speed (Hz)")
         hdr_acc  = QtWidgets.QLabel("Acceleration (steps/s²)")
@@ -3422,22 +3422,26 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         layout.addWidget(hdr_spd,  0, 1)
         layout.addWidget(hdr_acc,  0, 2)
 
-        self._speed_boxes: list[QtWidgets.QSpinBox] = []
-        self._accel_boxes: list[QtWidgets.QSpinBox] = []
+        self._speed_boxes = []
+        self._accel_boxes = []
 
         for row_idx, (axis_name, axis_idx) in enumerate(self._axis_rows, start=1):
             # Axis label
             lbl = QtWidgets.QLabel(axis_name)
             layout.addWidget(lbl, row_idx, 0)
 
-            # Speed spinbox + unit
+            # Speed spinbox
             spd = QtWidgets.QSpinBox()
             spd.setRange(self._speed_min, self._speed_max)
             spd.setSingleStep(self._speed_step)
             spd.setAccelerated(True)
             spd.setKeyboardTracking(False)
             spd.setToolTip("Per-axis max step rate (Hz)")
-            # Emit when user finishes editing or clicks arrows
+
+            # Make it not grab keyboard focus so shortcuts keep working
+            spd.setFocusPolicy(QtCore.Qt.NoFocus)
+            spd.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+
             spd.valueChanged.connect(self._mk_speed_handler(axis_idx))
             self._speed_boxes.append(spd)
             layout.addWidget(spd, row_idx, 1)
@@ -3449,14 +3453,27 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             acc.setAccelerated(True)
             acc.setKeyboardTracking(False)
             acc.setToolTip("Per-axis acceleration (steps/s²)")
+
+            # Same focus behavior
+            acc.setFocusPolicy(QtCore.Qt.NoFocus)
+            acc.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+
             acc.valueChanged.connect(self._mk_accel_handler(axis_idx))
             self._accel_boxes.append(acc)
             layout.addWidget(acc, row_idx, 2)
 
+        # Stretch/spacer row so everything stays at the top
+        last_row = len(self._axis_rows) + 1  # header(0) + data rows
+        spacer = QtWidgets.QSpacerItem(
+            0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+        )
+        layout.addItem(spacer, last_row, 0, 1, 3)
+        layout.setRowStretch(last_row, 1)
+
+        # Columns sizing
         layout.setColumnStretch(0, 0)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(2, 1)
-
     # ------------- Model <-> View wiring -------------
 
     def _connect_model_signals(self):
