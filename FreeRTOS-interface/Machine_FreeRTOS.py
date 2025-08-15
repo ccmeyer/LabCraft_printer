@@ -738,6 +738,9 @@ CMD_MAP = {
     'SET_AXIS_ACCEL': 0x41,
     'SET_AXIS_PROFILE': 0x42,
 
+    'HOME_XY' : 0x43,
+	'HOME_PR_BOTH' : 0x44,
+
     'WAIT': 0x50,
     'CHANGE_ACCEL': 0x51,
 
@@ -1628,10 +1631,11 @@ class Machine(QObject):
         if handler == None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
+        self.add_command_to_queue('HOME_XY',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_PR_BOTH',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)# self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        # self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
         return True
     
     def open_gripper_handler(self,additional_handler=None):
