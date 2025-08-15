@@ -60,6 +60,8 @@ class CalibrationManager(QObject):
     captureCompleted = Signal()
     moveCompleted = Signal()
 
+    captureFailed = Signal(str)
+
     position_diff_dict_signal = Signal(dict, dict)
     
     def __init__(self, model, parent=None):
@@ -392,6 +394,81 @@ class BaseCalibrationProcess(QObject):
         """Emit the completion signal."""
         self.calibrationCompleted.emit()
 
+    def _capture_with_policy(
+        self,
+        *,
+        set_attr: str,                # attribute name to store frame (e.g., "background_image")
+        stage_text: str,              # text for Stage display, e.g., "Capturing background image"
+        attempts_total: int = 3,      # total number of tries (first + retries)
+        retry_delay_ms: int = 75,     # delay between tries
+        guard_timeout_ms: int = 10_000,  # hard guard for each try
+        retry_stage_suffix: str = " (retry {i}/{n})",  # appended to stage text on retries
+        on_success: callable | None = None,  # called after setting the attribute (optional)
+        on_final_failure: callable | None = None,  # called after we exhaust attempts (optional)
+        final_error_msg: str = "Image capture failed repeatedly."  # default error if no handler
+    ):
+        """
+        Issue a capture request that will retry if the controller reports failure (frame=None).
+        On success: setattr(self, set_attr, frame) and emit captureCompleted.
+        On final failure: call on_final_failure() or emit calibrationError(final_error_msg).
+        """
+
+        # We track attempts in a small closure state
+        state = {"attempt": 1}  # 1-based for user-friendly messages
+        guard_timer_ref = {"t": None}  # so we can cancel from inner callback
+
+        def _arm_one_attempt():
+            # Stage text (with retry suffix after the first attempt)
+            if state["attempt"] == 1:
+                self.stageChanged.emit(stage_text)
+            else:
+                self.stageChanged.emit(stage_text + retry_stage_suffix.format(
+                    i=state["attempt"], n=attempts_total
+                ))
+
+            # Start a guard timeout for this attempt
+            guard_timer_ref["t"] = self._start_timeout(
+                guard_timeout_ms,
+                err_msg=None,  # we’ll treat it as a normal capture failure below
+                on_timeout=lambda: _on_result(None)  # resolve like a failed capture
+            )
+
+            # Single-shot callback used by the controller
+            def _on_result(frame):
+                # Cancel the guard
+                self._cancel_timeout(guard_timer_ref["t"])
+                guard_timer_ref["t"] = None
+
+                if frame is None:
+                    # Failed this attempt
+                    if state["attempt"] < attempts_total:
+                        state["attempt"] += 1
+                        # Schedule the next try
+                        QTimer.singleShot(retry_delay_ms, _arm_one_attempt)
+                        return
+                    # Final failure
+                    if on_final_failure is not None:
+                        on_final_failure()
+                    else:
+                        self.calibrationError.emit(final_error_msg)
+                    return
+
+                # Success
+                setattr(self, set_attr, frame)
+                if on_success is not None:
+                    try:
+                        on_success(frame)
+                    except Exception:
+                        pass
+                # Inform the state machine we’re done with this capture
+                self.calibration_manager.emitCaptureCompleted()
+
+            # Fire the request (controller will call _on_result with frame or None)
+            self.calibration_manager.captureImageRequested.emit(_on_result)
+
+        # Kick off the first attempt
+        _arm_one_attempt()
+
     # ---------- timeouts ----------
     def _start_timeout(self, msec, *, err_msg=None, on_timeout=None, name=None):
         """
@@ -544,9 +621,21 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureBackground(self):
-        self.stageChanged.emit("Capturing background image")
-        # Request a background capture. Use a calibration process callback to store the image.
-        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing background image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture background image."
+        )
+
+
+    # @Slot()
+    # def onCaptureBackground(self):
+    #     self.stageChanged.emit("Capturing background image")
+    #     # Request a background capture. Use a calibration process callback to store the image.
+    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
 
     @Slot()
     def onPrepareDroplet(self):
@@ -559,14 +648,26 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit("Capturing droplet image")
-        # Start a 10-second guard for capture
-        self._cap_timeout = self._start_timeout(
-            10_000,
-            err_msg="Droplet capture timed out"
+        # Slightly more aggressive retries for flash timing hiccups
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text="Capturing droplet image",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture droplet image."
         )
-        # Request a droplet capture. Use a callback that stores the droplet image.
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit("Capturing droplet image")
+    #     # Start a 10-second guard for capture
+    #     self._cap_timeout = self._start_timeout(
+    #         10_000,
+    #         err_msg="Droplet capture timed out"
+    #     )
+    #     # Request a droplet capture. Use a callback that stores the droplet image.
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
 
     @Slot()
     def onAnalyze(self):
@@ -686,11 +787,26 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.addState(self.state_final)
         self.state_machine.setInitialState(self.state_capture_droplet)
 
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit("Capturing droplet image")
+    #     # Request a capture; when complete, handleDropletCaptured will be called.
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit("Capturing droplet image")
-        # Request a capture; when complete, handleDropletCaptured will be called.
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+        # For emergence, misses can happen; retry a bit more before we bail.
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capturing droplet image",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=(
+                f"Failed to capture droplet"
+                "Try widening exposure or checking flash timing."
+            )
+        )
 
     @Slot()
     def onAnalyze(self):
@@ -764,9 +880,9 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         move_vector = (0, self.direction * self.step_size, 0)
         self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
 
-    def handleDropletCaptured(self, image):
-        self.droplet_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleDropletCaptured(self, image):
+    #     self.droplet_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
     
     def onCalibrationCompleted(self):
         """Emit the completion signal."""
@@ -880,9 +996,20 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureBackground(self):
-        self.stageChanged.emit("Capturing background image")
-        # Capture the background image.
-        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing background image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture background image."
+        )
+
+    # @Slot()
+    # def onCaptureBackground(self):
+    #     self.stageChanged.emit("Capturing background image")
+    #     # Capture the background image.
+    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
 
     @Slot()
     def onSetDelay(self):
@@ -894,10 +1021,25 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit("Capturing droplet image")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit("Capturing droplet image")
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+        # For emergence, misses can happen; retry a bit more before we bail.
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capturing droplet image at {self.candidate_delay} μs",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=(
+                f"Failed to capture droplet at delay={self.candidate_delay} μs. "
+                "Try widening exposure or checking flash timing."
+            )
+        )
 
     @Slot()
     def onAnalyze(self):
@@ -942,13 +1084,13 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Droplet emergence calibration complete")
         self.calibrationCompleted.emit()
 
-    def handleBackgroundCaptured(self, image):
-        self.background_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleBackgroundCaptured(self, image):
+    #     self.background_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
-    def handleDropletCaptured(self, image):
-        self.droplet_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleDropletCaptured(self, image):
+    #     self.droplet_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
     def emitContinueSearch(self):
         # Emit the custom signal to trigger the transition.
@@ -1181,9 +1323,20 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureBackground(self):
-        self.stageChanged.emit("Capturing background image")
-        print("Requesting background capture")
-        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing background image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture background image."
+        )
+
+    # @Slot()
+    # def onCaptureBackground(self):
+    #     self.stageChanged.emit("Capturing background image")
+    #     print("Requesting background capture")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
 
     @Slot()
     def onSetDelay(self):
@@ -1197,11 +1350,22 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         print(f"Requesting settings change: {settings}")
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
+    # @Slot()
+    # def onCaptureNozzle(self):
+    #     self.stageChanged.emit("Capturing nozzle image")
+    #     print("Requesting nozzle capture")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleNozzleCaptured)
+
     @Slot()
     def onCaptureNozzle(self):
-        self.stageChanged.emit("Capturing nozzle image")
-        print("Requesting nozzle capture")
-        self.calibration_manager.captureImageRequested.emit(self.handleNozzleCaptured)
+        self._capture_with_policy(
+            set_attr="nozzle_image",
+            stage_text="Capturing nozzle image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture nozzle image."
+        )
 
     @Slot()
     def onAnalyzeNozzle(self):
@@ -1234,11 +1398,26 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         print(f"Requesting settings change: {settings}")
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit("Capturing droplet image at set pressure")
+    #     print("Requesting droplet capture")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit("Capturing droplet image at set pressure")
-        print("Requesting droplet capture")
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+        # For emergence, misses can happen; retry a bit more before we bail.
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capturing droplet image at {self.candidate_pressure} psi",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=(
+                f"Failed to capture droplet at pressure={self.candidate_pressure} psi. "
+                "Try widening exposure or checking flash timing."
+            )
+        )
 
     def _record_replicate(self, droplet_count: int, nozzle_area):
         """Store one replicate result for the current pressure."""
@@ -1536,17 +1715,17 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
         self.calibrationCompleted.emit()
 
-    def handleBackgroundCaptured(self, image):
-        self.background_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleBackgroundCaptured(self, image):
+    #     self.background_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
-    def handleNozzleCaptured(self, image):
-        self.nozzle_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleNozzleCaptured(self, image):
+    #     self.nozzle_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
-    def handleDropletCaptured(self, image):
-        self.droplet_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleDropletCaptured(self, image):
+    #     self.droplet_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
     def emitNozzleDetected(self):
         self.nozzleDetected.emit()
@@ -1663,14 +1842,26 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         if self.nozzle_center_machine is None or self.background_image is None or self.nozzle_center_image_position is None:
             self.calibrationError.emit("Must complete pressure calibration first")
             return
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit(f"Capturing droplet image {self.image_counter + 1} of {self.num_images}")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+    
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit(f"Capturing droplet image {self.image_counter + 1} of {self.num_images}")
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
-    
-    def handleDropletCaptured(self, image):
-        self.droplet_image = image
-        self.calibration_manager.emitCaptureCompleted()
+        # Slightly more aggressive retries for flash timing hiccups
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capturing droplet image {self.image_counter + 1} of {self.num_images}",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture droplet image."
+        )
+
+    # def handleDropletCaptured(self, image):
+    #     self.droplet_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
     
     @Slot()
     def onAnalyze(self):
@@ -2036,35 +2227,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Must complete previous calibration first")
             return
 
-    # def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance,horizontal_offset=0):
-    #     # Convert nozzle_center from dict of motor positions to array of positions
-    #     nozzle_center = np.array([nozzle_center['X'], nozzle_center['Y'], nozzle_center['Z']])
-        
-    #     # Compute the offset by normalizing the trajectory vector and scaling by desired_distance.
-    #     nozzle = np.array(nozzle_center, dtype=float)
-    #     vec = np.array(trajectory_vector, dtype=float)
-    #     # # Invert the Y axis to match the image coordinates
-    #     # vec[1] = -vec[1]
-    #     norm = np.linalg.norm(vec)
-    #     if norm == 0:
-    #         offset = np.array([0,0,0])
-    #     else:
-    #         offset = (vec / norm) * desired_distance
-    #     print(f"Nozzle: {nozzle}, Type: {type(nozzle)}")
-    #     print(f"Trajectory vector: {vec}, Type: {type(vec)}")
-    #     print(f"Normalized vector: {norm}, Type: {type(norm)}")
-    #     print(f"Offset: {offset}, Type: {type(offset)}")
-
-    #     target = nozzle + offset
-
-    #     # If the Y component is negative add the offset to the Y component
-    #     if vec[1] > 0:
-    #         target[1] -= horizontal_offset
-    #     else:
-    #         target[1] += horizontal_offset
-    #     print(f"Target position: {target}, Type: {type(target)}")
-    #     return tuple(target.astype(int))
-
     def calculate_target_position(self, nozzle_center, trajectory_vector, desired_distance_px, horizontal_offset_steps=0):
         """
         Choose a target point 'desired_distance_px' pixels away from the nozzle
@@ -2141,10 +2303,22 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         settings = {"num_droplets": 0}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
+    # @Slot()
+    # def onCaptureBackground(self):
+    #     self.stageChanged.emit("Capturing background image")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+
     @Slot()
     def onCaptureBackground(self):
-        self.stageChanged.emit("Capturing background image")
-        self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
+        # One line: capture, retry a little, store to self.background_image
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing background image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture background image."
+        )
 
     @Slot()
     def onSetDelay(self):
@@ -2153,10 +2327,25 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         settings = {"flash_delay": self.current_delay, "num_droplets": 1}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
+    # @Slot()
+    # def onCaptureDroplet(self):
+    #     self.stageChanged.emit("Capturing droplet image at set delay")
+    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+
     @Slot()
     def onCaptureDroplet(self):
-        self.stageChanged.emit("Capturing droplet image at set delay")
-        self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+        # For emergence, misses can happen; retry a bit more before we bail.
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capturing droplet image at {self.current_delay} μs",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=(
+                f"Failed to capture droplet at delay={self.current_delay} μs. "
+                "Try widening exposure or checking flash timing."
+            )
+        )
 
     @Slot()
     def onAnalyze(self):
@@ -2374,17 +2563,17 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # cv2.line(final_img, self.nozzle_center, mean_center, (0, 255, 255), 2)
         return final_img        
 
-    def handleBackgroundCaptured(self, image):
-        self.background_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleBackgroundCaptured(self, image):
+    #     self.background_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
-    def handleDropletCaptured(self, image):
-        self.droplet_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleDropletCaptured(self, image):
+    #     self.droplet_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
-    def handleNozzleCaptured(self, image):
-        self.nozzle_image = image
-        self.calibration_manager.emitCaptureCompleted()
+    # def handleNozzleCaptured(self, image):
+    #     self.nozzle_image = image
+    #     self.calibration_manager.emitCaptureCompleted()
 
     def emitContinueSearch(self):
         self.continueSearch.emit()

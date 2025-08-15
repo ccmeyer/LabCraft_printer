@@ -56,6 +56,7 @@ class Controller(QObject):
         self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         try:
             self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+            self.machine.droplet_camera.capture_failed_signal.connect(self._on_capture_failed)
         except AttributeError:
             print("Droplet camera not initialized or image_captured_signal not available.")
     
@@ -968,13 +969,13 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
-    def capture_droplet_image(self, callback=None):
-        """
-        Initiates a non-blocking image capture. If a callback is provided,
-        it will be invoked with the captured frame once the capture completes.
-        """
-        self.pending_capture_callback = callback
-        self.machine.capture_droplet_image()
+    # def capture_droplet_image(self, callback=None):
+    #     """
+    #     Initiates a non-blocking image capture. If a callback is provided,
+    #     it will be invoked with the captured frame once the capture completes.
+    #     """
+    #     self.pending_capture_callback = callback
+    #     self.machine.capture_droplet_image()
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
@@ -1002,8 +1003,15 @@ class Controller(QObject):
         self.model.droplet_camera_model.set_save_directory(directory)      
 
     def handle_capture_request(self, callback):
+            # protect against overlapping requests
+        if self.pending_capture_callback is not None:
+            print("Capture already pending; dropping new request.")
+            return
+        self.pending_capture_callback = callback
+        # Use your defaults or pipe through parameters as needed
         # Start the non-blocking capture process, then invoke the callback with the captured image.
-        self.capture_droplet_image(callback=callback)
+        # self.capture_droplet_image(callback=callback)
+        self.machine.capture_droplet_image()
 
     def handle_move_request(self, move_vector, callback):
         # Perform the move command then call the callback.
@@ -1073,6 +1081,21 @@ class Controller(QObject):
             callback = self.pending_capture_callback
             self.pending_capture_callback = None  # Clear for future captures.
             callback(frame)
+
+    @QtCore.Slot(str)
+    def _on_capture_failed(self, msg: str):
+        print(f"[Camera] capture failed: {msg}")
+        # 1) If a caller is waiting via callback, resolve it with sentinel None
+        if self.pending_capture_callback:
+            cb = self.pending_capture_callback
+            self.pending_capture_callback = None
+            try:
+                cb(None)                # <- sentinel for failure
+            except Exception as e:
+                # If some callback signature changed, at least fail loudly
+                print(f"Callback raised after capture failure: {e}")
+        # 2) Also notify the calibration layer (optional, but handy for QState transitions)
+        self.model.calibration_manager.captureFailed.emit(msg)
 
     def start_nozzle_calibration(self):
         # Tell the Model to start the nozzle position calibration.
