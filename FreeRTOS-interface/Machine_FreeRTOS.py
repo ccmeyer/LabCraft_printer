@@ -373,11 +373,11 @@ class DropletCamera(QObject):
     
     def capture_with_retry_async(
         self,
-        attempts=3,
+        attempts=5,
         *,
-        max_new_frames=6,
+        max_new_frames=10,
         attempt_timeout_s=1.0,
-        small_sleep_between=0.02,
+        small_sleep_between=0.05,
     ):
         """
         Start a capture with internal retries. On success, emits image_captured_signal once.
@@ -399,184 +399,6 @@ class DropletCamera(QObject):
 
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
-
-# class DropletCamera(QObject):
-#     image_captured_signal = Signal()
-#     def __init__(self):
-#         super().__init__()
-#         self.signal_pin = 17
-#         self.camera = None
-#         self.chip = gpiod.Chip("gpiochip4")
-#         self.line = self.chip.get_line(self.signal_pin)
-#         self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
-#         self.line.set_value(0)
-
-#         self.exposure_time = 200000
-#         self.latest_frame = None
-
-#         # We’ll store the “job” IDs returned by PiCamera2’s non-blocking calls
-#         self.current_job = None
-
-#         # Timers for half-exposure steps
-#         self.timer_half = QtCore.QTimer()
-#         self.timer_half.setSingleShot(True)
-#         self.timer_half.timeout.connect(self._on_half_exposure_timeout)
-
-#         self.timer_second_half = QtCore.QTimer()
-#         self.timer_second_half.setSingleShot(True)
-#         self.timer_second_half.timeout.connect(self._on_second_half_timeout)
-
-#     def get_latest_frame(self):
-#         return self.latest_frame
-    
-#     def start_flash(self):
-#         self.line.set_value(1)
-
-#     def stop_flash(self):
-#         self.line.set_value(0)
-
-#     def start_camera(self):
-#         self.camera = Picamera2(1)
-#         print(f'--- Modes:{self.camera.sensor_modes}')
-#         print(f'--- Resolution:{self.camera.sensor_resolution}')
-#         self.configure_camera()
-#         self.camera.start()
-
-#     def configure_camera(self):
-#         # Create a "video" configuration to stream frames continuously
-#         video_config = self.camera.create_still_configuration(
-#             main={
-#                 "size": self.camera.sensor_resolution,
-#                 "format": "RGB888",
-#             }
-#         )
-#         self.camera.configure(video_config)
-
-#         # Force a fixed 200 ms exposure
-#         self.camera.set_controls({
-#             "FrameDurationLimits": (200_000, 200_000),  # 200 ms frame time
-#             "ExposureTime": 200_000,
-#             "AeEnable": False,
-#             "AwbEnable": False,
-#             "AnalogueGain": 1.0,
-#         })
-    
-#     def change_exposure_time(self, exposure_time, handler=None):
-#         """
-#         Adjusts the fixed exposure time on the fly.
-#         """
-#         if not self.camera:
-#             return
-#         self.camera.stop()
-#         self.camera.set_controls({
-#             "FrameDurationLimits": (exposure_time, exposure_time),
-#             "ExposureTime": exposure_time,
-#             "AeEnable": False,
-#             "AwbEnable": False
-#         })
-#         self.camera.start()
-#         print(f"--Camera changed: Exp {exposure_time} us")
-#         if handler is not None:
-#             handler()
-
-#     def stop_camera(self):
-#         if self.camera:
-#             self.camera.stop()
-#             self.camera.close()
-#             self.camera = None
-
-#     @QtCore.Slot(int)
-#     def _schedule_half_timer(self, half_ms):
-#         """
-#         This slot is guaranteed to run in the main thread (our droplet camera's thread).
-#         We start the QTimer here.
-#         """
-#         self.timer_half.start(half_ms)
-
-#     def _skip_frame(self):
-#         """
-#         Request 1 frame from the pipeline in a non-blocking manner,
-#         so we know exactly when the next frame starts.
-#         """
-#         # We supply a non-blocking "signal_function":
-#         self.current_job = self.camera.capture_request(signal_function=self._on_skip_frame_done)
-
-#     def _on_skip_frame_done(self, job):
-#         """
-#         Called when the skip-frame request completes, meaning a new 200ms exposure
-#         is just starting in the pipeline.
-#         """
-#         request = self.camera.wait(job)
-#         if request:
-#             request.release()  # discard the skip frame
-
-#         # Now we wait half the exposure time (100 ms) before setting the GPIO high
-#         half_ms = int(self.exposure_time * 2 / 5 / 1000)  # 200_000 us => 100 ms
-        
-#         # Queue a call to _schedule_half_timer(...) in the main thread
-#         QtCore.QMetaObject.invokeMethod(
-#             self, 
-#             "_schedule_half_timer",           # method name
-#             QtCore.Qt.QueuedConnection,       # ensures it runs in self's thread
-#             QtCore.Q_ARG(int, half_ms)        # pass the half_ms parameter
-#         )
-    
-
-#     def _on_half_exposure_timeout(self):
-#         """
-#         Called ~halfway (100 ms) into the current 200 ms frame.
-#         Set the GPIO line high so the flash board knows to flash (once).
-#         """
-#         self.start_flash()
-
-#         # Schedule the second half
-#         half_ms = int(self.exposure_time * 3 / 5 / 1000)
-#         lead_ms = 10  # capture 10 ms before the end of the exposure 
-#         self.timer_second_half.start(half_ms - lead_ms)
-
-#     def _on_second_half_timeout(self):
-#         """
-#         Called after the second 100 ms, meaning the frame that had the flash
-#         should now be finishing. We can capture that frame in a non-blocking manner.
-#         """
-#         # Next request should contain the lit frame
-#         self.current_job = self.camera.capture_request(signal_function=self._on_flash_frame_captured)
-
-#     def _on_flash_frame_captured(self, job):
-#         """
-#         Called when the flash frame request completes. We retrieve the frame,
-#         set the GPIO line low so the board can re-arm for future flashes, and emit.
-#         """
-#         request = self.camera.wait(job)
-#         if request:
-#             self.latest_frame = request.make_array("main")
-#             self.latest_frame = cv2.rotate(self.latest_frame, cv2.ROTATE_90_CLOCKWISE)
-
-#             md = request.get_metadata()  # or req.metadata
-#             print("Actual exposure used:", md["ExposureTime"])
-#             print("Actual frame duration:", md["FrameDuration"])
-#             request.release()
-#         else:
-#             print("--- Failed to capture frame.")
-#             frame = None
-
-#         # Now we can set GPIO low to re-arm the board
-#         self.stop_flash()
-
-#         # Emit the signal with the new frame
-#         self.image_captured_signal.emit()
-
-#     def capture_non_blocking(self):
-#         """
-#         Public method to start the “mid-exposure flash capture” process.
-#         1) skip a frame
-#         2) half exposure => set GPIO high
-#         3) second half => capture request => set GPIO low => emit
-#         """
-#         if not self.camera:
-#             print("Camera not started.")
-#             return
-#         self._skip_frame()
 
 class RefuelCamera(QObject):
     def __init__(self):
@@ -1632,10 +1454,8 @@ class Machine(QObject):
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_XY',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_PR_BOTH',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)# self.add_command_to_queue('HOME_X',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_Y',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_PRINT',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        # self.add_command_to_queue('HOME_REFUEL',10000,1000,1000,handler=handler,kwargs=kwargs, manual=manual)
+        self.add_command_to_queue('HOME_PR_BOTH',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+
         return True
     
     def open_gripper_handler(self,additional_handler=None):
@@ -1708,7 +1528,7 @@ class Machine(QObject):
     
     def capture_droplet_image(self):
         # return self.droplet_camera.capture_non_blocking()
-        return self.droplet_camera.capture_with_retry_async(attempts=3, attempt_timeout_s=1)
+        return self.droplet_camera.capture_with_retry_async(attempts=5, attempt_timeout_s=1)
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
