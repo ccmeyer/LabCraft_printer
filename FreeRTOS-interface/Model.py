@@ -5926,6 +5926,8 @@ class MachineModel(QObject):
     ports_updated = Signal(list)  # Signal to notify view of available ports update
     connection_requested = Signal(str, str)  # Signal to request connection
     gripper_state_changed = Signal(bool)  # Signal to notify when gripper state changes
+    speeds_changed = Signal(int,int,int)  # Signal to notify when speeds change
+    accelerations_changed = Signal(int,int,int)
     machine_paused = Signal()  # Signal to notify when machine is paused
     home_status_signal = Signal()
     command_numbers_updated = Signal()
@@ -5950,6 +5952,14 @@ class MachineModel(QObject):
         self.current_z = 0
         self.current_p = 0
         self.current_r = 0
+
+        self.x_max_hz = 0
+        self.y_max_hz = 0
+        self.z_max_hz = 0
+
+        self.x_accel = 0
+        self.y_accel = 0
+        self.z_accel = 0
 
         self.motors_homed = False
         self.current_location = "Unknown"
@@ -6163,6 +6173,24 @@ class MachineModel(QObject):
         self.refuel_pressure_readings[-1] = converted_pressure
         self.pressure_updated.emit()
 
+    def update_all_speeds(self, x, y, z):
+        self.x_max_hz = x
+        self.y_max_hz = y
+        self.z_max_hz = z
+        self.speeds_changed.emit(self.x_max_hz, self.y_max_hz, self.z_max_hz)
+
+    def update_all_accelerations(self, x, y, z):
+        self.x_accel = x
+        self.y_accel = y
+        self.z_accel = z
+        self.accelerations_changed.emit(self.x_accel, self.y_accel, self.z_accel)
+
+    def get_current_speeds(self):
+        return self.x_max_hz, self.y_max_hz, self.z_max_hz
+
+    def get_current_accelerations(self):
+        return self.x_accel, self.y_accel, self.z_accel
+
     def get_print_pressure_readings(self):
         return self.print_pressure_readings
     
@@ -6371,6 +6399,10 @@ class Model(QObject):
             self.droplet_camera_model.update_flash_delay(status_dict['Flash_delay'])
         if 'Flash_droplets' in status_keys:
             self.droplet_camera_model.update_num_droplets(status_dict['Flash_droplets'])
+        if 'X_max_hz' in status_keys:
+            self.machine_model.update_all_speeds(status_dict['X_max_hz'], status_dict['Y_max_hz'], status_dict['Z_max_hz'])
+        if 'X_accel' in status_keys:
+            self.machine_model.update_all_accelerations(status_dict['X_accel'], status_dict['Y_accel'], status_dict['Z_accel'])
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))

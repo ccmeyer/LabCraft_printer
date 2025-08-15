@@ -85,6 +85,14 @@ class Controller(QObject):
         """Update the volume in the view."""
         self.update_volumes_in_view_signal.emit()
 
+    def set_axis_maxspeed(self, axis_idx, max_speed):
+        """Set the maximum speed for a specific axis."""
+        self.machine.set_axis_maxspeed(axis_idx, max_speed)
+
+    def set_axis_accel(self, axis_idx, accel):
+        """Set the acceleration for a specific axis."""
+        self.machine.set_axis_accel(axis_idx, accel)
+
     def reset_board(self):
         """Reset the machine board."""
         self.machine.reset_board()

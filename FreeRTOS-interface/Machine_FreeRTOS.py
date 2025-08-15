@@ -659,6 +659,12 @@ TAG_FLASH_NUM	   = 0x60
 TAG_FLASH_WIDTH   = 0x61
 TAG_FLASH_DELAY   = 0x62
 TAG_FLASH_DROPS   = 0x63
+TAG_X_MAX_HZ      = 0x70
+TAG_Y_MAX_HZ      = 0x71
+TAG_Z_MAX_HZ      = 0x72
+TAG_X_ACCEL       = 0x73
+TAG_Y_ACCEL       = 0x74
+TAG_Z_ACCEL       = 0x75
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -689,6 +695,13 @@ TAG_MAP = {
     TAG_FLASH_WIDTH:  ("Flash_width", 4, False),
     TAG_FLASH_DELAY:  ("Flash_delay", 4, False),
     TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
+
+    TAG_X_MAX_HZ:     ("X_max_hz", 2, False),
+    TAG_Y_MAX_HZ:     ("Y_max_hz", 2, False),
+    TAG_Z_MAX_HZ:     ("Z_max_hz", 2, False),
+    TAG_X_ACCEL:      ("X_accel", 2, False),
+    TAG_Y_ACCEL:      ("Y_accel", 2, False),
+    TAG_Z_ACCEL:      ("Z_accel", 2, False),
 
     TAG_CMD_DEPTH:    ("cmd_depth",  4, False),
     TAG_LAST_CMD:     ("Last_completed", 4, False),
@@ -721,9 +734,9 @@ CMD_MAP = {
     'LED_ON': 0x30,
     'LED_OFF': 0x31,
 
-    'SET_DELAY_F': 0x40,
-    'SET_WIDTH_F': 0x41,
-    'SET_IMAGE_DROPLETS': 0x42,
+    'CMD_SET_AXIS_MAXSPEED': 0x40,
+    'CMD_SET_AXIS_ACCEL': 0x41,
+    'CMD_SET_AXIS_PROFILE': 0x42,
 
     'WAIT': 0x50,
     'CHANGE_ACCEL': 0x51,
@@ -1453,7 +1466,13 @@ class Machine(QObject):
         outcome = self.add_command_to_queue('DISABLE_MOTORS',0,0,0,handler=handler,kwargs=kwargs, manual=manual)
         self.add_command_to_queue('GRIPPER_OFF',0,0,0)
         return outcome
-    
+
+    def set_axis_maxspeed(self, axis_idx, max_speed):
+        return self.add_command_to_queue('SET_AXIS_MAXSPEED', axis_idx, max_speed, 0)
+
+    def set_axis_accel(self, axis_idx, accel):
+        return self.add_command_to_queue('SET_AXIS_ACCEL', axis_idx, accel, 0)
+
     def change_acceleration(self,acceleration,handler=None,kwargs=None,manual=False):
         if self.check_param_limits(acceleration,1,50000):
             return self.add_command_to_queue('CHANGE_ACCEL',acceleration,0,0,handler=handler,kwargs=kwargs,manual=manual)

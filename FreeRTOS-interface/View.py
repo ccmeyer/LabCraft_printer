@@ -21,6 +21,8 @@ import cv2
 from utilities import ShortcutManager
 import CalibrationClasses
 import importlib
+from typing import Mapping, Sequence, Optional, Any
+
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -139,6 +141,10 @@ class MainWindow(QMainWindow):
         self.movement_box = MovementBox(self, self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         tab_widget.addTab(self.movement_box, "MOVEMENT")
+
+        self.speed_profiles_tab = SpeedProfilesTab(self, self.model, self.controller, self.color_dict)
+        self.speed_profiles_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        tab_widget.addTab(self.speed_profiles_tab, "Speed Profiles")
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
@@ -3348,6 +3354,233 @@ class SimplePositionWidget(QGroupBox):
         """Update the model's step size when the spin box value changes."""
         new_step_size = int(self.step_size_input.value())
         self.model.machine_model.set_step_size(new_step_size)
+
+class SpeedProfilesTab(QtWidgets.QWidget):
+    """
+    A mid-panel tab showing per-axis max speed and acceleration.
+    - Rows: X, Y, Z
+    - Columns: Axis | Max Speed (Hz) | Acceleration (steps/s^2)
+
+    Signals:
+        set_axis_maxspeed(axis_index:int, max_hz:int)
+        set_axis_accel(axis_index:int, accel_sps2:int)
+    """
+    set_axis_maxspeed = QtCore.Signal(int, int)
+    set_axis_accel    = QtCore.Signal(int, int)
+
+    def __init__(self, parent, model, controller, color_dict):
+        super().__init__(parent)
+        self.model = model
+        self.controller = controller
+        self.color_dict = color_dict
+        self.setObjectName("SpeedProfilesTab")
+
+        # Prevent feedback loops when we update widgets from model signals
+        self._updating = False
+
+        # Reasonable UI limits
+        self._speed_min  = 500       # Hz
+        self._speed_max  = 80000     # Hz
+        self._speed_step = 100       # Hz
+
+        self._acc_min    = 1000      # steps/s^2
+        self._acc_max    = 100000    # steps/s^2
+        self._acc_step   = 1000      # steps/s^2
+
+        self._axis_rows = [
+            ("X", 0),
+            ("Y", 1),
+            ("Z", 2),
+        ]
+
+        self._build_ui()
+        self._connect_model_signals()
+
+        # Background to match the rest of the mid-panel
+        self.setStyleSheet(f"QWidget#SpeedProfilesTab {{ background-color: {self.color_dict['darker_gray']}; }}")
+
+        # If the model already has values, try to show them once at startup
+        self._pull_initial_values_if_available()
+
+    # ---------------- UI ----------------
+
+    def _build_ui(self):
+        layout = QtWidgets.QGridLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setHorizontalSpacing(14)
+        layout.setVerticalSpacing(10)
+
+        # Optional header row for clarity
+        hdr_axis = QtWidgets.QLabel("Axis")
+        hdr_spd  = QtWidgets.QLabel("Max Speed (Hz)")
+        hdr_acc  = QtWidgets.QLabel("Acceleration (steps/s²)")
+        font = hdr_axis.font()
+        font.setBold(True)
+        hdr_axis.setFont(font); hdr_spd.setFont(font); hdr_acc.setFont(font)
+
+        layout.addWidget(hdr_axis, 0, 0)
+        layout.addWidget(hdr_spd,  0, 1)
+        layout.addWidget(hdr_acc,  0, 2)
+
+        self._speed_boxes: list[QtWidgets.QSpinBox] = []
+        self._accel_boxes: list[QtWidgets.QSpinBox] = []
+
+        for row_idx, (axis_name, axis_idx) in enumerate(self._axis_rows, start=1):
+            # Axis label
+            lbl = QtWidgets.QLabel(axis_name)
+            layout.addWidget(lbl, row_idx, 0)
+
+            # Speed spinbox + unit
+            spd = QtWidgets.QSpinBox()
+            spd.setRange(self._speed_min, self._speed_max)
+            spd.setSingleStep(self._speed_step)
+            spd.setAccelerated(True)
+            spd.setKeyboardTracking(False)
+            spd.setToolTip("Per-axis max step rate (Hz)")
+            # Emit when user finishes editing or clicks arrows
+            spd.valueChanged.connect(self._mk_speed_handler(axis_idx))
+            self._speed_boxes.append(spd)
+            layout.addWidget(spd, row_idx, 1)
+
+            # Accel spinbox
+            acc = QtWidgets.QSpinBox()
+            acc.setRange(self._acc_min, self._acc_max)
+            acc.setSingleStep(self._acc_step)
+            acc.setAccelerated(True)
+            acc.setKeyboardTracking(False)
+            acc.setToolTip("Per-axis acceleration (steps/s²)")
+            acc.valueChanged.connect(self._mk_accel_handler(axis_idx))
+            self._accel_boxes.append(acc)
+            layout.addWidget(acc, row_idx, 2)
+
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(2, 1)
+
+    # ------------- Model <-> View wiring -------------
+
+    def _connect_model_signals(self):
+        # These signals should carry speeds or accels for all three axes
+        # Accept tuple/list order [X,Y,Z] or dicts like {"x":..,"y":..,"z":..}
+        if hasattr(self.model.machine_model, "speeds_changed"):
+            self.model.machine_model.speeds_changed.connect(self.on_speeds_changed)
+        if hasattr(self.model.machine_model, "accelerations_changed"):
+            self.model.machine_model.accelerations_changed.connect(self.on_accels_changed)
+        
+        self.set_axis_maxspeed.connect(self.controller.set_axis_maxspeed)
+        self.set_axis_accel.connect(self.controller.set_axis_accel)
+
+    def _pull_initial_values_if_available(self):
+        """If the model already exposes current values, reflect them at startup."""
+        # We intentionally don't fail if these attributes/methods don't exist.
+        speeds = getattr(self.model.machine_model, "current_speeds", None)
+        if speeds is None:
+            get_speeds = getattr(self.model.machine_model, "get_current_speeds", None)
+            if callable(get_speeds):
+                speeds = get_speeds()
+        if speeds is not None:
+            self.on_speeds_changed(speeds)
+
+        accels = getattr(self.model, "current_accelerations", None)
+        if accels is None:
+            get_accels = getattr(self.model, "get_current_accelerations", None)
+            if callable(get_accels):
+                accels = get_accels()
+        if accels is not None:
+            self.on_accels_changed(accels)
+
+    # ---------------- Slots ----------------
+
+    @QtCore.Slot(object)
+    def on_speeds_changed(self, speeds: Any):
+        """Update spin boxes from a model signal carrying X/Y/Z speeds."""
+        # vals = self._extract_xyz(speeds)
+        vals = self.model.machine_model.get_current_speeds()
+        if vals is None:
+            return
+        x, y, z = vals
+        self._updating = True
+        try:
+            for idx, val in enumerate((x, y, z)):
+                box = self._speed_boxes[idx]
+                # Clamp to UI limits so the control always accepts it
+                box.setValue(int(max(self._speed_min, min(self._speed_max, int(val)))))
+        finally:
+            self._updating = False
+
+    @QtCore.Slot(object)
+    def on_accels_changed(self, accels: Any):
+        """Update spin boxes from a model signal carrying X/Y/Z accelerations."""
+        # vals = self._extract_xyz(accels)
+        vals = self.model.machine_model.get_current_accelerations()
+        if vals is None:
+            return
+        x, y, z = vals
+        self._updating = True
+        try:
+            for idx, val in enumerate((x, y, z)):
+                box = self._accel_boxes[idx]
+                box.setValue(int(max(self._acc_min, min(self._acc_max, int(val)))))
+        finally:
+            self._updating = False
+
+    # ---------------- Emitters ----------------
+
+    def _mk_speed_handler(self, axis_idx: int):
+        def _handler(value: int):
+            if self._updating:
+                return
+            self.set_axis_maxspeed.emit(axis_idx, int(value))
+        return _handler
+
+    def _mk_accel_handler(self, axis_idx: int):
+        def _handler(value: int):
+            if self._updating:
+                return
+            self.set_axis_accel.emit(axis_idx, int(value))
+        return _handler
+
+    # ---------------- Helpers ----------------
+
+    @staticmethod
+    def _extract_xyz(payload: Any) -> Optional[tuple[int, int, int]]:
+        """
+        Accepts:
+          - Sequence/tuple/list like [x, y, z]
+          - Mapping/dict with keys 'x','y','z' (case-insensitive)
+          - Mapping/dict with 0,1,2
+        Returns (x,y,z) or None.
+        """
+        if payload is None:
+            return None
+
+        # Sequence
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+            if len(payload) >= 3:
+                try:
+                    return int(payload[0]), int(payload[1]), int(payload[2])
+                except Exception:
+                    return None
+
+        # Mapping
+        if isinstance(payload, Mapping):
+            # common lowercase keys
+            keys = {k.lower(): k for k in payload.keys()}
+            def _get(k, fallback=None):
+                if k in keys:
+                    return payload[keys[k]]
+                return fallback
+            try:
+                x = _get('x', payload.get(0))
+                y = _get('y', payload.get(1))
+                z = _get('z', payload.get(2))
+                if x is None or y is None or z is None:
+                    return None
+                return int(x), int(y), int(z)
+            except Exception:
+                return None
+
+        return None
 
 class BaseCalibrationDialog(QDialog):
     def __init__(self, main_window, model, controller, title, steps, name_dict,offsets):
