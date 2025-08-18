@@ -1579,6 +1579,12 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         if acceptable:
             self.last_acceptable_pressure = self.candidate_pressure
 
+        # SNAPSHOTS for anti-oscillation logic
+        prev_outcome  = self._last_outcome
+        prev_pressure = self._last_pressure
+        tested_pressure = self.candidate_pressure  # the pressure we just evaluated
+        print(f"\n\n[P-Cal] - new measurement: P={tested_pressure:.3f}, count={agg_count}, area={agg_area}")
+
         # --------- Anti-oscillation guard (BRACKET only) ----------
         # If we flip across the boundary in back-to-back steps (TOO_LOW ↔ NEAR/TOO_HIGH),
         # stop coarse stepping and enter REFINE immediately with those two points.
@@ -1587,12 +1593,12 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             flipped_highish_to_low = (self._last_outcome in ("NEAR", "TOO_HIGH") and outcome == "TOO_LOW")
             if flipped_low_to_highish or flipped_highish_to_low:
                 lo = self.last_too_low_pressure if self.last_too_low_pressure is not None else (
-                    min(self._last_pressure, self.candidate_pressure))
-                hi = max(self._last_pressure, self.candidate_pressure)
+                    min(prev_pressure, tested_pressure))
+                hi = max(prev_pressure, tested_pressure)
                 self._switch_to_refine(lo, hi)
                 # update "last" bookkeeping and return
                 self._last_outcome  = outcome
-                self._last_pressure = self.candidate_pressure
+                self._last_pressure = tested_pressure
                 if self.counter >= self.max_iterations:
                     self.calibrationError.emit("Pressure search did not converge (anti-oscillation)")
                 return
@@ -1600,24 +1606,24 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         # -------------------- Phase 1: BRACKET --------------------
         if self.phase == "bracket":
             if outcome == "TOO_LOW":
-                self.last_too_low_pressure = self.candidate_pressure
+                self.last_too_low_pressure = tested_pressure
                 step = self._adaptive_step(outcome, agg_area)
-                self.candidate_pressure = self._clamp(self.candidate_pressure + step)
+                self.candidate_pressure = self._clamp(tested_pressure + step)
                 print(f"[P-Cal] TOO_LOW → +{step:.3f} → {self.candidate_pressure:.3f}")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
                     self.calibrationError.emit("Pressure search did not converge (too low region)")
                 self._last_outcome  = outcome
-                self._last_pressure = self.candidate_pressure
+                self._last_pressure = tested_pressure
                 return
 
             if acceptable:
                 # keep the *highest acceptable* as lo; continue stepping up, but adaptively
-                if (self.bracket_lo is None) or (self.candidate_pressure > self.bracket_lo):
-                    self.bracket_lo = self.candidate_pressure
+                if (self.bracket_lo is None) or (tested_pressure > self.bracket_lo):
+                    self.bracket_lo = tested_pressure
                 step = self._adaptive_step(outcome, agg_area)
-                self.candidate_pressure = self._clamp(self.candidate_pressure + step)
+                self.candidate_pressure = self._clamp(tested_pressure + step)
                 print(f"[P-Cal] {outcome} → +{step:.3f} → {self.candidate_pressure:.3f} (lo={self.bracket_lo:.3f})")
                 self.emitContinueSearch()
                 self.counter += 1
@@ -1628,21 +1634,21 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                 return
 
             # outcome == NEAR or TOO_HIGH → we’re at/above the upper boundary
-            self.bracket_hi = self.candidate_pressure
+            self.bracket_hi = tested_pressure
             if self.bracket_lo is None:
                 # No acceptable yet: if we have a recorded TOO_LOW, use it; otherwise step down adaptively.
                 if self.last_too_low_pressure is not None:
                     self._switch_to_refine(self.last_too_low_pressure, self.bracket_hi)
                 else:
                     step = self._adaptive_step(outcome, agg_area)
-                    self.candidate_pressure = self._clamp(self.candidate_pressure - step)
+                    self.candidate_pressure = self._clamp(tested_pressure - step)
                     print(f"[P-Cal] {outcome} (no lo yet) → -{step:.3f} → {self.candidate_pressure:.3f}")
                     self.emitContinueSearch()
                     self.counter += 1
                     if self.counter >= self.max_iterations:
                         self.calibrationError.emit("Pressure search did not converge (no acceptable found)")
                 self._last_outcome  = outcome
-                self._last_pressure = self.candidate_pressure
+                self._last_pressure = tested_pressure
                 return
 
             # We have both lo and hi → enter REFINE right away.
@@ -1655,18 +1661,16 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # -------------------- Phase 2: REFINE (bisection to highest acceptable) --------------------
         if self.phase == "refine":
-            if outcome in ("ACCEPTABLE", "BORDERLINE"):
-                # acceptable → move lower bound up to this candidate
-                self.bracket_lo = (self.candidate_pressure if self.bracket_lo is None
-                                else max(self.bracket_lo, self.candidate_pressure))
-            elif outcome == "TOO_LOW":
-                # too low → also move lower bound up (we are below the boundary)
-                self.bracket_lo = (self.candidate_pressure if self.bracket_lo is None
-                                else max(self.bracket_lo, self.candidate_pressure))
+            if outcome in ("ACCEPTABLE", "BORDERLINE", "TOO_LOW"):
+                # too low or acceptable → move lower bound up (we are below/at boundary)
+                self.bracket_lo = (tested_pressure if self.bracket_lo is None
+                                   else max(self.bracket_lo, tested_pressure))
+                print(f"[P-Cal] REFINE: lo={self.bracket_lo:.3f}")
             else:
                 # NEAR or TOO_HIGH → move upper bound down
-                self.bracket_hi = (self.candidate_pressure if self.bracket_hi is None
-                                else min(self.bracket_hi, self.candidate_pressure))
+                self.bracket_hi = (tested_pressure if self.bracket_hi is None
+                                   else min(self.bracket_hi, tested_pressure))
+                print(f"[P-Cal] REFINE: hi={self.bracket_hi:.3f}")
             # if acceptable:
             #     self.bracket_lo = max(self.bracket_lo, self.candidate_pressure) if self.bracket_lo is not None else self.candidate_pressure
             # else:
@@ -1711,12 +1715,12 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                     # else:
                     #     self.calibrationError.emit("Pressure search did not converge (refine phase)")
                 self._last_outcome  = outcome
-                self._last_pressure = self.candidate_pressure
+                self._last_pressure = tested_pressure
                 return
 
         # Bookkeeping if we somehow fell through
         self._last_outcome  = outcome
-        self._last_pressure = self.candidate_pressure
+        self._last_pressure = tested_pressure
 
     @Slot()
     def onCalibrationCompleted(self):
