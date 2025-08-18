@@ -1454,7 +1454,7 @@ class Machine(QObject):
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_XY',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
-        self.add_command_to_queue('HOME_PR_BOTH',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
+        self.add_command_to_queue('HOME_PR_BOTH',10000,1000,1000,handler=handler,kwargs=kwargs,manual=manual)
 
         return True
     

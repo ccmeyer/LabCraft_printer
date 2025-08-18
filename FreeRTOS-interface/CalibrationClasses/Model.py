@@ -403,8 +403,8 @@ class BaseCalibrationProcess(QObject):
         retry_delay_ms: int = 75,     # delay between tries
         guard_timeout_ms: int = 10_000,  # hard guard for each try
         retry_stage_suffix: str = " (retry {i}/{n})",  # appended to stage text on retries
-        on_success: callable | None = None,  # called after setting the attribute (optional)
-        on_final_failure: callable | None = None,  # called after we exhaust attempts (optional)
+        on_success = None,  # called after setting the attribute (optional)
+        on_final_failure = None,  # called after we exhaust attempts (optional)
         final_error_msg: str = "Image capture failed repeatedly."  # default error if no handler
     ):
         """
