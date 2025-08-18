@@ -1332,12 +1332,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             final_error_msg="Failed to capture background image."
         )
 
-    # @Slot()
-    # def onCaptureBackground(self):
-    #     self.stageChanged.emit("Capturing background image")
-    #     print("Requesting background capture")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
-
     @Slot()
     def onSetDelay(self):
         self.stageChanged.emit("Setting flash delay to start time")
@@ -1349,12 +1343,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         settings = {"flash_delay": self.start_delay, "num_droplets": 1}
         print(f"Requesting settings change: {settings}")
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-
-    # @Slot()
-    # def onCaptureNozzle(self):
-    #     self.stageChanged.emit("Capturing nozzle image")
-    #     print("Requesting nozzle capture")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleNozzleCaptured)
 
     @Slot()
     def onCaptureNozzle(self):
@@ -1397,12 +1385,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         
         print(f"Requesting settings change: {settings}")
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-
-    # @Slot()
-    # def onCaptureDroplet(self):
-    #     self.stageChanged.emit("Capturing droplet image at set pressure")
-    #     print("Requesting droplet capture")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
 
     @Slot()
     def onCaptureDroplet(self):
@@ -1594,6 +1576,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         acceptable = (outcome in ("ACCEPTABLE", "BORDERLINE"))
         one_drop   = (outcome in ("ACCEPTABLE", "BORDERLINE", "NEAR"))
 
+        if acceptable:
+            self.last_acceptable_pressure = self.candidate_pressure
+
         # --------- Anti-oscillation guard (BRACKET only) ----------
         # If we flip across the boundary in back-to-back steps (TOO_LOW ↔ NEAR/TOO_HIGH),
         # stop coarse stepping and enter REFINE immediately with those two points.
@@ -1670,15 +1655,32 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # -------------------- Phase 2: REFINE (bisection to highest acceptable) --------------------
         if self.phase == "refine":
-            if acceptable:
-                self.bracket_lo = max(self.bracket_lo, self.candidate_pressure) if self.bracket_lo is not None else self.candidate_pressure
+            if outcome in ("ACCEPTABLE", "BORDERLINE"):
+                # acceptable → move lower bound up to this candidate
+                self.bracket_lo = (self.candidate_pressure if self.bracket_lo is None
+                                else max(self.bracket_lo, self.candidate_pressure))
+            elif outcome == "TOO_LOW":
+                # too low → also move lower bound up (we are below the boundary)
+                self.bracket_lo = (self.candidate_pressure if self.bracket_lo is None
+                                else max(self.bracket_lo, self.candidate_pressure))
             else:
-                self.bracket_hi = min(self.bracket_hi, self.candidate_pressure) if self.bracket_hi is not None else self.candidate_pressure
+                # NEAR or TOO_HIGH → move upper bound down
+                self.bracket_hi = (self.candidate_pressure if self.bracket_hi is None
+                                else min(self.bracket_hi, self.candidate_pressure))
+            # if acceptable:
+            #     self.bracket_lo = max(self.bracket_lo, self.candidate_pressure) if self.bracket_lo is not None else self.candidate_pressure
+            # else:
+            #     self.bracket_hi = min(self.bracket_hi, self.candidate_pressure) if self.bracket_hi is not None else self.candidate_pressure
 
             if (self.bracket_lo is not None) and (self.bracket_hi is not None):
                 gap = self.bracket_hi - self.bracket_lo
                 print(f"[P-Cal] REFINE: lo={self.bracket_lo:.3f} hi={self.bracket_hi:.3f} gap={gap:.4f}")
                 if gap <= self.pressure_threshold:
+                    if self.last_acceptable_pressure is None:
+                        self.calibrationError.emit(
+                            "Pressure search narrowed but never observed a valid single-droplet condition."
+                        )
+                        return
                     # return the HIGHEST acceptable
                     self.candidate_pressure = self.bracket_lo
                     self.final_condition_found = True
@@ -1695,12 +1697,19 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
-                    if self.bracket_lo is not None:
-                        self.candidate_pressure = self.bracket_lo
+                    # Prefer a real acceptable result if we have one; otherwise error
+                    if self.last_acceptable_pressure is not None:
+                        self.candidate_pressure = self.last_acceptable_pressure
                         self.final_condition_found = True
                         self.emitDropletDetected()
                     else:
                         self.calibrationError.emit("Pressure search did not converge (refine phase)")
+                    # if self.bracket_lo is not None:
+                    #     self.candidate_pressure = self.bracket_lo
+                    #     self.final_condition_found = True
+                    #     self.emitDropletDetected()
+                    # else:
+                    #     self.calibrationError.emit("Pressure search did not converge (refine phase)")
                 self._last_outcome  = outcome
                 self._last_pressure = self.candidate_pressure
                 return
@@ -1714,18 +1723,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Pressure calibration complete")
         self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
         self.calibrationCompleted.emit()
-
-    # def handleBackgroundCaptured(self, image):
-    #     self.background_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
-
-    # def handleNozzleCaptured(self, image):
-    #     self.nozzle_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
-
-    # def handleDropletCaptured(self, image):
-    #     self.droplet_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
 
     def emitNozzleDetected(self):
         self.nozzleDetected.emit()
