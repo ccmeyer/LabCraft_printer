@@ -731,16 +731,16 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     def _detect_nozzle_point(self, bg, dr):
         """
         Return (status, (x,y), n_contours, debug_img)
-          status: "OK" or "NONE"
-          (x,y):  top-of-contour pixel for the chosen candidate
+        status: "OK" or "NONE"
+        (x,y):  (x_mid_of_bounding_box, top_y_of_contour) for the chosen candidate
         Robust diff with thresholding + morphology, then contour filtering.
         """
         if bg is None or dr is None:
             return ("NONE", None, 0, None)
 
-        # Ensure 8-bit 3ch
         a = dr
         b = bg
+        # diff → gray
         if a.ndim == 3 and a.shape[2] == 3:
             diff = cv2.absdiff(a, b)
             gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
@@ -749,48 +749,65 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
 
         # denoise + threshold
-        blur = cv2.GaussianBlur(gray, (5,5), 0)
-        # adaptive choice: try Otsu; if super dark, fall back to small fixed offset
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
         _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         if np.count_nonzero(th) < 10:
-            _, th = cv2.threshold(blur, max(10, int(np.mean(blur) + 3*np.std(blur))), 255, cv2.THRESH_BINARY)
+            # fallback if Otsu gives almost nothing
+            t = max(10, int(np.mean(blur) + 3 * np.std(blur)))
+            _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
 
-        # clean small specks
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        # clean specks
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
 
         contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        # basic filtering by area
-        areas = [cv2.contourArea(c) for c in contours]
-        keep = [(i,c,a) for (i,(c,a)) in enumerate(zip(contours, areas)) if a >= 20]
-        if not keep:
-            # produce a debug image anyway
+        if not contours:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        # choose top-most contour (min y among all points)
-        def contour_top_xy(c):
-            ys = c[:,:,1].flatten()
-            xs = c[:,:,0].flatten()
-            min_y = int(ys.min())
-            # average x for points at that min_y band (robust to jaggy top)
-            xs_top = xs[ys == min_y]
-            x_mean = int(np.mean(xs_top)) if xs_top.size > 0 else int(xs.mean())
-            return (x_mean, min_y)
+        # basic area filter
+        areas = [cv2.contourArea(c) for c in contours]
+        keep = [(c, a) for (c, a) in zip(contours, areas) if a >= 20]
+        if not keep:
+            dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            return ("NONE", None, 0, dbg)
 
-        top_candidates = [(i, contour_top_xy(c)) for (i,c,_a) in keep]
-        # pick the globally smallest y
-        pick_idx, pick_xy = min(top_candidates, key=lambda t: t[1][1])
-        chosen = keep[pick_idx][1]
+        # choose the top-most contour (min y); tie-break by larger area
+        def contour_top_y(contour):
+            ys = contour[:, :, 1].flatten()
+            return int(ys.min())
+
+        keep_sorted = sorted(
+            keep,
+            key=lambda ca: (contour_top_y(ca[0]), -ca[1])
+        )
+        chosen, chosen_area = keep_sorted[0]
         n = len(keep)
 
-        # debug overlay
-        dbg = a.copy() if (a.ndim == 3 and a.shape[2] == 3) else cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
-        cv2.drawContours(dbg, [chosen], -1, (0,255,0), 2)
-        cv2.circle(dbg, pick_xy, 4, (255,0,0), -1)
+        # compute top y from contour and horizontal middle from bounding box
+        ys = chosen[:, :, 1].flatten()
+        top_y = int(ys.min())
 
-        return ("OK", pick_xy, n, dbg)
+        x, y, w, h = cv2.boundingRect(chosen)
+        mid_x = int(round(x + w / 2.0))
+
+        nozzle_xy = (mid_x, top_y)
+
+        # debug overlay
+        if a.ndim == 3 and a.shape[2] == 3:
+            dbg = a.copy()
+        else:
+            dbg = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
+
+        # contour and bbox
+        cv2.drawContours(dbg, [chosen], -1, (0, 255, 0), 2)
+        cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)  # orange box
+        # top edge line + point
+        cv2.line(dbg, (x, top_y), (x + w, top_y), (0, 200, 255), 1)
+        cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)  # chosen nozzle point
+
+        return ("OK", nozzle_xy, n, dbg)
 
     def _recenter_or_finish(self, nozzle_px):
         img_w, img_h = self.model.droplet_camera_model.get_image_size()
