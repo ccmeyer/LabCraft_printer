@@ -505,6 +505,12 @@ class BaseCalibrationProcess(QObject):
             self._active_timers.discard(timer)
 
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
+    """
+    Identify the nozzle by diffing background vs droplet image. If not found,
+    scan a handful of longer flash delays; if still not found, raise pressure (clamped)
+    and repeat the delay scan. Use the *top of the contour* as nozzle coordinate
+    and move near the *top-center* of the frame. Verify and iterate with safety caps.
+    """
     # Define signals to trigger transitions from analyze state.
     nozzleCentered = Signal()
 
@@ -516,6 +522,37 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Store captured images locally.
         self.background_image = None
         self.droplet_image = None
+
+        # ---- Safety & search tuning ----
+        # flash delay search (in microseconds), added to base (initial) delay
+        self.initial_flash_delay_us = 3800
+        self.delay_scan_increments = [0, 400, 800, 1200, 1600]   # try a few longer delays
+        self.min_flash_delay_us = 0
+        self.max_flash_delay_us = 12000
+
+        # pressure search (psi)
+        self.max_pressure_levels = 3          # total pressure levels: base + two bumps
+        self.pressure_step = 0.1              # psi per bump
+        self.min_print_pressure = 0.35        # safe fallback bounds if model doesn’t expose them
+        self.max_print_pressure = 1.00
+
+        # recenter loop guard
+        self.max_recenter_iterations = 8
+        self._recenter_iters = 0
+
+        # movement clamp (motor steps). Adjust to your mechanics.
+        self.max_xy_steps_per_correction = 1000
+
+        # top-center target: x center, y near top
+        self.top_margin_frac = 0.12           # ~12% down from top
+        self.center_tol_frac = 0.03           # within 3% of width (x) and 3% of height (y band around target)
+        self.top_band_frac   = 0.03
+
+        # ---- internal scan state (reset in onPrepareDroplet) ----
+        self._base_delay_us = self.initial_flash_delay_us
+        self._delay_idx = 0
+        self._base_pressure = None
+        self._pressure_level = 0  # 0=base,1=+step,2=+2*step
 
         # Define states
         self.state_initial_position = QState()
@@ -537,57 +574,58 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         # Create transitions using QSignalTransition:
 
-        # Transition: Move to initial position -> prepare_background
+                # Transitions
         t0 = QSignalTransition()
         t0.setSenderObject(self.calibration_manager)
-        t0.setSignal(b"2moveCompleted()")  # Use the normalized signature here.
+        t0.setSignal(b"2moveCompleted()")
         t0.setTargetState(self.state_prepare_background)
         self.state_initial_position.addTransition(t0)
 
-        # Transition: prepare_background -> capture_background
-        t1 = QSignalTransition() 
+        t1 = QSignalTransition()
         t1.setSenderObject(self.calibration_manager)
-        t1.setSignal(b"2settingsChangeCompleted()")  # Use the normalized signature here.
+        t1.setSignal(b"2settingsChangeCompleted()")
         t1.setTargetState(self.state_capture_background)
         self.state_prepare_background.addTransition(t1)
 
-        # Transition: capture_background -> prepare_droplet (when background capture is complete)
         t2 = QSignalTransition()
         t2.setSenderObject(self.calibration_manager)
-        t2.setSignal(b"2captureCompleted()")  # Use the normalized signature here.
+        t2.setSignal(b"2captureCompleted()")
         t2.setTargetState(self.state_prepare_droplet)
         self.state_capture_background.addTransition(t2)
 
-        # Transition: prepare_droplet -> capture_droplet
         t3 = QSignalTransition()
         t3.setSenderObject(self.calibration_manager)
-        t3.setSignal(b"2settingsChangeCompleted()")  # Use the normalized signature here.
+        t3.setSignal(b"2settingsChangeCompleted()")
         t3.setTargetState(self.state_capture_droplet)
         self.state_prepare_droplet.addTransition(t3)
 
-        # Transition: capture_droplet -> analyze
         t4 = QSignalTransition()
         t4.setSenderObject(self.calibration_manager)
-        t4.setSignal(b"2captureCompleted()")  # Use the normalized signature here.
+        t4.setSignal(b"2captureCompleted()")
         t4.setTargetState(self.state_analyze)
         self.state_capture_droplet.addTransition(t4)
 
-        # In the analyze state we decide whether to move or finish:
-        # If nozzle is centered:
+        # If we move, re-take background at the new location
         t5 = QSignalTransition()
-        t5.setSenderObject(self)
-        t5.setSignal(b"2nozzleCentered()")  # Use the normalized signature here.
-        t5.setTargetState(self.state_final)
+        t5.setSenderObject(self.calibration_manager)
+        t5.setSignal(b"2moveCompleted()")
+        t5.setTargetState(self.state_prepare_background)
         self.state_analyze.addTransition(t5)
-        # If nozzle is off-center, we need to move:
-        # After moving, restart the process (or re-check alignment)
+
+        # Success → final
         t6 = QSignalTransition()
-        t6.setSenderObject(self.calibration_manager)
-        t6.setSignal(b"2moveCompleted()")  # Use the normalized signature here.
-        t6.setTargetState(self.state_prepare_background)
+        t6.setSenderObject(self)
+        t6.setSignal(b"2nozzleCentered()")
+        t6.setTargetState(self.state_final)
         self.state_analyze.addTransition(t6)
 
-        # Add states to the state machine
+        # NEW: allow Analyze → Capture when we tweak settings (delay/pressure) for rescans
+        t7 = QSignalTransition()
+        t7.setSenderObject(self.calibration_manager)
+        t7.setSignal(b"2settingsChangeCompleted()")
+        t7.setTargetState(self.state_capture_droplet)
+        self.state_analyze.addTransition(t7)
+
         self.state_machine.addState(self.state_initial_position)
         self.state_machine.addState(self.state_prepare_background)
         self.state_machine.addState(self.state_capture_background)
@@ -595,8 +633,6 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.addState(self.state_capture_droplet)
         self.state_machine.addState(self.state_analyze)
         self.state_machine.addState(self.state_final)
-
-        # Set the initial state
         self.state_machine.setInitialState(self.state_initial_position)
 
     @Slot()
@@ -615,7 +651,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Request to change droplet settings (0 droplets). The callback emits a signal.
         settings = {
             "num_droplets": 0,
-            "flash_delay": 3800
+            "flash_delay": int(self.initial_flash_delay_us)
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
@@ -630,19 +666,19 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             final_error_msg="Failed to capture background image."
         )
 
-
-    # @Slot()
-    # def onCaptureBackground(self):
-    #     self.stageChanged.emit("Capturing background image")
-    #     # Request a background capture. Use a calibration process callback to store the image.
-    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
-
     @Slot()
     def onPrepareDroplet(self):
-        self.stageChanged.emit("Preparing droplet image (1 droplet)")
-        # Request to change droplet settings (1 droplet). The callback emits a signal.
+        # Reset the scan plan for this search loop
+        self.stageChanged.emit("Preparing droplet capture (init scan plan)")
+        self._base_delay_us = int(self.initial_flash_delay_us)
+        self._delay_idx = 0
+        self._base_pressure = float(self.model.machine_model.get_current_print_pressure())
+        self._pressure_level = 0
+
         settings = {
             "num_droplets": 1,
+            "flash_delay": int(self._clamp_delay(self._base_delay_us)),
+            # don't force pressure yet; use whatever current pressure is for the first shot
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
@@ -658,70 +694,197 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             final_error_msg="Failed to capture droplet image."
         )
 
-    # @Slot()
-    # def onCaptureDroplet(self):
-    #     self.stageChanged.emit("Capturing droplet image")
-    #     # Start a 10-second guard for capture
-    #     self._cap_timeout = self._start_timeout(
-    #         10_000,
-    #         err_msg="Droplet capture timed out"
-    #     )
-    #     # Request a droplet capture. Use a callback that stores the droplet image.
-    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
-
     @Slot()
     def onAnalyze(self):
-        self.stageChanged.emit("Analyzing images")
-        # Use the locally stored images.
-        bg = self.background_image
-        dr = self.droplet_image
-        center, focus, image = self.model.droplet_camera_model.identify_nozzle(bg, dr)
-        print(f'Identified nozzle at: {center}, focus: {focus}')
-        if center is None:
-            self.stageChanged.emit("No nozzle found, restarting")
-            # Restart process by emitting the droplet change completed signal.
-            # self.calibration_manager.emitDropletChangeCompleted()
-            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+        self.stageChanged.emit("Analyzing diff to locate nozzle")
+        bg, dr = self.background_image, self.droplet_image
+
+        status, nozzle_px, n_contours, debug_img = self._detect_nozzle_point(bg, dr)
+        if status == "OK":
+            # success; move toward top-center
+            if n_contours > 1:
+                self.stageChanged.emit(f"Multiple contours found ({n_contours}); using top-most candidate.")
+
+            self.presentImageSignal.emit(debug_img)
+            self._recenter_or_finish(nozzle_px)
+            return
+
+        # Not found → advance scan plan: delays first, then pressure bumps (bounded)
+        advanced, settings = self._advance_scan_plan()
+        if not advanced:
+            self.calibrationError.emit(
+                "No droplet/nozzle detected after scanning delays and pressure levels."
+            )
+            return
+
+        # Apply new settings and loop: Analyze -> (settingsChangeCompleted) -> CaptureDroplet -> Analyze
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    # def isCentered(self, center):
+    #     img_width, img_height = self.model.droplet_camera_model.get_image_size()
+    #     ideal_center = (img_width // 2, img_height // 2)
+    #     tolerance = 0.01
+    #     return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
+    #             abs(center[1] - ideal_center[1]) <= tolerance * img_height)
+    # ----------------- Helpers: detection & movement -----------------
+
+    def _detect_nozzle_point(self, bg, dr):
+        """
+        Return (status, (x,y), n_contours, debug_img)
+          status: "OK" or "NONE"
+          (x,y):  top-of-contour pixel for the chosen candidate
+        Robust diff with thresholding + morphology, then contour filtering.
+        """
+        if bg is None or dr is None:
+            return ("NONE", None, 0, None)
+
+        # Ensure 8-bit 3ch
+        a = dr
+        b = bg
+        if a.ndim == 3 and a.shape[2] == 3:
+            diff = cv2.absdiff(a, b)
+            gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
         else:
-            machine_position = self.model.machine_model.get_current_position_dict()
-            self.measurements.append((machine_position, center))
-            if not self.isCentered(center):
-                img_width, img_height = self.model.droplet_camera_model.get_image_size()
-                target = (img_width // 2, img_height // 2)
-                move_vector = self.model.droplet_camera_model.calculate_move_to_target(center,target)
-                self.stageChanged.emit("Nozzle off-center; moving machine")
-                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
-                print('Move requested')
-            else:
-                self.stageChanged.emit("Nozzle centered")
-                self.presentImageSignal.emit(image)
-                self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'center': center, 'machine_position': machine_position}})
-                self.nozzleCentered.emit()
+            diff = cv2.absdiff(a, b)
+            gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
 
-    def isCentered(self, center):
-        img_width, img_height = self.model.droplet_camera_model.get_image_size()
-        ideal_center = (img_width // 2, img_height // 2)
-        tolerance = 0.01
-        return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
-                abs(center[1] - ideal_center[1]) <= tolerance * img_height)
+        # denoise + threshold
+        blur = cv2.GaussianBlur(gray, (5,5), 0)
+        # adaptive choice: try Otsu; if super dark, fall back to small fixed offset
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if np.count_nonzero(th) < 10:
+            _, th = cv2.threshold(blur, max(10, int(np.mean(blur) + 3*np.std(blur))), 255, cv2.THRESH_BINARY)
 
-    def onCalibrationCompleted(self):
-        """Emit the completion signal."""
-        self.calibration_manager.set_nozzle_center(self.measurements[-1][0])
-        self.calibrationCompleted.emit()
+        # clean small specks
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
 
-    # Callbacks to store images in the calibration process
+        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # basic filtering by area
+        areas = [cv2.contourArea(c) for c in contours]
+        keep = [(i,c,a) for (i,(c,a)) in enumerate(zip(contours, areas)) if a >= 20]
+        if not keep:
+            # produce a debug image anyway
+            dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            return ("NONE", None, 0, dbg)
+
+        # choose top-most contour (min y among all points)
+        def contour_top_xy(c):
+            ys = c[:,:,1].flatten()
+            xs = c[:,:,0].flatten()
+            min_y = int(ys.min())
+            # average x for points at that min_y band (robust to jaggy top)
+            xs_top = xs[ys == min_y]
+            x_mean = int(np.mean(xs_top)) if xs_top.size > 0 else int(xs.mean())
+            return (x_mean, min_y)
+
+        top_candidates = [(i, contour_top_xy(c)) for (i,c,_a) in keep]
+        # pick the globally smallest y
+        pick_idx, pick_xy = min(top_candidates, key=lambda t: t[1][1])
+        chosen = keep[pick_idx][1]
+        n = len(keep)
+
+        # debug overlay
+        dbg = a.copy() if (a.ndim == 3 and a.shape[2] == 3) else cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
+        cv2.drawContours(dbg, [chosen], -1, (0,255,0), 2)
+        cv2.circle(dbg, pick_xy, 4, (255,0,0), -1)
+
+        return ("OK", pick_xy, n, dbg)
+
+    def _recenter_or_finish(self, nozzle_px):
+        img_w, img_h = self.model.droplet_camera_model.get_image_size()
+        target = (img_w // 2, int(self.top_margin_frac * img_h))
+        if self._is_top_centered(nozzle_px, (img_w, img_h), target):
+            self.stageChanged.emit("Nozzle near top-center; done.")
+            # record final machine position
+            machine_pos = self.model.machine_model.get_current_position_dict()
+            self.measurements.append((machine_pos, nozzle_px))
+            self.nozzleCentered.emit()
+            return
+
+        # compute move vector from pixel→motor; clamp to avoid huge jumps
+        move_vector = self.model.droplet_camera_model.calculate_move_to_target(nozzle_px, target)
+        move_vector = self._clamp_move(move_vector)
+        self.stageChanged.emit(f"Nozzle offset detected; moving by {move_vector}")
+        self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        self._recenter_iters += 1
+        if self._recenter_iters > self.max_recenter_iterations:
+            self.calibrationError.emit("Too many recenter attempts—aborting to avoid oscillation.")
+
+    def _is_top_centered(self, pt, img_size, target):
+        x, y = pt
+        w, h = img_size
+        tx, ty = target
+        tol_x = self.center_tol_frac * w
+        band_y = self.top_band_frac * h
+        return (abs(x - tx) <= tol_x) and (abs(y - ty) <= band_y)
+
+    def _clamp_move(self, mv):
+        """Limit per-correction XY steps; keep Z unchanged (usually zero for this)."""
+        try:
+            dx, dy, dz = mv
+        except Exception:
+            # if model returns 2D, extend to 3D
+            dx, dy = mv
+            dz = 0
+        cap = float(self.max_xy_steps_per_correction)
+        dx = max(-cap, min(cap, float(dx)))
+        dy = max(-cap, min(cap, float(dy)))
+        return (dx, dy, dz)
+
+    # ----------------- Helpers: scan plan & bounds -----------------
+
+    def _advance_scan_plan(self):
+        """
+        Advance either to the next delay (same pressure) or bump pressure (reset delay).
+        Returns (advanced: bool, settings: dict|None)
+        """
+        # next delay?
+        if self._delay_idx + 1 < len(self.delay_scan_increments):
+            self._delay_idx += 1
+            new_delay = self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])
+            self.stageChanged.emit(f"No contour; trying longer flash delay: {new_delay} µs (idx={self._delay_idx})")
+            return True, {"num_droplets": 1, "flash_delay": int(new_delay)}
+        # else try next pressure level (if any)
+        if self._pressure_level + 1 < self.max_pressure_levels:
+            self._pressure_level += 1
+            self._delay_idx = 0
+            new_pressure = self._clamp_pressure(self._base_pressure + self._pressure_level * self.pressure_step)
+            new_delay = self._clamp_delay(self._base_delay_us)
+            self.stageChanged.emit(
+                f"No contour after delay scan; raising pressure to {new_pressure:.3f} psi and resetting delay to {new_delay} µs"
+            )
+            return True, {"num_droplets": 1, "flash_delay": int(new_delay), "print_pressure": float(new_pressure)}
+        # out of options
+        return False, None
+
+    def _clamp_delay(self, us):
+        us = int(max(self.min_flash_delay_us, min(self.max_flash_delay_us, us)))
+        return us
+
+    def _clamp_pressure(self, p):
+        # If your model exposes min/max, prefer that:
+        try:
+            pmin = float(getattr(self.model.machine_model, "min_print_pressure", self.min_print_pressure))
+            pmax = float(getattr(self.model.machine_model, "max_print_pressure", self.max_print_pressure))
+        except Exception:
+            pmin, pmax = self.min_print_pressure, self.max_print_pressure
+        p_clamped = max(pmin, min(pmax, float(p)))
+        if p_clamped != p:
+            self.stageChanged.emit(f"Clamped print pressure from {p:.3f} to {p_clamped:.3f} psi")
+        return p_clamped
+
+    # ----------------- Capture callbacks -----------------
+
     def handleBackgroundCaptured(self, image):
         self.background_image = image
         self.calibration_manager.emitCaptureCompleted()
 
     def handleDropletCaptured(self, image):
         self.droplet_image = image
-
-        # cancel the guard
-        self._cancel_timeout(self._cap_timeout)
+        self._cancel_timeout(getattr(self, "_cap_timeout", None))
         self._cap_timeout = None
-
         self.calibration_manager.emitCaptureCompleted()
 
 class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
