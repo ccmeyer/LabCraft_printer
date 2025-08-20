@@ -2728,45 +2728,40 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             return
 
         # ---------- time-of-flight plan ----------
-        # We want a spherical droplet; sample well after pinch-off:
-        self.sphere_delay_us = 6000                 # tune: 4–8 ms typical
-        self.target_delay_us = int(
-            max(0, self.emergence_time_us + self.sphere_delay_us)
-        )
-        # If you want to try a couple of tweaks when nothing is found:
+        self.sphere_delay_us = 6000
+        self.target_delay_us = int(max(0, self.emergence_time_us + self.sphere_delay_us))
         self.delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
 
         # Clamp delay to sane bounds
         self.min_delay_us = 0
-        self.max_delay_us = 40000   # hard cap 40 ms
+        self.max_delay_us = 40000
         self.target_delay_us = self._clamp_delay(self.target_delay_us)
 
         # ---------- centering / movement safety ----------
-        # Per-move caps (steps) — keep small to avoid overshoot & scope collisions
-        self.max_center_step = 1200     # clamp per recenter move (X/Z)
-        self.max_focus_step = 16        # clamp per focus nudge (Y)
-        # Hard machine bounds (best effort; fallbacks are conservative)
-        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
-        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)  # focus axis near scope
-        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+        self.max_center_step = 1200
+        self.max_focus_step = 16
 
+        # Initialize bounds BEFORE predicting first target
+        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
+        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
+        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
 
         # ---------- predicted machine target from velocity ----------
         self.predicted_target = self._predict_stage_target(self.target_delay_us)
 
         # ---------- focus control (Y axis) ----------
         self.focus_dir = +1
-        self.focus_step = 8             # start coarse, clamp below
-        self.focus_min_step = 4         # avoid chatter
+        self.focus_step = 8
+        self.focus_min_step = 4
         self.focus_dir_switches = 0
         self.focus_switch_limit = 6
         self.last_focus_val = None
-        self.focus_ok_threshold = 5_000_000  # tune as needed
+        self.focus_ok_threshold = 5_000_000
 
         # ---------- retries / timeouts ----------
         self._not_found_count = 0
-        self._not_found_limit = 10      # give up gracefully
+        self._not_found_limit = 10
         self._lost_count = 0
         self._lost_limit = 5
 
@@ -2817,34 +2812,54 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t3.setSignal(b"2captureCompleted()"); t3.setTargetState(self.state_analyze)
         self.state_capture_droplet.addTransition(t3)
 
+        # analyze → set_delay (no droplet)
         t4 = QSignalTransition(); t4.setSenderObject(self); t4.setSignal(b"2continueSearch()")
-        t4.setTargetState(self.state_set_delay); self.state_analyze.addTransition(t4)
+        t4.setTargetState(self.state_set_delay)
+        self.state_analyze.addTransition(t4)
 
+        # analyze → center (droplet found)
         t5 = QSignalTransition(); t5.setSenderObject(self); t5.setSignal(b"2dropletFound()")
-        t5.setTargetState(self.state_center); self.state_analyze.addTransition(t5)
+        t5.setTargetState(self.state_center)
+        self.state_analyze.addTransition(t5)
 
+        # >>> FIX: allow center state to recover by trying next delay when droplet is lost
+        t4c = QSignalTransition(); t4c.setSenderObject(self); t4c.setSignal(b"2continueSearch()")
+        t4c.setTargetState(self.state_set_delay)
+        self.state_center.addTransition(t4c)
+        # <<<
+
+        # center → characterization (when centered)
         t6 = QSignalTransition(); t6.setSenderObject(self); t6.setSignal(b"2dropletCentered()")
-        t6.setTargetState(self.state_characterization); self.state_center.addTransition(t6)
+        t6.setTargetState(self.state_characterization)
+        self.state_center.addTransition(t6)
 
+        # after any move (center/focus) → capture again
         t7 = QSignalTransition(); t7.setSenderObject(self.calibration_manager)
         t7.setSignal(b"2moveCompleted()"); t7.setTargetState(self.state_capture_droplet)
         self.state_center.addTransition(t7); self.state_characterization.addTransition(t7)
 
+        # characterization loop
         t8 = QSignalTransition(); t8.setSenderObject(self); t8.setSignal(b"2continueCharacterization()")
-        t8.setTargetState(self.state_capture_droplet); self.state_characterization.addTransition(t8)
+        t8.setTargetState(self.state_capture_droplet)
+        self.state_characterization.addTransition(t8)
 
         t8b = QSignalTransition(); t8b.setSenderObject(self); t8b.setSignal(b"initiateCharacterizationAnalysis()")
-        t8b.setTargetState(self.state_analyze_characterization); self.state_characterization.addTransition(t8b)
+        t8b.setTargetState(self.state_analyze_characterization)
+        self.state_characterization.addTransition(t8b)
 
+        # pressure change during characterization
         tP = QSignalTransition(); tP.setSenderObject(self); tP.setSignal(b"2changePressure()")
-        tP.setTargetState(self.state_change_pressure); self.state_characterization.addTransition(tP)
+        tP.setTargetState(self.state_change_pressure)
+        self.state_characterization.addTransition(tP)
 
         tPdone = QSignalTransition(); tPdone.setSenderObject(self.calibration_manager)
         tPdone.setSignal(b"2settingsChangeCompleted()"); tPdone.setTargetState(self.state_capture_droplet)
         self.state_change_pressure.addTransition(tPdone)
 
+        # finalize
         t10 = QSignalTransition(); t10.setSenderObject(self); t10.setSignal(b"characterizationCompleted()")
-        t10.setTargetState(self.state_final); self.state_analyze_characterization.addTransition(t10)
+        t10.setTargetState(self.state_final)
+        self.state_analyze_characterization.addTransition(t10)
 
         # Add and start
         for s in (self.state_move_to_target, self.state_prepare_background, self.state_capture_background,
@@ -2856,12 +2871,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
     # ---------- SAFETY/UTILS ----------
     def _import_calibration_data(self):
-        # Velocity in stage units (steps/s) from TrajectoryCalibration
         self.vel_steps_per_s = self.calibration_manager.get_trajectory_vector()  # (vX, vY, vZ) steps/s
-        # Nozzle position and emergence timing
         self.nozzle_center_machine = self.calibration_manager.get_nozzle_center()
         self.emergence_time_us = self.calibration_manager.get_emergence_time()
-        # Also need a background to run identify_* routines robustly
         self.prev_background = self.calibration_manager.get_background_image()
 
         if (self.vel_steps_per_s is None or self.nozzle_center_machine is None
@@ -2873,14 +2885,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
 
     def _get_axis_bounds_safe(self, axis:str, default_span:int):
-        # Try to ask the machine; otherwise use nozzle ± default_span.
-        # try:
-        #     lo, hi = self.model.machine_model.get_axis_bounds(axis)
-        #     return int(lo), int(hi)
-        # except Exception:
-        base = int(self.nozzle_center_machine.get(axis, 0))
-        print(f"Using {axis} bounds from nozzle center: {base} ± {default_span}")
-        return base - default_span, base + default_span
+        try:
+            lo, hi = self.model.machine_model.get_axis_bounds(axis)
+            return int(lo), int(hi)
+        except Exception:
+            base = int(self.nozzle_center_machine.get(axis, 0))
+            print(f"Using {axis} bounds from nozzle center: {base} ± {default_span}")
+            return base - default_span, base + default_span
 
     def _clamp_abs(self, X:int, Y:int, Z:int):
         Xc = max(self.x_lo, min(self.x_hi, int(X)))
@@ -2900,21 +2911,18 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._safe_move_absolute(tgt)
 
     def _predict_stage_target(self, delay_us:int):
-        """nozzle + vel * (t - t_emerge) with clamping to bounds."""
+        """nozzle + vel * (t - t_emerge) with clamping to bounds; Z inverted per your setup."""
         dt_s = max(0.0, (int(delay_us) - int(self.emergence_time_us)) * 1e-6)
         vX, vY, vZ = map(float, self.vel_steps_per_s)
         X = int(round(self.nozzle_center_machine['X'] + vX * dt_s))
-        Y = int(round(self.nozzle_center_machine['Y'] + vY * dt_s))   # usually ~0
-        Z = int(round(self.nozzle_center_machine['Z'] + vZ * -dt_s))
+        Y = int(round(self.nozzle_center_machine['Y'] + vY * dt_s))
+        Z = int(round(self.nozzle_center_machine['Z'] + (-vZ) * dt_s))  # << inverted Z
         return self._clamp_abs(X, Y, Z)
 
     def _bounded_center_move(self, droplet_xy, target_xy):
-        """Compute recenter move via camera model, then clamp per-axis magnitude."""
         dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(droplet_xy, target_xy)
-        # clamp per-move magnitude for safety
         dX = int(max(-self.max_center_step, min(self.max_center_step, dX)))
         dZ = int(max(-self.max_center_step, min(self.max_center_step, dZ)))
-        # focus axis is not part of centering moves
         return (dX, 0, dZ)
 
     # ---------- states ----------
@@ -2945,22 +2953,18 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onSetDelay(self):
-        # Pick the next delay to try (first is target, then small tweaks)
         if self._delay_try_index < len(self.delay_offsets_us):
             d_us = self.target_delay_us + self.delay_offsets_us[self._delay_try_index]
             self._delay_try_index += 1
         else:
-            # If we’ve tried all offsets and haven’t found it, nudge the stage *along velocity*
             self._not_found_count += 1
             if self._not_found_count > self._not_found_limit:
                 self.calibrationError.emit("Droplet not found (max retries).")
                 return
             self.stageChanged.emit("Droplet not found yet → nudging along velocity and retrying")
-            # small nudge (2 ms worth of motion), clamped
             vX, vY, vZ = map(float, self.vel_steps_per_s)
             nudge = 0.002  # 2 ms
-            self._safe_move_relative((int(vX * nudge), int(vY * nudge), int(vZ * nudge)))
-            # restart the small delay sweep
+            self._safe_move_relative((int(vX * nudge), int(vY * nudge), int((-vZ) * nudge)))  # Z inverted
             self._delay_try_index = 0
             d_us = self.target_delay_us + self.delay_offsets_us[self._delay_try_index]
             self._delay_try_index += 1
@@ -2997,7 +3001,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         cxy = (x + w//2, y + h//2)
         self.presentImageSignal.emit(overlay)
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
-        self._lost_count = 0  # reset “lost” counter
+        self._lost_count = 0
         self.emitDropletFound()
 
     @Slot()
@@ -3013,6 +3017,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 return
             self.stageChanged.emit("Droplet lost while centering → retrying")
             self.presentImageSignal.emit(overlay)
+            # >>> this now actually transitions out of state_center
             self.emitContinueSearch()
             return
 
@@ -3020,7 +3025,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         cxy = (x + w//2, y + h//2)
         H, W = overlay.shape[:2]
         target = (W//2, H//2)
-        # within tolerance?
         tol = 100
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
@@ -3042,14 +3046,12 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitContinueCharacterization()
             return
         if result == 'Multiple':
-            # reduce pressure slightly (bounded) and restart capture
             cur_p = float(self.model.machine_model.get_current_print_pressure())
             self.new_pressure = max(self.min_pressure, cur_p - self.pressure_step)
             if self.new_pressure >= cur_p and cur_p <= self.min_pressure:
                 self.calibrationError.emit("Minimum pressure reached (multiple droplets persist)")
                 return
             self.stageChanged.emit(f"Multiple droplets → decreasing pressure to {self.new_pressure:.3f} psi")
-            # reset replicate buffers
             self.droplet_positions.clear()
             self.droplet_focus.clear()
             self.circularity_values.clear()
@@ -3058,7 +3060,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitChangePressure()
             return
 
-        # Focus maintenance on Y with anti-oscillation
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
         if focus_val < self.focus_ok_threshold:
@@ -3068,11 +3069,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 if self.focus_dir_switches > self.focus_switch_limit:
                     self.calibrationError.emit("Focus oscillation limit reached.")
                     return
-                # small hysteresis bump after a switch
                 self.focus_step = max(self.focus_min_step, self.focus_step)
             self.last_focus_val = focus_val
 
-            # dynamic step (larger if very blurry)
             if focus_val < 1_000_000: self.focus_step = 16
             elif focus_val < 3_000_000: self.focus_step = 8
             else: self.focus_step = 4
@@ -3083,7 +3082,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self._safe_move_relative((0, dY, 0))
             return
 
-        # accept measurement
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
         self.circularity_values.append(float(result.get("circularity_ellipse", 99.0)))
         self.droplet_positions.append(tuple(map(int, result.get("center", (0,0)))))
@@ -3111,7 +3109,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("No droplet volumes captured.")
             return
 
-        # Circularity pass/fail
         if not all(c < self.circularity_threshold for c in self.circularity_values):
             self.calibrationError.emit("Droplets not circular enough — consider a later delay.")
             return
@@ -3142,7 +3139,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Droplet search + characterization complete")
         self.calibrationCompleted.emit()
 
-    # ---------- helpers for this class ----------
+    # ---------- helpers ----------
     def _annotate_final(self, mean_center, mean_vol, cv_vol):
         img = self.droplet_image.copy()
         for p in self.droplet_positions:
@@ -3159,7 +3156,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def emitContinueCharacterization(self): self.continueCharacterization.emit()
     def emitInitiateAnalyzeCharacterization(self): self.initiateCharacterizationAnalysis.emit()
     def emitCharacterizationCompleted(self): self.characterizationCompleted.emit()
-
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
