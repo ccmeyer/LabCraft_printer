@@ -818,6 +818,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             # record final machine position
             machine_pos = self.model.machine_model.get_current_position_dict()
             self.measurements.append((machine_pos, nozzle_px))
+            self.calibration_manager.set_background_image(self.background_image)
             self.nozzleCentered.emit()
             return
 
@@ -922,7 +923,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     TENENGRAD_REL_EPS = 0.03
 
     MAX_EVALS = 60
-    MIN_REFINE_EVALS = 8
+    MIN_REFINE_EVALS = 3
     BRACKET_TOL = 1
 
     # Oscillation guard
@@ -1373,6 +1374,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     continueSearch = Signal()
     dropletDetected = Signal()
+    replicateContinue = Signal()
 
     # ---- tuning / safety ----
     DELAY_MIN = 1500          # μs hard clamp
@@ -1445,6 +1447,13 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
         t5 = QSignalTransition(); t5.setSenderObject(self); t5.setSignal(b"2continueSearch()"); t5.setTargetState(self.state_set_delay)
         self.state_analyze.addTransition(t5)
+        
+        # analyze -> capture_droplet for more replicates at the SAME delay
+        t5b = QSignalTransition()
+        t5b.setSenderObject(self)
+        t5b.setSignal(b"2replicateContinue()")
+        t5b.setTargetState(self.state_capture_droplet)
+        self.state_analyze.addTransition(t5b)
 
         self.state_machine.addState(self.state_prepare_background)
         self.state_machine.addState(self.state_capture_background)
@@ -1501,37 +1510,40 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyze(self):
-        # measure area
-        area, center, overlay = self.model.droplet_camera_model.calc_emergence_area(self.background_image, self.droplet_image)
+        self.stageChanged.emit("Analyzing droplet image")
+
+        area, center, overlay = self.model.droplet_camera_model.calc_emergence_area(
+            self.background_image, self.droplet_image
+        )
         self.presentImageSignal.emit(overlay)
         self._eval_count += 1
 
-        # treat "no contour" as zero area (still valid info)
+        # treat "no contour" as zero area
         if area is None:
             area = 0
 
         self._rep_areas.append(area)
         self.stageChanged.emit(f"Delay {self.candidate_delay} μs replicate → area {area}")
 
-        # collect replicates
+        # Need more replicates? loop back to capture_droplet via signal/transition
         if len(self._rep_areas) < self.REPLICATES:
-            # request another capture at the *same* delay
-            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+            self.replicateContinue.emit()     # <-- FIX: use state transition, not a direct capture call
             return
 
-        # aggregate
+        # Aggregate this delay
         agg_area = int(median(self._rep_areas))
         self._rep_areas.clear()
         self.measurements.append((self.candidate_delay, agg_area))
         self.stageChanged.emit(f"Delay {self.candidate_delay} μs → median area {agg_area}")
 
-        # classify
+        # classify result for this delay
         cls = self._classify(agg_area)
         if cls == "TARGET":
             self.stageChanged.emit("Target area reached")
-            # store result; consumers read via calibration file
-            self.calibrationDataUpdated.emit({'measurements': self.measurements,
-                                              'result': {'area': agg_area, 'flash_delay': self.candidate_delay}})
+            self.calibrationDataUpdated.emit({
+                'measurements': self.measurements,
+                'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
+            })
             self.dropletDetected.emit()
             return
 
@@ -3569,61 +3581,93 @@ class DropletCameraModel(QObject):
     
     def calc_emergence_area(self, background, image):
         """
-        Robustly estimate emergence 'size' at a delay:
-          - abs diff, Otsu threshold fallback, morphology cleanup
-          - choose *top-most* external contour (most likely the nozzle/droplet)
-          - return bounding-rect area, bbox center, and an overlay image
+        Robustly estimate emergence area and overlay.
         Returns: (area:int|None, center:(x,y)|None, overlay_bgr)
+        Rejects background/ghosts via:
+          - min foreground pixel count after threshold
+          - min contour area
+          - min peak intensity in the diff
+          - optional top-band gate (nozzle expected near top)
         """
         import numpy as np, cv2
         if background is None or image is None:
             return None, None, image
 
-        # diff → gray
+        # Tunables (adjust for your scene)
+        MIN_FG_PIX       = 60      # require at least this many mask pixels
+        MIN_CONTOUR_AREA = 40      # reject tiny specks
+        MIN_PEAK_DELTA   = 25      # min 95th-percentile of diff (0..255)
+        TOP_BAND_FRAC    = 0.45    # accept contours whose top is in top 45% image
+
+        # --- diff → gray ---
         if image.ndim == 3 and image.shape[2] == 3:
             diff = cv2.absdiff(image, background)
             gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
         else:
             diff = cv2.absdiff(image, background)
-            gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
-            gray = gray if gray.ndim == 2 else cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+            gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
 
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        # Otsu; fallback to mean+3σ if too few pixels
-        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if np.count_nonzero(th) < 20:
-            t = max(15, int(np.mean(blur) + 3*np.std(blur)))
-            _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
+        h, w = gray.shape[:2]
 
+        # --- denoise + threshold (guarded) ---
+        blur = cv2.GaussianBlur(gray, (5,5), 0)
+
+        # Try mean+3σ (harder threshold) first; fall back to Otsu only if too strict
+        mu, sd = float(np.mean(blur)), float(np.std(blur))
+        t_hard = max(20, int(mu + 3.0 * sd))
+        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(th) < MIN_FG_PIX:
+            # too strict → try Otsu
+            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # morphology cleanup
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
         th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  k, iterations=1)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+        # quick reject: not enough foreground
+        if np.count_nonzero(th) < MIN_FG_PIX:
+            return None, None, image
 
         contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None, None, image
 
-        # pick the *top-most* contour (min y of its points), break ties by larger area
         def top_y(c): return int(c[:,:,1].min())
         areas = [cv2.contourArea(c) for c in contours]
-        keep  = [(c, a) for (c, a) in zip(contours, areas) if a >= 20]
+        keep  = [(c, a) for (c, a) in zip(contours, areas) if a >= MIN_CONTOUR_AREA]
         if not keep:
             return None, None, image
+
+        # Prefer top-most; break ties by larger area
         keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
-        chosen, _ = keep[0]
+        chosen, a_cont = keep[0]
+        ty = top_y(chosen)
 
-        x, y, w, h = cv2.boundingRect(chosen)
-        area = int(w*h)
-        center = (x + w//2, y + h//2)
+        # top-band gate (optional but helpful)
+        if ty > int(TOP_BAND_FRAC * h):
+            return None, None, image
 
-        # overlay
+        x, y, ww, hh = cv2.boundingRect(chosen)
+        area = int(ww * hh)
+        center = (x + ww//2, y + hh//2)
+
+        # Peak intensity check inside bbox
+        roi = gray[y:y+hh, x:x+ww]
+        if roi.size == 0:
+            return None, None, image
+        p95 = float(np.percentile(roi, 95))
+        if p95 < MIN_PEAK_DELTA:
+            return None, None, image
+
         overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         cv2.drawContours(overlay, [chosen], -1, (0,255,0), 2)
-        cv2.rectangle(overlay, (x,y), (x+w, y+h), (255,0,0), 2)
-        cv2.putText(overlay, f'Area: {area}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50,200,50), 2)
+        cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (255,0,0), 2)
+        cv2.putText(overlay, f'Area:{area} p95:{int(p95)}', (x+ww+5, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50,200,50), 2)
 
         return area, center, overlay
-
+    
     def identify_droplets(self,image, background, nozzle_center,min_area=1000):
         """
         Identifies the number of droplets and their locations in the image.
