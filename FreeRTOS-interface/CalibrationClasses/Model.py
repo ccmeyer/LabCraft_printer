@@ -2309,7 +2309,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
 
         # Delay bounds (safe guard)
         self.min_delay_us = 0
-        self.max_delay_us = 20000  # 50 ms hard cap (adjust if needed)
+        self.max_delay_us = 20000  # 20 ms hard cap (adjust if needed)
         self.delay_plan_us = [int(min(max(d, self.min_delay_us), self.max_delay_us))
                               for d in self.delay_plan_us]
 
@@ -2369,6 +2369,13 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         t3.setSignal(b"2trajectoryCalculated()")
         t3.setTargetState(self.state_trajectory_analysis)
         self.state_analyze.addTransition(t3)
+
+        # allow finishing directly from capture state too
+        t3_cap = QSignalTransition()
+        t3_cap.setSenderObject(self)
+        t3_cap.setSignal(b"2trajectoryCalculated()")
+        t3_cap.setTargetState(self.state_trajectory_analysis)
+        self.state_capture_droplet.addTransition(t3_cap)
 
         tP = QSignalTransition()
         tP.setSenderObject(self)
@@ -2467,6 +2474,8 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             return
 
         target_delay = int(self.delay_plan_us[self._delay_index])
+        if target_delay not in self._positions_by_delay:
+            self._positions_by_delay[target_delay] = []
         current_delay = self._current_delay_us
 
         # If this is our first shot or we need to switch delay, set settings then capture
@@ -2496,6 +2505,8 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             return
 
         delay_us = int(self._current_delay_us)
+        if delay_us not in self._positions_by_delay:
+            self._positions_by_delay[delay_us] = []
         self.stageChanged.emit(f"Analyzing droplet at {delay_us} μs")
 
         droplets, nozzle_area, annotated = self.model.droplet_camera_model.identify_droplets(
