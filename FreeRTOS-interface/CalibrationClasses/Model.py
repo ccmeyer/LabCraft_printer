@@ -1371,39 +1371,56 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             cv2.putText(img_bgr, line, (8, 18 + i*18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 220, 20), 1, cv2.LINE_AA)
 
 class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
-    # Custom signals for state transitions.
     continueSearch = Signal()
     dropletDetected = Signal()
+
+    # ---- tuning / safety ----
+    DELAY_MIN = 1500          # μs hard clamp
+    DELAY_MAX = 8000          # μs hard clamp
+    COARSE_STEP = 300         # first-phase step
+    FINE_STEP   = 60          # min bisection resolution before we stop trying to split hairs
+    MAX_EVALS   = 32          # hard cap, including replicates
+    REPLICATES  = 3           # median over replicates per delay
+    STALL_DELTA = 20          # μs; if mid repeats, nudge by this
+
+    # acceptable area band (target window)
+    MIN_AREA = 1000
+    MAX_AREA = 2000
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_emergence"
-        
-        # Set initial binary search bounds for the flash delay (in microseconds, for example).
-        self.lower_delay = 2000
-        self.upper_delay = 5000  # Adjust as appropriate.
-        self.candidate_delay = 3000  # Initial guess.
-        
-        # Store the background image (captured once) and the droplet image.
+
+        # working vars
         self.background_image = None
         self.droplet_image = None
-        
-        # Target contour area range.
-        self.min_area = 1000
-        self.max_area = 2000
 
-        # Store all measurements, includes the delay and the computed area.
-        self.measurements = []
+        self.lower_delay  = 2000
+        self.upper_delay  = 5000
+        self.candidate_delay = 3000
 
-        # Define states.
+        self.min_area = self.MIN_AREA
+        self.max_area = self.MAX_AREA
+
+        self.measurements = []    # (delay, area)
+        self._eval_count  = 0
+        self._last_delay  = None
+
+        # bracket: (delay, area) where area < min_area (low) and > max_area (high)
+        self._lo = None   # tuple (d, area)
+        self._hi = None   # tuple (d, area)
+
+        # replicates buffer at current delay
+        self._rep_areas = []
+
+        # states
         self.state_prepare_background = QState()
         self.state_capture_background = QState()
-        self.state_set_delay = QState()
-        self.state_capture_droplet = QState()
-        self.state_analyze = QState()
-        self.state_final = QFinalState()
+        self.state_set_delay          = QState()
+        self.state_capture_droplet    = QState()
+        self.state_analyze            = QState()
+        self.state_final              = QFinalState()
 
-        # Connect on-entry actions.
         self.state_prepare_background.entered.connect(self.onPrepareBackground)
         self.state_capture_background.entered.connect(self.onCaptureBackground)
         self.state_set_delay.entered.connect(self.onSetDelay)
@@ -1411,68 +1428,44 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze.entered.connect(self.onAnalyze)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
-        # Transitions:
-
-        # 0. Prepare background -> capture background.
-        t0 = QSignalTransition()
-        t0.setSenderObject(self.calibration_manager)
-        t0.setSignal(b"2settingsChangeCompleted()")
-        t0.setTargetState(self.state_capture_background)
+        t0 = QSignalTransition(); t0.setSenderObject(self.calibration_manager); t0.setSignal(b"2settingsChangeCompleted()"); t0.setTargetState(self.state_capture_background)
         self.state_prepare_background.addTransition(t0)
 
-        # 1. After capturing the background, transition to set_delay.
-        t1 = QSignalTransition()
-        t1.setSenderObject(self.calibration_manager)
-        t1.setSignal(b"2captureCompleted()")  # from background capture.
-        t1.setTargetState(self.state_set_delay)
+        t1 = QSignalTransition(); t1.setSenderObject(self.calibration_manager); t1.setSignal(b"2captureCompleted()"); t1.setTargetState(self.state_set_delay)
         self.state_capture_background.addTransition(t1)
-        
-        # 2. After setting the flash delay, transition to capture droplet.
-        t2 = QSignalTransition()
-        t2.setSenderObject(self.calibration_manager)
-        t2.setSignal(b"2settingsChangeCompleted()")  # assume calibration_manager emits this after setting delay.
-        t2.setTargetState(self.state_capture_droplet)
+
+        t2 = QSignalTransition(); t2.setSenderObject(self.calibration_manager); t2.setSignal(b"2settingsChangeCompleted()"); t2.setTargetState(self.state_capture_droplet)
         self.state_set_delay.addTransition(t2)
-        
-        # 3. After capturing the droplet image, transition to analyze.
-        t3 = QSignalTransition()
-        t3.setSenderObject(self.calibration_manager)
-        t3.setSignal(b"2captureCompleted()")
-        t3.setTargetState(self.state_analyze)
+
+        t3 = QSignalTransition(); t3.setSenderObject(self.calibration_manager); t3.setSignal(b"2captureCompleted()"); t3.setTargetState(self.state_analyze)
         self.state_capture_droplet.addTransition(t3)
-        
-        # 4a. In analyze, if the computed area is within the target range, signal success.
-        t4 = QSignalTransition()
-        t4.setSenderObject(self)
-        t4.setSignal(b"2dropletDetected()")
-        t4.setTargetState(self.state_final)
+
+        t4 = QSignalTransition(); t4.setSenderObject(self); t4.setSignal(b"2dropletDetected()"); t4.setTargetState(self.state_final)
         self.state_analyze.addTransition(t4)
-        
-        # 4b. Otherwise, signal to continue the binary search.
-        t5 = QSignalTransition()
-        t5.setSenderObject(self)
-        t5.setSignal(b"2continueSearch()")
-        t5.setTargetState(self.state_set_delay)
+
+        t5 = QSignalTransition(); t5.setSenderObject(self); t5.setSignal(b"2continueSearch()"); t5.setTargetState(self.state_set_delay)
         self.state_analyze.addTransition(t5)
-        
-        # Add states to the state machine.
+
         self.state_machine.addState(self.state_prepare_background)
         self.state_machine.addState(self.state_capture_background)
         self.state_machine.addState(self.state_set_delay)
         self.state_machine.addState(self.state_capture_droplet)
         self.state_machine.addState(self.state_analyze)
         self.state_machine.addState(self.state_final)
-        
-        # Set the initial state.
         self.state_machine.setInitialState(self.state_prepare_background)
+
+    # ---------- phases ----------
 
     @Slot()
     def onPrepareBackground(self):
         self.stageChanged.emit("Preparing background image")
-        # Request to change droplet settings (0 droplets).
-        settings = {
-            "num_droplets": 0,
-        }
+        self._eval_count = 0
+        self._lo = None; self._hi = None
+        self._last_delay = None
+        self._rep_areas.clear()
+
+        # keep your current nozzle/pressure settings; ensure 0 drops
+        settings = {"num_droplets": 0}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
     @Slot()
@@ -1486,100 +1479,155 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             final_error_msg="Failed to capture background image."
         )
 
-    # @Slot()
-    # def onCaptureBackground(self):
-    #     self.stageChanged.emit("Capturing background image")
-    #     # Capture the background image.
-    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
-
     @Slot()
     def onSetDelay(self):
-        self.stageChanged.emit(f"Setting flash delay to {self.candidate_delay} μs")
-        # Request to set the flash delay to candidate_delay.
-        settings = {
-            "flash_delay": self.candidate_delay,
-            "num_droplets": 1
-        }
+        d = int(self._clamp_delay(self.candidate_delay))
+        self.candidate_delay = d
+        self.stageChanged.emit(f"Setting flash delay to {d} μs (lo={self._lo}, hi={self._hi})")
+        settings = {"flash_delay": d, "num_droplets": 1}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-
-    # @Slot()
-    # def onCaptureDroplet(self):
-    #     self.stageChanged.emit("Capturing droplet image")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
 
     @Slot()
     def onCaptureDroplet(self):
-        # For emergence, misses can happen; retry a bit more before we bail.
+        # median over a few replicates at the same delay
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capturing droplet image at {self.candidate_delay} μs",
+            stage_text=f"Capturing droplet @ {self.candidate_delay} μs (rep {len(self._rep_areas)+1}/{self.REPLICATES})",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
-            final_error_msg=(
-                f"Failed to capture droplet at delay={self.candidate_delay} μs. "
-                "Try widening exposure or checking flash timing."
-            )
+            final_error_msg=f"Failed to capture droplet at {self.candidate_delay} μs."
         )
 
     @Slot()
     def onAnalyze(self):
-        self.stageChanged.emit("Analyzing droplet image")
-        # Compute the bounding rectangle area from the difference image.
-        area, center, image = self.model.droplet_camera_model.calc_bounding_rect_area(self.background_image, self.droplet_image)
-        print(f"Computed area: {area}, center: {center}")
-        self.stageChanged.emit(f"Rectangle area: {area}")
-        self.measurements.append((self.candidate_delay, area))
-        
-        # If the area is within target range, we consider it a success.
-        if area is not None and self.min_area <= area <= self.max_area:
+        # measure area
+        area, center, overlay = self.model.droplet_camera_model.calc_emergence_area(self.background_image, self.droplet_image)
+        self.presentImageSignal.emit(overlay)
+        self._eval_count += 1
+
+        # treat "no contour" as zero area (still valid info)
+        if area is None:
+            area = 0
+
+        self._rep_areas.append(area)
+        self.stageChanged.emit(f"Delay {self.candidate_delay} μs replicate → area {area}")
+
+        # collect replicates
+        if len(self._rep_areas) < self.REPLICATES:
+            # request another capture at the *same* delay
+            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
+            return
+
+        # aggregate
+        agg_area = int(median(self._rep_areas))
+        self._rep_areas.clear()
+        self.measurements.append((self.candidate_delay, agg_area))
+        self.stageChanged.emit(f"Delay {self.candidate_delay} μs → median area {agg_area}")
+
+        # classify
+        cls = self._classify(agg_area)
+        if cls == "TARGET":
             self.stageChanged.emit("Target area reached")
-            self.presentImageSignal.emit(image)
+            # store result; consumers read via calibration file
+            self.calibrationDataUpdated.emit({'measurements': self.measurements,
+                                              'result': {'area': agg_area, 'flash_delay': self.candidate_delay}})
+            self.dropletDetected.emit()
+            return
 
-            machine_position = self.model.machine_model.get_current_position_dict()
-            nozzle_machine_position = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(center, machine_position)
+        # update bracket
+        if cls == "LOW":
+            self._lo = (self.candidate_delay, agg_area)
+        else:  # "HIGH"
+            self._hi = (self.candidate_delay, agg_area)
 
-            self.calibration_manager.set_nozzle_center(nozzle_machine_position)
-            self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'area': area, 'flash_delay': self.candidate_delay}})
-            self.emitDropletDetected()
+        # try to ensure we *have* a bracket; expand if needed
+        if self._lo is None and self._hi is None:
+            # first datapoint → step up or down based on class
+            step = self._adaptive_step(cls, agg_area)
+            self._set_next_delay(self.candidate_delay + (step if cls == "LOW" else -step))
+        elif self._lo is None:
+            # have only HIGH → step downward to find LOW
+            step = self._adaptive_step("HIGH", agg_area)
+            self._set_next_delay(self.candidate_delay - step)
+        elif self._hi is None:
+            # have only LOW → step upward to find HIGH
+            step = self._adaptive_step("LOW", agg_area)
+            self._set_next_delay(self.candidate_delay + step)
         else:
-            # Update the binary search bounds:
-            if area is None or area < self.min_area:
-                # Too little area: droplet hasn't begun emerging.
-                self.lower_delay = self.candidate_delay
-            else:
-                # Too much area: droplet is too advanced.
-                self.upper_delay = self.candidate_delay
-            # Compute new candidate.
-            # new_candidate = int((self.lower_delay + self.upper_delay) / 2)
-            new_candidate = (self.lower_delay + self.upper_delay)//2
-            if new_candidate == self.candidate_delay or self.upper_delay - self.lower_delay < 50:
-                self.calibrationError.emit("Emergence binary search stalled")
-                return
-            self.stageChanged.emit(f"Adjusting flash delay from {self.candidate_delay} to {new_candidate}")
-            self.candidate_delay = new_candidate
-            self.emitContinueSearch()
+            # refine (bisection), with anti-stall nudge
+            d_lo, _ = self._lo; d_hi, _ = self._hi
+            if d_hi < d_lo:
+                d_lo, d_hi = d_hi, d_lo
+            width = d_hi - d_lo
 
+            if width <= self.FINE_STEP:
+                # close enough—pick the side whose area is nearer the window edge
+                chosen = d_lo if abs(self._lo[1] - self.min_area) < abs(self._hi[1] - self.max_area) else d_hi
+                self.candidate_delay = int(self._clamp_delay(chosen))
+                self.stageChanged.emit("Bracket tight; taking best boundary and finishing as TARGET-ish.")
+                self.calibrationDataUpdated.emit({'measurements': self.measurements,
+                                                  'result': {'area': agg_area, 'flash_delay': self.candidate_delay}})
+                self.dropletDetected.emit()
+                return
+
+            mid = (d_lo + d_hi) // 2
+            if self._last_delay is not None and mid == self._last_delay:
+                mid = mid + (self.STALL_DELTA if cls == "LOW" else -self.STALL_DELTA)
+            self._set_next_delay(mid)
+
+        # safety caps
+        if self._eval_count >= self.MAX_EVALS:
+            self.calibrationError.emit("Emergence search did not converge (max evaluations)")
+            return
+
+        self.emitContinueSearch()
+
+    # ---------- completion ----------
     @Slot()
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Droplet emergence calibration complete")
         self.calibrationCompleted.emit()
 
-    # def handleBackgroundCaptured(self, image):
-    #     self.background_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
+    # ---------- helpers ----------
 
-    # def handleDropletCaptured(self, image):
-    #     self.droplet_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
+    def handleDropletCaptured(self, img):
+        # Base _capture_with_policy sets attribute; we just re-emit captureCompleted
+        self.calibration_manager.emitCaptureCompleted()
 
-    def emitContinueSearch(self):
-        # Emit the custom signal to trigger the transition.
-        self.continueSearch.emit()
+    def _classify(self, area:int) -> str:
+        if area < self.min_area:      return "LOW"
+        if area > self.max_area:      return "HIGH"
+        return "TARGET"
 
-    def emitDropletDetected(self):
-        self.dropletDetected.emit()
+    def _adaptive_step(self, cls:str, area:int) -> int:
+        """
+        Adapt step based on how far we are from the window (in 'area' units).
+        Converts that to a delay step using coarse heuristic (monotonic area↑ with delay↑).
+        """
+        # rough scaling: relative distance to window edges
+        if cls == "LOW":
+            frac = 1.0 if self.min_area <= 0 else min(2.0, max(0.2, (self.min_area - area) / max(self.min_area, 1)))
+            step = int(round(self.COARSE_STEP * frac))
+        elif cls == "HIGH":
+            frac = 1.0 if self.max_area <= 0 else min(2.0, max(0.2, (area - self.max_area) / max(self.max_area, 1)))
+            step = int(round(self.COARSE_STEP * frac))
+        else:
+            step = self.FINE_STEP
+        return max(self.FINE_STEP, min(4*self.COARSE_STEP, step))
 
+    def _set_next_delay(self, d:int):
+        d = int(self._clamp_delay(d))
+        # avoid exact repeats if we can (nudge by FINE_STEP)
+        if self._last_delay is not None and d == self._last_delay:
+            d = int(self._clamp_delay(d + (self.FINE_STEP if d + self.FINE_STEP <= self.DELAY_MAX else -self.FINE_STEP)))
+        self._last_delay = self.candidate_delay
+        self.candidate_delay = d
+        self.stageChanged.emit(f"Next candidate delay: {self.candidate_delay} μs")
+
+    def _clamp_delay(self, d:int) -> int:
+        return max(self.DELAY_MIN, min(self.DELAY_MAX, int(d)))
+    
 class PressureCalibrationProcess(BaseCalibrationProcess):
     """
     A calibration process to identify the highest pressure that yields a single droplet
@@ -3519,6 +3567,63 @@ class DropletCameraModel(QObject):
         cv2.putText(image, f'Area: {w*h}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         return w * h, center, image
     
+    def calc_emergence_area(self, background, image):
+        """
+        Robustly estimate emergence 'size' at a delay:
+          - abs diff, Otsu threshold fallback, morphology cleanup
+          - choose *top-most* external contour (most likely the nozzle/droplet)
+          - return bounding-rect area, bbox center, and an overlay image
+        Returns: (area:int|None, center:(x,y)|None, overlay_bgr)
+        """
+        import numpy as np, cv2
+        if background is None or image is None:
+            return None, None, image
+
+        # diff → gray
+        if image.ndim == 3 and image.shape[2] == 3:
+            diff = cv2.absdiff(image, background)
+            gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+        else:
+            diff = cv2.absdiff(image, background)
+            gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
+            gray = gray if gray.ndim == 2 else cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Otsu; fallback to mean+3σ if too few pixels
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if np.count_nonzero(th) < 20:
+            t = max(15, int(np.mean(blur) + 3*np.std(blur)))
+            _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
+
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  k, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, image
+
+        # pick the *top-most* contour (min y of its points), break ties by larger area
+        def top_y(c): return int(c[:,:,1].min())
+        areas = [cv2.contourArea(c) for c in contours]
+        keep  = [(c, a) for (c, a) in zip(contours, areas) if a >= 20]
+        if not keep:
+            return None, None, image
+        keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
+        chosen, _ = keep[0]
+
+        x, y, w, h = cv2.boundingRect(chosen)
+        area = int(w*h)
+        center = (x + w//2, y + h//2)
+
+        # overlay
+        overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(overlay, [chosen], -1, (0,255,0), 2)
+        cv2.rectangle(overlay, (x,y), (x+w, y+h), (255,0,0), 2)
+        cv2.putText(overlay, f'Area: {area}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (50,200,50), 2)
+
+        return area, center, overlay
+
     def identify_droplets(self,image, background, nozzle_center,min_area=1000):
         """
         Identifies the number of droplets and their locations in the image.
