@@ -2750,9 +2750,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.max_center_step = 1200     # clamp per recenter move (X/Z)
         self.max_focus_step = 16        # clamp per focus nudge (Y)
         # Hard machine bounds (best effort; fallbacks are conservative)
-        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=40000)
-        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=20000)  # focus axis near scope
-        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=40000)
+        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
+        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)  # focus axis near scope
+        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
 
         # ---------- focus control (Y axis) ----------
         self.focus_dir = +1
