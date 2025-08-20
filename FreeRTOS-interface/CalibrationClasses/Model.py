@@ -1668,6 +1668,11 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         # Start with a candidate near the lower bound.
         self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
         
+        lo_hw, hi_hw = self._pressure_bounds()
+        self.lower_pressure = max(lo_hw, self.lower_pressure)
+        self.upper_pressure = min(hi_hw, self.upper_pressure)
+        self.candidate_pressure = self._clampP(self.candidate_pressure)
+        
         # --- bracketed search state ---
         self.bracket_lo = None   # highest pressure confirmed ACCEPTABLE
         self.bracket_hi = None   # lowest pressure confirmed TOO_HIGH
@@ -1837,23 +1842,11 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onInitialPosition(self):
         self.stageChanged.emit("Moving to initial position")
-        centered_nozzle_position = self.calibration_manager.get_nozzle_center()
-        # Create a copy of the centered nozzle position
-        target_position = centered_nozzle_position.copy()
-        if target_position is None:
-            print('Nozzle center not found')
+        nozzle_vector = self.calibration_manager.get_nozzle_center()
+        if nozzle_vector is None:
             self.calibrationError.emit("Nozzle center not found")
             return
-
-        nozzle_vector = self.calibration_manager.get_nozzle_center()
-        # center_vector = self.model.droplet_camera_model.get_center_in_pixels()
-        # move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=350)
-        # dX, dY, dZ = move_vector
-        # target_position['X'] += dX
-        # target_position['Y'] += dY
-        # target_position['Z'] += dZ
-        # absolute_move_vector = (target_position['X'], target_position['Y'],target_position['Z'])
-        print(f'Requesting move to initial position: {nozzle_vector}')
+        print(f"Requesting move to initial position: {nozzle_vector}")
         self.calibration_manager.moveAbsoluteRequested.emit(nozzle_vector, self.calibration_manager.emitMoveCompleted)
 
     @Slot()
@@ -1913,20 +1906,20 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onSetPressure(self):
-        self.stageChanged.emit(f"Setting pressure to {self.candidate_pressure:.2f}")
-        new_flash_delay = max(0, int(self.start_delay + self.start_delay_offset))
-        print(f"New flash delay: {new_flash_delay}")
+        self.stageChanged.emit(f"Setting pressure to {self.candidate_pressure:.3f}")
+        new_flash_delay = max(0, int(self.start_delay + self.start_delay_offset))  # keep non-negative
+        self.candidate_pressure = self._clampP(self.candidate_pressure)
+
         settings = {
             "flash_delay": new_flash_delay,
             "num_droplets": 1,
             "print_pressure": self.candidate_pressure,
         }
-        # reset replicate bookkeeping
         self._rep_results = []
         self._rep_captured = 0
-        
-        print(f"Requesting settings change: {settings}")
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self.calibration_manager.changeSettingsRequested.emit(
+            settings, self.calibration_manager.emitSettingsChangeCompleted
+        )
 
     @Slot()
     def onCaptureDroplet(self):
@@ -1988,6 +1981,18 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
     def _clamp(self, p):
         return max(self.lower_pressure, min(self.upper_pressure, p))
+    
+    def _pressure_bounds(self):
+        # Try to read from the machine; fallback to safe defaults
+        try:
+            lo, hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            lo, hi = 0.2, 1.50  # psi, conservative
+        return float(lo), float(hi)
+
+    def _clampP(self, p: float) -> float:
+        lo, hi = self.lower_pressure, self.upper_pressure
+        return max(lo, min(hi, float(p)))
 
     def evaluate_condition(self, droplet_count, nozzle_area, threshold):
         """
@@ -2094,9 +2099,17 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.presentImageSignal.emit(image)
 
         # --- record replicate and maybe loop for more ---
+        tested_pressure = float(self.candidate_pressure)  # freeze the value we just tested
         self._record_replicate(droplet_count, nozzle_area)
         print(f"[P-Cal] replicate {self._rep_captured}/{self.replicates_per_pressure} "
-            f"@P={self.candidate_pressure:.3f}: count={droplet_count}, area={nozzle_area}")
+            f"@P={tested_pressure:.3f}: count={droplet_count}, area={nozzle_area}")
+
+        # ---- Early-exit replicates (strong signals) ----
+        if self._rep_captured >= 2:
+            counts = [c for (c, _a) in self._rep_results]
+            if counts.count(0) >= 2 or sum(1 for c in counts if c >= 2) >= 2:
+                # force aggregation now
+                self._rep_captured = self.replicates_per_pressure
 
         if self._rep_captured < self.replicates_per_pressure:
             self.replicateContinue.emit()
@@ -2104,27 +2117,27 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # --- aggregate replicates into a single decision for this pressure ---
         agg_count, agg_area, dbg = self._aggregate_replicates()
-        print(f"[P-Cal] aggregated @P={self.candidate_pressure:.3f}: "
+        print(f"[P-Cal] aggregated @P={tested_pressure:.3f}: "
             f"count={agg_count}, area={agg_area}, rule={dbg.get('rule')} "
             f"reps={dbg.get('replicates')}")
-        self.measurements.append((self.candidate_pressure, agg_count, agg_area))
+        self.measurements.append((tested_pressure, agg_count, agg_area))
         self.stageChanged.emit(
-            f"Aggregated — Pressure: {self.candidate_pressure:.3f}, "
+            f"Aggregated — Pressure: {tested_pressure:.3f}, "
             f"Droplet count: {agg_count}, Nozzle area: {agg_area}"
         )
 
         # classify with hysteresis-aware evaluator
         outcome = self.evaluate_condition(agg_count, agg_area, self.nozzle_droplet_threshold)
         acceptable = (outcome in ("ACCEPTABLE", "BORDERLINE"))
-        one_drop   = (outcome in ("ACCEPTABLE", "BORDERLINE", "NEAR"))
+        # one_drop   = (outcome in ("ACCEPTABLE", "BORDERLINE", "NEAR"))
 
         if acceptable:
-            self.last_acceptable_pressure = self.candidate_pressure
+            self.last_acceptable_pressure = tested_pressure
 
-        # SNAPSHOTS for anti-oscillation logic
-        prev_outcome  = self._last_outcome
-        prev_pressure = self._last_pressure
-        tested_pressure = self.candidate_pressure  # the pressure we just evaluated
+        # # SNAPSHOTS for anti-oscillation logic
+        # prev_outcome  = self._last_outcome
+        # prev_pressure = self._last_pressure
+        # tested_pressure = self.candidate_pressure  # the pressure we just evaluated
         print(f"\n\n[P-Cal] - new measurement: P={tested_pressure:.3f}, count={agg_count}, area={agg_area}")
 
         # --------- Anti-oscillation guard (BRACKET only) ----------
@@ -2135,10 +2148,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             flipped_highish_to_low = (self._last_outcome in ("NEAR", "TOO_HIGH") and outcome == "TOO_LOW")
             if flipped_low_to_highish or flipped_highish_to_low:
                 lo = self.last_too_low_pressure if self.last_too_low_pressure is not None else (
-                    min(prev_pressure, tested_pressure))
-                hi = max(prev_pressure, tested_pressure)
+                    min(self._last_pressure, tested_pressure))
+                hi = max(self._last_pressure, tested_pressure)
                 self._switch_to_refine(lo, hi)
-                # update "last" bookkeeping and return
                 self._last_outcome  = outcome
                 self._last_pressure = tested_pressure
                 if self.counter >= self.max_iterations:
@@ -2150,7 +2162,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             if outcome == "TOO_LOW":
                 self.last_too_low_pressure = tested_pressure
                 step = self._adaptive_step(outcome, agg_area)
-                self.candidate_pressure = self._clamp(tested_pressure + step)
+                self.candidate_pressure = self._clampP(tested_pressure + step)
                 print(f"[P-Cal] TOO_LOW → +{step:.3f} → {self.candidate_pressure:.3f}")
                 self.emitContinueSearch()
                 self.counter += 1
@@ -2161,29 +2173,27 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                 return
 
             if acceptable:
-                # keep the *highest acceptable* as lo; continue stepping up, but adaptively
                 if (self.bracket_lo is None) or (tested_pressure > self.bracket_lo):
                     self.bracket_lo = tested_pressure
                 step = self._adaptive_step(outcome, agg_area)
-                self.candidate_pressure = self._clamp(tested_pressure + step)
+                self.candidate_pressure = self._clampP(tested_pressure + step)
                 print(f"[P-Cal] {outcome} → +{step:.3f} → {self.candidate_pressure:.3f} (lo={self.bracket_lo:.3f})")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
                     self.calibrationError.emit("Pressure search did not converge (bracket acceptable climb)")
                 self._last_outcome  = outcome
-                self._last_pressure = self.candidate_pressure
+                self._last_pressure = tested_pressure
                 return
 
             # outcome == NEAR or TOO_HIGH → we’re at/above the upper boundary
             self.bracket_hi = tested_pressure
             if self.bracket_lo is None:
-                # No acceptable yet: if we have a recorded TOO_LOW, use it; otherwise step down adaptively.
                 if self.last_too_low_pressure is not None:
                     self._switch_to_refine(self.last_too_low_pressure, self.bracket_hi)
                 else:
                     step = self._adaptive_step(outcome, agg_area)
-                    self.candidate_pressure = self._clamp(tested_pressure - step)
+                    self.candidate_pressure = self._clampP(tested_pressure - step)
                     print(f"[P-Cal] {outcome} (no lo yet) → -{step:.3f} → {self.candidate_pressure:.3f}")
                     self.emitContinueSearch()
                     self.counter += 1
@@ -2196,7 +2206,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             # We have both lo and hi → enter REFINE right away.
             self._switch_to_refine(self.bracket_lo, self.bracket_hi)
             self._last_outcome  = outcome
-            self._last_pressure = self.candidate_pressure
+            self._last_pressure = tested_pressure
             if self.counter >= self.max_iterations:
                 self.calibrationError.emit("Pressure search did not converge (switching to refine)")
             return
@@ -2204,19 +2214,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         # -------------------- Phase 2: REFINE (bisection to highest acceptable) --------------------
         if self.phase == "refine":
             if outcome in ("ACCEPTABLE", "BORDERLINE", "TOO_LOW"):
-                # too low or acceptable → move lower bound up (we are below/at boundary)
-                self.bracket_lo = (tested_pressure if self.bracket_lo is None
-                                   else max(self.bracket_lo, tested_pressure))
-                print(f"[P-Cal] REFINE: lo={self.bracket_lo:.3f}")
+                self.bracket_lo = tested_pressure if self.bracket_lo is None else max(self.bracket_lo, tested_pressure)
             else:
-                # NEAR or TOO_HIGH → move upper bound down
-                self.bracket_hi = (tested_pressure if self.bracket_hi is None
-                                   else min(self.bracket_hi, tested_pressure))
-                print(f"[P-Cal] REFINE: hi={self.bracket_hi:.3f}")
-            # if acceptable:
-            #     self.bracket_lo = max(self.bracket_lo, self.candidate_pressure) if self.bracket_lo is not None else self.candidate_pressure
-            # else:
-            #     self.bracket_hi = min(self.bracket_hi, self.candidate_pressure) if self.bracket_hi is not None else self.candidate_pressure
+                self.bracket_hi = tested_pressure if self.bracket_hi is None else min(self.bracket_hi, tested_pressure)
 
             if (self.bracket_lo is not None) and (self.bracket_hi is not None):
                 gap = self.bracket_hi - self.bracket_lo
@@ -2227,8 +2227,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                             "Pressure search narrowed but never observed a valid single-droplet condition."
                         )
                         return
-                    # return the HIGHEST acceptable
-                    self.candidate_pressure = self.bracket_lo
+                    self.candidate_pressure = self.bracket_lo  # highest acceptable
                     self.final_condition_found = True
                     self.stageChanged.emit("Final condition found (bisection → highest acceptable)")
                     self.calibrationDataUpdated.emit({
@@ -2238,29 +2237,22 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
                     self.emitDropletDetected()
                     return
 
-                self.candidate_pressure = 0.5 * (self.bracket_lo + self.bracket_hi)
+                self.candidate_pressure = self._clampP(0.5 * (self.bracket_lo + self.bracket_hi))
                 print(f"[P-Cal] Next mid={self.candidate_pressure:.3f}")
                 self.emitContinueSearch()
                 self.counter += 1
                 if self.counter >= self.max_iterations:
-                    # Prefer a real acceptable result if we have one; otherwise error
                     if self.last_acceptable_pressure is not None:
                         self.candidate_pressure = self.last_acceptable_pressure
                         self.final_condition_found = True
                         self.emitDropletDetected()
                     else:
                         self.calibrationError.emit("Pressure search did not converge (refine phase)")
-                    # if self.bracket_lo is not None:
-                    #     self.candidate_pressure = self.bracket_lo
-                    #     self.final_condition_found = True
-                    #     self.emitDropletDetected()
-                    # else:
-                    #     self.calibrationError.emit("Pressure search did not converge (refine phase)")
                 self._last_outcome  = outcome
                 self._last_pressure = tested_pressure
                 return
 
-        # Bookkeeping if we somehow fell through
+        # Fallback bookkeeping
         self._last_outcome  = outcome
         self._last_pressure = tested_pressure
 
@@ -2278,7 +2270,6 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
     def emitDropletDetected(self):
         self.calibration_manager.set_background_image(self.background_image)
-        # self.calibration_manager.set_nozzle_center(self.nozzle_center)
         self.calibration_manager.set_nozzle_center_image_position(self.nozzle_center)
         self.calibration_manager.set_min_start_delay(self.start_delay + self.start_delay_offset)
         self.dropletDetected.emit()
@@ -3669,66 +3660,95 @@ class DropletCameraModel(QObject):
 
         return area, center, overlay
     
-    def identify_droplets(self,image, background, nozzle_center,min_area=1000):
+    def identify_droplets(self, image, background, nozzle_center, min_area=1000):
         """
-        Identifies the number of droplets and their locations in the image.
-        - Uses the background image to compute the difference image.
-        - Uses the nozzle to identify what contours are still in contact with the nozzle.
-        - Excludes all contours that are above the nozzle as these are reflections in the image.
+        Robust droplet identification:
+          - works on diff = |image - background|
+          - restricts to ROI below the nozzle row (+margin)
+          - morphology to clean noise
+          - classifies "nozzle-attached" area (area below nozzle within any bbox that contains the nozzle center)
+          - counts free droplets entirely below the nozzle
+        Returns: (droplets_list_or_None, nozzle_attached_area_or_None, overlay_bgr)
         """
 
         image_gray, diff = self.calc_diff_image(image, background)
-        if diff is None:
-            print('Difference image is None')
-            return None, None, None
+        if diff is None or nozzle_center is None:
+            return None, None, image
 
-        # Apply a threshold to the difference image
-        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+        h, w = diff.shape[:2]
+        nzx, nzy = int(nozzle_center[0]), int(nozzle_center[1])
+        nzy = max(0, min(h-1, nzy))
 
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # ---- ROI: only rows at/under the nozzle (+ small margin) ----
+        MARGIN = 8
+        mask = np.zeros_like(diff, dtype=np.uint8)
+        mask[max(0, nzy - MARGIN):, :] = 255
 
-        # Check if there are any contours
-        if len(contours) == 0:
-            print('No contours detected')
-            return None, None, None
+        # ---- threshold (hard first, then Otsu fallback) ----
+        blur = cv2.GaussianBlur(diff, (5,5), 0)
+        mu, sd = float(np.mean(blur[mask>0])), float(np.std(blur[mask>0]))
+        t_hard = max(20, int(mu + 3.0 * sd))
+        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+        th = cv2.bitwise_and(th, th, mask=mask)
 
-        # Identify the droplets
+        MIN_FG = 60
+        if np.count_nonzero(th) < MIN_FG:
+            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            th = cv2.bitwise_and(th, th, mask=mask)
+
+        # morphology cleanup
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  k, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+        if np.count_nonzero(th) < MIN_FG:
+            return None, None, image
+
+        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, image
+
+        overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        cv2.line(overlay, (0, nzy), (w-1, nzy), (128, 128, 255), 1)  # nozzle row reference
+        cv2.circle(overlay, (nzx, nzy), 5, (255, 0, 0), -1)
+
+        nozzle_attached_area = 0
         droplets = []
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > min_area]
-        cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
-        
-        nozzle_droplet_area = 0
-        for contour in large_contours:
-            x, y, w, h = cv2.boundingRect(contour)
 
-            # Check if the nozzle center is inside the bounding box
-            if x < nozzle_center[0] < x+w and y < nozzle_center[1] < y+h:
-                # print('Nozzle is inside the bounding box')
-                cv2.circle(image, nozzle_center, 10, (255, 0, 0), -1)
-                # Calculate the area of the bounding box, but only include the area that is below the nozzle center
-                area = (y + h - nozzle_center[1]) * w
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < max(40, min_area*0.05):  # drop tiny specks up-front
+                continue
+            x, y, ww, hh = cv2.boundingRect(c)
 
-                # Add text to the bottom right of the bounding box
-                cv2.putText(image, f'Area: {area}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                nozzle_droplet_area = max(nozzle_droplet_area, area)
+            # ignore blobs whose entire bbox is above nozzle row (reflection/ghosts)
+            if y + hh <= nzy:
                 continue
 
-            # Check if the contour is above the nozzle
-            if y < nozzle_center[1]:
-                print('Contour is above the nozzle')
-                continue
-            droplet_center = (x + w//2, y + h//2)
-            droplets.append(droplet_center)
+            bbox_contains_nozzle = (x <= nzx <= x+ww) and (y <= nzy <= y+hh)
 
-            # Draw the bounding box
-            cv2.rectangle(image, (x, y), (x+w, y+h), (0, 0, 255), 2)
-            cv2.circle(image, droplet_center, 10, (0, 0, 255), -1)
+            if bbox_contains_nozzle:
+                # nozzle-attached: only count below the nozzle row
+                # clip the bbox to rows >= nzy
+                below_h = (y + hh) - nzy
+                if below_h > 0:
+                    area_below = below_h * ww
+                    nozzle_attached_area = max(nozzle_attached_area, int(area_below))
+                cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 200, 255), 2)
+            else:
+                # free droplet(s) below the nozzle
+                if area >= min_area:
+                    cx, cy = x + ww//2, y + hh//2
+                    droplets.append((cx, cy))
+                    cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 0, 255), 2)
+                    cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
 
-            # Add the droplet count to the top left of the image
-            cv2.putText(image, f'Droplet count: {len(droplets)}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        if droplets:
+            cv2.putText(overlay, f'Droplets: {len(droplets)}', (10, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
 
-        return droplets, nozzle_droplet_area, image
+        return (droplets if droplets else None,
+                (nozzle_attached_area if nozzle_attached_area > 0 else None),
+                overlay)
 
     def identify_droplet_contour(self, image, background):
         """
