@@ -2742,9 +2742,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.max_delay_us = 40000   # hard cap 40 ms
         self.target_delay_us = self._clamp_delay(self.target_delay_us)
 
-        # ---------- predicted machine target from velocity ----------
-        self.predicted_target = self._predict_stage_target(self.target_delay_us)
-
         # ---------- centering / movement safety ----------
         # Per-move caps (steps) — keep small to avoid overshoot & scope collisions
         self.max_center_step = 1200     # clamp per recenter move (X/Z)
@@ -2753,6 +2750,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
         self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)  # focus axis near scope
         self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+
+
+        # ---------- predicted machine target from velocity ----------
+        self.predicted_target = self._predict_stage_target(self.target_delay_us)
 
         # ---------- focus control (Y axis) ----------
         self.focus_dir = +1
@@ -2873,12 +2874,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
     def _get_axis_bounds_safe(self, axis:str, default_span:int):
         # Try to ask the machine; otherwise use nozzle ± default_span.
-        try:
-            lo, hi = self.model.machine_model.get_axis_bounds(axis)
-            return int(lo), int(hi)
-        except Exception:
-            base = int(self.nozzle_center_machine.get(axis, 0))
-            return base - default_span, base + default_span
+        # try:
+        #     lo, hi = self.model.machine_model.get_axis_bounds(axis)
+        #     return int(lo), int(hi)
+        # except Exception:
+        base = int(self.nozzle_center_machine.get(axis, 0))
+        print(f"Using {axis} bounds from nozzle center: {base} ± {default_span}")
+        return base - default_span, base + default_span
 
     def _clamp_abs(self, X:int, Y:int, Z:int):
         Xc = max(self.x_lo, min(self.x_hi, int(X)))
@@ -2903,7 +2905,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         vX, vY, vZ = map(float, self.vel_steps_per_s)
         X = int(round(self.nozzle_center_machine['X'] + vX * dt_s))
         Y = int(round(self.nozzle_center_machine['Y'] + vY * dt_s))   # usually ~0
-        Z = int(round(self.nozzle_center_machine['Z'] + vZ * dt_s))
+        Z = int(round(self.nozzle_center_machine['Z'] + vZ * -dt_s))
         return self._clamp_abs(X, Y, Z)
 
     def _bounded_center_move(self, droplet_xy, target_xy):
