@@ -1593,7 +1593,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Emergence search did not converge (max evaluations)")
             return
 
-        self.emitContinueSearch()
+        self.continueSearch.emit()
 
     # ---------- completion ----------
     @Slot()
