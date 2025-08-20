@@ -256,6 +256,9 @@ class CalibrationManager(QObject):
     def set_trajectory_vector(self, vector):
         self.droplet_trajectory_vector = vector
 
+    def set_trajectory_delay(self, delay):
+        self.trajectory_delay = delay
+
     def set_min_start_delay(self, delay):
         self.min_start_delay = delay
 
@@ -273,6 +276,9 @@ class CalibrationManager(QObject):
 
     def get_trajectory_vector(self):
         return self.droplet_trajectory_vector
+
+    def get_trajectory_delay(self):
+        return self.trajectory_delay
 
     def get_min_start_delay(self):
         return self.min_start_delay
@@ -2275,33 +2281,43 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.dropletDetected.emit()
 
 class TrajectoryCalibrationProcess(BaseCalibrationProcess):
-    # Custom signals for state transitions.
-    continueTrajectory = Signal()       # To trigger capture of next droplet image.
-    trajectoryCalculated = Signal()       # To trigger transition from trajectory analysis to final.
-    trajectoryFinalized = Signal()        # To indicate that final trajectory analysis is complete.
-    changePressure = Signal()             # To trigger a change in pressure.
+    continueTrajectory = Signal()
+    trajectoryCalculated = Signal()
+    trajectoryFinalized = Signal()
+    changePressure = Signal()
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "trajectory_calibration"
-        
-        # Use information passed from previous calibrations:
-        # (Assume these were set by the pressure calibration process and passed to the model.)
+
+        # ---- prerequisites from earlier calibrations ----
         self._ready = True
         self.import_calibration_data()
+        if not self._ready:
+            return
 
-        # Number of droplet images to capture.
-        self.num_images = 5
-        self.image_counter = 0
+        # ---- delay plan (sample well after emergence) ----
+        # Base = emergence time + offset (to ensure free-flight), then 2 more later points
+        self.start_delay_offset = max(self.model.machine_model.get_print_pulse_width() + 1000, 0)
+        self.t_emerge_us = int(self.start_delay)  # from emergence calibration
+        base_us = int(max(0, self.t_emerge_us + self.start_delay_offset))  # free-flight start
+        # Plan (us) relative to base: tune spacings to keep droplet inside FOV
+        self.plan_offsets_us = [0, 500, 1000]     # 0 ms, +0.5 ms, +1 ms
+        self.delay_plan_us = [base_us + d for d in self.plan_offsets_us]
+        self._delay_index = 0
+        self._current_delay_us = None
 
-        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 2000, 0)
-        self.trajectory_delay_us = max(0, int(self.start_delay + self.start_delay_offset))
+        # Delay bounds (safe guard)
+        self.min_delay_us = 0
+        self.max_delay_us = 20000  # 50 ms hard cap (adjust if needed)
+        self.delay_plan_us = [int(min(max(d, self.min_delay_us), self.max_delay_us))
+                              for d in self.delay_plan_us]
 
-        # Apply settings once on the first entry to capture
-        self._settings_applied = False
+        # Replicates per delay and storage
+        self.reps_per_delay = 3
+        self._positions_by_delay = {d: [] for d in self.delay_plan_us}
 
-        # ------ pressure management ------
-        # Prefer bounds from hardware; fall back to safe defaults.
+        # ---- pressure management (same guardrails as before) ----
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
@@ -2309,167 +2325,184 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.min_pressure = float(p_lo)
         self.max_pressure = float(p_hi)
 
-        # Variables to change pressure
         self.pressure_step = 0.02
         self.new_pressure = None
         self._adjustments = 0
-        self._max_adjustments = 8    # don’t thrash forever
+        self._max_adjustments = 8
+        self._discard_next = False  # discard first shot after pressure change
 
-        # After any pressure change, discard the first capture
-        self._discard_next = False
-        
-        # Lists to store droplet analysis results.
-        self.droplet_positions = []  # List of (x, y) positions.
-        self.droplet_focus = []      # List of focus values.
-        self.annotated_images = []   # Annotated images for record.
+        # ---- capture state ----
+        self._settings_applied = False
+        self.image_counter = 0
+        self.annotated_images = []  # for the *current* delay only (debug view)
 
-        # Early convergence
+        # Early stability check per-delay (keeps time down if very repeatable)
         self.std_tol_px = 3.0
-        self.min_reps_for_early = 3
-        
-        # Define states.
+
+        # ---- states ----
         self.state_capture_droplet = QState()
         self.state_analyze = QState()
         self.state_change_pressure = QState()
         self.state_trajectory_analysis = QState()
         self.state_final = QFinalState()
-        
-        # Connect on-entry actions.
+
         self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
         self.state_change_pressure.entered.connect(self.onChangePressure)
         self.state_trajectory_analysis.entered.connect(self.onTrajectoryAnalysis)
         self.state_final.entered.connect(self.onCalibrationCompleted)
-        
-        # Create transitions.
-        # Transition: After capturing a droplet image, move to analysis.
+
         t1 = QSignalTransition()
         t1.setSenderObject(self.calibration_manager)
         t1.setSignal(b"2captureCompleted()")
         t1.setTargetState(self.state_analyze)
         self.state_capture_droplet.addTransition(t1)
-        
-        # Transition: In the analysis state, decide whether to capture the next image or perform trajectory analysis.
+
         t2 = QSignalTransition()
         t2.setSenderObject(self)
         t2.setSignal(b"2continueTrajectory()")
         t2.setTargetState(self.state_capture_droplet)
         self.state_analyze.addTransition(t2)
-        
+
         t3 = QSignalTransition()
         t3.setSenderObject(self)
         t3.setSignal(b"2trajectoryCalculated()")
         t3.setTargetState(self.state_trajectory_analysis)
         self.state_analyze.addTransition(t3)
 
-        # If no droplets or multiple droplets are identified then change the pressure and recapture
-        t0 = QSignalTransition()
-        t0.setSenderObject(self)
-        t0.setSignal(b"2changePressure()")
-        t0.setTargetState(self.state_change_pressure)
-        self.state_analyze.addTransition(t0)
-        
-        t01 = QSignalTransition()
-        t01.setSenderObject(self.calibration_manager)
-        t01.setSignal(b"2settingsChangeCompleted()")
-        t01.setTargetState(self.state_capture_droplet)
-        self.state_change_pressure.addTransition(t01)
-        
-        # Transition: After trajectory analysis, move to final state.
+        tP = QSignalTransition()
+        tP.setSenderObject(self)
+        tP.setSignal(b"2changePressure()")
+        tP.setTargetState(self.state_change_pressure)
+        self.state_analyze.addTransition(tP)
+
+        tPdone = QSignalTransition()
+        tPdone.setSenderObject(self.calibration_manager)
+        tPdone.setSignal(b"2settingsChangeCompleted()")
+        tPdone.setTargetState(self.state_capture_droplet)
+        self.state_change_pressure.addTransition(tPdone)
+
         t4 = QSignalTransition()
         t4.setSenderObject(self)
         t4.setSignal(b"2trajectoryFinalized()")
         t4.setTargetState(self.state_final)
         self.state_trajectory_analysis.addTransition(t4)
-        
-        # Add states to the state machine.
+
         self.state_machine.addState(self.state_capture_droplet)
         self.state_machine.addState(self.state_analyze)
         self.state_machine.addState(self.state_change_pressure)
         self.state_machine.addState(self.state_trajectory_analysis)
         self.state_machine.addState(self.state_final)
-        
-        # Set the initial state.
         self.state_machine.setInitialState(self.state_capture_droplet)
 
-        # ---------- helpers ----------
+    # ---------- helpers ----------
     def _clampP(self, p: float) -> float:
         return max(self.min_pressure, min(self.max_pressure, float(p)))
-    
+
     def import_calibration_data(self):
         self.nozzle_center_image_position = self.calibration_manager.get_nozzle_center_image_position()
         self.nozzle_center_machine = self.calibration_manager.get_nozzle_center()
         self.background_image = self.calibration_manager.get_background_image()
         self.start_delay = self.calibration_manager.get_emergence_time()
-
         if (self.nozzle_center_machine is None or
             self.background_image is None or
             self.nozzle_center_image_position is None or
             self.start_delay is None):
             self._ready = False
-            self.calibrationError.emit("Must complete pressure calibration first")
+            self.calibrationError.emit("Must complete pressure + emergence + nozzle-center first")
 
-    def _apply_initial_settings_then_capture(self):
-        """One-shot: set delay & 1 droplet, then start capture."""
+    def _apply_settings_and_capture(self, delay_us):
+        """Set (flash_delay, num_droplets=1) and capture in the callback."""
         self._settings_applied = True
+        self._current_delay_us = int(delay_us)
         current_p = self._clampP(self.model.machine_model.get_current_print_pressure())
         settings = {
-            "flash_delay": self.trajectory_delay_us,
+            "flash_delay": self._current_delay_us,
             "num_droplets": 1,
             "print_pressure": current_p,
         }
-        # After settings are applied, immediately request a capture (within the callback).
         def _after():
-            # Use the same capture policy as normal
             self._capture_with_policy(
                 set_attr="droplet_image",
-                stage_text=f"Capturing droplet image {self.image_counter + 1} of {self.num_images}",
+                stage_text=f"Capturing at delay {self._current_delay_us} μs "
+                           f"({len(self._positions_by_delay[self._current_delay_us]) + 1}"
+                           f"/{self.reps_per_delay})",
                 attempts_total=5,
                 retry_delay_ms=75,
                 guard_timeout_ms=10_000,
-                final_error_msg="Failed to capture droplet image."
+                final_error_msg=f"Failed to capture droplet at delay={self._current_delay_us} μs."
             )
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
+
+    def _positions_are_tight(self, pts, tol_px=3.0):
+        if len(pts) < 2: return False
+        a = np.array(pts, dtype=np.float32)
+        std = np.std(a, axis=0)
+        return bool((std[0] <= tol_px) and (std[1] <= tol_px))
+
+    def _robust_mean(self, pts):
+        """MAD filter then mean. Returns (mean_tuple, kept_points)."""
+        if len(pts) == 1:
+            return tuple(map(int, pts[0])), pts[:]
+        a = np.array(pts, dtype=np.float32)
+        med = np.median(a, axis=0)
+        d = np.linalg.norm(a - med, axis=1)
+        mad = np.median(np.abs(d - np.median(d))) + 1e-6
+        keep = a[d <= (np.median(d) + 2.5 * mad)]
+        if keep.size == 0:
+            keep = a
+        mean_xy = tuple(np.mean(keep, axis=0).astype(int))
+        return mean_xy, [tuple(map(int, xy)) for xy in keep]
 
     # ---------- states ----------
     @Slot()
     def onCaptureDroplet(self):
         if not self._ready:
-            # We can't proceed safely.
             self.calibrationError.emit("Trajectory calibration prerequisites missing")
             return
-
-        # First entry: apply (delay, 1 drop, current pressure), then capture
-        if not self._settings_applied:
-            self._apply_initial_settings_then_capture()
+        # Choose the delay for this shot
+        if self._delay_index >= len(self.delay_plan_us):
+            # We have everything we need; proceed to analysis
+            self.emitTrajectoryCalculated()
             return
 
-        # Normal capture path
+        target_delay = int(self.delay_plan_us[self._delay_index])
+        current_delay = self._current_delay_us
+
+        # If this is our first shot or we need to switch delay, set settings then capture
+        if (not self._settings_applied) or (current_delay != target_delay):
+            self._apply_settings_and_capture(target_delay)
+            return
+
+        # Settings are already correct → capture now
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capturing droplet image {self.image_counter + 1} of {self.num_images}",
+            stage_text=f"Capturing at delay {current_delay} μs "
+                       f"({len(self._positions_by_delay[current_delay]) + 1}"
+                       f"/{self.reps_per_delay})",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
-            final_error_msg="Failed to capture droplet image."
+            final_error_msg=f"Failed to capture droplet at delay={current_delay} μs."
         )
 
     @Slot()
     def onAnalyze(self):
-        self.stageChanged.emit(f"Analyzing droplet image {self.image_counter + 1}")
-
-        # Optionally discard the first shot after any pressure change to let the jet settle
+        # Optionally discard the first shot after any pressure change (settling)
         if self._discard_next:
             self._discard_next = False
             self.stageChanged.emit("Discarding first shot after pressure change (settling)")
             self.emitContinueTrajectory()
             return
 
+        delay_us = int(self._current_delay_us)
+        self.stageChanged.emit(f"Analyzing droplet at {delay_us} μs")
+
         droplets, nozzle_area, annotated = self.model.droplet_camera_model.identify_droplets(
             self.droplet_image, self.background_image, self.nozzle_center_image_position
         )
 
-        # If nothing detected → increase pressure a bit (bounded)
+        # Pressure corrections (unchanged logic)
         if not droplets:
             self._adjustments += 1
             if self._adjustments > self._max_adjustments:
@@ -2480,11 +2513,10 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             if self.new_pressure <= cur_p and cur_p >= self.max_pressure:
                 self.calibrationError.emit("Maximum pressure reached")
                 return
-            self.stageChanged.emit(f"No droplet detected → increasing pressure to {self.new_pressure:.3f} psi")
+            self.stageChanged.emit(f"No droplet → increasing pressure to {self.new_pressure:.3f} psi")
             self.emitChangePressure()
             return
 
-        # If more than one droplet → decrease pressure a bit (bounded) and restart collection
         if len(droplets) > 1:
             self._adjustments += 1
             if self._adjustments > self._max_adjustments:
@@ -2495,37 +2527,41 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
             if self.new_pressure >= cur_p and cur_p <= self.min_pressure:
                 self.calibrationError.emit("Minimum pressure reached")
                 return
-
-            self.stageChanged.emit(f"Multiple droplets detected → decreasing pressure to {self.new_pressure:.3f} psi")
-            # Reset sample buffers for the new pressure
-            self.droplet_positions.clear()
+            self.stageChanged.emit(f"Multiple droplets → decreasing pressure to {self.new_pressure:.3f} psi")
+            # Reset samples for current delay so we don’t mix conditions
+            self._positions_by_delay[delay_us].clear()
             self.annotated_images.clear()
-            self.image_counter = 0
             self.emitChangePressure()
             return
 
-        # Exactly one droplet detected.
-        dxy = droplets[0]
-        # Draw nozzle->droplet vector for operator sanity
+        # Exactly one droplet
+        dxy = tuple(map(int, droplets[0]))
+        # Visual overlay (nozzle -> droplet)
         cv2.circle(annotated, dxy, 8, (0, 0, 255), -1)
         cv2.circle(annotated, self.nozzle_center_image_position, 6, (255, 0, 0), -1)
         cv2.line(annotated, self.nozzle_center_image_position, dxy, (0, 255, 255), 2)
         self.presentImageSignal.emit(annotated)
 
-        # Record the measurement.
-        self.droplet_positions.append(tuple(map(int, dxy)))
+        self._positions_by_delay[delay_us].append(dxy)
         self.annotated_images.append(annotated)
-        self.image_counter += 1
 
-        # ---- early convergence: if the cloud is already tight, stop early ----
-        if self.image_counter >= self.min_reps_for_early:
-            tight, n_kept = self._positions_are_tight(self.droplet_positions, tol_px=self.std_tol_px)
-            if tight and (self.image_counter >= self.min_reps_for_early):
-                self.stageChanged.emit(f"Positions stable (n={n_kept}); finalizing early")
-                self.emitTrajectoryCalculated()
-                return
+        # Early “tight” check within this delay to speed up if extremely stable
+        if (len(self._positions_by_delay[delay_us]) >= 2
+                and self._positions_are_tight(self._positions_by_delay[delay_us], self.std_tol_px)):
+            # proceed to next delay immediately
+            self.stageChanged.emit(f"Delay {delay_us} μs samples stable; advancing")
+            self._delay_index += 1
+            self.emitContinueTrajectory()
+            return
 
-        if self.image_counter < self.num_images:
+        # Enough replicates for this delay?
+        if len(self._positions_by_delay[delay_us]) < self.reps_per_delay:
+            self.emitContinueTrajectory()
+            return
+
+        # Move to next delay (if any)
+        self._delay_index += 1
+        if self._delay_index < len(self.delay_plan_us):
             self.emitContinueTrajectory()
         else:
             self.emitTrajectoryCalculated()
@@ -2533,88 +2569,96 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onChangePressure(self):
         self.stageChanged.emit("Changing pressure")
-        self._discard_next = True   # flush one shot after pressure change
-        settings = {
-            "print_pressure": self.new_pressure,
-        }
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-    
-    @Slot()
-    def onTrajectoryAnalysis(self):
-        self.stageChanged.emit("Performing final trajectory analysis")
-
-        # Robust mean: remove outliers with MAD, then compute mean/std
-        kept = self._robust_filter(self.droplet_positions, k=2.5)
-        if len(kept) < 2:
-            # fall back to all if filter was too aggressive
-            kept = self.droplet_positions[:]
-
-        positions = np.array(kept, dtype=np.float32)  # shape (n, 2)
-        mean_xy = tuple(np.mean(positions, axis=0).astype(int))
-        std_xy  = tuple(np.std(positions, axis=0))
-
-        final_image = (self.annotated_images[-1].copy()
-                       if self.annotated_images else self.droplet_image.copy())
-        for pos in kept:
-            cv2.circle(final_image, tuple(map(int, pos)), 5, (255, 0, 0), -1)
-        cv2.circle(final_image, mean_xy, 8, (0, 255, 0), -1)
-        cv2.line(final_image, self.nozzle_center_image_position, mean_xy, (0, 255, 255), 2)
-        self.presentImageSignal.emit(final_image)
-
-        # Convert pixel-mean to machine coords at current position
-        machine_position = self.model.machine_model.get_current_position_dict()
-        droplet_machine_position = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
-            mean_xy, machine_position
+        self._discard_next = True
+        settings = { "print_pressure": self.new_pressure }
+        self.calibration_manager.changeSettingsRequested.emit(
+            settings, self.calibration_manager.emitSettingsChangeCompleted
         )
 
-        traj_vec = (droplet_machine_position['X'] - self.nozzle_center_machine['X'],
-                    droplet_machine_position['Y'] - self.nozzle_center_machine['Y'],
-                    droplet_machine_position['Z'] - self.nozzle_center_machine['Z'])
+    @Slot()
+    def onTrajectoryAnalysis(self):
+        self.stageChanged.emit("Fitting velocity from multi-delay samples")
 
+        # Build robust per-delay means (in pixel coords) and flight times (seconds)
+        t_s = []
+        pts = []
+        kept_by_delay = {}
+        for dly in self.delay_plan_us:
+            samples = self._positions_by_delay.get(dly, [])
+            if not samples:
+                continue
+            mean_xy, kept = self._robust_mean(samples)
+            kept_by_delay[dly] = kept
+            pts.append(mean_xy)
+            # Flight time since emergence (convert μs → s)
+            t_s.append(max(0.0, (dly - self.t_emerge_us) * 1e-6))
+
+        if len(pts) < 2:
+            self.calibrationError.emit("Not enough valid delays to fit velocity (need ≥2).")
+            return
+
+        pts = np.array(pts, dtype=np.float32)  # (n,2)
+        t_s = np.array(t_s, dtype=np.float64)  # (n,)
+
+        # Linear fit: x(t) = a_x + b_x t ; y(t) = a_y + b_y t
+        # b_x, b_y are pixels/second
+        A = np.vstack([np.ones_like(t_s), t_s]).T
+        bx = np.linalg.lstsq(A, pts[:,0], rcond=None)[0][1]
+        by = np.linalg.lstsq(A, pts[:,1], rcond=None)[0][1]
+
+        v_px_per_s = np.array([bx, by], dtype=np.float64)
+        v_px_per_us = v_px_per_s / 1e6
+
+        # Map pixel velocity to stage units using camera model (A_inv)
+        # A_inv maps [Δcx, Δcy] → [ΔX, ΔZ] (dY=0 in your model).
+        A_inv = getattr(self.model.droplet_camera_model, "A_inv", None)
+        if A_inv is None:
+            self.calibrationError.emit("Camera model A_inv missing; cannot convert velocity to stage units.")
+            return
+        vXZ_steps_per_s = A_inv.dot(v_px_per_s)  # [vX_steps/s, vZ_steps/s]
+        v_vec_steps_per_s = (float(vXZ_steps_per_s[0]), 0.0, float(vXZ_steps_per_s[1]))
+        speed_steps_per_s = float(np.hypot(vXZ_steps_per_s[0], vXZ_steps_per_s[1]))
+
+        # Final debug image: draw per-delay means and fit direction
+        final_image = self.annotated_images[-1].copy() if self.annotated_images else self.droplet_image.copy()
+        for dly, kept in kept_by_delay.items():
+            for (x, y) in kept:
+                cv2.circle(final_image, (int(x), int(y)), 4, (255, 0, 0), -1)
+        # Draw a small velocity ray from the last mean
+        p_last = tuple(map(int, pts[-1]))
+        ray = (int(p_last[0] + 0.002 * v_px_per_s[0]), int(p_last[1] + 0.002 * v_px_per_s[1]))  # scale for view
+        cv2.arrowedLine(final_image, p_last, ray, (0, 255, 0), 2, tipLength=0.25)
+        cv2.circle(final_image, self.nozzle_center_image_position, 6, (255, 0, 0), -1)
+        self.presentImageSignal.emit(final_image)
+
+        # Package results (keep pixel and stage-space velocities)
         results = {
-            'droplet_positions': kept,
-            'pixel_mean': mean_xy,
-            'pixel_std': std_xy,
-            'mean_position': droplet_machine_position,
-            'trajectory_vector': traj_vec
+            'delays_us': self.delay_plan_us,
+            't_flight_s': t_s.tolist(),
+            'pixel_means': pts.astype(int).tolist(),
+            'velocity_px_per_s': (float(v_px_per_s[0]), float(v_px_per_s[1])),
+            'velocity_steps_per_s': v_vec_steps_per_s,
+            'speed_steps_per_s': speed_steps_per_s,
+            'emergence_time_us': int(self.t_emerge_us)
         }
 
-        self.calibration_manager.set_trajectory_vector(results['trajectory_vector'])
-        self.calibration_manager.set_intermediate_droplet_position(droplet_machine_position)
-        self.calibrationDataUpdated.emit({'measurements': kept, 'result': results})
+        # Persist for the next calibration step
+        self.calibration_manager.set_trajectory_vector(v_vec_steps_per_s)         # direction & magnitude in stage units
+        self.calibration_manager.set_trajectory_delay(int(self.delay_plan_us[0])) # first delay used (for reference)
+        self.calibration_manager.set_intermediate_droplet_position(
+            self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
+                tuple(map(int, pts[-1])), self.model.machine_model.get_current_position_dict()
+            )
+        )
+
+        self.calibrationDataUpdated.emit({'measurements': results['pixel_means'], 'result': results})
         self.emitTrajectoryFinalized()
 
-    def _positions_are_tight(self, pts, tol_px=3.0):
-        """Return (True/False, n_kept) if recent positions are within std tolerance."""
-        if len(pts) < 2:
-            return False, len(pts)
-        a = np.array(pts, dtype=np.float32)
-        std = np.std(a, axis=0)
-        return bool((std[0] <= tol_px) and (std[1] <= tol_px)), len(pts)
+    def emitContinueTrajectory(self): self.continueTrajectory.emit()
+    def emitChangePressure(self): self.changePressure.emit()
+    def emitTrajectoryCalculated(self): self.trajectoryCalculated.emit()
+    def emitTrajectoryFinalized(self): self.trajectoryFinalized.emit()
 
-    def _robust_filter(self, pts, k=2.5):
-        """MAD-based outlier filter around the median; returns a filtered list."""
-        if len(pts) < 3:
-            return pts[:]
-        a = np.array(pts, dtype=np.float32)
-        med = np.median(a, axis=0)
-        d = np.linalg.norm(a - med, axis=1)
-        mad = np.median(np.abs(d - np.median(d))) + 1e-6
-        keep = a[d <= (np.median(d) + k * mad)]
-        return [tuple(map(int, xy)) for xy in keep]
-    
-    def emitContinueTrajectory(self):
-        self.continueTrajectory.emit()
-    
-    def emitChangePressure(self):
-        self.changePressure.emit()
-    
-    def emitTrajectoryCalculated(self):
-        self.trajectoryCalculated.emit()
-    
-    def emitTrajectoryFinalized(self):
-        self.trajectoryFinalized.emit()
-    
     @Slot()
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Trajectory calibration complete")
@@ -2668,13 +2712,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.correction_offset = 0  # Offset to shift the target position (in Y motor steps).
         self.offset_counter = 0  # Counter to track the number of corrections.
 
-        # Compute target machine position.
-        # self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance)
-        
-        # print(f"Nozzle center: {self.nozzle_center_machine}, Target position: {self.target_position}")
-        # print(f"Desired distance: {self.desired_distance}, Trajectory vector: {self.trajectory_vector}")
-
-        
         # Flash delay search parameters.
         self.initial_delay_offset = 5000
         self.delay_range = (self.min_start_delay + self.initial_delay_offset, self.min_start_delay + 25000)  # adjust range as needed.
@@ -2949,11 +2986,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         settings = {"num_droplets": 0}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
-    # @Slot()
-    # def onCaptureBackground(self):
-    #     self.stageChanged.emit("Capturing background image")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleBackgroundCaptured)
-
     @Slot()
     def onCaptureBackground(self):
         # One line: capture, retry a little, store to self.background_image
@@ -2972,11 +3004,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit(f"Setting flash delay to {self.current_delay} μs")
         settings = {"flash_delay": self.current_delay, "num_droplets": 1}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-
-    # @Slot()
-    # def onCaptureDroplet(self):
-    #     self.stageChanged.emit("Capturing droplet image at set delay")
-    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
 
     @Slot()
     def onCaptureDroplet(self):
@@ -3154,7 +3181,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # Calculate target using trajectory info.
         self.target_position = self.calculate_target_position(self.nozzle_center_machine, self.trajectory_vector, self.desired_distance)
         # Command the machine to move to target position.
-        # move_vector = self.model.droplet_camera_model.calculate_move_to_target(self.target_position, self.nozzle_center_machine)
         move_vector = self.target_position
         print(f"Move vector: {move_vector}")
         self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
@@ -3208,18 +3234,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         cv2.circle(final_img, mean_center, 8, (0, 255, 0), -1)
         # cv2.line(final_img, self.nozzle_center, mean_center, (0, 255, 255), 2)
         return final_img        
-
-    # def handleBackgroundCaptured(self, image):
-    #     self.background_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
-
-    # def handleDropletCaptured(self, image):
-    #     self.droplet_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
-
-    # def handleNozzleCaptured(self, image):
-    #     self.nozzle_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
 
     def emitContinueSearch(self):
         self.continueSearch.emit()
