@@ -27,6 +27,7 @@ import csv
 import math
 import matplotlib.pyplot as plt
 from enum import Enum
+from collections import deque
 
 def numpy_encoder(obj):
     if isinstance(obj, np.integer):
@@ -905,46 +906,36 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.emitCaptureCompleted()
 
 class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
-    """
-    Focus the nozzle by maximizing a masked Tenengrad variance near the droplet/nozzle.
-
-    Two-phase search:
-      1) RUN-UP: grow step along Y while focus improves; when it worsens, we’ve bracketed the peak.
-      2) REFINE: shrink the [lo, hi] bracket by testing midpoints until the bracket is tiny
-                 or we’ve clearly plateaued. Always stay within a safe sweep window.
-
-    Shows an overlay of the ROI used for the focus metric.
-    """
     nozzleFocused = Signal()
 
     # --------- Tuning / Safety ---------
-    FOCUS_AXIS = "Y"              # scope views along Y (side view), so focus moves along Y
-    SAFE_SWEEP_STEPS = 500        # max ±steps allowed from starting Y
-    STEP_INIT = 8                 # initial step (motor steps) along Y
-    STEP_GROWTH = 1.6             # multiplicative growth while improving
-    STEP_MIN = 1                  # minimum step size
-    STEP_MAX = 128                # hard cap
+    FOCUS_AXIS = "Y"
+    SAFE_SWEEP_STEPS = 500
 
-    # Tenengrad thresholds — require real improvement before declaring victory
-    TENENGRAD_ABS_EPS = 1e5       # absolute min delta to treat as “real”
-    TENENGRAD_REL_EPS = 0.03      # OR 3% relative improvement
+    # (Raised defaults you tested)
+    STEP_INIT = 16
+    STEP_GROWTH = 1.6
+    STEP_MIN = 4
+    STEP_MAX = 128
 
-    # Run guards / refine guards
-    MAX_EVALS = 60                # hard limit on number of frames we’ll evaluate
-    MIN_REFINE_EVALS = 8          # ensure we actually refine before we stop
-    BRACKET_TOL = 1               # stop when hi-lo <= this (in steps)
+    TENENGRAD_ABS_EPS = 1e5
+    TENENGRAD_REL_EPS = 0.03
+
+    MAX_EVALS = 60
+    MIN_REFINE_EVALS = 8
+    BRACKET_TOL = 1
+
+    # Oscillation guard
+    _OSC_HISTORY = 6  # keep last N targets for pattern detection
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
-
         self.phase_name = "nozzle_focus"
 
-        # images
         self.droplet_image = None
         self.background_image = None
 
-        # search state
-        self.mode = "probe_dir"   # "probe_dir" -> "run_up" -> "refine"
+        self.mode = "probe_dir"
         self.direction = +1
         self.step = self.STEP_INIT
 
@@ -952,34 +943,32 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.refine_evals = 0
 
         self.best_focus = None
-        self.best_pos = None             # absolute dict at best focus
+        self.best_pos = None
         self.prev_focus = None
 
-        # positions / bounds
         self._start_pos = None
         self._loY = None
         self._hiY = None
 
-        # last two points used to seed the bracket
         self._prev_y = None
         self._prev_f = None
         self._last_y = None
         self._last_f = None
 
-        # bracket for refine
         self._lo_br_y = None
         self._lo_br_f = None
         self._hi_br_y = None
         self._hi_br_f = None
 
-        # mask debug
         self._last_mask = None
         self._last_bbox = None
 
-        # logs
-        self.focus_curve = []  # (focus, X, Y, Z, step, mode)
+        self.focus_curve = []
 
-        # --- State machine: capture → analyze → (move → capture)* → final ---
+        # NEW: target history to detect ABAB oscillation
+        self._targets = deque(maxlen=self._OSC_HISTORY)
+
+        # --- state machine wiring (unchanged) ---
         self.state_capture = QState()
         self.state_analyze = QState()
         self.state_final   = QFinalState()
@@ -1014,7 +1003,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     # ---------- capture ----------
     @Slot()
     def onCaptureDroplet(self):
-        # Reuse prior successful imaging params (no settings changes here).
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text="Capturing focus frame",
@@ -1031,7 +1019,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         self.stageChanged.emit(f"Analyzing focus ({self.mode})")
 
-        # Background comes from the previous nozzle-position calibration
         if self.background_image is None:
             self.background_image = self.calibration_manager.get_background_image()
 
@@ -1040,12 +1027,10 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self._abort_with_error("No image to analyze (capture failed).")
             return
 
-        # Build an ROI mask near the droplet/nozzle if possible
         mask = self._build_focus_mask(self.background_image, img) if self.background_image is not None else None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         focus = float(self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask))
 
-        # Draw overlay and present (TOI/bbox + live numbers)
         overlay = img.copy()
         self._draw_focus_overlay(overlay, mask, focus)
         self.presentImageSignal.emit(overlay)
@@ -1057,94 +1042,78 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             y0 = self._start_pos["Y"]
             self._loY = y0 - self.SAFE_SWEEP_STEPS
             self._hiY = y0 + self.SAFE_SWEEP_STEPS
-            self.stageChanged.emit(
-                f"Focus sweep bounds on Y: [{self._loY}, {self._hiY}] (±{self.SAFE_SWEEP_STEPS})"
-            )
+            self.stageChanged.emit(f"Focus sweep bounds on Y: [{self._loY}, {self._hiY}]")
 
         self.eval_count += 1
         self.focus_curve.append((focus, pos["X"], pos["Y"], pos["Z"], int(self.step), self.mode))
 
-        # Track best
+        # update best
         if (self.best_focus is None) or (focus > self.best_focus):
             self.best_focus = focus
             self.best_pos = dict(pos)
 
-        # Early hard stop if too many evals
+        # hard eval caps
         if self.eval_count >= self.MAX_EVALS and self.mode != "refine":
-            self.stageChanged.emit("Max evaluations reached (pre-refine); switching to refine around best.")
+            self.stageChanged.emit("Max evals reached (pre-refine) → refine around best.")
             self._seed_refine_from_best()
             self._refine_next()
             return
         if self.eval_count >= self.MAX_EVALS and self.mode == "refine":
-            self.stageChanged.emit("Max evaluations reached; finishing at best.")
+            self.stageChanged.emit("Max evals reached → move to best & finish.")
             self._move_to_best_then_finish()
             return
 
-        # ------------- Modes -------------
+        # ---------- probe_dir ----------
         if self.mode == "probe_dir":
-            # First measurement was at start (Y0). Try +step; if not better, try -step; pick the better direction.
             if self._prev_y is None:
-                # prev := start sample
                 self._prev_y, self._prev_f = Y, focus
-                # move to Y0 + step
                 self._move_to_Y_clamped(Y + self.step)
                 return
             else:
-                # We are at Y0 + step now
-                f_pos = focus
-                if f_pos > self._prev_f + self._improve_eps(self._prev_f):
-                    # Good — climb upward in + direction
+                # at Y0+step
+                if focus > self._prev_f + self._improve_eps(self._prev_f):
                     self.direction = +1
-                    self._last_y, self._last_f = Y, f_pos
+                    self._last_y, self._last_f = Y, focus
                     self.mode = "run_up"
                     self._run_up_next()
                     return
                 else:
-                    # Test the other side: go back through start to Y0 - step
+                    # try the other side
                     y0 = self._start_pos["Y"]
-                    target = y0 - self.step
                     self.direction = -1
-                    self._prev_y, self._prev_f = y0, self._prev_f  # start sample stays as prev
-                    self._last_y, self._last_f = None, None         # unknown yet
-                    self._move_to_Y_clamped(target)
-                    # next analyze will compare f_neg vs start
+                    self._prev_y, self._prev_f = y0, self._prev_f
+                    self._last_y, self._last_f = None, None
+                    self._move_to_Y_clamped(y0 - self.step)
                     self.mode = "probe_dir_neg"
                     return
 
         if self.mode == "probe_dir_neg":
-            # We are at Y0 - step
-            f_neg = focus
-            y0 = self._start_pos["Y"]
-            if f_neg > self._prev_f + self._improve_eps(self._prev_f):
-                # Better in - direction → climb downward
+            if focus > self._prev_f + self._improve_eps(self._prev_f):
                 self.direction = -1
-                self._last_y, self._last_f = Y, f_neg
+                self._last_y, self._last_f = Y, focus
                 self.mode = "run_up"
                 self._run_up_next()
                 return
             else:
-                # Neither side beat the start — we’re already near a local peak.
-                # Seed refine around [y0 - step, y0 + step]
-                self.stageChanged.emit("Start is near peak; refining locally.")
-                self._lo_br_y, self._lo_br_f = min(y0 - self.step, y0 + self.step), min(f_neg, self._prev_f)
-                self._hi_br_y, self._hi_br_f = max(y0 - self.step, y0 + self.step), max(f_neg, self._prev_f)
-                # ensure order a<b
-                if self._lo_br_y > self._hi_br_y:
-                    self._lo_br_y, self._hi_br_y = self._hi_br_y, self._lo_br_y
+                # start near peak → refine locally
+                y0 = self._start_pos["Y"]
+                a, b = y0 - self.step, y0 + self.step
+                if a > b: a, b = b, a
+                self._lo_br_y, self._hi_br_y = a, b
+                self._lo_br_f = self._hi_br_f = None
                 self.mode = "refine"
                 self.refine_evals = 0
                 self._refine_next()
                 return
 
+        # ---------- run_up ----------
         if self.mode == "run_up":
-            # We have prev (older) and last (newer) samples in our chosen direction
             if self._last_y is None:
-                # Should not happen, but guard anyway
                 self._last_y, self._last_f = Y, focus
                 self._run_up_next()
                 return
 
-            # If current focus <= last focus, we passed the peak → bracket is [prev, current]
+            # decline → bracketed
             if focus < self._last_f - self._improve_eps(self._last_f):
                 a_y, a_f = self._prev_y, self._prev_f
                 b_y, b_f = Y, focus
@@ -1153,67 +1122,66 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                     a_f, b_f = b_f, a_f
                 self._lo_br_y, self._lo_br_f = a_y, a_f
                 self._hi_br_y, self._hi_br_f = b_y, b_f
-                self.stageChanged.emit("Peak bracketed; switching to refine.")
+                self.stageChanged.emit("Peak bracketed → refine.")
                 self.mode = "refine"
                 self.refine_evals = 0
                 self._refine_next()
                 return
 
-            # Still improving → advance: shift prev <- last, last <- current; grow step
+            # still improving
             self._prev_y, self._prev_f = self._last_y, self._last_f
             self._last_y, self._last_f = Y, focus
             self.step = min(self.STEP_MAX, max(self.STEP_MIN, int(round(self.step * self.STEP_GROWTH))))
             self._run_up_next()
             return
 
+        # ---------- refine ----------
         if self.mode == "refine":
-            # Bisection-like refine around best within [lo, hi]
             self.refine_evals += 1
 
-            # Update bracket with this sample:
-            # Keep best inside and shrink the outer bound
-            if self.best_pos is not None:
-                best_y = self.best_pos["Y"]
-                if best_y <= Y:
-                    # we measured on/after best → shrink upper bound if needed
-                    if self._hi_br_y is None or Y < self._hi_br_y:
-                        self._hi_br_y, self._hi_br_f = Y, focus
-                if best_y >= Y:
-                    # measured on/before best → shrink lower bound if needed
-                    if self._lo_br_y is None or Y > self._lo_br_y:
-                        self._lo_br_y, self._lo_br_f = Y, focus
+            # tighten bracket w.r.t. best_y
+            best_y = self.best_pos["Y"] if self.best_pos else Y
+            if best_y <= Y:
+                if self._hi_br_y is None or Y < self._hi_br_y:
+                    self._hi_br_y, self._hi_br_f = Y, focus
+            if best_y >= Y:
+                if self._lo_br_y is None or Y > self._lo_br_y:
+                    self._lo_br_y, self._lo_br_f = Y, focus
 
-            # stopping conditions (stringent):
-            span = abs((self._hi_br_y or Y) - (self._lo_br_y or Y))
-            small_span = span <= self.BRACKET_TOL
-            tiny_step  = self.step <= self.STEP_MIN
-            plateau    = (self.refine_evals >= self.MIN_REFINE_EVALS and
-                          self._recent_improvement_small())
-            if small_span or (tiny_step and plateau) or self.eval_count >= self.MAX_EVALS:
-                self.stageChanged.emit("Refine converged; moving to best and finishing.")
+            a = self._lo_br_y if self._lo_br_y is not None else Y
+            b = self._hi_br_y if self._hi_br_y is not None else Y
+            if a > b: a, b = b, a
+            span = b - a
+            plateau = (self.refine_evals >= self.MIN_REFINE_EVALS and self._recent_improvement_small())
+
+            # NEW: oscillation & tight-span guards
+            if self._is_oscillating() or (span <= 2*self.STEP_MIN and plateau):
+                self.stageChanged.emit("Oscillation/tight-span detected → snap to best & finish.")
                 self._move_to_best_then_finish()
                 return
 
-            # pick next midpoint
-            a = self._lo_br_y if self._lo_br_y is not None else Y
-            b = self._hi_br_y if self._hi_br_y is not None else Y
-            if a > b:
-                a, b = b, a
-            mid = int(round((a + b) / 2))
-            if mid == Y:
-                # nudge by min step toward the far side
-                mid = Y + (self.STEP_MIN if (b - Y) >= (Y - a) else -self.STEP_MIN)
+            # Bias the next probe toward the side **away from current side of best**
+            # so we don't cross best every time.
+            if Y <= best_y:
+                # we are on/before best → sample between best and upper bound
+                mid = int(round((best_y + b) / 2))
+            else:
+                # we are after best → sample between lower bound and best
+                mid = int(round((a + best_y) / 2))
+
+            # ensure we make progress: avoid equal-to-current or immediate repeat
+            mid = self._avoid_revisit(mid, Y, a, b)
+
             self._move_to_Y_clamped(mid)
             return
 
-        # Shouldn’t fall through; if we do, just head to best
+        # fallback
         self.stageChanged.emit("Unexpected state; finishing at best.")
         self._move_to_best_then_finish()
 
     # ---------- finish ----------
     @Slot()
     def onCalibrationCompleted(self):
-        # Update nozzle position with best Y (keep X/Z as-is)
         if self.best_pos is None:
             self.best_pos = self._start_pos or self.model.machine_model.get_current_position_dict()
 
@@ -1223,59 +1191,47 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.set_nozzle_center(final)
         self.calibrationDataUpdated.emit({
             "measurements": self.focus_curve,
-            "result": {
-                "best_focus": self.best_focus,
-                "best_position": final,
-                "focus_axis": "Y"
-            }
+            "result": {"best_focus": self.best_focus, "best_position": final, "focus_axis": "Y"}
         })
         self.calibrationCompleted.emit()
 
     # ---------- helpers ----------
-    def _abort_with_error(self, msg: str):
-        self.stageChanged.emit(msg)
-        self.calibrationError.emit(msg)
+    def _abort_with_error(self, msg): self.stageChanged.emit(msg); self.calibrationError.emit(msg)
 
     def _improve_eps(self, ref: float) -> float:
-        # require either absolute or relative improvement
         return max(self.TENENGRAD_ABS_EPS, self.TENENGRAD_REL_EPS * max(abs(ref), 1.0))
 
     def _recent_improvement_small(self) -> bool:
-        # Look at last ~5 points; if best minus last_best < eps, we’re plateaued.
-        if len(self.focus_curve) < 5:
-            return False
-        recent = [f for (f, *_rest) in self.focus_curve[-5:]]
+        if len(self.focus_curve) < 6: return False
+        recent = [f for (f, *_) in self.focus_curve[-5:]]
+        earlier = [f for (f, *_) in self.focus_curve[:-5]]
+        if not earlier: return False
         latest_best = max(recent)
-        older_best  = max(f for (f, *_r) in self.focus_curve[:-5]) if len(self.focus_curve) > 5 else -1e30
+        older_best  = max(earlier)
         return (latest_best - older_best) < self._improve_eps(max(older_best, 1.0))
 
     def _seed_refine_from_best(self):
-        # Seed a minimal bracket around the best we’ve seen so far
         yb = self.best_pos["Y"] if self.best_pos else self._start_pos["Y"]
         a = max(self._loY, yb - max(self.STEP_INIT, self.BRACKET_TOL))
         b = min(self._hiY, yb + max(self.STEP_INIT, self.BRACKET_TOL))
-        if a > b:
-            a, b = b, a
+        if a > b: a, b = b, a
         self._lo_br_y, self._hi_br_y = int(a), int(b)
-        self._lo_br_f, self._hi_br_f = None, None  # unknown at bracket endpoints
+        self._lo_br_f = self._hi_br_f = None
         self.mode = "refine"
         self.refine_evals = 0
 
     def _run_up_next(self):
-        # Propose next Y along direction; clamp. If clamped to bound, switch to refine.
         cur = self.model.machine_model.get_current_position_dict()
         target = cur["Y"] + self.direction * self.step
         target = max(self._loY, min(self._hiY, target))
         if target == cur["Y"]:
-            # Hit a bound → bracket around the last two points and refine
+            # hit a bound → refine around last two points
             a_y, a_f = self._prev_y, self._prev_f
             b_y, b_f = self._last_y, self._last_f
             if a_y is None or b_y is None:
                 self._seed_refine_from_best()
             else:
-                if a_y > b_y:
-                    a_y, b_y = b_y, a_y
-                    a_f, b_f = b_f, a_f
+                if a_y > b_y: a_y, b_y, a_f, b_f = b_y, a_y, b_f, a_f
                 self._lo_br_y, self._lo_br_f = a_y, a_f
                 self._hi_br_y, self._hi_br_f = b_y, b_f
                 self.mode = "refine"
@@ -1285,47 +1241,78 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._move_to_Y_clamped(target)
 
     def _refine_next(self):
-        # Kick off refine by moving to the midpoint of the current bracket
         a = self._lo_br_y if self._lo_br_y is not None else self.model.machine_model.get_current_position_dict()["Y"]
         b = self._hi_br_y if self._hi_br_y is not None else self.model.machine_model.get_current_position_dict()["Y"]
-        if a > b:
-            a, b = b, a
+        if a > b: a, b = b, a
         mid = int(round((a + b) / 2))
+        mid = self._avoid_revisit(mid, self.model.machine_model.get_current_position_dict()["Y"], a, b)
         self._move_to_Y_clamped(mid)
 
     def _move_to_best_then_finish(self):
         if self.best_pos is None:
-            self.nozzleFocused.emit()
-            return
+            self.nozzleFocused.emit(); return
         cur = self.model.machine_model.get_current_position_dict()
         dY = self.best_pos["Y"] - cur["Y"]
         if dY == 0:
-            self.nozzleFocused.emit()
-            return
+            self.nozzleFocused.emit(); return
         self.calibration_manager.moveRequested.emit((0, dY, 0), self.nozzleFocused.emit)
 
     def _move_to_Y_clamped(self, target_y: int):
-        # Clamp to safe bounds, compute relative move, request move
         cur = self.model.machine_model.get_current_position_dict()
         tgt = int(max(self._loY, min(self._hiY, target_y)))
         dY = tgt - cur["Y"]
+        # record proposed target for oscillation detection
+        self._targets.append(tgt)
+
         if dY == 0:
-            # Nothing to do; if we’re refining, nudge by STEP_MIN toward center
             if self.mode == "refine":
-                center = int(round((self._lo_br_y + self._hi_br_y) / 2)) if (self._lo_br_y is not None and self._hi_br_y is not None) else cur["Y"]
-                nudged = cur["Y"] + (self.STEP_MIN if cur["Y"] <= center else -self.STEP_MIN)
-                if nudged != cur["Y"]:
-                    self._move_to_Y_clamped(nudged)
+                # try a one-side nudge toward farther bound
+                a = self._lo_br_y if self._lo_br_y is not None else cur["Y"]
+                b = self._hi_br_y if self._hi_br_y is not None else cur["Y"]
+                alt = cur["Y"] + (self.STEP_MIN if (b - cur["Y"]) >= (cur["Y"] - a) else -self.STEP_MIN)
+                alt = int(max(self._loY, min(self._hiY, alt)))
+                if alt != cur["Y"] and (len(self._targets) < 2 or alt != self._targets[-2]):
+                    self._targets.append(alt)
+                    self.calibration_manager.moveRequested.emit((0, alt - cur["Y"], 0), self.calibration_manager.emitMoveCompleted)
                     return
-            # else: capture again to progress
+                # nothing else to try → snap to best
+                self._move_to_best_then_finish()
+                return
+            # pre-refine: just recapture
             self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
             return
+
         self.calibration_manager.moveRequested.emit((0, dY, 0), self.calibration_manager.emitMoveCompleted)
 
-    # ---- image/ROI helpers ----
+    # ---- oscillation avoidance helpers ----
+    def _avoid_revisit(self, candidate: int, current_y: int, a: int, b: int) -> int:
+        """Keep the next target inside [a,b], not equal to current or last target; nudge if needed."""
+        cand = int(max(a, min(b, candidate)))
+        if cand == current_y or (len(self._targets) > 0 and cand == self._targets[-1]):
+            # nudge toward farther side
+            cand2 = current_y + (self.STEP_MIN if (b - current_y) >= (current_y - a) else -self.STEP_MIN)
+            cand2 = int(max(a, min(b, cand2)))
+            if cand2 != current_y:
+                return cand2
+        return cand
+
+    def _is_oscillating(self) -> bool:
+        """Detect ABAB or A…B…A…B pattern in the recent target sequence."""
+        t = list(self._targets)
+        if len(t) < 4: return False
+        # ABAB check on last 4
+        if t[-1] != t[-2] and t[-1] == t[-3] and t[-2] == t[-4]:
+            return True
+        # two-value flip over longer window
+        last4 = t[-4:]
+        if len(set(last4)) == 2 and (last4[0] == last4[2]) and (last4[1] == last4[3]):
+            return True
+        return False
+
+    # ---- image/ROI helpers (unchanged from your working version) ----
     def _build_focus_mask(self, bg, dr):
-        """Return a uint8 0/255 mask around the droplet/nozzle TOI; stores _last_bbox for overlay."""
-        import numpy as np, cv2
+        # ... (same as before) ...
+        # import numpy as np, cv2
         try:
             a = dr; b = bg
             if a.ndim == 3 and a.shape[2] == 3:
@@ -1334,42 +1321,28 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             else:
                 diff = cv2.absdiff(a, b)
                 gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-
             blur = cv2.GaussianBlur(gray, (5, 5), 0)
             _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             if np.count_nonzero(th) < 20:
                 t = max(15, int(np.mean(blur) + 3*np.std(blur)))
                 _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
-
             k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
             th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
-
             contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                self._last_bbox = None
-                self._last_mask = None
-                return None
-
+            if not contours: self._last_bbox = None; self._last_mask = None; return None
             areas = [cv2.contourArea(c) for c in contours]
             keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 20]
-            if not keep:
-                self._last_bbox = None
-                self._last_mask = None
-                return None
-
+            if not keep: self._last_bbox = None; self._last_mask = None; return None
             def top_y(c): return int(c[:, :, 1].min())
             keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
             chosen, _ = keep[0]
-
             x, y, w, h = cv2.boundingRect(chosen)
             pad_x = max(6, int(round(0.25 * w)))
             pad_y = max(6, int(round(0.25 * h)))
-            x0 = max(0, x - pad_x)
-            y0 = max(0, y - pad_y)              # extend above top
+            x0 = max(0, x - pad_x); y0 = max(0, y - pad_y)
             x1 = min(dr.shape[1] - 1, x + w + pad_x)
             y1 = min(dr.shape[0] - 1, y + h + pad_y)
-
             mask = np.zeros((dr.shape[0], dr.shape[1]), np.uint8)
             mask[y0:y1+1, x0:x1+1] = 255
             self._last_bbox = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
@@ -1381,26 +1354,21 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             return None
 
     def _draw_focus_overlay(self, img_bgr, mask, focus_value: float):
-        """Draw the ROI bbox (TOI) and some live text onto the image and emit it."""
-        import cv2
-        h, w = img_bgr.shape[:2]
+        # import cv2
         if self._last_bbox is not None:
             x, y, bw, bh = self._last_bbox
             cv2.rectangle(img_bgr, (x, y), (x + bw - 1, y + bh - 1), (0, 255, 0), 2)
         if mask is not None:
-            # optional: draw a faint mask outline
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(img_bgr, contours, -1, (255, 0, 255), 1)
-
         pos = self.model.machine_model.get_current_position_dict()
         lines = [
             f"Focus (Tenengrad): {focus_value:.0f}",
             f"Y: {pos['Y']}  step:{self.step}  mode:{self.mode}",
             f"Best: {self.best_focus:.0f}" if self.best_focus is not None else "Best: -",
         ]
-        y0 = 18
         for i, line in enumerate(lines):
-            cv2.putText(img_bgr, line, (8, y0 + i*18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 220, 20), 1, cv2.LINE_AA)
+            cv2.putText(img_bgr, line, (8, 18 + i*18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 220, 20), 1, cv2.LINE_AA)
 
 class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     # Custom signals for state transitions.
