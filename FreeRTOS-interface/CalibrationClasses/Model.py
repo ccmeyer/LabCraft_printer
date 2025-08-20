@@ -1845,15 +1845,16 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Nozzle center not found")
             return
 
-        center_vector = self.model.droplet_camera_model.get_center_in_pixels()
+        nozzle_vector = self.calibration_manager.get_nozzle_center()
+        # center_vector = self.model.droplet_camera_model.get_center_in_pixels()
         # move_vector = self.model.droplet_camera_model.calculate_move_to_top_center(current,offset=350)
         # dX, dY, dZ = move_vector
         # target_position['X'] += dX
         # target_position['Y'] += dY
         # target_position['Z'] += dZ
         # absolute_move_vector = (target_position['X'], target_position['Y'],target_position['Z'])
-        print(f'Requesting move to initial position: {center_vector}')
-        self.calibration_manager.moveAbsoluteRequested.emit(center_vector, self.calibration_manager.emitMoveCompleted)
+        print(f'Requesting move to initial position: {nozzle_vector}')
+        self.calibration_manager.moveAbsoluteRequested.emit(nozzle_vector, self.calibration_manager.emitMoveCompleted)
 
     @Slot()
     def onPrepareBackground(self):
