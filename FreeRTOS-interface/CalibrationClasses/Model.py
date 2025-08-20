@@ -905,169 +905,327 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.emitCaptureCompleted()
 
 class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
+    """
+    Focus the nozzle by maximizing a masked Tenengrad variance near the droplet/nozzle.
+    Motion is bounded to avoid collision with the scope and uses a robust hill-climb:
+      - step in one direction; if worse, flip direction and halve step
+      - never exceed a configured sweep window around the start position
+      - stop when we've bracketed the peak and returned to the best or when
+        step size is tiny and improvement is negligible
+    """
     nozzleFocused = Signal()
+
+    # --------- Tuning / Safety ---------
+    FOCUS_AXIS = "Y"              # "Y" axis is used with the current imaging setup
+    SAFE_SWEEP_STEPS = 300        # max ±steps allowed from starting position on the focus axis
+    STEP_INIT = 8                 # initial step (motor steps) along the focus axis
+    STEP_MIN = 1                  # minimum step size
+    STEP_MAX = 64                 # hard cap; we’ll clamp internally
+
+    # Tenengrad thresholds
+    TENENGRAD_ABS_EPS = 1e5       # absolute min delta to treat as a “real” improvement
+    TENENGRAD_REL_EPS = 0.03      # or 3% relative to previous value
+
+    # Iteration guard
+    MAX_ITER = 40
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
 
         self.phase_name = "nozzle_focus"
 
-        # List to store (focus, X position) measurements.
-        self.focus_values = []   
+        # images
         self.droplet_image = None
-        self.direction = 1            # +1 or -1 indicating movement direction.
-        self.initial_step_size = 4    # Initial step size.
-        self.step_size = self.initial_step_size # Current step size.
-        self.noise_threshold = 500000 # Minimum focus difference to consider significant.
-        self.baseline_focus = 1e6     # Minimum focus value to consider in focus.
-        self.min_step_size = 1        # Minimum allowed step size.
-        self.max_step_size = 12           # Maximum number of steps to take.
-        self.best_focus = None        # Best (maximum) focus seen so far.
-        self.best_Y = None            # X position corresponding to the best focus.
-        self.in_fine_search = False   # Flag to indicate fine search mode.
-        
-        self.final_nozzle_position = None   # Store the final nozzle position.
+        self.background_image = None   # pulled from CalibrationManager
 
-        self.timeout_counter = 0              # Number of steps taken so far.   
-        self.max_timeout = 5       # Maximum number of steps before quitting the calibration.
-        
-        # Define states.
-        self.state_capture_droplet = QState()
+        # mask bookkeeping (built per capture; cached last ROI for debugging)
+        self._last_mask = None
+        self._last_bbox = None
+
+        # 1D search state
+        self.direction = +1
+        self.step = self.STEP_INIT
+        self.iter_count = 0
+
+        self.best_focus = None
+        self.best_pos = None     # absolute machine pos (dict) at best focus
+        self.prev_focus = None
+
+        # Axis bookkeeping
+        self._axis_idx = {"X": 0, "Y": 1, "Z": 2}[self.FOCUS_AXIS]
+        self._start_pos = None   # absolute dict at start
+        self._lo_bound = None    # min allowed absolute value on axis
+        self._hi_bound = None    # max allowed absolute value on axis
+
+        # data log [(focus, X, Y, Z, step)]
+        self.focus_curve = []
+
+        # Simple state machine: capture -> analyze -> (move -> capture) … -> final
+        self.state_capture = QState()
         self.state_analyze = QState()
-        self.state_final = QFinalState()
+        self.state_final   = QFinalState()
 
-        # Connect on-entry actions.
-        self.state_capture_droplet.entered.connect(self.onCaptureDroplet)
+        self.state_capture.entered.connect(self.onCaptureDroplet)
         self.state_analyze.entered.connect(self.onAnalyze)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
-        # Transition from capture to analyze:
-        t1 = QSignalTransition()
-        t1.setSenderObject(self.calibration_manager)
-        t1.setSignal(b"2captureCompleted()")
-        t1.setTargetState(self.state_analyze)
-        self.state_capture_droplet.addTransition(t1)
+        t_cap_done = QSignalTransition()
+        t_cap_done.setSenderObject(self.calibration_manager)
+        t_cap_done.setSignal(b"2captureCompleted()")
+        t_cap_done.setTargetState(self.state_analyze)
+        self.state_capture.addTransition(t_cap_done)
 
-        # Transition in analyze: if focused, go to final state.
-        t2 = QSignalTransition()
-        t2.setSenderObject(self)
-        t2.setSignal(b"2nozzleFocused()")
-        t2.setTargetState(self.state_final)
-        self.state_analyze.addTransition(t2)
-        # Otherwise, after a move, loop back to capture.
-        t3 = QSignalTransition()
-        t3.setSenderObject(self.calibration_manager)
-        t3.setSignal(b"2moveCompleted()")
-        t3.setTargetState(self.state_capture_droplet)
-        self.state_analyze.addTransition(t3)
+        t_move_done = QSignalTransition()
+        t_move_done.setSenderObject(self.calibration_manager)
+        t_move_done.setSignal(b"2moveCompleted()")
+        t_move_done.setTargetState(self.state_capture)
+        self.state_analyze.addTransition(t_move_done)
 
-        # Add states to the state machine.
-        self.state_machine.addState(self.state_capture_droplet)
+        t_focused = QSignalTransition()
+        t_focused.setSenderObject(self)
+        t_focused.setSignal(b"2nozzleFocused()")
+        t_focused.setTargetState(self.state_final)
+        self.state_analyze.addTransition(t_focused)
+
+        self.state_machine.addState(self.state_capture)
         self.state_machine.addState(self.state_analyze)
         self.state_machine.addState(self.state_final)
-        self.state_machine.setInitialState(self.state_capture_droplet)
+        self.state_machine.setInitialState(self.state_capture)
 
-    # @Slot()
-    # def onCaptureDroplet(self):
-    #     self.stageChanged.emit("Capturing droplet image")
-    #     # Request a capture; when complete, handleDropletCaptured will be called.
-    #     self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
-
+    # ---------- capture ----------
     @Slot()
     def onCaptureDroplet(self):
-        # For emergence, misses can happen; retry a bit more before we bail.
+        # Reuse the same imaging parameters that worked in the previous step.
+        # (We don't issue any settings changes here.)
+        # Keep retries moderately generous; focus loops do lots of captures.
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capturing droplet image",
+            stage_text="Capturing focus frame",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
-            final_error_msg=(
-                f"Failed to capture droplet"
-                "Try widening exposure or checking flash timing."
-            )
+            final_error_msg="Failed to capture droplet for focus."
         )
 
+    # ---------- analyze ----------
     @Slot()
     def onAnalyze(self):
-        self.stageChanged.emit("Analyzing image")
+        self.stageChanged.emit("Analyzing focus")
+
+        # Cache background provided by the nozzle-position process (if any)
+        if self.background_image is None:
+            self.background_image = self.calibration_manager.get_background_image()
+
         img = self.droplet_image
+        if img is None:
+            self._abort_with_error("No image to analyze (capture did not supply a frame).")
+            return
+
+        # Build a mask around the droplet/nozzle if possible
+        mask = self._build_focus_mask(self.background_image, img) if self.background_image is not None else None
+
+        # Compute Tenengrad (masked if available)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        focus = self.model.droplet_camera_model.compute_tenengrad_variance(gray)
-        if focus is None:
-            if self.timeout_counter >= self.max_timeout:
-                self.stageChanged.emit("No droplet found, calibration failed")
-                self.calibration_manager.emitCaptureCompleted()
-            self.stageChanged.emit("No droplet found, restarting capture")
-            self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
-            self.timeout_counter += 1
+        focus = self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask)
+
+        # Initialize bounds and best on first iteration
+        cur_pos_dict = self.model.machine_model.get_current_position_dict()
+        if self._start_pos is None:
+            self._start_pos = dict(cur_pos_dict)
+            axis_val = self._start_pos[self.FOCUS_AXIS]
+            self._lo_bound = axis_val - self.SAFE_SWEEP_STEPS
+            self._hi_bound = axis_val + self.SAFE_SWEEP_STEPS
+            self.stageChanged.emit(
+                f"Focus sweep bounds on {self.FOCUS_AXIS}: "
+                f"[{self._lo_bound}, {self._hi_bound}] (±{self.SAFE_SWEEP_STEPS})"
+            )
+
+        # Log + best tracking
+        self.focus_curve.append((float(focus), cur_pos_dict["X"], cur_pos_dict["Y"], cur_pos_dict["Z"], int(self.step)))
+        if (self.best_focus is None) or (focus > self.best_focus):
+            self.best_focus = float(focus)
+            self.best_pos = dict(cur_pos_dict)
+
+        # Convergence / stopping tests
+        stop_now = False
+        if self.prev_focus is not None:
+            abs_eps = self.TENENGRAD_ABS_EPS
+            rel_eps = self.TENENGRAD_REL_EPS * max(abs(self.prev_focus), 1.0)
+            small_gain = (focus - self.prev_focus) < max(abs_eps, rel_eps)
+
+            # if we just got worse → we passed the peak; go to best and finish
+            if focus < self.prev_focus:
+                self.stageChanged.emit("Focus decreased: moving back to best and finishing")
+                self._move_to_best_then_finish()
+                return
+
+            # also stop if step is tiny and gain is negligible
+            if self.step <= self.STEP_MIN and small_gain:
+                self.stageChanged.emit("Improvements negligible at min step; finishing at best")
+                self._move_to_best_then_finish()
+                return
+
+        # If not stopping, decide next move
+        self.prev_focus = float(focus)
+        self.iter_count += 1
+        if self.iter_count >= self.MAX_ITER:
+            self.stageChanged.emit("Max focus iterations reached; moving to best and finishing")
+            self._move_to_best_then_finish()
             return
 
-        # Get current position (assuming movement along the X-axis for focus).
-        X_pos, Y_pos, Z_pos = self.model.machine_model.get_current_position()
-        # Store this measurement.
-        self.focus_values.append((focus, Y_pos))
-        print(f'Focus: {focus:.2f} at Y: {Y_pos}')
-
-        self.stageChanged.emit(f"Focus: {focus:.2f} at Y: {Y_pos}")
-
-        # Update best focus if this is the highest seen so far.
-        if self.best_focus is None or focus > self.best_focus:
-            self.best_focus = focus
-            self.best_Y = Y_pos
-
-        # If only one measurement exists, take an initial step in the current direction.
-        if len(self.focus_values) == 1:
-            move_vector = (0, self.direction * self.step_size, 0)
-            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        # First “real” move if this was the first measurement
+        if len(self.focus_curve) == 1:
+            self._move_along_focus_axis(self.direction * self.step)
             return
 
-        # Compare the current focus with the previous measurement.
-        prev_focus, prev_Y = self.focus_values[-2]
-        delta = focus - prev_focus
-
-        if len(self.focus_values) == 2:
-            # If the focus has improved, continue in the same direction.
-            if delta > 0:
-                move_vector = (0, self.direction * self.step_size, 0)
-                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
-            # If the focus has decreased, reverse direction and move.
+        # If we improved, keep direction; if we didn’t (caught above), we won’t get here
+        # Occasionally grow the step if gains are tiny (but we didn’t get worse)
+        if self.prev_focus is not None:
+            abs_eps = self.TENENGRAD_ABS_EPS
+            rel_eps = self.TENENGRAD_REL_EPS * max(abs(self.prev_focus), 1.0)
+            if (focus - self.prev_focus) < max(abs_eps, rel_eps):
+                self.step = min(self.STEP_MAX, max(self.STEP_MIN, int(round(self.step * 1.5))))
+                self.stageChanged.emit(f"Small improvement; increasing step to {self.step}")
             else:
-                self.direction = -self.direction
-                move_vector = (0, self.direction * self.step_size, 0)
-                self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
-            return
-        # If the current focus is lower than the best focus (by more than the noise threshold),
-        # then we've passed the peak.
-        if focus < self.best_focus - self.noise_threshold:
-            move_vector = (0, self.best_Y - Y_pos, 0)
-            self.stageChanged.emit("Peak reached; moving to best focus position")
-            self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
-            self.calibrationDataUpdated.emit({'measurements': self.focus_values, 'result': {'best_focus': self.best_focus, 'best_Y': self.best_Y}})
-            self.final_nozzle_position = {"X": X_pos, "Y": self.best_Y, "Z": Z_pos}
+                # reset to a reasonable step if we had a solid improvement
+                self.step = max(self.STEP_MIN, min(self.step, self.STEP_INIT))
+
+        self._move_along_focus_axis(self.direction * self.step)
+
+    # ---------- finish ----------
+    @Slot()
+    def onCalibrationCompleted(self):
+        # Update nozzle “center” with the best axis coordinate (keep X/Y as-is)
+        if self.best_pos is None:
+            # If somehow missing, just use the start pos
+            self.best_pos = self._start_pos or self.model.machine_model.get_current_position_dict()
+
+        final_dict = dict(self.model.machine_model.get_current_position_dict())
+        final_dict[self.FOCUS_AXIS] = self.best_pos[self.FOCUS_AXIS]
+
+        # Persist
+        self.calibration_manager.set_nozzle_center(final_dict)
+        # Save a record of the curve + best
+        self.calibrationDataUpdated.emit({
+            "measurements": self.focus_curve,
+            "result": {
+                "best_focus": self.best_focus,
+                "best_position": final_dict,
+                "focus_axis": self.FOCUS_AXIS
+            }
+        })
+        self.calibrationCompleted.emit()
+
+    # ---------- helpers ----------
+    def _abort_with_error(self, msg: str):
+        self.stageChanged.emit(msg)
+        self.calibrationError.emit(msg)
+
+    def _move_to_best_then_finish(self):
+        if self.best_pos is None:
             self.nozzleFocused.emit()
             return
+        cur = self.model.machine_model.get_current_position_dict()
+        delta = self._delta_to(cur, self.best_pos)
+        if delta == (0, 0, 0):
+            self.nozzleFocused.emit()
+            return
+        self.calibration_manager.moveRequested.emit(delta, self.nozzleFocused.emit)
 
-        # Otherwise, if the improvement from the previous step is marginal, increase step size.
-        if abs(delta) < self.noise_threshold:
-            self.step_size = min(self.step_size * 2, self.max_step_size)
-            self.stageChanged.emit("Small improvement; increasing step size")
-        else:
-            self.step_size = self.initial_step_size
-            self.stageChanged.emit("Focus improved; continuing in same direction")
+    def _delta_to(self, cur_dict, target_dict):
+        dX = target_dict["X"] - cur_dict["X"]
+        dY = target_dict["Y"] - cur_dict["Y"]
+        dZ = target_dict["Z"] - cur_dict["Z"]
+        return (dX, dY, dZ)
 
-        # Continue moving in the same direction.
-        move_vector = (0, self.direction * self.step_size, 0)
-        self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+    def _move_along_focus_axis(self, delta_steps: int):
+        """Clamp the move within the safe sweep window; flip direction and halve step if we hit a bound."""
+        cur = self.model.machine_model.get_current_position_dict()
+        target = dict(cur)
+        target[self.FOCUS_AXIS] = cur[self.FOCUS_AXIS] + int(delta_steps)
 
-    # def handleDropletCaptured(self, image):
-    #     self.droplet_image = image
-    #     self.calibration_manager.emitCaptureCompleted()
-    
-    def onCalibrationCompleted(self):
-        """Emit the completion signal."""
-        self.calibration_manager.set_nozzle_center(self.final_nozzle_position)
-        self.calibrationCompleted.emit()
+        # clamp to bounds
+        clamped = max(self._lo_bound, min(self._hi_bound, target[self.FOCUS_AXIS]))
+        if clamped != target[self.FOCUS_AXIS]:
+            # We tried to exceed a bound → flip and shrink step
+            self.direction *= -1
+            self.step = max(self.STEP_MIN, int(max(1, round(self.step / 2))))
+            self.stageChanged.emit(
+                f"Hit focus bound on {self.FOCUS_AXIS}; flipping direction, step={self.step}"
+            )
+            # Recompute clamped target after flip (one step inside the window)
+            target[self.FOCUS_AXIS] = cur[self.FOCUS_AXIS] + self.direction * self.step
+            target[self.FOCUS_AXIS] = max(self._lo_bound, min(self._hi_bound, target[self.FOCUS_AXIS]))
+
+        # issue relative move
+        rel = self._delta_to(cur, target)
+        if rel == (0, 0, 0):
+            # nowhere to go — finish at best
+            self._move_to_best_then_finish()
+            return
+        self.calibration_manager.moveRequested.emit(rel, self.calibration_manager.emitMoveCompleted)
+
+    def _build_focus_mask(self, bg, dr):
+        """
+        Build a compact mask around the droplet/nozzle using absdiff thresholding.
+        Returns a uint8 mask with 0/255 or None if nothing detected.
+        Also stores _last_bbox for debugging.
+        """
+        try:
+            a = dr; b = bg
+            if a.ndim == 3 and a.shape[2] == 3:
+                diff = cv2.absdiff(a, b)
+                gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+            else:
+                diff = cv2.absdiff(a, b)
+                gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            # Otsu first; fallback to high fixed threshold if tiny signal
+            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if np.count_nonzero(th) < 20:
+                t = max(15, int(np.mean(blur) + 3*np.std(blur)))
+                _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
+
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
+            th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
+
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                self._last_bbox = None
+                return None
+
+            # pick top-most & substantial contour
+            areas = [cv2.contourArea(c) for c in contours]
+            keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 20]
+            if not keep:
+                self._last_bbox = None
+                return None
+
+            def top_y(c): return int(c[:, :, 1].min())
+            keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
+            chosen, _area = keep[0]
+
+            x, y, w, h = cv2.boundingRect(chosen)
+            # pad ROI to include a bit more than the droplet top (important for Tenengrad)
+            pad_x = max(6, int(round(0.25 * w)))
+            pad_y = max(6, int(round(0.25 * h)))
+            x0 = max(0, x - pad_x)
+            y0 = max(0, y - pad_y)              # extend above the top
+            x1 = min(dr.shape[1] - 1, x + w + pad_x)
+            y1 = min(dr.shape[0] - 1, y + h + pad_y)
+
+            mask = np.zeros(gray.shape, np.uint8)
+            mask[y0:y1+1, x0:x1+1] = 255
+            self._last_bbox = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+            self._last_mask = mask
+            return mask
+        except Exception:
+            # If anything goes sideways, just skip mask
+            self._last_bbox = None
+            self._last_mask = None
+            return None
 
 class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     # Custom signals for state transitions.
@@ -2914,13 +3072,7 @@ class DropletCameraModel(QObject):
         """
         Gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
         Gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        # gradient_magnitude = cv2.magnitude(sobel_x ** 2, sobel_y ** 2)
-
-        # if mask is not None:
-        #     masked_vals = gradient_magnitude[mask > 0]
-        #     variance = np.var(masked_vals)
-        # else:
-        #     variance = np.var(gradient_magnitude)
+        # Compute the gradient magnitude squared
         G2 = Gx*Gx + Gy*Gy
         variance = np.var(G2 if mask is None else G2[mask > 0])
         return variance
