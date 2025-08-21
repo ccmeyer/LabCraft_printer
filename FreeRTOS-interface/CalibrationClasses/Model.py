@@ -29,115 +29,197 @@ import matplotlib.pyplot as plt
 from enum import Enum
 from collections import deque
 
+import os, json, time, uuid, tempfile, threading
+import numpy as np
+
+# ---- numpy encoder helper (robust JSON) ----
 def numpy_encoder(obj):
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+    try:
+        import numpy as _np
+        if isinstance(obj, (_np.integer,)):
+            return int(obj)
+        if isinstance(obj, (_np.floating,)):
+            return float(obj)
+        if isinstance(obj, _np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+    # Allow datetime-like, etc.
+    try:
+        return obj.__json__()
+    except Exception:
+        pass
+    return str(obj)
+
 
 class CalibrationManager(QObject):
-    # Signal to update the current stage text (used by the view).
     calibrationStageChanged = Signal(str)
-
-    # Signals to indicate overall process completion or failure.
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
     calibrationQueueCompleted = Signal()
 
-    # Signal to update the presented image in the view.
     analyzedImageUpdated = Signal(object)
 
-    # Signals used for calibration actions.
-    captureImageRequested = Signal(object)   # expects a callback function
-    moveRequested = Signal(object, object)     # expects a move_vector and a callback
-    moveAbsoluteRequested = Signal(object, object)  # expects a move_vector with absolute coordinates and a callback
-    changeSettingsRequested = Signal(dict, object)  # expects settings and a callback
+    captureImageRequested = Signal(object)       # callback(image)
+    moveRequested = Signal(object, object)       # (move_vector, callback)
+    moveAbsoluteRequested = Signal(object, object)
+    changeSettingsRequested = Signal(dict, object)
 
-    # These signals will be used to drive the state machine transitions.
     settingsChangeCompleted = Signal()
     captureCompleted = Signal()
     moveCompleted = Signal()
 
     captureFailed = Signal(str)
-
     position_diff_dict_signal = Signal(dict, dict)
-    
+
+    # Map alternate phase names to canonical keys
+    PHASE_ALIASES = {
+        "pressure": "pressure_calibration",
+        "pressure_calibration": "pressure_calibration",
+        "nozzle": "nozzle_position",
+        "nozzle_position": "nozzle_position",
+        "nozzle_focus": "nozzle_focus",
+        "droplet_emergence": "droplet_emergence",
+        "trajectory": "trajectory",
+        "droplet_search": "droplet_search",
+    }
+
     def __init__(self, model, parent=None):
         super().__init__(parent)
         self.activeCalibration = None
         self.model = model
-        self.data = {}
 
-        # Variables to store calibration data across the process.
+        # Persisted JSON
+        self._lock = threading.Lock()
+        self.data = {"schema_version": 1, "runs": []}
+        self.calibration_file_path = None
+
+        # Current run envelope
+        self._run_id = None
+        self._run_idx = None
+
+        # Cross-step ephemeral cache (images, etc.)
         self.background_image = None
         self.nozzle_center = None
         self.nozzle_center_image_position = None
         self.droplet_trajectory_vector = None
+        self.trajectory_delay = None
         self.min_start_delay = None
         self.intermediate_droplet_position = None
 
-        self.calibration_file_path = None
-
-        # New: a queue to hold calibration process instances.
         self.calibration_queue = []
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
 
+    # ------------- Session / File management -------------
+
+    def begin_session(self, experiment_dir: str, notes: str = None):
+        """
+        Start a new calibration run under the given directory.
+        Creates/loads calibration.json and opens a new run envelope
+        including printer head + stock solution metadata.
+        """
+        os.makedirs(experiment_dir, exist_ok=True)
+        self.calibration_file_path = os.path.join(experiment_dir, "calibration.json")
+
+        # Load if exists
+        if os.path.exists(self.calibration_file_path):
+            try:
+                with open(self.calibration_file_path, "r") as f:
+                    self.data = json.load(f)
+            except Exception:
+                # Corrupted? Keep a backup and start fresh structure
+                backup = self.calibration_file_path + ".corrupt." + time.strftime("%Y%m%d-%H%M%S")
+                try:
+                    os.rename(self.calibration_file_path, backup)
+                except Exception:
+                    pass
+                self.data = {"schema_version": 1, "runs": []}
+
+        # Build run envelope
+        self._run_id = str(uuid.uuid4())
+        run_meta = {
+            "run_id": self._run_id,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "ended_at": None,
+            "printer_head_id": self._safe_get_printer_head_id(),
+            "stock_solution": self._safe_get_stock_solution(),
+            "notes": notes or "",
+            "steps": {k: [] for k in set(self.PHASE_ALIASES.values())},
+            "flat_measurements": []
+        }
+        self.data.setdefault("schema_version", 1)
+        self.data.setdefault("runs", [])
+        self.data["runs"].append(run_meta)
+        self._run_idx = len(self.data["runs"]) - 1
+        self._save_atomic()
+
+        self.calibrationStageChanged.emit(
+            f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})"
+        )
+
+    def end_session(self):
+        """Stamp end time for the current run."""
+        if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
+            self.data["runs"][self._run_idx]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._save_atomic()
+            self.calibrationStageChanged.emit("Calibration session ended")
+
+        self._run_id = None
+        self._run_idx = None
+
+    # Back-compat: keep these, but redirect through session I/O
     def create_calibration_file(self, file_path):
+        """Creates a brand-new file and clears any prior data."""
+        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         self.calibration_file_path = file_path
         self.remove_all_calibrations()
-        with open(file_path, 'w') as file:
-            json.dump(self.data, file)
 
     def update_calibration_file_path(self, file_path):
+        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         self.calibration_file_path = file_path
+        # Try to load existing; else start a new envelope
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r") as f:
+                    self.data = json.load(f)
+            except Exception:
+                self.data = {"schema_version": 1, "runs": []}
+        else:
+            self.data = {"schema_version": 1, "runs": []}
+        self._save_atomic()
 
     def save_calibration_data(self, file_path):
-        """Save the calibration data as a JSON file."""
-        with open(file_path, 'w') as file:
-            json.dump(self.data, file, indent=4, default=numpy_encoder)
+        self.calibration_file_path = file_path
+        self._save_atomic()
 
     def load_calibration_data(self, file_path):
-        """Load the calibration data from a JSON file."""
         self.calibration_file_path = file_path
         with open(file_path, 'r') as file:
             self.data = json.load(file)
 
     def remove_all_calibrations(self):
-        """Removes all measurements."""
-        self.data = {}
-        if self.calibration_file_path:
-            self.save_calibration_data(self.calibration_file_path)
+        self.data = {"schema_version": 1, "runs": []}
+        self._save_atomic()
 
-    # --- Methods to start individual calibration processes ---
-    def start_nozzle_calibration(self):
-        self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+    def _save_atomic(self):
+        """Atomic write to avoid truncation on crash."""
+        if not self.calibration_file_path:
+            # safe default so nothing is lost silently
+            self.calibration_file_path = os.path.abspath("calibration.json")
+            self.calibrationStageChanged.emit(
+                f"Warning: calibration_file_path not set — writing to {self.calibration_file_path}"
+            )
+        with self._lock:
+            tmp = self.calibration_file_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f, indent=2, default=numpy_encoder)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.calibration_file_path)
 
-    def start_nozzle_focus_calibration(self):
-        self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+    # ------------- Calibration queue -------------
 
-    def start_droplet_emergence_calibration(self):
-        self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
-        self.start_active_calibration()
-
-    def start_pressure_calibration(self):
-        self.activeCalibration = PressureCalibrationProcess(self, self.model)
-        self.start_active_calibration()
-
-    def start_trajectory_calibration(self):
-        self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
-        self.start_active_calibration()
-
-    def start_droplet_search_calibration(self):
-        self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
-        self.start_active_calibration()
-
-    # --- Queue-related methods ---
     def add_all_calibrations_to_queue(self):
         self.add_calibration_to_queue('nozzle_position')
         self.add_calibration_to_queue('nozzle_focus')
@@ -145,45 +227,43 @@ class CalibrationManager(QObject):
         self.add_calibration_to_queue('pressure')
         self.add_calibration_to_queue('trajectory')
         self.add_calibration_to_queue('droplet_search')
-
         self.start_calibration_queue()
 
     def add_calibration_to_queue(self, calibration_name):
-        """Add a calibration process instance to the queue."""
         self.calibration_queue.append(calibration_name)
 
     def add_calibration_queue(self, calibration_list):
-        """Add a list of calibration process names to the queue."""
         self.calibration_queue.extend(calibration_list)
 
     def clear_calibration_queue(self):
-        """Clear the calibration queue."""
         self.calibration_queue = []
 
     def start_calibration_queue(self):
-        """Start processing the queue sequentially."""
         if len(self.calibration_queue) > 0:
-            next_calibration = self.calibration_queue.pop(0)
-            if next_calibration == 'nozzle_position':
+            next_cal = self.calibration_queue.pop(0)
+            if next_cal == 'nozzle_position':
                 self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
-            elif next_calibration == 'nozzle_focus':
+            elif next_cal == 'nozzle_focus':
                 self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
-            elif next_calibration == 'droplet_emergence':
+            elif next_cal == 'droplet_emergence':
                 self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
-            elif next_calibration == 'pressure':
+            elif next_cal == 'pressure':
                 self.activeCalibration = PressureCalibrationProcess(self, self.model)
-            elif next_calibration == 'trajectory':
+            elif next_cal == 'trajectory':
                 self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
-            elif next_calibration == 'droplet_search':
+            elif next_cal == 'droplet_search':
                 self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
             self.start_active_calibration()
         else:
             self.calibrationStageChanged.emit("No calibrations in queue.")
             self.calibrationQueueCompleted.emit()
 
-    # --- Start active calibration (used by individual start functions and queue processing) ---
     def start_active_calibration(self):
         if self.activeCalibration is not None:
+            # Ensure we have an open run to write into
+            if self._run_idx is None:
+                # Create a default session in CWD if the caller forgot
+                self.begin_session(os.path.abspath("."), notes="auto-started session")
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
@@ -200,8 +280,11 @@ class CalibrationManager(QObject):
         self.calibrationStageChanged.emit("Calibration stopped")
         self.calibrationError.emit("Calibration terminated by user")
 
+    # ------------- Settings snapshot -------------
+
     def get_current_settings(self):
-        num_flashes, flash_duration, flash_delay, num_droplets, exposure_time = self.model.droplet_camera_model.get_image_metadata()
+        (num_flashes, flash_duration, flash_delay,
+         num_droplets, exposure_time) = self.model.droplet_camera_model.get_image_metadata()
         current_position = self.model.machine_model.get_current_position_dict()
         print_width = self.model.machine_model.get_print_pulse_width()
         refuel_width = self.model.machine_model.get_refuel_pulse_width()
@@ -220,105 +303,88 @@ class CalibrationManager(QObject):
             "refuel_pressure": refuel_pressure
         }
 
-    # Methods to retrieve calibration data.
+    # ------------- Getters (alias-aware) -------------
+
+    def _resolve_phase_key(self, phase_name):
+        c = self.PHASE_ALIASES.get(phase_name, phase_name)
+        return c
+
+    def _latest_step_list(self, phase_name):
+        if self._run_idx is None:
+            return []
+        phase_key = self._resolve_phase_key(phase_name)
+        steps = self.data["runs"][self._run_idx]["steps"]
+        return steps.get(phase_key, [])
+
     def get_centered_nozzle_position(self):
-        if "nozzle_position" in self.data:
-            position_data = self.data["nozzle_position"]
-            return position_data[-1]["result"]
-        else:
-            print("No nozzle position calibration available")
-            return None
-        
+        recs = self._latest_step_list("nozzle_position")
+        if recs:
+            return recs[-1].get("result")
+        self.calibrationStageChanged.emit("No nozzle position calibration available")
+        return None
+
     def get_emergence_time(self):
-        if "droplet_emergence" in self.data:
-            emergence_data = self.data["droplet_emergence"]
-            return emergence_data[-1]["result"]["flash_delay"]
-        else:
-            print("No droplet emergence calibration available")
-            return None
-        
+        recs = self._latest_step_list("droplet_emergence")
+        if recs:
+            return recs[-1].get("result", {}).get("flash_delay")
+        self.calibrationStageChanged.emit("No droplet emergence calibration available")
+        return None
+
     def is_in_initial_position(self):
-        if "pressure_calibration" in self.data:
-            return True
-        else:
-            print("Not in initial position")
-            return False
-        
-    def set_background_image(self, background):
-        self.background_image = background
+        # kept for compatibility—presence of any pressure step
+        return bool(self._latest_step_list("pressure_calibration"))
 
-    def set_nozzle_center(self, center):
-        self.nozzle_center = center
+    # ------------- Cross-step setters/getters -------------
 
-    def set_nozzle_center_image_position(self, center):
-        self.nozzle_center_image_position = center
+    def set_background_image(self, background): self.background_image = background
+    def set_nozzle_center(self, center): self.nozzle_center = center
+    def set_nozzle_center_image_position(self, center): self.nozzle_center_image_position = center
+    def set_trajectory_vector(self, vector): self.droplet_trajectory_vector = vector
+    def set_trajectory_delay(self, delay): self.trajectory_delay = delay
+    def set_min_start_delay(self, delay): self.min_start_delay = delay
+    def set_intermediate_droplet_position(self, position): self.intermediate_droplet_position = position
 
-    def set_trajectory_vector(self, vector):
-        self.droplet_trajectory_vector = vector
+    def get_background_image(self): return self.background_image
+    def get_nozzle_center(self): return self.nozzle_center
+    def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
+    def get_trajectory_vector(self): return self.droplet_trajectory_vector
+    def get_trajectory_delay(self): return self.trajectory_delay
+    def get_min_start_delay(self): return self.min_start_delay
+    def get_intermediate_droplet_position(self): return self.intermediate_droplet_position
 
-    def set_trajectory_delay(self, delay):
-        self.trajectory_delay = delay
-
-    def set_min_start_delay(self, delay):
-        self.min_start_delay = delay
-
-    def set_intermediate_droplet_position(self, position):
-        self.intermediate_droplet_position = position
-
-    def get_background_image(self):
-        return self.background_image
-    
-    def get_nozzle_center(self):
-        return self.nozzle_center
-    
-    def get_nozzle_center_image_position(self):
-        return self.nozzle_center_image_position
-
-    def get_trajectory_vector(self):
-        return self.droplet_trajectory_vector
-
-    def get_trajectory_delay(self):
-        return self.trajectory_delay
-
-    def get_min_start_delay(self):
-        return self.min_start_delay
-
-    def get_intermediate_droplet_position(self):
-        return self.intermediate_droplet_position
+    # ------------- Offsets helper -------------
 
     def update_offsets_from_nozzle(self):
         current_dict = self.model.machine_model.get_current_position_dict()
         diff_dict = current_dict.copy()
         if self.nozzle_center is not None:
-            for key in diff_dict:
-                diff_dict[key] -= self.nozzle_center[key]
+            for k in diff_dict:
+                diff_dict[k] -= self.nozzle_center[k]
         else:
-            for key in diff_dict:
-                diff_dict[key] = 0
-        
+            for k in diff_dict:
+                diff_dict[k] = 0
         self.position_diff_dict_signal.emit(current_dict, diff_dict)
 
-    # Helper methods for callbacks in QStateMachine transitions.
-    @Slot()
-    def emitSettingsChangeCompleted(self):
-        self.settingsChangeCompleted.emit()
+    # ------------- Transition helpers -------------
 
     @Slot()
-    def emitCaptureCompleted(self):
-        self.captureCompleted.emit()
-
+    def emitSettingsChangeCompleted(self): self.settingsChangeCompleted.emit()
+    
+    @Slot()
+    def emitCaptureCompleted(self): self.captureCompleted.emit()
+    
     @Slot()
     def emitMoveCompleted(self):
         self.moveCompleted.emit()
         print('Emit Move completed called')
 
-    # Slots to handle calibration completion or error.
+    # ------------- Completion / Error -------------
+
     @Slot()
     def onCalibrationCompleted(self):
         self.calibrationStageChanged.emit("Calibration completed successfully")
         self.activeCalibration = None
         self.calibrationCompleted.emit()
-        # If there are more calibrations in the queue, start the next one.
         if len(self.calibration_queue) > 0:
             self.calibrationStageChanged.emit("Starting next calibration in queue...")
             self.start_calibration_queue()
@@ -330,28 +396,125 @@ class CalibrationManager(QObject):
         self.calibrationStageChanged.emit("Calibration error: " + error_message)
         self.activeCalibration = None
         self.calibrationError.emit(error_message)
-        # Stop the queue on error.
         if len(self.calibration_queue) > 0:
             self.calibrationStageChanged.emit("Calibration queue stopped due to error")
             self.clear_calibration_queue()
 
+    # ------------- The key hook: persist every step -------------
+
     @Slot(dict)
     def onCalibrationDataUpdated(self, data):
-        phase = self.activeCalibration.phase_name
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        data["timestamp"] = timestamp
+        """
+        Augment per-step payload with timestamp + settings + run metadata,
+        append under current run.steps[phase], and also append flat per-droplet
+        rows when present (droplet volumes list, etc.).
+        """
+        if self._run_idx is None:
+            # fallback to default session in CWD
+            self.begin_session(os.path.abspath("."), notes="auto-started during data update")
+
+        phase = getattr(self.activeCalibration, "phase_name", "unknown")
+        phase_key = self._resolve_phase_key(phase)
+
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         settings = self.get_current_settings()
-        data["settings"] = settings
-        if phase in self.data:
-            self.data[phase].append(data)
-        else:
-            self.data[phase] = [data]
-        if self.calibration_file_path:
-            self.save_calibration_data(self.calibration_file_path)
+
+        # Run metadata
+        meta = {
+            "run_id": self._run_id,
+            "stock_solution": self._safe_get_stock_solution(),
+            "printer_head_id": self._safe_get_printer_head_id()
+        }
+
+        # Augment
+        payload = dict(data)  # shallow copy
+        payload["timestamp"] = stamp
+        payload["settings"] = settings
+        payload["meta"] = meta
+        payload["phase"] = phase_key
+
+        # Append to steps
+        run = self.data["runs"][self._run_idx]
+        run["steps"].setdefault(phase_key, []).append(payload)
+
+        # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
+        self._try_append_flat_rows_from_payload(run, phase_key, payload)
+
+        self._save_atomic()
+
+    def _try_append_flat_rows_from_payload(self, run_obj, phase_key, payload):
+        """
+        Try to normalize per-droplet replicates into flat rows.
+        We look for common fields used in your processes.
+        """
+        # Case 1: droplet_search characterization summary
+        vols = payload.get("result", {}).get("mean_volume")
+        per_vols = payload.get("result", {}).get("droplet_volumes") or payload.get("droplet_volumes")
+        centers = payload.get("result", {}).get("droplet_positions") or payload.get("droplet_positions")
+        circ = payload.get("circularity_values") or payload.get("result", {}).get("circularity_values")
+        focus_list = payload.get("droplet_focus") or payload.get("result", {}).get("droplet_focus")
+
+        # If a list of volumes exists, write each as its own row
+        if isinstance(per_vols, list) and per_vols:
+            # align optional lists
+            N = len(per_vols)
+            centers = centers if isinstance(centers, list) and len(centers) == N else [None]*N
+            circ = circ if isinstance(circ, list) and len(circ) == N else [None]*N
+            focus_list = focus_list if isinstance(focus_list, list) and len(focus_list) == N else [None]*N
+
+            # Pull stable settings for all rows from the payload snapshot
+            flash_delay = None
+            try:
+                # prefer what's in payload['result'] first
+                flash_delay = payload.get("result", {}).get("delay_us")
+            except Exception:
+                pass
+            if flash_delay is None:
+                flash_delay = payload.get("settings", {}).get("flash_delay")
+
+            print_pw = payload.get("settings", {}).get("print_width")
+            print_p = payload.get("settings", {}).get("print_pressure")
+
+            # also nozzle pixel center if we cached it
+            nozzle_px = self.nozzle_center_image_position
+
+            for i in range(N):
+                row = {
+                    "phase": phase_key,
+                    "timestamp": payload.get("timestamp"),
+                    "flash_delay_us": flash_delay,
+                    "print_pressure": print_p,
+                    "print_pulse_width_us": print_pw,
+                    "volume_pL": per_vols[i],
+                    "circularity_ellipse": (circ[i] if i < len(circ) else None),
+                    "focus": (focus_list[i] if i < len(focus_list) else None),
+                    "center_px": centers[i],
+                    "nozzle_center_px": nozzle_px,
+                    "stock_solution": self._safe_get_stock_solution(),
+                    "printer_head_id": self._safe_get_printer_head_id(),
+                }
+                run_obj["flat_measurements"].append(row)
 
     @Slot(object)
     def onPresentImage(self, image):
         self.analyzedImageUpdated.emit(image)
+
+    # ------------- Small helpers -------------
+
+    def _safe_get_stock_solution(self):
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+            return getattr(ph.get_stock_solution(), "name", None) or str(ph.get_stock_solution())
+        except Exception:
+            return None
+
+    def _safe_get_printer_head_id(self):
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+            # Prefer a stable id/serial if available; fallback to str()
+            return getattr(ph, "serial", None) or getattr(ph, "id", None) or str(ph)
+        except Exception:
+            return None
 
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
