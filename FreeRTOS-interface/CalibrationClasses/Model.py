@@ -263,7 +263,7 @@ class CalibrationManager(QObject):
             # Ensure we have an open run to write into
             if self._run_idx is None:
                 # Create a default session in CWD if the caller forgot
-                self.begin_session(os.path.abspath("."), notes="auto-started session")
+                self.begin_session(self.model.experiment_model.get_experiment_dir(), notes="auto-started session")
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
@@ -279,6 +279,31 @@ class CalibrationManager(QObject):
             self.clear_calibration_queue()
         self.calibrationStageChanged.emit("Calibration stopped")
         self.calibrationError.emit("Calibration terminated by user")
+
+    # --- Methods to start individual calibration processes ---
+    def start_nozzle_calibration(self):
+        self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_nozzle_focus_calibration(self):
+        self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_droplet_emergence_calibration(self):
+        self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_pressure_calibration(self):
+        self.activeCalibration = PressureCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_trajectory_calibration(self):
+        self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
+    def start_droplet_search_calibration(self):
+        self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
+        self.start_active_calibration()
 
     # ------------- Settings snapshot -------------
 
@@ -411,7 +436,7 @@ class CalibrationManager(QObject):
         """
         if self._run_idx is None:
             # fallback to default session in CWD
-            self.begin_session(os.path.abspath("."), notes="auto-started during data update")
+            self.begin_session(self.model.experiment_model.get_experiment_dir(), notes="auto-started during data update")
 
         phase = getattr(self.activeCalibration, "phase_name", "unknown")
         phase_key = self._resolve_phase_key(phase)
@@ -445,37 +470,45 @@ class CalibrationManager(QObject):
     def _try_append_flat_rows_from_payload(self, run_obj, phase_key, payload):
         """
         Try to normalize per-droplet replicates into flat rows.
-        We look for common fields used in your processes.
+        Accepts both 'droplet_positions' and 'positions_px' for centers.
         """
-        # Case 1: droplet_search characterization summary
-        vols = payload.get("result", {}).get("mean_volume")
-        per_vols = payload.get("result", {}).get("droplet_volumes") or payload.get("droplet_volumes")
-        centers = payload.get("result", {}).get("droplet_positions") or payload.get("droplet_positions")
-        circ = payload.get("circularity_values") or payload.get("result", {}).get("circularity_values")
-        focus_list = payload.get("droplet_focus") or payload.get("result", {}).get("droplet_focus")
+        # Lists of replicates (prefer 'result' block; fallback to top-level)
+        per_vols = (
+            payload.get("result", {}).get("droplet_volumes")
+            or payload.get("droplet_volumes")
+        )
 
-        # If a list of volumes exists, write each as its own row
+        # Centers: accept either 'droplet_positions' or 'positions_px'
+        centers = (
+            payload.get("result", {}).get("droplet_positions")
+            or payload.get("droplet_positions")
+            or payload.get("result", {}).get("positions_px")
+            or payload.get("positions_px")
+        )
+
+        circ = (
+            payload.get("result", {}).get("circularity_values")
+            or payload.get("circularity_values")
+        )
+        focus_list = (
+            payload.get("result", {}).get("droplet_focus")
+            or payload.get("droplet_focus")
+        )
+
         if isinstance(per_vols, list) and per_vols:
-            # align optional lists
             N = len(per_vols)
-            centers = centers if isinstance(centers, list) and len(centers) == N else [None]*N
-            circ = circ if isinstance(circ, list) and len(circ) == N else [None]*N
-            focus_list = focus_list if isinstance(focus_list, list) and len(focus_list) == N else [None]*N
+            # Align optional lists to N
+            centers = centers if isinstance(centers, list) and len(centers) == N else [None] * N
+            circ = circ if isinstance(circ, list) and len(circ) == N else [None] * N
+            focus_list = focus_list if isinstance(focus_list, list) and len(focus_list) == N else [None] * N
 
-            # Pull stable settings for all rows from the payload snapshot
-            flash_delay = None
-            try:
-                # prefer what's in payload['result'] first
-                flash_delay = payload.get("result", {}).get("delay_us")
-            except Exception:
-                pass
+            # Stable settings for all rows from this payload snapshot
+            flash_delay = payload.get("result", {}).get("delay_us")
             if flash_delay is None:
                 flash_delay = payload.get("settings", {}).get("flash_delay")
 
             print_pw = payload.get("settings", {}).get("print_width")
             print_p = payload.get("settings", {}).get("print_pressure")
-
-            # also nozzle pixel center if we cached it
             nozzle_px = self.nozzle_center_image_position
 
             for i in range(N):
@@ -486,8 +519,8 @@ class CalibrationManager(QObject):
                     "print_pressure": print_p,
                     "print_pulse_width_us": print_pw,
                     "volume_pL": per_vols[i],
-                    "circularity_ellipse": (circ[i] if i < len(circ) else None),
-                    "focus": (focus_list[i] if i < len(focus_list) else None),
+                    "circularity_ellipse": circ[i],
+                    "focus": focus_list[i],
                     "center_px": centers[i],
                     "nozzle_center_px": nozzle_px,
                     "stock_solution": self._safe_get_stock_solution(),
@@ -3274,14 +3307,22 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         drop_machine = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
             mean_center, machine_position
         )
+
+        # ---- IMPORTANT: include raw replicate arrays so the manager can flatten them ----
         results = {
             "delay_us": int(self.current_delay_us),
             "positions_px": self.droplet_positions,
+            "droplet_positions": self.droplet_positions,
+            "droplet_volumes": [float(v) for v in self.droplet_volumes],
+            "circularity_values": [float(c) for c in self.circularity_values],
+            "droplet_focus": [float(f) for f in self.droplet_focus],
             "mean_center_px": mean_center,
             "mean_volume": mean_vol,
             "cv_volume_percent": cv_vol,
             "mean_position_machine": drop_machine,
         }
+
+        # Measurements you collected during search are still included
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": results})
         self.emitCharacterizationCompleted()
 
@@ -3307,6 +3348,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def emitContinueCharacterization(self): self.continueCharacterization.emit()
     def emitInitiateAnalyzeCharacterization(self): self.initiateCharacterizationAnalysis.emit()
     def emitCharacterizationCompleted(self): self.characterizationCompleted.emit()
+
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()

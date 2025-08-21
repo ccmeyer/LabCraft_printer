@@ -4159,7 +4159,6 @@ class ExperimentModel(QObject):
             return obj.tolist()  # Convert numpy arrays to lists
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-    
     def initialize_experiment(self):
         """Generates the initial directory for the experiment and all initial files"""
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4175,7 +4174,11 @@ class ExperimentModel(QObject):
         self.save_experiment()
         self.create_progress_file()
         self.create_key_file()
-        self.calibration_manager.create_calibration_file(self.calibration_file_path)
+        self.calibration_manager.begin_session(self.calibration_file_path)
+
+    def get_experiment_dir(self):
+        """Return the experiment directory path."""
+        return self.experiment_dir_path
 
     def rename_experiment(self,new_name):
         """Rename the experiment directory and update the metadata."""
