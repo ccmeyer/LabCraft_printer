@@ -113,15 +113,17 @@ class CalibrationManager(QObject):
 
     # ------------- Session / File management -------------
 
-    def begin_session(self, experiment_dir: str, notes: str = None):
+    def begin_session(self, calibration_file_path: str, notes: str = None):
         """
         Start a new calibration run under the given directory.
         Creates/loads calibration.json and opens a new run envelope
         including printer head + stock solution metadata.
         """
-        os.makedirs(experiment_dir, exist_ok=True)
-        self.calibration_file_path = os.path.join(experiment_dir, "calibration.json")
-
+        # print(f"Starting calibration session in {experiment_dir}")
+        # if not os.path.exists(experiment_dir):
+        #     os.makedirs(experiment_dir, exist_ok=True)
+        self.calibration_file_path = calibration_file_path
+        print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
             try:
@@ -263,7 +265,7 @@ class CalibrationManager(QObject):
             # Ensure we have an open run to write into
             if self._run_idx is None:
                 # Create a default session in CWD if the caller forgot
-                self.begin_session(self.model.experiment_model.get_experiment_dir(), notes="auto-started session")
+                self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started session")
             self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
@@ -442,7 +444,7 @@ class CalibrationManager(QObject):
         """
         if self._run_idx is None:
             # fallback to default session in CWD
-            self.begin_session(self.model.experiment_model.get_experiment_dir(), notes="auto-started during data update")
+            self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started during data update")
 
         phase = getattr(self.activeCalibration, "phase_name", "unknown")
         phase_key = self._resolve_phase_key(phase)
@@ -2928,7 +2930,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             return
 
         # Time-of-flight plan
-        self.sphere_delay_us = 6000
+        self.sphere_delay_us = 8000
         self.target_delay_us = int(max(0, self.emergence_time_us + self.sphere_delay_us))
         self.delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
@@ -3261,7 +3263,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         cxy = (x + w//2, y + h//2)
         H, W = overlay.shape[:2]
         target = (W//2, H//2)
-        tol = 100
+        tol = 150
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
             self.emitDropletCentered()
@@ -3443,7 +3445,7 @@ class DropletCameraModel(QObject):
         self.flash_duration = 1000
         self.flash_delay = 5000
         self.num_droplets = 1
-        self.exposure_time = 20000
+        self.exposure_time = 30000
         self.analysis_active = False
         self.saving_active = False
         self.image_width = 1088

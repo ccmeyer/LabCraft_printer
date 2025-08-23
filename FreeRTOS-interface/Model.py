@@ -4180,6 +4180,9 @@ class ExperimentModel(QObject):
         """Return the experiment directory path."""
         return self.experiment_dir_path
 
+    def get_calibration_file_path(self):
+        return self.calibration_file_path
+
     def rename_experiment(self,new_name):
         """Rename the experiment directory and update the metadata."""
         script_dir = os.path.dirname(os.path.abspath(__file__))
