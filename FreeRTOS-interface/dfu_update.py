@@ -197,6 +197,54 @@ def _flash_with_dfu(bin_path: Path,
     cmd = ["dfu-util", "-a", "0", "-s", f"{flash_addr}:leave", "-D", str(bin_path)]
     subprocess.run(cmd, check=True, cwd=(str(cwd) if cwd else None))
 
+def _resolve_firmware_path(
+    candidate: str | Path,
+    module_dir: Path,
+    extra_candidates: list[Path] | None = None,
+) -> Path:
+    """
+    Return an absolute Path to the firmware .bin, or raise FileNotFoundError
+    after trying a sensible set of locations.
+    """
+    tried: list[Path] = []
+
+    def _ok(p: Path) -> Path | None:
+        tried.append(p)
+        return p if p.is_file() else None
+
+    # 1) As given (expand ~, don’t assume relative/absolute yet)
+    cand = Path(str(candidate)).expanduser()
+    if cand.is_file():
+        return cand.resolve()
+
+    # 2) If relative, try relative to:
+    #    a) current working directory
+    if not cand.is_absolute():
+        if (p := _ok(Path.cwd() / cand)):
+            return p.resolve()
+        #    b) this module’s directory (file sitting next to script)
+        if (p := _ok(module_dir / cand)):
+            return p.resolve()
+        #    c) repo root (if we’re inside a git repo)
+        try:
+            repo_root = Path(
+                subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+            )
+            if (p := _ok(repo_root / cand)):
+                return p.resolve()
+        except Exception:
+            pass
+
+    # 3) Any extra explicit candidates you want to try
+    for p in (extra_candidates or []):
+        if (q := _ok(p.expanduser())):
+            return q.resolve()
+
+    # 4) Nothing worked
+    msg = ["Firmware .bin not found. Tried:"]
+    msg += [f"  - {p}" for p in tried]
+    raise FileNotFoundError("\n".join(msg))
+
 # -------------------------
 # Public API
 # -------------------------
@@ -228,23 +276,33 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
         cwd_for_dfu: optional working directory when invoking dfu-util
         verbose: print progress
     """
-    bin_path = Path(bin_path)
-    if not bin_path.is_absolute():
-        # If relative, try as given; if not found and we're in a subdir, try repo root + given path
-        if not bin_path.exists():
-            try:
-                repo_root = Path(subprocess.check_output(
-                    ["git", "rev-parse", "--show-toplevel"], text=True
-                ).strip())
-                alt = (repo_root / bin_path)
-                if alt.exists():
-                    bin_path = alt
-            except Exception:
-                pass
+    # bin_path = Path(bin_path)
+    # if not bin_path.is_absolute():
+    #     # If relative, try as given; if not found and we're in a subdir, try repo root + given path
+    #     if not bin_path.exists():
+    #         try:
+    #             repo_root = Path(subprocess.check_output(
+    #                 ["git", "rev-parse", "--show-toplevel"], text=True
+    #             ).strip())
+    #             alt = (repo_root / bin_path)
+    #             if alt.exists():
+    #                 bin_path = alt
+    #         except Exception:
+    #             pass
 
-    if not bin_path.exists():
-        raise FileNotFoundError(f"Firmware .bin not found: {bin_path}")
-
+    # if not bin_path.exists():
+    #     raise FileNotFoundError(f"Firmware .bin not found: {bin_path}")
+    module_dir = Path(__file__).resolve().parent
+    bin_abs = _resolve_firmware_path(
+        candidate=bin_path,
+        module_dir=module_dir,
+        extra_candidates=[
+            # your known absolute on the Pi:
+            Path("/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin"),
+            # a common repo-relative location if the app is run elsewhere:
+            module_dir.parent / "firmware" / "freeRTOS_LabCraft.bin",
+        ],
+    )
     if verbose:
         print(f"[DFU] Using firmware: {bin_path}")
         print(f"[DFU] Entering DFU mode via {boot_line_name} (BOOT) and {reset_line_name} (RESET) ...")
