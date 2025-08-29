@@ -53,70 +53,52 @@ RESET_ACTIVE_LOW  = True
 DFU_VIDPID    = "0483:df11"
 FLASH_ADDRESS = "0x08000000"  # STM32F4 internal flash base
 
-# # -------------------------
-# # Minimal gpiod helpers
-# # -------------------------
-
-# def _gpiofind(line_name: str):
-#     """
-#     Use the 'gpiofind' binary to resolve a line name like 'GPIO23' -> (chip, offset).
-#     Returns ("/dev/gpiochipX", offset) or raises RuntimeError.
-#     """
-#     if shutil.which("gpiofind") is None:
-#         raise RuntimeError("gpiofind not found. Install 'gpiod' tools (sudo apt install gpiod).")
-#     try:
-#         out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
-#     except subprocess.CalledProcessError as e:
-#         raise RuntimeError(f"gpiofind failed for {line_name}: {e}") from e
-#     # Expected format: "/dev/gpiochip4 23"
-#     parts = out.split()
-#     if len(parts) != 2 or not parts[0].startswith("/dev/gpiochip"):
-#         raise RuntimeError(f"Unexpected gpiofind output for {line_name!r}: {out!r}")
-#     chip, off_s = parts
-#     try:
-#         off = int(off_s)
-#     except ValueError:
-#         raise RuntimeError(f"Unexpected gpiofind offset for {line_name!r}: {out!r}")
-#     return chip, off
-
-# def _request_output(chip_path: str, line_offset: int, initial: int):
-#     """
-#     Request an output line using python3-libgpiod v2 API.
-#     Returns a request object with .set_value(line, value).
-#     """
-#     try:
-#         import gpiod  # python3-libgpiod v2
-#     except Exception as e:
-#         raise RuntimeError("python3-libgpiod is required. Install with: sudo apt install python3-libgpiod") from e
-
-#     # Build config: one line, set initial value
-#     cfg = { line_offset: gpiod.LineSettings(direction=gpiod.LineDirection.OUTPUT,
-#                                             output_value=1 if initial else 0) }
-#     req = gpiod.request_lines(chip_path, consumer="dfu-update", config=cfg)
-#     return req
-
 # -------------------------
 # gpiod helpers (v1 & v2)
 # -------------------------
 
+def _open_chip(chip_name: str):
+    """Open a gpiod.Chip allowing either 'gpiochipX' or '/dev/gpiochipX'."""
+    import gpiod
+    tried = []
+    for name in (chip_name, f"/dev/{chip_name}" if not chip_name.startswith("/dev/") else None):
+        if not name:
+            continue
+        tried.append(name)
+        try:
+            return gpiod.Chip(name)
+        except FileNotFoundError:
+            pass
+    # Show what's actually available to help debugging
+    import glob
+    available = " ".join(sorted(glob.glob("/dev/gpiochip*"))) or "<none>"
+    raise FileNotFoundError(f"Could not open GPIO chip {chip_name!r}. Tried {tried}. "
+                            f"Available chips: {available}")
+
+def _gpiofind(line_name: str):
+    """
+    Resolve a line name like 'GPIO24' -> (chip_path, offset) using the gpiofind CLI.
+    Requires 'gpiod' package (apt) which provides gpiofind/gpioinfo binaries.
+    """
+    if shutil.which("gpiofind") is None:
+        raise RuntimeError("gpiofind not found. Install it: sudo apt install gpiod")
+    out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
+    # Format: "/dev/gpiochipN <offset>"
+    chip_path, off = out.split()
+    return chip_path, int(off)
+
 def _make_output_line(chip_name, offset, initial=0, consumer="dfu_updater"):
-    """
-    Return an object with .set_value(v:int) and .release() that controls a single GPIO line.
-    Works with libgpiod v1 and v2.
-    """
     try:
         import gpiod
     except Exception as e:
         raise RuntimeError("python3-libgpiod is required. Install: sudo apt install python3-libgpiod") from e
 
-    # v2 has gpiod.LineSettings; v1 doesn't
     if hasattr(gpiod, "LineSettings"):  # v2
-        chip = gpiod.Chip(chip_name)
+        chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
         ls.direction = gpiod.LineDirection.OUTPUT
         ls.output_value = gpiod.LineValue.ONE if initial else gpiod.LineValue.ZERO
         req = chip.request_lines(consumer=consumer, config={offset: ls})
-
         class OutV2:
             def set_value(self, v):
                 req.set_values({offset: gpiod.LineValue.ONE if v else gpiod.LineValue.ZERO})
@@ -124,10 +106,9 @@ def _make_output_line(chip_name, offset, initial=0, consumer="dfu_updater"):
                 req.release()
         return OutV2()
     else:  # v1
-        chip = gpiod.Chip(chip_name)
+        chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         line.request(consumer=consumer, type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
-
         class OutV1:
             def set_value(self, v):
                 line.set_value(1 if v else 0)
@@ -135,35 +116,36 @@ def _make_output_line(chip_name, offset, initial=0, consumer="dfu_updater"):
                 line.release()
         return OutV1()
 
-
 class BootReset:
     """
     Context manager that controls BOOT and RESET via libgpiod.
     """
     def __init__(self,
-                boot_chip=DEFAULT_BOOT_CHIP,
-                boot_offset=DEFAULT_BOOT_OFFSET,
-                rst_chip=DEFAULT_RST_CHIP,
-                rst_offset=DEFAULT_RST_OFFSET,
-                boot_active_high=BOOT_ACTIVE_HIGH,
-                reset_active_low=RESET_ACTIVE_LOW,
-                 ):
+                 boot_chip=DEFAULT_BOOT_CHIP,
+                 boot_offset=DEFAULT_BOOT_OFFSET,
+                 rst_chip=DEFAULT_RST_CHIP,
+                 rst_offset=DEFAULT_RST_OFFSET,
+                 boot_active_high=BOOT_ACTIVE_HIGH,
+                 reset_active_low=RESET_ACTIVE_LOW,
+                 boot_line_name: str | None = None,
+                 rst_line_name: str | None = None):
         self.boot_chip = boot_chip
         self.boot_offset = boot_offset
         self.rst_chip = rst_chip
         self.rst_offset = rst_offset
         self.boot_active_high = boot_active_high
         self.reset_active_low = reset_active_low
+        self.boot_line_name = boot_line_name
+        self.rst_line_name = rst_line_name
         self._boot = None
         self._rst = None
 
     def __enter__(self):
-        # Start with BOOT disabled (run app) and RESET deasserted
-        boot_init = 0 if self.boot_active_high else 1
-        rst_init  = 1 if self.reset_active_low else 0
-        self._boot = _make_output_line(self.boot_chip, self.boot_offset, initial=boot_init, consumer="dfu_boot")
-        self._rst  = _make_output_line(self.rst_chip,  self.rst_offset,  initial=rst_init,  consumer="dfu_reset")
-        return self
+        # If names provided (e.g., 'GPIO24'), resolve to chip+offset dynamically
+        if self.boot_line_name:
+            self.boot_chip, self.boot_offset = _gpiofind(self.boot_line_name)
+        if self.rst_line_name:
+            self.rst_chip, self.rst_offset = _gpiofind(self.rst_line_name)
 
     def __exit__(self, exc_type, exc, tb):
         if self._boot:
@@ -301,22 +283,6 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
         cwd_for_dfu: optional working directory when invoking dfu-util
         verbose: print progress
     """
-    # bin_path = Path(bin_path)
-    # if not bin_path.is_absolute():
-    #     # If relative, try as given; if not found and we're in a subdir, try repo root + given path
-    #     if not bin_path.exists():
-    #         try:
-    #             repo_root = Path(subprocess.check_output(
-    #                 ["git", "rev-parse", "--show-toplevel"], text=True
-    #             ).strip())
-    #             alt = (repo_root / bin_path)
-    #             if alt.exists():
-    #                 bin_path = alt
-    #         except Exception:
-    #             pass
-
-    # if not bin_path.exists():
-    #     raise FileNotFoundError(f"Firmware .bin not found: {bin_path}")
     module_dir = Path(__file__).resolve().parent
     bin_abs = _resolve_firmware_path(
         candidate=bin_path,
@@ -329,7 +295,7 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
         ],
     )
     if verbose:
-        print(f"[DFU] Using firmware: {bin_path}")
+        print(f"[DFU] Using firmware: {bin_abs}")
         print(f"[DFU] BOOT={boot_chip}:{boot_offset}, RESET={rst_chip}:{rst_offset}")
 
     with BootReset(boot_chip=boot_chip,
@@ -354,7 +320,7 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
             print(f"[DFU] Device {dfu_vidpid} detected. Flashing at {flash_address} ...")
 
         # Flash
-        _flash_with_dfu(bin_path, flash_addr=flash_address, cwd=(Path(cwd_for_dfu) if cwd_for_dfu else None))
+        _flash_with_dfu(bin_abs, flash_addr=flash_address, cwd=(Path(cwd_for_dfu) if cwd_for_dfu else None))
 
         if verbose:
             print("[DFU] Flash complete. Exiting DFU and rebooting into application ...")
