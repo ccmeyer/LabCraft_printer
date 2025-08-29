@@ -38,8 +38,10 @@ from pathlib import Path
 # -------------------------
 
 # Default pins (BCM names on Raspberry Pi):
-BOOT_LINE_NAME_DEFAULT  = "GPIO24"  # BOOT0 control
-RESET_LINE_NAME_DEFAULT = "GPIO23"  # NRST control
+DEFAULT_BOOT_CHIP   = "gpiochip4"  # BOOT0 control
+DEFAULT_BOOT_OFFSET = 24           # BCM 24 on many Pi setups
+DEFAULT_RST_CHIP    = "gpiochip4"  # NRST control
+DEFAULT_RST_OFFSET  = 23           # BCM 23 on many Pi setups
 
 # Polarity:
 # - BOOT:   set HIGH to enable DFU (BOOT0=1), set LOW to run app (BOOT0=0)
@@ -51,120 +53,141 @@ RESET_ACTIVE_LOW  = True
 DFU_VIDPID    = "0483:df11"
 FLASH_ADDRESS = "0x08000000"  # STM32F4 internal flash base
 
+# # -------------------------
+# # Minimal gpiod helpers
+# # -------------------------
+
+# def _gpiofind(line_name: str):
+#     """
+#     Use the 'gpiofind' binary to resolve a line name like 'GPIO23' -> (chip, offset).
+#     Returns ("/dev/gpiochipX", offset) or raises RuntimeError.
+#     """
+#     if shutil.which("gpiofind") is None:
+#         raise RuntimeError("gpiofind not found. Install 'gpiod' tools (sudo apt install gpiod).")
+#     try:
+#         out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
+#     except subprocess.CalledProcessError as e:
+#         raise RuntimeError(f"gpiofind failed for {line_name}: {e}") from e
+#     # Expected format: "/dev/gpiochip4 23"
+#     parts = out.split()
+#     if len(parts) != 2 or not parts[0].startswith("/dev/gpiochip"):
+#         raise RuntimeError(f"Unexpected gpiofind output for {line_name!r}: {out!r}")
+#     chip, off_s = parts
+#     try:
+#         off = int(off_s)
+#     except ValueError:
+#         raise RuntimeError(f"Unexpected gpiofind offset for {line_name!r}: {out!r}")
+#     return chip, off
+
+# def _request_output(chip_path: str, line_offset: int, initial: int):
+#     """
+#     Request an output line using python3-libgpiod v2 API.
+#     Returns a request object with .set_value(line, value).
+#     """
+#     try:
+#         import gpiod  # python3-libgpiod v2
+#     except Exception as e:
+#         raise RuntimeError("python3-libgpiod is required. Install with: sudo apt install python3-libgpiod") from e
+
+#     # Build config: one line, set initial value
+#     cfg = { line_offset: gpiod.LineSettings(direction=gpiod.LineDirection.OUTPUT,
+#                                             output_value=1 if initial else 0) }
+#     req = gpiod.request_lines(chip_path, consumer="dfu-update", config=cfg)
+#     return req
+
 # -------------------------
-# Minimal gpiod helpers
+# gpiod helpers (v1 & v2)
 # -------------------------
 
-def _gpiofind(line_name: str):
+def _make_output_line(chip_name, offset, initial=0, consumer="dfu_updater"):
     """
-    Use the 'gpiofind' binary to resolve a line name like 'GPIO23' -> (chip, offset).
-    Returns ("/dev/gpiochipX", offset) or raises RuntimeError.
-    """
-    if shutil.which("gpiofind") is None:
-        raise RuntimeError("gpiofind not found. Install 'gpiod' tools (sudo apt install gpiod).")
-    try:
-        out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"gpiofind failed for {line_name}: {e}") from e
-    # Expected format: "/dev/gpiochip4 23"
-    parts = out.split()
-    if len(parts) != 2 or not parts[0].startswith("/dev/gpiochip"):
-        raise RuntimeError(f"Unexpected gpiofind output for {line_name!r}: {out!r}")
-    chip, off_s = parts
-    try:
-        off = int(off_s)
-    except ValueError:
-        raise RuntimeError(f"Unexpected gpiofind offset for {line_name!r}: {out!r}")
-    return chip, off
-
-def _request_output(chip_path: str, line_offset: int, initial: int):
-    """
-    Request an output line using python3-libgpiod v2 API.
-    Returns a request object with .set_value(line, value).
+    Return an object with .set_value(v:int) and .release() that controls a single GPIO line.
+    Works with libgpiod v1 and v2.
     """
     try:
-        import gpiod  # python3-libgpiod v2
+        import gpiod
     except Exception as e:
-        raise RuntimeError("python3-libgpiod is required. Install with: sudo apt install python3-libgpiod") from e
+        raise RuntimeError("python3-libgpiod is required. Install: sudo apt install python3-libgpiod") from e
 
-    # Build config: one line, set initial value
-    cfg = { line_offset: gpiod.LineSettings(direction=gpiod.LineDirection.OUTPUT,
-                                            output_value=1 if initial else 0) }
-    req = gpiod.request_lines(chip_path, consumer="dfu-update", config=cfg)
-    return req
+    # v2 has gpiod.LineSettings; v1 doesn't
+    if hasattr(gpiod, "LineSettings"):  # v2
+        chip = gpiod.Chip(chip_name)
+        ls = gpiod.LineSettings()
+        ls.direction = gpiod.LineDirection.OUTPUT
+        ls.output_value = gpiod.LineValue.ONE if initial else gpiod.LineValue.ZERO
+        req = chip.request_lines(consumer=consumer, config={offset: ls})
+
+        class OutV2:
+            def set_value(self, v):
+                req.set_values({offset: gpiod.LineValue.ONE if v else gpiod.LineValue.ZERO})
+            def release(self):
+                req.release()
+        return OutV2()
+    else:  # v1
+        chip = gpiod.Chip(chip_name)
+        line = chip.get_line(offset)
+        line.request(consumer=consumer, type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
+
+        class OutV1:
+            def set_value(self, v):
+                line.set_value(1 if v else 0)
+            def release(self):
+                line.release()
+        return OutV1()
+
 
 class BootReset:
     """
     Context manager that controls BOOT and RESET via libgpiod.
     """
     def __init__(self,
-                 boot_line_name=BOOT_LINE_NAME_DEFAULT,
-                 reset_line_name=RESET_LINE_NAME_DEFAULT,
-                 boot_active_high=BOOT_ACTIVE_HIGH,
-                 reset_active_low=RESET_ACTIVE_LOW):
-        self.boot_line_name = boot_line_name
-        self.reset_line_name = reset_line_name
+                boot_chip=DEFAULT_BOOT_CHIP,
+                boot_offset=DEFAULT_BOOT_OFFSET,
+                rst_chip=DEFAULT_RST_CHIP,
+                rst_offset=DEFAULT_RST_OFFSET,
+                boot_active_high=BOOT_ACTIVE_HIGH,
+                reset_active_low=RESET_ACTIVE_LOW,
+                 ):
+        self.boot_chip = boot_chip
+        self.boot_offset = boot_offset
+        self.rst_chip = rst_chip
+        self.rst_offset = rst_offset
         self.boot_active_high = boot_active_high
         self.reset_active_low = reset_active_low
-        self._boot_chip = None
-        self._boot_off  = None
-        self._rst_chip  = None
-        self._rst_off   = None
-        self._boot_req  = None
-        self._rst_req   = None
+        self._boot = None
+        self._rst = None
 
     def __enter__(self):
-        self._boot_chip, self._boot_off = _gpiofind(self.boot_line_name)
-        self._rst_chip,  self._rst_off  = _gpiofind(self.reset_line_name)
-
-        # Initialize: BOOT = inactive (so we start in app mode); RESET = deasserted (high if active-low)
+        # Start with BOOT disabled (run app) and RESET deasserted
         boot_init = 0 if self.boot_active_high else 1
         rst_init  = 1 if self.reset_active_low else 0
-
-        self._boot_req = _request_output(self._boot_chip, self._boot_off, boot_init)
-        self._rst_req  = _request_output(self._rst_chip,  self._rst_off,  rst_init)
+        self._boot = _make_output_line(self.boot_chip, self.boot_offset, initial=boot_init, consumer="dfu_boot")
+        self._rst  = _make_output_line(self.rst_chip,  self.rst_offset,  initial=rst_init,  consumer="dfu_reset")
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        # Release in reverse order
-        try:
-            if self._boot_req:
-                self._boot_req.release()
-        finally:
-            if self._rst_req:
-                self._rst_req.release()
-
-    def _set_boot_raw(self, val: int):
-        self._boot_req.set_value(self._boot_off, 1 if val else 0)
-
-    def _set_reset_raw(self, val: int):
-        self._rst_req.set_value(self._rst_off, 1 if val else 0)
+        if self._boot:
+            self._boot.release()
+        if self._rst:
+            self._rst.release()
 
     def set_boot_enabled(self, enabled: bool):
-        """
-        enabled=True  -> drive BOOT into DFU-enabled state (BOOT0=1 if active-high)
-        enabled=False -> normal run state
-        """
+        # enabled=True => BOOT0 asserted (enter DFU on next reset)
         if self.boot_active_high:
-            self._set_boot_raw(1 if enabled else 0)
+            self._boot.set_value(1 if enabled else 0)
         else:
-            self._set_boot_raw(0 if enabled else 1)
+            self._boot.set_value(0 if enabled else 1)
 
     def pulse_reset(self, low_ms=300):
-        """
-        Pulse reset: assert then deassert.
-        If reset is active-low, we drive low then high; if active-high, we drive high then low.
-        """
+        # Assert then deassert reset according to polarity
         if self.reset_active_low:
-            # assert
-            self._set_reset_raw(0)
+            self._rst.set_value(0)
             time.sleep(low_ms / 1000.0)
-            # deassert
-            self._set_reset_raw(1)
+            self._rst.set_value(1)
         else:
-            self._set_reset_raw(1)
+            self._rst.set_value(1)
             time.sleep(low_ms / 1000.0)
-            self._set_reset_raw(0)
+            self._rst.set_value(0)
 
 # -------------------------
 # DFU helpers
@@ -250,8 +273,10 @@ def _resolve_firmware_path(
 # -------------------------
 
 def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
-                    boot_line_name: str = BOOT_LINE_NAME_DEFAULT,
-                    reset_line_name: str = RESET_LINE_NAME_DEFAULT,
+                    boot_chip: str = DEFAULT_BOOT_CHIP,
+                    boot_offset: int = DEFAULT_BOOT_OFFSET,
+                    rst_chip: str = DEFAULT_RST_CHIP,
+                    rst_offset: int = DEFAULT_RST_OFFSET,
                     dfu_vidpid: str = DFU_VIDPID,
                     flash_address: str = FLASH_ADDRESS,
                     enter_reset_ms: int = 400,
@@ -305,10 +330,12 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
     )
     if verbose:
         print(f"[DFU] Using firmware: {bin_path}")
-        print(f"[DFU] Entering DFU mode via {boot_line_name} (BOOT) and {reset_line_name} (RESET) ...")
+        print(f"[DFU] BOOT={boot_chip}:{boot_offset}, RESET={rst_chip}:{rst_offset}")
 
-    with BootReset(boot_line_name=boot_line_name,
-                   reset_line_name=reset_line_name,
+    with BootReset(boot_chip=boot_chip,
+                   boot_offset=boot_offset,
+                   rst_chip=rst_chip,
+                   rst_offset=rst_offset,
                    boot_active_high=BOOT_ACTIVE_HIGH,
                    reset_active_low=RESET_ACTIVE_LOW) as br:
         # Ensure RESET is deasserted before we start, ensure BOOT is disabled
@@ -349,10 +376,10 @@ def _parse_args(argv=None):
     p.add_argument("--bin", dest="bin_path",
                    default="LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
                    help="Path to firmware .bin (default: LabCraft_printer/firmware/freeRTOS_LabCraft.bin)")
-    p.add_argument("--boot", dest="boot_line_name", default=BOOT_LINE_NAME_DEFAULT,
-                   help='BOOT line name (for gpiofind), default "GPIO24"')
-    p.add_argument("--reset", dest="reset_line_name", default=RESET_LINE_NAME_DEFAULT,
-                   help='RESET line name (for gpiofind), default "GPIO23"')
+    p.add_argument("--boot-chip", default=DEFAULT_BOOT_CHIP, help="Chip for BOOT line (e.g., gpiochip4)")
+    p.add_argument("--boot-off", type=int, default=DEFAULT_BOOT_OFFSET, help="Line offset for BOOT (e.g., 24)")
+    p.add_argument("--rst-chip", default=DEFAULT_RST_CHIP, help="Chip for RESET line (e.g., gpiochip4)")
+    p.add_argument("--rst-off", type=int, default=DEFAULT_RST_OFFSET, help="Line offset for RESET (e.g., 23)")
     p.add_argument("--vidpid", dest="dfu_vidpid", default=DFU_VIDPID,
                    help='DFU VID:PID string, default "0483:df11"')
     p.add_argument("--addr", dest="flash_address", default=FLASH_ADDRESS,
@@ -369,8 +396,10 @@ def main(argv=None):
     args = _parse_args(argv)
     update_firmware(
         bin_path=args.bin_path,
-        boot_line_name=args.boot_line_name,
-        reset_line_name=args.reset_line_name,
+        boot_chip=args.boot_chip,
+        boot_offset=args.boot_off,
+        rst_chip=args.rst_chip,
+        rst_offset=args.rst_off,
         dfu_vidpid=args.dfu_vidpid,
         flash_address=args.flash_address,
         enter_reset_ms=args.enter_ms,
@@ -381,4 +410,4 @@ def main(argv=None):
     )
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
