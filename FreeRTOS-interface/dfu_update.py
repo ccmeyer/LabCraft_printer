@@ -147,6 +147,16 @@ class BootReset:
         if self.rst_line_name:
             self.rst_chip, self.rst_offset = _gpiofind(self.rst_line_name)
 
+        # Start with BOOT disabled (run app) and RESET deasserted
+        boot_init = 0 if self.boot_active_high else 1
+        rst_init  = 1 if self.reset_active_low else 0
+
+        self._boot = _make_output_line(self.boot_chip, self.boot_offset,
+                                    initial=boot_init, consumer="dfu_boot")
+        self._rst  = _make_output_line(self.rst_chip,  self.rst_offset,
+                                    initial=rst_init,  consumer="dfu_reset")
+        return self
+
     def __exit__(self, exc_type, exc, tb):
         if self._boot:
             self._boot.release()
@@ -259,6 +269,8 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
                     boot_offset: int = DEFAULT_BOOT_OFFSET,
                     rst_chip: str = DEFAULT_RST_CHIP,
                     rst_offset: int = DEFAULT_RST_OFFSET,
+                    boot_line_name: str | None = None,
+                    rst_line_name:  str | None = None,
                     dfu_vidpid: str = DFU_VIDPID,
                     flash_address: str = FLASH_ADDRESS,
                     enter_reset_ms: int = 400,
@@ -303,7 +315,9 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
                    rst_chip=rst_chip,
                    rst_offset=rst_offset,
                    boot_active_high=BOOT_ACTIVE_HIGH,
-                   reset_active_low=RESET_ACTIVE_LOW) as br:
+                   reset_active_low=RESET_ACTIVE_LOW,
+                   boot_line_name=boot_line_name,
+                   rst_line_name=rst_line_name) as br:
         # Ensure RESET is deasserted before we start, ensure BOOT is disabled
         br.set_boot_enabled(False)
         time.sleep(0.02)
