@@ -153,6 +153,9 @@ class Controller(QObject):
         self.machine.disconnect_balance()
         self.model.machine_model.disconnect_balance()
 
+    def update_firmware(self, bin_path: str):
+        self.machine.update_firmware(bin_path)
+
     def update_balance_prediction_models(self,target_volume=40):
         pred_model = self.model.calibration_model.get_selected_model_path()
         # resistance_model = self.model.calibration_model.get_selected_resistance_model_path()

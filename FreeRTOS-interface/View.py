@@ -3462,12 +3462,18 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self._accel_boxes.append(acc)
             layout.addWidget(acc, row_idx, 2)
 
+        # Add a button on the top that updates the firmware
+        self.firmware_update_button = QtWidgets.QPushButton("Update Firmware")
+        self.firmware_update_button.clicked.connect(self._on_firmware_update_requested)
+
+        layout.addWidget(self.firmware_update_button, 0, 3)
+
         # Stretch/spacer row so everything stays at the top
-        last_row = len(self._axis_rows) + 1  # header(0) + data rows
+        last_row = len(self._axis_rows) + 2  # header(0) + data rows
         spacer = QtWidgets.QSpacerItem(
             0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
         )
-        layout.addItem(spacer, last_row, 0, 1, 3)
+        layout.addItem(spacer, last_row, 0, 1, 4)
         layout.setRowStretch(last_row, 1)
 
         # Columns sizing
@@ -3540,6 +3546,10 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 box.setValue(int(max(self._acc_min, min(self._acc_max, int(val)))))
         finally:
             self._updating = False
+
+    def _on_firmware_update_requested(self):
+        """Handle firmware update button click."""
+        self.controller.update_firmware()
 
     # ---------------- Emitters ----------------
 

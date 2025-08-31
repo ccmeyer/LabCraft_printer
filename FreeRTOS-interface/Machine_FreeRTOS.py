@@ -5,6 +5,8 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtWidgets import QApplication
 
+from dfu_update import update_firmware
+
 from collections import deque
 
 import serial
@@ -1020,6 +1022,13 @@ class Machine(QObject):
         else:
             print("Max connection attempts reached. Please check the machine.")
             self.machine_connected_signal.emit(False)
+
+    def update_firmware(self, bin_path: str):
+        update_firmware(
+            bin_path="/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
+            boot_chip="gpiochip4", boot_offset=24,
+            rst_chip="gpiochip4",  rst_offset=23,
+        )
 
     def reset_board(self):
         print('Resetting board')
