@@ -2,20 +2,24 @@ from PySide6.QtCore import QObject, Signal
 from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
+from dfu_controller_mixin import FirmwareUpdateControllerMixin
 import time
 import numpy as np
 import os
 import serial
 
 
-class Controller(QObject):
+class Controller(QObject,FirmwareUpdateControllerMixin):
     """Controller class for the application."""
     array_complete = Signal()
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
     def __init__(self, machine, model):
-        super().__init__()
+        # super().__init__()
+        QObject.__init__(self)                      # init QObject side
+        FirmwareUpdateControllerMixin.__init__(self)  # init mixin side
+        
         self.machine = machine
         self.model = model
         self.expected_position = self.model.machine_model.get_current_position_dict()

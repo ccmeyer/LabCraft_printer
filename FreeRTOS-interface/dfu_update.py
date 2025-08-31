@@ -33,6 +33,103 @@ import sys
 import time
 from pathlib import Path
 
+from PySide6 import QtCore
+import subprocess
+import re
+
+class DfuUpdateWorker(QtCore.QThread):
+    progress = QtCore.Signal(int)          # 0..100
+    stage    = QtCore.Signal(str)          # human message
+    finished = QtCore.Signal(bool, str)    # ok, message
+    output   = QtCore.Signal(str)          # raw lines (optional)
+
+    def __init__(self, dfu_script: Path, bin_path: Path, cwd: Path | None = None,
+                 boot_chip="gpiochip4", boot_off=24, rst_chip="gpiochip4", rst_off=23,
+                 timeout_s=20.0, parent=None):
+        super().__init__(parent)
+        self.dfu_script = Path(dfu_script)
+        self.bin_path   = Path(bin_path)
+        self.cwd        = None if cwd is None else Path(cwd)
+        self.boot_chip  = boot_chip
+        self.boot_off   = int(boot_off)
+        self.rst_chip   = rst_chip
+        self.rst_off    = int(rst_off)
+        self.timeout_s  = float(timeout_s)
+
+    def run(self):
+        if not self.dfu_script.is_file():
+            self.finished.emit(False, f"DFU script not found: {self.dfu_script}")
+            return
+        if not self.bin_path.is_file():
+            self.finished.emit(False, f"Firmware .bin not found: {self.bin_path}")
+            return
+
+        # Build the command; -u = unbuffered so we can parse lines live
+        cmd = [
+            sys.executable, "-u", str(self.dfu_script),
+            "--bin", str(self.bin_path),
+            "--boot-chip", self.boot_chip, "--boot-off", str(self.boot_off),
+            "--rst-chip", self.rst_chip,   "--rst-off",  str(self.rst_off),
+            "--timeout", str(self.timeout_s)
+        ]
+
+        self.stage.emit("Preparing…")
+        self.progress.emit(1)
+
+        # Start subprocess and stream output
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=(str(self.cwd) if self.cwd else None),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1
+            )
+        except Exception as e:
+            self.finished.emit(False, f"Failed to spawn DFU: {e}")
+            return
+
+        percent = 1
+        # Simple regex to catch dfu-util percentages, e.g. " 42% "
+        rx_pct = re.compile(r"(\d{1,3})%\s")
+        # Heuristic stages using dfu_update.py messages
+        while True:
+            line = proc.stdout.readline() if proc.stdout else ""
+            if not line:
+                if proc.poll() is not None:
+                    break
+                self.msleep(20)
+                continue
+
+            self.output.emit(line.rstrip())
+
+            low = line.lower()
+            if "[dfu] using firmware:" in low:
+                self.stage.emit("Found firmware")
+                percent = max(percent, 5);  self.progress.emit(percent)
+            elif "detected. flashing" in low:
+                self.stage.emit("Device detected")
+                percent = max(percent, 20); self.progress.emit(percent)
+            elif "flash complete" in low:
+                self.stage.emit("Finalizing…")
+                percent = max(percent, 98); self.progress.emit(percent)
+
+            # Parse dfu-util progress
+            m = rx_pct.search(line)
+            if m:
+                p = int(m.group(1))
+                # Map dfu-util 0..100 → UI 20..98 (keeps early/late stages visible)
+                ui = 20 + int(p * 0.78)
+                if ui > percent:
+                    percent = ui
+                    self.progress.emit(percent)
+
+        rc = proc.wait()
+        if rc == 0:
+            self.progress.emit(100)
+            self.stage.emit("Done")
+            self.finished.emit(True, "Firmware updated successfully.")
+        else:
+            self.finished.emit(False, f"DFU failed (rc={rc}). Check logs.")
+
 # -------------------------
 # Configuration defaults
 # -------------------------
