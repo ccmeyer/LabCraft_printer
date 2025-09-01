@@ -58,10 +58,10 @@ class DfuUpdateWorker(QtCore.QThread):
 
     @staticmethod
     def _scale(pct: int, lo: int, hi: int) -> int:
-        if pct < 0:   pct = 0
-        if pct > 100: pct = 100
-        span = hi - lo
-        return lo + int(span * (pct / 100.0))
+        # clamp and linearly map 0..100 → lo..hi
+        if   pct < 0:   pct = 0
+        elif pct > 100: pct = 100
+        return lo + int((hi - lo) * (pct / 100.0))
 
     def run(self):
         if not self.dfu_script.is_file():
@@ -95,12 +95,13 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(False, f"Failed to spawn DFU: {e}")
             return
 
-        # Regexes
-        rx_pct_generic = re.compile(r"(\d{1,3})%\s")  # fallback
-        rx_phase_pct   = re.compile(r"^(Erase|Download)\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
+        # Strict patterns for progress lines ONLY:
+        rx_erase_line    = re.compile(r"^Erase\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
+        rx_download_line = re.compile(r"^Download\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
+        # Fallback percentage (used only if we never detected a phase yet)
+        rx_pct_generic   = re.compile(r"(\d{1,3})%\b")
 
-        # State for progress mapping
-        phase = None  # None | "erase" | "download"
+        phase = None            # None | "erase" | "download"
         ui_percent = 1
 
         while True:
@@ -111,91 +112,74 @@ class DfuUpdateWorker(QtCore.QThread):
                 self.msleep(20)
                 continue
 
-            line_stripped = line.rstrip("\r\n")
-            self.output.emit(line_stripped)
-            low = line_stripped.lower()
+            s = line.rstrip("\r\n")
+            low = s.lower()
+            self.output.emit(s)
 
-            # Early stages from our dfu_update.py prints
+            # Early stages from your dfu_update.py prints
             if "[dfu] using firmware:" in low:
                 self.stage.emit("Found firmware")
                 if ui_percent < 5:
                     ui_percent = 5; self.progress.emit(ui_percent)
                 continue
-
             if "detected. flashing" in low:
                 self.stage.emit("Device detected")
                 if ui_percent < 20:
                     ui_percent = 20; self.progress.emit(ui_percent)
                 continue
 
-            # Detect transitions printed by dfu-util
-            if low.startswith("erase"):
+            # --- ERASE progress rows ---
+            m = rx_erase_line.match(s)
+            if m:
+                pct = int(m.group(1))
                 if phase != "erase":
                     phase = "erase"
                     self.stage.emit("Erasing…")
-                    # keep current percent ≥20
                     if ui_percent < 20:
                         ui_percent = 20; self.progress.emit(ui_percent)
-
-                m = rx_phase_pct.search(line_stripped)
-                if m:
-                    pct = int(m.group(2))
-                    ui = self._scale(pct, 20, 50)  # 20–50%
-                    if ui > ui_percent:
-                        ui_percent = ui
-                        self.progress.emit(ui_percent)
-                if "100%" in line_stripped:
-                    ui_percent = max(ui_percent, 50)
+                ui = self._scale(pct, 20, 50)         # 20..50
+                if ui > ui_percent:
+                    ui_percent = ui
                     self.progress.emit(ui_percent)
+                # no 'continue' needed; next loop
                 continue
 
-            if low.startswith("download"):
+            # --- DOWNLOAD progress rows ---
+            m = rx_download_line.match(s)
+            if m:
+                pct = int(m.group(1))
                 if phase != "download":
                     phase = "download"
                     self.stage.emit("Downloading…")
                     if ui_percent < 50:
                         ui_percent = 50; self.progress.emit(ui_percent)
-
-                m = rx_phase_pct.search(line_stripped)
-                if m:
-                    pct = int(m.group(2))
-                    ui = self._scale(pct, 50, 90)  # 50–90%
-                    if ui > ui_percent:
-                        ui_percent = ui
-                        self.progress.emit(ui_percent)
-                if "100%" in line_stripped:
-                    ui_percent = max(ui_percent, 90)
+                ui = self._scale(pct, 50, 90)         # 50..90
+                if ui > ui_percent:
+                    ui_percent = ui
                     self.progress.emit(ui_percent)
                 continue
 
-            # End stages
+            # End / finalize cues
             if "download done." in low or "file downloaded successfully" in low:
                 self.stage.emit("Finalizing…")
                 ui_percent = max(ui_percent, 98)
                 self.progress.emit(ui_percent)
                 continue
-
             if "submitting leave request" in low or "transitioning to dfumanifest" in low:
                 self.stage.emit("Rebooting…")
                 ui_percent = max(ui_percent, 99)
                 self.progress.emit(ui_percent)
                 continue
 
-            if "flash complete" in low:
-                self.stage.emit("Finalizing…")
-                ui_percent = max(ui_percent, 98)
-                self.progress.emit(ui_percent)
-                continue
-
-            # Fallback: if dfu-util printed a bare percentage somewhere else
-            m = rx_pct_generic.search(line_stripped)
-            if m and phase is None:
-                # If we don't know the phase, map to 20–98 as a generic fallback
-                pct = int(m.group(1))
-                ui = 20 + int(0.78 * pct)
-                if ui > ui_percent:
-                    ui_percent = ui
-                    self.progress.emit(ui_percent)
+            # Fallback percentage only if we haven't entered a phase yet
+            if phase is None:
+                m = rx_pct_generic.search(s)
+                if m:
+                    pct = int(m.group(1))
+                    ui = 20 + int(0.78 * pct)         # 20..98
+                    if ui > ui_percent:
+                        ui_percent = ui
+                        self.progress.emit(ui_percent)
 
         rc = proc.wait()
         if rc == 0:

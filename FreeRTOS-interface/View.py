@@ -3474,6 +3474,13 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.fw_bar.setValue(0)
 
         self.firmware_update_button = QtWidgets.QPushButton("Update Firmware")
+        self.firmware_update_button.setStyleSheet("""
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #AAAAAA;
+                    border: 1px solid #444444;
+                }
+                """)
         self.firmware_update_button.clicked.connect(self._on_firmware_update_requested)
 
         fw_v.addWidget(self.fw_status)
