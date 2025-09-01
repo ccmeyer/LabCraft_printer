@@ -100,11 +100,11 @@ source .venv/bin/activate
 python FreeRTOS_interface/App.py
 
 ```bash
-mkdir -p docs/env
+mkdir -p Documentation/env
 {
   echo "== OS =="; cat /etc/os-release
   echo; echo "== Kernel =="; uname -a
   echo; echo "== Python =="; python3 --version; pip3 --version
   echo; echo "== dfu-util =="; dfu-util --version
   echo; echo "== gpiod =="; gpiod --version || true
-} > docs/env/system_summary.txt
+} > Documentation/env/system_summary.txt
