@@ -95,24 +95,28 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(False, f"Failed to spawn DFU: {e}")
             return
 
-        # Strict patterns for progress lines ONLY:
-        rx_erase_line    = re.compile(r"^Erase\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
-        rx_download_line = re.compile(r"^Download\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
+        # Allow leading spaces and CR-echoed progress lines; capture %.
+        rx_erase_line      = re.compile(r"^\s*Erase\s+\[[^\]]*\]\s+(\d{1,3})%", re.IGNORECASE)
+        rx_erase_done_line = re.compile(r"^\s*Erase\s+done\.", re.IGNORECASE)
+        rx_dl_line         = re.compile(r"^\s*Download\s+\[[^\]]*\]\s+(\d{1,3})%", re.IGNORECASE)
+        rx_dl_done_line    = re.compile(r"^\s*Download\s+done\.", re.IGNORECASE)
+
         # Fallback percentage (used only if we never detected a phase yet)
-        rx_pct_generic   = re.compile(r"(\d{1,3})%\b")
+        rx_pct_generic     = re.compile(r"(\d{1,3})%\b")
 
         phase = None            # None | "erase" | "download"
         ui_percent = 1
 
         while True:
-            line = proc.stdout.readline() if proc.stdout else ""
-            if not line:
+            raw = proc.stdout.readline() if proc.stdout else ""
+            if not raw:
                 if proc.poll() is not None:
                     break
                 self.msleep(20)
                 continue
 
-            s = line.rstrip("\r\n")
+            # dfu-util often uses '\r' to rewrite the same line; strip all CRs
+            s = raw.replace('\r', '').rstrip('\n')
             low = s.lower()
             self.output.emit(s)
 
@@ -128,7 +132,7 @@ class DfuUpdateWorker(QtCore.QThread):
                     ui_percent = 20; self.progress.emit(ui_percent)
                 continue
 
-            # --- ERASE progress rows ---
+            # ----- ERASE progress -----
             m = rx_erase_line.match(s)
             if m:
                 pct = int(m.group(1))
@@ -137,15 +141,21 @@ class DfuUpdateWorker(QtCore.QThread):
                     self.stage.emit("Erasing…")
                     if ui_percent < 20:
                         ui_percent = 20; self.progress.emit(ui_percent)
-                ui = self._scale(pct, 20, 50)         # 20..50
+                ui = self._scale(pct, 20, 50)  # 20–50%
                 if ui > ui_percent:
                     ui_percent = ui
                     self.progress.emit(ui_percent)
-                # no 'continue' needed; next loop
                 continue
 
-            # --- DOWNLOAD progress rows ---
-            m = rx_download_line.match(s)
+            if rx_erase_done_line.match(s):
+                phase = "erase"
+                ui_percent = max(ui_percent, 50)
+                self.progress.emit(ui_percent)
+                # don't 'continue' early; next lines may switch to Download
+                continue
+
+            # ----- DOWNLOAD progress -----
+            m = rx_dl_line.match(s)
             if m:
                 pct = int(m.group(1))
                 if phase != "download":
@@ -153,14 +163,20 @@ class DfuUpdateWorker(QtCore.QThread):
                     self.stage.emit("Downloading…")
                     if ui_percent < 50:
                         ui_percent = 50; self.progress.emit(ui_percent)
-                ui = self._scale(pct, 50, 90)         # 50..90
+                ui = self._scale(pct, 50, 90)  # 50–90%
                 if ui > ui_percent:
                     ui_percent = ui
                     self.progress.emit(ui_percent)
                 continue
 
+            if rx_dl_done_line.match(s):
+                phase = "download"
+                ui_percent = max(ui_percent, 90)
+                self.progress.emit(ui_percent)
+                continue
+
             # End / finalize cues
-            if "download done." in low or "file downloaded successfully" in low:
+            if "file downloaded successfully" in low:
                 self.stage.emit("Finalizing…")
                 ui_percent = max(ui_percent, 98)
                 self.progress.emit(ui_percent)
@@ -176,7 +192,7 @@ class DfuUpdateWorker(QtCore.QThread):
                 m = rx_pct_generic.search(s)
                 if m:
                     pct = int(m.group(1))
-                    ui = 20 + int(0.78 * pct)         # 20..98
+                    ui = 20 + int(0.78 * pct)  # 20–98
                     if ui > ui_percent:
                         ui_percent = ui
                         self.progress.emit(ui_percent)
@@ -188,7 +204,6 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(True, "Firmware updated successfully.")
         else:
             self.finished.emit(False, f"DFU failed (rc={rc}). Check logs.")
-            
 # -------------------------
 # Configuration defaults
 # -------------------------
