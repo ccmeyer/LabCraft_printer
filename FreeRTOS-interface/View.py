@@ -140,7 +140,7 @@ class MainWindow(QMainWindow):
 
         self.movement_box = MovementBox(self, self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        tab_widget.addTab(self.movement_box, "MOVEMENT")
+        tab_widget.addTab(self.movement_box, "Movement")
 
         self.speed_profiles_tab = SpeedProfilesTab(self, self.model, self.controller, self.color_dict)
         self.speed_profiles_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
@@ -4079,7 +4079,7 @@ class MovementBox(QtWidgets.QGroupBox):
     """
 
     def __init__(self, main_window,model, controller):
-        super().__init__("MOVEMENT")
+        super().__init__("Movement")
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
         self.model = model

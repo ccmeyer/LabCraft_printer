@@ -1874,7 +1874,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
-        self.upper_pressure = 0.8   # example maximum pressure
+        self.upper_pressure = 1.5   # example maximum pressure
         # Start with a candidate near the lower bound.
         self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
         
@@ -2947,8 +2947,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.predicted_target = self._predict_stage_target(self.target_delay_us)
 
         # Focus control
-        self.focus_dir, self.focus_step = +1, 8
-        self.focus_min_step = 4
+        self.focus_dir, self.focus_step = +1, 16
+        self.focus_min_step = 8
         self.focus_dir_switches, self.focus_switch_limit = 0, 6
         self.last_focus_val = None
         self.focus_ok_threshold = 5_000_000
@@ -3316,7 +3316,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             else:
                 # Not improved: try a second step in the SAME direction before switching
                 self._focus_same_dir_tries += 1
-                if self._focus_same_dir_tries >= 2:
+                if self._focus_same_dir_tries >= 3:
                     # Switch direction after two non-improving probes, expand step a bit
                     self._focus_same_dir_tries = 0
                     self.focus_dir *= -1

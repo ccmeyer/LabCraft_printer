@@ -102,7 +102,7 @@ class DfuUpdateWorker(QtCore.QThread):
         rx_dl_done_line    = re.compile(r"^\s*Download\s+done\.", re.IGNORECASE)
 
         # Fallback percentage (used only if we never detected a phase yet)
-        rx_pct_generic     = re.compile(r"(\d{1,3})%\b")
+        rx_pct_generic     = re.compile(r"(\d{1,3})%")
 
         phase = None            # None | "erase" | "download"
         ui_percent = 1
