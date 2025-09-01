@@ -259,29 +259,50 @@ def _gpiofind(line_name: str):
     return chip_path, int(off)
 
 def _make_output_line(chip_name, offset, initial=0, consumer="dfu_updater"):
+    """
+    Return an object with .set_value(v:int) and .release() that controls a single GPIO line.
+    Works with libgpiod v1 and v2.
+    """
     try:
         import gpiod
     except Exception as e:
-        raise RuntimeError("python3-libgpiod is required. Install: sudo apt install python3-libgpiod") from e
+        raise RuntimeError(
+            "python3-libgpiod/gpiod is required.\n"
+            "On Raspberry Pi OS: sudo apt install python3-libgpiod gpiod"
+        ) from e
 
-    if hasattr(gpiod, "LineSettings"):  # v2
+    # Detect v2 by presence of the 'line' namespace
+    is_v2 = hasattr(gpiod, "line")
+
+    if is_v2:
+        # ----- libgpiod v2 API -----
         chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
-        ls.direction = gpiod.LineDirection.OUTPUT
-        ls.output_value = gpiod.LineValue.ONE if initial else gpiod.LineValue.ZERO
+
+        # v2 enums live in gpiod.line
+        Direction = gpiod.line.Direction
+        Value     = gpiod.line.Value
+
+        ls.direction    = Direction.OUTPUT
+        ls.output_value = Value.ACTIVE if initial else Value.INACTIVE
+
         req = chip.request_lines(consumer=consumer, config={offset: ls})
+
         class OutV2:
-            def set_value(self, v):
-                req.set_values({offset: gpiod.LineValue.ONE if v else gpiod.LineValue.ZERO})
+            def set_value(self, v: int):
+                req.set_values({offset: Value.ACTIVE if v else Value.INACTIVE})
             def release(self):
                 req.release()
         return OutV2()
-    else:  # v1
+
+    else:
+        # ----- libgpiod v1 API -----
         chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         line.request(consumer=consumer, type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
+
         class OutV1:
-            def set_value(self, v):
+            def set_value(self, v: int):
                 line.set_value(1 if v else 0)
             def release(self):
                 line.release()
