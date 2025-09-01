@@ -80,3 +80,31 @@ To run launch the user interface that connects and drives the machine use the fo
 python .\MVC-Interface\App.py
 ```
 Inside of the `.\MVC-Interface\Presets` directory is the file `Settings.json`. This file sets several predefined values such as the default COM ports, default plate setup, etc.
+
+## First-time setup on a new Pi
+
+```bash
+# 1) Clone
+git clone https://github.com/ccmeyer/LabCraft_printer
+cd LabCraft_printer
+
+# 2) Provision OS deps, groups, DFU rule, UART
+./scripts/setup_pi.sh
+# Log out / reboot if groups changed
+
+# 3) Python env
+./scripts/post_clone.sh
+
+# 4) Run
+source .venv/bin/activate
+python FreeRTOS_interface/App.py
+
+```bash
+mkdir -p docs/env
+{
+  echo "== OS =="; cat /etc/os-release
+  echo; echo "== Kernel =="; uname -a
+  echo; echo "== Python =="; python3 --version; pip3 --version
+  echo; echo "== dfu-util =="; dfu-util --version
+  echo; echo "== gpiod =="; gpiod --version || true
+} > docs/env/system_summary.txt
