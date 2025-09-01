@@ -17,6 +17,10 @@ import numpy as np
 import pandas as pd
 import os
 import joblib
+import shutil
+import subprocess
+import glob
+
 try:
     from picamera2 import Picamera2
     import gpiod
@@ -24,6 +28,13 @@ except ImportError:
     print("Running on a non-Raspberry Pi system or missing required libraries. Camera and GPIO functionality will be unavailable.")
     Picamera2 = None
     gpiod = None
+
+def _gpiofind(line_name: str):
+    if shutil.which("gpiofind") is None:
+        raise RuntimeError("gpiofind not found. Install it: sudo apt install gpiod")
+    out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
+    chip_path, off = out.split()
+    return chip_path, int(off)
 
 def _open_chip(chip_name: str):
     """Open a gpiod.Chip allowing 'gpiochipX' or '/dev/gpiochipX'."""
@@ -155,9 +166,11 @@ class DropletCamera(QObject):
         self.trigger_pin_out_bcm = 17   # Pi -> MCU trigger
         self.flash_fired_in_bcm  = 22   # MCU -> Pi flash-ack
 
-        self._chip_name = "gpiochip4"
-        self._trig_line = _make_output_line(self._chip_name, self.trigger_pin_out_bcm, initial=0)
-        self._edge_in   = _make_rising_edge_input(self._chip_name, self.flash_fired_in_bcm)
+        # self._chip_name = "gpiochip4"
+        self._trig_chip_name, off = _gpiofind("GPIO"+str(self.trigger_pin_out_bcm))
+        self.trig_line = _make_output_line(self._trig_chip_name, off, initial=0)
+        self._flash_chip_name, off = _gpiofind("GPIO"+str(self.flash_fired_in_bcm))
+        self._edge_in   = _make_rising_edge_input(self._flash_chip_name, off)
 
         # camera
         self.camera = None
@@ -466,11 +479,11 @@ class RefuelCamera(QObject):
         super().__init__()
         self.camera = None
         self.led_pin = 27
-        self._chip_name = "gpiochip4"  # adjust if needed on your Pi
-
+        # self._chip_name = "gpiochip4"  # adjust if needed on your Pi
+        self._chip_name, off = _gpiofind("GPIO"+str(self.led_pin))
         # v1/v2 compatible output line
-        self._led = _make_output_line(self._chip_name, self.led_pin,
-                                      initial=0, consumer="refuel_led")
+        self._led = _make_output_line(self._chip_name, off,
+                                             initial=0, consumer="refuel_led")
 
     def start_camera(self):
         from picamera2 import Picamera2
