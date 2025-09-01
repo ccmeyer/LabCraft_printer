@@ -3483,7 +3483,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         layout.addWidget(fw_group, row_after_table + 1, 0, 1, 3)
 
         # Stretch/spacer row so everything stays at the top
-        last_row = len(self._axis_rows) + 2  # header(0) + data rows
+        last_row = len(self._axis_rows) + 4  # header(0) + data rows
         spacer = QtWidgets.QSpacerItem(
             0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
         )
@@ -3571,28 +3571,26 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         finally:
             self._updating = False
 
-    # def _on_firmware_update_requested(self):
-    #     """Handle firmware update button click."""
-    #     self.controller.update_firmware()
-
-        # ---------- DFU UI handlers ----------
+    # ---------- DFU UI handlers ----------
     @QtCore.Slot()
     def _on_firmware_update_requested(self):
+        # Lock the button and change its text
         self.firmware_update_button.setEnabled(False)
-        self.fw_bar.setRange(0, 0)  # indeterminate while the worker spins up
+        self.firmware_update_button.setText("Updating…")
+        # Indeterminate bar while the worker spins up
+        self.fw_bar.setRange(0, 0)
         self.fw_status.setText("Starting…")
-        # Ask controller to start (non-blocking); if you kept old name, support both
+        # Kick the controller
         if hasattr(self.controller, "start_firmware_update"):
             self.controller.start_firmware_update()
         elif hasattr(self.controller, "update_firmware"):
-            # Fallback: warn that this may block the UI
             self.fw_status.setText("Running (UI will freeze)…")
             self.controller.update_firmware()
 
     @QtCore.Slot(int)
     def _on_dfu_progress(self, p):
         if self.fw_bar.maximum() == 0:
-            self.fw_bar.setRange(0, 100)      # switch from indeterminate
+            self.fw_bar.setRange(0, 100)  # switch from indeterminate
         self.fw_bar.setValue(max(0, min(100, p)))
 
     @QtCore.Slot(str)
@@ -3601,17 +3599,18 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     @QtCore.Slot(bool, str)
     def _on_dfu_finished(self, ok, msg):
-        self.fw_status.setText("✅ " + msg if ok else "❌ " + msg)
+        # Restore button & show result
+        self.fw_status.setText(("✅ " if ok else "❌ ") + msg)
         self.fw_bar.setRange(0, 100)
         self.fw_bar.setValue(100 if ok else 0)
         self.firmware_update_button.setEnabled(True)
+        self.firmware_update_button.setText("Update Firmware")
 
     @QtCore.Slot(str)
     def _on_dfu_output(self, line):
-        # Optional: if you want to surface raw output somewhere
-        print('Line:', line)
+        # Optional: surface raw dfu-util output somewhere if you want
+        # print('DFU:', line)
         pass
-
     # ---------------- Emitters ----------------
 
     def _mk_speed_handler(self, axis_idx: int):

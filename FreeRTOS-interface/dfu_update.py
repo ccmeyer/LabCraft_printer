@@ -41,7 +41,7 @@ class DfuUpdateWorker(QtCore.QThread):
     progress = QtCore.Signal(int)          # 0..100
     stage    = QtCore.Signal(str)          # human message
     finished = QtCore.Signal(bool, str)    # ok, message
-    output   = QtCore.Signal(str)          # raw lines (optional)
+    output   = QtCore.Signal(str)          # raw stdout lines (optional)
 
     def __init__(self, dfu_script: Path, bin_path: Path, cwd: Path | None = None,
                  boot_chip="gpiochip0", boot_off=24, rst_chip="gpiochip0", rst_off=23,
@@ -56,6 +56,13 @@ class DfuUpdateWorker(QtCore.QThread):
         self.rst_off    = int(rst_off)
         self.timeout_s  = float(timeout_s)
 
+    @staticmethod
+    def _scale(pct: int, lo: int, hi: int) -> int:
+        if pct < 0:   pct = 0
+        if pct > 100: pct = 100
+        span = hi - lo
+        return lo + int(span * (pct / 100.0))
+
     def run(self):
         if not self.dfu_script.is_file():
             self.finished.emit(False, f"DFU script not found: {self.dfu_script}")
@@ -64,7 +71,6 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(False, f"Firmware .bin not found: {self.bin_path}")
             return
 
-        # Build the command; -u = unbuffered so we can parse lines live
         cmd = [
             sys.executable, "-u", str(self.dfu_script),
             "--bin", str(self.bin_path),
@@ -76,21 +82,27 @@ class DfuUpdateWorker(QtCore.QThread):
         self.stage.emit("Preparing…")
         self.progress.emit(1)
 
-        # Start subprocess and stream output
         try:
             proc = subprocess.Popen(
-                cmd, cwd=(str(self.cwd) if self.cwd else None),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1
+                cmd,
+                cwd=(str(self.cwd) if self.cwd else None),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
             )
         except Exception as e:
             self.finished.emit(False, f"Failed to spawn DFU: {e}")
             return
 
-        percent = 1
-        # Simple regex to catch dfu-util percentages, e.g. " 42% "
-        rx_pct = re.compile(r"(\d{1,3})%\s")
-        # Heuristic stages using dfu_update.py messages
+        # Regexes
+        rx_pct_generic = re.compile(r"(\d{1,3})%\s")  # fallback
+        rx_phase_pct   = re.compile(r"^(Erase|Download)\s+\[.*\]\s+(\d{1,3})%\b", re.IGNORECASE)
+
+        # State for progress mapping
+        phase = None  # None | "erase" | "download"
+        ui_percent = 1
+
         while True:
             line = proc.stdout.readline() if proc.stdout else ""
             if not line:
@@ -99,28 +111,91 @@ class DfuUpdateWorker(QtCore.QThread):
                 self.msleep(20)
                 continue
 
-            self.output.emit(line.rstrip())
+            line_stripped = line.rstrip("\r\n")
+            self.output.emit(line_stripped)
+            low = line_stripped.lower()
 
-            low = line.lower()
+            # Early stages from our dfu_update.py prints
             if "[dfu] using firmware:" in low:
                 self.stage.emit("Found firmware")
-                percent = max(percent, 5);  self.progress.emit(percent)
-            elif "detected. flashing" in low:
-                self.stage.emit("Device detected")
-                percent = max(percent, 20); self.progress.emit(percent)
-            elif "flash complete" in low:
-                self.stage.emit("Finalizing…")
-                percent = max(percent, 98); self.progress.emit(percent)
+                if ui_percent < 5:
+                    ui_percent = 5; self.progress.emit(ui_percent)
+                continue
 
-            # Parse dfu-util progress
-            m = rx_pct.search(line)
-            if m:
-                p = int(m.group(1))
-                # Map dfu-util 0..100 → UI 20..98 (keeps early/late stages visible)
-                ui = 20 + int(p * 0.78)
-                if ui > percent:
-                    percent = ui
-                    self.progress.emit(percent)
+            if "detected. flashing" in low:
+                self.stage.emit("Device detected")
+                if ui_percent < 20:
+                    ui_percent = 20; self.progress.emit(ui_percent)
+                continue
+
+            # Detect transitions printed by dfu-util
+            if low.startswith("erase"):
+                if phase != "erase":
+                    phase = "erase"
+                    self.stage.emit("Erasing…")
+                    # keep current percent ≥20
+                    if ui_percent < 20:
+                        ui_percent = 20; self.progress.emit(ui_percent)
+
+                m = rx_phase_pct.search(line_stripped)
+                if m:
+                    pct = int(m.group(2))
+                    ui = self._scale(pct, 20, 50)  # 20–50%
+                    if ui > ui_percent:
+                        ui_percent = ui
+                        self.progress.emit(ui_percent)
+                if "100%" in line_stripped:
+                    ui_percent = max(ui_percent, 50)
+                    self.progress.emit(ui_percent)
+                continue
+
+            if low.startswith("download"):
+                if phase != "download":
+                    phase = "download"
+                    self.stage.emit("Downloading…")
+                    if ui_percent < 50:
+                        ui_percent = 50; self.progress.emit(ui_percent)
+
+                m = rx_phase_pct.search(line_stripped)
+                if m:
+                    pct = int(m.group(2))
+                    ui = self._scale(pct, 50, 90)  # 50–90%
+                    if ui > ui_percent:
+                        ui_percent = ui
+                        self.progress.emit(ui_percent)
+                if "100%" in line_stripped:
+                    ui_percent = max(ui_percent, 90)
+                    self.progress.emit(ui_percent)
+                continue
+
+            # End stages
+            if "download done." in low or "file downloaded successfully" in low:
+                self.stage.emit("Finalizing…")
+                ui_percent = max(ui_percent, 98)
+                self.progress.emit(ui_percent)
+                continue
+
+            if "submitting leave request" in low or "transitioning to dfumanifest" in low:
+                self.stage.emit("Rebooting…")
+                ui_percent = max(ui_percent, 99)
+                self.progress.emit(ui_percent)
+                continue
+
+            if "flash complete" in low:
+                self.stage.emit("Finalizing…")
+                ui_percent = max(ui_percent, 98)
+                self.progress.emit(ui_percent)
+                continue
+
+            # Fallback: if dfu-util printed a bare percentage somewhere else
+            m = rx_pct_generic.search(line_stripped)
+            if m and phase is None:
+                # If we don't know the phase, map to 20–98 as a generic fallback
+                pct = int(m.group(1))
+                ui = 20 + int(0.78 * pct)
+                if ui > ui_percent:
+                    ui_percent = ui
+                    self.progress.emit(ui_percent)
 
         rc = proc.wait()
         if rc == 0:
@@ -129,7 +204,7 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(True, "Firmware updated successfully.")
         else:
             self.finished.emit(False, f"DFU failed (rc={rc}). Check logs.")
-
+            
 # -------------------------
 # Configuration defaults
 # -------------------------
