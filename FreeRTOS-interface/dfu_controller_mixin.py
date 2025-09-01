@@ -15,8 +15,8 @@ class FirmwareUpdateControllerMixin(QtCore.QObject):
         # Defaults; tweak if you keep them elsewhere
         self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
         self._bin_path   = Path("/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin")
-        self._boot_chip  = "gpiochip4"; self._boot_off = 24
-        self._rst_chip   = "gpiochip4"; self._rst_off  = 23
+        self._boot_chip  = "gpiochip0"; self._boot_off = 24
+        self._rst_chip   = "gpiochip0"; self._rst_off  = 23
         self._cwd        = None  # or Path("/home/labcraft/LabCraft_printer")
 
     def start_firmware_update(self):

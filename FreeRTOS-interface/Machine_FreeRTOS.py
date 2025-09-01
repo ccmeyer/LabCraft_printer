@@ -1023,12 +1023,12 @@ class Machine(QObject):
             print("Max connection attempts reached. Please check the machine.")
             self.machine_connected_signal.emit(False)
 
-    def update_firmware(self, bin_path: str):
-        update_firmware(
-            bin_path="/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
-            boot_chip="gpiochip4", boot_offset=24,
-            rst_chip="gpiochip4",  rst_offset=23,
-        )
+    # def update_firmware(self, bin_path: str):
+    #     update_firmware(
+    #         bin_path="/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
+    #         boot_chip="gpiochip4", boot_offset=24,
+    #         rst_chip="gpiochip4",  rst_offset=23,
+    #     )
 
     def reset_board(self):
         print('Resetting board')

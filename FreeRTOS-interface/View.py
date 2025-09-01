@@ -3609,7 +3609,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     @QtCore.Slot(str)
     def _on_dfu_output(self, line):
         # Optional: if you want to surface raw output somewhere
-        # print(line)
+        print('Line:', line)
         pass
 
     # ---------------- Emitters ----------------

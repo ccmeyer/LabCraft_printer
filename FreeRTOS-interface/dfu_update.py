@@ -44,7 +44,7 @@ class DfuUpdateWorker(QtCore.QThread):
     output   = QtCore.Signal(str)          # raw lines (optional)
 
     def __init__(self, dfu_script: Path, bin_path: Path, cwd: Path | None = None,
-                 boot_chip="gpiochip4", boot_off=24, rst_chip="gpiochip4", rst_off=23,
+                 boot_chip="gpiochip0", boot_off=24, rst_chip="gpiochip0", rst_off=23,
                  timeout_s=20.0, parent=None):
         super().__init__(parent)
         self.dfu_script = Path(dfu_script)
@@ -135,16 +135,16 @@ class DfuUpdateWorker(QtCore.QThread):
 # -------------------------
 
 # Default pins (BCM names on Raspberry Pi):
-DEFAULT_BOOT_CHIP   = "gpiochip4"  # BOOT0 control
+DEFAULT_BOOT_CHIP   = "gpiochip0"  # BOOT0 control
 DEFAULT_BOOT_OFFSET = 24           # BCM 24 on many Pi setups
-DEFAULT_RST_CHIP    = "gpiochip4"  # NRST control
+DEFAULT_RST_CHIP    = "gpiochip0"  # NRST control
 DEFAULT_RST_OFFSET  = 23           # BCM 23 on many Pi setups
 
 # Polarity:
 # - BOOT:   set HIGH to enable DFU (BOOT0=1), set LOW to run app (BOOT0=0)
 # - RESET:  pulse LOW to reset
 BOOT_ACTIVE_HIGH  = True
-RESET_ACTIVE_LOW  = True
+RESET_ACTIVE_LOW  = False
 
 # DFU details
 DFU_VIDPID    = "0483:df11"
