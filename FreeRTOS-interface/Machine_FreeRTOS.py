@@ -24,64 +24,123 @@ except ImportError:
     print("Running on a non-Raspberry Pi system or missing required libraries. Camera and GPIO functionality will be unavailable.")
     Picamera2 = None
     gpiod = None
+
+def _open_chip(chip_name: str):
+    """Open a gpiod.Chip allowing 'gpiochipX' or '/dev/gpiochipX'."""
+    import gpiod
+    tried = []
+    for name in (chip_name, f"/dev/{chip_name}" if not chip_name.startswith("/dev/") else None):
+        if not name: continue
+        tried.append(name)
+        try:
+            return gpiod.Chip(name)
+        except FileNotFoundError:
+            pass
+    available = " ".join(sorted(glob.glob("/dev/gpiochip*"))) or "<none>"
+    raise FileNotFoundError(f"Could not open GPIO chip {chip_name!r}. Tried {tried}. "
+                            f"Available chips: {available}")
     
-def _make_output_line(chip_name, offset, initial=0, consumer="droplet_trigger"):
-    if hasattr(gpiod, "LineSettings"):  # libgpiod v2
-        chip = gpiod.Chip(chip_name)
+def _make_output_line(chip_name, offset, initial=0, consumer="gpio_out"):
+    """
+    Return an object with .set_value(v:int) and .release()
+    that works across libgpiod v1 and v2.
+    """
+    try:
+        import gpiod
+    except Exception as e:
+        # No GPIO available: return a no-op stub
+        class _Null:
+            def set_value(self, v): pass
+            def release(self): pass
+        return _Null()
+
+    is_v2 = hasattr(gpiod, "line")  # v2 has the 'line' namespace
+
+    if is_v2:
+        chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
-        ls.direction = gpiod.LineDirection.OUTPUT
-        ls.output_value = gpiod.LineValue.ONE if initial else gpiod.LineValue.ZERO
+        Direction = gpiod.line.Direction
+        Value     = gpiod.line.Value
+        ls.direction    = Direction.OUTPUT
+        ls.output_value = Value.ACTIVE if initial else Value.INACTIVE
         req = chip.request_lines(consumer=consumer, config={offset: ls})
         class OutV2:
-            def set_value(self, v):
-                req.set_values({offset: gpiod.LineValue.ONE if v else gpiod.LineValue.ZERO})
+            def set_value(self, v: int):
+                req.set_values({offset: Value.ACTIVE if v else Value.INACTIVE})
             def release(self):
                 req.release()
         return OutV2()
-    else:  # libgpiod v1
-        chip = gpiod.Chip(chip_name)
+
+    else:
+        chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         line.request(consumer=consumer, type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
         class OutV1:
-            def set_value(self, v):
+            def set_value(self, v: int):
                 line.set_value(1 if v else 0)
             def release(self):
                 line.release()
         return OutV1()
 
-def _make_rising_edge_input(chip_name, offset, consumer="flash_fired_in"):
+def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
     """
     Returns an object with:
       .event_wait(timeout_s: float) -> bool
       .event_consume() -> None
-      .release()
+      .release() -> None
+    Works with libgpiod v1 and v2.
     """
-    if hasattr(gpiod, "LineSettings"):  # libgpiod v2
-        chip = gpiod.Chip(chip_name)
+    try:
+        import gpiod
+    except Exception:
+        # No GPIO available: return a no-op stub that always times out
+        class _NullIn:
+            def event_wait(self, timeout): return False
+            def event_consume(self): pass
+            def release(self): pass
+        return _NullIn()
+
+    is_v2 = hasattr(gpiod, "line")
+
+    if is_v2:
+        chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
-        ls.direction = gpiod.LineDirection.INPUT
-        ls.edge_detection = gpiod.LineEdge.RISING
-        try:
-            ls.bias = gpiod.LineBias.PULL_DOWN
-        except Exception:
-            pass
+        Direction = gpiod.line.Direction
+        Edge      = gpiod.line.Edge
+        Bias      = getattr(gpiod.line, "Bias", None)
+
+        ls.direction      = Direction.INPUT
+        ls.edge_detection = Edge.RISING
+        if Bias is not None:
+            try: ls.bias = Bias.PULL_DOWN
+            except Exception: pass
+
         req = chip.request_lines(consumer=consumer, config={offset: ls})
+
         class InV2:
-            def event_wait(self, timeout): return req.wait_edge_events(timeout)
-            def event_consume(self): _ = req.read_edge_events()
-            def release(self): req.release()
+            def event_wait(self, timeout):
+                return req.wait_edge_events(timeout)
+            def event_consume(self):
+                _ = req.read_edge_events()
+            def release(self):
+                req.release()
         return InV2()
-    else:  # libgpiod v1
-        chip = gpiod.Chip(chip_name)
+
+    else:
+        chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         flags = 0
         if hasattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_DOWN"):
             flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
         line.request(consumer=consumer, type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
+
         class InV1:
-            def event_wait(self, timeout): return line.event_wait(timeout)
-            def event_consume(self): _ = line.event_read()
-            def release(self): line.release()
+            def event_wait(self, timeout):
+                return line.event_wait(timeout)
+            def event_consume(self):
+                _ = line.event_read()
+            def release(self):
+                line.release()
         return InV1()
 
 # ---------- DropletCamera: grabber-driven flash detection with time gating ----------
@@ -405,14 +464,16 @@ class DropletCamera(QObject):
 class RefuelCamera(QObject):
     def __init__(self):
         super().__init__()
+        self.camera = None
         self.led_pin = 27
-        self.chip = gpiod.Chip("gpiochip4")
-        self.line = self.chip.get_line(self.led_pin)
-        self.line.request(consumer="GPIOConsumer", type=gpiod.LINE_REQ_DIR_OUT)
-        self.line.set_value(0)
+        self._chip_name = "gpiochip4"  # adjust if needed on your Pi
+
+        # v1/v2 compatible output line
+        self._led = _make_output_line(self._chip_name, self.led_pin,
+                                      initial=0, consumer="refuel_led")
 
     def start_camera(self):
-        # Initialize Picamera2
+        from picamera2 import Picamera2
         self.camera = Picamera2(0)
         self.camera.configure(self.camera.create_still_configuration(
             main={"size": self.camera.sensor_resolution, "format": "RGB888"}
@@ -420,26 +481,31 @@ class RefuelCamera(QObject):
         self.camera.start()
 
     def capture_image(self):
-        return self.camera.capture_array()
+        return self.camera.capture_array() if self.camera else None
 
     def stop_camera(self):
         if self.camera:
             self.camera.stop()
             self.camera.close()
+            self.camera = None
+        # ensure LED off on stop
+        try: self._led.set_value(0)
+        except Exception: pass
 
     def led_on(self):
         print("---LED ON")
-        self.line.set_value(1)
+        self._led.set_value(1)
 
     def led_off(self):
         print("---LED OFF")
-        self.line.set_value(0)
+        self._led.set_value(0)
 
     def __del__(self):
-        self.line.set_value(0)
-        self.line.release()
-
-
+        try:
+            self._led.set_value(0)
+            self._led.release()
+        except Exception:
+            pass
 
 
 START_BYTE = 0xAA
