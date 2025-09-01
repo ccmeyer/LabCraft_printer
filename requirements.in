@@ -1,0 +1,15 @@
+matplotlib
+matplotlib-inline
+numpy
+opencv-python
+pandas
+picamera2
+pyDOE3
+pyserial
+requests
+scikit-image
+scikit-learn
+scipy
+seaborn
+statsmodels 
+PySide6
