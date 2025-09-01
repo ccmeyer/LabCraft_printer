@@ -2,27 +2,43 @@ from PySide6.QtCore import QObject, Signal
 from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
-from dfu_controller_mixin import FirmwareUpdateControllerMixin
+from dfu_update import DfuUpdateWorker
+from pathlib import Path
+
 import time
 import numpy as np
 import os
 import serial
 
 
-class Controller(QObject,FirmwareUpdateControllerMixin):
+class Controller(QObject):
     """Controller class for the application."""
     array_complete = Signal()
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
+
+    # DFU signals
+    dfu_progress = QtCore.Signal(int)
+    dfu_stage    = QtCore.Signal(str)
+    dfu_finished = QtCore.Signal(bool, str)
+    dfu_output   = QtCore.Signal(str)
+
     def __init__(self, machine, model):
-        # super().__init__()
-        QObject.__init__(self)                      # init QObject side
-        FirmwareUpdateControllerMixin.__init__(self)  # init mixin side
-        
+        super().__init__()
+
         self.machine = machine
         self.model = model
         self.expected_position = self.model.machine_model.get_current_position_dict()
+
+        self._dfu_thread: DfuUpdateWorker | None = None
+
+        # Defaults; tweak if you keep them elsewhere
+        self._dfu_script = Path(__file__).resolve().parent / "dfu_update.py"
+        self._bin_path   = Path("/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin")
+        self._boot_chip  = "gpiochip0"; self._boot_off = 24
+        self._rst_chip   = "gpiochip0"; self._rst_off  = 23
+        self._cwd        = None  # or Path("/home/labcraft/LabCraft_printer")
 
         # This variable will temporarily hold the callback for the next capture.
         self.pending_capture_callback = None
@@ -157,8 +173,26 @@ class Controller(QObject,FirmwareUpdateControllerMixin):
         self.machine.disconnect_balance()
         self.model.machine_model.disconnect_balance()
 
-    def update_firmware(self, bin_path: str):
-        self.machine.update_firmware(bin_path)
+    # def update_firmware(self, bin_path: str):
+    #     self.machine.update_firmware(bin_path)
+
+    def start_firmware_update(self):
+        if self._dfu_thread and self._dfu_thread.isRunning():
+            return  # already running
+        w = DfuUpdateWorker(
+            dfu_script=self._dfu_script,
+            bin_path=self._bin_path,
+            cwd=self._cwd,
+            boot_chip=self._boot_chip, boot_off=self._boot_off,
+            rst_chip=self._rst_chip,   rst_off=self._rst_off,
+        )
+        w.progress.connect(self.dfu_progress)
+        w.stage.connect(self.dfu_stage)
+        w.finished.connect(self.dfu_finished)
+        w.output.connect(self.dfu_output)
+        # Retain ref so it isn’t GC’d
+        self._dfu_thread = w
+        w.start()
 
     def update_balance_prediction_models(self,target_volume=40):
         pred_model = self.model.calibration_model.get_selected_model_path()
