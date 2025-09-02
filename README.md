@@ -108,3 +108,41 @@ mkdir -p Documentation/env
   echo; echo "== dfu-util =="; dfu-util --version
   echo; echo "== gpiod =="; gpiod --version || true
 } > Documentation/env/system_summary.txt
+
+# Make sure the Raspberry Pi archive keyring is installed
+sudo apt-get update
+sudo apt-get install -y raspberrypi-archive-keyring
+
+# Ensure the Raspberry Pi repo is present (Bookworm)
+echo 'deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.org/debian/ bookworm main' | \
+  sudo tee /etc/apt/sources.list.d/raspi.list
+
+# Also make sure the Raspbian repo is present (usually already there)
+sudo mkdir -p /etc/apt/sources.list.d
+grep -q 'raspbian.raspberrypi.org' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || \
+  echo 'deb http://raspbian.raspberrypi.org/raspbian/ bookworm main contrib non-free rpi' | \
+  sudo tee -a /etc/apt/sources.list
+
+sudo apt-get update
+
+apt-cache policy python3-libcamera python3-picamera2
+sudo apt-get install -y python3-libcamera python3-picamera2
+
+# From your project root
+deactivate 2>/dev/null || true
+rm -rf venv
+python3 -m venv --system-site-packages venv
+source venv/bin/activate
+
+# Sanity check
+python - <<'PY'
+import sys
+print("dist-packages in sys.path?", any("dist-packages" in p for p in sys.path))
+try:
+    import libcamera, picamera2
+    print("OK: libcamera & picamera2 imported")
+except Exception as e:
+    print("Import failed:", e)
+PY
+
+sudo usermod -aG video,render $USER
