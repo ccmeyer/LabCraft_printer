@@ -168,7 +168,7 @@ class DropletCamera(QObject):
 
         # self._chip_name = "gpiochip4"
         self._trig_chip_name, off = _gpiofind("GPIO"+str(self.trigger_pin_out_bcm))
-        self.trig_line = _make_output_line(self._trig_chip_name, off, initial=0)
+        self._trig_line = _make_output_line(self._trig_chip_name, off, initial=0)
         self._flash_chip_name, off = _gpiofind("GPIO"+str(self.flash_fired_in_bcm))
         self._edge_in   = _make_rising_edge_input(self._flash_chip_name, off)
 

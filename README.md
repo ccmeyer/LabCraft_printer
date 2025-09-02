@@ -98,80 +98,106 @@ cd LabCraft_printer
 # 4) Run
 source .venv/bin/activate
 python FreeRTOS_interface/App.py
+```
 
+
+## Updated Startup Procedure
 ```bash
-mkdir -p Documentation/env
-{
-  echo "== OS =="; cat /etc/os-release
-  echo; echo "== Kernel =="; uname -a
-  echo; echo "== Python =="; python3 --version; pip3 --version
-  echo; echo "== dfu-util =="; dfu-util --version
-  echo; echo "== gpiod =="; gpiod --version || true
-} > Documentation/env/system_summary.txt
-
-# Make sure the Raspberry Pi archive keyring is installed
+### Update base system (safe)
 sudo apt-get update
-sudo apt-get install -y raspberrypi-archive-keyring
+sudo apt-get -y full-upgrade
+sudo reboot
 
-# Ensure the Raspberry Pi repo is present (Bookworm)
-echo 'deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.org/debian/ bookworm main' | \
-  sudo tee /etc/apt/sources.list.d/raspi.list
+# Enable the primary UART and disable the login console on it
+# (This keeps the desktop boot intact and gives you /dev/ttyAMA0 for your MCU)
+sudo raspi-config
+#  → Interface Options → Serial Port:
+#     - Login shell over serial?  NO
+#     - Enable serial port hardware?  YES
+#  → Interface Options → I2C:
+#     - Enable I2C?  YES
+#  → Finish (raspi-config will offer to reboot) → Reboot now
 
-# Also make sure the Raspbian repo is present (usually already there)
-sudo mkdir -p /etc/apt/sources.list.d
-grep -q 'raspbian.raspberrypi.org' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || \
-  echo 'deb http://raspbian.raspberrypi.org/raspbian/ bookworm main contrib non-free rpi' | \
-  sudo tee -a /etc/apt/sources.list
+# Give the GPU a reasonable memory split
+echo 'gpu_mem=128' | sudo tee -a /boot/firmware/config.txt
+sudo reboot
 
-sudo apt-get update
+# Cameras & tools (Bookworm uses rpicam-* commands)
+sudo apt-get install -y \
+  python3-libcamera python3-picamera2 rpicam-apps
+
+# GPIO (libgpiod + Python binding + CLI tools like gpiofind/gpioinfo)
+sudo apt-get install -y python3-libgpiod gpiod
+
+# DFU and udev rule needs
+sudo apt-get install -y dfu-util
+
+# Build tools (handy for wheels)
+sudo apt-get install -y python3-venv python3-pip
+
+# Numpy dependent libraries
+sudo apt-get install -y python3-numpy python3-scipy \   python3-skimage python3-sklearn python3-opencv
+
+# Serial access & video groups for your user
+sudo usermod -aG dialout,video,gpio,render,plugdev $USER
+sudo reboot
+
+# ST DFU udev rule (non-root dfu-util):
+printf '%s\n' 'SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="df11", GROUP="plugdev", MODE="0664"' \
+ | sudo tee /etc/udev/rules.d/45-st-dfu.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo reboot
+
+## Configure camera overlays
+# 1) Backup
+sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.bak.$(date +%F-%H%M)
+
+# 2) Edit
+sudo nano /boot/firmware/config.txt
+
+# --- Camera configuration ---
+camera_auto_detect=0
+
+# V2 (IMX219) on CAM0, GS (IMX296) on CAM1:
+dtoverlay=imx219,cam0
+dtoverlay=imx296,cam1
+
+# press Ctrl+O, Enter to save
+# press Ctrl+X to exit
+
+## Checks to make sure that the configurations are correct:
+# Serial device present?
+ls -l /dev/ttyAMA0
+
+# Camera works?
+rpicam-hello -t 2000 --camera 0
+rpicam-hello -t 2000 --camera 1
 
 
+# GPIO tools present?
+gpioinfo | head
+gpiofind GPIO17 2>/dev/null || true
+```
 
-
-
-sudo tee /etc/apt/sources.list.d/raspi.list >/dev/null <<'EOF'
-deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.org/debian/ bookworm main
-deb [signed-by=/usr/share/keyrings/raspbian-archive-keyring.gpg]   http://raspbian.raspberrypi.org/raspbian/ bookworm main contrib non-free rpi
-EOF
-
-sudo sed -i '/raspbian.raspberrypi.org/d' /etc/apt/sources.list
-
-sudo apt-get update || true   # ok if this still errors
-sudo apt-get install -y raspberrypi-archive-keyring raspbian-archive-keyring
-
-# Raspberry Pi archive key (for archive.raspberrypi.org)
-sudo mkdir -p /usr/share/keyrings
-curl -fsSL https://archive.raspberrypi.org/debian/raspberrypi.gpg.key | \
-  sudo gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
-
-# Raspbian archive key (for raspbian.raspberrypi.org)
-curl -fsSL https://archive.raspbian.org/raspbian.public.key | \
-  sudo gpg --dearmor -o /usr/share/keyrings/raspbian-archive-keyring.gpg
-
-sudo apt-get update
-apt-cache policy python3-picamera2 python3-libcamera libcamera-apps | sed -n '1,120p'
-
-
-
-
-apt-cache policy python3-libcamera python3-picamera2
-sudo apt-get install -y python3-libcamera python3-picamera2
-
-# From your project root
-deactivate 2>/dev/null || true
-rm -rf venv
+## Python setup sequence
+```bash
+git clone https://github.com/ccmeyer/LabCraft_printer
+cd ~/LabCraft_printer
 python3 -m venv --system-site-packages venv
 source venv/bin/activate
 
-# Sanity check
-python - <<'PY'
-import sys
-print("dist-packages in sys.path?", any("dist-packages" in p for p in sys.path))
-try:
-    import libcamera, picamera2
-    print("OK: libcamera & picamera2 imported")
-except Exception as e:
-    print("Import failed:", e)
-PY
+python -m pip install -U pip wheel
+pip install pip-tools
+pip-compile --generate-hashes --output-file requirements-pi.lock requirements.in
 
-sudo usermod -aG video,render $USER
+pip-sync requirements-pi.lock
+
+# Numpy and associated libraries are reinstalled during pip-sync and must be removed from site-packages so that they rely on the dist-packages version. 
+rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/numpy*
+rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/pandas*
+rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/matplotlib*
+rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/scipy*
+rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/sklearn*
+```
+
