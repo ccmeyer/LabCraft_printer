@@ -125,6 +125,35 @@ grep -q 'raspbian.raspberrypi.org' /etc/apt/sources.list /etc/apt/sources.list.d
 
 sudo apt-get update
 
+
+
+
+
+sudo tee /etc/apt/sources.list.d/raspi.list >/dev/null <<'EOF'
+deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.org/debian/ bookworm main
+deb [signed-by=/usr/share/keyrings/raspbian-archive-keyring.gpg]   http://raspbian.raspberrypi.org/raspbian/ bookworm main contrib non-free rpi
+EOF
+
+sudo sed -i '/raspbian.raspberrypi.org/d' /etc/apt/sources.list
+
+sudo apt-get update || true   # ok if this still errors
+sudo apt-get install -y raspberrypi-archive-keyring raspbian-archive-keyring
+
+# Raspberry Pi archive key (for archive.raspberrypi.org)
+sudo mkdir -p /usr/share/keyrings
+curl -fsSL https://archive.raspberrypi.org/debian/raspberrypi.gpg.key | \
+  sudo gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg
+
+# Raspbian archive key (for raspbian.raspberrypi.org)
+curl -fsSL https://archive.raspbian.org/raspbian.public.key | \
+  sudo gpg --dearmor -o /usr/share/keyrings/raspbian-archive-keyring.gpg
+
+sudo apt-get update
+apt-cache policy python3-picamera2 python3-libcamera libcamera-apps | sed -n '1,120p'
+
+
+
+
 apt-cache policy python3-libcamera python3-picamera2
 sudo apt-get install -y python3-libcamera python3-picamera2
 
