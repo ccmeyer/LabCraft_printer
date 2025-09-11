@@ -362,12 +362,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_nozzle_button, row, 0, 1, 2)
         row += 1
 
-        # Add a button to move the machine to position the nozzle in the center of the screen
-        self.center_nozzle_button = QtWidgets.QPushButton("Center Nozzle")
-        self.center_nozzle_button.clicked.connect(self.center_nozzle)
-        self.button_layout.addWidget(self.center_nozzle_button, row, 0, 1, 2)
-        row += 1
-
         # Add a button to trigger the nozzle focus calibration
         self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
         self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
@@ -469,6 +463,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add the diff_widget (which now contains the grid of labels) to the analysis layout.
         self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
 
+        self.log_label = QtWidgets.QLabel("Calibration Log")
+        self.log_label.setStyleSheet("font-weight: bold;")
+        self.analysis_layout.addWidget(self.log_label)
+
+        self.stage_table = QtWidgets.QTableWidget()
+        self.stage_table.setColumnCount(2)
+        self.stage_table.setHorizontalHeaderLabels(["Time", "Stage"])
+        self.stage_table.verticalHeader().setVisible(False)
+        self.stage_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.stage_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.stage_table.setWordWrap(True)
+        self.stage_table.setAlternatingRowColors(True)
+        self.stage_table.horizontalHeader().setStretchLastSection(True)
+        self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.stage_table.setMinimumHeight(200)   # ensures it’s visible; grows with dialog
+        self.analysis_layout.addWidget(self.stage_table)
+
         # Finally, add the analysis_layout to your main layout.
         self.layout.addLayout(self.analysis_layout)
 
@@ -492,7 +503,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.edge_margin_spinbox.valueChanged.connect(self.update_analysis_parameters)
 
         # Connect the model's calibration stage signal to update the UI.
-        self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
+        # self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
+        self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
@@ -840,14 +852,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Called when the calibration process is completed.
         """
-        self.update_stage("Calibration Completed")
+        self.update_stage_and_log("Calibration Completed", "green")
         self.reset_calibration_buttons()
 
     def on_calibration_queue_completed(self):
         """
         Called when the calibration queue is completed.
         """
-        self.update_stage("Calibration Queue Completed")
+        self.update_stage_and_log("Calibration Queue Completed","green")
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
 
@@ -855,7 +867,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Called when the calibration process encounters an error.
         """
-        self.update_stage("Calibration Error")
+        self.update_stage_and_log("Calibration Error", "red")
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
@@ -962,11 +974,37 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_all_button.setText("Stop Calibration")
             self.controller.start_all_calibrations()
 
-    def update_stage(self, stage):
-        """
-        Updates the stage label based on the calibration stage.
-        """
+    # def update_stage(self, stage):
+    #     """
+    #     Updates the stage label based on the calibration stage.
+    #     """
+    #     self.stageLabel.setText(f"Status: {stage}")
+
+    def update_stage_and_log(self, stage: str, color_name: str):
+        # Update the small status label
         self.stageLabel.setText(f"Status: {stage}")
+
+        # Append to the log table (time + stage text)
+        row = self.stage_table.rowCount()
+        self.stage_table.insertRow(row)
+
+        time_str = datetime.now().strftime("%H:%M:%S")
+        time_item = QtWidgets.QTableWidgetItem(time_str)
+        stage_item = QtWidgets.QTableWidgetItem(stage)
+
+        # Resolve background color from main_window.color_dict
+        # Fallbacks: "dark_gray" → hex → default gray if missing
+        hex_color = self.color_dict.get(color_name) or self.color_dict.get("dark_gray") or "#444444"
+        brush = QBrush(QColor(hex_color))
+
+        time_item.setBackground(brush)
+        stage_item.setBackground(brush)
+
+        self.stage_table.setItem(row, 0, time_item)
+        self.stage_table.setItem(row, 1, stage_item)
+
+        # Auto-scroll to the newest row
+        self.stage_table.scrollToBottom()
 
     def center_nozzle(self):
         self.controller.center_nozzle_in_camera(position='top')

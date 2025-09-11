@@ -53,7 +53,7 @@ def numpy_encoder(obj):
 
 
 class CalibrationManager(QObject):
-    calibrationStageChanged = Signal(str)
+    calibrationStageChanged = Signal(str, str)  # (message, color_name)
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
     calibrationQueueCompleted = Signal()
@@ -157,7 +157,8 @@ class CalibrationManager(QObject):
         self._save_atomic()
 
         self.calibrationStageChanged.emit(
-            f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})"
+            f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})",
+            "dark_blue"
         )
 
     def end_session(self):
@@ -165,7 +166,7 @@ class CalibrationManager(QObject):
         if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
             self.data["runs"][self._run_idx]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._save_atomic()
-            self.calibrationStageChanged.emit("Calibration session ended")
+            self.calibrationStageChanged.emit("Calibration session ended", "purple")
 
         self._run_id = None
         self._run_idx = None
@@ -210,7 +211,7 @@ class CalibrationManager(QObject):
             # safe default so nothing is lost silently
             self.calibration_file_path = os.path.abspath("calibration.json")
             self.calibrationStageChanged.emit(
-                f"Warning: calibration_file_path not set — writing to {self.calibration_file_path}"
+                f"Warning: calibration_file_path not set — writing to {self.calibration_file_path}", "red"
             )
         with self._lock:
             tmp = self.calibration_file_path + ".tmp"
@@ -257,7 +258,7 @@ class CalibrationManager(QObject):
                 self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
             self.start_active_calibration()
         else:
-            self.calibrationStageChanged.emit("No calibrations in queue.")
+            self.calibrationStageChanged.emit("No calibrations in queue.", "red")
             self.calibrationQueueCompleted.emit()
 
     def start_active_calibration(self):
@@ -279,7 +280,7 @@ class CalibrationManager(QObject):
             self.activeCalibration = None
         if len(self.calibration_queue) > 0:
             self.clear_calibration_queue()
-        self.calibrationStageChanged.emit("Calibration stopped")
+        self.calibrationStageChanged.emit("Calibration stopped","orange")
         self.calibrationError.emit("Calibration terminated by user")
 
     # --- Methods to start individual calibration processes ---
@@ -347,14 +348,14 @@ class CalibrationManager(QObject):
         recs = self._latest_step_list("nozzle_position")
         if recs:
             return recs[-1].get("result")
-        self.calibrationStageChanged.emit("No nozzle position calibration available")
+        self.calibrationStageChanged.emit("No nozzle position calibration available", "red")
         return None
 
     def get_emergence_time(self):
         recs = self._latest_step_list("droplet_emergence")
         if recs:
             return recs[-1].get("result", {}).get("flash_delay")
-        self.calibrationStageChanged.emit("No droplet emergence calibration available")
+        self.calibrationStageChanged.emit("No droplet emergence calibration available", "red")
         return None
 
     def is_in_initial_position(self):
@@ -409,18 +410,18 @@ class CalibrationManager(QObject):
 
     @Slot()
     def onCalibrationCompleted(self):
-        self.calibrationStageChanged.emit("Calibration completed successfully")
+        self.calibrationStageChanged.emit("Calibration completed successfully", "green")
         self.activeCalibration = None
         self.calibrationCompleted.emit()
         if len(self.calibration_queue) > 0:
-            self.calibrationStageChanged.emit("Starting next calibration in queue...")
+            self.calibrationStageChanged.emit("Starting next calibration in queue...", "blue")
             self.start_calibration_queue()
         else:
             self.calibrationQueueCompleted.emit()
 
     @Slot(str)
     def onCalibrationError(self, error_message):
-        self.calibrationStageChanged.emit("Calibration error: " + error_message)
+        self.calibrationStageChanged.emit("Calibration error: " + error_message, "red")
         # NEW: hard-stop the running calibration FSM to prevent any queued transitions
         if self.activeCalibration is not None:
             try:
@@ -430,7 +431,7 @@ class CalibrationManager(QObject):
         self.activeCalibration = None
         self.calibrationError.emit(error_message)
         if len(self.calibration_queue) > 0:
-            self.calibrationStageChanged.emit("Calibration queue stopped due to error")
+            self.calibrationStageChanged.emit("Calibration queue stopped due to error", "red")
             self.clear_calibration_queue()
 
     # ------------- The key hook: persist every step -------------
