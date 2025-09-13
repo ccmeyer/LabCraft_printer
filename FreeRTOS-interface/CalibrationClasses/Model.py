@@ -267,7 +267,7 @@ class CalibrationManager(QObject):
             if self._run_idx is None:
                 # Create a default session in CWD if the caller forgot
                 self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started session")
-            self.activeCalibration.stageChanged.connect(self.calibrationStageChanged)
+            self.activeCalibration.stageChanged.connect(self.onCalibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
             self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
@@ -408,6 +408,10 @@ class CalibrationManager(QObject):
 
     # ------------- Completion / Error -------------
 
+    @Slot(str)
+    def onCalibrationStageChanged(self, message):
+        self.calibrationStageChanged.emit(message, "dark_gray")
+
     @Slot()
     def onCalibrationCompleted(self):
         self.calibrationStageChanged.emit("Calibration completed successfully", "green")
@@ -472,7 +476,7 @@ class CalibrationManager(QObject):
         run["steps"].setdefault(phase_key, []).append(payload)
 
         # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
-        self._try_append_flat_rows_from_payload(run, phase_key, payload)
+        # self._try_append_flat_rows_from_payload(run, phase_key, payload)
 
         self._save_atomic()
 
