@@ -741,7 +741,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         # ---- Safety & search tuning ----
         # flash delay search (in microseconds), added to base (initial) delay
-        self.initial_flash_delay_us = 3800
+        self.initial_flash_delay_us = max(self.model.machine_model.get_print_pulse_width() + 2600, 0)
         self.delay_scan_increments = [0, 400, 800, 1200, 1600]   # try a few longer delays
         self.min_flash_delay_us = 0
         self.max_flash_delay_us = 12000
@@ -984,7 +984,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         # basic area filter
         areas = [cv2.contourArea(c) for c in contours]
-        keep = [(c, a) for (c, a) in zip(contours, areas) if a >= 20]
+        keep = [(c, a) for (c, a) in zip(contours, areas) if a >= 2000]
         if not keep:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
@@ -1548,7 +1548,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not contours: self._last_bbox = None; self._last_mask = None; return None
             areas = [cv2.contourArea(c) for c in contours]
-            keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 20]
+            keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 2000]
             if not keep: self._last_bbox = None; self._last_mask = None; return None
             def top_y(c): return int(c[:, :, 1].min())
             keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
