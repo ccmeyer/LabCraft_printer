@@ -3621,7 +3621,7 @@ class DropletCameraModel(QObject):
     def analyze_droplets(
         self,
         image,
-        um_per_pixel=1.545,
+        um_per_pixel=1.5696,
         intensity_threshold=150,
         circularity_threshold=1.15,
         min_area_threshold=10,
@@ -4084,7 +4084,7 @@ class DropletCameraModel(QObject):
 
         return largest_contour, annotated_image
 
-    def characterize_droplet(self, image, background,um_per_pixel=1.545):
+    def characterize_droplet(self, image, background,um_per_pixel=1.5696):
         """
         Characterizes the droplet in the image.
         - Uses the background image to compute the difference image.
