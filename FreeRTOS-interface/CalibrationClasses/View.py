@@ -380,6 +380,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger the pressure scan
+        self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
+        self.calibrate_pressure_scan_button.clicked.connect(self.toggle_start_pressure_scan_calibration)
+        self.button_layout.addWidget(self.calibrate_pressure_scan_button, row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger the droplet trajectory calibration
         self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
         self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
@@ -934,6 +940,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_pressure_button.setText("Stop Calibration")
             self.controller.start_pressure_calibration()
+
+    def toggle_start_pressure_scan_calibration(self):
+        """
+        Toggles whether the pressure scan calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_pressure_scan_button.setText("Scan Pressures")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_pressure_scan_button.setText("Stop Calibration")
+            self.controller.start_pressure_scan_calibration()
 
     def toggle_start_trajectory_calibration(self):
         """

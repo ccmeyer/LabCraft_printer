@@ -1154,6 +1154,10 @@ class Controller(QObject):
         # Tell the Model to start the pressure calibration.
         self.model.calibration_manager.start_pressure_calibration()
 
+    def start_pressure_scan_calibration(self):
+        # Tell the Model to start the pressure scan calibration.
+        self.model.calibration_manager.start_pressure_scan_calibration()
+
     def start_trajectory_calibration(self):
         # Tell the Model to start the trajectory calibration.
         self.model.calibration_manager.start_trajectory_calibration()
