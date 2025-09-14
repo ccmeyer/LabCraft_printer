@@ -998,14 +998,14 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        # choose the top-most contour (min y); tie-break by larger area
-        def contour_top_y(contour):
+        # choose the lowest contour (max y); tie-break by larger area
+        def contour_bottom_y(contour):
             ys = contour[:, :, 1].flatten()
-            return int(ys.min())
+            return int(ys.max())
 
         keep_sorted = sorted(
             keep,
-            key=lambda ca: (contour_top_y(ca[0]), -ca[1])
+            key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1])
         )
         chosen, chosen_area = keep_sorted[0]
         n = len(keep)
@@ -1559,8 +1559,16 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             areas = [cv2.contourArea(c) for c in contours]
             keep = [(c, a_) for (c, a_) in zip(contours, areas) if a_ >= 2000]
             if not keep: self._last_bbox = None; self._last_mask = None; return None
-            def top_y(c): return int(c[:, :, 1].min())
-            keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
+            # choose the lowest contour (max y); tie-break by larger area
+            def contour_bottom_y(contour):
+                ys = contour[:, :, 1].flatten()
+                return int(ys.max())
+
+            keep_sorted = sorted(
+                keep,
+                key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1])
+            )
+            chosen, chosen_area = keep_sorted[0]
             chosen, _ = keep[0]
             x, y, w, h = cv2.boundingRect(chosen)
             pad_x = max(6, int(round(0.25 * w)))
@@ -2532,7 +2540,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            p_lo, p_hi = 0.3, 1.5
+            p_lo, p_hi = 0.5, 1.5
         self.P_MIN = float(p_lo)
         self.P_MAX = float(p_hi)
 
@@ -2825,11 +2833,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.droplet_image,
             self.background_image,
             self.nozzle_center_px,
-            min_area=1000,
-            nozzle_contact_band_px=12,
-            min_free_offset_px=18,
-            aspect_guard=(1.6, 38),
-            delay_us=self.classify_delay_us
+            # min_area=1000,
+            # nozzle_contact_band_px=12,
+            # min_free_offset_px=18,
+            # aspect_guard=(1.6, 38),
+            # delay_us=self.classify_delay_us
         )
         cls = self._classify_from_contours(droplets, nozzle_hits)
         if cls == "invalid":
@@ -4480,16 +4488,16 @@ class DropletCameraModel(QObject):
         if not contours:
             return None, None, image
 
-        def top_y(c): return int(c[:,:,1].min())
+        def bottom_y(c): return int(c[:,:,1].max())
         areas = [cv2.contourArea(c) for c in contours]
         keep  = [(c, a) for (c, a) in zip(contours, areas) if a >= MIN_CONTOUR_AREA]
         if not keep:
             return None, None, image
 
-        # Prefer top-most; break ties by larger area
-        keep.sort(key=lambda ca: (top_y(ca[0]), -ca[1]))
+        # Prefer bottom-most; break ties by larger area
+        keep.sort(key=lambda ca: (-bottom_y(ca[0]), -ca[1]))
         chosen, a_cont = keep[0]
-        ty = top_y(chosen)
+        ty = bottom_y(chosen)
 
         # top-band gate (optional but helpful)
         if ty > int(TOP_BAND_FRAC * h):
