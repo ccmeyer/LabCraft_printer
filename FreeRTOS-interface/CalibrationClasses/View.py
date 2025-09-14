@@ -398,6 +398,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger the droplet characterization calibration
+        self.calibrate_characterization_button = QtWidgets.QPushButton("Characterize Droplets")
+        self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
+        self.button_layout.addWidget(self.calibrate_characterization_button, row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger all calibrations
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
@@ -979,6 +985,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_search_button.setText("Stop Calibration")
             self.controller.start_droplet_search_calibration()
+
+    def toggle_start_characterization_calibration(self):
+        """
+        Toggles whether the droplet characterization calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_characterization_button.setText("Characterize Droplets")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_characterization_button.setText("Stop Calibration")
+            self.controller.start_droplet_characterization_calibration()
 
     def toggle_start_all_calibration(self):
         """
