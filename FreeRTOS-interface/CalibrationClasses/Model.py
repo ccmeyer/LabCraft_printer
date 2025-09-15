@@ -108,6 +108,8 @@ class CalibrationManager(QObject):
         self.min_start_delay = None
         self.intermediate_droplet_position = None
 
+        self._last_pressure_scan_result = None
+
         self.calibration_queue = []
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
@@ -325,6 +327,10 @@ class CalibrationManager(QObject):
         self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
+    def start_pressure_trajectory_calibration(self):
+        self.activeCalibration = PressureTrajectoryCalibrationProcess(self, self.model)
+        self.start_active_calibration()
+
     def start_droplet_search_calibration(self):
         self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
         self.start_active_calibration()
@@ -397,6 +403,9 @@ class CalibrationManager(QObject):
     def set_trajectory_delay(self, delay): self.trajectory_delay = delay
     def set_min_start_delay(self, delay): self.min_start_delay = delay
     def set_intermediate_droplet_position(self, position): self.intermediate_droplet_position = position
+    def set_primary_pressure_band(self, result): 
+        print("Setting primary pressure band:", result)
+        self._last_pressure_scan_result = result
 
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
@@ -405,6 +414,15 @@ class CalibrationManager(QObject):
     def get_trajectory_delay(self): return self.trajectory_delay
     def get_min_start_delay(self): return self.min_start_delay
     def get_intermediate_droplet_position(self): return self.intermediate_droplet_position
+
+    def get_primary_pressure_band(self):
+        res = self._last_pressure_scan_result
+        if not res:
+            return None
+        band = res.get("primary_band")
+        if band and len(band) == 2:
+            return float(band[0]), float(band[1])
+        return None
 
     # ------------- Offsets helper -------------
 
@@ -2807,6 +2825,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "measurements": [],
             "result": result
         })
+        self.set_primary_pressure_band(result)
         self.stageChanged.emit("Pressure scan complete")
         self.calibrationCompleted.emit()
 
@@ -3267,6 +3286,304 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Trajectory calibration complete")
         self.calibrationCompleted.emit()
+
+class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
+    """
+    For each selected pressure within the primary single-droplet band:
+      - capture images at multiple flash delays (relative to emergence)
+      - detect the droplet center (relative to nozzle center)
+      - fit a linear model center(t) -> velocity (vx, vy) in px/µs
+    Emits one result payload with per-pressure fits and raw points.
+
+    Requires: background image, nozzle_center_px, emergence_time_us.
+    """
+
+    # machine signals
+    pressureApplied   = Signal()   # ready to capture at this pressure
+    timepointReady    = Signal()   # a timepoint analyzed; go decide next step
+    continuePressure  = Signal()   # keep working at this pressure (next delay / retry)
+    finalize          = Signal()   # all done
+
+    def __init__(self,
+                 calibration_manager,
+                 model,
+                 *,
+                 pressures: list[float] | None = None,
+                 delays_us: list[int] | None = None,
+                 min_points: int = 3,
+                 max_attempts_per_delay: int = 2,
+                 parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "pressure_trajectory"
+
+        # --- prerequisites ---
+        self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+        self.background_image = self.calibration_manager.get_background_image()
+        self.emergence_time_us = self.calibration_manager.get_emergence_time()
+
+        # if (self.nozzle_center_px is None) or (self.background_image is None) or (self.emergence_time_us is None):
+        #     self.calibrationError.emit("Trajectory requires nozzle-center, background, and emergence time.")
+        #     # NOTE: leave machine constructed; first state will finalize cleanly.
+        # Mark "ready" for safe finalize guard later
+        self._ready = (self.nozzle_center_px is not None and
+                       self.background_image is not None and
+                       self.emergence_time_us is not None)
+
+        # --- choose pressures to measure ---
+        if pressures is None:
+            band = self.calibration_manager.get_primary_pressure_band()
+            if band:
+                p_lo, p_hi = float(band[0]), float(band[1])
+                p_mid = round((p_lo + p_hi) / 2.0, 5)
+                pressures = [round(p_lo, 5), p_mid, round(p_hi, 5)]
+            else:
+                # Fallback: current pressure or hardware mid
+                try:
+                    cur = float(self.model.machine_model.get_print_pressure())
+                except Exception:
+                    hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
+                    cur = (hw_lo + hw_hi) * 0.5
+                pressures = [round(cur, 5)]
+
+        self.pressures = list(pressures)
+        self.p_index = 0
+        self._current_pressure = None
+
+        # --- delays to sample (in µs, absolute flash delay) ---
+        if delays_us is None:
+            # Start a bit after emergence and sample a short window of free flight
+            start = int(self.emergence_time_us + 1500)
+            step  = 1000
+            delays_us = [start + i * step for i in range(5)]  # 5 points: ~1.5–5.5ms after emergence
+        self.delays_us = list(map(int, delays_us))
+        self.d_index = 0
+        self._attempts_this_delay = 0
+        self.min_points = int(min_points)
+        self.max_attempts_per_delay = int(max_attempts_per_delay)
+
+        # --- per-pressure accumulation ---
+        self.points = []  # [{"t_us": int, "center_px": (x,y)} ...]
+        self.samples = [] # list of per-pressure results
+
+        # --- states ---
+        self.state_prepare_bg = QState()
+        self.state_apply      = QState()
+        self.state_capture    = QState()
+        self.state_analyze    = QState()
+        self.state_decide     = QState()
+        self.state_final      = QFinalState()
+
+        self.state_prepare_bg.entered.connect(self.onPrepare)
+        self.state_apply.entered.connect(self.onApplyPressure)
+        self.state_capture.entered.connect(self.onCaptureTimepoint)
+        self.state_analyze.entered.connect(self.onAnalyzeTimepoint)
+        self.state_decide.entered.connect(self.onDecide)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+
+        # transitions (match your existing style)
+        t_bg = QSignalTransition(); t_bg.setSenderObject(self.calibration_manager)
+        t_bg.setSignal(b"2settingsChangeCompleted()"); t_bg.setTargetState(self.state_apply)
+        self.state_prepare_bg.addTransition(t_bg)
+
+        t_apply = QSignalTransition(); t_apply.setSenderObject(self); t_apply.setSignal(b"2pressureApplied()")
+        t_apply.setTargetState(self.state_capture); self.state_apply.addTransition(t_apply)
+
+        t_cap = QSignalTransition(); t_cap.setSenderObject(self.calibration_manager)
+        t_cap.setSignal(b"2captureCompleted()"); t_cap.setTargetState(self.state_analyze)
+        self.state_capture.addTransition(t_cap)
+
+        t_an = QSignalTransition(); t_an.setSenderObject(self); t_an.setSignal(b"2timepointReady()")
+        t_an.setTargetState(self.state_decide); self.state_analyze.addTransition(t_an)
+
+        t_loop = QSignalTransition(); t_loop.setSenderObject(self); t_loop.setSignal(b"2continuePressure()")
+        t_loop.setTargetState(self.state_capture); self.state_decide.addTransition(t_loop)
+
+        t_done = QSignalTransition(); t_done.setSenderObject(self); t_done.setSignal(b"2finalize()")
+        t_done.setTargetState(self.state_final); self.state_decide.addTransition(t_done)
+
+        for s in (self.state_prepare_bg, self.state_apply, self.state_capture,
+                  self.state_analyze, self.state_decide, self.state_final):
+            self.state_machine.addState(s)
+        self.state_machine.setInitialState(self.state_prepare_bg)
+
+    # ----------------- state handlers -----------------
+
+    @Slot()
+    def onPrepare(self):
+        if not self._ready:
+            self.calibrationError.emit("Trajectory prerequisites missing.")
+            self.finalize.emit()
+            return
+        self.stageChanged.emit("Trajectory: preparing (num_droplets=0)")
+        self.calibration_manager.changeSettingsRequested.emit(
+            {"num_droplets": 0},
+            self.calibration_manager.emitSettingsChangeCompleted
+        )
+
+    @Slot()
+    def onApplyPressure(self):
+        # move to next pressure if needed
+        if self.p_index >= len(self.pressures):
+            self.finalize.emit()
+            return
+
+        # if pressure changed, reset per-pressure buffers
+        if self._current_pressure != self.pressures[self.p_index]:
+            self._current_pressure = float(self.pressures[self.p_index])
+            self.points = []
+            self.d_index = 0
+            self._attempts_this_delay = 0
+
+        # set pressure and the first (or current) delay
+        settings = {
+            "print_pressure": self._current_pressure,
+            "num_droplets": 1,
+            "flash_delay": int(self.delays_us[self.d_index])
+        }
+        self.stageChanged.emit(
+            f"Trajectory: P={self._current_pressure:.3f} psi, delay={settings['flash_delay']} µs "
+            f"({self.d_index+1}/{len(self.delays_us)})"
+        )
+        def _after(): self.pressureApplied.emit()
+        self.calibration_manager.changeSettingsRequested.emit(settings, _after)
+
+    @Slot()
+    def onCaptureTimepoint(self):
+        # capture one image at the current pressure & delay
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capture @ {self._current_pressure:.3f} psi, delay={self.delays_us[self.d_index]} µs",
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=f"Capture failed @ {self._current_pressure:.3f} psi"
+        )
+
+    @Slot()
+    def onAnalyzeTimepoint(self):
+        # identify droplet
+        droplets, nozzle_area, overlay = self.model.droplet_camera_model.identify_droplets(
+            self.droplet_image,
+            self.background_image,
+            self.nozzle_center_px,
+            min_area=900,
+            satellite_band_px=12,
+            min_free_offset_px=18
+        )
+        self.presentImageSignal.emit(overlay)
+
+        good = False
+        if droplets and len(droplets) == 1 and not nozzle_area:
+            (cx, cy) = droplets[0]
+            nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
+            # store relative to nozzle center (px)
+            self.points.append({
+                "t_us": int(self.delays_us[self.d_index]),
+                "center_px": (float(cx - nx), float(cy - ny))
+            })
+            good = True
+
+        if not good:
+            self._attempts_this_delay += 1
+
+        self.timepointReady.emit()
+
+    @Slot()
+    def onDecide(self):
+        # progress over delays for this pressure
+        need_more_delays = (self.d_index + 1) < len(self.delays_us)
+        have_enough_points = (len(self.points) >= self.min_points)
+
+        # if this delay failed too many times, advance anyway
+        if self._attempts_this_delay >= self.max_attempts_per_delay:
+            self._attempts_this_delay = 0
+            if need_more_delays:
+                self.d_index += 1
+                self.continuePressure.emit()
+                return
+
+        # if still working through delay list:
+        if need_more_delays:
+            self.d_index += 1
+            self._attempts_this_delay = 0
+            self.continuePressure.emit()
+            return
+
+        # No more delays. If we don't have enough points, mark as unusable and advance pressure.
+        if not have_enough_points:
+            self.stageChanged.emit(
+                f"Trajectory: insufficient points at {self._current_pressure:.3f} psi; skipping fit."
+            )
+            self.samples.append({
+                "pressure": float(self._current_pressure),
+                "points": self.points[:],
+                "fit": None
+            })
+            self.p_index += 1
+            self._current_pressure = None
+            if self.p_index >= len(self.pressures):
+                self.finalize.emit()
+            else:
+                self.continuePressure.emit()  # this re-enters capture after apply
+            return
+
+        # Fit a line x(t), y(t) via least squares (px vs µs)
+        vx, vy = self._fit_velocity(self.points)
+        speed = math.hypot(vx, vy)
+        angle_deg = math.degrees(math.atan2(vy, vx))  # image coords; +y downward
+
+        self.samples.append({
+            "pressure": float(self._current_pressure),
+            "points": self.points[:],
+            "fit": {
+                "vx_px_per_us": float(vx),
+                "vy_px_per_us": float(vy),
+                "speed_px_per_us": float(speed),
+                "angle_deg": float(angle_deg),
+                "n_points": int(len(self.points))
+            }
+        })
+
+        # Advance to next pressure or finish
+        self.p_index += 1
+        self._current_pressure = None
+        if self.p_index >= len(self.pressures):
+            self.finalize.emit()
+        else:
+            self.continuePressure.emit()
+
+    @Slot()
+    def onCalibrationCompleted(self):
+        # package results
+        result = {
+            "pressures": self.samples,              # per-pressure points and fit
+            "delays_us": self.delays_us,            # used delays
+            "band_used": self.calibration_manager.get_primary_pressure_band(),
+            "nozzle_center_px": self.nozzle_center_px,
+            "emergence_time_us": self.emergence_time_us
+        }
+        self.calibrationDataUpdated.emit({
+            "measurements": [],     # raw image-level items could be added later
+            "result": result
+        })
+        self.stageChanged.emit("Trajectory calibration complete")
+        self.calibrationCompleted.emit()
+
+    # ----------------- helpers -----------------
+
+    def _fit_velocity(self, points):
+        """
+        Simple least-squares for x(t), y(t). Returns (vx, vy) in px/µs.
+        """
+        t = np.array([p["t_us"] for p in points], dtype=float)
+        x = np.array([p["center_px"][0] for p in points], dtype=float)
+        y = np.array([p["center_px"][1] for p in points], dtype=float)
+
+        t_mean = t.mean()
+        denom = np.sum((t - t_mean) ** 2) or 1.0
+        vx = np.sum((t - t_mean) * (x - x.mean())) / denom
+        vy = np.sum((t - t_mean) * (y - y.mean())) / denom
+        return float(vx), float(vy)
 
 class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     """

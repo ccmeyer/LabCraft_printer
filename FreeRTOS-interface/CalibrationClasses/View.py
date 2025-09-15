@@ -435,6 +435,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
         row += 1
 
+        self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
+        self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
+        self.button_layout.addWidget(self.scan_trajectory_button, row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger the droplet search calibration
         self.calibrate_search_button = QtWidgets.QPushButton("Calibrate Droplet Search")
         self.calibrate_search_button.clicked.connect(self.toggle_start_search_calibration)
@@ -1034,6 +1039,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_trajectory_button.setText("Stop Calibration")
             self.controller.start_trajectory_calibration()
+
+    def toggle_start_pressure_trajectory_calibration(self):
+        """
+        Toggles whether the pressure trajectory calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.scan_trajectory_button.setText("Scan Trajectory Pressures")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.scan_trajectory_button.setText("Stop Calibration")
+            self.controller.start_pressure_trajectory_calibration()
 
     def toggle_start_search_calibration(self):
         """

@@ -1164,6 +1164,10 @@ class Controller(QObject):
         # Tell the Model to start the trajectory calibration.
         self.model.calibration_manager.start_trajectory_calibration()
 
+    def start_pressure_trajectory_calibration(self):
+        # Tell the Model to start the pressure trajectory calibration.
+        self.model.calibration_manager.start_pressure_trajectory_calibration()
+
     def start_droplet_search_calibration(self):
         # Tell the Model to start the droplet search calibration.
         self.model.calibration_manager.start_droplet_search_calibration()
