@@ -1060,6 +1060,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             machine_pos = self.model.machine_model.get_current_position_dict()
             self.measurements.append((machine_pos, nozzle_px))
             self.calibration_manager.set_background_image(self.background_image)
+            self.calibration_manager.set_nozzle_center_image_position(nozzle_px)
+            self.calibration_manager.set_nozzle_center(machine_pos)
             self.nozzleCentered.emit()
             return
 
@@ -2530,7 +2532,8 @@ def make_pressure_grid(p0, p1, step, hw_lo, hw_hi):
     hi = max(hw_lo, min(hw_hi, max(p0, p1)))
     # number of *inclusive* points
     n = int(math.floor((hi - lo) / step + 1e-9)) + 1
-    return [round(lo + i * step, 5) for i in range(max(n, 1))]
+    grid = [round(lo + i * step, 5) for i in range(max(n, 1))]
+    return grid[::-1]
 
 class PressureBandCalibrationProcess(BaseCalibrationProcess):
     """
