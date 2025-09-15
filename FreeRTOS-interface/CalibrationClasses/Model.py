@@ -305,31 +305,22 @@ class CalibrationManager(QObject):
     #     self.activeCalibration = PressureBandCalibrationProcess(self, self.model)
     #     self.start_active_calibration()
 
-    def start_pressure_scan_calibration(
-        self,
-        p_start: float,
-        p_end: float,
-        p_step: float,
-        *,
-        classification_delay_us: int | None = None,
-        min_reps: int = 3,
-        escalate_to: int = 7
-    ):
+    def start_pressure_scan_calibration(self, *, p_lo: float | None = None, p_hi: float | None = None, step: float | None = None):
         """
-        Fixed-range pressure scan that labels each pressure as none/single/multiple.
+        Start the pressure-band scan with optional user-defined range and step.
         """
-        self.activeCalibration = PressureBandCalibrationProcess(
-            self,
-            self.model,
-            p_start=p_start,
-            p_end=p_end,
-            p_step=p_step,
-            min_reps=min_reps,
-            escalate_to=escalate_to,
-            classification_delay_us=classification_delay_us,
-        )
-        self.start_active_calibration()
+        kwargs = {}
+        if step is not None:
+            kwargs["coarse_step"] = float(step)
+        # If your PressureBandCalibrationProcess supports user bounds, pass them:
+        if p_lo is not None:
+            kwargs["user_p_lo"] = float(p_lo)
+        if p_hi is not None:
+            kwargs["user_p_hi"] = float(p_hi)
 
+        self.activeCalibration = PressureBandCalibrationProcess(self, self.model, **kwargs)
+        self.start_active_calibration()
+        
     def start_trajectory_calibration(self):
         self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
         self.start_active_calibration()
