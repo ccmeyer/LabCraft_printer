@@ -311,12 +311,12 @@ class CalibrationManager(QObject):
         """
         kwargs = {}
         if step is not None:
-            kwargs["coarse_step"] = float(step)
+            kwargs["p_step"] = float(step)
         # If your PressureBandCalibrationProcess supports user bounds, pass them:
         if p_lo is not None:
-            kwargs["user_p_lo"] = float(p_lo)
+            kwargs["p_start"] = float(p_lo)
         if p_hi is not None:
-            kwargs["user_p_hi"] = float(p_hi)
+            kwargs["p_end"] = float(p_hi)
 
         self.activeCalibration = PressureBandCalibrationProcess(self, self.model, **kwargs)
         self.start_active_calibration()
@@ -2551,9 +2551,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     finalize        = Signal()
 
     def __init__(self, calibration_manager, model,
-                 p_start: float,
-                 p_end: float,
-                 p_step: float,
+                 p_start: float=0.3,
+                 p_end: float=1.5,
+                 p_step: float=0.05,
                  *,
                  min_reps: int = 3,
                  escalate_to: int = 7,
