@@ -321,9 +321,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.min_area_spinbox.setRange(0, 10000000)
         self.min_area_spinbox.setSingleStep(1000)
         self.min_area_spinbox.setValue(min_area)
-        self.button_layout.addWidget(self.min_area_label, row, 0)
-        self.button_layout.addWidget(self.min_area_spinbox, row, 1)
-        row += 1
+        # self.button_layout.addWidget(self.min_area_label, row, 0)
+        # self.button_layout.addWidget(self.min_area_spinbox, row, 1)
+        # row += 1
 
         # Add a spin box to set the intensity threshold for the analysis
         self.intensity_threshold_label = QtWidgets.QLabel("Intensity Threshold:")
@@ -331,9 +331,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.intensity_threshold_spinbox.setRange(0, 255)
         self.intensity_threshold_spinbox.setSingleStep(10)
         self.intensity_threshold_spinbox.setValue(intensity_threshold)
-        self.button_layout.addWidget(self.intensity_threshold_label, row, 0)
-        self.button_layout.addWidget(self.intensity_threshold_spinbox, row, 1)
-        row += 1
+        # self.button_layout.addWidget(self.intensity_threshold_label, row, 0)
+        # self.button_layout.addWidget(self.intensity_threshold_spinbox, row, 1)
+        # row += 1
 
         # Add a spin box to set the circularity threshold for the analysis
         self.circularity_threshold_label = QtWidgets.QLabel("Circularity Threshold:")
@@ -342,9 +342,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.circularity_threshold_spinbox.setRange(0, 2)
         self.circularity_threshold_spinbox.setSingleStep(0.1)
         self.circularity_threshold_spinbox.setValue(circularity_threshold)
-        self.button_layout.addWidget(self.circularity_threshold_label, row, 0)
-        self.button_layout.addWidget(self.circularity_threshold_spinbox, row, 1)
-        row += 1
+        # self.button_layout.addWidget(self.circularity_threshold_label, row, 0)
+        # self.button_layout.addWidget(self.circularity_threshold_spinbox, row, 1)
+        # row += 1
 
         # Add a spin box to set the edge margin for the analysis
         self.edge_margin_label = QtWidgets.QLabel("Edge Margin:")
@@ -352,9 +352,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.edge_margin_spinbox.setRange(0, 1000)
         self.edge_margin_spinbox.setSingleStep(5)
         self.edge_margin_spinbox.setValue(edge_margin)
-        self.button_layout.addWidget(self.edge_margin_label, row, 0)
-        self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
-        row += 1
+        # self.button_layout.addWidget(self.edge_margin_label, row, 0)
+        # self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
+        # row += 1
 
         # Add a button to trigger the nozzle position calibration
         self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
@@ -379,6 +379,49 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
         self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
         row += 1
+
+                # --- Pressure Scan controls (low / high / step) ---
+        # Try to use hardware bounds if available
+        try:
+            hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            hw_lo, hw_hi = 0.1, 2.0
+
+        self.scan_p_lo_label = QtWidgets.QLabel("Scan Pressure Low (psi):")
+        self.scan_p_lo_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_p_lo_spin.setDecimals(2)
+        self.scan_p_lo_spin.setRange(hw_lo, hw_hi)
+        self.scan_p_lo_spin.setSingleStep(0.01)
+
+        self.scan_p_hi_label = QtWidgets.QLabel("Scan Pressure High (psi):")
+        self.scan_p_hi_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_p_hi_spin.setDecimals(2)
+        self.scan_p_hi_spin.setRange(hw_lo, hw_hi)
+        self.scan_p_hi_spin.setSingleStep(0.01)
+
+        # Sensible defaults around current pressure
+        try:
+            cur_p = float(self.model.machine_model.get_current_print_pressure())
+        except Exception:
+            cur_p = (hw_lo + hw_hi) / 2.0
+        default_lo = max(hw_lo, cur_p - 0.10)
+        default_hi = min(hw_hi, cur_p + 0.10)
+        self.scan_p_lo_spin.setValue(round(default_lo, 2))
+        self.scan_p_hi_spin.setValue(round(default_hi, 2))
+
+        self.scan_p_step_label = QtWidgets.QLabel("Scan Step (psi):")
+        self.scan_p_step_spin = QtWidgets.QDoubleSpinBox()
+        self.scan_p_step_spin.setDecimals(2)
+        self.scan_p_step_spin.setRange(0.01, max(0.01, hw_hi - hw_lo))
+        self.scan_p_step_spin.setSingleStep(0.01)
+        self.scan_p_step_spin.setValue(0.01)
+
+        self.button_layout.addWidget(self.scan_p_lo_label, row, 0)
+        self.button_layout.addWidget(self.scan_p_lo_spin,  row, 1); row += 1
+        self.button_layout.addWidget(self.scan_p_hi_label, row, 0)
+        self.button_layout.addWidget(self.scan_p_hi_spin,  row, 1); row += 1
+        self.button_layout.addWidget(self.scan_p_step_label, row, 0)
+        self.button_layout.addWidget(self.scan_p_step_spin,  row, 1); row += 1
 
         # Add a button to trigger the pressure scan
         self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
@@ -576,6 +619,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
+
+        self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.main_window.pause_machine())
+
 
     def move_fraction_of_frame(self, x_fraction, y_fraction):
         """
@@ -894,6 +940,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_pressure_button.setText("Calibrate Pressure")
         self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
         self.calibrate_search_button.setText("Calibrate Droplet Search")
+        self.calibrate_pressure_scan_button.setText("Scan Pressures")
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -949,16 +996,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def toggle_start_pressure_scan_calibration(self):
         """
-        Toggles whether the pressure scan calibration should be started.
+        Start/stop the pressure scan using UI-provided low/high/step.
         """
         if self.model.calibration_manager.activeCalibration is not None:
-            print('Stopping calibration')
+            # Stop any running calibration
             self.calibrate_pressure_scan_button.setText("Scan Pressures")
             self.controller.stop_calibration()
-        else:
-            print('Starting calibration')
-            self.calibrate_pressure_scan_button.setText("Stop Calibration")
-            self.controller.start_pressure_scan_calibration()
+            return
+
+        # Read & validate inputs
+        p_lo  = float(self.scan_p_lo_spin.value())
+        p_hi  = float(self.scan_p_hi_spin.value())
+        step  = float(self.scan_p_step_spin.value())
+
+        if p_hi <= p_lo:
+            QtWidgets.QMessageBox.warning(self, "Invalid range",
+                                          "High pressure must be greater than low pressure.")
+            return
+        if step <= 0 or step > (p_hi - p_lo):
+            QtWidgets.QMessageBox.warning(self, "Invalid step",
+                                          "Step must be > 0 and ≤ (High - Low).")
+            return
+
+        # Launch
+        self.calibrate_pressure_scan_button.setText("Stop Calibration")
+        self.controller.start_pressure_scan_calibration(p_lo, p_hi, step)
 
     def toggle_start_trajectory_calibration(self):
         """

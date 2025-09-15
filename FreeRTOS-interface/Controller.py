@@ -1150,9 +1150,11 @@ class Controller(QObject):
         # Tell the Model to start the droplet emergence calibration.
         self.model.calibration_manager.start_droplet_emergence_calibration()
 
-    def start_pressure_calibration(self):
-        # Tell the Model to start the pressure calibration.
-        self.model.calibration_manager.start_pressure_calibration()
+    def start_pressure_scan_calibration(self, p_lo: float, p_hi: float, step: float):
+        # Forward the user-selected scan range to the CalibrationManager
+        self.model.calibration_manager.start_pressure_scan_calibration(
+            p_lo=p_lo, p_hi=p_hi, step=step
+        )
 
     def start_pressure_scan_calibration(self):
         # Tell the Model to start the pressure scan calibration.

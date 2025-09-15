@@ -76,6 +76,7 @@ class CalibrationManager(QObject):
     PHASE_ALIASES = {
         "pressure": "pressure_calibration",
         "pressure_calibration": "pressure_calibration",
+        "pressure_scan": "pressure_scan",
         "nozzle": "nozzle_position",
         "nozzle_position": "nozzle_position",
         "nozzle_focus": "nozzle_focus",
@@ -300,8 +301,33 @@ class CalibrationManager(QObject):
         self.activeCalibration = PressureCalibrationProcess(self, self.model)
         self.start_active_calibration()
 
-    def start_pressure_scan_calibration(self):
-        self.activeCalibration = PressureBandCalibrationProcess(self, self.model)
+    # def start_pressure_scan_calibration(self):
+    #     self.activeCalibration = PressureBandCalibrationProcess(self, self.model)
+    #     self.start_active_calibration()
+
+    def start_pressure_scan_calibration(
+        self,
+        p_start: float,
+        p_end: float,
+        p_step: float,
+        *,
+        classification_delay_us: int | None = None,
+        min_reps: int = 3,
+        escalate_to: int = 7
+    ):
+        """
+        Fixed-range pressure scan that labels each pressure as none/single/multiple.
+        """
+        self.activeCalibration = PressureBandCalibrationProcess(
+            self,
+            self.model,
+            p_start=p_start,
+            p_end=p_end,
+            p_step=p_step,
+            min_reps=min_reps,
+            escalate_to=escalate_to,
+            classification_delay_us=classification_delay_us,
+        )
         self.start_active_calibration()
 
     def start_trajectory_calibration(self):
@@ -2506,125 +2532,121 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.set_min_start_delay(self.start_delay + self.start_delay_offset)
         self.dropletDetected.emit()
 
+def make_pressure_grid(p0, p1, step, hw_lo, hw_hi):
+    import math
+    # clamp & order
+    lo = max(hw_lo, min(hw_hi, min(p0, p1)))
+    hi = max(hw_lo, min(hw_hi, max(p0, p1)))
+    # number of *inclusive* points
+    n = int(math.floor((hi - lo) / step + 1e-9)) + 1
+    return [round(lo + i * step, 5) for i in range(max(n, 1))]
+
 class PressureBandCalibrationProcess(BaseCalibrationProcess):
     """
-    Map the pressure band that yields exactly one droplet.
-    Strategy:
-      • Coarse scan (triplicates) until:
-          - a 'single' is found → switch to fine EXPANSION around it
-          - or a class flip none<->multiple is detected → switch to fine BISECTION in that bracket
-      • Fine search:
-          - bisection until bracket <= fine_step
-          - once 'single' is found at any point, expand down/up by fine_step to get continuous single band
-      • Optional manual bracket to skip coarse fully.
+    Fixed-range pressure scan for a given pulse width (PW).
+    For each pressure in [p_start, p_end] with step p_step:
+      - capture 3 replicates and classify: 'none'|'single'|'multiple'
+      - if the 3 replicates disagree, escalate to 7 total replicates and return the majority verdict
+      - record per-replicate details and a per-pressure summary
+    Result payload includes the full per-pressure list and computed single-droplet bands.
+
+    Prerequisites (error if missing): nozzle-center image coordinate, background image, emergence time.
     """
 
-    # Signals for the state machine
-    continueScan      = Signal()  # loop to set next pressure
-    pressureApplied   = Signal()  # settings applied
-    replicateReady    = Signal()  # one replicate captured → analyze
-    finalize          = Signal()  # done
+    # State-machine signals
+    pressureApplied = Signal()
+    replicateReady  = Signal()
+    continueScan    = Signal()
+    finalize        = Signal()
 
     def __init__(self, calibration_manager, model,
-                 parent=None,
-                 coarse_step=0.05,           # psi
-                 fine_step=0.01,             # psi
-                 max_reps=7, min_reps=3,     # replicates per pressure
-                 manual_fine_range=None,     # (p_lo, p_hi) to skip coarse
-                 sphere_delay_us=None):      # optional override of flash delay
+                 p_start: float,
+                 p_end: float,
+                 p_step: float,
+                 *,
+                 min_reps: int = 3,
+                 escalate_to: int = 7,
+                 classification_delay_us: int | None = None,
+                 parent=None):
         super().__init__(calibration_manager, model, parent)
-        self.phase_name = "pressure_band"
+        self.phase_name = "pressure_scan"
 
-        # ---------- parameters ----------
-        # Pressure bounds from HW (fallback to safe default)
-        try:
-            p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
-        except Exception:
-            p_lo, p_hi = 0.5, 1.5
-        self.P_MIN = float(p_lo)
-        self.P_MAX = float(p_hi)
-
-        self.coarse_step = float(coarse_step)
-        self.fine_step   = float(fine_step)
-        self.max_reps    = int(max_reps)
-        self.min_reps    = int(min_reps)
-        self.manual_fine_range = manual_fine_range
-
-        # Imaging delay to classify count reliably (use emergence + small offset unless overridden)
-        self.emergence_time_us = self.calibration_manager.get_emergence_time()
-        self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 1000, 0)
-        if sphere_delay_us is None:
-            # light offset (2 ms) is usually enough for reliable count detection
-            sphere_delay_us = int(self.emergence_time_us or 0) + self.start_delay_offset
-        self.classify_delay_us = int(sphere_delay_us)
-
-        # Inputs from prior steps
+        # --- prerequisites pulled from manager ---
         self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
         self.background_image = self.calibration_manager.get_background_image()
-
-        # Early sanity
-        self._ready = True
+        self.emergence_time_us = self.calibration_manager.get_emergence_time()
         if (self.nozzle_center_px is None) or (self.background_image is None) or (self.emergence_time_us is None):
+            self.calibrationError.emit("Pressure scan requires nozzle-center, background, and emergence time.")
             self._ready = False
-            self.calibrationError.emit("Must complete nozzle center + background + emergence first")
+            return
+        self._ready = True
 
-        # ---------- mode & bookkeeping ----------
-        # Modes: 'coarse', 'fine_bisect', 'fine_expand'
-        self.mode = 'coarse'
-        if manual_fine_range is not None:
-            plo, phi = sorted((float(manual_fine_range[0]), float(manual_fine_range[1])))
-            plo = max(self.P_MIN, min(self.P_MAX, plo))
-            phi = max(self.P_MIN, min(self.P_MAX, phi))
-            if phi - plo < 1e-6:
-                self.calibrationError.emit("Manual fine range is degenerate.")
-                self._ready = False
-            else:
-                self.mode = 'fine_bisect'
-                self.bracket = (plo, phi)
+        # --- imaging delay to reliably count droplets ---
+        if classification_delay_us is None:
+            # Use emergence + (PW + 1000 µs) as a safe, free-flight counting delay
+            try:
+                pw = int(self.model.machine_model.get_print_pulse_width())
+            except Exception:
+                pw = 1500
+            classification_delay_us = int(max(0, self.emergence_time_us + pw + 1000))
+        self.classify_delay_us = int(classification_delay_us)
 
-        # Coarse grid
-        self.coarse_pressures = self._make_coarse_grid(self.P_MIN, self.P_MAX, self.coarse_step)
-        self.coarse_index = 0
+        # --- pressure range & hardware clamping ---
+        try:
+            hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            hw_lo, hw_hi = 0.3, 1.5
+        self.P_MIN = float(hw_lo)
+        self.P_MAX = float(hw_hi)
 
-        # Brackets for fine search
-        self.bracket = None    # (plo, phi) with expected none<->multiple
-        self.single_seed = None  # a pressure where 'single' observed (for expansion)
+        p0, p1 = float(p_start), float(p_end)
+        if p1 < p0:
+            p0, p1 = p1, p0
+        step = abs(float(p_step)) if p_step != 0 else 0.05
+        pressures = make_pressure_grid(p0, p1, step, self.P_MIN, self.P_MAX)
 
-        # Current pressure / replicate buffers
-        self.current_pressure = None
-        self._discard_next = False
-        self.reps = []     # list of replicate results at current pressure
-        self._skip_count = 0
-        self._skip_cap   = 5
+        self.pressure_list = pressures
+        self.pressure_index = 0
 
-        # Aggregated results per pressure
-        # each sample: {"pressure": p, "replicates":[{class, center, volume, ...}, ...],
-        #               "verdict": <none/single/multiple/ambiguous>, "mean_volume":..., "cv_volume":...}
-        self.samples = []
+        # --- thresholds ---
+        self.nozzle_area_threshold = 8000
 
-        # Keep last coarse class to detect flips
-        self._last_class = None
-        self._last_p     = None
+        # --- replicate policy ---
+        self.min_reps = int(min_reps)
+        self.escalate_to = int(escalate_to)  # total replicates when escalation triggered
+        self.replicates_target = self.min_reps
+        self.reps = []  # list of dicts per replicate
+        self._invalid_skip_count = 0
+        self._invalid_skip_cap = 6
+        self._discard_next = True  # settle after pressure change (logical flag; we simply skip storing the first)
+
+        # --- outputs ---
+        self.samples = []   # list of per-pressure summary dicts
+        self.annotated_image = None
+
+        # --- handy flags ---
+        self._current_pressure = None
+        try:
+            self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
+        except Exception:
+            self._pulse_width_us = None
 
         # ---------- states ----------
-        self.state_prepare_bg   = QState()
-        self.state_apply        = QState()
-        self.state_capture      = QState()
-        self.state_analyze      = QState()
-        self.state_decide       = QState()
-        self.state_fine_plan    = QState()   # decide next fine pressure (bisect/expand)
-        self.state_final        = QFinalState()
+        self.state_prepare_bg = QState()
+        self.state_apply      = QState()
+        self.state_capture    = QState()
+        self.state_analyze    = QState()
+        self.state_decide     = QState()
+        self.state_final      = QFinalState()
 
-        # Handlers
         self.state_prepare_bg.entered.connect(self.onPrepareBackground)
         self.state_apply.entered.connect(self.onApplyPressure)
         self.state_capture.entered.connect(self.onCaptureReplicate)
         self.state_analyze.entered.connect(self.onAnalyzeReplicate)
-        self.state_decide.entered.connect(self.onDecideAtPressure)
-        self.state_fine_plan.entered.connect(self.onFinePlan)
+        self.state_decide.entered.connect(self.onDecide)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
-        # Transitions
+        # transitions
         t_bg = QSignalTransition(); t_bg.setSenderObject(self.calibration_manager)
         t_bg.setSignal(b"2settingsChangeCompleted()"); t_bg.setTargetState(self.state_apply)
         self.state_prepare_bg.addTransition(t_bg)
@@ -2642,142 +2664,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         t_loop = QSignalTransition(); t_loop.setSenderObject(self); t_loop.setSignal(b"2continueScan()")
         t_loop.setTargetState(self.state_apply); self.state_decide.addTransition(t_loop)
 
-        t_fine = QSignalTransition(); t_fine.setSenderObject(self); t_fine.setSignal(b"2continueScan()")
-        t_fine.setTargetState(self.state_fine_plan); self.state_fine_plan.addTransition(t_fine)
-
         t_done = QSignalTransition(); t_done.setSenderObject(self); t_done.setSignal(b"2finalize()")
-        t_done.setTargetState(self.state_final); self.state_decide.addTransition(t_done); self.state_fine_plan.addTransition(t_done)
+        t_done.setTargetState(self.state_final); self.state_decide.addTransition(t_done)
 
-        # Add states
         for s in (self.state_prepare_bg, self.state_apply, self.state_capture,
-                  self.state_analyze, self.state_decide, self.state_fine_plan, self.state_final):
+                  self.state_analyze, self.state_decide, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare_bg)
 
-    # ---------- helpers ----------
-    def _make_coarse_grid(self, lo, hi, step):
-        if step <= 0:
-            return [float(lo), float(hi)]
-        n = int(math.floor((hi - lo) / step)) + 1
-        arr = [float(lo + i * step) for i in range(n)]
-        if arr[-1] < hi - 1e-9:
-            arr.append(float(hi))
-        return arr
+    # ---------- states handlers ----------
 
-    def _clampP(self, p: float) -> float:
-        return max(self.P_MIN, min(self.P_MAX, float(p)))
-
-    def _pick_next_pressure(self):
-        """
-        Decide next pressure based on mode.
-        Returns (pressure or None, 'coarse'|'fine_bisect'|'fine_expand'|'done')
-        """
-        if self.mode == 'coarse':
-            if self.coarse_index >= len(self.coarse_pressures):
-                # no single found and no flip detected; try to tighten coarse grid (optional)
-                # fallback: ask for manual bracket
-                return None, 'done'
-            return float(self.coarse_pressures[self.coarse_index]), 'coarse'
-
-        if self.mode == 'fine_bisect':
-            plo, phi = self.bracket
-            if (phi - plo) <= self.fine_step * 1.0001:
-                # If we never saw a 'single' inside, do a quick sweep to try to spot any
-                mid = 0.5 * (plo + phi)
-                return float(mid), 'fine_bisect'  # one last test; next transition will convert to expand or done
-            return float(0.5 * (plo + phi)), 'fine_bisect'
-
-        if self.mode == 'fine_expand':
-            # expand from a seed outward to map continuous single band
-            if not hasattr(self, "_expand_plan"):
-                # plan = [seed, seed - step, seed + step, seed - 2*step, seed + 2*step, ...]
-                seed = float(self.single_seed)
-                seq = [seed]
-                for k in range(1, 200):  # generous max
-                    seq.append(seed - k * self.fine_step)
-                    seq.append(seed + k * self.fine_step)
-                self._expand_plan = [self._clampP(x) for x in seq
-                                     if (self.P_MIN - 1e-9) <= x <= (self.P_MAX + 1e-9)]
-                self._expand_seen = set()
-                self._expand_hits = set()  # pressures that returned 'single'
-                self._expand_break_low = False
-                self._expand_break_high = False
-
-            # fetch next untested
-            while self._expand_plan and (self._expand_plan[0] in self._expand_seen):
-                self._expand_plan.pop(0)
-            if not self._expand_plan:
-                return None, 'done'
-            return float(self._expand_plan[0]), 'fine_expand'
-
-        return None, 'done'
-
-    def _start_reps(self, p):
-        self.current_pressure = float(p)
-        self.reps = []
-        self._skip_count = 0
-        self._discard_next = True  # settle after pressure change
-
-    def _majority_verdict(self):
-        """
-        Decide class from self.reps (list of dicts with 'cls').
-        Early stop rules:
-          - if any class count >= ceil(n/2) and n>=min_reps → finish
-          - or n>=max_reps → finish with majority/tie→ambiguous
-        """
-        counts = {"none": 0, "single": 0, "multiple": 0}
-        for r in self.reps:
-            counts[r["cls"]] = counts.get(r["cls"], 0) + 1
-
-        n = len(self.reps)
-        # stable early stop
-        for key in ("single", "none", "multiple"):
-            if counts[key] >= max(self.min_reps, (n+1)//2):
-                return key, True
-
-        if n >= self.max_reps:
-            # pick majority; if tie or mixed with no clear majority → ambiguous
-            best = max(counts, key=lambda k: counts[k])
-            # check tie
-            ties = [k for k in counts if counts[k] == counts[best]]
-            if len(ties) > 1:
-                return "ambiguous", True
-            return best, True
-
-        return None, False
-
-    def _classify_from_contours(self, droplets, nozzle_hits):
-        """Map detection to 'none'|'single'|'multiple'. Contours touching nozzle band are ignored (re-capture)."""
-        if nozzle_hits:  # nozzle-contact → reject replicate (treat as invalid)
-            return "invalid"
-        if droplets is None or len(droplets) == 0:
-            return "none"
-        if len(droplets) == 1:
-            return "single"
-        return "multiple"
-
-    def _store_pressure_result(self, verdict):
-        """Aggregate volumes (if available) and append a sample record."""
-        # If your characterize_droplet is available here, you could add mean/std. For now keep per-rep info.
-        rec = {
-            "pressure": float(self.current_pressure),
-            "replicates": self.reps[:],
-            "verdict": verdict
-        }
-        # Optional: volumes summary if present in reps
-        vols = [r.get("volume") for r in self.reps if r.get("volume") is not None]
-        if vols:
-            m = float(np.mean(vols)); cv = float(np.std(vols) / (m + 1e-9) * 100.0)
-            rec.update({"mean_volume": m, "cv_volume_percent": cv})
-        self.samples.append(rec)
-
-    # ---------- states ----------
     @Slot()
     def onPrepareBackground(self):
         if not self._ready:
-            self.calibrationError.emit("Pressure band prerequisites missing")
+            self.calibrationError.emit("Pressure scan prerequisites missing.")
             return
-        self.stageChanged.emit("Pressure band: preparing background (num_droplets=0)")
+        self.stageChanged.emit("Pressure scan: preparing background (num_droplets=0)")
         self.calibration_manager.changeSettingsRequested.emit(
             {"num_droplets": 0},
             self.calibration_manager.emitSettingsChangeCompleted
@@ -2785,248 +2687,189 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onApplyPressure(self):
-        # Pick next pressure according to mode
-        p, mode = self._pick_next_pressure()
-        if mode == 'done' or p is None:
-            # Produce summary and finish
-            self._finalize_and_emit()
+        if self.pressure_index >= len(self.pressure_list):
             self.finalize.emit()
             return
 
-        # Switch to planning state when switching modes
-        if mode.startswith("fine"):
-            # let the fine planner choose the next mid or expansion step on the next loop
-            self.state_machine.postEvent(self.finalize)  # no-op; keep state stable
-            self.stageChanged.emit(f"Pressure band: fine planning ({mode})")
-            self._planned_next_p = float(p)
-            # Jump directly to applying the planned fine pressure
-        # Apply pressure settings, also set 1 droplet and detection delay
-        self._start_reps(p)
+        if self._current_pressure is None or self._current_pressure != self.pressure_list[self.pressure_index]:
+            # New pressure → reset replicate buffer, escalate policy, and discard-next flag
+            self.reps = []
+            self.replicates_target = self.min_reps
+            self._invalid_skip_count = 0
+            self._discard_next = True
+
+        self._current_pressure = float(self.pressure_list[self.pressure_index])
         settings = {
-            "print_pressure": float(self.current_pressure),
+            "print_pressure": self._current_pressure,
             "num_droplets": 1,
             "flash_delay": int(self.classify_delay_us)
         }
-        self.stageChanged.emit(f"Set pressure={self.current_pressure:.3f} psi; delay={self.classify_delay_us} μs")
-        def _after():
-            self._discard_next = True
-            self.pressureApplied.emit()
+        self.stageChanged.emit(f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs")
+        def _after(): self.pressureApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
 
     @Slot()
     def onCaptureReplicate(self):
-        # Discard the first shot after a pressure change for settling
-        if self._discard_next:
-            self._discard_next = False
-            self.stageChanged.emit("Settling shot discarded")
-            # Immediately capture the real replicate
+        # Capture a replicate (we'll decide to keep/discard in analyze)
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capturing @ {self.current_pressure:.3f} psi (rep {len(self.reps)+1})",
-            attempts_total=4, retry_delay_ms=75, guard_timeout_ms=10_000,
-            final_error_msg=f"Capture failed @ {self.current_pressure:.3f} psi"
+            stage_text=f"Capturing @ {self._current_pressure:.3f} psi (rep {len(self.reps)+1}/{self.replicates_target})",
+            attempts_total=5, retry_delay_ms=75, guard_timeout_ms=10_000,
+            final_error_msg=f"Capture failed @ {self._current_pressure:.3f} psi"
         )
 
     @Slot()
     def onAnalyzeReplicate(self):
-        droplets, nozzle_hits, overlay = self.model.droplet_camera_model.identify_droplets(
+        # If we're discarding the first shot after a pressure change, just skip storing this and capture again.
+        if self._discard_next:
+            self._discard_next = False
+            self.stageChanged.emit("Settling shot discarded; capturing again")
+            self.replicateReady.emit()   # jump to decide → which will send us back to capture
+            return
+
+        droplets, nozzle_area, overlay = self.model.droplet_camera_model.identify_droplets(
             self.droplet_image,
             self.background_image,
             self.nozzle_center_px,
-            # min_area=1000,
-            # nozzle_contact_band_px=12,
-            # min_free_offset_px=18,
-            # aspect_guard=(1.6, 38),
-            # delay_us=self.classify_delay_us
+            min_area=1000,
+            satellite_band_px=12,      # NEW
+            min_free_offset_px=18      # keep the clearance
         )
-        cls = self._classify_from_contours(droplets, nozzle_hits)
-        if cls == "invalid":
-            self._skip_count += 1
-            self.stageChanged.emit("Nozzle-contact/stationary artifact → re-capturing replicate")
-            self.presentImageSignal.emit(overlay)
-            if self._skip_count > self._skip_cap:
-                self.calibrationError.emit("Too many invalid replicates at this pressure.")
-                return
-            # Try again (same pressure)
-            self.replicateReady.emit()  # will route to decide → which will send us back to capture
-            return
-
-        # Optionally, compute volume if you have a fast lightweight estimator here; else keep None
-        rep = {"cls": cls}
-        self.reps.append(rep)
         self.presentImageSignal.emit(overlay)
 
-        # Decide whether to keep sampling or move on
-        verdict, done = self._majority_verdict()
-        if done and verdict is not None:
-            # store aggregate now; next state will pick next pressure
-            self._store_pressure_result(verdict)
+        # classify this replicate
+        cls = self._classify_from_detection(droplets)
+        if cls == "invalid":
+            self._invalid_skip_count += 1
+            self.stageChanged.emit("Nozzle-contact / invalid replicate → re-capturing")
+            if self._invalid_skip_count > self._invalid_skip_cap:
+                self.calibrationError.emit("Too many invalid replicates at this pressure.")
+                return
+            self.replicateReady.emit()
+            return
+
+        rep = {
+            "cls": cls,
+            "center_px": (None if not droplets else droplets[0]),
+            "nozzle_attached_area": int(nozzle_area or 0),
+            "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
+        }
+        self.reps.append(rep)
         self.replicateReady.emit()
 
     @Slot()
-    def onDecideAtPressure(self):
-        # After a replicate or after finishing replicates at a pressure
-        verdict, done = self._majority_verdict()
-        if not done:
-            # need more replicates at same pressure
-            self.stageChanged.emit("Replicates inconclusive → capturing again")
-            self.continueScan.emit()  # goes to ApplyPressure → Capture; ApplyPressure will reapply same P
-            return
-
-        # Verdict is stable
-        v = verdict
-        self.stageChanged.emit(f"Pressure {self.current_pressure:.3f} psi → verdict: {v}")
-
-        # COARSE MODE: record class changes and single detection
-        if self.mode == 'coarse':
-            if v == "single":
-                # Single found → seed fine expansion
-                self.single_seed = float(self.current_pressure)
-                self.mode = 'fine_expand'
-                self.continueScan.emit()  # move into expansion plan
-                return
-            # Flip detection: (none→multiple) or (multiple→none)
-            if (self._last_class is not None) and (v in ("none", "multiple")) and (self._last_class in ("none", "multiple")) and (v != self._last_class):
-                plo = min(self._last_p, self.current_pressure)
-                phi = max(self._last_p, self.current_pressure)
-                self.bracket = (float(plo), float(phi))
-                self.mode = 'fine_bisect'
-                self.stageChanged.emit(f"Flip detected → fine bisection in [{plo:.3f}, {phi:.3f}] psi")
-                self.continueScan.emit()
-                return
-
-            # No single, no flip yet → advance coarse
-            self._last_class = v
-            self._last_p = float(self.current_pressure)
-            self.coarse_index += 1
-            if self.coarse_index >= len(self.coarse_pressures):
-                # finished coarse without finding single or flip
-                self.stageChanged.emit("Coarse scan finished with no single or bracket — stopping.")
-                self._finalize_and_emit()
-                self.finalize.emit()
-                return
+    def onDecide(self):
+        # Need more replicates at this pressure?
+        if len(self.reps) < self.replicates_target:
             self.continueScan.emit()
             return
 
-        # FINE BISECTION
-        if self.mode == 'fine_bisect':
-            # Update bracket based on verdict
-            plo, phi = self.bracket
-            p = float(self.current_pressure)
-
-            # If we get a 'single' inside → switch to expansion
-            if v == "single":
-                self.single_seed = p
-                self.mode = 'fine_expand'
-                self.continueScan.emit()
+        # If we just completed the first 3, check unanimity
+        if self.replicates_target == self.min_reps:
+            classes = [r["cls"] for r in self.reps]
+            if len(set(classes)) == 1:
+                verdict = classes[0]
+                self._store_pressure_summary(verdict, escalated=False)
+                self._advance_or_finish()
                 return
-
-            # We expect monotonic transitions: 'none' on one side, 'multiple' on the other
-            # Decide which side to move
-            mid = 0.5 * (plo + phi)
-            if (v == "none" and p >= mid) or (v == "multiple" and p < mid):
-                # This means we need to move the corresponding side
-                # Keep bracket invariant: bracket always lo<hi
-                pass
-
-            if v == "none":
-                plo = max(plo, p)
-            elif v == "multiple":
-                phi = min(phi, p)
-            else:
-                # ambiguous → shrink conservatively towards mid
-                if p <= mid:
-                    plo = max(plo, p)
-                else:
-                    phi = min(phi, p)
-            self.bracket = (float(min(plo, phi)), float(max(plo, phi)))
-
-            # Stopping check
-            if (self.bracket[1] - self.bracket[0]) <= self.fine_step * 1.0001:
-                # Either narrowly missed or band extremely thin: do a small sweep inside to try to find a single
-                self.stageChanged.emit(f"Bisection converged to ~{self.bracket[0]:.3f}–{self.bracket[1]:.3f} psi")
-                # Try center once more; if not single, we’re done with bracket
-                self.continueScan.emit()
-                return
-
-            # Continue bisection
+            # Not unanimous → escalate to 7
+            self.stageChanged.emit("Replicates disagree → escalating to 7 total")
+            self.replicates_target = self.escalate_to
             self.continueScan.emit()
             return
 
-        # FINE EXPANSION
-        if self.mode == 'fine_expand':
-            # Track expansion success/failure
-            if not hasattr(self, "_expand_plan"):
-                # Planning occurs in _pick_next_pressure
-                pass
-            # Mark that we've executed this pressure
-            self._expand_seen.add(float(self.current_pressure))
-            if v == "single":
-                self._expand_hits.add(float(self.current_pressure))
-                # keep expanding
-                self.continueScan.emit()
-                return
-            else:
-                # If this pressure is below seed and returns not single, stop expanding downward
-                if float(self.current_pressure) < float(self.single_seed):
-                    self._expand_break_low = True
-                # If above seed and not single, stop expanding upward
-                if float(self.current_pressure) > float(self.single_seed):
-                    self._expand_break_high = True
+        # We have 7 total → take majority
+        if len(self.reps) >= self.escalate_to:
+            verdict = self._majority_verdict(self.reps)
+            self._store_pressure_summary(verdict, escalated=True)
+            self._advance_or_finish()
+            return
 
-                # If both sides are stopped or plan exhausted → we’re done
-                if (self._expand_break_low and self._expand_break_high) or not self._expand_plan:
-                    # Compute band from hits
-                    if self._expand_hits:
-                        pmin = min(self._expand_hits)
-                        pmax = max(self._expand_hits)
-                        self.stageChanged.emit(f"Single droplet band: [{pmin:.3f}, {pmax:.3f}] psi")
-                    self._finalize_and_emit()
-                    self.finalize.emit()
-                    return
-
-                # Otherwise continue expansion
-                self.continueScan.emit()
-                return
-
-    @Slot()
-    def onFinePlan(self):
-        # Currently unused because _pick_next_pressure handles fine planning inline.
+        # Otherwise, keep sampling up to target
         self.continueScan.emit()
 
     @Slot()
     def onCalibrationCompleted(self):
-        self.stageChanged.emit("Pressure band calibration complete")
-        self.calibrationCompleted.emit()
-
-    # ---------- emitters ----------
-    def emitContinueScan(self): self.continueScan.emit()
-    def emitFinalize(self): self.finalize.emit()
-    def emitPressureApplied(self): self.pressureApplied.emit()
-    def emitReplicateReady(self): self.replicateReady.emit()
-
-    # ---------- finalization ----------
-    def _finalize_and_emit(self):
-        # Compute final band from expansion (if available)
-        band = None
-        if hasattr(self, "_expand_hits") and self._expand_hits:
-            band = (min(self._expand_hits), max(self._expand_hits))
-
+        # Compute single bands from samples, then emit one record
+        bands = self._compute_single_bands()
         result = {
-            "mode": self.mode,
-            "coarse_step": self.coarse_step,
-            "fine_step": self.fine_step,
+            "pulse_width_us": self._pulse_width_us,
             "delay_us": int(self.classify_delay_us),
             "pressure_bounds": [self.P_MIN, self.P_MAX],
-            "samples": self.samples,                # all per-pressure verdicts + replicates
-            "single_band": band                     # None if not found
+            "pressures": self.samples,               # full per-pressure objects
+            "single_bands": bands,                   # [[p_lo, p_hi], ...]
+            "primary_band": (bands[0] if bands else None)
         }
-        # Persist one record
         self.calibrationDataUpdated.emit({
-            "measurements": [],  # optional: could stream intermediate too
+            "measurements": [],
             "result": result
         })
+        self.stageChanged.emit("Pressure scan complete")
+        self.calibrationCompleted.emit()
 
+    # ---------- helpers ----------
+
+    def _classify_from_detection(self, droplets):
+        if not droplets or len(droplets) == 0:
+            return "none"
+        return "single" if len(droplets) == 1 else "multiple"
+
+    def _majority_verdict(self, reps):
+        counts = {"none": 0, "single": 0, "multiple": 0}
+        for r in reps:
+            c = r.get("cls")
+            if c in counts:
+                counts[c] += 1
+        # Find top count; if tie, mark ambiguous
+        max_ct = max(counts.values())
+        winners = [k for k, v in counts.items() if v == max_ct]
+        return winners[0] if len(winners) == 1 else "ambiguous"
+
+    def _store_pressure_summary(self, verdict: str, escalated: bool):
+        # Simple volume stats can be added later; for now, this scan is count-only.
+        rec = {
+            "pressure": float(self._current_pressure),
+            "n_reps": len(self.reps),
+            "escalated": bool(escalated),
+            "verdict": verdict,
+            "replicates": self.reps[:]  # shallow copy
+        }
+        self.samples.append(rec)
+
+    def _advance_or_finish(self):
+        self.pressure_index += 1
+        self._current_pressure = None
+        if self.pressure_index >= len(self.pressure_list):
+            self.finalize.emit()
+        else:
+            self.continueScan.emit()
+
+    def _compute_single_bands(self):
+        """Group contiguous 'single' pressures into bands."""
+        singles = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") == "single"])
+        if not singles:
+            return []
+        # Build bands: if gap <= ~1.25 * nominal step, treat as contiguous
+        # Infer nominal step from list (first diffs median)
+        diffs = [b - a for a, b in zip(singles[:-1], singles[1:])]
+        step = (sorted(diffs)[len(diffs)//2] if diffs else (self.pressure_list[1]-self.pressure_list[0] if len(self.pressure_list) > 1 else 0.05))
+        tol = abs(step) * 1.25 + 1e-6
+
+        bands = []
+        band_start = singles[0]
+        prev = singles[0]
+        for p in singles[1:]:
+            if (p - prev) <= tol:
+                prev = p
+                continue
+            bands.append([band_start, prev])
+            band_start = p
+            prev = p
+        bands.append([band_start, prev])
+        # Sort by length descending (primary band = first)
+        bands.sort(key=lambda ab: (ab[1]-ab[0]), reverse=True)
+        return bands
+    
 class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     continueTrajectory = Signal()
     trajectoryCalculated = Signal()
@@ -4023,6 +3866,9 @@ class DropletCameraModel(QObject):
         self.min_area_threshold = 10
         self.edge_margin = 10
 
+        self._k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        self._roi_cache = None  # (h, w, nzy, margin_up, band_half, roi_top, mask)
+
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
         self.dir_name = "Untitled"
@@ -4522,8 +4368,9 @@ class DropletCameraModel(QObject):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50,200,50), 2)
 
         return area, center, overlay
-    
-    def identify_droplets(self, image, background, nozzle_center, min_area=1000):
+
+    def identify_droplets(self, image, background, nozzle_center, min_area=1000,
+                          margin_up_px: int=8,satellite_band_px: int=12, min_free_offset_px: int=18):
         """
         Robust droplet identification:
           - works on diff = |image - background|
@@ -4531,88 +4378,104 @@ class DropletCameraModel(QObject):
           - morphology to clean noise
           - classifies "nozzle-attached" area (area below nozzle within any bbox that contains the nozzle center)
           - counts free droplets entirely below the nozzle
-        Returns: (droplets_list_or_None, nozzle_attached_area_or_None, overlay_bgr)
+        Returns: 
+          droplets: list[(cx, cy)] or None
+          nozzle_attached_area: int or None   # includes band satellites + area below nozzle within nozzle bbox
+          overlay_bgr: np.ndarray
         """
 
-        image_gray, diff = self.calc_diff_image(image, background)
+        img_gray, diff = self.calc_diff_image(image, background)
         if diff is None or nozzle_center is None:
             return None, None, image
 
         h, w = diff.shape[:2]
         nzx, nzy = int(nozzle_center[0]), int(nozzle_center[1])
-        nzy = max(0, min(h-1, nzy))
+        nzy = max(0, min(h - 1, nzy))
 
-        # ---- ROI: only rows at/under the nozzle (+ small margin) ----
-        MARGIN = 8
-        mask = np.zeros_like(diff, dtype=np.uint8)
-        mask[max(0, nzy - MARGIN):, :] = 255
+        # ---------- ROI (crop) ----------
+        # We process only rows from (nzy - margin_up) down to bottom.
+        roi_top = max(0, nzy - int(margin_up_px))
+        roi = diff[roi_top:, :]  # H_roi x W
 
-        # ---- threshold (hard first, then Otsu fallback) ----
-        blur = cv2.GaussianBlur(diff, (5,5), 0)
-        mu, sd = float(np.mean(blur[mask>0])), float(np.std(blur[mask>0]))
-        t_hard = max(20, int(mu + 3.0 * sd))
-        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
-        th = cv2.bitwise_and(th, th, mask=mask)
+        # ---------- threshold on ROI ----------
+        # Small Gaussian -> Otsu on ROI (fast); fall back to a "mu+3*sd" if ROI is too empty
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        # mask is full in ROI; if needed we can add a col-mask but not necessary for speed
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if cv2.countNonZero(th) < 60:
+            mu, sd = float(blur.mean()), float(blur.std())
+            t = max(20, int(mu + 3.0 * sd))
+            _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
 
-        MIN_FG = 60
-        if np.count_nonzero(th) < MIN_FG:
-            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            th = cv2.bitwise_and(th, th, mask=mask)
+        # morphology (very light)
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  self._k3, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, self._k3, iterations=1)
+        if cv2.countNonZero(th) < 60:
+            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            return None, None, overlay
 
-        # morphology cleanup
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-        th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  k, iterations=1)
-        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
-        if np.count_nonzero(th) < MIN_FG:
-            return None, None, image
-
-        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None, None, image
-
+        # ---------- components (faster than findContours) ----------
+        # labels: 0 is background; stats: [x, y, w, h, area] in ROI coords
+        nlab, labels, stats, _ = cv2.connectedComponentsWithStats(th, connectivity=8)
         overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        cv2.line(overlay, (0, nzy), (w-1, nzy), (128, 128, 255), 1)  # nozzle row reference
+
+        # Draw nozzle row reference
+        cv2.line(overlay, (0, nzy), (w - 1, nzy), (128, 128, 255), 1)
         cv2.circle(overlay, (nzx, nzy), 5, (255, 0, 0), -1)
 
-        nozzle_attached_area = 0
         droplets = []
+        nozzle_attached_area = 0
 
-        for c in contours:
-            area = cv2.contourArea(c)
-            if area < max(40, min_area*0.05):  # drop tiny specks up-front
+        # Define bands in *full-image* coordinates
+        band_top = max(0, nzy - int(satellite_band_px))
+        band_bot = min(h - 1, nzy + int(satellite_band_px))
+        free_min_y = min(h - 1, band_bot + int(min_free_offset_px))
+
+        for lab in range(1, nlab):
+            x, y, ww, hh, area = stats[lab]
+            if area < max(40, int(min_area * 0.05)):
                 continue
-            x, y, ww, hh = cv2.boundingRect(c)
 
-            # ignore blobs whose entire bbox is above nozzle row (reflection/ghosts)
-            if y + hh <= nzy:
+            # Convert ROI coords -> full-image coords
+            y0 = y + roi_top
+            x0 = x
+            x1 = x0 + ww
+            y1 = y0 + hh
+
+            # Ignore blobs entirely above nozzle row (should be unlikely due to ROI, but keep guard)
+            if y1 <= nzy:
                 continue
 
-            bbox_contains_nozzle = (x <= nzx <= x+ww) and (y <= nzy <= y+hh)
+            # Does bbox contain nozzle center?
+            bbox_contains_nozzle = (x0 <= nzx <= x1) and (y0 <= nzy <= y1)
 
-            if bbox_contains_nozzle:
-                # nozzle-attached: only count below the nozzle row
-                # clip the bbox to rows >= nzy
-                below_h = (y + hh) - nzy
+            # If bbox contains the nozzle OR overlaps the horizontal "satellite" band → treat as attached
+            overlaps_band = not (y1 < band_top or y0 > band_bot)
+            if bbox_contains_nozzle or overlaps_band:
+                # Accumulate "attached" area as an *approximation* of the portion below the nozzle
+                # Fast approximation: area below nozzle row within bbox footprint
+                below_h = max(0, y1 - max(y0, nzy))
                 if below_h > 0:
-                    area_below = below_h * ww
-                    nozzle_attached_area = max(nozzle_attached_area, int(area_below))
-                cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 200, 255), 2)
-            else:
-                # free droplet(s) below the nozzle
-                if area >= min_area:
-                    cx, cy = x + ww//2, y + hh//2
-                    droplets.append((cx, cy))
-                    cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (0, 0, 255), 2)
-                    cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
+                    nozzle_attached_area += int(below_h * ww)
+                cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 200, 255), 2)  # amber: attached
+                continue
+
+            # Else: candidate free droplet (must be sufficiently below the band and large enough)
+            if (y0 >= free_min_y) and (area >= int(min_area)):
+                cx = x0 + ww // 2
+                cy = y0 + hh // 2
+                droplets.append((cx, cy))
+                cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 255), 2)
+                cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
 
         if droplets:
-            cv2.putText(overlay, f'Droplets: {len(droplets)}', (10, 24),
+            cv2.putText(overlay, f"Droplets: {len(droplets)}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
 
         return (droplets if droplets else None,
-                (nozzle_attached_area if nozzle_attached_area > 0 else None),
+                (int(nozzle_attached_area) if nozzle_attached_area > 0 else None),
                 overlay)
-
+    
     def identify_droplet_contour(self, image, background):
         """
         Identifies the contour of the droplet in the image.
