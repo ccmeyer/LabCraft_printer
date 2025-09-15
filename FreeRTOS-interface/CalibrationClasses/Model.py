@@ -2825,7 +2825,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "measurements": [],
             "result": result
         })
-        self.set_primary_pressure_band(result)
+        self.calibration_manager.set_primary_pressure_band(result)
         self.stageChanged.emit("Pressure scan complete")
         self.calibrationCompleted.emit()
 
@@ -3352,7 +3352,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         # --- delays to sample (in µs, absolute flash delay) ---
         if delays_us is None:
             # Start a bit after emergence and sample a short window of free flight
-            start = int(self.emergence_time_us + 1500)
+            start = int(self.emergence_time_us + self.model.machine_model.get_print_pulse_width() + 1000)
             step  = 1000
             delays_us = [start + i * step for i in range(5)]  # 5 points: ~1.5–5.5ms after emergence
         self.delays_us = list(map(int, delays_us))
@@ -3428,6 +3428,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             return
 
         # if pressure changed, reset per-pressure buffers
+        print(f'Current:{self._current_pressure}, Target:{self.pressures[self.p_index]}')
         if self._current_pressure != self.pressures[self.p_index]:
             self._current_pressure = float(self.pressures[self.p_index])
             self.points = []
@@ -3450,6 +3451,14 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCaptureTimepoint(self):
         # capture one image at the current pressure & delay
+        if self._current_pressure is None:
+            self.calibrationError.emit("Current pressure not set; cannot capture.")
+            self.finalize.emit()
+            return
+        if self.d_index is None or self.d_index >= len(self.delays_us):
+            self.calibrationError.emit("Delay index out of range; cannot capture.")
+            self.finalize.emit()
+            return
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text=f"Capture @ {self._current_pressure:.3f} psi, delay={self.delays_us[self.d_index]} µs",
