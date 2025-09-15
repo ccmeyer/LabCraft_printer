@@ -320,7 +320,7 @@ class CalibrationManager(QObject):
 
         self.activeCalibration = PressureBandCalibrationProcess(self, self.model, **kwargs)
         self.start_active_calibration()
-        
+
     def start_trajectory_calibration(self):
         self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
         self.start_active_calibration()
@@ -2566,11 +2566,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
         self.background_image = self.calibration_manager.get_background_image()
         self.emergence_time_us = self.calibration_manager.get_emergence_time()
-        if (self.nozzle_center_px is None) or (self.background_image is None) or (self.emergence_time_us is None):
-            self.calibrationError.emit("Pressure scan requires nozzle-center, background, and emergence time.")
-            self._ready = False
-            return
-        self._ready = True
+        print(f"Pressure scan prerequisites: nozzle_center={self.nozzle_center_px}, "
+              f"background_image={'set' if self.background_image is not None else 'None'}, "
+              f"emergence_time_us={self.emergence_time_us}"
+              )
+        # Only mark readiness; do NOT return here. We will handle not-ready in the first state.
+        self._ready = not (
+            self.nozzle_center_px is None
+            or self.background_image is None
+            or self.emergence_time_us is None
+        )
 
         # --- imaging delay to reliably count droplets ---
         if classification_delay_us is None:
@@ -2668,7 +2673,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onPrepareBackground(self):
         if not self._ready:
-            self.calibrationError.emit("Pressure scan prerequisites missing.")
+            # Emit the real error and finalize immediately so the machine exits cleanly.
+            self.calibrationError.emit(
+                "Pressure scan requires nozzle-center, background, and emergence time."
+            )
+            self.finalize.emit()
             return
         self.stageChanged.emit("Pressure scan: preparing background (num_droplets=0)")
         self.calibration_manager.changeSettingsRequested.emit(
