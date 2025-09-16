@@ -3456,6 +3456,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._failed_caps_this_delay = 0
         self._miss_streak = 0
         self._stop_delays_after_this = False
+        self._max_delay_allowed_us = None  # hard ceiling for allowed delays after edge is detected
+
 
         # track which delays have been aggregated (or skipped)
         self._completed: list[bool] = [False] * len(self.delays_us)
@@ -3537,6 +3539,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self._miss_streak = 0
             self._stop_delays_after_this = False
             self._discard_next = bool(self.discard_first_after_pressure)
+            self._max_delay_allowed_us = None
+
             # reset completion map for this pressure
             self._completed = [False] * len(self.delays_us)
 
@@ -3628,6 +3632,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 edge_close_now = True
                 # We won't schedule larger delays; we will adapt earlier/mid delays in decide
                 self._stop_delays_after_this = True
+                t_now = int(self.delays_us[self.d_index])
+                if (self._max_delay_allowed_us is None) or (t_now < self._max_delay_allowed_us):
+                    self._max_delay_allowed_us = t_now
             self._miss_streak = 0
         else:
             self._failed_caps_this_delay += 1
@@ -3653,6 +3660,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 f"Delay {self.delays_us[self.d_index]} µs: too many failed captures → skipping"
             )
             self._mark_current_delay_completed(aggregated=False)
+            if self._stop_delays_after_this and len(self.points) >= self.min_points:
+                self.stageChanged.emit("Near edge and have enough points → finishing this pressure")
+                self._finish_pressure_and_advance()
+                return
             nxt = self._pick_next_delay_index()
             if nxt is None:
                 self._finish_pressure_and_advance()
@@ -3678,6 +3689,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             t_now  = int(self.delays_us[self.d_index])
             self.points.append({"t_us": t_now, "center_px": (dx_med, dy_med)})
             self._mark_current_delay_completed(aggregated=True)
+
+            if self._stop_delays_after_this and len(self.points) >= self.min_points:
+                self.stageChanged.emit("Near edge and have enough points → finishing this pressure")
+                self._finish_pressure_and_advance()
+                return
 
             # If near the edge, adapt the plan so we can still hit min_points.
             if self._stop_delays_after_this and len(self.points) < self.min_points:
@@ -3750,6 +3766,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._reset_delay_state()
         self._miss_streak = 0
         self._stop_delays_after_this = False
+        self._max_delay_allowed_us = None
         self._completed = [False] * len(self.delays_us)
 
         if self.p_index >= len(self.pressures):
@@ -3834,30 +3851,21 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         return inserted_any
 
     def _insert_midpoint_delay_if_helpful(self):
-        """
-        Insert a midpoint delay between the two *earliest* aggregated timepoints,
-        only if it helps reach min_points and remains above the floor.
-        """
         if len(self.points) >= self.min_points:
             return False
-
-        # need at least one aggregated point; use first aggregated and earliest scheduled delay
-        if not self.points:
+        if not self.points or len(self.delays_us) < 2:
             return False
 
-        # Find the earliest two scheduled delays (whether completed or not)
         delays_sorted = sorted(self.delays_us)
-        if len(delays_sorted) < 2:
-            return False
-
         a, b = delays_sorted[0], delays_sorted[1]
         mid = int((a + b) // 2)
         if mid <= self._delay_floor_us:
             return False
+        if (self._max_delay_allowed_us is not None) and (mid > self._max_delay_allowed_us):
+            return False
         if mid in self.delays_us:
             return False
 
-        # Insert midpoint as uncompleted and keep list sorted
         existing = list(zip(self.delays_us, self._completed))
         existing.append((mid, False))
         existing.sort(key=lambda x: x[0])
@@ -3867,34 +3875,46 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     def _find_next_uncompleted_index(self, prefer: str = "after_current"):
         """
+        Return the index of the next uncompleted delay, respecting the cap
+        self._max_delay_allowed_us (if set).
         prefer:
-          - "after_current": next uncompleted index > current, else earliest uncompleted
-          - "earliest": earliest uncompleted index
+        - "after_current": smallest eligible delay strictly greater than current,
+                            else the smallest eligible delay
+        - "earliest": smallest eligible delay
         """
-        n = len(self.delays_us)
-        if n == 0:
+        if not self.delays_us:
             return None
+
+        # Build eligible indices (uncompleted and <= cap if cap is set)
+        cap = self._max_delay_allowed_us
+        eligible = []
+        for i, done in enumerate(self._completed):
+            if done:
+                continue
+            if (cap is not None) and (self.delays_us[i] > cap):
+                continue
+            eligible.append(i)
+
+        if not eligible:
+            return None
+
+        def _min_by_delay(indices):
+            return min(indices, key=lambda k: self.delays_us[k])
 
         if prefer == "earliest":
-            for i, done in enumerate(self._completed):
-                if not done:
-                    return i
-            return None
+            return _min_by_delay(eligible)
 
-        # after_current
-        for i in range(self.d_index + 1, n):
-            if not self._completed[i]:
-                return i
-        for i in range(0, self.d_index + 1):
-            if not self._completed[i]:
-                return i
-        return None
+        # prefer == "after_current"
+        cur_delay = self.delays_us[self.d_index] if (0 <= self.d_index < len(self.delays_us)) else -1
+        after = [i for i in eligible if self.delays_us[i] > cur_delay]
+        if after:
+            return _min_by_delay(after)
+        return _min_by_delay(eligible)
 
     def _pick_next_delay_index(self):
         """
-        Choose the next delay depending on whether we're near the edge.
-        - If near the edge: prefer the earliest uncompleted delay (avoid larger delays)
-        - Else: prefer the next uncompleted delay after current
+        If near edge: prefer earliest uncompleted delay (and never exceed cap).
+        Else: prefer next uncompleted after current.
         """
         if self._stop_delays_after_this:
             return self._find_next_uncompleted_index(prefer="earliest")
