@@ -4640,6 +4640,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.repl_target       = int(replicates_per_pressure)
         self.focus_ok_threshold = float(focus_ok_threshold)
 
+        self.boundary_tol_px = 250          # pixels around image center accepted as "in-bounds"
+        self._oob_streak = 0                # consecutive out-of-bound hits
+        self._oob_positions = []            # recent out-of-bound centers (pixels)
+
+
         # delay clamps (safety)
         self.min_delay_us, self.max_delay_us = 0, 50000
 
@@ -4772,6 +4777,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._focus_move_budget = 60
         self._min_focus_gain = 0.05
         self._lost_count, self._lost_limit = 0, 5
+        self._oob_streak = 0
+        self._oob_positions = []
 
     # ---------- per-pressure planning ----------
     def _compute_stage_scales_steps_per_px(self):
@@ -4955,6 +4962,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         tol = 150
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
+            self._centered = True
+            self._char_need_capture = True
             self.dropletCentered.emit()
             return
 
@@ -5035,11 +5044,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # Accept replicate
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
+        center_px = tuple(map(int, result.get("center", (0, 0))))
         self.circularity_values.append(float(result.get("circularity_ellipse", 99.0)))
-        self.droplet_positions.append(tuple(map(int, result.get("center", (0,0)))))
+        self.droplet_positions.append(center_px)
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
+
+        if self._check_boundary_and_maybe_recentre(center_px):
+            # A recenter move was issued (average of 2 consecutive OOB hits).
+            # After the move completes, state_char → (moveDone) → state_capture → fresh frame.
+            return
 
         if self.image_counter < self.num_images:
             self.continueCap.emit()
@@ -5062,6 +5077,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             drop_machine = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
                 mean_center, machine_position
             )
+
+            try:
+                summary_img = self._annotate_char_summary_image(mean_center, mean_vol, cv_vol)
+                self.presentImageSignal.emit(summary_img)
+            except Exception:
+                pass
 
             self.samples.append({
                 "pressure": float(self.cur_pressure),
@@ -5096,6 +5117,75 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "mean_position_machine": None,
             "valid": bool(valid)
         })
+    
+    def _annotate_char_summary_image(self, mean_center, mean_vol, cv_vol):
+        """
+        Draw all replicate centers (red), the mean center (green), and mean/CV text.
+        """
+        img = (self.droplet_image.copy()
+               if self.droplet_image.ndim == 3
+               else cv2.cvtColor(self.droplet_image, cv2.COLOR_GRAY2BGR))
+        for p in self.droplet_positions:
+            cv2.circle(img, tuple(map(int, p)), 5, (0, 0, 255), -1)
+        cv2.circle(img, tuple(map(int, mean_center)), 8, (0, 255, 0), -1)
+        cv2.putText(img, f"Mean vol: {mean_vol:.2f}", (10, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
+        cv2.putText(img, f"CV vol: {cv_vol:.2f}%", (10, 64),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
+        # draw the accepted boundary box for clarity
+        H, W = img.shape[:2]
+        b = int(self.boundary_tol_px)
+        cv2.rectangle(img, (W//2 - b, H//2 - b), (W//2 + b, H//2 + b), (80,80,80), 1)
+        return img
+    
+    def _is_within_boundary(self, center_px) -> bool:
+        """Return True if within the square boundary centered in image."""
+        H, W = self.droplet_image.shape[:2]
+        cx, cy = int(center_px[0]), int(center_px[1])
+        tx, ty = W // 2, H // 2
+        b = int(self.boundary_tol_px)
+        return (abs(cx - tx) <= b) and (abs(cy - ty) <= b)
+
+    def _check_boundary_and_maybe_recentre(self, center_px) -> bool:
+        """
+        Track out-of-bound streaks during characterization.
+        Only after >=2 consecutive OOB hits do a single recenter move to the *average*
+        of those OOB centers. Returns True iff a move was issued.
+        """
+        if self._is_within_boundary(center_px):
+            # Good sample → reset streak
+            self._oob_streak = 0
+            self._oob_positions.clear()
+            return False
+
+        # OOB sample
+        self._oob_streak += 1
+        self._oob_positions.append(tuple(map(int, center_px)))
+
+        if self._oob_streak < 2:
+            # First miss → just flag it, no movement
+            self.stageChanged.emit("Out-of-bound droplet (1st) → holding position")
+            return False
+
+        # Two consecutive OOB → move once to average offset
+        avgx = int(round(sum(p[0] for p in self._oob_positions) / len(self._oob_positions)))
+        avgy = int(round(sum(p[1] for p in self._oob_positions) / len(self._oob_positions)))
+
+        H, W = self.droplet_image.shape[:2]
+        target = (W // 2, H // 2)
+        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target((avgx, avgy), target)
+        # center moves are X/Z only
+        dX = int(max(-1200, min(1200, dX)))
+        dZ = int(max(-1200, min(1200, dZ)))
+
+        cur = self.model.machine_model.get_current_position_dict()
+        self.stageChanged.emit(f"2x out-of-bound → recenter to averaged offset: move XZ=({dX},{dZ})")
+        self._oob_streak = 0
+        self._oob_positions.clear()
+        self._char_need_capture = True  # get a fresh frame after motion
+
+        self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
+        return True
 
     @Slot()
     def onCompleted(self):
