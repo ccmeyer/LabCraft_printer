@@ -279,6 +279,13 @@ class CalibrationManager(QObject):
 
     def stop(self):
         if self.activeCalibration is not None:
+            # Prefer graceful finalize if the process supports it
+            if hasattr(self.activeCalibration, "requestGracefulStop"):
+                try:
+                    self.activeCalibration.requestGracefulStop("User requested graceful stop")
+                    return
+                except Exception:
+                    pass
             self.activeCalibration.stop()
             self.activeCalibration = None
         if len(self.calibration_queue) > 0:
@@ -2551,18 +2558,30 @@ def make_pressure_grid(p0, p1, step, hw_lo, hw_hi):
     # number of *inclusive* points
     n = int(math.floor((hi - lo) / step + 1e-9)) + 1
     grid = [round(lo + i * step, 5) for i in range(max(n, 1))]
-    return grid[::-1]
+    return grid
 
 class PressureBandCalibrationProcess(BaseCalibrationProcess):
     """
     Fixed-range pressure scan for a given pulse width (PW).
-    For each pressure in [p_start, p_end] with step p_step:
-      - capture 3 replicates and classify: 'none'|'single'|'multiple'
-      - if the 3 replicates disagree, escalate to 7 total replicates and return the majority verdict
-      - record per-replicate details and a per-pressure summary
-    Result payload includes the full per-pressure list and computed single-droplet bands.
 
-    Prerequisites (error if missing): nozzle-center image coordinate, background image, emergence time.
+    Changes:
+      - Scans pressures HIGH → LOW (safe-by-default).
+      - Manual early stop (requestGracefulStop) preserves progress.
+      - Auto-stop if droplet approaches the nozzle (safety_clearance_px) or nozzle gets wet.
+      - Robust state transitions; finalize allowed from any state.
+
+    Result payload (unchanged shape + termination metadata):
+      {
+        "pulse_width_us": ...,
+        "delay_us": ...,
+        "pressure_bounds": [P_MIN, P_MAX],
+        "pressures": [ ... per-pressure records ... ],
+        "single_bands": [[p_lo, p_hi], ...],
+        "primary_band": [p_lo, p_hi] | None,
+        "terminated_early": bool,
+        "stop_reason": str | None,
+        "terminate_pressure": float | None
+      }
     """
 
     # State-machine signals
@@ -2572,40 +2591,36 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     finalize        = Signal()
 
     def __init__(self, calibration_manager, model,
-                 p_start: float=0.3,
-                 p_end: float=1.5,
-                 p_step: float=0.05,
+                 p_start: float = 0.3,
+                 p_end: float = 1.5,
+                 p_step: float = 0.05,
                  *,
                  min_reps: int = 3,
                  escalate_to: int = 7,
                  classification_delay_us: int | None = None,
+                 # Safety additions
+                 reverse_order: bool = True,
+                 safety_clearance_px: int = 50,   # distance below nozzle that triggers auto-stop
+                 auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "pressure_scan"
 
         # --- prerequisites pulled from manager ---
-        self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
-        self.background_image = self.calibration_manager.get_background_image()
-        self.emergence_time_us = self.calibration_manager.get_emergence_time()
-        print(f"Pressure scan prerequisites: nozzle_center={self.nozzle_center_px}, "
-              f"background_image={'set' if self.background_image is not None else 'None'}, "
-              f"emergence_time_us={self.emergence_time_us}"
-              )
-        # Only mark readiness; do NOT return here. We will handle not-ready in the first state.
-        self._ready = not (
-            self.nozzle_center_px is None
-            or self.background_image is None
-            or self.emergence_time_us is None
-        )
+        self.nozzle_center_px   = self.calibration_manager.get_nozzle_center_image_position()
+        self.background_image   = self.calibration_manager.get_background_image()
+        self.emergence_time_us  = self.calibration_manager.get_emergence_time()
+        self._ready = not (self.nozzle_center_px is None or
+                           self.background_image is None or
+                           self.emergence_time_us is None)
 
         # --- imaging delay to reliably count droplets ---
         if classification_delay_us is None:
-            # Use emergence + (PW + 1000 µs) as a safe, free-flight counting delay
             try:
                 pw = int(self.model.machine_model.get_print_pulse_width())
             except Exception:
                 pw = 1500
-            classification_delay_us = int(max(0, self.emergence_time_us + pw + 1000))
+            classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1000))
         self.classify_delay_us = int(classification_delay_us)
 
         # --- pressure range & hardware clamping ---
@@ -2616,33 +2631,38 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.P_MIN = float(hw_lo)
         self.P_MAX = float(hw_hi)
 
-        p0, p1 = float(p_start), float(p_end)
-        if p1 < p0:
-            p0, p1 = p1, p0
+        p0, p1 = float(min(p_start, p_end)), float(max(p_start, p_end))
         step = abs(float(p_step)) if p_step != 0 else 0.05
         pressures = make_pressure_grid(p0, p1, step, self.P_MIN, self.P_MAX)
 
-        self.pressure_list = pressures
+        # Scan HIGH → LOW by default for safety.
+        self.pressure_list = list(reversed(pressures)) if reverse_order else list(pressures)
         self.pressure_index = 0
 
-        # --- thresholds ---
-        self.nozzle_area_threshold = 8000
+        # --- thresholds & safety ---
+        self.nozzle_area_threshold     = 8000
+        self.safety_clearance_px       = int(safety_clearance_px)
+        self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
 
         # --- replicate policy ---
-        self.min_reps = int(min_reps)
-        self.escalate_to = int(escalate_to)  # total replicates when escalation triggered
-        self.replicates_target = self.min_reps
-        self.reps = []  # list of dicts per replicate
+        self.min_reps           = int(min_reps)
+        self.escalate_to        = int(escalate_to)
+        self.replicates_target  = self.min_reps
+        self.reps               = []
         self._invalid_skip_count = 0
-        self._invalid_skip_cap = 6
-        self._discard_next = True  # settle after pressure change (logical flag; we simply skip storing the first)
+        self._invalid_skip_cap   = 6
+        self._discard_next       = True   # skip first frame after pressure change (settling)
 
         # --- outputs ---
-        self.samples = []   # list of per-pressure summary dicts
-        self.annotated_image = None
+        self.samples          = []   # per-pressure summary dicts
+        self.annotated_image  = None
 
         # --- handy flags ---
-        self._current_pressure = None
+        self._current_pressure   = None
+        self._early_stop         = False
+        self._stop_reason        = None
+        self._terminate_at_pressure = None
+
         try:
             self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
         except Exception:
@@ -2663,38 +2683,46 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.state_decide.entered.connect(self.onDecide)
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
-        # transitions
-        t_bg = QSignalTransition(); t_bg.setSenderObject(self.calibration_manager)
-        t_bg.setSignal(b"2settingsChangeCompleted()"); t_bg.setTargetState(self.state_apply)
-        self.state_prepare_bg.addTransition(t_bg)
+        # ---------- robust transitions (bound signals) ----------
+        # prepare -> apply settings acknowledged
+        self.state_prepare_bg.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_apply
+        )
+        # allow finalize from any state (manual/auto early stop)
+        for st in (self.state_prepare_bg, self.state_apply, self.state_capture,
+                   self.state_analyze, self.state_decide):
+            st.addTransition(self.finalize, self.state_final)
 
-        t_apply = QSignalTransition(); t_apply.setSenderObject(self); t_apply.setSignal(b"2pressureApplied()")
-        t_apply.setTargetState(self.state_capture); self.state_apply.addTransition(t_apply)
+        # apply -> capture
+        self.state_apply.addTransition(self.pressureApplied, self.state_capture)
+        # capture -> analyze
+        self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
+        # analyze -> decide
+        self.state_analyze.addTransition(self.replicateReady, self.state_decide)
+        # decide -> apply (next pressure / more reps loop)
+        self.state_decide.addTransition(self.continueScan, self.state_apply)
 
-        t_cap = QSignalTransition(); t_cap.setSenderObject(self.calibration_manager)
-        t_cap.setSignal(b"2captureCompleted()"); t_cap.setTargetState(self.state_analyze)
-        self.state_capture.addTransition(t_cap)
-
-        t_an = QSignalTransition(); t_an.setSenderObject(self); t_an.setSignal(b"2replicateReady()")
-        t_an.setTargetState(self.state_decide); self.state_analyze.addTransition(t_an)
-
-        t_loop = QSignalTransition(); t_loop.setSenderObject(self); t_loop.setSignal(b"2continueScan()")
-        t_loop.setTargetState(self.state_apply); self.state_decide.addTransition(t_loop)
-
-        t_done = QSignalTransition(); t_done.setSenderObject(self); t_done.setSignal(b"2finalize()")
-        t_done.setTargetState(self.state_final); self.state_decide.addTransition(t_done)
-
+        # register
         for s in (self.state_prepare_bg, self.state_apply, self.state_capture,
                   self.state_analyze, self.state_decide, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare_bg)
 
-    # ---------- states handlers ----------
+    # ---------- public: graceful/manual early stop ----------
+    @Slot()
+    def requestGracefulStop(self, reason: str = "User requested stop"):
+        """Callable from manager when the user presses Stop during the scan."""
+        self._early_stop = True
+        self._stop_reason = str(reason)
+        self._terminate_at_pressure = float(self._current_pressure) if self._current_pressure is not None else None
+        self.stageChanged.emit("Pressure scan: graceful stop requested")
+        self.finalize.emit()
+
+    # ---------- state handlers ----------
 
     @Slot()
     def onPrepareBackground(self):
         if not self._ready:
-            # Emit the real error and finalize immediately so the machine exits cleanly.
             self.calibrationError.emit(
                 "Pressure scan requires nozzle-center, background, and emergence time."
             )
@@ -2712,26 +2740,29 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
 
-        if self._current_pressure is None or self._current_pressure != self.pressure_list[self.pressure_index]:
-            # New pressure → reset replicate buffer, escalate policy, and discard-next flag
+        # Reset replicate state when pressure changes
+        target = float(self.pressure_list[self.pressure_index])
+        if self._current_pressure != target:
+            self._current_pressure = target
             self.reps = []
             self.replicates_target = self.min_reps
             self._invalid_skip_count = 0
             self._discard_next = True
 
-        self._current_pressure = float(self.pressure_list[self.pressure_index])
         settings = {
             "print_pressure": self._current_pressure,
             "num_droplets": 1,
             "flash_delay": int(self.classify_delay_us)
         }
-        self.stageChanged.emit(f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs")
+        self.stageChanged.emit(
+            f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs "
+            f"({self.pressure_index+1}/{len(self.pressure_list)})"
+        )
         def _after(): self.pressureApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
 
     @Slot()
     def onCaptureReplicate(self):
-        # Capture a replicate (we'll decide to keep/discard in analyze)
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text=f"Capturing @ {self._current_pressure:.3f} psi (rep {len(self.reps)+1}/{self.replicates_target})",
@@ -2741,30 +2772,67 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyzeReplicate(self):
-        # If we're discarding the first shot after a pressure change, just skip storing this and capture again.
+        # Optional "settling" discard after pressure change
         if self._discard_next:
             self._discard_next = False
             self.stageChanged.emit("Settling shot discarded; capturing again")
-            self.replicateReady.emit()   # jump to decide → which will send us back to capture
+            self.replicateReady.emit()
             return
 
+        # STRICT pass for classification (requires clearance)
         droplets, nozzle_area, overlay = self.model.droplet_camera_model.identify_droplets(
             self.droplet_image,
             self.background_image,
             self.nozzle_center_px,
             min_area=1000,
-            satellite_band_px=12,      # NEW
-            min_free_offset_px=18      # keep the clearance
+            satellite_band_px=12,
+            min_free_offset_px=18
         )
         self.presentImageSignal.emit(overlay)
 
-        # classify this replicate
+        # --- SAFETY CHECK 1: nozzle wetness
+        if self.auto_stop_on_nozzle_wet and (nozzle_area and nozzle_area > self.nozzle_area_threshold):
+            self._early_stop = True
+            self._stop_reason = f"Nozzle wet (area={int(nozzle_area)})"
+            self._terminate_at_pressure = float(self._current_pressure)
+            self.stageChanged.emit(
+                f"Safety stop: nozzle wet at {self._current_pressure:.3f} psi"
+            )
+            self.finalize.emit()
+            return
+
+        # --- SAFETY CHECK 2: proximity (loose pass, zero clearance)
+        nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
+        # droplets_loose, nozzle_any, _ = self.model.droplet_camera_model.identify_droplets(
+        #     self.droplet_image,
+        #     self.background_image,
+        #     self.nozzle_center_px,
+        #     min_area=600,
+        #     satellite_band_px=12,
+        #     min_free_offset_px=0
+        # )
+        if droplets:
+            dy_below = [ (cy - ny) for (cx, cy) in droplets if cy >= ny ]
+            if dy_below:
+                min_dy = min(dy_below)
+                if min_dy < self.safety_clearance_px:
+                    self._early_stop = True
+                    self._stop_reason = f"Droplet too close to nozzle (dy={int(min_dy)} px < {self.safety_clearance_px})"
+                    self._terminate_at_pressure = float(self._current_pressure)
+                    self.stageChanged.emit(
+                        f"Safety stop: droplet too close (dy={int(min_dy)} px) at {self._current_pressure:.3f} psi"
+                    )
+                    self.finalize.emit()
+                    return
+
+        # --- classification for this replicate
         cls = self._classify_from_detection(droplets)
         if cls == "invalid":
             self._invalid_skip_count += 1
             self.stageChanged.emit("Nozzle-contact / invalid replicate → re-capturing")
             if self._invalid_skip_count > self._invalid_skip_cap:
                 self.calibrationError.emit("Too many invalid replicates at this pressure.")
+                self.finalize.emit()
                 return
             self.replicateReady.emit()
             return
@@ -2811,7 +2879,6 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCalibrationCompleted(self):
-        # Compute single bands from samples, then emit one record
         bands = self._compute_single_bands()
         result = {
             "pulse_width_us": self._pulse_width_us,
@@ -2819,14 +2886,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "pressure_bounds": [self.P_MIN, self.P_MAX],
             "pressures": self.samples,               # full per-pressure objects
             "single_bands": bands,                   # [[p_lo, p_hi], ...]
-            "primary_band": (bands[0] if bands else None)
+            "primary_band": (bands[0] if bands else None),
+            "terminated_early": bool(self._early_stop),
+            "stop_reason": (self._stop_reason if self._early_stop else None),
+            "terminate_pressure": (float(self._terminate_at_pressure)
+                                   if self._terminate_at_pressure is not None else None),
         }
         self.calibrationDataUpdated.emit({
             "measurements": [],
             "result": result
         })
+        # Keep your existing hook to make the band available downstream
         self.calibration_manager.set_primary_pressure_band(result)
-        self.stageChanged.emit("Pressure scan complete")
+        self.stageChanged.emit(f"Pressure scan complete: single bands: {bands}")
         self.calibrationCompleted.emit()
 
     # ---------- helpers ----------
@@ -2842,13 +2914,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             c = r.get("cls")
             if c in counts:
                 counts[c] += 1
-        # Find top count; if tie, mark ambiguous
         max_ct = max(counts.values())
         winners = [k for k, v in counts.items() if v == max_ct]
         return winners[0] if len(winners) == 1 else "ambiguous"
 
     def _store_pressure_summary(self, verdict: str, escalated: bool):
-        # Simple volume stats can be added later; for now, this scan is count-only.
         rec = {
             "pressure": float(self._current_pressure),
             "n_reps": len(self.reps),
@@ -2867,29 +2937,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.continueScan.emit()
 
     def _compute_single_bands(self):
-        """Group contiguous 'single' pressures into bands."""
         singles = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") == "single"])
         if not singles:
             return []
-        # Build bands: if gap <= ~1.25 * nominal step, treat as contiguous
-        # Infer nominal step from list (first diffs median)
         diffs = [b - a for a, b in zip(singles[:-1], singles[1:])]
-        step = (sorted(diffs)[len(diffs)//2] if diffs else (self.pressure_list[1]-self.pressure_list[0] if len(self.pressure_list) > 1 else 0.05))
+        default_step = (self.pressure_list[0] - self.pressure_list[1]) if len(self.pressure_list) > 1 else 0.05
+        step = (sorted(diffs)[len(diffs)//2] if diffs else abs(default_step))
         tol = abs(step) * 1.25 + 1e-6
-
-        bands = []
-        band_start = singles[0]
-        prev = singles[0]
+        bands, band_start, prev = [], singles[0], singles[0]
         for p in singles[1:]:
             if (p - prev) <= tol:
                 prev = p
                 continue
             bands.append([band_start, prev])
-            band_start = p
-            prev = p
+            band_start = p; prev = p
         bands.append([band_start, prev])
-        # Sort by length descending (primary band = first)
-        bands.sort(key=lambda ab: (ab[1]-ab[0]), reverse=True)
+        bands.sort(key=lambda ab: (ab[1]-ab[0]), reverse=True)  # primary first
         return bands
     
 class TrajectoryCalibrationProcess(BaseCalibrationProcess):
