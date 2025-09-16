@@ -356,6 +356,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
         # row += 1
 
+        # Line to separate buttons
+        self.button_layout.addWidget(QtWidgets.QLabel("--- Calibrations ---"), row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger the nozzle position calibration
         self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
         self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
@@ -450,6 +454,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_characterization_button = QtWidgets.QPushButton("Characterize Droplets")
         self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
         self.button_layout.addWidget(self.calibrate_characterization_button, row, 0, 1, 2)
+        row += 1
+
+        # Add a button to trigger the pressure sweep characterization calibration
+        self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
+        self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
+        self.button_layout.addWidget(self.calibrate_pressure_sweep_button, row, 0, 1, 2)
         row += 1
 
         # Add a button to trigger all calibrations
@@ -946,6 +956,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
         self.calibrate_search_button.setText("Calibrate Droplet Search")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
+        self.calibrate_characterization_button.setText("Characterize Droplets")
+        self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -1078,6 +1090,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_characterization_button.setText("Stop Calibration")
             self.controller.start_droplet_characterization_calibration()
+
+    def toggle_start_pressure_sweep_calibration(self):
+        """
+        Toggles whether the pressure sweep characterization calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_pressure_sweep_button.setText("Stop Calibration")
+            self.controller.start_pressure_sweep_characterization_calibration()
 
     def toggle_start_all_calibration(self):
         """

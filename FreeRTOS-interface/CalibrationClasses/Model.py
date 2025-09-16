@@ -109,6 +109,7 @@ class CalibrationManager(QObject):
         self.intermediate_droplet_position = None
 
         self._last_pressure_scan_result = None
+        self._pressure_traj_result = None
 
         self.calibration_queue = []
 
@@ -347,6 +348,15 @@ class CalibrationManager(QObject):
             self, self.model, manual_start=True)
         self.start_active_calibration()
 
+    def start_pressure_sweep_characterization(self, *, sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
+        self.activeCalibration = PressureSweepCharacterizationProcess(
+            self, self.model,
+            sphere_delay_us=sphere_delay_us,
+            replicates_per_pressure=replicates_per_pressure,
+            order=order
+        )
+        self.start_active_calibration()
+
     # ------------- Settings snapshot -------------
 
     def get_current_settings(self):
@@ -413,6 +423,8 @@ class CalibrationManager(QObject):
     def set_primary_pressure_band(self, result): 
         print("Setting primary pressure band:", result)
         self._last_pressure_scan_result = result
+    def set_pressure_trajectory_result(self, result_dict):
+        self._pressure_traj_result = result_dict
 
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
@@ -430,6 +442,9 @@ class CalibrationManager(QObject):
         if band and len(band) == 2:
             return float(band[0]), float(band[1])
         return None
+    
+    def get_pressure_trajectory_result(self):
+        return self._pressure_traj_result
 
     # ------------- Offsets helper -------------
 
@@ -3784,6 +3799,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             "emergence_time_us": self.emergence_time_us
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+        try:
+            self.calibration_manager.set_pressure_trajectory_result(result)
+        except Exception:
+            pass
         self.stageChanged.emit("Trajectory calibration complete")
         self.calibrationCompleted.emit()
 
@@ -4536,6 +4555,538 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def emitContinueCharacterization(self): self.continueCharacterization.emit()
     def emitInitiateAnalyzeCharacterization(self): self.initiateCharacterizationAnalysis.emit()
     def emitCharacterizationCompleted(self): self.characterizationCompleted.emit()
+
+class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
+    """
+    Sweep across the pressures that were measured in the trajectory scan (high -> low).
+    For each pressure:
+      - compute per-pressure stage velocity (steps/s) from the trajectory fit (px/us)
+      - predict droplet XYZ at (emergence + sphere_delay) and move there
+      - capture background, find/center/focus the droplet
+      - capture N replicates and quantify volume consistency
+    Emits: per-pressure entries with mean volume, CV, centers, etc.
+    """
+
+    # local signals
+    pressureReady   = Signal()
+    moveDone        = Signal()
+    delayApplied    = Signal()
+    timepointReady  = Signal()
+    continueCap     = Signal()
+    continueSearch  = Signal()
+    dropletFound    = Signal()
+    dropletCentered = Signal()
+    analyzeBatch    = Signal()
+    nextPressure    = Signal()
+    finalize        = Signal()
+
+    def __init__(self,
+                 calibration_manager,
+                 model,
+                 *,
+                 sphere_delay_us: int = 8000,
+                 replicates_per_pressure: int = 20,
+                 order: str = "desc",            # "desc" = high -> low (safer)
+                 edge_guard_px: int = 200,
+                 focus_ok_threshold: float = 5_000_000,
+                 parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "pressure_sweep_characterization"
+
+        # ---------- prerequisites ----------
+        self.nozzle_center_machine = self.calibration_manager.get_nozzle_center()
+        self.nozzle_center_px      = self.calibration_manager.get_nozzle_center_image_position()
+        self.emergence_time_us     = self.calibration_manager.get_emergence_time()
+        self.prev_background       = self.calibration_manager.get_background_image()
+
+        # pull per-pressure trajectory fits
+        traj = (getattr(self.calibration_manager, "get_pressure_trajectory_result", None) or
+                getattr(self.calibration_manager, "get_pressure_trajectory_results", None))
+        traj = traj() if callable(traj) else None
+
+        if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and traj and traj.get("pressures")):
+            self.calibrationError.emit("Sweep requires nozzle center, background, emergence, and trajectory scan results.")
+            self._ready = False
+        else:
+            self._ready = True
+
+        # list of (pressure, fit) we’ll actually use (only with a valid fit)
+        self.plan = []
+        if self._ready:
+            for rec in traj["pressures"]:
+                if rec.get("fit"):
+                    p = float(rec["pressure"])
+                    fit = rec["fit"]
+                    vx = float(fit.get("vx_px_per_us", 0.0))
+                    vy = float(fit.get("vy_px_per_us", 0.0))
+                    self.plan.append({"pressure": p, "vx": vx, "vy": vy})
+            if not self.plan:
+                self.calibrationError.emit("Trajectory scan had no valid fits to use.")
+                self._ready = False
+
+        if order.lower().startswith("desc"):
+            self.plan.sort(key=lambda r: r["pressure"], reverse=True)
+        else:
+            self.plan.sort(key=lambda r: r["pressure"])
+
+        self.i = 0  # plan index
+
+        # ---------- policy / settings ----------
+        self.sphere_delay_us   = int(sphere_delay_us)
+        self.edge_guard_px     = int(edge_guard_px)
+        self.repl_target       = int(replicates_per_pressure)
+        self.focus_ok_threshold = float(focus_ok_threshold)
+
+        # delay clamps (safety)
+        self.min_delay_us, self.max_delay_us = 0, 50000
+
+        # characterize buffers (per pressure)
+        self._reset_char_buffers()
+
+        # stage bounds safety
+        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
+        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
+        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+
+        # results
+        self.samples = []   # list of per-pressure dicts
+
+        # ---------- states ----------
+        self.state_pick      = QState()
+        self.state_applyP    = QState()
+        self.state_move      = QState()
+        self.state_prepBG    = QState()
+        self.state_capBG     = QState()
+        self.state_setDelay  = QState()
+        self.state_capture   = QState()
+        self.state_analyze   = QState()
+        self.state_center    = QState()
+        self.state_char      = QState()
+        self.state_anBatch   = QState()
+        self.state_final     = QFinalState()
+
+        # enter handlers
+        self.state_pick.entered.connect(self.onPickPressure)
+        self.state_applyP.entered.connect(self.onApplyPressure)
+        self.state_move.entered.connect(self.onMoveToTarget)
+        self.state_prepBG.entered.connect(self.onPrepareBG)
+        self.state_capBG.entered.connect(self.onCaptureBG)
+        self.state_setDelay.entered.connect(self.onSetDelay)
+        self.state_capture.entered.connect(self.onCaptureDroplet)
+        self.state_analyze.entered.connect(self.onAnalyzeDroplet)
+        self.state_center.entered.connect(self.onCenter)
+        self.state_char.entered.connect(self.onCharacterizeLoop)
+        self.state_anBatch.entered.connect(self.onAnalyzeBatch)
+        self.state_final.entered.connect(self.onCompleted)
+
+        # transitions
+        for st in (self.state_pick, self.state_applyP, self.state_move, self.state_prepBG,
+                   self.state_capBG, self.state_setDelay, self.state_capture, self.state_analyze,
+                   self.state_center, self.state_char, self.state_anBatch):
+            st.addTransition(self.finalize, self.state_final)
+
+        self.state_pick.addTransition(self.pressureReady, self.state_applyP)
+        self.state_applyP.addTransition(self.calibration_manager.settingsChangeCompleted, self.state_move)
+        self.state_move.addTransition(self.moveDone, self.state_prepBG)
+
+        self.state_prepBG.addTransition(self.calibration_manager.settingsChangeCompleted, self.state_capBG)
+        self.state_capBG.addTransition(self.calibration_manager.captureCompleted, self.state_setDelay)
+
+        self.state_setDelay.addTransition(self.delayApplied, self.state_capture)
+        self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
+
+        # search: loop until found or retries exhausted
+        self.state_analyze.addTransition(self.continueSearch, self.state_setDelay)  # keep sweeping delay
+        self.state_analyze.addTransition(self.dropletFound,  self.state_center)
+
+        # center -> either continue search if lost, or go characterize when centered
+        self.state_center.addTransition(self.continueSearch, self.state_setDelay)
+        self.state_center.addTransition(self.dropletCentered, self.state_char)
+
+        # characterization loop
+        self.state_char.addTransition(self.continueCap,  self.state_capture)
+        self.state_char.addTransition(self.analyzeBatch, self.state_anBatch)
+
+        # after analysis, go to next pressure
+        self.state_anBatch.addTransition(self.nextPressure, self.state_pick)
+
+        # register
+        for s in (self.state_pick, self.state_applyP, self.state_move, self.state_prepBG, self.state_capBG,
+                  self.state_setDelay, self.state_capture, self.state_analyze, self.state_center,
+                  self.state_char, self.state_anBatch, self.state_final):
+            self.state_machine.addState(s)
+
+        self.state_machine.setInitialState(self.state_pick)
+
+    # ---------- helpers (generic) ----------
+    def _get_axis_bounds_safe(self, axis:str, default_span:int):
+        try:
+            lo, hi = self.model.machine_model.get_axis_bounds(axis)
+            return int(lo), int(hi)
+        except Exception:
+            base = int(self.nozzle_center_machine.get(axis, 0)) if self.nozzle_center_machine else 0
+            return base - default_span, base + default_span
+
+    def _clamp_xyz(self, x:int, y:int, z:int):
+        return (max(self.x_lo, min(self.x_hi, int(x))),
+                max(self.y_lo, min(self.y_hi, int(y))),
+                max(self.z_lo, min(self.z_hi, int(z))))
+
+    def _safe_move_abs(self, xyz):
+        X, Y, Z = self._clamp_xyz(*xyz)
+        cur = self.model.machine_model.get_current_position_dict()
+        if (int(cur['X']) == X) and (int(cur['Y']) == Y) and (int(cur['Z']) == Z):
+            self.moveDone.emit()
+            return
+        self.calibration_manager.moveAbsoluteRequested.emit((X, Y, Z), self.moveDone.emit)
+
+    def _reset_char_buffers(self):
+        self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
+        self._delay_try_index = 0
+        self.current_delay_us = None
+        self.num_images = self.repl_target
+        self.image_counter = 0
+        self.circularity_threshold = 1.15
+        self.circularity_values = []
+        self.droplet_volumes = []
+        self.droplet_positions = []
+        self.droplet_focus = []
+        self.measurements = []
+        # focus controls
+        self.focus_ok_threshold = float(self.focus_ok_threshold)
+        self.focus_dir, self.focus_step = +1, 16
+        self.focus_min_step = 8
+        self.focus_dir_switches, self.focus_switch_limit = 0, 6
+        self._focus_best = 0.0
+        self._focus_same_dir_tries = 0
+        self._focus_moves_done = 0
+        self._focus_move_budget = 60
+        self._min_focus_gain = 0.05
+        self._lost_count, self._lost_limit = 0, 5
+
+    # ---------- per-pressure planning ----------
+    def _compute_stage_scales_steps_per_px(self):
+        """
+        Estimate steps/px mapping at current pose using the camera model.
+        Returns (kx, ky, kz) as steps per +1px in image (x or y).
+        (Ky is usually ~0 for in-plane centering; keep for completeness.)
+        """
+        cur = self.model.machine_model.get_current_position_dict()
+        nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
+
+        def pix_to_steps(px, py):
+            m = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps((px, py), cur)
+            return int(m['X']), int(m.get('Y', 0)), int(m['Z'])
+
+        x0, y0, z0 = pix_to_steps(nx, ny)
+        x1, y1, z1 = pix_to_steps(nx + 100, ny)
+        x2, y2, z2 = pix_to_steps(nx, ny + 100)
+
+        kx = (x1 - x0) / 100.0
+        ky = (y1 - y0) / 100.0 if 'Y' in cur else 0.0
+        kz = (z2 - z0) / 100.0
+        return float(kx), float(ky), float(kz)
+
+    def _image_vel_to_stage_vel(self, vx_px_per_us: float, vy_px_per_us: float):
+        """
+        Convert (vx, vy) in px/us into (vX, vY, vZ) in steps/s.
+        We assume image-x -> stage X; image-y -> stage Z (note: image y+ is down).
+        """
+        kx, ky, kz = self._compute_stage_scales_steps_per_px()
+        s_per_us = 1e6  # µs -> s
+        vX = kx * vx_px_per_us * s_per_us
+        # many rigs don't shift stage Y from image motion; keep 0 unless you really map it
+        vY = 0.0
+        # image y increases downward; many Z axes are positive upward, so invert:
+        vZ = -kz * vy_px_per_us * s_per_us
+        return float(vX), float(vY), float(vZ)
+
+    def _predict_target_xyz(self, vec_steps_per_s, delay_us: int):
+        dt_s = max(0.0, (int(delay_us) - int(self.emergence_time_us)) * 1e-6)
+        vX, vY, vZ = vec_steps_per_s
+        X = int(round(self.nozzle_center_machine['X'] + vX * dt_s))
+        Y = int(round(self.nozzle_center_machine['Y'] + vY * dt_s))
+        Z = int(round(self.nozzle_center_machine['Z'] + vZ * dt_s))
+        return self._clamp_xyz(X, Y, Z)
+
+    def _clamp_delay(self, d_us: int) -> int:
+        return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
+
+    # ---------- states ----------
+    @Slot()
+    def onPickPressure(self):
+        if not self._ready:
+            self.finalize.emit()
+            return
+        if self.i >= len(self.plan):
+            self.finalize.emit()
+            return
+
+        rec = self.plan[self.i]
+        self.cur_pressure = float(rec["pressure"])
+        vx, vy = float(rec["vx"]), float(rec["vy"])
+        # compute per-pressure stage velocity
+        self.vec_steps_per_s = self._image_vel_to_stage_vel(vx, vy)
+
+        # choose a good initial delay
+        seed = int(self.emergence_time_us + self.sphere_delay_us)
+        self.target_delay_us = self._clamp_delay(seed)
+
+        self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
+                               f"(vx={vx:.4f} px/µs, vy={vy:.4f} px/µs)")
+        self._reset_char_buffers()
+        self.pressureReady.emit()
+
+    @Slot()
+    def onApplyPressure(self):
+        settings = {"print_pressure": float(self.cur_pressure), "num_droplets": 0}
+        self.stageChanged.emit(f"Applying pressure {self.cur_pressure:.3f} psi and preparing background")
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+
+    @Slot()
+    def onMoveToTarget(self):
+        # predict stage target at target_delay_us
+        tgt = self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
+        self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} µs → {tgt}")
+        self._safe_move_abs(tgt)
+
+    @Slot()
+    def onPrepareBG(self):
+        self.stageChanged.emit("Setting num_droplets=0 and capturing background")
+        self.calibration_manager.changeSettingsRequested.emit(
+            {"num_droplets": 0}, self.calibration_manager.emitSettingsChangeCompleted
+        )
+
+    @Slot()
+    def onCaptureBG(self):
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing background",
+            attempts_total=3, retry_delay_ms=120, guard_timeout_ms=10_000,
+            final_error_msg="Background capture failed."
+        )
+
+    @Slot()
+    def onSetDelay(self):
+        # sweep around the target delay until droplet found
+        if self._delay_try_index >= len(self._delay_offsets_us):
+            # simple nudge along predicted path and restart delay sweep
+            self._delay_try_index = 0
+            vX, vY, vZ = self.vec_steps_per_s
+            nudge = 0.002
+            self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
+            self._safe_move_abs(self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us + int(1000 * nudge)))
+
+        d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
+        self._delay_try_index += 1
+        self.current_delay_us = self._clamp_delay(d)
+        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} µs (search)")
+        self.calibration_manager.changeSettingsRequested.emit(
+            {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+            self.delayApplied.emit
+        )
+
+    @Slot()
+    def onCaptureDroplet(self):
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=f"Capture droplet @ {self.current_delay_us} µs",
+            attempts_total=5, retry_delay_ms=75, guard_timeout_ms=10_000,
+            final_error_msg=f"Failed to capture droplet @ {self.current_delay_us} µs."
+        )
+
+    @Slot()
+    def onAnalyzeDroplet(self):
+        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image, self.background_image
+        )
+        if contour is None:
+            self.stageChanged.emit("No droplet in frame → try next delay")
+            self.presentImageSignal.emit(overlay)
+            self.continueSearch.emit()
+            return
+
+        # Found something
+        x, y, w, h = cv2.boundingRect(contour)
+        cxy = (x + w//2, y + h//2)
+        self.presentImageSignal.emit(overlay)
+        self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
+        self._lost_count = 0
+        self.dropletFound.emit()
+
+    @Slot()
+    def onCenter(self):
+        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image, self.background_image
+        )
+        if contour is None:
+            self._lost_count += 1
+            if self._lost_count > self._lost_limit:
+                self.stageChanged.emit("Droplet repeatedly lost while centering → restart search")
+                self.continueSearch.emit()
+                return
+            self.stageChanged.emit("Droplet lost while centering → retry delay sweep")
+            self.presentImageSignal.emit(overlay)
+            self.continueSearch.emit()
+            return
+
+        x, y, w, h = cv2.boundingRect(contour)
+        cxy = (x + w//2, y + h//2)
+        H, W = overlay.shape[:2]
+        target = (W//2, H//2)
+        tol = 150
+        if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
+            self.stageChanged.emit("Droplet centered")
+            self.dropletCentered.emit()
+            return
+
+        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
+        dX = int(max(-1200, min(1200, dX)))
+        dZ = int(max(-1200, min(1200, dZ)))
+        self.stageChanged.emit(f"Recentering move (clamped): {dX},{0},{dZ}")
+        self._safe_move_abs(self._clamp_xyz(
+            self.model.machine_model.get_current_position_dict()['X'] + dX,
+            self.model.machine_model.get_current_position_dict()['Y'] + 0,
+            self.model.machine_model.get_current_position_dict()['Z'] + dZ
+        ))
+
+    @Slot()
+    def onCharacterizeLoop(self):
+        # capture a replicate; when focus inadequate, adjust Y and recapture
+        result, annotated = self.model.droplet_camera_model.characterize_droplet(
+            self.droplet_image, self.background_image
+        )
+        if result is None:
+            self.stageChanged.emit("Replicate failed → recapturing")
+            self.continueCap.emit()
+            return
+
+        if result == 'Multiple':
+            self.stageChanged.emit("Multiple droplets at this pressure → record as invalid and advance")
+            # record failure footprint and move on
+            self._record_pressure_result(valid=False)
+            self.i += 1
+            self.nextPressure.emit()
+            return
+
+        focus_val = float(result.get('focus', 0.0))
+        self.presentImageSignal.emit(annotated)
+
+        # focus control (same policy as your search process)
+        if focus_val < self.focus_ok_threshold:
+            if self._focus_best <= 0.0:
+                self._focus_best = focus_val
+
+            improved = (focus_val >= (1.0 + self._min_focus_gain) * self._focus_best)
+            if improved:
+                self._focus_best = focus_val
+                self._focus_same_dir_tries = 0
+                self.focus_step = max(self.focus_min_step, self.focus_step // 2)
+            else:
+                self._focus_same_dir_tries += 1
+                if self._focus_same_dir_tries >= 3:
+                    self._focus_same_dir_tries = 0
+                    self.focus_dir *= -1
+                    self.focus_dir_switches += 1
+                    self.focus_step = min(16, max(self.focus_min_step, self.focus_step * 2))
+                    if self.focus_dir_switches > 6:
+                        self.stageChanged.emit("Focus oscillation limit reached → advance pressure")
+                        self._record_pressure_result(valid=False)
+                        self.i += 1
+                        self.nextPressure.emit()
+                        return
+
+            self._focus_moves_done += 1
+            if self._focus_moves_done > 60:
+                self.stageChanged.emit("Focus budget exceeded → advance pressure")
+                self._record_pressure_result(valid=False)
+                self.i += 1
+                self.nextPressure.emit()
+                return
+
+            dY = int(self.focus_dir * self.focus_step)
+            self.stageChanged.emit(f"Focus low ({focus_val:.0f}) → Y move {dY} steps")
+            cur = self.model.machine_model.get_current_position_dict()
+            self._safe_move_abs((cur['X'], cur['Y'] + dY, cur['Z']))
+            return
+
+        # Accept replicate
+        self.focus_step = max(self.focus_min_step, self.focus_step // 2)
+        self.circularity_values.append(float(result.get("circularity_ellipse", 99.0)))
+        self.droplet_positions.append(tuple(map(int, result.get("center", (0,0)))))
+        self.droplet_focus.append(focus_val)
+        self.droplet_volumes.append(float(result.get("volume", 0.0)))
+        self.image_counter += 1
+
+        if self.image_counter < self.num_images:
+            self.continueCap.emit()
+        else:
+            self.analyzeBatch.emit()
+
+    @Slot()
+    def onAnalyzeBatch(self):
+        # Only keep “good” (circular) replicates
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
+        if len(good) < max(3, self.num_images // 2):
+            self.stageChanged.emit("Too few good replicates (circularity) → mark invalid and continue")
+            self._record_pressure_result(valid=False)
+        else:
+            mean_vol = float(np.mean(good))
+            cv_vol   = float(np.std(good) / (mean_vol + 1e-9) * 100.0)
+            mean_center = tuple(np.mean(np.array(self.droplet_positions), axis=0).astype(int))
+
+            machine_position = self.model.machine_model.get_current_position_dict()
+            drop_machine = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
+                mean_center, machine_position
+            )
+
+            self.samples.append({
+                "pressure": float(self.cur_pressure),
+                "delay_us": int(self.current_delay_us),
+                "mean_center_px": mean_center,
+                "mean_volume": mean_vol,
+                "cv_volume_percent": cv_vol,
+                "positions_px": [tuple(map(int, p)) for p in self.droplet_positions],
+                "volumes": [float(v) for v in self.droplet_volumes],
+                "focus_values": [float(f) for f in self.droplet_focus],
+                "circularity_values": [float(c) for c in self.circularity_values],
+                "mean_position_machine": drop_machine,
+                "valid": True
+            })
+
+        # advance plan
+        self.i += 1
+        self._reset_char_buffers()
+        self.nextPressure.emit()
+
+    def _record_pressure_result(self, valid: bool):
+        self.samples.append({
+            "pressure": float(self.cur_pressure),
+            "delay_us": int(self.current_delay_us or self.target_delay_us),
+            "mean_center_px": None,
+            "mean_volume": None,
+            "cv_volume_percent": None,
+            "positions_px": [],
+            "volumes": [],
+            "focus_values": [],
+            "circularity_values": [],
+            "mean_position_machine": None,
+            "valid": bool(valid)
+        })
+
+    @Slot()
+    def onCompleted(self):
+        result = {
+            "pressures": self.samples,
+            "order": "desc",
+            "sphere_delay_us": int(self.sphere_delay_us),
+            "nozzle_center_px": self.nozzle_center_px,
+            "nozzle_center_machine": self.nozzle_center_machine,
+            "emergence_time_us": int(self.emergence_time_us),
+        }
+        self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+        self.stageChanged.emit("Pressure sweep characterization complete")
+        self.calibrationCompleted.emit()
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
