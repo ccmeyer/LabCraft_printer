@@ -348,9 +348,10 @@ class CalibrationManager(QObject):
             self, self.model, manual_start=True)
         self.start_active_calibration()
 
-    def start_pressure_sweep_characterization(self, *, sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
+    def start_pressure_sweep_characterization(self, *, p_step=0.2, sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
         self.activeCalibration = PressureSweepCharacterizationProcess(
             self, self.model,
+            p_step=p_step,
             sphere_delay_us=sphere_delay_us,
             replicates_per_pressure=replicates_per_pressure,
             order=order
@@ -3422,15 +3423,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             band = self.calibration_manager.get_primary_pressure_band()
             if band:
                 p_lo, p_hi = float(band[0]), float(band[1])
-                p_mid = round((p_lo + p_hi) / 2.0, 5)
-                pressures = [round(p_lo, 5), p_mid, round(p_hi, 5)]
+                p_mid = round((p_lo + p_hi) / 2.0, 3)
+                pressures = [round(p_lo, 3), p_mid, round(p_hi, 3)]
             else:
                 try:
                     cur = float(self.model.machine_model.get_print_pressure())
                 except Exception:
                     hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
                     cur = (hw_lo + hw_hi) * 0.5
-                pressures = [round(cur, 5)]
+                pressures = [round(cur, 3)]
         self.pressures = list(pressures)
         self.p_index = 0
         self._current_pressure = None
@@ -4587,6 +4588,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  calibration_manager,
                  model,
                  *,
+                 p_step: float = 0.02,               # pressure grid step (psi)
                  sphere_delay_us: int = 8000,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
@@ -4613,18 +4615,47 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         else:
             self._ready = True
 
-        # list of (pressure, fit) we’ll actually use (only with a valid fit)
+        # list of (pressure, fit) we’ll actually use (build grid from traj min/max using scan step)
         self.plan = []
         if self._ready:
-            for rec in traj["pressures"]:
-                if rec.get("fit"):
-                    p = float(rec["pressure"])
-                    fit = rec["fit"]
-                    vx = float(fit.get("vx_px_per_us", 0.0))
-                    vy = float(fit.get("vy_px_per_us", 0.0))
-                    self.plan.append({"pressure": p, "vx": vx, "vy": vy})
-            if not self.plan:
-                self.calibrationError.emit("Trajectory scan had no valid fits to use.")
+            all_tested = [float(rec.get("pressure")) for rec in traj["pressures"] if "pressure" in rec]
+            if not all_tested:
+                self.calibrationError.emit("Trajectory scan returned no tested pressures.")
+                self._ready = False
+            else:
+                p_lo, p_hi = min(all_tested), max(all_tested)
+
+                # step size from the pressure-scan spin box (robust fallbacks)
+                step = float(p_step or 0.02)
+                if step <= 0:
+                    step = 0.02
+
+                grid = self._make_pressure_grid(p_lo, p_hi, step)
+
+                # Collect valid fit points for interpolation
+                fit_pts = [
+                    (float(rec["pressure"]),
+                    float(rec["fit"].get("vx_px_per_us", 0.0)),
+                    float(rec["fit"].get("vy_px_per_us", 0.0)))
+                    for rec in traj["pressures"] if rec.get("fit")
+                ]
+                if not fit_pts:
+                    self.calibrationError.emit("Trajectory scan had no valid fits to interpolate velocities.")
+                    self._ready = False
+                else:
+                    fit_pts.sort(key=lambda t: t[0])
+                    P_fit  = np.array([t[0] for t in fit_pts], dtype=float)
+                    VX_fit = np.array([t[1] for t in fit_pts], dtype=float)
+                    VY_fit = np.array([t[2] for t in fit_pts], dtype=float)
+
+                    # piecewise-linear interpolation; numpy.interp clamps to ends
+                    for p in grid:
+                        vx = float(np.interp(p, P_fit, VX_fit))
+                        vy = float(np.interp(p, P_fit, VY_fit))
+                        self.plan.append({"pressure": float(round(p, 3)), "vx": vx, "vy": vy})
+
+            if self._ready and not self.plan:
+                self.calibrationError.emit("No pressures to characterize after planning.")
                 self._ready = False
 
         if order.lower().startswith("desc"):
@@ -4827,6 +4858,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _clamp_delay(self, d_us: int) -> int:
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
+
+    def _make_pressure_grid(self, p_lo: float, p_hi: float, step: float) -> list[float]:
+        """Inclusive grid from p_lo to p_hi using step, rounded nicely."""
+        lo, hi = (float(p_lo), float(p_hi))
+        if hi < lo:
+            lo, hi = hi, lo
+        if step <= 0:
+            step = 0.05
+        n = int(max(1, round((hi - lo) / step))) + 1
+        grid = [round(lo + i * step, 3) for i in range(n)]
+        if grid[-1] < hi - 1e-6:
+            grid.append(round(hi, 3))
+        return grid
 
     # ---------- states ----------
     @Slot()

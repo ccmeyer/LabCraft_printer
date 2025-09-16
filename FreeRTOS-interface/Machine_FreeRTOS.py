@@ -1486,7 +1486,7 @@ class Machine(QObject):
         return round(((pressure - self.psi_offset) / self.fss) * self.psi_max,4)
     
     def convert_to_raw_pressure(self,psi):
-        return int((psi / self.psi_max) * self.fss + self.psi_offset)
+        return int(round((psi / self.psi_max) * self.fss + self.psi_offset, 0))
 
     def set_relative_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
         pressure = self.convert_to_raw_pressure(psi)

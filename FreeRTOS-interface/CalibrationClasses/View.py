@@ -1095,6 +1095,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Toggles whether the pressure sweep characterization calibration should be started.
         """
+        step  = float(self.scan_p_step_spin.value())
+        if step <= 0:
+            QtWidgets.QMessageBox.warning(self, "Invalid step",
+                                          "Step must be > 0.")
+            return
+
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
             self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
@@ -1102,7 +1108,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             print('Starting calibration')
             self.calibrate_pressure_sweep_button.setText("Stop Calibration")
-            self.controller.start_pressure_sweep_characterization()
+            self.controller.start_pressure_sweep_characterization(p_step=step)
 
     def toggle_start_all_calibration(self):
         """
