@@ -4401,6 +4401,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         tol = 150
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
+            self._centered = True
+            self._char_need_capture = True   # first entry to char should capture
             self.emitDropletCentered()
             return
 
@@ -4576,6 +4578,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     continueSearch  = Signal()
     dropletFound    = Signal()
     dropletCentered = Signal()
+    readyToCharacterize = Signal()
     analyzeBatch    = Signal()
     nextPressure    = Signal()
     finalize        = Signal()
@@ -4642,6 +4645,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # characterize buffers (per pressure)
         self._reset_char_buffers()
+        self._centered = False
+        self._char_need_capture = False
 
         # stage bounds safety
         self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
@@ -4693,20 +4698,24 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.state_capBG.addTransition(self.calibration_manager.captureCompleted, self.state_setDelay)
 
         self.state_setDelay.addTransition(self.delayApplied, self.state_capture)
+        self.state_set_delay.addTransition(self.moveDone, self.state_set_delay)
         self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
 
         # search: loop until found or retries exhausted
         self.state_analyze.addTransition(self.continueSearch, self.state_setDelay)  # keep sweeping delay
         self.state_analyze.addTransition(self.dropletFound,  self.state_center)
+        self.state_analyze.addTransition(self.readyToCharacterize, self.state_char)
 
         # center -> either continue search if lost, or go characterize when centered
         self.state_center.addTransition(self.continueSearch, self.state_setDelay)
         self.state_center.addTransition(self.dropletCentered, self.state_char)
+        self.state_center.addTransition(self.moveDone, self.state_capture)  # recapture after recenter move
 
         # characterization loop
         self.state_char.addTransition(self.continueCap,  self.state_capture)
         self.state_char.addTransition(self.analyzeBatch, self.state_anBatch)
-
+        self.state_char.addTransition(self.moveDone,   self.state_capture)  # recapture after focus move
+        
         # after analysis, go to next pressure
         self.state_anBatch.addTransition(self.nextPressure, self.state_pick)
 
@@ -4835,6 +4844,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
                                f"(vx={vx:.4f} px/µs, vy={vy:.4f} px/µs)")
         self._reset_char_buffers()
+        self._centered = False
+        self._char_need_capture = False
         self.pressureReady.emit()
 
     @Slot()
@@ -4868,15 +4879,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onSetDelay(self):
-        # sweep around the target delay until droplet found
         if self._delay_try_index >= len(self._delay_offsets_us):
             # simple nudge along predicted path and restart delay sweep
             self._delay_try_index = 0
-            vX, vY, vZ = self.vec_steps_per_s
             nudge = 0.002
             self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
-            self._safe_move_abs(self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us + int(1000 * nudge)))
-
+            self._safe_move_abs(
+                self._predict_target_xyz(self.vec_steps_per_s,
+                                        self.target_delay_us + int(1000 * nudge))
+            )
+            return  # <<< wait for moveDone
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
         self._delay_try_index += 1
         self.current_delay_us = self._clamp_delay(d)
@@ -4912,7 +4924,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.presentImageSignal.emit(overlay)
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
-        self.dropletFound.emit()
+        if self._centered:
+            # In replicate mode: go straight to characterization (don’t re-center)
+            self.readyToCharacterize.emit()
+        else:
+            # In search mode: go center it
+            self.dropletFound.emit()
+        return
 
     @Slot()
     def onCenter(self):
@@ -4952,6 +4970,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCharacterizeLoop(self):
+        # First time after centering: capture a fresh frame
+        if self._char_need_capture:
+            self._char_need_capture = False
+            self.continueCap.emit()
+            return
         # capture a replicate; when focus inadequate, adjust Y and recapture
         result, annotated = self.model.droplet_camera_model.characterize_droplet(
             self.droplet_image, self.background_image
