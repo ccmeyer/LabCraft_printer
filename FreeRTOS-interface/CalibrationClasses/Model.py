@@ -4698,7 +4698,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.state_capBG.addTransition(self.calibration_manager.captureCompleted, self.state_setDelay)
 
         self.state_setDelay.addTransition(self.delayApplied, self.state_capture)
-        self.state_set_delay.addTransition(self.moveDone, self.state_set_delay)
+        self.state_setDelay.addTransition(self.moveDone, self.state_setDelay)
         self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
 
         # search: loop until found or retries exhausted
