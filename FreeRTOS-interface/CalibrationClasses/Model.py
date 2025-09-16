@@ -2600,7 +2600,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  classification_delay_us: int | None = None,
                  # Safety additions
                  reverse_order: bool = True,
-                 safety_clearance_px: int = 50,   # distance below nozzle that triggers auto-stop
+                 safety_clearance_px: int = 300,   # distance below nozzle that triggers auto-stop
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -2790,16 +2790,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         )
         self.presentImageSignal.emit(overlay)
 
-        # --- SAFETY CHECK 1: nozzle wetness
-        if self.auto_stop_on_nozzle_wet and (nozzle_area and nozzle_area > self.nozzle_area_threshold):
-            self._early_stop = True
-            self._stop_reason = f"Nozzle wet (area={int(nozzle_area)})"
-            self._terminate_at_pressure = float(self._current_pressure)
-            self.stageChanged.emit(
-                f"Safety stop: nozzle wet at {self._current_pressure:.3f} psi"
-            )
-            self.finalize.emit()
-            return
+        # # --- SAFETY CHECK 1: nozzle wetness
+        # if self.auto_stop_on_nozzle_wet and (nozzle_area and nozzle_area > self.nozzle_area_threshold):
+        #     self._early_stop = True
+        #     self._stop_reason = f"Nozzle wet (area={int(nozzle_area)})"
+        #     self._terminate_at_pressure = float(self._current_pressure)
+        #     self.stageChanged.emit(
+        #         f"Safety stop: nozzle wet at {self._current_pressure:.3f} psi"
+        #     )
+        #     self.finalize.emit()
+        #     return
 
         # --- SAFETY CHECK 2: proximity (loose pass, zero clearance)
         nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
@@ -2811,19 +2811,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         #     satellite_band_px=12,
         #     min_free_offset_px=0
         # )
-        if droplets:
-            dy_below = [ (cy - ny) for (cx, cy) in droplets if cy >= ny ]
-            if dy_below:
-                min_dy = min(dy_below)
-                if min_dy < self.safety_clearance_px:
-                    self._early_stop = True
-                    self._stop_reason = f"Droplet too close to nozzle (dy={int(min_dy)} px < {self.safety_clearance_px})"
-                    self._terminate_at_pressure = float(self._current_pressure)
-                    self.stageChanged.emit(
-                        f"Safety stop: droplet too close (dy={int(min_dy)} px) at {self._current_pressure:.3f} psi"
-                    )
-                    self.finalize.emit()
-                    return
+        if droplets is not None and len(droplets) > 0:
+            if len(droplets) == 1:
+                dy_below = [ (cy - ny) for (cx, cy) in droplets if cy >= ny ]
+                if dy_below:
+                    min_dy = min(dy_below)
+                    if min_dy < self.safety_clearance_px:
+                        self._early_stop = True
+                        self._stop_reason = f"Droplet too close to nozzle (dy={int(min_dy)} px < {self.safety_clearance_px})"
+                        self._terminate_at_pressure = float(self._current_pressure)
+                        self.stageChanged.emit(
+                            f"Safety stop: droplet too close (dy={int(min_dy)} px) at {self._current_pressure:.3f} psi"
+                        )
+                        self.finalize.emit()
+                        return
 
         # --- classification for this replicate
         cls = self._classify_from_detection(droplets)
@@ -3414,7 +3415,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             except Exception:
                 pw = 1500
             start = int((self.emergence_time_us or 1000) + pw + 1000)
-            step = 1000
+            step = 500
             delays_us = [start + i * step for i in range(5)]
         self.delays_us = list(map(int, delays_us))
         self.d_index = 0
