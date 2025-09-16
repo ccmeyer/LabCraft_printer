@@ -2635,7 +2635,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 pw = int(self.model.machine_model.get_print_pulse_width())
             except Exception:
                 pw = 1500
-            classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1000))
+            classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1300))
         self.classify_delay_us = int(classification_delay_us)
 
         # --- pressure range & hardware clamping ---
@@ -3442,8 +3442,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 pw = int(self.model.machine_model.get_print_pulse_width())
             except Exception:
                 pw = 1500
-            start = int((self.emergence_time_us or 1000) + pw + 1000)
-            step  = 500
+            start = int((self.emergence_time_us or 1000) + pw + 1500)
+            step  = 700
             delays_us = [start + i * step for i in range(3)]
         self.delays_us = sorted(list(map(int, delays_us)))
         self.d_index = 0

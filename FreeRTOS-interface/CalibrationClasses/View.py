@@ -1102,7 +1102,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             print('Starting calibration')
             self.calibrate_pressure_sweep_button.setText("Stop Calibration")
-            self.controller.start_pressure_sweep_characterization_calibration()
+            self.controller.start_pressure_sweep_characterization()
 
     def toggle_start_all_calibration(self):
         """
