@@ -3948,7 +3948,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         denom = np.sum((t - t_mean) ** 2) or 1.0
         vx = np.sum((t - t_mean) * (x - x.mean())) / denom
         vy = np.sum((t - t_mean) * (y - y.mean())) / denom
-        return float(vx), float(vy)
+        return -float(vx), float(vy)
 
     def _annotate_path_overlay(self, overlay, abs_center_now):
         """
