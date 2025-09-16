@@ -3356,11 +3356,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     Measure droplet trajectory (vx, vy) for one or more pressures.
 
     For each pressure:
-      - (optional) discard the first frame after pressure change (settling)
+      - (optional) discard first frame after pressure change (settling)
       - For each flash delay:
           * take R replicates, keep the *median* center (robust)
-          * stop early if droplet is near the image edge (no larger delays)
-          * stop early if missed for several later delays (miss_streak guard)
+          * if near the image edge, DO NOT try larger delays; instead
+            adaptively insert earlier/mid delays to secure >= min_points
       - Fit a line center(t) -> (vx, vy) using aggregated points (one per delay)
 
     Emits: per-pressure raw aggregated points and the fit.
@@ -3389,6 +3389,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                  discard_first_after_pressure_change: bool = True,
                  edge_guard_px: int = 200,
                  miss_streak_limit: int = 2,
+                 delay_floor_margin_us: int = 300,           # emergence+PW+margin is the earliest allowed
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "pressure_trajectory"
@@ -3429,7 +3430,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             start = int((self.emergence_time_us or 1000) + pw + 1000)
             step  = 500
             delays_us = [start + i * step for i in range(3)]
-        self.delays_us = list(map(int, delays_us))
+        self.delays_us = sorted(list(map(int, delays_us)))
         self.d_index = 0
 
         # --- policy / guards ---
@@ -3439,14 +3440,25 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.discard_first_after_pressure     = bool(discard_first_after_pressure_change)
         self.edge_guard_px                    = int(edge_guard_px)
         self.miss_streak_limit                = int(miss_streak_limit)
+        self.delay_floor_margin_us            = int(delay_floor_margin_us)
+
+        # earliest allowable delay (do not go earlier than this)
+        try:
+            pw = int(self.model.machine_model.get_print_pulse_width())
+        except Exception:
+            pw = 1500
+        self._delay_floor_us = int((self.emergence_time_us or 1000) + pw + self.delay_floor_margin_us)
 
         # --- replicate bookkeeping for current delay ---
-        self._discard_next = False                   # after pressure change
-        self._rep_count    = 0                       # accepted (good) replicates
-        self._rep_buffer   = []                      # relative centers for this delay [(dx,dy),...]
-        self._failed_caps_this_delay = 0             # failed captures at this delay
-        self._miss_streak = 0                        # consecutive misses at *later* delays
-        self._stop_delays_after_this = False         # set when droplet near edge
+        self._discard_next = False
+        self._rep_count    = 0
+        self._rep_buffer   = []
+        self._failed_caps_this_delay = 0
+        self._miss_streak = 0
+        self._stop_delays_after_this = False
+
+        # track which delays have been aggregated (or skipped)
+        self._completed: list[bool] = [False] * len(self.delays_us)
 
         # --- accumulators ---
         # points: aggregated timepoints (one per delay): [{"t_us": int, "center_px": (dx,dy)} ...]
@@ -3472,30 +3484,20 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.state_final.entered.connect(self.onCalibrationCompleted)
 
         # ---------- transitions (bound signals; robust) ----------
-        # prepare -> apply when settings change acknowledged
         self.state_prepare_bg.addTransition(
             self.calibration_manager.settingsChangeCompleted, self.state_apply
         )
-        # allow finalize from any state
         for st in (self.state_prepare_bg, self.state_apply, self.state_set_delay,
                    self.state_capture, self.state_analyze, self.state_decide):
             st.addTransition(self.finalize, self.state_final)
 
-        # apply -> capture when pressure (and initial delay) applied
         self.state_apply.addTransition(self.pressureApplied, self.state_capture)
-
-        # set_delay -> capture once delay applied
         self.state_set_delay.addTransition(self.delayApplied, self.state_capture)
-
-        # capture -> analyze when image is ready
         self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
-
-        # analyze -> decide
         self.state_analyze.addTransition(self.timepointReady, self.state_decide)
 
-        # decide loops:
-        self.state_decide.addTransition(self.continueCapture, self.state_capture)   # more replicates, same delay
-        self.state_decide.addTransition(self.setNextDelay,    self.state_set_delay) # next delay
+        self.state_decide.addTransition(self.continueCapture, self.state_capture)   # more reps at same delay
+        self.state_decide.addTransition(self.setNextDelay,    self.state_set_delay) # move to another delay
         self.state_decide.addTransition(self.advancePressure, self.state_apply)     # next pressure
 
         # register states
@@ -3522,12 +3524,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onApplyPressure(self):
-        # Finalize if all pressures done
         if self.p_index >= len(self.pressures):
             self.finalize.emit()
             return
 
-        # New pressure → reset per-pressure buffers
         target = float(self.pressures[self.p_index])
         if self._current_pressure != target:
             self._current_pressure = target
@@ -3537,26 +3537,33 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self._miss_streak = 0
             self._stop_delays_after_this = False
             self._discard_next = bool(self.discard_first_after_pressure)
+            # reset completion map for this pressure
+            self._completed = [False] * len(self.delays_us)
 
-        # Apply pressure + initial delay
+        # pick earliest uncompleted delay to start
+        nxt = self._find_next_uncompleted_index(prefer="earliest")
+        if nxt is None:
+            # no work to do at this pressure
+            self._finish_pressure_and_advance()
+            return
+        self.d_index = nxt
+
         delay = int(self.delays_us[self.d_index])
         settings = {"print_pressure": self._current_pressure, "num_droplets": 1, "flash_delay": delay}
         self.stageChanged.emit(
             f"Trajectory: P={self._current_pressure:.3f} psi, delay={delay} µs "
-            f"({self.d_index+1}/{len(self.delays_us)})"
+            f"({self._completed.count(True)+1}/{len(self.delays_us)})"
         )
         def _after(): self.pressureApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
 
     @Slot()
     def onSetDelay(self):
-        # Guard
         if self._current_pressure is None or not (0 <= self.d_index < len(self.delays_us)):
             self.calibrationError.emit("Internal error: invalid delay/pressure state.")
             self.finalize.emit()
             return
 
-        # Reset delay-local state
         self._reset_delay_state()
 
         delay = int(self.delays_us[self.d_index])
@@ -3568,7 +3575,6 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureTimepoint(self):
-        # Guard
         if self._current_pressure is None or not (0 <= self.d_index < len(self.delays_us)):
             self.calibrationError.emit("Capture guard failed (pressure/delay invalid).")
             self.finalize.emit()
@@ -3586,11 +3592,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyzeTimepoint(self):
-        # Discard the very first frame after pressure change (settling)
         if self._discard_next:
             self._discard_next = False
             self.stageChanged.emit("Settling frame discarded; re-capturing")
-            # Do NOT count as a fail; just loop capture again
             self.timepointReady.emit()
             return
 
@@ -3607,117 +3611,107 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         edge_close_now = False
         abs_center = None
 
-        if droplets and (len(droplets) == 1) and not nozzle_area:
+        if droplets and (len(droplets) == 1):
             (cx, cy) = droplets[0]
             nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
-            dx, dy = float(cx - nx), float(cy - ny)   # relative to nozzle
+            dx, dy = float(cx - nx), float(cy - ny)
             self._rep_buffer.append((dx, dy))
             self._rep_count += 1
             self._failed_caps_this_delay = 0
             good = True
             abs_center = (int(cx), int(cy))
 
-            # Edge check (use absolute coords)
+            # Edge check
             h, w = self.droplet_image.shape[:2]
             if (cx < self.edge_guard_px or cx > (w-1 - self.edge_guard_px) or
                 cy < self.edge_guard_px or cy > (h-1 - self.edge_guard_px)):
                 edge_close_now = True
-                self._stop_delays_after_this = True  # don't attempt larger delays
-
-            # If we are at *later* delays and start missing, we use _miss_streak;
-            # because this is a good hit, reset the streak:
+                # We won't schedule larger delays; we will adapt earlier/mid delays in decide
+                self._stop_delays_after_this = True
             self._miss_streak = 0
         else:
-            # bad capture at this delay
             self._failed_caps_this_delay += 1
-            # Count a "miss" only once we are beyond the first delay; likely it's leaving the FOV
             if self.d_index > 0:
                 self._miss_streak += 1
 
-        # annotate with current & historical path
+        # annotate path
         try:
             overlay = self._annotate_path_overlay(overlay, abs_center)
         except Exception:
-            # If annotation fails, still show the original overlay.
             pass
 
         self.presentImageSignal.emit(overlay)
         self._analyze_good = good
         self._edge_close_now = edge_close_now
-
         self.timepointReady.emit()
 
     @Slot()
     def onDecide(self):
-        """
-        Decide what to do after one capture:
-          - more replicates at this delay,
-          - next delay,
-          - or fit & advance pressure / finalize.
-        """
-        # 1) If capture failed too many times, abandon this delay:
+        # 1) too many fails at this delay → mark completed (skipped) and move on
         if self._failed_caps_this_delay >= self.max_failed_captures_per_delay:
             self.stageChanged.emit(
                 f"Delay {self.delays_us[self.d_index]} µs: too many failed captures → skipping"
             )
-            self._failed_caps_this_delay = 0
-            self._rep_buffer.clear()
-            self._rep_count = 0
-            # If more delays exist, go next; else finish this pressure (fit or mark insufficient)
-            if (self.d_index + 1) < len(self.delays_us):
-                self.d_index += 1
-                self.setNextDelay.emit()
-            else:
+            self._mark_current_delay_completed(aggregated=False)
+            nxt = self._pick_next_delay_index()
+            if nxt is None:
                 self._finish_pressure_and_advance()
+            else:
+                self.d_index = nxt
+                self.setNextDelay.emit()
             return
 
-        # 2) If we haven't reached the replicate target *and* the last capture was good:
+        # 2) need more replicates at this delay (last capture was good)
         if self._rep_count < self.replicates_per_delay and self._analyze_good:
-            # Take another replicate at the same delay
             self.continueCapture.emit()
             return
 
-        # 3) If last capture was bad but we haven't exceeded fail cap, try again (same delay)
+        # 3) last capture was bad but we haven't exceeded fail cap → retry same delay
         if not self._analyze_good:
             self.continueCapture.emit()
             return
 
-        # 4) We have enough replicates at this delay -> aggregate a timepoint
+        # 4) aggregate a timepoint for this delay
         if self._rep_count >= self.replicates_per_delay and len(self._rep_buffer) > 0:
             dx_med = float(np.median([p[0] for p in self._rep_buffer]))
             dy_med = float(np.median([p[1] for p in self._rep_buffer]))
-            self.points.append({
-                "t_us": int(self.delays_us[self.d_index]),
-                "center_px": (dx_med, dy_med)
-            })
+            t_now  = int(self.delays_us[self.d_index])
+            self.points.append({"t_us": t_now, "center_px": (dx_med, dy_med)})
+            self._mark_current_delay_completed(aggregated=True)
 
-            # prepare for next delay
-            # if we were near the edge at this delay, stop trying larger delays
-            near_edge_stop = self._stop_delays_after_this
+            # If near the edge, adapt the plan so we can still hit min_points.
+            if self._stop_delays_after_this and len(self.points) < self.min_points:
+                inserted = self._ensure_min_points_by_inserting_earlier_delays()
+                if not inserted and len(self.points) < self.min_points:
+                    # As a secondary attempt, try inserting a midpoint between earliest two sampled points
+                    self._insert_midpoint_delay_if_helpful()
 
-            self._reset_delay_state()
+                # Pick the earliest uncompleted delay next (avoid larger delays near edge)
+                nxt = self._find_next_uncompleted_index(prefer="earliest")
+                if nxt is None:
+                    # Could not schedule anything else
+                    self._finish_pressure_and_advance()
+                else:
+                    self.d_index = nxt
+                    self.setNextDelay.emit()
+                return
 
-            # 4a) If we should stop adding larger delays (near edge):
-            if near_edge_stop:
-                self.stageChanged.emit("Near image edge → stop adding larger delays")
+            # Also stop if we've been missing repeatedly at later delays
+            if self._miss_streak >= self.miss_streak_limit and len(self.points) >= self.min_points:
+                self.stageChanged.emit(f"Miss streak (≥{self.miss_streak_limit}) → stop larger delays")
                 self._finish_pressure_and_advance()
                 return
 
-            # 4b) If we've missed several times in a row at later delays, also stop:
-            if self._miss_streak >= self.miss_streak_limit:
-                self.stageChanged.emit(f"Miss streak (≥{self.miss_streak_limit}) → stop adding larger delays")
+            # Otherwise: pick next delay (prefer > current if not at edge; earliest if at edge)
+            nxt = self._pick_next_delay_index()
+            if nxt is None:
                 self._finish_pressure_and_advance()
-                return
-
-            # 4c) Otherwise, continue if more delays exist; else finish this pressure
-            if (self.d_index + 1) < len(self.delays_us):
-                self.d_index += 1
-                self.setNextDelay.emit()
             else:
-                self._finish_pressure_and_advance()
+                self.d_index = nxt
+                self.setNextDelay.emit()
             return
 
-        # Fallback (shouldn't hit): keep capturing
+        # Fallback: keep capturing at this delay
         self.continueCapture.emit()
 
     # ----------------- end states -----------------
@@ -3756,6 +3750,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._reset_delay_state()
         self._miss_streak = 0
         self._stop_delays_after_this = False
+        self._completed = [False] * len(self.delays_us)
 
         if self.p_index >= len(self.pressures):
             self.finalize.emit()
@@ -3771,22 +3766,139 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             "nozzle_center_px": self.nozzle_center_px,
             "emergence_time_us": self.emergence_time_us
         }
-        self.calibrationDataUpdated.emit({
-            "measurements": [],
-            "result": result
-        })
+        self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self.stageChanged.emit("Trajectory calibration complete")
         self.calibrationCompleted.emit()
 
     # ----------------- helpers -----------------
 
     def _reset_delay_state(self):
-        """Reset per-delay replicate counters/buffers."""
         self._rep_count = 0
         self._rep_buffer = []
         self._failed_caps_this_delay = 0
         self._analyze_good = False
         self._edge_close_now = False
+
+    def _mark_current_delay_completed(self, aggregated: bool):
+        # Bounds guard
+        if 0 <= self.d_index < len(self._completed):
+            self._completed[self.d_index] = True
+        self._reset_delay_state()
+
+    def _typical_step_us(self) -> int:
+        d = sorted(set(self.delays_us))
+        if len(d) < 2:
+            return 500
+        diffs = [b - a for a, b in zip(d[:-1], d[1:])]
+        diffs.sort()
+        step = int(diffs[len(diffs)//2])
+        return max(100, step)
+
+    def _ensure_min_points_by_inserting_earlier_delays(self) -> bool:
+        """
+        If we don't yet have min_points and we're near the edge, insert earlier delays
+        (and mark them uncompleted) until we *can* reach min_points, staying above the floor.
+        Returns True if we inserted any new delays.
+        """
+        needed = self.min_points - len(self.points)
+        if needed <= 0:
+            return False
+
+        inserted_any = False
+        step = max(100, self._typical_step_us() // 2)  # go denser & earlier
+        current_first = min(self.delays_us) if self.delays_us else self._delay_floor_us + step
+        cands = []
+        t = current_first
+
+        while needed > 0:
+            t_new = t - step
+            if t_new < self._delay_floor_us:
+                break
+            cands.append(int(t_new))
+            t = t_new
+            needed -= 1
+
+        if not cands:
+            return False
+
+        # merge + sort; rebuild completion map keeping completed marks for existing delays
+        existing = list(zip(self.delays_us, self._completed))
+        # add new ones as uncompleted
+        for c in cands:
+            existing.append((c, False))
+
+        existing.sort(key=lambda x: x[0])
+        self.delays_us = [x[0] for x in existing]
+        self._completed = [x[1] for x in existing]
+        inserted_any = True
+        return inserted_any
+
+    def _insert_midpoint_delay_if_helpful(self):
+        """
+        Insert a midpoint delay between the two *earliest* aggregated timepoints,
+        only if it helps reach min_points and remains above the floor.
+        """
+        if len(self.points) >= self.min_points:
+            return False
+
+        # need at least one aggregated point; use first aggregated and earliest scheduled delay
+        if not self.points:
+            return False
+
+        # Find the earliest two scheduled delays (whether completed or not)
+        delays_sorted = sorted(self.delays_us)
+        if len(delays_sorted) < 2:
+            return False
+
+        a, b = delays_sorted[0], delays_sorted[1]
+        mid = int((a + b) // 2)
+        if mid <= self._delay_floor_us:
+            return False
+        if mid in self.delays_us:
+            return False
+
+        # Insert midpoint as uncompleted and keep list sorted
+        existing = list(zip(self.delays_us, self._completed))
+        existing.append((mid, False))
+        existing.sort(key=lambda x: x[0])
+        self.delays_us = [x[0] for x in existing]
+        self._completed = [x[1] for x in existing]
+        return True
+
+    def _find_next_uncompleted_index(self, prefer: str = "after_current"):
+        """
+        prefer:
+          - "after_current": next uncompleted index > current, else earliest uncompleted
+          - "earliest": earliest uncompleted index
+        """
+        n = len(self.delays_us)
+        if n == 0:
+            return None
+
+        if prefer == "earliest":
+            for i, done in enumerate(self._completed):
+                if not done:
+                    return i
+            return None
+
+        # after_current
+        for i in range(self.d_index + 1, n):
+            if not self._completed[i]:
+                return i
+        for i in range(0, self.d_index + 1):
+            if not self._completed[i]:
+                return i
+        return None
+
+    def _pick_next_delay_index(self):
+        """
+        Choose the next delay depending on whether we're near the edge.
+        - If near the edge: prefer the earliest uncompleted delay (avoid larger delays)
+        - Else: prefer the next uncompleted delay after current
+        """
+        if self._stop_delays_after_this:
+            return self._find_next_uncompleted_index(prefer="earliest")
+        return self._find_next_uncompleted_index(prefer="after_current")
 
     def _fit_velocity(self, points):
         """Least-squares for x(t), y(t). Returns (vx, vy) in px/µs."""
@@ -3802,19 +3914,16 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     def _annotate_path_overlay(self, overlay, abs_center_now):
         """
         Draw historical aggregated points (green) and current replicate center (cyan).
-        Also draw nozzle center marker and a polyline path.
+        Also draw nozzle center marker and a polyline path + edge guard box.
         """
         if overlay is None:
             return overlay
-
         if overlay.ndim == 2:
             overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
 
-        # Nozzle center
         nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
         cv2.drawMarker(overlay, (nx, ny), (255, 0, 0), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)
 
-        # Historical aggregated points (green) + polyline
         if self.points:
             pts_abs = []
             for p in self.points:
@@ -3822,19 +3931,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 cx, cy = int(round(nx + dx)), int(round(ny + dy))
                 pts_abs.append((cx, cy))
                 cv2.circle(overlay, (cx, cy), 4, (0, 200, 0), -1)
-            if len(pts_abs) >= 2:
-                for i in range(len(pts_abs)-1):
-                    cv2.line(overlay, pts_abs[i], pts_abs[i+1], (0, 200, 0), 1)
+            for i in range(len(pts_abs) - 1):
+                cv2.line(overlay, pts_abs[i], pts_abs[i+1], (0, 200, 0), 1)
 
-        # Current replicate center (cyan)
         if abs_center_now is not None:
             cv2.circle(overlay, abs_center_now, 4, (200, 200, 0), -1)
 
-        # Edge guard box (visualization)
         h, w = overlay.shape[:2]
         eg = self.edge_guard_px
         cv2.rectangle(overlay, (eg, eg), (w-1-eg, h-1-eg), (80, 80, 80), 1)
-
         return overlay
     
 class DropletSearchCalibrationProcess(BaseCalibrationProcess):
