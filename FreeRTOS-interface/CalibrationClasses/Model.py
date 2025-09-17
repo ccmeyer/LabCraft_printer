@@ -1,3 +1,4 @@
+from unittest import result
 import pandas as pd
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -4672,6 +4673,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.focus_ok_threshold = float(focus_ok_threshold)
 
         self.boundary_tol_px = 250          # pixels around image center accepted as "in-bounds"
+        self.center_first_tol_px = 140      # first center attempt tolerance
         self._oob_streak = 0                # consecutive out-of-bound hits
         self._oob_positions = []            # recent out-of-bound centers (pixels)
 
@@ -5070,6 +5072,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.continueCap.emit()
             return
         
+        # ---------- CENTER FIRST ----------
+        center_px = tuple(map(int, result.get("center", (0, 0))))
+        self.presentImageSignal.emit(annotated)
+
+        # If not tightly centered, recenter immediately before any focus work
+        if not self._is_within(center_px, self.center_first_tol_px):
+            self._recentre_immediate(center_px)
+            return  # will recapture after move
+        
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
 
@@ -5208,13 +5219,29 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         cv2.rectangle(img, (W//2 - b, H//2 - b), (W//2 + b, H//2 + b), (80,80,80), 1)
         return img
     
-    def _is_within_boundary(self, center_px) -> bool:
-        """Return True if within the square boundary centered in image."""
+    def _is_within(self, center_px, tol_px:int) -> bool:
+        """Return True if `center_px` is within a tol_px box around the image center."""
         H, W = self.droplet_image.shape[:2]
         cx, cy = int(center_px[0]), int(center_px[1])
         tx, ty = W // 2, H // 2
-        b = int(self.boundary_tol_px)
-        return (abs(cx - tx) <= b) and (abs(cy - ty) <= b)
+        return (abs(cx - tx) <= int(tol_px)) and (abs(cy - ty) <= int(tol_px))
+
+
+    def _recentre_immediate(self, center_px) -> None:
+        """Single-shot recenter to the current droplet center, then recapture."""
+        H, W = self.droplet_image.shape[:2]
+        target = (W // 2, H // 2)
+        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(
+            (int(center_px[0]), int(center_px[1])), target
+        )
+        # center moves are X/Z only; clamp for safety
+        dX = int(max(-1200, min(1200, dX)))
+        dZ = int(max(-1200, min(1200, dZ)))
+
+        cur = self.model.machine_model.get_current_position_dict()
+        self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
+        self._char_need_capture = True  # after motion, take a fresh frame
+        self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
 
     def _check_boundary_and_maybe_recentre(self, center_px) -> bool:
         """
