@@ -4078,7 +4078,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._focus_same_dir_tries = 0
         self._focus_moves_done = 0
         self._focus_move_budget = 60
-        self._min_focus_gain = 0.05
+        self._min_focus_gain = 0.01
 
         # Retry counters
         self._not_found_count, self._not_found_limit = 0, 10
@@ -4331,7 +4331,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             if not self.manual_start and self.vel_steps_per_s:
                 self.stageChanged.emit("Droplet not found yet → nudging along velocity and retrying")
                 vX, vY, vZ = map(float, self.vel_steps_per_s)
-                nudge = 0.002
+                nudge = 0.02
                 self._safe_move_relative((int(vX * nudge), int(vY * nudge), int((-vZ) * nudge)))
             else:
                 self.stageChanged.emit("Droplet not found yet → skipping stage nudge (manual start); retrying delay sweep")
@@ -5968,7 +5968,7 @@ class DropletCameraModel(QObject):
             return None, image
 
         # Determine if there are mutliple large contours
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000]
+        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 10000]
         if len(large_contours) > 1:
             print('Multiple large contours detected')
             cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
