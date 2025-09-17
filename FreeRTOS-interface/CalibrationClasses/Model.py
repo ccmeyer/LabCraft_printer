@@ -5249,7 +5249,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         Only after >=2 consecutive OOB hits do a single recenter move to the *average*
         of those OOB centers. Returns True iff a move was issued.
         """
-        if self._is_within_boundary(center_px):
+        if self._is_within(center_px, self.boundary_tol_px):
             # Good sample → reset streak
             self._oob_streak = 0
             self._oob_positions.clear()
