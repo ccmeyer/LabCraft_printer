@@ -4797,6 +4797,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.droplet_positions = []
         self.droplet_focus = []
         self.measurements = []
+
+        # track multiple-droplet frames & a guard to prevent hangs
+        self.multiple_droplet_hits = 0
+        self._char_attempts = 0
+        # e.g., allow up to 4× the requested replicates worth of attempts
+        self._char_attempt_limit = max(3 * self.repl_target, self.repl_target + 20)
+
+
         # focus controls
         self.focus_ok_threshold = float(self.focus_ok_threshold)
         self.focus_dir, self.focus_step = +1, 16
@@ -5032,19 +5040,36 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         result, annotated = self.model.droplet_camera_model.characterize_droplet(
             self.droplet_image, self.background_image
         )
+
+        # Count every frame we evaluate so we can bail out safely if needed
+        self._char_attempts += 1
+
         if result is None:
             self.stageChanged.emit("Replicate failed → recapturing")
+            if self._char_attempts >= self._char_attempt_limit:
+                self.stageChanged.emit("Too many failed frames → analyzing partial batch")
+                self.analyzeBatch.emit()
+                return
             self.continueCap.emit()
             return
 
+        # tolerate multiple droplets — log and keep going, do not count as a replicate
         if result == 'Multiple':
-            self.stageChanged.emit("Multiple droplets at this pressure → record as invalid and advance")
-            # record failure footprint and move on
-            self._record_pressure_result(valid=False)
-            self.i += 1
-            self.nextPressure.emit()
+            self.multiple_droplet_hits += 1
+            self.measurements.append({
+                "flash_delay": int(self.current_delay_us),
+                "pressure": float(self.cur_pressure),
+                "event": "multiple_droplets"
+            })
+            self.presentImageSignal.emit(annotated)
+            self.stageChanged.emit("Multiple droplets in frame → skipping (replicate not counted)")
+            if self._char_attempts >= self._char_attempt_limit:
+                self.stageChanged.emit("Too many problematic frames (multiple/failed) → analyzing partial batch")
+                self.analyzeBatch.emit()
+                return
+            self.continueCap.emit()
             return
-
+        
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
 
@@ -5139,6 +5164,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "focus_values": [float(f) for f in self.droplet_focus],
                 "circularity_values": [float(c) for c in self.circularity_values],
                 "mean_position_machine": drop_machine,
+                "multiple_detections": int(self.multiple_droplet_hits),
                 "valid": True
             })
 
