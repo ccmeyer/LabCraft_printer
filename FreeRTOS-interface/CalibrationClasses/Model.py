@@ -4649,7 +4649,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_streak = 0                # consecutive out-of-bound hits
         self._oob_positions = []            # recent out-of-bound centers (pixels)
 
-
+        self._y_focus_offset_steps = 0            # persistent Y offset (steps) for best focus so far
+        self._y_focus_ema_alpha    = 0.35         # EMA smoothing (0..1). Higher = react faster
+        
         # delay clamps (safety)
         self.min_delay_us, self.max_delay_us = 0, 50000
 
@@ -4891,6 +4893,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onMoveToTarget(self):
         # predict stage target at target_delay_us
         tgt = self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
+        tgt = (tgt[0], int(tgt[1] + self._y_focus_offset_steps), tgt[2])
         self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} µs → {tgt}")
         self._safe_move_abs(tgt)
 
@@ -5056,6 +5059,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
 
+        # If focus is already good, capture this Y as a candidate best
+        if focus_val >= self.focus_ok_threshold:
+            self._update_y_focus_offset()
+
         # focus control (same policy as your search process)
         if focus_val < self.focus_ok_threshold:
             if self._focus_best <= 0.0:
@@ -5103,6 +5110,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
 
+        self._update_y_focus_offset()
+
         if self._check_boundary_and_maybe_recentre(center_px):
             # A recenter move was issued (average of 2 consecutive OOB hits).
             # After the move completes, state_char → (moveDone) → state_capture → fresh frame.
@@ -5148,6 +5157,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "circularity_values": [float(c) for c in self.circularity_values],
                 "mean_position_machine": drop_machine,
                 "multiple_detections": int(self.multiple_droplet_hits),
+                "y_focus_offset_steps": int(self._y_focus_offset_steps),
                 "valid": True
             })
 
@@ -5255,6 +5265,23 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True
+
+    def _update_y_focus_offset(self):
+        """
+        Measure current stage Y relative to the nozzle-center Y and
+        update the EMA'd focus offset in steps.
+        """
+        try:
+            cur = self.model.machine_model.get_current_position_dict()
+            baseY = int(self.nozzle_center_machine.get('Y', 0))
+            curY  = int(cur.get('Y', baseY))
+            delta = curY - baseY
+            a = float(self._y_focus_ema_alpha)
+            self._y_focus_offset_steps = int(round((1.0 - a) * self._y_focus_offset_steps + a * delta))
+            self.stageChanged.emit(f"Focus OK → update Y-offset = {self._y_focus_offset_steps} steps (EMA)")
+        except Exception as e:
+            # Non-fatal: just log
+            self.stageChanged.emit(f"Could not update Y-offset (using previous): {e}")
 
     @Slot()
     def onCompleted(self):
