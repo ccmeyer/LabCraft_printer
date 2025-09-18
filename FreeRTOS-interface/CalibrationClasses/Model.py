@@ -1837,6 +1837,9 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 'measurements': self.measurements,
                 'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
             })
+            machine_pos = self.model.machine_model.get_current_position_dict()
+            self.calibration_manager.set_nozzle_center_image_position(center)
+            self.calibration_manager.set_nozzle_center(machine_pos)
             self.dropletDetected.emit()
             return
 
@@ -1873,6 +1876,9 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 self.stageChanged.emit("Bracket tight; taking best boundary and finishing as TARGET-ish.")
                 self.calibrationDataUpdated.emit({'measurements': self.measurements,
                                                   'result': {'area': agg_area, 'flash_delay': self.candidate_delay}})
+                machine_pos = self.model.machine_model.get_current_position_dict()
+                self.calibration_manager.set_nozzle_center_image_position(center)
+                self.calibration_manager.set_nozzle_center(machine_pos)
                 self.dropletDetected.emit()
                 return
 
