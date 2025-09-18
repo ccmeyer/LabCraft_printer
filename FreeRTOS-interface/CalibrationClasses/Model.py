@@ -5928,12 +5928,13 @@ class DropletCameraModel(QObject):
         # Check if there are any contours
         if len(contours) == 0:
             print('No contours detected')
-            return None, None
+            return None, image
         
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 10000]
+        # large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 10000]
 
         # Find the largest contour
-        largest_contour = max(large_contours, key=cv2.contourArea)
+        # largest_contour = max(large_contours, key=cv2.contourArea)
+        largest_contour = max(contours, key=cv2.contourArea)
 
         # Draw the contour
         annotated_image = image.copy()
