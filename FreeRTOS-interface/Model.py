@@ -6074,7 +6074,7 @@ class MachineModel(QObject):
         return round(((float(pressure) - self.psi_offset) / self.fss) * self.psi_max,4)
     
     def convert_to_raw_pressure(self,psi):
-        return float((float(psi) / self.psi_max) * self.fss + self.psi_offset)
+        return int((float(psi) / self.psi_max) * self.fss + self.psi_offset)
 
     def set_step_size(self, new_step_size):
         """Set the step size and emit a signal if it changes."""
