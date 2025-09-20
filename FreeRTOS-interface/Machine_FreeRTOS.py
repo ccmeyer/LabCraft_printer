@@ -772,6 +772,7 @@ class LogReader(QThread):
                 line = self.ser.readline()
                 if line:
                     text = line.decode('ascii',errors="ignore").rstrip("\r\n")
+                    print(f"Log line received: {text}")
                     self.lineReceived.emit(text)
             except serial.SerialException:
                 break
