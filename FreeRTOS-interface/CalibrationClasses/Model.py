@@ -4794,7 +4794,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._focus_same_dir_tries = 0
         self._focus_moves_done = 0
         self._focus_move_budget = 60
-        self._min_focus_gain = 0.05
+        self._min_focus_gain = 0.02
         self._lost_count, self._lost_limit = 0, 5
         self._oob_streak = 0
         self._oob_positions = []
@@ -5079,7 +5079,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 self.focus_step = max(self.focus_min_step, self.focus_step // 2)
             else:
                 self._focus_same_dir_tries += 1
-                if self._focus_same_dir_tries >= 3:
+                if self._focus_same_dir_tries >= 4:
                     self._focus_same_dir_tries = 0
                     self.focus_dir *= -1
                     self.focus_dir_switches += 1
@@ -6152,11 +6152,27 @@ class DropletCameraModel(QObject):
             print('No contours detected')
             return None, image
         
-        # large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 10000]
+        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 100000]
+        
+        # Remove contours that have a very high width to height ratio
+        
+        large_contours = [contour for contour in large_contours if cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3] < 3]
+
+
+        if len(large_contours) == 0:
+            print('No large contours detected')
+            # Draw all contours and write their areas on the image
+            annotated_image = image.copy()
+            cv2.drawContours(annotated_image, contours, -1, (0, 255, 0), 2)
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                x, y, w, h = cv2.boundingRect(contour)
+                cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            return None, annotated_image
 
         # Find the largest contour
         # largest_contour = max(large_contours, key=cv2.contourArea)
-        largest_contour = max(contours, key=cv2.contourArea)
+        largest_contour = max(large_contours, key=cv2.contourArea)
 
         # Draw the contour
         annotated_image = image.copy()
@@ -6192,16 +6208,29 @@ class DropletCameraModel(QObject):
             return None, image
 
         # Determine if there are mutliple large contours
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 10000]
+        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 100000]
+        large_contours = [contour for contour in large_contours if cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3] < 3]
+
         if len(large_contours) > 1:
             print('Multiple large contours detected')
             cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
             # Add text in the middle of the screen saying multiple large contours detected
             cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             return "Multiple", image
+        
+        if len(large_contours) == 0:
+            print('No large contours detected')
+            # Draw all contours and write their areas on the image
+            annotated_image = image.copy()
+            cv2.drawContours(annotated_image, contours, -1, (0, 255, 0), 2)
+            for i, contour in enumerate(contours):
+                area = cv2.contourArea(contour)
+                x, y, w, h = cv2.boundingRect(contour)
+                cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            return None, annotated_image
 
         # Find the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
+        largest_contour = max(large_contours, key=cv2.contourArea)
 
         # Compute the circularity of the droplet
         area = cv2.contourArea(largest_contour)
