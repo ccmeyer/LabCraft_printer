@@ -462,6 +462,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_pressure_sweep_button, row, 0, 1, 2)
         row += 1
 
+        # Add a button to trigger droplet timecourse imaging
+        self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
+        self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
+        self.button_layout.addWidget(self.calibrate_timecourse_button, row, 0, 1, 2)
+        row += 1
+
         # Add a button to trigger all calibrations
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
@@ -956,6 +962,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
         self.calibrate_search_button.setText("Calibrate Droplet Search")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
+        self.scan_trajectory_button.setText("Scan Trajectory Pressures")
+        self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
         self.calibrate_characterization_button.setText("Characterize Droplets")
         self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
 
@@ -1109,6 +1117,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_pressure_sweep_button.setText("Stop Calibration")
             self.controller.start_pressure_sweep_characterization(p_step=step)
+
+    def toggle_start_timecourse_calibration(self):
+        """
+        Toggles whether the droplet timecourse imaging calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_timecourse_button.setText("Stop Calibration")
+            self.controller.start_droplet_timecourse_process()
 
     def toggle_start_all_calibration(self):
         """

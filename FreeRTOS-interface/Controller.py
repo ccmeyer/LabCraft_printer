@@ -1162,6 +1162,9 @@ class Controller(QObject):
             replicates_per_pressure=replicates_per_pressure,
             order=order
         )
+    
+    def start_droplet_timecourse_process(self):
+        self.model.calibration_manager.start_droplet_timecourse_process()
 
     # def start_pressure_scan_calibration(self):
     #     # Tell the Model to start the pressure scan calibration.

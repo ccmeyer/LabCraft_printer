@@ -359,6 +359,10 @@ class CalibrationManager(QObject):
         )
         self.start_active_calibration()
 
+    def start_droplet_timecourse_process(self):
+        self.activeCalibration = DropletTimecourseProcess(self, self.model)
+        self.start_active_calibration()
+
     # ------------- Settings snapshot -------------
 
     def get_current_settings(self):
@@ -5296,6 +5300,197 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self.stageChanged.emit("Pressure sweep characterization complete")
         self.calibrationCompleted.emit()
+
+class DropletTimecourseProcess(BaseCalibrationProcess):
+    """
+    Capture a time course of the droplet generation process.
+
+    Behavior:
+      - Compute start = first whole 100 µs BEFORE the emergence time (clamped at 0).
+      - Capture 1 image every 100 µs from start to start + window_us (inclusive).
+      - Stamp each image with the current flash delay (bottom-right, large black font).
+      - Do NOT change pressure or pulse width; we only set flash_delay and num_droplets=1.
+
+    Result payload shape:
+      {
+        "emergence_time_us": ...,
+        "start_delay_us": ...,
+        "step_us": 100,
+        "window_us": 8000,
+        "delays": [list of delays],
+        "frames": [
+            {"delay_us": d, "ok": true/false}
+            ...
+        ]
+      }
+    """
+
+    # State-machine signals
+    setupReady     = Signal()
+    delayApplied   = Signal()
+    nextDelay      = Signal()
+    finalize       = Signal()
+
+    def __init__(self, calibration_manager, model,
+                 *,
+                 step_us: int = 100,
+                 window_us: int = 8000,
+                 parent=None):
+        super().__init__(calibration_manager, model, parent)
+        self.phase_name = "droplet_timecourse"
+
+        # --- prerequisites ---
+        self.emergence_time_us = self.calibration_manager.get_emergence_time()
+        self.background_image  = self.calibration_manager.get_background_image()
+        self._ready = self.emergence_time_us is not None
+
+        if not self._ready:
+            self.calibrationError.emit("Timecourse requires an estimated emergence time.")
+            return
+
+        # --- schedule of delays ---
+        self.step_us   = int(max(1, step_us))
+        self.window_us = int(max(self.step_us, window_us))
+        self.start_delay_us = max(0, (int(self.emergence_time_us) // self.step_us) * self.step_us - self.step_us)
+        stop = self.start_delay_us + self.window_us
+        self.delays = list(range(self.start_delay_us, stop + 1, self.step_us))
+        self._delay_index = 0
+
+        # --- outputs ---
+        self.frames = []  # list of {"delay_us": int, "ok": bool}
+        self.annotated_image = None
+
+        # ---------- states ----------
+        self.state_prepare = QState()
+        self.state_apply   = QState()
+        self.state_capture = QState()
+        self.state_annot   = QState()
+        self.state_final   = QFinalState()
+
+        # enters
+        self.state_prepare.entered.connect(self.onPrepare)
+        self.state_apply.entered.connect(self.onApplyDelay)
+        self.state_capture.entered.connect(self.onCaptureFrame)
+        self.state_annot.entered.connect(self.onAnnotateAndAdvance)
+        self.state_final.entered.connect(self.onCompleted)
+
+        # robust finalize from anywhere
+        for st in (self.state_prepare, self.state_apply, self.state_capture, self.state_annot):
+            st.addTransition(self.finalize, self.state_final)
+
+        # transitions
+        self.state_prepare.addTransition(self.setupReady, self.state_apply)
+        self.state_apply.addTransition(self.delayApplied, self.state_capture)
+        self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_annot)
+        self.state_annot.addTransition(self.nextDelay, self.state_apply)
+
+        # register
+        for s in (self.state_prepare, self.state_apply, self.state_capture, self.state_annot, self.state_final):
+            self.state_machine.addState(s)
+        self.state_machine.setInitialState(self.state_prepare)
+
+    # ---------- helpers ----------
+    def _put_delay_stamp(self, img, delay_us: int):
+        """Draw large black 'XXXX µs' at bottom-right."""
+        if img is None:
+            return None
+        if img.ndim == 2:
+            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = img.copy()
+
+        text = f"{int(delay_us)} µs"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 2.0
+        thickness = 4
+        (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+        H, W = vis.shape[:2]
+        x = max(8, W - tw - 16)
+        y = max(th + 8, H - 16)
+        # Draw the text (black as requested)
+        cv2.putText(vis, text, (x, y), font, scale, (0, 0, 0), thickness, cv2.LINE_AA)
+        return vis
+
+    # ---------- state handlers ----------
+    @Slot()
+    def onPrepare(self):
+        if not self._ready or not self.delays:
+            self.calibrationError.emit("Timecourse not ready or no delays scheduled.")
+            self.finalize.emit()
+            return
+
+        self.stageChanged.emit(
+            f"Timecourse: emergence={int(self.emergence_time_us)} µs, "
+            f"start={self.start_delay_us} µs, step={self.step_us} µs, window={self.window_us} µs "
+            f"({len(self.delays)} frames)"
+        )
+
+        # Optional: ensure we are not printing during background view
+        # We won't recapture background here—use any existing background if needed downstream.
+        self.setupReady.emit()
+
+    @Slot()
+    def onApplyDelay(self):
+        if self._delay_index >= len(self.delays):
+            self.finalize.emit()
+            return
+
+        d = int(self.delays[self._delay_index])
+        self.current_delay_us = d
+        self.stageChanged.emit(f"Setting flash_delay = {d} µs")
+        # Only manipulate flash delay and ensure a single droplet per capture
+        settings = {"flash_delay": d, "num_droplets": 1}
+        self.calibration_manager.changeSettingsRequested.emit(settings, self.delayApplied.emit)
+
+    @Slot()
+    def onCaptureFrame(self):
+        d = int(self.current_delay_us)
+        self._capture_with_policy(
+            set_attr="raw_frame_image",
+            stage_text=f"Capturing timecourse frame @ {d} µs",
+            attempts_total=5, retry_delay_ms=50, guard_timeout_ms=8000,
+            final_error_msg=f"Capture failed at delay {d} µs"
+        )
+
+    @Slot()
+    def onAnnotateAndAdvance(self):
+        d = int(self.current_delay_us)
+        ok = hasattr(self, "raw_frame_image") and (self.raw_frame_image is not None)
+        if not ok:
+            self.frames.append({"delay_us": d, "ok": False})
+            self.stageChanged.emit(f"Frame @ {d} µs: missing image")
+        else:
+            ann = self._put_delay_stamp(self.raw_frame_image, d)
+            self.annotated_image = ann
+            # stream to UI
+            try:
+                self.presentImageSignal.emit(ann)
+            except Exception:
+                pass
+            self.frames.append({"delay_us": d, "ok": True})
+
+        # advance
+        self._delay_index += 1
+        if self._delay_index >= len(self.delays):
+            self.finalize.emit()
+        else:
+            self.nextDelay.emit()
+
+    @Slot()
+    def onCompleted(self):
+        result = {
+            "emergence_time_us": int(self.emergence_time_us),
+            "start_delay_us": int(self.start_delay_us),
+            "step_us": int(self.step_us),
+            "window_us": int(self.window_us),
+            "delays": [int(x) for x in self.delays],
+            "frames": self.frames[:],  # shallow copy
+        }
+        # Publish results (no “measurements” for this simple capture)
+        self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+        self.stageChanged.emit("Droplet timecourse capture complete")
+        self.calibrationCompleted.emit()
+
 
 class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
