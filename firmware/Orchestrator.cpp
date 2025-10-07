@@ -65,6 +65,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		case CMD_HELLO: {
 		  // Reset any stale state and request HELLO_ACK
 		  _paused = false; _pauseRequested = false;
+		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
 		  _inFlight = cmd;                 // capture seq/cmd for ACK
 		  _acknowledgeRequested = true;
@@ -76,7 +77,8 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		  _inFlight = cmd;                 // capture seq/cmd for ACK
 		  _paused = true;
 		  _pauseRequested = true;
-		  _clearRequested = true;
+		  _shutdownRequested = true;
+//		  _clearRequested = true;
 		  _acknowledgeRequested = true;
 		  return pdFALSE;
 		}
@@ -108,7 +110,7 @@ void Orchestrator::pauseCurrent() {
   Printer::instance()->pauseDispense();
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|
-      BIT_STEPPER3_DONE|BIT_PRINTING_DONE);
+      BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE);
 }
 
 void Orchestrator::resumeCurrent() {
@@ -148,6 +150,29 @@ bool Orchestrator::waitForBit(EventBits_t bit) {
   }
 }
 
+bool Orchestrator::waitForBits(EventBits_t bits)
+{
+  const TickType_t ticks = pdMS_TO_TICKS(50);
+  while (true) {
+	// If a PAUSE came in, stop waiting immediately.
+	if (_paused) {
+	  return false;
+	}
+	// Wait in small chunks
+	EventBits_t result = xEventGroupWaitBits(
+	  _doneEvents,
+	  bits,
+	  pdTRUE,  // clear on exit
+	  pdTRUE,  // wait for all bits (just one here)
+	  ticks
+	);
+	if ( (result & bits) != 0 ) {
+	  return true;  // we got the signal, normal completion
+	}
+	// else: timed out, loop again (to check _paused)
+  }
+}
+
 void Orchestrator::_run() {
   for (;;) {
 	  if (_acknowledgeRequested) {
@@ -166,7 +191,7 @@ void Orchestrator::_run() {
             	Comm::instance()->sendCommandByte(CMD_BYE_ACK, seq);
             	// Start next session clean
             	Comm::instance()->resetReceiveState();
-            	MX_LEDSTRIP_FadeTo(0,500);
+//            	MX_LEDSTRIP_FadeTo(0,500);
             	break;
             }
             case CMD_CLEAR:{
@@ -197,6 +222,7 @@ void Orchestrator::_run() {
 			case CMD_MOVE_Y: waitForBit(BIT_STEPPER2_DONE); break;
 			case CMD_MOVE_Z: waitForBit(BIT_STEPPER3_DONE); break;
 			case CMD_DISPENSE: waitForBit(BIT_PRINTING_DONE); break;
+			case CMD_GRIPPER_OPEN: waitForBit(BIT_GRIPPER_DONE); break;
 			// … etc …
 			default: {
 
@@ -213,8 +239,11 @@ void Orchestrator::_run() {
 
         _currentCmdNum = 0;
         _lastExecutedCmdNum = 0;
+        _seqEpoch = 0;
+        _lastSeq8 = 0;
+
         xEventGroupClearBits(_doneEvents,
-            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE);
+            BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE);
 
         _paused = false;
         _clearRequested = false;
@@ -225,10 +254,22 @@ void Orchestrator::_run() {
         Comm::instance()->setStatusPaused(false);
 	  }
 
+	// —— SHUTDOWN: do it after BYE_ACK ——
+	if (_shutdownRequested) {
+	  // Use the GOODBYE seq so host can correlate if it wants
+	  performShutdown(_inFlight.seq);
+	  _shutdownRequested = false;
+	}
+
 	if (_paused) {
 	  vTaskDelay(pdMS_TO_TICKS(50));
 	  continue;
 	}
+	// if a flash cycle is underway, wait until it's done
+    if (_flashInProgress) {
+      (void)waitForBit(BIT_FLASH_DONE);
+      // _flashInProgress is cleared by the flash task
+    }
 
     Command cmd;
     // 1) always block here until there’s anything in the queue
@@ -242,10 +283,19 @@ void Orchestrator::_run() {
 
 /// factor out all your “case CMD_MOVE_X / CMD_LED / etc” into this:
 void Orchestrator::executeCommand(const Command &cmd) {
-  _currentCmdNum = cmd.seq;
+	// Detect wrap and compute absolute numbers
+	if (cmd.seq < _lastSeq8 && (_lastSeq8 - cmd.seq) > 128) {
+	  _seqEpoch++;  // crossed 255->0
+	}
+	_lastSeq8 = cmd.seq;
+
+	_currentCmdNum = (uint32_t(_seqEpoch) << 8) | uint32_t(cmd.seq);
+//  _currentCmdNum = cmd.seq;
+
   // clear done‐bits
   xEventGroupClearBits(_doneEvents,
-      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE);
+      BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_GRIPPER_DONE|
+	  BIT_PRESSURE_P_READY | BIT_PRESSURE_R_READY);
 
   switch(cmd.cmd) {
 	   case CMD_LED: {
@@ -298,6 +348,22 @@ void Orchestrator::executeCommand(const Command &cmd) {
       	  waitForBit(BIT_STEPPER3_DONE);
           break;
         }
+        case CMD_SET_AXIS_MAXSPEED: {
+          auto ax = (Stepper::Axis)cmd.p1;
+          if (auto s = Stepper::getAxis(ax)) s->setMaxSpeedHz((uint32_t)cmd.p2);
+          break;
+        }
+        case CMD_SET_AXIS_ACCEL: {
+          auto ax = (Stepper::Axis)cmd.p1;
+          if (auto s = Stepper::getAxis(ax)) s->setAccelStepsPerSec2((float)cmd.p2);
+          break;
+        }
+        case CMD_SET_AXIS_PROFILE: {
+          auto ax = (Stepper::Axis)cmd.p1;
+          auto pf = (Stepper::AccelProfile)cmd.p2;
+          if (auto s = Stepper::getAxis(ax)) s->setAccelProfile(pf);
+          break;
+        }
         case CMD_HOME_X: {
           MX_STEPPERX_Home(cmd.p1, cmd.p2,cmd.p3);
 		  break;
@@ -308,6 +374,14 @@ void Orchestrator::executeCommand(const Command &cmd) {
 		}
         case CMD_HOME_Z: {
           MX_STEPPERZ_Home(cmd.p1, cmd.p2,cmd.p3);
+		  break;
+		}
+        case CMD_ENABLE_MOTORS: {
+          Stepper::stepperX()->enableMotor();
+          Stepper::stepperY()->enableMotor();
+          Stepper::stepperZ()->enableMotor();
+          Stepper::stepperP()->enableMotor();
+          Stepper::stepperR()->enableMotor();
 		  break;
 		}
         case CMD_DISABLE_MOTORS: {
@@ -327,10 +401,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
         }
         case CMD_GRIPPER_OPEN: {
       	  MX_GRIPPER_Open();
+      	  waitForBit(BIT_GRIPPER_DONE);
   		  break;
   		}
         case CMD_GRIPPER_CLOSE: {
       	  MX_GRIPPER_Close();
+      	  waitForBit(BIT_GRIPPER_DONE);
   		  break;
   		}
         case CMD_GRIPPER_OFF: {
@@ -375,6 +451,11 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					&_flashTaskHandle
         		);
         	}
+			if (!_flashAckTmr) {
+			_flashAckTmr = xTimerCreate(
+				"FlashAck", pdMS_TO_TICKS(kFlashAckMs), pdFALSE, this, _flashAckTimerCb);
+			}
+			HAL_GPIO_WritePin(_flashAckPort, _flashAckPin, GPIO_PIN_RESET);
           break;
         }
         case CMD_STOP_FLASH: {
@@ -398,19 +479,37 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
         }
         case CMD_PR_PRINT: {
-        	PressureRegulator::regP().setTarget(cmd.p1);
+        	int32_t  target = (int32_t)cmd.p1u();
+        	PressureRegulator::regP().setTargetSafe(target);
+            // ensure we re-wait even if already in band
+            xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+            waitForBit(BIT_PRESSURE_P_READY);
         	break;
         }
         case CMD_PR_REFUEL: {
-        	PressureRegulator::regR().setTarget(cmd.p1);
+        	int32_t  target = (int32_t)cmd.p1u();
+			PressureRegulator::regR().setTargetSafe(target);
+            xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
+            waitForBit(BIT_PRESSURE_R_READY);
 			break;
 		}
         case CMD_PR_PRINT_REL: {
-        	PressureRegulator::regP().setRelativeTarget(cmd.p1, cmd.p2);
+			bool  sign   = cmd.p1b();
+			int32_t  delta  = (int32_t)cmd.p2u();
+			  if (delta == 0) { Logger::instance()->log("[PReg] REL P delta=0\n"); break; }
+			PressureRegulator::regP().setRelativeTargetSafe(sign, delta);
+            // ensure we re-wait even if already in band
+            xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+            waitForBit(BIT_PRESSURE_P_READY);
 			break;
 		}
         case CMD_PR_REFUEL_REL: {
-			PressureRegulator::regR().setRelativeTarget(cmd.p1, cmd.p2);
+			bool  sign   = cmd.p1b();
+			int32_t  delta  = (int32_t)cmd.p2u();
+			  if (delta == 0) { Logger::instance()->log("[PReg] REL R delta=0\n"); break; }
+			PressureRegulator::regR().setRelativeTargetSafe(sign, delta);
+			xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
+			waitForBit(BIT_PRESSURE_R_READY);
 			break;
 		}
         case CMD_SET_PW_PRINT: {
@@ -429,6 +528,38 @@ void Orchestrator::executeCommand(const Command &cmd) {
         	PressureRegulator::regR().homeWithValve(cmd.p1, cmd.p2, cmd.p3);
 			break;
 		}
+        case CMD_HOME_XY: {
+          // p1 = fastHz, p2 = slowHz, p3 = backoffSteps
+          uint32_t fastHz = cmd.p1, slowHz = cmd.p2, backoff = cmd.p3;
+
+          // Clear "home done" bits for these axes
+          xEventGroupClearBits(_doneEvents, BIT_HOME_X_DONE | BIT_HOME_Y_DONE);
+
+          // Fire both homing tasks in parallel
+          startHomeAsync(Stepper::stepperX(), fastHz, slowHz, backoff, BIT_HOME_X_DONE);
+          startHomeAsync(Stepper::stepperY(), fastHz, slowHz, backoff, BIT_HOME_Y_DONE);
+
+          // Wait for both to finish
+          waitForBits(BIT_HOME_X_DONE | BIT_HOME_Y_DONE);
+          break;
+        }
+        case CMD_HOME_PR_BOTH: {
+          // p1 = fastHz, p2 = slowHz, p3 = backoffSteps
+          uint32_t fastHz   = cmd.p1;
+          uint32_t slowHz   = cmd.p2;
+          uint32_t backoff  = cmd.p3;
+
+          // Clear the "both regulators home finished" bits
+          xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE | BIT_HOME_R_DONE);
+
+          // Kick off both, in parallel. This runs Valve+Stepper homing per regulator.
+          startRegHomeAsync(&PressureRegulator::regP(), fastHz, slowHz, backoff, BIT_HOME_P_DONE);
+          startRegHomeAsync(&PressureRegulator::regR(), fastHz, slowHz, backoff, BIT_HOME_R_DONE);
+
+          // Block here until both are done
+          waitForBits(BIT_HOME_P_DONE | BIT_HOME_R_DONE);
+          break;
+        }
         case CMD_P_VALVE_OPEN: {
         	PressureRegulator::regP().openValve();
 			break;
@@ -482,8 +613,204 @@ void Orchestrator::executeCommand(const Command &cmd) {
       	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
           break;
       }
-  _lastExecutedCmdNum = cmd.seq;
+  _lastExecutedCmdNum = _currentCmdNum;
   }
+
+void Orchestrator::performShutdown(uint8_t byeSeq)
+{
+//  Logger::instance()->log("Shutdown start\r\n");
+
+  _clearing = true;
+
+  // 1) Stop anything active
+  pauseCurrent();             // pause gantry, printer; clears bits
+  cancelCurrent();            // cancel active motion/dispense
+
+  // 2) Stop background tasks/services
+  if (_flashTaskHandle) {
+    vTaskDelete(_flashTaskHandle);
+    _flashTaskHandle = nullptr;
+  }
+//
+//  // 3) Pressure regulators and valves safe
+  PressureRegulator::regP().pause();
+  PressureRegulator::regR().pause();
+
+  PressureRegulator::regP().openValve();
+  PressureRegulator::regR().openValve();
+
+  // 4) Gripper off
+  MX_GRIPPER_StopRefresh();
+//
+//  // 5) Disable motors
+  Stepper::stepperX()->disableMotor();
+  Stepper::stepperY()->disableMotor();
+  Stepper::stepperZ()->disableMotor();
+  Stepper::stepperP()->disableMotor();
+  Stepper::stepperR()->disableMotor();
+
+  // 6) Drain queue (no xQueueReset)
+  if (_cmdQueue) {
+    Command dump;
+    while (xQueueReceive(_cmdQueue, &dump, 0) == pdTRUE) { /* discard */ }
+  }
+
+  _currentCmdNum = 0;
+  _lastExecutedCmdNum = 0;
+  xEventGroupClearBits(_doneEvents,
+    BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_DONE);
+
+  // 7) UI off (asynchronous; don’t block)
+  MX_LEDSTRIP_FadeTo(0, 500);
+
+  // small settle delay for hardware
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  PressureRegulator::regP().closeValve();
+  PressureRegulator::regR().closeValve();
+//
+
+  _paused = true;     // remain paused until next HELLO
+  _clearing = false;
+
+  Logger::instance()->log("Shutdown done\r\n");
+
+  // 8) Tell host we’re safe. Status is paused, but command bytes still go out.
+  Comm::instance()->sendCommandByte(CMD_BYE_DONE, byeSeq);
+}
+
+// ---------- Async homing task ----------
+void Orchestrator::_homeTaskEntry(void* ctx)
+{
+  auto* a = static_cast<HomeTaskArgs*>(ctx);
+  a->stepper->home(a->fastHz, a->slowHz, a->backoffSteps);
+  xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
+
+  // Clear the handle for this bank so a new home can be started later
+  if (a->stepper == Stepper::stepperX()) instance()->_taskHomeX = nullptr;
+  else if (a->stepper == Stepper::stepperY()) instance()->_taskHomeY = nullptr;
+
+  vTaskDelete(nullptr);
+}
+
+void Orchestrator::startHomeAsync(Stepper* s,
+                                  uint32_t fastHz,
+                                  uint32_t slowHz,
+                                  uint32_t backoffSteps,
+                                  EventBits_t doneBit)
+{
+  // Choose a static bank based on which axis we were asked to home
+  StaticTask_t* tcb   = nullptr;
+  StackType_t*  stack = nullptr;
+  TaskHandle_t* handle= nullptr;
+  HomeTaskArgs* args  = nullptr;
+  const char*   name  = "HomeAx";
+
+  if (s == Stepper::stepperX()) {
+    tcb = &_tcbHomeX; stack = _stackHomeX; handle = &_taskHomeX; args = &_argsHomeX; name = "HomeX";
+  } else if (s == Stepper::stepperY()) {
+    tcb = &_tcbHomeY; stack = _stackHomeY; handle = &_taskHomeY; args = &_argsHomeY; name = "HomeY";
+  } else {
+    // Fallback for any other axis (Z, P, R) if you ever call this path:
+    Logger::instance()->log("[Home] No static bank for this axis; running blocking fallback\r\n");
+    s->home(fastHz, slowHz, backoffSteps);
+    xEventGroupSetBits(_doneEvents, doneBit);
+    return;
+  }
+
+  if (*handle != nullptr) {
+    Logger::instance()->log("[Home] %s already running; ignoring duplicate request\r\n", name);
+    return;
+  }
+
+  // Populate the (persistent) args
+  args->stepper      = s;
+  args->fastHz       = fastHz;
+  args->slowHz       = slowHz;
+  args->backoffSteps = backoffSteps;
+  args->doneBit      = doneBit;
+
+  // Create without touching the heap
+  *handle = xTaskCreateStatic(
+      _homeTaskEntry,
+      name,
+      HOME_STACK_WORDS,
+      (void*)args,
+      tskIDLE_PRIORITY + 3,
+      stack,
+      tcb);
+
+  if (!*handle) {
+    Logger::instance()->log("[Home] xTaskCreateStatic failed for %s\r\n", name);
+    // As a last resort, run blocking so the command still completes
+    s->home(fastHz, slowHz, backoffSteps);
+    xEventGroupSetBits(_doneEvents, doneBit);
+  }
+}
+
+// ---------------- Regulator async homing ----------------
+
+void Orchestrator::_regHomeTaskEntry(void* ctx)
+{
+  auto* a = static_cast<RegHomeTaskArgs*>(ctx);
+  a->reg->homeWithValve(a->fastHz, a->slowHz, a->backoffSteps);
+  xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
+
+  if (a->reg == &PressureRegulator::regP()) instance()->_taskHomeP = nullptr;
+  else if (a->reg == &PressureRegulator::regR()) instance()->_taskHomeR = nullptr;
+
+  vTaskDelete(nullptr);
+}
+
+void Orchestrator::startRegHomeAsync(PressureRegulator* r,
+                                     uint32_t fastHz,
+                                     uint32_t slowHz,
+                                     uint32_t backoffSteps,
+                                     EventBits_t doneBit)
+{
+  StaticTask_t*    tcb    = nullptr;
+  StackType_t*     stack  = nullptr;
+  TaskHandle_t*    handle = nullptr;
+  RegHomeTaskArgs* args   = nullptr;
+  const char*      name   = "HomePR";
+
+  if (r == &PressureRegulator::regP()) {
+    tcb = &_tcbHomeP; stack = _stackHomeP; handle = &_taskHomeP; args = &_argsHomeP; name = "HomePR_P";
+  } else if (r == &PressureRegulator::regR()) {
+    tcb = &_tcbHomeR; stack = _stackHomeR; handle = &_taskHomeR; args = &_argsHomeR; name = "HomePR_R";
+  } else {
+    Logger::instance()->log("[HomePR] No static bank for this regulator; blocking fallback\r\n");
+    r->homeWithValve(fastHz, slowHz, backoffSteps);
+    xEventGroupSetBits(_doneEvents, doneBit);
+    return;
+  }
+
+  if (*handle != nullptr) {
+    Logger::instance()->log("[HomePR] %s already running; ignoring duplicate request\r\n", name);
+    return;
+  }
+
+  args->reg          = r;
+  args->fastHz       = fastHz;
+  args->slowHz       = slowHz;
+  args->backoffSteps = backoffSteps;
+  args->doneBit      = doneBit;
+
+  *handle = xTaskCreateStatic(
+      _regHomeTaskEntry,
+      name,
+      REG_HOME_STACK_WORDS,
+      (void*)args,
+      tskIDLE_PRIORITY + 3,
+      stack,
+      tcb);
+
+  if (!*handle) {
+    Logger::instance()->log("[HomePR] xTaskCreateStatic failed for %s\r\n", name);
+    r->homeWithValve(fastHz, slowHz, backoffSteps);
+    xEventGroupSetBits(_doneEvents, doneBit);
+  }
+}
 
 
 //===========================================================================//
@@ -503,6 +830,9 @@ void Orchestrator::scheduleFlashIn() {
   // clear any pending flags
   __HAL_TIM_CLEAR_FLAG(&htim12, TIM_FLAG_CC1|TIM_FLAG_UPDATE);
 
+  // Reset the counter so the delay is "from now"
+  __HAL_TIM_SET_COUNTER(&htim12, 0);
+
   // set compare value = desired delay in µs
   __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, _flashDelay);
 
@@ -515,7 +845,7 @@ void Orchestrator::scheduleFlashIn() {
 
 void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
 	if (_instance && GPIO_Pin == _instance->_trigPin && _instance->_flashTaskHandle) {
-//			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+			HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 		    BaseType_t woke = pdFALSE;
 		    // just poke the FlashTask
 		    xTaskNotifyFromISR(
@@ -538,24 +868,52 @@ void Orchestrator::_flashTaskLoop() {
     // wait for the EXTI ISR to notify us
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-//    // now in thread context — safe to do HAL calls
-//    xEventGroupClearBits(_doneEvents, BIT_PRINTING_DONE);
-    Printer::instance()->setFlashOnLast(true);
-    Printer::instance()->enqueue(_imagingDroplets, _imagingFreq,PulseMode::BOTH);
-//    waitForBit(BIT_PRINTING_DONE);
-//    MX_FLASH_ONCE();
+    _flashInProgress = true;
+    xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
 
-//    scheduleFlashIn(_flashDelay);  // e.g. 1800 for 1.8 ms, output compare fires the flash
+    if (_imagingDroplets == 0){
+    	Orchestrator::instance()->scheduleFlashIn();
+    }
+    else {
+        Printer::instance()->setFlashOnLast(true);
+        Printer::instance()->enqueue(_imagingDroplets, _imagingFreq,PulseMode::BOTH);
+    }
 
-    // 4) then don’t proceed until the Pi’s line goes back low
+    // then don’t proceed until the Pi’s line goes back low
     while (HAL_GPIO_ReadPin(_trigPort, _trigPin) == GPIO_PIN_SET) {
       vTaskDelay(pdMS_TO_TICKS(1));
     }
+
+    _flashInProgress = false;
+    xEventGroupSetBits(_doneEvents, BIT_FLASH_DONE);
   }
+}
+
+void Orchestrator::_flashAckHigh() {
+  HAL_GPIO_WritePin(_flashAckPort, _flashAckPin, GPIO_PIN_SET);
+}
+
+void Orchestrator::_flashAckLow() {
+  HAL_GPIO_WritePin(_flashAckPort, _flashAckPin, GPIO_PIN_RESET);
+}
+
+void Orchestrator::_flashAckTimerCb(TimerHandle_t tmr) {
+  auto* self = static_cast<Orchestrator*>(pvTimerGetTimerID(tmr));
+  self->_flashAckLow();
 }
 
 extern "C" void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin) {
 //	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	Orchestrator::instance()->flashNotifyFromISR(GPIO_Pin);
 }
-s
+
+extern "C" void MX_FLASH_Acknowledge() {
+//	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+    // Immediately raise the "flash fired" GPIO so the Pi can edge-trigger
+    Orchestrator::instance()->_flashAckHigh();
+
+    // Drop it low in ~2 ms via a FreeRTOS software timer
+    BaseType_t hpw = pdFALSE;
+    xTimerStartFromISR(Orchestrator::instance()->_flashAckTmr, &hpw);
+    portYIELD_FROM_ISR(hpw);
+}

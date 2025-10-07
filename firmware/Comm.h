@@ -7,57 +7,11 @@
 
 #ifndef INC_COMM_H_
 #define INC_COMM_H_
-//#include "stm32f4xx_hal.h"
-//#include "FreeRTOS.h"
-//
-//class Comm {
-//public:
-//  Comm(UART_HandleTypeDef* huart);
-//  static Comm* instance() { return _instance; }
-//  void begin();
-//
-//  // call when an action fully completes:
-//  void notifyCommandComplete(uint8_t seq) { _lastCompletedSeq = seq; }
-//
-//private:
-//  UART_HandleTypeDef* _huart;
-//  uint8_t             _rxByte;
-//
-//  // RX state
-//  enum RxState { WAIT_START, WAIT_LEN, WAIT_DATA };
-//  RxState _rxState = WAIT_START;
-//  uint8_t _rxLen    = 0;
-//  uint8_t _rxBuf[16];
-//  uint8_t _rxIdx    = 0;
-//
-//  // sequence tracking  <<< SEQ
-//  uint8_t _expectedSeq      = 0;
-//  uint8_t _lastCompletedSeq = 0xFF;
-//
-//  // status task
-//  static void statusTaskEntry(void* pv);
-//  void        statusTask();
-//
-//  // framing & CRC
-//  static constexpr uint8_t START_BYTE = 0xAA;
-//  static uint16_t crc16(const uint8_t* data, uint16_t len);
-//
-//  // send generic frame
-//  void sendFrame(const uint8_t* payload, size_t len);
-//
-//  // parse a valid, length-checked, crc-checked packet
-//  void handlePacket(const uint8_t* buf, uint8_t len);
-//
-//  static Comm* _instance;
-//};
-//
-//// C‐API init
-//extern "C" void MX_COMM_Init(UART_HandleTypeDef* huart);
-//// called by actions when done:
-//extern "C" void COMM_CommandComplete(uint8_t seq);
 
 #include "stm32f4xx_hal.h"
 #include <cstdint>
+#include "FreeRTOS.h"
+#include "semphr.h"
 
 static constexpr uint8_t CMD_STATUS        = 0x02;
 static constexpr uint8_t TAG_LED_TOTAL     = 0x10;
@@ -92,6 +46,16 @@ static constexpr uint8_t TAG_LAST_CMD      = 0x51;
 static constexpr uint8_t TAG_CURR_CMD      = 0x52;
 
 static constexpr uint8_t TAG_FLASH_NUM	   = 0x60;
+static constexpr uint8_t TAG_FLASH_WIDTH   = 0x61;
+static constexpr uint8_t TAG_FLASH_DELAY   = 0x62;
+static constexpr uint8_t TAG_FLASH_DROPS   = 0x63;
+
+static constexpr uint8_t TAG_X_MAX_HZ  = 0x70;
+static constexpr uint8_t TAG_Y_MAX_HZ  = 0x71;
+static constexpr uint8_t TAG_Z_MAX_HZ  = 0x72;
+static constexpr uint8_t TAG_X_ACCEL   = 0x73; // steps/s^2 (truncate to u16 if you like)
+static constexpr uint8_t TAG_Y_ACCEL   = 0x74;
+static constexpr uint8_t TAG_Z_ACCEL   = 0x75;
 
 class Comm {
 public:
@@ -112,6 +76,12 @@ public:
     uint8_t _rxBuf[64];
     uint8_t _rxIdx    = 0;
 
+    volatile bool _txBusy = false;
+    uint8_t _txBuf[160];   // >= max frame size (header + payload + CRC)
+
+    UART_HandleTypeDef* handle() const { return _huart; }
+    void on_tx_cplt() { _txBusy = false; }  // or a nicer name
+
     // framing & CRC
     static uint16_t crc16(const uint8_t* data, uint16_t len);
     static constexpr uint8_t START_BYTE = 0xAA;
@@ -127,6 +97,14 @@ public:
     // Send a 2‐byte payload: <cmd, seq>, wrapped in START/len/CRC
     void sendCommandByte(uint8_t cmd, uint8_t seq = 0);
 
+    // briefly pause status spam (optional)
+    void setStatusPaused(bool p);
+
+    void resetReceiveState();
+
+    volatile bool 	  _needRxRearm = false;
+
+
 private:
 
     static Comm*        _instance;
@@ -134,6 +112,8 @@ private:
     static void statusTaskEntry(void* pv);
     void        statusTask();
 
+    SemaphoreHandle_t _txMutex = nullptr;
+    volatile bool     _statusPaused = false;
 
 
     // send generic frame

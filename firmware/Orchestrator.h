@@ -6,16 +6,30 @@
 #include "queue.h"
 #include "task.h"
 #include "event_groups.h"
+#include "semphr.h"
+#include "Stepper.h"
+#include "PressureRegulator.h"
+
 #include <cstdint>
+#include <cstring>
 
 // bit-flags for waiting on completion
-#define BIT_LED_DONE      (1 << 0)
-#define BIT_STEPPER1_DONE (1 << 1)
-#define BIT_STEPPER2_DONE (1 << 2)
-#define BIT_STEPPER3_DONE (1 << 3)
-#define BIT_STEPPER4_DONE (1 << 4)
-#define BIT_STEPPER5_DONE (1 << 5)
-#define BIT_PRINTING_DONE (1 << 6)
+#define BIT_LED_DONE      (1u << 0)
+#define BIT_STEPPER1_DONE (1u << 1)
+#define BIT_STEPPER2_DONE (1u << 2)
+#define BIT_STEPPER3_DONE (1u << 3)
+#define BIT_STEPPER4_DONE (1u << 4)
+#define BIT_STEPPER5_DONE (1u << 5)
+#define BIT_PRINTING_DONE (1u << 6)
+#define BIT_GRIPPER_DONE  (1u << 7)
+#define BIT_FLASH_DONE    (1u << 8)
+#define BIT_PRESSURE_P_READY    (1u << 9)   // Print regulator
+#define BIT_PRESSURE_R_READY    (1u << 10)  // Refuel regulator
+#define BIT_HOME_X_DONE   (1u << 11)
+#define BIT_HOME_Y_DONE   (1u << 12)
+#define BIT_HOME_Z_DONE   (1u << 13)  // optional if you want async Z too
+#define BIT_HOME_P_DONE   (1u << 14)
+#define BIT_HOME_R_DONE   (1u << 15)
 
 
 
@@ -55,6 +69,13 @@ public:
 	CMD_LEDSTRIP_ON = 0x30,
 	CMD_LEDSTRIP_OFF = 0x31,
 
+	CMD_SET_AXIS_MAXSPEED = 0x40,   // p1=axis (0..4), p2=max Hz
+	CMD_SET_AXIS_ACCEL    = 0x41,   // p1=axis (0..4), p2=accel (steps/s^2)
+	CMD_SET_AXIS_PROFILE  = 0x42,   // p1=axis (0..4), p2=profile (0,1,2)
+
+	CMD_HOME_XY = 0x43,
+	CMD_HOME_PR_BOTH = 0x44,
+
 	CMD_INIT_FLASH = 0xC0,
 	CMD_STOP_FLASH = 0xC1,
 	CMD_SET_FLASH_DURATION = 0xC2,
@@ -91,14 +112,29 @@ public:
 	CMD_HELLO       = 0xF3,
 	CMD_HELLO_ACK   = 0xF4,
 	CMD_GOODBYE     = 0xF5,
-	CMD_BYE_ACK     = 0xF6
+	CMD_BYE_ACK     = 0xF6,
+	CMD_CLEAR_ACK	= 0xF7,
+	CMD_BYE_DONE	= 0xF8
   };
 
   // complete packet, decoded from Comm
   struct Command {
-    CmdType   cmd;
-    uint8_t   seq;
-    uint32_t  p1, p2, p3;
+    CmdType  cmd;
+    uint8_t  seq;
+
+    uint32_t p1 = 0, p2 = 0, p3 = 0;   // raw 32-bit storage
+    uint8_t  p1Len = 0, p2Len = 0, p3Len = 0; // TLV value lengths (0,1,2,4)
+
+    // Integer views (unsigned and signed)
+    inline uint32_t p1u() const { return p1; }
+    inline uint32_t p2u() const { return p2; }
+    inline uint32_t p3u() const { return p3; }
+    inline int32_t  p1s() const { return int32_t(p1); }
+    inline int32_t  p2s() const { return int32_t(p2); }
+    inline int32_t  p3s() const { return int32_t(p3); }
+
+    // Boolean flag view (for sign bit you send as 0/1)
+    inline bool  p1b() const { return p1 != 0; }
   };
 
   Orchestrator();
@@ -119,33 +155,43 @@ public:
 	  return uxQueueMessagesWaiting(instance()->_cmdQueue);
   }
 
-  static uint16_t getLastCmdNum() {
+  static uint32_t getLastCmdNum() {
 	  return instance()->_lastExecutedCmdNum;
   }
 
-  static uint16_t getCurrentCmdNum() {
+  static uint32_t getCurrentCmdNum() {
 	  return instance()->_currentCmdNum;
   }
 
   bool waitForBit(EventBits_t bit);
+  bool waitForBits(EventBits_t bits);
   void executeCommand(const Command &cmd);
 
   // Capture last command to reset the blocking condition
   Command _inFlight;
   Command _lastPausedCmd;
-  uint16_t _currentCmdNum;
-  uint16_t _lastExecutedCmdNum;
+  uint32_t _currentCmdNum;
+  uint32_t _lastExecutedCmdNum;
+
+  // epoch/seq tracking
+  uint16_t  _seqEpoch             = 0;
+  uint8_t   _lastSeq8             = 0;
 
   volatile bool _pauseRequested  = false;
   volatile bool _resumeRequested = false;
   volatile bool _clearRequested  = false;
   volatile bool _acknowledgeRequested = false;
-  bool _paused = false;
+  volatile bool _shutdownRequested = false;
+
+  volatile bool _paused = false;
+  volatile bool _clearing = false;
 
   void clearQueue();
   void pauseCurrent();
   void resumeCurrent();
   void cancelCurrent();
+
+  void performShutdown(uint8_t byeSeq);
 
   /// Called from your EXTI ISR to poke the flash task
   void flashNotifyFromISR(uint16_t GPIO_Pin);
@@ -155,6 +201,30 @@ public:
 
   void scheduleFlashIn();
 
+  static uint32_t getFlashDelay() {
+	  return instance()->_flashDelay;
+  }
+
+  static uint16_t getImagingDroplets() {
+	  return instance()->_imagingDroplets;
+  }
+
+
+  TimerHandle_t    _flashAckTmr = nullptr;   // FreeRTOS software timer to clear the strobe
+  void         _flashAckHigh();
+  void         _flashAckLow();
+
+  void startHomeAsync(Stepper* s,
+                      uint32_t fastHz,
+                      uint32_t slowHz,
+                      uint32_t backoffSteps,
+                      EventBits_t doneBit);
+
+  void startRegHomeAsync(PressureRegulator* r,
+                         uint32_t fastHz,
+                         uint32_t slowHz,
+                         uint32_t backoffSteps,
+                         EventBits_t doneBit);
 
 private:
   static Orchestrator* 	_instance;
@@ -177,6 +247,59 @@ private:
   uint32_t			 _flashDelay;
   uint16_t			 _imagingDroplets;
   uint16_t			 _imagingFreq;
+
+  static constexpr uint32_t kFlashAckMs = 5; // how long to hold the "flash fired" pin high
+
+  // GPIO that reports "flash fired" to the Pi
+  GPIO_TypeDef*    _flashAckPort = GPIOE;
+  uint16_t         _flashAckPin  = GPIO_PIN_12;
+
+  static void _flashAckTimerCb(TimerHandle_t);
+
+  bool _flashInProgress = false;
+
+
+  static void _homeTaskEntry(void* ctx);
+  struct HomeTaskArgs {
+    Stepper*   stepper;
+    uint32_t   fastHz;
+    uint32_t   slowHz;
+    uint32_t   backoffSteps;
+    EventBits_t doneBit;
+  };
+
+  static void _regHomeTaskEntry(void* ctx);
+  struct RegHomeTaskArgs {
+    PressureRegulator* reg;
+    uint32_t           fastHz;
+    uint32_t           slowHz;
+    uint32_t           backoffSteps;
+    EventBits_t        doneBit;
+  };
+
+  // ---- Static stacks/TCBs for homing tasks (no heap allocation) ----
+  static constexpr uint16_t HOME_STACK_WORDS     = 320;  // ~1280 bytes
+  static constexpr uint16_t REG_HOME_STACK_WORDS = 384;  // ~1536 bytes
+
+  // X & Y home tasks
+  StaticTask_t  _tcbHomeX{};
+  StaticTask_t  _tcbHomeY{};
+  StackType_t   _stackHomeX[HOME_STACK_WORDS];
+  StackType_t   _stackHomeY[HOME_STACK_WORDS];
+  TaskHandle_t  _taskHomeX = nullptr;
+  TaskHandle_t  _taskHomeY = nullptr;
+  HomeTaskArgs  _argsHomeX{};
+  HomeTaskArgs  _argsHomeY{};
+
+  // P & R regulator home tasks
+  StaticTask_t     _tcbHomeP{};
+  StaticTask_t     _tcbHomeR{};
+  StackType_t      _stackHomeP[REG_HOME_STACK_WORDS];
+  StackType_t      _stackHomeR[REG_HOME_STACK_WORDS];
+  TaskHandle_t     _taskHomeP = nullptr;
+  TaskHandle_t     _taskHomeR = nullptr;
+  RegHomeTaskArgs  _argsHomeP{};
+  RegHomeTaskArgs  _argsHomeR{};
 };
 
 #endif // ORCHESTRATOR_H

@@ -16,6 +16,7 @@
 #include "PressureRegulator.h"
 #include "Gantry.h"
 #include "Flash.hpp"
+#include "Logger.h"
 
 // Append an unsigned 16 bit value
 #define APPEND_U16(p, idx, tag, v)      \
@@ -37,7 +38,6 @@
     p[(idx)++] = uint8_t((v)>>24 &0xFF);\
   } while(0)
 
-
 // framing constants
 static constexpr uint8_t START_BYTE = 0xAA;
 static constexpr int   MAX_BUF    = 64;  // enough for cmd + 3×2B + CRC
@@ -45,12 +45,6 @@ static constexpr int   MAX_BUF    = 64;  // enough for cmd + 3×2B + CRC
 static constexpr uint8_t TAG_P1 = 0x01;
 static constexpr uint8_t TAG_P2 = 0x02;
 static constexpr uint8_t TAG_P3 = 0x03;
-
-
-
-
-// bring in the LED queue getter
-//extern "C" QueueHandle_t MX_LED_GetQueue();
 
 //------------------------------------------------------------------------------
 // static singleton pointer
@@ -82,7 +76,7 @@ void Comm::begin() {
 
     // spawn status‐sender task @50 ms intervals
     xTaskCreate(
-      statusTaskEntry, "Status", 128,
+      statusTaskEntry, "Status", 256,
       this,                // pvParameters
       tskIDLE_PRIORITY+1,  // priority
       nullptr
@@ -130,7 +124,7 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
     c->_needRxRearm = true;
   }
 
-  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
+//  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
   switch (c->_rxState) {
 	case Comm::WAIT_START:
@@ -169,47 +163,34 @@ void Comm::setStatusPaused(bool p) {
 }
 
 void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
-    // Must have at least cmd+seq
-    if (len < 2) {
-        return;
+  if (len < 2) return;
+
+  Orchestrator::Command oc;
+  oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
+  oc.seq = buf[1];
+
+  int idx = 2;
+  while (idx + 1 < len) {
+    uint8_t tag = buf[idx++];
+    uint8_t l   = buf[idx++];
+    if (idx + l > len) break;
+
+    uint32_t v = 0;
+    for (int i=0; i<l; ++i) v |= uint32_t(buf[idx++]) << (8*i);
+
+    switch (tag) {
+      case TAG_P1: oc.p1 = v; oc.p1Len = l; break;
+      case TAG_P2: oc.p2 = v; oc.p2Len = l; break;
+      case TAG_P3: oc.p3 = v; oc.p3Len = l; break;
+      default: break;
     }
+  }
 
-    // 1) basic header
-    Orchestrator::Command oc;
-    oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
-    oc.seq = buf[1];
-
-    // 2) default all params to zero
-    oc.p1 = 0;  oc.p2 = 0;  oc.p3 = 0;
-
-    // 3) TLV decode
-    int idx = 2;
-    while (idx + 1 < len) {
-        uint8_t tag = buf[idx++];
-        uint8_t l   = buf[idx++];
-        if (idx + l > len) break; // bounds check
-        uint32_t v  = 0;
-        // little-endian assemble
-        for (int i = 0; i < l; ++i) {
-            v |= uint32_t(buf[idx++]) << (8 * i);
-        }
-        switch (tag) {
-          case TAG_P1: oc.p1 = v; break;
-          case TAG_P2: oc.p2 = v; break;
-          case TAG_P3: oc.p3 = v; break;
-          default: /* ignore unknown tags */ break;
-        }
-    }
-
-    // 4) dispatch
-    auto orch = Orchestrator::instance();
-    if (!orch) {
-        // Orchestrator not ready yet; ignore safely (no ACK from here)
-        return;
-    }
+  if (auto orch = Orchestrator::instance()) {
     BaseType_t woken = pdFALSE;
     orch->enqueueFromISR(oc, &woken);
     portYIELD_FROM_ISR(woken);
+  }
 }
 
 void Comm::resetReceiveState() {
@@ -263,6 +244,27 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
     xSemaphoreGive(_txMutex);
 }
 
+void uart_diag(UART_HandleTypeDef* huart)
+{
+    uint32_t pclk = (huart->Instance==USART1 || huart->Instance==USART6)
+                    ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
+    uint32_t brr = huart->Instance->BRR;
+    uint32_t cr1 = huart->Instance->CR1;
+    uint32_t cr3 = huart->Instance->CR3;
+    uint32_t over8 = (cr1 & USART_CR1_OVER8) ? 1u : 0u;
+
+    // Rough actual baud estimate (good enough to catch “way off” cases)
+    uint32_t mant = brr >> 4, frac = brr & 0xFu;
+    uint32_t actual_baud = over8
+        ? (pclk * 2u) / ((mant << 1) | frac)        // oversampling by 8
+        : (pclk)      / (mant * 16u + frac);        // oversampling by 16
+    if (auto L = Logger::instance()) {
+        L->log("COMM diag: PCLK=%lu BRR=0x%04lx OVER8=%lu HWFC=%s actual=%lu baud\r\n",
+                (unsigned long)pclk, (unsigned long)brr, (unsigned long)over8,
+                (cr3 & (USART_CR3_RTSE|USART_CR3_CTSE)) ? "ON" : "OFF",
+                (unsigned long)actual_baud);
+    }
+}
 
 // Give your enum a real name:
 enum Chunk : int {
@@ -275,7 +277,6 @@ enum Chunk : int {
 static Chunk chunk = CHUNK_0;
 
 void Comm::statusTask() {
-//	Chunk chunk = CHUNK_0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -289,16 +290,15 @@ void Comm::statusTask() {
         switch (chunk) {
         	case CHUNK_0: {
 				// LED, pressure, flash
-
-				uint8_t payload[1 + 12*(1+1+4)] = {};
+				uint8_t payload[1 + 18*(1+1+4)] = {};
 				size_t idx = 0;
 
 				auto ps = PressureSensor::instance();
-				uint16_t printP  = uint16_t(ps->getPrintPressure()  + 0.5f);
-				uint16_t refuelP = uint16_t(ps->getRefuelPressure() + 0.5f);
+				uint16_t printP  = (uint16_t)ps->getPrintPressure();
+				uint16_t refuelP = (uint16_t)ps->getRefuelPressure();
 
-				uint32_t targetPrint = PressureRegulator::regP().getTarget();
-				uint32_t targetRefuel = PressureRegulator::regR().getTarget();
+				uint16_t targetPrint = (uint16_t)PressureRegulator::regP().getTarget();
+				uint16_t targetRefuel = (uint16_t)PressureRegulator::regR().getTarget();
 
 				auto printer = Printer::instance();
 				uint32_t dropTot = printer->getTotalDispensed();
@@ -307,9 +307,17 @@ void Comm::statusTask() {
 				uint32_t refuelW = printer->getRefuelPulse();
 				uint32_t dispHz = printer->getDispenseHz();
 
+				uint32_t xMax = (uint32_t)Stepper::stepperX()->maxSpeedHz();
+				uint32_t yMax = (uint32_t)Stepper::stepperY()->maxSpeedHz();
+				uint32_t zMax = (uint32_t)Stepper::stepperZ()->maxSpeedHz();
+
+				uint32_t xAcc = (uint32_t)Stepper::stepperX()->accelStepsPerSec2();
+				uint32_t yAcc = (uint32_t)Stepper::stepperY()->accelStepsPerSec2();
+				uint32_t zAcc = (uint32_t)Stepper::stepperZ()->accelStepsPerSec2();
+
 				UBaseType_t depth = Orchestrator::getCommandDepth();
-				uint16_t currentCmd = Orchestrator::getCurrentCmdNum();
-				uint16_t lastCmd = Orchestrator::getLastCmdNum();
+				uint32_t currentCmd = Orchestrator::getCurrentCmdNum();
+				uint32_t lastCmd = Orchestrator::getLastCmdNum();
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -317,7 +325,7 @@ void Comm::statusTask() {
 				APPEND_U16(payload, idx, TAG_PRINT_P,     printP);
 				APPEND_U16(payload, idx, TAG_REFUEL_P,    refuelP);
 
-				APPEND_U16(payload, idx, TAG_TAR_PRINT_P, targetPrint);
+				APPEND_U16(payload, idx, TAG_TAR_PRINT_P,  targetPrint);
 				APPEND_U16(payload, idx, TAG_TAR_REFUEL_P, targetRefuel);
 
 				APPEND_S32(payload, idx, TAG_DROP_TOTAL,  dropTot);
@@ -327,17 +335,25 @@ void Comm::statusTask() {
 				APPEND_U16(payload, idx, TAG_REFUEL_PW,   refuelW);
 				APPEND_U16(payload, idx, TAG_DISP_FREQ,   dispHz);
 
-				APPEND_U16(payload, idx, TAG_CMD_DEPTH,   depth);
-				APPEND_U16(payload, idx, TAG_CURR_CMD,    currentCmd);
-				APPEND_U16(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_X_MAX_HZ, xMax);
+				APPEND_S32(payload, idx, TAG_Y_MAX_HZ, yMax);
+				APPEND_S32(payload, idx, TAG_Z_MAX_HZ, zMax);
 
-		        sendFrame(_huart, payload, idx);
+				APPEND_S32(payload, idx, TAG_X_ACCEL,  xAcc);
+				APPEND_S32(payload, idx, TAG_Y_ACCEL,  yAcc);
+				APPEND_S32(payload, idx, TAG_Z_ACCEL,  zAcc);
+
+				APPEND_S32(payload, idx, TAG_CMD_DEPTH,   depth);
+				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
+				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+
+				sendFrame(_huart, payload, idx);
 				chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
 
 				break;
         	}
 			case CHUNK_1: {
-				uint8_t payload[1 + 12*(1+1+4)] = {};
+				uint8_t payload[1 + 16*(1+1+4)] = {};
 				size_t idx = 0;
 
 				auto pos = Gantry::instance()->getPosition();
@@ -347,14 +363,18 @@ void Comm::statusTask() {
 				int32_t tarX = Stepper::stepperX()->getTargetPosition();
 				int32_t tarY = Stepper::stepperY()->getTargetPosition();
 				int32_t tarZ = Stepper::stepperZ()->getTargetPosition();
-//				int32_t tarP = Stepper::stepperP()->getTargetPosition();
-//				int32_t tarR = Stepper::stepperR()->getTargetPosition();
 
 				bool activeP = PressureRegulator::regP().isActive();
 				bool activeR = PressureRegulator::regR().isActive();
 
-				uint16_t currentCmd = Orchestrator::getCurrentCmdNum();
-				uint16_t lastCmd = Orchestrator::getLastCmdNum();
+				uint32_t flashDelay = Orchestrator::getFlashDelay();
+				uint16_t imagingDroplets = Orchestrator::getImagingDroplets();
+
+				uint32_t numFlashes = Flash::instance()->getPulses();
+				uint32_t flashDuration = Flash::instance()->getPulseDuration();
+
+				uint32_t currentCmd = Orchestrator::getCurrentCmdNum();
+				uint32_t lastCmd = Orchestrator::getLastCmdNum();
 
 				// Command byte first
 				payload[idx++] = CMD_STATUS;
@@ -368,14 +388,17 @@ void Comm::statusTask() {
 				APPEND_S32(payload, idx, TAG_TAR_X_POS,   tarX);
 				APPEND_S32(payload, idx, TAG_TAR_Y_POS,   tarY);
 				APPEND_S32(payload, idx, TAG_TAR_Z_POS,   tarZ);
-//				APPEND_S32(payload, idx, TAG_TAR_P_POS,   tarP);
-//				APPEND_S32(payload, idx, TAG_TAR_R_POS,   tarR);
+
+				APPEND_S32(payload, idx, TAG_FLASH_NUM,	  numFlashes);
+				APPEND_S32(payload, idx, TAG_FLASH_WIDTH, flashDuration);
+				APPEND_S32(payload, idx, TAG_FLASH_DELAY, flashDelay);
+				APPEND_U16(payload, idx, TAG_FLASH_DROPS, imagingDroplets);
 
 				APPEND_U16(payload, idx, TAG_ACTIVE_P,    activeP);
 				APPEND_U16(payload, idx, TAG_ACTIVE_R,    activeR);
 
-				APPEND_U16(payload, idx, TAG_CURR_CMD,    currentCmd);
-				APPEND_U16(payload, idx, TAG_LAST_CMD,    lastCmd);
+				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
+				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
 
 		        sendFrame(_huart, payload, idx);
 				chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
