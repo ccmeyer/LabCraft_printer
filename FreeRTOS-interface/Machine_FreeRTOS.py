@@ -691,8 +691,12 @@ def crc16_x25(data: bytes) -> int:
                 crc >>= 1
     return crc & 0xFFFF
 
-def build_frame(cmd, seq=0):
-    payload = bytes([cmd, seq])
+def build_frame(cmd, seq32):
+    TAG_SEQ32 = 0x10
+    seq8 = seq32 & 0xFF
+    payload = bytearray([cmd & 0xFF, seq8])
+    # SEQ32 TLV
+    payload += bytes([TAG_SEQ32, 4]) + struct.pack("<I", seq32 & 0xFFFFFFFF)
     header  = bytes([START_BYTE, len(payload)])
     c       = crc16_x25(payload)
     tail    = struct.pack("<H", c)
@@ -728,11 +732,33 @@ def parse_tlv_payload(payload: bytes) -> dict:
 
 class SerialReader(QThread):
     status_received = Signal(dict)
-    ackReceived     = Signal(int)
+    ackReceived     = Signal(object)  # dict with ack_cmd, seq8, seq32
 
     def __init__(self, ser, parent=None):
         super().__init__(parent)
         self.ser = ser
+        
+    @staticmethod
+    def _parse_ack(payload: bytes) -> dict:
+        """
+        payload layout: [ack_cmd, seq8, (TLVs...)]
+        We only care about TAG_SEQ32 (0x10, len=4, LE)
+        """
+        TAG_SEQ32 = 0x10
+
+        ack_cmd = payload[0]
+        seq8 = payload[1] if len(payload) >= 2 else 0
+        seq32 = None
+        i = 2
+        while i + 1 < len(payload):
+            tag = payload[i]; ln = payload[i+1]; i += 2
+            if i + ln > len(payload):
+                break
+            if tag == TAG_SEQ32 and ln == 4:
+                seq32 = struct.unpack_from("<I", payload, i)[0]
+            i += ln
+        return {"ack_cmd": ack_cmd, "seq8": seq8, "seq32": seq32}
+
 
     def run(self):
         while not self.isInterruptionRequested():
@@ -752,8 +778,10 @@ class SerialReader(QThread):
                 self.status_received.emit(data)
             else:
                 # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
-                print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
-                self.ackReceived.emit(cmd)
+                # print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
+                ack = self._parse_ack(payload)
+                print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
+                self.ackReceived.emit(ack)
 
 class LogReader(QThread):
     lineReceived = Signal(str)
@@ -800,10 +828,12 @@ class Command:
     TAG_P1 = 0x01
     TAG_P2 = 0x02
     TAG_P3 = 0x03
+    TAG_SEQ32 = 0x10
 
     def __init__(self, command_number, command_type, param1, param2, param3,
                  handler=None, kwargs=None):
-        self.command_number = command_number
+        self.command_number = int(command_number)
+        self.seq8 = self.command_number & 0xFF
         self.command_type   = command_type
         self.command_code   = CMD_MAP[command_type]
         self.param1 = int(param1)
@@ -814,7 +844,11 @@ class Command:
         p = bytearray()
         # 1) cmd byte + seq
         p.append(self.command_code & 0xFF)
-        p.append(self.command_number & 0xFF)
+        p.append(self.seq8 & 0xFF)
+
+        # SEQ32 TLV (little-endian)
+        p.append(self.TAG_SEQ32); p.append(4)
+        p.extend(struct.pack("<I", self.command_number & 0xFFFFFFFF))
 
         for tag, val in ((self.TAG_P1, self.param1),
                  (self.TAG_P2, self.param2),
@@ -939,29 +973,6 @@ class CommandQueue(QObject):
 
         self.queue_updated.emit()
 
-    # def update_command_status(self, current_executing_command, last_completed_command):
-    #     if current_executing_command is None or last_completed_command is None:
-    #         print('No commands to update')
-    #         return
-    #     # Iterate over a copy of the queue.
-    #     for command in list(self.queue):
-    #         if command.status == "Sent" and command.command_number == int(current_executing_command):
-    #             command.mark_as_executing()
-    #         if command.command_number <= int(last_completed_command):
-    #             command.mark_as_completed()
-
-    #     # Now remove completed commands.
-    #     while self.queue and self.queue[0].status == "Completed":
-    #         completed_command = self.queue.popleft()
-    #         self.completed.append(completed_command)
-    #         if len(self.completed) > 100:
-    #             self.completed.popleft()
-
-    #     if len(self.queue) == 0:
-    #         self.commands_completed.emit()
-
-    #     self.queue_updated.emit()
-
     def clear_queue(self):
         """Clear the command queue."""
         self.queue.clear()
@@ -1003,6 +1014,8 @@ class Machine(QObject):
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
+        self._next_ctl_seq32 = 1          # for out-of-band control frames (HELLO, CLEAR, etc.)
+
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
         self._tx_paused = False
@@ -1019,49 +1032,84 @@ class Machine(QObject):
             print(f'Error initializing droplet camera: {e}')
             self.droplet_camera = None
 
-    def _start_ack_wait(self, ack_code: int, timeout_ms: int,
-                        on_ok: callable, on_timeout: callable):
+    def _alloc_ctl_seq32(self) -> int:
+        n = self._next_ctl_seq32
+        self._next_ctl_seq32 = (self._next_ctl_seq32 + 1) & 0xFFFFFFFF
+        return n
+    
+    @staticmethod
+    def _ack_key(ack_code: int, seq32: int | None, seq8: int | None = None):
+        """
+        Prefer SEQ32 if present; otherwise fall back to seq8.
+        Use -1 when missing to keep a stable tuple key type.
+        """
+        if seq32 is not None:
+            return (ack_code, int(seq32), -1)
+        if seq8 is not None:
+            return (ack_code, -1, int(seq8))
+        return (ack_code, -1, -1)  # last-ditch fallback
+
+    def _start_ack_wait(self, ack_code: int, seq32: int | None, timeout_ms: int,
+                        on_ok: callable, on_timeout: callable, *, seq8: int | None = None):
         """Begin waiting for a specific ack_code with a one-shot timer."""
         # If a previous wait exists for this ack, cancel it
-        self._cancel_ack_wait(ack_code)
+        # self._cancel_ack_wait(ack_code)
+        key = self._ack_key(ack_code, seq32, seq8)
+        self._cancel_ack_wait_by_key(key)
 
         t = QTimer(self)
         t.setSingleShot(True)
-        # capture ack_code in lambda so we can look up the right entry
-        t.timeout.connect(lambda: self._ack_timeout(ack_code))
-        self._pending_acks[ack_code] = {"timer": t, "ok": on_ok, "to": on_timeout}
+        t.timeout.connect(lambda: self._ack_timeout_by_key(key))
+        self._pending_acks[key] = {"timer": t, "ok": on_ok, "to": on_timeout}
         t.start(timeout_ms)
 
-    def _ack_timeout(self, ack_code: int):
-        entry = self._pending_acks.pop(ack_code, None)
+        # t = QTimer(self)
+        # t.setSingleShot(True)
+        # # capture ack_code in lambda so we can look up the right entry
+        # t.timeout.connect(lambda: self._ack_timeout(ack_code))
+        # self._pending_acks[ack_code] = {"timer": t, "ok": on_ok, "to": on_timeout}
+        # t.start(timeout_ms)
+
+    def _ack_timeout_by_key(self, key):
+        entry = self._pending_acks.pop(key, None)
         if not entry:
             return
-        # timer already fired
         try:
-            entry["to"]()  # on_timeout
+            entry["to"]()
         finally:
-            # make sure we don’t leak the timer
             entry["timer"].deleteLater()
 
-    def _cancel_ack_wait(self, ack_code: int):
-        entry = self._pending_acks.pop(ack_code, None)
+    def _cancel_ack_wait_by_key(self, key):
+        entry = self._pending_acks.pop(key, None)
         if entry:
             entry["timer"].stop()
             entry["timer"].deleteLater()
 
-    @Slot(int)
-    def _on_any_ack(self, cmd_code: int):
-        """Called from SerialReader; fan-out to the right waiter (if any)."""
-        entry = self._pending_acks.pop(cmd_code, None)
+    @Slot(object)
+    def _on_any_ack(self, ack: dict):
+        """
+        ack = {"ack_cmd": int, "seq8": int, "seq32": int|None}
+        """
+        ack_code = ack.get("ack_cmd")
+        seq32    = ack.get("seq32")
+        seq8     = ack.get("seq8")
+
+        # Try SEQ32 first, then fall back to seq8
+        key = self._ack_key(ack_code, seq32, None)
+        entry = self._pending_acks.pop(key, None)
+        if not entry and seq32 is None:
+            key = self._ack_key(ack_code, None, seq8)
+            entry = self._pending_acks.pop(key, None)
+
         if entry:
             entry["timer"].stop()
             try:
-                entry["ok"]()  # on_ok
+                entry["ok"]()
             finally:
                 entry["timer"].deleteLater()
         else:
-            # Stray ack (no one is waiting) — optional: log it
-            # print(f"Stray ACK {cmd_code}")
+            # Optional: log stray ACKs
+            print(f"Stray ACK: code=0x{ack_code:02X} seq32={seq32} seq8={seq8}")
             pass
 
     def connect_board(self, port):
@@ -1074,9 +1122,10 @@ class Machine(QObject):
             self.begin_reader_thread()
 
             # Send HELLO and wait up to 1000 ms for HELLO_ACK
-            self._write_frame(build_frame(HELLO, seq=0))
+            hello_seq = self._alloc_ctl_seq32()
+            self._write_frame(build_frame(HELLO, hello_seq))
             self._start_ack_wait(
-                HELLO_ACK, 1000,
+                HELLO_ACK, hello_seq, 1000,
                 on_ok=self._on_hello_ack,
                 on_timeout=lambda: self._hello_timeout()
             )
@@ -1133,21 +1182,27 @@ class Machine(QObject):
         if hasattr(self, 'execution_timer') and self.execution_timer:
             try: self.stop_execution_timer()
             except Exception: pass
-        # send GOODBYE
-        frame = build_frame(GOODBYE, seq=0)
+
+        # Allocate a unique 32-bit control seq for GOODBYE
+        seq = self._alloc_ctl_seq32()
+        self._goodbye_seq32 = seq    # keep for BYE_DONE correlation
+
+        frame = build_frame(GOODBYE, seq)  # MUST include SEQ32 TLV inside
         self._write_frame(frame)
 
+        # Wait for BYE_ACK with the SAME seq32
         self._start_ack_wait(
-            BYE_ACK, 1000,
-            on_ok=lambda: self._on_goodbye_ack_and_wait_done(),
-            on_timeout=lambda: self._on_goodbye_ack_and_wait_done()  # proceed anyway
+            BYE_ACK, seq, 1000,
+            on_ok=lambda s=seq: self._on_goodbye_ack_and_wait_done(s),
+            on_timeout=lambda s=seq: self._on_goodbye_ack_and_wait_done(s)  # proceed anyway
         )
 
-    def _on_goodbye_ack_and_wait_done(self):
+
+    def _on_goodbye_ack_and_wait_done(self, seq32):
         # Second wait: BYE_DONE (shutdown finished). If it never arrives, proceed anyway.
         print('Goodbye acknowledged, waiting for shutdown confirmation...')
         self._start_ack_wait(
-            BYE_DONE, 3000,                   # adjust timeout to your shutdown worst-case
+            BYE_DONE, seq32, 3000,                   # adjust timeout to your shutdown worst-case
             on_ok=self._on_goodbye_done,
             on_timeout=self._on_goodbye_done  # proceed anyway after timeout
         )
@@ -1338,11 +1393,12 @@ class Machine(QObject):
         except Exception: pass
 
         # send CLEAR
-        frame = build_frame(CLEAR_QUEUE, seq=0)
+        seq = self._alloc_ctl_seq32()
+        frame = build_frame(CLEAR_QUEUE, seq)
         self._write_frame(frame)
 
         self._start_ack_wait(
-            CLEAR_ACK, 2000,
+            CLEAR_ACK, seq, 2000,
             on_ok=lambda: self._on_clear_ack(handler, timed_out=False),
             on_timeout=lambda: self._on_clear_ack(handler, timed_out=True)
         )        
