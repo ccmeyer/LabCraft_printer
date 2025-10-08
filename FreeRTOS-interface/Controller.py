@@ -612,6 +612,11 @@ class Controller(QObject):
         print("Homing machine...")
         self.machine.home_motors()
 
+    def home_regulators(self):
+        """Home the regulators."""
+        print("Homing regulators...")
+        self.machine.home_regulators()
+
     def toggle_motors(self):
         """Slot to toggle the motor state."""
         if self.model.machine_model.motors_enabled:

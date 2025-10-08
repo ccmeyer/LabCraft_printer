@@ -641,6 +641,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
 
+        self.shortcut_manager.add_shortcut('Shift+7','Home Regulators', lambda: self.controller.home_regulators())
+
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.main_window.pause_machine())
 
 

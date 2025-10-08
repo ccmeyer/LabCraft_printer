@@ -232,6 +232,7 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('Shift+4','Stop Refuel Camera', lambda: self.controller.stop_refuel_camera())
         self.shortcut_manager.add_shortcut('Shift+5','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
         self.shortcut_manager.add_shortcut('Shift+6','Reset Refuel Syringe', lambda: self.controller.reset_refuel_syringe())
+        self.shortcut_manager.add_shortcut('Shift+7','Home Regulators', lambda: self.controller.home_regulators())
 
 
 
