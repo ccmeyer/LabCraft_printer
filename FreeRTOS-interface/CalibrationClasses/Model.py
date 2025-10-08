@@ -622,7 +622,8 @@ class CalibrationManager(QObject):
     def _safe_get_stock_solution(self):
         try:
             ph = self.model.rack_model.get_gripper_printer_head()
-            return getattr(ph.get_stock_solution(), "name", None) or str(ph.get_stock_solution())
+            # Prefer a stable name if available; fallback to str()
+            return getattr(ph.get_stock_solution(), "reagent_name", None) or str(ph.get_stock_solution())
         except Exception:
             return None
 
