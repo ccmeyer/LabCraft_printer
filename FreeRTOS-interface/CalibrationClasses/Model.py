@@ -1967,7 +1967,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
-        self.upper_pressure = 1.5   # example maximum pressure
+        self.upper_pressure = 3.0   # example maximum pressure
         # Start with a candidate near the lower bound.
         self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
         
@@ -2290,7 +2290,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         try:
             lo, hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            lo, hi = 0.2, 1.50  # psi, conservative
+            lo, hi = 0.2, 3.00  # psi, conservative
         return float(lo), float(hi)
 
     def _clampP(self, p: float) -> float:
@@ -2620,7 +2620,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model,
                  p_start: float = 0.3,
-                 p_end: float = 1.5,
+                 p_end: float = 2.5,
                  p_step: float = 0.05,
                  *,
                  min_reps: int = 5,
@@ -2654,7 +2654,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         try:
             hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            hw_lo, hw_hi = 0.3, 1.5
+            hw_lo, hw_hi = 0.3, 3.0
         self.P_MIN = float(hw_lo)
         self.P_MAX = float(hw_hi)
 
@@ -2990,7 +2990,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            p_lo, p_hi = 0.3, 1.5
+            p_lo, p_hi = 0.3, 3.0
         self.min_pressure = float(p_lo)
         self.max_pressure = float(p_hi)
 
@@ -4000,7 +4000,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            p_lo, p_hi = 0.3, 1.5
+            p_lo, p_hi = 0.3, 3.0
         self.min_pressure, self.max_pressure = float(p_lo), float(p_hi)
         self.pressure_step = 0.02
         self.new_pressure = None
@@ -5333,7 +5333,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model,
                  *,
-                 step_us: int = 100,
+                 step_us: int = 200,
                  window_us: int = 8000,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -5399,7 +5399,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         else:
             vis = img.copy()
 
-        text = f"{int(delay_us)} µs"
+        text = f"{int(delay_us)} usec"
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 2.0
         thickness = 4

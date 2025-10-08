@@ -389,7 +389,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         try:
             hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            hw_lo, hw_hi = 0.1, 2.0
+            hw_lo, hw_hi = 0.1, 3.0
 
         self.scan_p_lo_label = QtWidgets.QLabel("Scan Pressure Low (psi):")
         self.scan_p_lo_spin = QtWidgets.QDoubleSpinBox()
