@@ -883,7 +883,7 @@ class Controller(QObject):
                 self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
             # self.machine.reset_acceleration()
             # self.exit_print_mode()
-            # self.machine.disable_print_profile()
+            self.disable_print_profile()
             self.move_to_location('pause')
             self.move_to_location('pause',z_offset=True)
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
@@ -961,7 +961,7 @@ class Controller(QObject):
         self.move_to_location('pause')
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
-        # self.machine.enable_print_profile()
+        self.enable_print_profile()
 
         current_printer_head = self.model.rack_model.get_gripper_printer_head()
         if current_printer_head is not None:
@@ -1002,6 +1002,14 @@ class Controller(QObject):
             else:
                 self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             
+    def enable_print_profile(self):
+        """Enable the print profile."""
+        self.machine.enable_print_profile()
+
+    def disable_print_profile(self):
+        """Disable the print profile."""
+        self.machine.disable_print_profile()
+    
     def start_refuel_camera(self):
         self.machine.start_refuel_camera()
         self.machine.refuel_led_on()

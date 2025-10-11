@@ -952,6 +952,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         importlib.reload(CalibrationClasses)
         self.model.reload_droplet_model()
         self.controller.connect_droplet_camera_signals()
+        self.controller.enable_print_profile()
         droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
 

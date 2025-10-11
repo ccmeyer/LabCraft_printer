@@ -1235,6 +1235,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.camera_timer.stop()
         self.stop_droplet_camera()
         self.controller.stop_read_camera()
+        self.controller.disable_print_profile()
         event.accept()
 
 
