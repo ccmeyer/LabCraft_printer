@@ -883,6 +883,7 @@ class Controller(QObject):
                 self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
             # self.machine.reset_acceleration()
             # self.exit_print_mode()
+            # self.machine.disable_print_profile()
             self.move_to_location('pause')
             self.move_to_location('pause',z_offset=True)
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
@@ -960,6 +961,7 @@ class Controller(QObject):
         self.move_to_location('pause')
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
+        # self.machine.enable_print_profile()
 
         current_printer_head = self.model.rack_model.get_gripper_printer_head()
         if current_printer_head is not None:

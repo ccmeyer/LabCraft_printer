@@ -647,6 +647,9 @@ CMD_MAP = {
     'WAIT': 0x50,
     'CHANGE_ACCEL': 0x51,
 
+    'ENABLE_PRINT_PROFILE': 0x60,
+    'DISABLE_PRINT_PROFILE': 0x61,
+
     'START_READ_CAMERA': 0xC0,
     'STOP_READ_CAMERA': 0xC1,
     'SET_WIDTH_F' : 0xC2,
@@ -1713,3 +1716,9 @@ class Machine(QObject):
     def refuel_only(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
         return self.add_command_to_queue('DISPENSE_REFUEL',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)
+    
+    def enable_print_profile(self, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('ENABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    
+    def disable_print_profile(self, handler=None, kwargs=None, manual=False):
+        return self.add_command_to_queue('DISABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
