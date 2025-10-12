@@ -68,6 +68,7 @@ def _make_output_line(chip_name, offset, initial=0, consumer="gpio_out"):
     is_v2 = hasattr(gpiod, "line")  # v2 has the 'line' namespace
 
     if is_v2:
+        print("Using gpiod v2 API, making output line")
         chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
         Direction = gpiod.line.Direction
@@ -83,6 +84,7 @@ def _make_output_line(chip_name, offset, initial=0, consumer="gpio_out"):
         return OutV2()
 
     else:
+        print("Using gpiod v1 API, making output line")
         chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         line.request(consumer=consumer, type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
@@ -114,6 +116,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
     is_v2 = hasattr(gpiod, "line")
 
     if is_v2:
+        print("Using gpiod v2 API, making rising edge input line")
         chip = _open_chip(chip_name)
         ls = gpiod.LineSettings()
         Direction = gpiod.line.Direction
@@ -138,6 +141,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
         return InV2()
 
     else:
+        print("Using gpiod v1 API, making rising edge input line")
         chip = _open_chip(chip_name)
         line = chip.get_line(offset)
         flags = 0
