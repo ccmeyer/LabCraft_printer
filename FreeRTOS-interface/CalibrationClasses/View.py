@@ -156,6 +156,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.flash_count_label, row, 0, 1, 2)
         row += 1
 
+        self.trigger_count_label = QtWidgets.QLabel("Triggers: 0")
+        self.button_layout.addWidget(self.trigger_count_label, row, 0, 1, 2)
+        row += 1
+
         # Add a spinbox to set the duration of the flash
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
         self.flash_duration_spinbox = QtWidgets.QSpinBox()
@@ -795,6 +799,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         count = self.model.droplet_camera_model.get_num_flashes()
         self.flash_count_label.setText(f"Flashes: {count}")
+        trigger_count = self.model.droplet_camera_model.get_trigger_counter()
+        self.trigger_count_label.setText(f"Triggers: {trigger_count}")
         self.flash_duration_spinbox.blockSignals(True)
         self.flash_duration_spinbox.setValue(self.model.droplet_camera_model.get_flash_duration())
         self.flash_duration_spinbox.blockSignals(False)

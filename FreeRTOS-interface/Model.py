@@ -6405,6 +6405,8 @@ class Model(QObject):
             self.droplet_camera_model.update_flash_delay(status_dict['Flash_delay'])
         if 'Flash_droplets' in status_keys:
             self.droplet_camera_model.update_num_droplets(status_dict['Flash_droplets'])
+        if 'Ext_counter' in status_keys:
+            self.droplet_camera_model.update_trigger_counter(status_dict['Ext_counter'])
         if 'X_max_hz' in status_keys:
             self.machine_model.update_all_speeds(status_dict['X_max_hz'], status_dict['Y_max_hz'], status_dict['Z_max_hz'])
         if 'X_accel' in status_keys:

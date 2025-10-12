@@ -5505,6 +5505,7 @@ class DropletCameraModel(QObject):
         self.reading = False
         self.signal = False
         self.num_flashes = 0
+        self.ext_counter = 0
         self.flash_duration = 1000
         self.flash_delay = 5000
         self.num_droplets = 1
@@ -5566,6 +5567,13 @@ class DropletCameraModel(QObject):
     
     def update_exposure_time(self,exposure_time):
         self.exposure_time = int(exposure_time)
+        self.flash_signal.emit()
+
+    def get_trigger_counter(self):
+        return self.ext_counter
+    
+    def update_trigger_counter(self,counter):
+        self.ext_counter = int(counter)
         self.flash_signal.emit()
 
     def get_image_metadata(self):

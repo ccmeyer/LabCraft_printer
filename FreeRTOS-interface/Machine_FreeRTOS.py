@@ -211,8 +211,12 @@ class DropletCamera(QObject):
         self.max_wait_s = 1.0
 
     # --- GPIO ---
-    def _trigger_high(self): self._trig_line.set_value(1)
-    def _trigger_low(self):  self._trig_line.set_value(0)
+    def _trigger_high(self): 
+        print("[Pi] trigger HIGH")
+        self._trig_line.set_value(1)
+    def _trigger_low(self): 
+        print("[Pi] trigger LOW")
+        self._trig_line.set_value(0)
 
     # --- camera lifecycle ---
     def start_camera(self):
@@ -355,18 +359,17 @@ class DropletCamera(QObject):
             print("Camera not started.")
             return
 
-        # drain stale edges
+        # Drain stale edges from previous runs
         while self._edge_in.event_wait(0):
             self._edge_in.event_consume()
 
-        # raise trigger to MCU
+        # Raise trigger to MCU
         self._trigger_high()
 
-        # wait for ack synchronously (simpler & safer)
+        # Wait for MCU "flash fired" ACK
         if not self._edge_in.event_wait(timeout_s):
             print("Timed out waiting for flash-fired edge.")
             self._trigger_low()
-                    # mark a failure result so wrappers can see it
             with self._cv:
                 self._cap_active = False
                 self._cap_result = {"arr": None, "md": None, "mean": 0.0,
@@ -375,31 +378,31 @@ class DropletCamera(QObject):
             return
         self._edge_in.event_consume()
 
-        # arm immediately: record arm time BEFORE computing baseline
-        arm_ns = time.monotonic_ns()
+        # Immediately deassert trigger to avoid EXTI re-notifications while high
+        self._trigger_low()
 
+        # Arm the time gate AFTER the ack
+        arm_ns = time.monotonic_ns()
         with self._cv:
             base_mean, base_std = self._baseline_before_ns_locked(arm_ns, N=4)
             threshold = base_mean + self.k_sigma * max(base_std, 1.0) + self.min_delta
-            threshold = min(threshold, 150.0)  # cap at 150 for RGB
-            
+            threshold = min(threshold, 150.0)
+
             self._cap_id         += 1
             self._cap_active      = True
-            self._cap_arm_ns      = arm_ns              # <<< time gate starts here
+            self._cap_arm_ns      = arm_ns
             self._cap_deadline    = time.monotonic() + timeout_s
             self._cap_max_new     = max_new_frames
             self._cap_seen        = 0
             self._cap_threshold   = threshold
             self._cap_brightest   = None
-            self._emit_on_complete = bool(emit_signal) 
+            self._emit_on_complete = bool(emit_signal)
 
-            # clear the completion latch for this attempt
             self._cap_done.clear()
             self._cap_result = None
 
             print(f"[Arm] cap_id={self._cap_id} base_mean={base_mean:.1f} "
-                  f"base_std={base_std:.1f} threshold={threshold:.1f} "
-                  f"arm_ns={arm_ns}")
+                f"base_std={base_std:.1f} threshold={threshold:.1f} arm_ns={arm_ns}")
             
     def capture_with_retry_sync(
         self,
@@ -566,6 +569,7 @@ TAG_FLASH_NUM	   = 0x60
 TAG_FLASH_WIDTH   = 0x61
 TAG_FLASH_DELAY   = 0x62
 TAG_FLASH_DROPS   = 0x63
+TAG_EXT_COUNTER   = 0x64
 TAG_X_MAX_HZ      = 0x70
 TAG_Y_MAX_HZ      = 0x71
 TAG_Z_MAX_HZ      = 0x72
@@ -602,6 +606,7 @@ TAG_MAP = {
     TAG_FLASH_WIDTH:  ("Flash_width", 4, False),
     TAG_FLASH_DELAY:  ("Flash_delay", 4, False),
     TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
+    TAG_EXT_COUNTER:  ("Ext_counter", 4, False),
 
     TAG_X_MAX_HZ:     ("X_max_hz", 4, False),
     TAG_Y_MAX_HZ:     ("Y_max_hz", 4, False),
