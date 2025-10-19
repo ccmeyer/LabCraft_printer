@@ -5,7 +5,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtWidgets import QApplication
 
-from dfu_update import update_firmware
+from dfu_update import DfuUpdateWorker, reset_board, update_firmware
 
 from collections import deque
 
@@ -1160,16 +1160,13 @@ class Machine(QObject):
             self._connection_attempts += 1
             print(f"Retrying connection ({self._connection_attempts}/3)…")
             self.connect_board(self.port)
+        elif self._connection_attempts < 6:
+            self._connection_attempts += 1
+            self.reset_mcu_board()
+            print(f"Resetting board and retrying connection ({self._connection_attempts}/6)…")
         else:
             print("Max connection attempts reached. Please check the machine.")
             self.machine_connected_signal.emit(False)
-
-    # def update_firmware(self, bin_path: str):
-    #     update_firmware(
-    #         bin_path="/home/labcraft/LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
-    #         boot_chip="gpiochip4", boot_offset=24,
-    #         rst_chip="gpiochip4",  rst_offset=23,
-    #     )
 
     def reset_board(self):
         print('Resetting board')
@@ -1177,6 +1174,9 @@ class Machine(QObject):
         self.stop_execution_timer()
         self.stop_reader_thread()
         self.stop_log_thread()
+
+    def reset_mcu_board(self):
+        reset_board()
         
     def disconnect_handler(self):
         self.reset_board()

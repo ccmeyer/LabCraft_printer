@@ -2,7 +2,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
-from dfu_update import DfuUpdateWorker
+from dfu_update import DfuUpdateWorker, reset_board
 from pathlib import Path
 
 import time
@@ -193,6 +193,11 @@ class Controller(QObject):
         # Retain ref so it isn’t GC’d
         self._dfu_thread = w
         w.start()
+
+    def reset_mcu_board(self):
+        """Reset the MCU board."""
+        self.machine.reset_mcu_board()
+        self.machine.reset_board()
 
     def update_balance_prediction_models(self,target_volume=40):
         pred_model = self.model.calibration_model.get_selected_model_path()

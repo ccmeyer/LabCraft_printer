@@ -539,6 +539,45 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
     if verbose:
         print("[DFU] Done.")
 
+def reset_board(*,
+                rst_chip: str = DEFAULT_RST_CHIP,
+                rst_offset: int = DEFAULT_RST_OFFSET,
+                rst_line_name: str | None = None,
+                pulse_ms: int = 200,
+                # The BOOT params are optional; we keep BOOT explicitly disabled
+                boot_chip: str = DEFAULT_BOOT_CHIP,
+                boot_offset: int = DEFAULT_BOOT_OFFSET,
+                boot_line_name: str | None = None,
+                verbose: bool = True):
+    """
+    Hardware reset only:
+      - Ensure BOOT is *disabled* (run application).
+      - Pulse RESET (NRST) for `pulse_ms`.
+      - Do not wait for/enter DFU; no flashing.
+
+    You can pass either chip/offset or a gpio line name via `*_line_name`
+    (e.g., rst_line_name="GPIO23") and it will resolve with `gpiofind`.
+    """
+    if verbose:
+        print(f"[RESET] rst={rst_chip}:{rst_offset} (name={rst_line_name or '—'})")
+
+    with BootReset(boot_chip=boot_chip,
+                   boot_offset=boot_offset,
+                   rst_chip=rst_chip,
+                   rst_offset=rst_offset,
+                   boot_line_name=boot_line_name,
+                   rst_line_name=rst_line_name,
+                   boot_active_high=BOOT_ACTIVE_HIGH,
+                   reset_active_low=RESET_ACTIVE_LOW) as br:
+        # Make sure we are NOT in DFU mode
+        br.set_boot_enabled(False)
+        time.sleep(0.02)
+        # Pulse NRST
+        br.pulse_reset(low_ms=pulse_ms)
+
+    if verbose:
+        print("[RESET] Done.")
+
 # -------------------------
 # CLI entry point
 # -------------------------

@@ -3372,6 +3372,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
     def __init__(self, parent, model, controller, color_dict):
         super().__init__(parent)
+        self.main_window = parent
         self.model = model
         self.controller = controller
         self.color_dict = color_dict
@@ -3491,6 +3492,23 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
         layout.addWidget(fw_group, row_after_table + 1, 0, 1, 3)
 
+        # Add a new button for resetting the mcu board
+        self.reset_mcu_button = QtWidgets.QPushButton("Reset MCU")
+        self.reset_mcu_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF5555;
+                color: #FFFFFF;
+                border: 1px solid #FF4444;
+            }
+            QPushButton:disabled {
+                background-color: #555555;
+                color: #AAAAAA;
+                border: 1px solid #444444;
+            }
+        """)
+        self.reset_mcu_button.clicked.connect(self._on_reset_mcu_requested)
+        layout.addWidget(self.reset_mcu_button, row_after_table + 2, 0, 1, 3)
+
         # Stretch/spacer row so everything stays at the top
         last_row = len(self._axis_rows) + 4  # header(0) + data rows
         spacer = QtWidgets.QSpacerItem(
@@ -3595,6 +3613,16 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         elif hasattr(self.controller, "update_firmware"):
             self.fw_status.setText("Running (UI will freeze)…")
             self.controller.update_firmware()
+
+    @QtCore.Slot()
+    def _on_reset_mcu_requested(self):
+        # Confirm with the user
+        response = self.main_window.popup_yes_no("Reset MCU","Are you sure you want to reset the microcontroller unit (MCU)? This will interrupt any ongoing operations.")
+        if response == "&Yes":
+            if hasattr(self.controller, "reset_mcu_board"):
+                self.controller.reset_mcu_board()
+            else:
+                self.main_window.popup_message("Reset MCU","The controller does not support MCU reset.")
 
     @QtCore.Slot(int)
     def _on_dfu_progress(self, p):
