@@ -1075,13 +1075,6 @@ class Machine(QObject):
         self._pending_acks[key] = {"timer": t, "ok": on_ok, "to": on_timeout}
         t.start(timeout_ms)
 
-        # t = QTimer(self)
-        # t.setSingleShot(True)
-        # # capture ack_code in lambda so we can look up the right entry
-        # t.timeout.connect(lambda: self._ack_timeout(ack_code))
-        # self._pending_acks[ack_code] = {"timer": t, "ok": on_ok, "to": on_timeout}
-        # t.start(timeout_ms)
-
     def _ack_timeout_by_key(self, key):
         entry = self._pending_acks.pop(key, None)
         if not entry:
@@ -1144,6 +1137,7 @@ class Machine(QObject):
 
         except Exception as e:
             print(f"Connection error: {e}")
+            self.error_occurred.emit(str(f"Connection error: {e}"))
             self.machine_connected_signal.emit(False)
     @Slot()
     def _on_hello_ack(self):

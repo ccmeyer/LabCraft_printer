@@ -5942,9 +5942,9 @@ class MachineModel(QObject):
         super().__init__()
         self.available_ports = []
         self.machine_connected = False
-        self.balance_connected = False
+        # self.balance_connected = False
         # self.machine_port = "Virtual"
-        self.balance_port = "Virtual"
+        # self.balance_port = "Virtual"
 
         self.motors_enabled = False
         self.target_x = 0
@@ -6027,8 +6027,8 @@ class MachineModel(QObject):
     def is_connected(self):
         return self.machine_connected
     
-    def is_balance_connected(self):
-        return self.balance_connected
+    # def is_balance_connected(self):
+    #     return self.balance_connected
     
     def motors_are_enabled(self):
         return self.motors_enabled
@@ -6036,14 +6036,14 @@ class MachineModel(QObject):
     def motors_are_homed(self):
         return self.motors_homed
 
-    def connect_balance(self, port):
-        self.balance_port = port
-        self.balance_connected = True
-        self.balance_state_updated.emit(self.balance_connected)
+    # def connect_balance(self, port):
+    #     self.balance_port = port
+    #     self.balance_connected = True
+    #     self.balance_state_updated.emit(self.balance_connected)
 
-    def disconnect_balance(self):
-        self.balance_connected = False
-        self.balance_state_updated.emit(self.balance_connected)
+    # def disconnect_balance(self):
+    #     self.balance_connected = False
+    #     self.balance_state_updated.emit(self.balance_connected)
 
     def pause_commands(self):
         self.paused = True
@@ -6354,8 +6354,8 @@ class Model(QObject):
     def get_default_machine_port(self):
         return self.settings['MACHINE_PORT']
     
-    def get_default_balance_port(self):
-        return self.settings['BALANCE_PORT']
+    # def get_default_balance_port(self):
+    #     return self.settings['BALANCE_PORT']
         
     def update_rack_calibration(self):
         print('\n---Updating rack calibration')

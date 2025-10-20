@@ -1,7 +1,6 @@
 {
     "BASE_PATH":"./",
-    "MACHINE_PORT":"COM3",
-    "BALANCE_PORT":"COM4",
+    "MACHINE_PORT":"/dev/ttyAMA0",
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",
     "DEFAULT_REAGENT":"water",

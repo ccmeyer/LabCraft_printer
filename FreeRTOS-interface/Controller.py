@@ -96,7 +96,7 @@ class Controller(QObject):
         """Handle errors from the machine."""
         pass
         #print(f"Error occurred: {error_message}")
-        # self.error_occurred_signal.emit('Error Occurred',error_message)
+        self.error_occurred_signal.emit('Error Occurred',error_message)
 
     def update_command_numbers(self):
         """Pass the current command and last completed command to the command queue"""
@@ -162,16 +162,16 @@ class Controller(QObject):
         """Get the currently connected machine port."""
         return self.machine.get_machine_port()
 
-    def connect_balance(self, port):
-        """Connect to the microbalance."""
-        if self.machine.connect_balance(port):
-            # Update the model state
-            self.model.machine_model.connect_balance(port)
+    # def connect_balance(self, port):
+    #     """Connect to the microbalance."""
+    #     if self.machine.connect_balance(port):
+    #         # Update the model state
+    #         self.model.machine_model.connect_balance(port)
     
-    def disconnect_balance(self):
-        """Disconnect from the balance."""
-        self.machine.disconnect_balance()
-        self.model.machine_model.disconnect_balance()
+    # def disconnect_balance(self):
+    #     """Disconnect from the balance."""
+    #     self.machine.disconnect_balance()
+    #     self.model.machine_model.disconnect_balance()
 
     # def update_firmware(self, bin_path: str):
     #     self.machine.update_firmware(bin_path)
@@ -199,8 +199,8 @@ class Controller(QObject):
         self.machine.reset_mcu_board()
         self.machine.reset_board()
 
-    def update_balance_prediction_models(self,target_volume=40):
-        pred_model = self.model.calibration_model.get_selected_model_path()
+    # def update_balance_prediction_models(self,target_volume=40):
+    #     pred_model = self.model.calibration_model.get_selected_model_path()
         # resistance_model = self.model.calibration_model.get_selected_resistance_model_path()
         # self.machine.balance.update_prediction_models(pred_model,target_volume)
 
