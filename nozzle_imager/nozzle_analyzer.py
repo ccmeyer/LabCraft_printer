@@ -2,10 +2,10 @@
 import cv2, numpy as np
 from math import sqrt
 
-# ---------------- Calibration ----------------
-UM_PER_PX = 0.3896  # microns per pixel (edit if you recalibrate)
+# ---------------- Calibration default ----------------
+UM_PER_PX = 0.3896  # microns per pixel (override from UI)
 
-# ---- Tunables ----
+# ---- Tunables (defaults; can be overridden via function args) ----
 DEFAULT_LO = 25
 DEFAULT_HI = 25
 R_MIN_FRAC = 0.04
@@ -95,33 +95,12 @@ def _floodfill_candidates(roi, seeds, lo=DEFAULT_LO, hi=DEFAULT_HI):
 def _circularity_metrics(inliers, center, percentiles=(5,95)):
     xc, yc = center
     rads = np.sqrt((inliers[:,0]-xc)**2 + (inliers[:,1]-yc)**2)
-
     p_lo, p_hi = percentiles
     r_in  = float(np.percentile(rads, p_lo))
     r_out = float(np.percentile(rads, p_hi))
     C_io  = max(0.0, min(1.0, r_in/(r_out+1e-9)))
     radial_nonuniformity = (r_out - r_in) / (r_out + 1e-9)
-
-    C_ellipse = None
-    try:
-        (cx_e, cy_e), (MA, ma), ang = cv2.fitEllipse(inliers.astype(np.float32))
-        major, minor = (max(MA,ma), min(MA,ma))
-        C_ellipse = float(minor / (major + 1e-9))
-    except cv2.error:
-        pass
-
-    hull = cv2.convexHull(inliers.astype(np.float32))
-    A = float(cv2.contourArea(hull))
-    P = float(cv2.arcLength(hull, True))
-    C_4pi = float((4*np.pi*A)/(P*P + 1e-9)) if P > 0 else None
-
-    return {
-        "circularity_io": C_io,
-        "r_in": r_in, "r_out": r_out,
-        "radial_nonuniformity": radial_nonuniformity,
-        "circularity_ellipse": C_ellipse,
-        "circularity_4pi": C_4pi
-    }
+    return C_io, r_in, r_out, radial_nonuniformity
 
 # ---------------- Eyepiece → ROI ----------------
 def detect_field_robust(gray):
@@ -147,44 +126,42 @@ def crop_central_roi(gray, center, field_r, roi_scale=0.62):
     x2, y2 = min(gray.shape[1], cx+roi_r), min(gray.shape[0], cy+roi_r)
     return gray[y1:y2, x1:x2]
 
-# ---------------- One-call analysis ----------------
-def analyze_nozzle_from_frame(bgr_frame, um_per_px=UM_PER_PX, debug=False):
-    """
-    Takes an RGB/BGR frame from Picamera2, crops the ROI automatically, performs
-    flood-fill analysis, and returns:
-      overlay_bgr (annotated ROI image), results (dict), roi_gray
-    """
-    gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
-    center, field_r = detect_field_robust(gray)
-    roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
-
-    # seed grid
-    H, W = roi.shape
+# ---------------- Public analysis API ----------------
+def analyze_nozzle_from_roi(
+    roi_gray,
+    um_per_px=UM_PER_PX,
+    lo=DEFAULT_LO, hi=DEFAULT_HI,
+    seed_win_frac=SEED_WIN_FRAC, grid_n=GRID_N,
+    p_lo=5, p_hi=95
+):
+    """Analyze a pre-cropped grayscale ROI."""
+    H, W = roi_gray.shape
     cx0, cy0 = W//2, H//2
-    win = int(SEED_WIN_FRAC * min(H, W))
-    xs = np.linspace(cx0 - win, cx0 + win, GRID_N)
-    ys = np.linspace(cy0 - win, cy0 + win, GRID_N)
+    win = int(seed_win_frac * min(H, W))
+    xs = np.linspace(cx0 - win, cx0 + win, grid_n)
+    ys = np.linspace(cy0 - win, cy0 + win, grid_n)
     seeds = [(float(x), float(y)) for x in xs for y in ys]
 
-    best = _floodfill_candidates(roi, seeds, lo=DEFAULT_LO, hi=DEFAULT_HI)
+    best = _floodfill_candidates(roi_gray, seeds, lo=lo, hi=hi)
     if best is None:
         raise RuntimeError("Nozzle not detected.")
     score, (xc, yc, r0), pts, mask, seed = best
 
     xc, yc, r, inliers = _robust_refit(pts, iters=5, mad_tau=2.5)
+
     diameter_px = 2.0 * r
     diameter_um = diameter_px * um_per_px
-    circ = _circularity_metrics(inliers, (xc, yc), percentiles=(5,95))
+    C_io, r_in, r_out, rn = _circularity_metrics(inliers, (xc, yc), percentiles=(p_lo, p_hi))
 
-    # Draw overlay on ROI
-    overlay = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+    # Build overlay
+    overlay = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
     for x,y in inliers[::max(1, len(inliers)//600)]:
         cv2.circle(overlay, (int(x), int(y)), 1, (0,128,255), -1)
     cv2.circle(overlay, (int(round(xc)), int(round(yc))), int(round(r)), (0,255,0), 2)
-    cv2.circle(overlay, (int(round(xc)), int(round(yc))), int(round(circ["r_in"])),  (255,0,0), 1)
-    cv2.circle(overlay, (int(round(xc)), int(round(yc))), int(round(circ["r_out"])), (255,0,0), 1)
+    cv2.circle(overlay, (int(round(xc)), int(round(yc))), int(round(r_in)),  (255,0,0), 1)
+    cv2.circle(overlay, (int(round(xc)), int(round(yc))), int(round(r_out)), (255,0,0), 1)
 
-    text = f"d={diameter_um:.2f} µm  C_io={circ['circularity_io']:.3f}"
+    text = f"d={diameter_um:.2f} µm  C_io={C_io:.3f}"
     cv2.putText(overlay, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50,50,50), 3, cv2.LINE_AA)
     cv2.putText(overlay, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
 
@@ -193,11 +170,24 @@ def analyze_nozzle_from_frame(bgr_frame, um_per_px=UM_PER_PX, debug=False):
         "diameter_um": float(diameter_um),
         "center_px": (float(xc), float(yc)),
         "radius_px": float(r),
-        "circularity_io": float(circ["circularity_io"]),
-        "r_in_px": float(circ["r_in"]),
-        "r_out_px": float(circ["r_out"]),
-        "radial_nonuniformity": float(circ["radial_nonuniformity"]),
+        "circularity_io": float(C_io),
+        "r_in_px": float(r_in),
+        "r_out_px": float(r_out),
+        "radial_nonuniformity": float(rn),
         "seed_used": (float(seed[0]), float(seed[1])),
         "score": float(score),
     }
-    return overlay, results, roi
+    return overlay, results
+
+def analyze_nozzle_from_frame(
+    bgr_frame,
+    um_per_px=UM_PER_PX,
+    lo=DEFAULT_LO, hi=DEFAULT_HI,
+    seed_win_frac=SEED_WIN_FRAC, grid_n=GRID_N,
+    p_lo=5, p_hi=95
+):
+    """Convenience: auto-crop ROI from a BGR frame, then analyze."""
+    gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+    center, field_r = detect_field_robust(gray)
+    roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
+    return analyze_nozzle_from_roi(roi, um_per_px, lo, hi, seed_win_frac, grid_n, p_lo, p_hi), roi

@@ -1,51 +1,50 @@
 # app.py
 import sys
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout
-from PySide6.QtGui import QImage, QPixmap, QColor, QPalette
+from PySide6.QtGui import QPalette, QColor, QImage, QPixmap
 from PySide6.QtCore import QTimer
 
 import numpy as np
 import cv2
 
 from camera_pi import RefuelCamera
-from nozzle_analyzer import analyze_nozzle_from_frame, UM_PER_PX
+from nozzle_analyzer import (
+    analyze_nozzle_from_roi,
+    detect_field_robust, crop_central_roi,
+    UM_PER_PX, DEFAULT_LO, DEFAULT_HI, SEED_WIN_FRAC, GRID_N
+)
 
-# -------- theme (your dark theme) --------
+# ---- dark theme (your styling) ----
 def set_dark_theme(app):
     app.setStyle("Fusion")
-    dark_palette = QPalette()
-    dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
-    dark_palette.setColor(QPalette.WindowText, QColor(255, 255, 255))
-    dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))
-    dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    dark_palette.setColor(QPalette.ToolTipBase, QColor(50,50,50))
-    dark_palette.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
-    dark_palette.setColor(QPalette.Text, QColor(255, 255, 255))
-    dark_palette.setColor(QPalette.Button, QColor(53, 53, 53))
-    dark_palette.setColor(QPalette.ButtonText, QColor(255, 255, 255))
-    dark_palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
-    dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
-    dark_palette.setColor(QPalette.LinkVisited, QColor(42, 130, 218))
-    dark_palette.setColor(QPalette.Highlight, QColor(50, 50, 50))
-    dark_palette.setColor(QPalette.HighlightedText, QColor(150, 150, 150))
-    app.setPalette(dark_palette)
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor(53,53,53))
+    pal.setColor(QPalette.WindowText, QColor(255,255,255))
+    pal.setColor(QPalette.Base, QColor(25,25,25))
+    pal.setColor(QPalette.AlternateBase, QColor(53,53,53))
+    pal.setColor(QPalette.ToolTipBase, QColor(50,50,50))
+    pal.setColor(QPalette.ToolTipText, QColor(255,255,255))
+    pal.setColor(QPalette.Text, QColor(255,255,255))
+    pal.setColor(QPalette.Button, QColor(53,53,53))
+    pal.setColor(QPalette.ButtonText, QColor(255,255,255))
+    pal.setColor(QPalette.BrightText, QColor(255,0,0))
+    pal.setColor(QPalette.Link, QColor(42,130,218))
+    pal.setColor(QPalette.LinkVisited, QColor(42,130,218))
+    pal.setColor(QPalette.Highlight, QColor(50,50,50))
+    pal.setColor(QPalette.HighlightedText, QColor(150,150,150))
+    app.setPalette(pal)
     app.setStyleSheet("QLabel { border-radius: 5px; }")
 
-# -------- helpers --------
-def np_to_qimage(img_bgr):
-    """Convert BGR/Gray numpy image to QImage."""
-    if img_bgr.ndim == 2:
-        h, w = img_bgr.shape
-        qimg = QImage(img_bgr.data, w, h, w, QImage.Format_Grayscale8)
-        return qimg
-    h, w, ch = img_bgr.shape
-    bytes_per_line = ch * w
-    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    return QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+def np_to_qimage(img):
+    if img is None: return QImage()
+    if img.ndim == 2:
+        h, w = img.shape
+        return QImage(img.data, w, h, w, QImage.Format_Grayscale8)
+    h, w, ch = img.shape
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return QImage(rgb.data, w, h, ch*w, QImage.Format_RGB888)
 
-# -------- main window --------
-class NozzleApp(QWidget):
+class NozzleApp(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Nozzle Analyzer")
@@ -55,84 +54,125 @@ class NozzleApp(QWidget):
         self.cam = RefuelCamera()
         self.cam.start_camera()
 
-        # UI
-        self.live_label = QLabel("Live")
-        self.live_label.setMinimumSize(480, 360)
-        self.live_label.setAlignment(QtCore.Qt.AlignCenter)
-        self.live_label.setStyleSheet("background:#202020")
+        # UI elements
+        self.preview_label = QtWidgets.QLabel("ROI preview")
+        self.preview_label.setMinimumSize(520, 390)
+        self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.preview_label.setStyleSheet("background:#202020")
 
-        self.annot_label = QLabel("Annotated (after Analyze)")
-        self.annot_label.setMinimumSize(480, 360)
+        self.annot_label = QtWidgets.QLabel("Annotated (after Analyze)")
+        self.annot_label.setMinimumSize(520, 390)
         self.annot_label.setAlignment(QtCore.Qt.AlignCenter)
         self.annot_label.setStyleSheet("background:#202020")
 
-        self.analyze_btn = QPushButton("Analyze Nozzle")
-        self.analyze_btn.clicked.connect(self.analyze_current_frame)
+        # --- parameter controls (labels left, spinboxes right)
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignRight)
+        form.setFormAlignment(QtCore.Qt.AlignLeft)
 
-        self.status_label = QLabel("Ready")
+        self.um_per_px = QtWidgets.QDoubleSpinBox()
+        self.um_per_px.setDecimals(4); self.um_per_px.setRange(0.001, 10.0)
+        self.um_per_px.setSingleStep(0.001); self.um_per_px.setValue(UM_PER_PX)
+        form.addRow("µm / px", self.um_per_px)
+
+        self.lo_sb = QtWidgets.QSpinBox(); self.lo_sb.setRange(0, 100); self.lo_sb.setValue(DEFAULT_LO)
+        form.addRow("Flood lo", self.lo_sb)
+
+        self.hi_sb = QtWidgets.QSpinBox(); self.hi_sb.setRange(0, 100); self.hi_sb.setValue(DEFAULT_HI)
+        form.addRow("Flood hi", self.hi_sb)
+
+        self.seed_win = QtWidgets.QDoubleSpinBox()
+        self.seed_win.setDecimals(3); self.seed_win.setRange(0.05, 0.50)
+        self.seed_win.setSingleStep(0.01); self.seed_win.setValue(SEED_WIN_FRAC)
+        form.addRow("Seed window frac", self.seed_win)
+
+        self.grid_n = QtWidgets.QSpinBox(); self.grid_n.setRange(3, 11); self.grid_n.setSingleStep(2); self.grid_n.setValue(GRID_N)
+        form.addRow("Grid N (seeds/side)", self.grid_n)
+
+        self.p_lo = QtWidgets.QSpinBox(); self.p_lo.setRange(0, 49); self.p_lo.setValue(5)
+        form.addRow("IO low percentile", self.p_lo)
+
+        self.p_hi = QtWidgets.QSpinBox(); self.p_hi.setRange(51, 100); self.p_hi.setValue(95)
+        form.addRow("IO high percentile", self.p_hi)
+
+        self.analyze_btn = QtWidgets.QPushButton("Analyze Nozzle")
+        self.analyze_btn.clicked.connect(self.analyze_clicked)
+
+        self.status_label = QtWidgets.QLabel("Ready")
         self.status_label.setWordWrap(True)
 
-        left_box = QVBoxLayout()
+        left_box = QtWidgets.QVBoxLayout()
+        left_box.addLayout(form)
         left_box.addWidget(self.analyze_btn)
+        left_box.addSpacing(10)
         left_box.addWidget(self.status_label)
         left_box.addStretch(1)
 
-        right_box = QVBoxLayout()
-        right_box.addWidget(self.live_label)
+        right_box = QtWidgets.QVBoxLayout()
+        right_box.addWidget(self.preview_label)
         right_box.addWidget(self.annot_label)
 
-        grid = QGridLayout()
-        grid.addLayout(left_box, 0, 0, 2, 1)
-        grid.addLayout(right_box, 0, 1, 2, 1)
-        self.setLayout(grid)
+        layout = QtWidgets.QGridLayout()
+        layout.addLayout(left_box, 0, 0, 2, 1)
+        layout.addLayout(right_box, 0, 1, 2, 1)
+        self.setLayout(layout)
 
-        # timer to update live view
+        # timers & buffers
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_live)
+        self.timer.timeout.connect(self.update_preview_roi)
         self.timer.start(150)  # ms
 
-        self.last_frame = None
+        self.last_roi = None    # grayscale
+        self.last_roi_bgr = None  # for debug if needed
 
-    # ---- camera preview ----
-    def update_live(self):
+    # -------- live ROI preview instead of raw camera ----------
+    def update_preview_roi(self):
         frame = self.cam.capture_image()
         if frame is None:
             return
-        self.last_frame = frame
-        qimg = np_to_qimage(frame)
-        self.live_label.setPixmap(QPixmap.fromImage(qimg).scaled(
-            self.live_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        center, field_r = detect_field_robust(gray)
+        roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
 
-    # ---- analysis ----
-    def analyze_current_frame(self):
-        if self.last_frame is None:
-            self.status_label.setText("No frame yet.")
+        self.last_roi = roi
+        qimg = np_to_qimage(roi)
+        self.preview_label.setPixmap(QPixmap.fromImage(qimg).scaled(
+            self.preview_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+
+    # -------- run analysis using current parameters ----------
+    def analyze_clicked(self):
+        if self.last_roi is None:
+            self.status_label.setText("No ROI yet.")
             return
         try:
-            overlay_bgr, results, _roi = analyze_nozzle_from_frame(self.last_frame, um_per_px=UM_PER_PX)
-            # show annotated ROI
+            overlay_bgr, results = analyze_nozzle_from_roi(
+                self.last_roi,
+                um_per_px=self.um_per_px.value(),
+                lo=self.lo_sb.value(),
+                hi=self.hi_sb.value(),
+                seed_win_frac=self.seed_win.value(),
+                grid_n=self.grid_n.value(),
+                p_lo=self.p_lo.value(),
+                p_hi=self.p_hi.value()
+            )
             qimg = np_to_qimage(overlay_bgr)
             self.annot_label.setPixmap(QPixmap.fromImage(qimg).scaled(
                 self.annot_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
-            txt = (f"Diameter: {results['diameter_um']:.2f} µm  "
-                   f"C_io: {results['circularity_io']:.3f}  "
+            txt = (f"Diameter: {results['diameter_um']:.2f} µm   "
+                   f"C_io: {results['circularity_io']:.3f}   "
                    f"(r_in={results['r_in_px']:.1f}px, r_out={results['r_out_px']:.1f}px)")
             self.status_label.setText(txt)
         except Exception as e:
             self.status_label.setText(f"Analysis failed: {e}")
 
     def closeEvent(self, ev):
-        try:
-            self.timer.stop()
-        except Exception:
-            pass
+        self.timer.stop()
         self.cam.stop_camera()
         super().closeEvent(ev)
 
-# -------- entry point --------
 def main():
-    app = QApplication(sys.argv)
+    app = QtWidgets.QApplication(sys.argv)
     set_dark_theme(app)
     w = NozzleApp()
     w.show()
