@@ -36,13 +36,40 @@ def set_dark_theme(app):
     app.setStyleSheet("QLabel { border-radius: 5px; }")
 
 def np_to_qimage(img):
-    if img is None: return QImage()
+    """Robust NumPy -> QImage. Works for gray (uint8 HxW) and BGR (HxWx3)."""
+    if img is None:
+        return QImage()
+
+    # Grayscale
     if img.ndim == 2:
-        h, w = img.shape
-        return QImage(img.data, w, h, w, QImage.Format_Grayscale8)
-    h, w, ch = img.shape
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return QImage(rgb.data, w, h, ch*w, QImage.Format_RGB888)
+        img8 = img
+        if img8.dtype != np.uint8:
+            img8 = np.clip(img8, 0, 255).astype(np.uint8)
+        if not img8.flags['C_CONTIGUOUS']:
+            img8 = np.ascontiguousarray(img8)
+        h, w = img8.shape
+        qimg = QImage(img8.data, w, h, int(img8.strides[0]), QImage.Format_Grayscale8)
+        return qimg.copy()  # detach from NumPy buffer
+
+    # Color (BGR -> RGB)
+    if img.ndim == 3 and img.shape[2] == 3:
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if not rgb.flags['C_CONTIGUOUS']:
+            rgb = np.ascontiguousarray(rgb)
+        h, w, _ = rgb.shape
+        qimg = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format_RGB888)
+        return qimg.copy()
+
+    # BGRA fallback
+    if img.ndim == 3 and img.shape[2] == 4:
+        rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+        if not rgba.flags['C_CONTIGUOUS']:
+            rgba = np.ascontiguousarray(rgba)
+        h, w, _ = rgba.shape
+        qimg = QImage(rgba.data, w, h, int(rgba.strides[0]), QImage.Format_RGBA8888)
+        return qimg.copy()
+
+    return QImage()
 
 class NozzleApp(QtWidgets.QWidget):
     def __init__(self):
@@ -133,6 +160,7 @@ class NozzleApp(QtWidgets.QWidget):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         center, field_r = detect_field_robust(gray)
         roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
+        roi = np.ascontiguousarray(roi)  # optional; np_to_qimage already handles it
 
         self.last_roi = roi
         qimg = np_to_qimage(roi)
