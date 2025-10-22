@@ -1,11 +1,12 @@
 # app.py
 import sys
 from PySide6 import QtCore, QtGui, QtWidgets
-from PySide6.QtGui import QPalette, QColor, QImage, QPixmap
+from PySide6.QtGui import QPalette, QColor, QImage, QPixmap, QTextCursor
 from PySide6.QtCore import QTimer
 
 import numpy as np
 import cv2
+from datetime import datetime
 
 from camera_pi import RefuelCamera
 from nozzle_analyzer import (
@@ -14,7 +15,7 @@ from nozzle_analyzer import (
     UM_PER_PX, DEFAULT_LO, DEFAULT_HI, SEED_WIN_FRAC, GRID_N
 )
 
-# ---- dark theme (your styling) ----
+# ---- dark theme ----
 def set_dark_theme(app):
     app.setStyle("Fusion")
     pal = QPalette()
@@ -35,6 +36,7 @@ def set_dark_theme(app):
     app.setPalette(pal)
     app.setStyleSheet("QLabel { border-radius: 5px; }")
 
+# ---- robust NumPy -> QImage ----
 def np_to_qimage(img):
     """Robust NumPy -> QImage. Works for gray (uint8 HxW) and BGR (HxWx3)."""
     if img is None:
@@ -42,16 +44,14 @@ def np_to_qimage(img):
 
     # Grayscale
     if img.ndim == 2:
-        img8 = img
-        if img8.dtype != np.uint8:
-            img8 = np.clip(img8, 0, 255).astype(np.uint8)
+        img8 = img if img.dtype == np.uint8 else np.clip(img, 0, 255).astype(np.uint8)
         if not img8.flags['C_CONTIGUOUS']:
             img8 = np.ascontiguousarray(img8)
         h, w = img8.shape
         qimg = QImage(img8.data, w, h, int(img8.strides[0]), QImage.Format_Grayscale8)
-        return qimg.copy()  # detach from NumPy buffer
+        return qimg.copy()
 
-    # Color (BGR -> RGB)
+    # BGR -> RGB
     if img.ndim == 3 and img.shape[2] == 3:
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         if not rgb.flags['C_CONTIGUOUS']:
@@ -60,7 +60,7 @@ def np_to_qimage(img):
         qimg = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format_RGB888)
         return qimg.copy()
 
-    # BGRA fallback
+    # BGRA -> RGBA fallback
     if img.ndim == 3 and img.shape[2] == 4:
         rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
         if not rgba.flags['C_CONTIGUOUS']:
@@ -81,8 +81,8 @@ class NozzleApp(QtWidgets.QWidget):
         self.cam = RefuelCamera()
         self.cam.start_camera()
 
-        # UI elements
-        self.preview_label = QtWidgets.QLabel("ROI preview")
+        # right: preview full frame + annotated ROI
+        self.preview_label = QtWidgets.QLabel("Preview (full frame)")
         self.preview_label.setMinimumSize(520, 390)
         self.preview_label.setAlignment(QtCore.Qt.AlignCenter)
         self.preview_label.setStyleSheet("background:#202020")
@@ -92,7 +92,7 @@ class NozzleApp(QtWidgets.QWidget):
         self.annot_label.setAlignment(QtCore.Qt.AlignCenter)
         self.annot_label.setStyleSheet("background:#202020")
 
-        # --- parameter controls (labels left, spinboxes right)
+        # --- left: parameters, buttons, log ---
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(QtCore.Qt.AlignRight)
         form.setFormAlignment(QtCore.Qt.AlignLeft)
@@ -125,13 +125,26 @@ class NozzleApp(QtWidgets.QWidget):
         self.analyze_btn = QtWidgets.QPushButton("Analyze Nozzle")
         self.analyze_btn.clicked.connect(self.analyze_clicked)
 
+        self.sep_btn = QtWidgets.QPushButton("Insert Separator")
+        self.sep_btn.clicked.connect(self.insert_separator)
+
+        # scrolling results log under the analyze button
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(220)
+        self.log.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        font = QtGui.QFont("Monospace")
+        font.setStyleHint(QtGui.QFont.TypeWriter)
+        self.log.setFont(font)
+
         self.status_label = QtWidgets.QLabel("Ready")
         self.status_label.setWordWrap(True)
 
         left_box = QtWidgets.QVBoxLayout()
         left_box.addLayout(form)
         left_box.addWidget(self.analyze_btn)
-        left_box.addSpacing(10)
+        left_box.addWidget(self.sep_btn)          # <- new separator button
+        left_box.addWidget(self.log)              # <- results log under the button
         left_box.addWidget(self.status_label)
         left_box.addStretch(1)
 
@@ -146,18 +159,17 @@ class NozzleApp(QtWidgets.QWidget):
 
         # timers & buffers
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_preview)
-        self.timer.start(50)  # ms
+        self.timer.timeout.connect(self.update_preview)  # full frame preview
+        self.timer.start(50)  # tweak 50–100 ms as desired
 
-        self.last_roi = None    # grayscale
-        self.last_roi_bgr = None  # for debug if needed
+        self.last_frame = None
 
+    # ---- preview full camera frame ----
     def update_preview(self):
-        """Show the FULL camera frame in the preview window."""
         frame = self.cam.capture_image()
         if frame is None:
             return
-        self.last_frame = frame  # keep for analysis
+        self.last_frame = frame
         qimg = np_to_qimage(frame)
         self.preview_label.setPixmap(
             QPixmap.fromImage(qimg).scaled(
@@ -167,28 +179,24 @@ class NozzleApp(QtWidgets.QWidget):
             )
         )
 
-    # -------- live ROI preview instead of raw camera ----------
-    # def update_preview_roi(self):
-    #     frame = self.cam.capture_image()
-    #     if frame is None:
-    #         return
-    #     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    #     center, field_r = detect_field_robust(gray)
-    #     roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
-    #     roi = np.ascontiguousarray(roi)  # optional; np_to_qimage already handles it
+    # ---- helper: append to log and auto-scroll ----
+    def append_log(self, text: str):
+        self.log.appendPlainText(text)
+        cursor = self.log.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.log.setTextCursor(cursor)
+        self.log.ensureCursorVisible()
 
-    #     self.last_roi = roi
-    #     qimg = np_to_qimage(roi)
-    #     self.preview_label.setPixmap(QPixmap.fromImage(qimg).scaled(
-    #         self.preview_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+    # ---- insert a dashed separator into the log ----
+    def insert_separator(self):
+        self.append_log("-" * 60)
 
-    # -------- run analysis using current parameters ----------
+    # ---- run analysis on current frame (ROI-cropped) ----
     def analyze_clicked(self):
         if self.last_frame is None:
             self.status_label.setText("No frame yet.")
             return
         try:
-            # Crop ROI from the full frame, then analyze with the current tunables
             gray = cv2.cvtColor(self.last_frame, cv2.COLOR_BGR2GRAY)
             center, field_r = detect_field_robust(gray)
             roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
@@ -213,14 +221,26 @@ class NozzleApp(QtWidgets.QWidget):
                 )
             )
 
+            # Status line
             txt = (f"Diameter: {results['diameter_um']:.2f} µm   "
-                f"C_io: {results['circularity_io']:.3f}   "
-                f"(r_in={results['r_in_px']:.1f}px, r_out={results['r_out_px']:.1f}px)")
+                   f"C_io: {results['circularity_io']:.3f}   "
+                   f"(r_in={results['r_in_px']:.1f}px, r_out={results['r_out_px']:.1f}px)")
             self.status_label.setText(txt)
+
+            # Log line (timestamp + key numbers + params)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_line = (f"{ts} | d={results['diameter_um']:.2f} µm "
+                        f"(px={results['diameter_px']:.1f}) | "
+                        f"C_io={results['circularity_io']:.3f} | "
+                        f"r_in={results['r_in_px']:.1f}px r_out={results['r_out_px']:.1f}px | "
+                        f"lo={self.lo_sb.value()} hi={self.hi_sb.value()} "
+                        f"seed_win={self.seed_win.value():.2f} gridN={self.grid_n.value()}")
+            self.append_log(log_line)
 
         except Exception as e:
             self.status_label.setText(f"Analysis failed: {e}")
-            
+            self.append_log(f"ERROR: {e}")
+
     def closeEvent(self, ev):
         self.timer.stop()
         self.cam.stop_camera()
