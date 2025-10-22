@@ -229,12 +229,14 @@ class NozzleApp(QtWidgets.QWidget):
 
             # Log line (timestamp + key numbers + params)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            log_line = (f"{ts} | d={results['diameter_um']:.2f} µm "
-                        f"(px={results['diameter_px']:.1f}) | "
-                        f"C_io={results['circularity_io']:.3f} | "
-                        f"r_in={results['r_in_px']:.1f}px r_out={results['r_out_px']:.1f}px | "
-                        f"lo={self.lo_sb.value()} hi={self.hi_sb.value()} "
-                        f"seed_win={self.seed_win.value():.2f} gridN={self.grid_n.value()}")
+            # log_line = (f"{ts} | d={results['diameter_um']:.2f} µm "
+            #             f"(px={results['diameter_px']:.1f}) | "
+            #             f"C_io={results['circularity_io']:.3f} | "
+            #             f"r_in={results['r_in_px']:.1f}px r_out={results['r_out_px']:.1f}px | "
+            #             f"lo={self.lo_sb.value()} hi={self.hi_sb.value()} "
+            #             f"seed_win={self.seed_win.value():.2f} gridN={self.grid_n.value()}")
+            log_line = (f"{ts} | d={results['diameter_um']:.2f} µm | "
+                        f"C_io={results['circularity_io']:.3f}")
             self.append_log(log_line)
 
         except Exception as e:
