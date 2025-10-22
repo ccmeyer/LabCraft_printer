@@ -146,35 +146,55 @@ class NozzleApp(QtWidgets.QWidget):
 
         # timers & buffers
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_preview_roi)
-        self.timer.start(150)  # ms
+        self.timer.timeout.connect(self.update_preview)
+        self.timer.start(50)  # ms
 
         self.last_roi = None    # grayscale
         self.last_roi_bgr = None  # for debug if needed
 
-    # -------- live ROI preview instead of raw camera ----------
-    def update_preview_roi(self):
+    def update_preview(self):
+        """Show the FULL camera frame in the preview window."""
         frame = self.cam.capture_image()
         if frame is None:
             return
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        center, field_r = detect_field_robust(gray)
-        roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
-        roi = np.ascontiguousarray(roi)  # optional; np_to_qimage already handles it
+        self.last_frame = frame  # keep for analysis
+        qimg = np_to_qimage(frame)
+        self.preview_label.setPixmap(
+            QPixmap.fromImage(qimg).scaled(
+                self.preview_label.size(),
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation
+            )
+        )
 
-        self.last_roi = roi
-        qimg = np_to_qimage(roi)
-        self.preview_label.setPixmap(QPixmap.fromImage(qimg).scaled(
-            self.preview_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+    # -------- live ROI preview instead of raw camera ----------
+    # def update_preview_roi(self):
+    #     frame = self.cam.capture_image()
+    #     if frame is None:
+    #         return
+    #     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    #     center, field_r = detect_field_robust(gray)
+    #     roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
+    #     roi = np.ascontiguousarray(roi)  # optional; np_to_qimage already handles it
+
+    #     self.last_roi = roi
+    #     qimg = np_to_qimage(roi)
+    #     self.preview_label.setPixmap(QPixmap.fromImage(qimg).scaled(
+    #         self.preview_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
 
     # -------- run analysis using current parameters ----------
     def analyze_clicked(self):
-        if self.last_roi is None:
-            self.status_label.setText("No ROI yet.")
+        if self.last_frame is None:
+            self.status_label.setText("No frame yet.")
             return
         try:
+            # Crop ROI from the full frame, then analyze with the current tunables
+            gray = cv2.cvtColor(self.last_frame, cv2.COLOR_BGR2GRAY)
+            center, field_r = detect_field_robust(gray)
+            roi = crop_central_roi(gray, center, field_r, roi_scale=0.62)
+
             overlay_bgr, results = analyze_nozzle_from_roi(
-                self.last_roi,
+                roi,
                 um_per_px=self.um_per_px.value(),
                 lo=self.lo_sb.value(),
                 hi=self.hi_sb.value(),
@@ -183,17 +203,24 @@ class NozzleApp(QtWidgets.QWidget):
                 p_lo=self.p_lo.value(),
                 p_hi=self.p_hi.value()
             )
+
             qimg = np_to_qimage(overlay_bgr)
-            self.annot_label.setPixmap(QPixmap.fromImage(qimg).scaled(
-                self.annot_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            self.annot_label.setPixmap(
+                QPixmap.fromImage(qimg).scaled(
+                    self.annot_label.size(),
+                    QtCore.Qt.KeepAspectRatio,
+                    QtCore.Qt.SmoothTransformation
+                )
+            )
 
             txt = (f"Diameter: {results['diameter_um']:.2f} µm   "
-                   f"C_io: {results['circularity_io']:.3f}   "
-                   f"(r_in={results['r_in_px']:.1f}px, r_out={results['r_out_px']:.1f}px)")
+                f"C_io: {results['circularity_io']:.3f}   "
+                f"(r_in={results['r_in_px']:.1f}px, r_out={results['r_out_px']:.1f}px)")
             self.status_label.setText(txt)
+
         except Exception as e:
             self.status_label.setText(f"Analysis failed: {e}")
-
+            
     def closeEvent(self, ev):
         self.timer.stop()
         self.cam.stop_camera()
