@@ -576,6 +576,8 @@ TAG_Z_MAX_HZ      = 0x72
 TAG_X_ACCEL       = 0x73
 TAG_Y_ACCEL       = 0x74
 TAG_Z_ACCEL       = 0x75
+TAG_GRIP_PULSE    = 0x80
+TAG_GRIP_REFRESH  = 0x81
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -607,6 +609,9 @@ TAG_MAP = {
     TAG_FLASH_DELAY:  ("Flash_delay", 4, False),
     TAG_FLASH_DROPS:  ("Flash_droplets", 2, False),
     TAG_EXT_COUNTER:  ("Ext_counter", 4, False),
+
+    TAG_GRIP_PULSE:    ("Grip_pulse", 4, False),
+    TAG_GRIP_REFRESH:  ("Grip_refresh", 4, False),
 
     TAG_X_MAX_HZ:     ("X_max_hz", 4, False),
     TAG_Y_MAX_HZ:     ("Y_max_hz", 4, False),
@@ -658,6 +663,8 @@ CMD_MAP = {
 
     'ENABLE_PRINT_PROFILE': 0x60,
     'DISABLE_PRINT_PROFILE': 0x61,
+
+    'SET_GRIPPER_PARAMS': 0x70,
 
     'START_READ_CAMERA': 0xC0,
     'STOP_READ_CAMERA': 0xC1,
@@ -1725,3 +1732,10 @@ class Machine(QObject):
     
     def disable_print_profile(self, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('DISABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+
+    def set_gripper_params(self, refresh_period, pulse_duration, handler=None, kwargs=None, manual=False):
+        if self.check_param_limits(refresh_period, 10, 1000) and self.check_param_limits(pulse_duration, 10, 1000):
+            return self.add_command_to_queue('SET_GRIPPER_PARAMS', refresh_period, pulse_duration, 0, handler=handler, kwargs=kwargs, manual=manual)
+        else:
+            print(f'Gripper parameters out of range: refresh_period={refresh_period}, pulse_duration={pulse_duration}')
+            return False

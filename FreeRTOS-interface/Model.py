@@ -5992,6 +5992,9 @@ class MachineModel(QObject):
         self.print_pulse_width = 0
         self.refuel_pulse_width = 0
 
+        self.gripper_refresh_period = 0
+        self.gripper_pulse_duration = 0
+
         # self.fss = 6553
         # self.psi_offset = 8192
         self.fss = 13107
@@ -6190,6 +6193,17 @@ class MachineModel(QObject):
         self.y_accel = y
         self.z_accel = z
         self.accelerations_changed.emit(self.x_accel, self.y_accel, self.z_accel)
+
+    def update_gripper_refresh_period(self, period):
+        self.gripper_refresh_period = int(period)
+        self.printing_parameters_updated.emit()
+
+    def update_gripper_pulse_duration(self, duration):
+        self.gripper_pulse_duration = int(duration)
+        self.printing_parameters_updated.emit()
+
+    def get_gripper_settings(self):
+        return self.gripper_refresh_period, self.gripper_pulse_duration
 
     def get_current_speeds(self):
         return self.x_max_hz, self.y_max_hz, self.z_max_hz
@@ -6411,6 +6425,11 @@ class Model(QObject):
             self.machine_model.update_all_speeds(status_dict['X_max_hz'], status_dict['Y_max_hz'], status_dict['Z_max_hz'])
         if 'X_accel' in status_keys:
             self.machine_model.update_all_accelerations(status_dict['X_accel'], status_dict['Y_accel'], status_dict['Z_accel'])
+
+        if 'Grip_pulse' in status_keys:
+            self.machine_model.update_gripper_pulse_duration(status_dict['Grip_pulse'])
+        if 'Grip_period' in status_keys:
+            self.machine_model.update_gripper_refresh_period(status_dict['Grip_period'])
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
