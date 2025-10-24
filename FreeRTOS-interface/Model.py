@@ -3643,764 +3643,1555 @@ class MassCalibrationModel(QObject):
         pressure_solution = fsolve(func, initial_guess)
         print(f"Pressure solution: {pressure_solution[0]:.2f} psi, initial guess: {initial_guess:.2f} psi")
         return round(pressure_solution[0],2)
+            
+            
+from dataclasses import dataclass, field
+from itertools import product
+from math import gcd
+from functools import reduce
+from typing import List, Dict, Tuple, Optional, Any, Set
+
+import numpy as np
+import pandas as pd
+
+# --------------------------
+# Data structures
+# --------------------------
+
+@dataclass
+class OptionSpec:
+    name: str
+    targets: List[float]           # desired final concentrations for this option
+    units: str                     # e.g. 'mM'
+    droplet_nL: float              # droplet volume for this reagent
 
 
-def find_minimal_stock_solutions_backtracking(target_concentrations, max_droplets):
-    target_concentrations.sort()
+@dataclass
+class FactorSpec:
+    name: str                      # factor/group name
+    kind: str                      # 'additive' or 'choice'
+    options: List[OptionSpec] = field(default_factory=list)
 
-    def can_achieve_all(stock_solutions):
-        achievable_concentrations = {0: []}  # concentration -> list of (stock_solution, droplets)
-        for num_droplets in range(1, max_droplets + 1):
-            for comb in combinations_with_replacement(stock_solutions, num_droplets):
-                total_concentration = sum(comb)
-                if total_concentration not in achievable_concentrations:
-                    achievable_concentrations[total_concentration] = comb
-        return achievable_concentrations
 
-    def backtrack(current_solutions, index):
-        achievable_concentrations = can_achieve_all(current_solutions)
+# --------------------------
+# Numeric helpers (grid-based)
+# --------------------------
 
-        if all(tc in achievable_concentrations for tc in target_concentrations):
-            return current_solutions, achievable_concentrations
+def _quantize(x: float, q: float) -> float:
+    return round(x / q) * q
 
-        if index == len(target_concentrations):
-            return None, None
+def _gcd_float(values: List[float], quantum: float) -> float:
+    """GCD for floats on a quantum grid. Returns k * quantum."""
+    ints = [int(round(abs(v) / quantum)) for v in values if abs(v) > 0]
+    if not ints:
+        return quantum
+    g = 0
+    for n in ints:
+        g = math.gcd(g, n)
+    return max(g, 1) * quantum
 
-        # Explore both including and excluding the current concentration as a stock solution
-        with_current, achievable_with = backtrack(current_solutions + [target_concentrations[index]], index + 1)
-        without_current, achievable_without = backtrack(current_solutions, index + 1)
+def _base_step_for_targets(targets: List[float], quantum: float) -> float:
+    """
+    Smallest delta that can be used by a single stock to reach ALL targets
+    as integer multiples from zero. This is the GCD over the targets
+    themselves on the quantum grid (zeros are ignored).
+    """
+    xs = sorted(set(_quantize(t, quantum) for t in targets))
+    # integers on the quantum grid
+    ints = [int(round(abs(x) / quantum)) for x in xs if abs(x) > 0]
+    if not ints:
+        return quantum
+    g = 0
+    for n in ints:
+        g = math.gcd(g, n)
+    return max(g, 1) * quantum
 
-        if with_current is None:
-            return without_current, achievable_without
-        if without_current is None:
-            return with_current, achievable_with
-        
-        # Prioritize the solution with fewer stock solutions
-        if len(with_current) < len(without_current):
-            return with_current, achievable_with
-        elif len(with_current) > len(without_current):
-            return without_current, achievable_without
-        else:
-            # If the number of stock solutions is the same, choose the one with the lower sum of concentrations
-            if sum(with_current) < sum(without_current):
-                return with_current, achievable_with
-            else:
-                return without_current, achievable_without
+def _is_multiple_of(delta: float, t: float, tol: float = 1e-9) -> bool:
+    if delta <= 0:
+        return False
+    k = t / delta
+    return abs(k - round(k)) <= tol
 
-    minimal_solutions, achievable_concentrations = backtrack([], 0)
-    return minimal_solutions, achievable_concentrations
+def _int_ratio(delta: float, t: float) -> int:
+    return int(round(t / delta))
 
-def multi_reagent_optimization(reagents_data, max_total_droplets):
-    reagent_solutions = []
-    for target_concentrations, max_droplets in reagents_data:
-        solutions = []
-        for droplet_limit in range(1, max_droplets + 1):
-            stock_solutions, achievable_concentrations = find_minimal_stock_solutions_backtracking(target_concentrations, droplet_limit)
-            max_droplets_for_any_concentration = max([len(achievable_concentrations[tc]) for tc in target_concentrations])
-            solutions.append((stock_solutions, max_droplets_for_any_concentration))
-        reagent_solutions.append(solutions)
 
-    best_combination = None
-    min_stock_count = float('inf')
-    min_concentration_sum = float('inf')
+# --------------------------
+# Plan containers
+# --------------------------
 
-    for combination in itertools.product(*reagent_solutions):
-        stock_solution_set = set()
-        total_droplets = 0
-        max_droplets_per_reagent = []
-        concentration_sum = 0
+@dataclass
+class SingleStockPlan:
+    delta_per_drop: float
+    stock_concentration: float      # final stock conc chosen
+    droplet_nL: float
+    units: str
+    droplets_per_target: Dict[float, int]    # target -> drops
+    max_volume_nL: float             # worst-case (drops*drop_nL)
+    n_stocks: int = 1
 
-        for stock_solutions, droplets_used in combination:
-            stock_solution_set.update(stock_solutions)
-            total_droplets += droplets_used
-            max_droplets_per_reagent.append(droplets_used)
-            concentration_sum += sum(stock_solutions)  # Sum the concentrations used
+@dataclass
+class TwoStockPlan:
+    deltas: Tuple[float, float]               # (delta1, delta2)
+    stock_concs: Tuple[float, float]          # (c1, c2)
+    droplet_nL: float
+    units: str
+    droplets_per_target: Dict[float, Tuple[int, int]]  # target -> (a,b)
+    max_volume_nL: float
+    conc_sum: float
+    n_stocks: int = 2
 
-        # Prioritize by fewest stock solutions, then by lowest concentration sum
-        if total_droplets <= max_total_droplets:
-            if len(stock_solution_set) < min_stock_count or (len(stock_solution_set) == min_stock_count and concentration_sum < min_concentration_sum):
-                best_combination = combination
-                min_stock_count = len(stock_solution_set)
-                min_concentration_sum = concentration_sum
 
-    if best_combination:
-        final_stock_solutions = [sol[0] for sol in best_combination]
-        max_droplets_per_reagent = [sol[1] for sol in best_combination]
-    else:
-        final_stock_solutions = []
-        max_droplets_per_reagent = []
-
-    return final_stock_solutions, max_droplets_per_reagent
-
-def check_stock_solution_calculations(target_concentrations, stock_solutions, units, max_droplets):
-    target_concentrations.sort()
-    target_concentrations = [round(tc, 3) for tc in target_concentrations]
-    unachievable_concentrations = []
-    droplet_usage = {}
-
-    achievable_concentrations = {0: []}  # concentration -> list of (stock_solution, droplets)
-    
-    # Generate all possible combinations of stock solutions within the max droplet count
-    for num_droplets in range(1, max_droplets + 1):
-        for comb in combinations_with_replacement(stock_solutions, num_droplets):
-            total_concentration = sum(comb)
-            if total_concentration not in achievable_concentrations:
-                achievable_concentrations[total_concentration] = comb
-    
-    # Check which target concentrations are achievable and calculate droplet usage
-    for tc in target_concentrations:
-        if tc not in achievable_concentrations:
-            unachievable_concentrations.append(tc)
-        else:
-            # Calculate the number of droplets used from each stock solution
-            droplets = achievable_concentrations[tc]
-            droplet_count = {stock: droplets.count(stock) for stock in stock_solutions}
-            droplet_usage[tc] = droplet_count
-
-    lookup_table = pd.DataFrame(droplet_usage).T.stack().reset_index().rename(columns={'level_0':'target_concentration', 'level_1':'stock_solution', 0:'droplet_count'})
-    lookup_table['units'] = units
-    # Calculate the most droplets used for any target concentration
-    if lookup_table.empty:
-        max_droplets_for_any_concentration = 0
-    else:
-        max_droplets_for_any_concentration = lookup_table.groupby('target_concentration')['droplet_count'].sum().max()
-
-    # #print(f'Max droplets for any concentration: {max_droplets_for_any_concentration}')
-    # If there are unachievable concentrations, return them
-    if unachievable_concentrations:
-        return False, unachievable_concentrations, lookup_table, max_droplets_for_any_concentration
-    else:
-        return True, None, lookup_table, max_droplets_for_any_concentration
-
+# --------------------------
+# Experiment Model (v2)
+# --------------------------
 
 class ExperimentModel(QObject):
-    data_updated = Signal(int)  # Signal to notify when reagent data is updated, passing the row index
+    # Signals to mirror the classic API
     stock_updated = Signal()
-    experiment_generated = Signal(int,int)  # Signal to notify when the experiment is generated, passing the total number of reactions
-    update_max_droplets_signal = Signal(int) # Signal to notify when the max droplets is updated, passing the row index
-    unsaved_changes_signal = Signal() # Signal to notify when there are unsaved changes
+    experiment_generated = Signal(int, float)  # (n_reactions, worst_nonfill_volume_nL)
 
-    def __init__(self,well_plate,calibration_manager):
+    def __init__(self):
         super().__init__()
-        self.well_plate = well_plate
-        self.calibration_manager = calibration_manager
-        self.reagents = []
-        temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
-        self.metadata = {
-            "name": temp_name,
+        # Factors (additive & choice groups)
+        self.factors: List[FactorSpec] = []
+
+        # Metadata
+        self.metadata: Dict = {
+            "name": "Untitled",
             "replicates": 1,
-            "max_droplets": 50,
-            'droplet_volume': 0.03,
-            'fill_reagent': 'Water',
-            'random_seed': None,
-            'reduction_factor': 1,
-            'start_row':0,
-            'start_col':0
+            "use_subset_design": False,
+            "reduction_factor": 1,  # reserved; current generate is full factorial
+            "target_reaction_volume_nL": 500.0,
+            "fill_reagent_name": "Water",
+            "fill_droplet_volume_nL": 10.0,
+            "randomize_assignments": False,
+            "random_seed": None,
+            "start_row": 0,
+            "start_col": 0, 
         }
-        self.stock_solutions = []
-        self.experiment_df = pd.DataFrame()
-        self.complete_lookup_table = pd.DataFrame()
-        self.all_droplet_df = pd.DataFrame()
 
-        self.experiment_dir_path = None
-        self.experiment_file_path = None
-        self.progress_file_path = None
-        self.progress_data = {}
-        self.calibration_file_path = None
-        self.key_file_path = None
+        # Results of optimization
+        # key for additives: (factor_name, None)
+        # key for options in groups: (group_name, option_name)
+        self.plans_per_option: Dict[Tuple[str, Optional[str]], Dict] = {}
 
-        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
-        self.initialize_experiment()
+        # Cached stock rows for the UI stock table
+        self._stock_rows_cache: List[Dict] = []
+        self._fill_row_cache: Optional[Dict] = None
 
-        self.unsaved_changes = False
+        # Last computed grid
+        self._reactions_df: pd.DataFrame = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL: Optional[float] = None
 
-    def mark_unsaved_changes(self):
-        self.unsaved_changes = True
-        self.unsaved_changes_signal.emit()
+                # ---- paths & persistence ----
+        self.experiment_dir_path: Optional[str] = None
+        self.experiment_file_path: Optional[str] = None
+        self.progress_file_path: Optional[str] = None
+        self.key_file_path: Optional[str] = None
+        self.calibration_file_path: Optional[str] = None
+        self.progress_data: Dict[str, Dict] = {}
+        self.unsaved_changes: bool = False
 
-    def reset_unsaved_changes(self):
-        print('reset unsaved changes')
-        self.unsaved_changes = False
-        self.unsaved_changes_signal.emit()
+        # optional dependency (if you have one); safe to ignore if None
+        self._calibration_manager = None
 
-    def has_unsaved_changes(self):
-        return self.unsaved_changes
-    
-    def add_reagent(self, name, min_conc, max_conc, steps, mode, manual_input,units,max_droplets,stock_solutions):
-        reagent = {
-            "name": name,
-            "min_conc": min_conc,
-            "max_conc": max_conc,
-            "steps": steps,
-            "mode": mode,
-            "manual_input": manual_input,
-            "concentrations": [],
-            'units':units,
-            "max_droplets": max_droplets,
-            "stock_solutions": stock_solutions,
-            "missing_concentrations": [],
-            "max_droplets_for_conc": 0
-        }
-        self.reagents.append(reagent)
-        self.calculate_concentrations(len(self.reagents) - 1)
-        self.mark_unsaved_changes()
+        # runtime context provided by Model for progress/key creation
+        self._runtime_well_plate = None
+        self._runtime_reaction_collection = None
 
-    def update_reagent(self, index, name=None, min_conc=None, max_conc=None, steps=None, mode=None, manual_input=None, units=None, max_droplets=None,stock_solutions=None):
-        reagent = self.reagents[index]
-        if name is not None:
-            reagent["name"] = name
-        if min_conc is not None:
-            reagent["min_conc"] = min_conc
-        if max_conc is not None:
-            reagent["max_conc"] = max_conc
-        if steps is not None:
-            reagent["steps"] = steps
-        if mode is not None:
-            reagent["mode"] = mode
-        if manual_input is not None:
-            reagent["manual_input"] = manual_input
-        if units is not None:
-            reagent['units'] = units
-        if max_droplets is not None:
-            reagent["max_droplets"] = max_droplets
-        if stock_solutions is not None:
-            reagent["stock_solutions"] = stock_solutions
+    # ------------- Factor management -------------
 
-        # Update concentrations preview based on the new data
-        self.calculate_concentrations(index)
-        self.mark_unsaved_changes()
+    def add_additive(self, name: str, targets: List[float], units: str, droplet_nL: float):
+        self.factors.append(FactorSpec(
+            name=name, kind="additive",
+            options=[OptionSpec(name=f"{name}", targets=list(targets), units=units, droplet_nL=float(droplet_nL))]
+        ))
 
-    def delete_reagent(self, name):
-        self.reagents = [reagent for reagent in self.reagents if reagent["name"] != name]
-        self.remove_stock_solutions_for_unused_reagents()
-        self.generate_experiment(feasible=False)
-        self.mark_unsaved_changes()
+    def add_choice_group(self, group_name: str):
+        self.factors.append(FactorSpec(name=group_name, kind="choice", options=[]))
 
-    def change_random_seed(self,remove_seed=False):
-        if remove_seed:
-            self.metadata['random_seed'] = None
-        else:
-            self.metadata['random_seed'] = random.randint(0,100000)
-        self.generate_experiment(feasible=False)
-        self.mark_unsaved_changes()
-
-    def get_random_seed(self):
-        return self.metadata['random_seed']
-
-    def update_metadata(self, replicates, max_droplets,reduction_factor,start_row,start_col):
-        self.metadata["replicates"] = replicates
-        self.metadata["max_droplets"] = max_droplets
-        self.metadata["reduction_factor"] = reduction_factor
-        self.metadata['start_row'] = start_row
-        self.metadata['start_col'] = start_col
-
-        self.generate_experiment(feasible=False)
-        self.mark_unsaved_changes()
-
-    def update_fill_reagent_name(self,fill_reagent):
-        self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != self.metadata['fill_reagent']]
-        self.metadata['fill_reagent'] = fill_reagent
-        self.add_new_stock_solutions_for_reagent(fill_reagent,[1.0],'--')
-        self.generate_experiment(feasible=False)
-        self.mark_unsaved_changes()
-
-    def get_start_row(self):
-        return self.metadata['start_row']
-    
-    def get_start_col(self):
-        return self.metadata['start_col']
-
-    def calculate_concentrations(self, index,calc_experiment=True):
-        reagent = self.reagents[index]
-        mode = reagent["mode"]
-        if mode == "Manual":
-            try:
-                reagent["concentrations"] = [round(float(c.strip()), 2) for c in reagent["manual_input"].split(',') if c.strip()]
-            except ValueError:
-                reagent["concentrations"] = []
-        else:
-            min_conc = reagent["min_conc"]
-            max_conc = reagent["max_conc"]
-            steps = reagent["steps"]
-
-            if min_conc >= max_conc:
-                reagent["concentrations"] = []
+    def add_choice_option(self, group_name: str, option_name: str, targets: List[float], units: str, droplet_nL: float):
+        for f in self.factors:
+            if f.name == group_name and f.kind == "choice":
+                f.options.append(OptionSpec(option_name, list(targets), units, float(droplet_nL)))
                 return
-            
-            if steps == 1:
-                reagent["concentrations"] = [round(max_conc, 2)]
-                # #print(f'Conc for {index} has steps {steps} and {reagent["concentrations"]}')
-            elif mode == "Linear":
-                reagent["concentrations"] = [round(x, 2) for x in np.linspace(min_conc, max_conc, steps).tolist()]
-            elif mode == "Quadratic":
-                reagent["concentrations"] = [round(x, 2) for x in (np.linspace(np.sqrt(min_conc), np.sqrt(max_conc), steps)**2).tolist()]
-            elif mode == "Logarithmic":
-                reagent["concentrations"] = [round(x, 2) for x in np.logspace(np.log10(min_conc), np.log10(max_conc), steps).tolist()]
-        
-        # self.calculate_stock_solutions(index)
-        feasible = self.check_stock_solutions(index)
-        
-        # Emit signal to update the view
-        self.data_updated.emit(index)
-        if calc_experiment:
-            self.generate_experiment(feasible=feasible)
+        # auto-create group if missing
+        self.add_choice_group(group_name)
+        self.add_choice_option(group_name, option_name, targets, units, droplet_nL)
 
+    def set_metadata(self, **kwargs):
+        self.metadata.update(kwargs)
 
-    def calculate_all_concentrations(self):
-        for i in range(len(self.reagents)):
-            self.calculate_concentrations(i)
+    def get_random_seed(self) -> Optional[int]:
+        """Only return a seed when randomization is enabled."""
+        return self.metadata.get("random_seed", None) if self.metadata.get("randomize_assignments", False) else None
 
-    def check_stock_solutions(self, index):
-        """Check if the specified stock solutions are able to produce the target concentrations."""
-        self.remove_stock_solutions_for_unused_reagents()
-        reagent = self.reagents[index]
-        if type(reagent["stock_solutions"]) == str:
-            current_stock_solutions = [round(float(c.strip()), 3) for c in reagent["stock_solutions"].split(',') if c.strip()]
-            reagent['stock_solutions'] = current_stock_solutions
-        else:
-            current_stock_solutions = reagent["stock_solutions"]
-        feasible, unachievable, lookup_table, max_droplets_for_conc = check_stock_solution_calculations(reagent['concentrations'], current_stock_solutions, reagent['units'], reagent['max_droplets'])
-        if not feasible:
-            reagent['missing_concentrations'] = unachievable
-            self.remove_stock_solutions_for_reagent(reagent['name'])
-        else:
-            reagent['missing_concentrations'] = []
-            self.add_lookup_table(reagent['name'],lookup_table)
-            self.add_new_stock_solutions_for_reagent(reagent['name'], current_stock_solutions,reagent['units'])
-        reagent['max_droplets_for_conc'] = max_droplets_for_conc
-        return feasible
+    def get_start_row(self) -> int:
+        return int(self.metadata.get("start_row", 0))
 
-    def add_new_stock_solutions_for_reagent(self, reagent_name, concentrations,units):
-        # Remove any existing stock solutions for this reagent
-        self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != reagent_name]
-        # Check if this stock solution already exists to avoid duplicates
-        for concentration in concentrations:
-            self.stock_solutions.append({
-                "reagent_name": reagent_name,
-                "concentration": concentration,
-                "units":units,
-                "total_droplets": 0,
-                'total_volume': 0
-            })
-        self.mark_unsaved_changes()
+    def get_start_col(self) -> int:
+        return int(self.metadata.get("start_col", 0))
 
-    def remove_stock_solutions_for_reagent(self, reagent_name):
-        self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] != reagent_name]
-        # Update the stock solutions in the experiment DataFrame
-        if not self.all_droplet_df.empty:
-            self.all_droplet_df = self.all_droplet_df[self.all_droplet_df['reagent_name'] != reagent_name].copy()
-        # Update the stock solutions in the lookup table
-        if not self.complete_lookup_table.empty:
-            self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
-        self.mark_unsaved_changes()
-    
-    def remove_stock_solutions_for_unused_reagents(self):
-        used_reagents = [reagent['name'] for reagent in self.reagents]
-        used_reagents.append(self.metadata['fill_reagent'])
-        self.stock_solutions = [stock for stock in self.stock_solutions if stock['reagent_name'] in used_reagents]
-        # Update the stock solutions in the experiment DataFrame
-        if not self.all_droplet_df.empty:
-            self.all_droplet_df = self.all_droplet_df[self.all_droplet_df['reagent_name'].isin(used_reagents)].copy()
-        # Update the stock solutions in the lookup table
-        # #print(f'Complete lookup table:\n{self.complete_lookup_table}')
-        if not self.complete_lookup_table.empty:
-            self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'].isin(used_reagents)].copy()
+    # ------------- Candidate builders -------------
 
-        
+    def _enumerate_single_stock_candidates(
+        self,
+        targets: List[float],
+        droplet_nL: float,
+        units: str,
+        *,
+        final_volume_nL: float,
+        quantum: float = 0.1,
+        max_refine: int = 50,
+        min_delta: float = 1e-6
+    ) -> List[SingleStockPlan]:
+        xs = sorted(set(_quantize(t, quantum) for t in targets))
+        base = _base_step_for_targets(xs, quantum)
+        cands: List[SingleStockPlan] = []
+        for m in range(1, max_refine + 1):
+            delta = base / m
+            if delta < min_delta:
+                break
+            if any(not _is_multiple_of(delta, t, tol=1e-9) for t in xs):
+                continue
+            drops = {t: _int_ratio(delta, t) for t in xs}
+            max_vol = max(d * droplet_nL for d in drops.values()) if drops else 0.0
+            stock_c = (delta * final_volume_nL) / droplet_nL
+            cands.append(SingleStockPlan(
+                delta_per_drop=delta,
+                stock_concentration=stock_c,
+                droplet_nL=droplet_nL,
+                units=units,
+                droplets_per_target=drops,
+                max_volume_nL=max_vol,
+                n_stocks=1
+            ))
+        # Lowest concentration first (smallest delta)
+        cands.sort(key=lambda p: (p.stock_concentration, p.max_volume_nL))
+        return cands
 
-    def check_missing_concentrations(self):
-        for reagent in self.reagents:
-            if len(reagent['missing_concentrations']) > 0:
-                return True
-        return False
+    def _enumerate_two_stock_candidates(
+        self,
+        targets: List[float],
+        droplet_nL: float,
+        units: str,
+        *,
+        final_volume_nL: float,
+        quantum: float = 0.1,
+        max_refine: int = 30,
+        kmax_multiples: int = 12,
+        max_pairs: int = 300
+    ) -> List[TwoStockPlan]:
+        """
+        Enumerate feasible 2-stock pairs. We consider a broad set of deltas:
+        - fractions of the base (base / m)
+        - multiples of the base (k * base), k=1..kmax_multiples
+        - per-target divisors t / k up to a hard drop cap
 
-    def create_lookup_table(self,reagent_name,achievable_concentrations, stock_solutions):
-        # Initialize a DataFrame with target concentrations as index and stock solutions as columns
-        if achievable_concentrations == None:
-            return pd.DataFrame()
-        lookup_table = pd.DataFrame(index=achievable_concentrations.keys(), columns=stock_solutions)
-        # Iterate over the achievable concentrations and populate the lookup table
-        for concentration, droplets in achievable_concentrations.items():
-            droplet_counts = {stock: 0 for stock in stock_solutions}  # Initialize droplet counts
-            for droplet in droplets:
-                droplet_counts[droplet] += 1  # Count how many droplets of each stock solution are used
-            lookup_table.loc[concentration] = pd.Series(droplet_counts)
-        
-        # Replace NaN values with 0 (indicating no droplets of that stock solution are used)
-        lookup_table['reagent_name'] = reagent_name
-        lookup_table = lookup_table.reset_index().rename(columns={'index': 'target_concentration'})
-        lookup_table = lookup_table.set_index(['reagent_name','target_concentration']).stack().reset_index().rename(columns={0: 'droplet_count', 'level_2': 'stock_solution'})
-        # print('\nLookup table:\n',lookup_table)
-        return lookup_table
-    
-    def add_lookup_table(self,reagent_name,lookup_table):
-        lookup_table['reagent_name'] = reagent_name
-        if self.complete_lookup_table.empty:
-            self.complete_lookup_table = lookup_table
-            return
-        # Remove any existing rows with the same reagent name
-        self.complete_lookup_table = self.complete_lookup_table[self.complete_lookup_table['reagent_name'] != reagent_name].copy()
-        # Append the new lookup table
-        self.complete_lookup_table = pd.concat([self.complete_lookup_table, lookup_table], ignore_index=True)
-        # print('\nLookup table:\n',self.complete_lookup_table)
+        Then solve two-coin change on the integer grid (quantum) and
+        keep non-dominated pairs by (conc_sum, max_volume_nL).
+        """
+        xs = sorted(set(_quantize(t, quantum) for t in targets))
+        if not xs:
+            return []
 
+        base = _base_step_for_targets(xs, quantum)
 
-    def get_reagent(self, index):
-        return self.reagents[index]
+        # Cap on drops if this reagent alone filled the volume.
+        max_drops_cap = max(1, int(math.floor(final_volume_nL / max(droplet_nL, 1e-9))))
 
-    def get_all_reagents(self):
-        return self.reagents
-    
-    def get_all_stock_solutions(self):
-        return self.stock_solutions
+        # Build delta set on the quantum grid
+        delta_set: Set[float] = set()
 
-    def generate_experiment(self,feasible=True):
-        """Generate the experiment combinations as a pandas DataFrame."""
-        reagent_names = [reagent['name'] for reagent in self.reagents]
-        # print('\nReagent names:\n',reagent_names)
-        # concentrations = [reagent['concentrations'] for reagent in self.reagents]
-        # conc_units = []
-        concentrations = []
-        for reag in self.reagents:
-            concentrations.append(['_'.join([str(conc),reag['units']]) for conc in reag['concentrations']])
-        # print('\nConcentrations:\n',concentrations)
-        if self.metadata['reduction_factor'] == 1:
-            concentration_combinations = list(itertools.product(*concentrations))
-            self.experiment_df = pd.DataFrame(concentration_combinations, columns=reagent_names)
-        else:
-            num_concentrations = [len(c) for c in concentrations]
-            try:
-                reduced_comb = pyDOE3.gsd(num_concentrations, self.metadata['reduction_factor'])
-                self.experiment_df = pd.DataFrame(
-                    [[concentrations[j][idx] for j, idx in enumerate(row)] for row in reduced_comb],
-                    columns=reagent_names
+        # (a) Fractions of base
+        for m in range(1, max_refine + 1):
+            d = _quantize(base / m, quantum)
+            if d > 0:
+                delta_set.add(d)
+
+        # (b) Multiples of base
+        for k in range(1, kmax_multiples + 1):
+            d = _quantize(base * k, quantum)
+            if d > 0:
+                delta_set.add(d)
+
+        # (c) Per-target divisors
+        for t in xs:
+            if t <= 0:
+                continue
+            for k in range(1, max_drops_cap + 1):
+                d = _quantize(t / k, quantum)
+                if d > 0:
+                    delta_set.add(d)
+
+        deltas = sorted(delta_set)
+        if not deltas:
+            return []
+
+        # Integerize
+        s = int(round(1.0 / quantum))
+        int_targets = [int(round(t * s)) for t in xs]
+        int_deltas = [int(round(d * s)) for d in deltas]
+
+        pairs: List[TwoStockPlan] = []
+
+        for i in range(len(int_deltas)):
+            for j in range(i + 1, len(int_deltas)):
+                di, dj = int_deltas[i], int_deltas[j]
+                if di <= 0 or dj <= 0:
+                    continue
+
+                # gcd feasibility: each target must be multiple of gcd(di, dj)
+                g = math.gcd(di, dj)
+                if any((t % g) != 0 for t in int_targets):
+                    continue
+
+                # Two-coin change per target: minimize a+b
+                drops_map: Dict[float, Tuple[int, int]] = {}
+                max_drops = 0
+                feasible = True
+                for t_int, t_real in zip(int_targets, xs):
+                    best_ab = None
+                    a_max = t_int // di
+                    for a in range(a_max + 1):
+                        rem = t_int - a * di
+                        if rem < 0:
+                            break
+                        if rem % dj == 0:
+                            b = rem // dj
+                            if best_ab is None or (a + b) < (best_ab[0] + best_ab[1]):
+                                best_ab = (a, b)
+                    if best_ab is None:
+                        feasible = False
+                        break
+                    drops_map[t_real] = best_ab
+                    max_drops = max(max_drops, best_ab[0] + best_ab[1])
+
+                if not feasible:
+                    continue
+
+                # ---- NEW: skip degenerate pairs (one stock never used across all targets)
+                all_a_zero = all(ab[0] == 0 for ab in drops_map.values())
+                all_b_zero = all(ab[1] == 0 for ab in drops_map.values())
+                if all_a_zero or all_b_zero:
+                    continue
+                # ---- end NEW
+
+                d1 = deltas[i]
+                d2 = deltas[j]
+                c1 = (d1 * final_volume_nL) / droplet_nL
+                c2 = (d2 * final_volume_nL) / droplet_nL
+                conc_sum = c1 + c2
+                max_vol = max_drops * droplet_nL
+
+                pairs.append(TwoStockPlan(
+                    deltas=(d1, d2),
+                    stock_concs=(c1, c2),
+                    droplet_nL=droplet_nL,
+                    units=units,
+                    droplets_per_target=drops_map,
+                    max_volume_nL=max_vol,
+                    conc_sum=conc_sum,
+                    n_stocks=2
+                ))
+
+        if not pairs:
+            return []
+
+        # Pareto-prune by (conc_sum, max_volume_nL)
+        pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
+        pruned: List[TwoStockPlan] = []
+        best_vol = float("inf")
+        for p in pairs:
+            if p.max_volume_nL + 1e-12 < best_vol:
+                pruned.append(p)
+                best_vol = p.max_volume_nL
+
+        return pruned[:max_pairs]
+
+    # ------------- Optimization -------------
+
+    def optimize_stock_solutions(
+        self,
+        *,
+        quantum: float = 0.1,
+        max_refine: int = 50,
+        two_max_refine: int = 30,
+        allow_two: bool = True
+    ) -> Dict:
+        V = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+
+        # Build candidate lists
+        additives: List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]] = []
+        choice_groups: Dict[str, List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]]] = {}
+
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                singles = self._enumerate_single_stock_candidates(
+                    o.targets, o.droplet_nL, o.units,
+                    final_volume_nL=V, quantum=quantum, max_refine=max_refine
                 )
-            except Exception as e:
-                print('Error generating reduced experiment:',e)
-                self.experiment_df = pd.DataFrame()
-                return
-        self.experiment_df = self.experiment_df.stack().reset_index().rename(columns={'level_0':'reaction_id','level_1':'reagent_name',0: 'target_concentration'})
-        self.experiment_df['units'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[-1])
-        self.experiment_df['target_concentration'] = self.experiment_df['target_concentration'].apply(lambda x: x.split('_')[0]).astype(float)
-        #print(f'\nExperiment df:\n{self.experiment_df}')
-        # Apply replicates
-        all_dfs = []
-        for i in range(self.metadata["replicates"]):
-            temp_df = self.experiment_df.copy()
-            if not temp_df.empty:
-                temp_df['replicate'] = i
-                temp_df['unique_id'] = temp_df['reaction_id'] + (temp_df['replicate']*(max(temp_df['reaction_id'])+1))
-            all_dfs.append(temp_df)
-        self.experiment_df = pd.concat(all_dfs, ignore_index=True)
-        # #print(f'Experiment df:\n{self.experiment_df}')
-        # #print(f'complete lookup table:\n{self.complete_lookup_table}')
-        
-        try:
-            self.all_droplet_df = self.experiment_df.merge(self.complete_lookup_table, on=['reagent_name','target_concentration','units'], how='left')
-            max_droplet_df = self.all_droplet_df[['reaction_id','unique_id','replicate','droplet_count']].groupby(['reaction_id','unique_id','replicate']).sum().reset_index()
-            fill_reagent_df = max_droplet_df.copy()
-            fill_reagent_df['reagent_name'] = self.metadata['fill_reagent']
-            fill_reagent_df['stock_solution'] = 1
-            fill_reagent_df['droplet_count'] = self.metadata['max_droplets'] - fill_reagent_df['droplet_count']
-            fill_reagent_df['target_concentration'] = 0
-            fill_reagent_df['units'] = '--'
-            self.all_droplet_df = pd.concat([self.all_droplet_df,fill_reagent_df],ignore_index=True)
-            droplet_count = max_droplet_df['droplet_count'].max()
-            self.add_total_droplet_count_to_stock()
+                twos = self._enumerate_two_stock_candidates(
+                    o.targets, o.droplet_nL, o.units,
+                    final_volume_nL=V, quantum=quantum, max_refine=two_max_refine
+                ) if allow_two else []
+                if not singles and not twos:
+                    return {"best": None, "reason": f"No feasible plan (single or two-stock) for additive '{f.name}'."}
+                additives.append((f.name, singles, twos))
+            else:
+                bucket = []
+                for opt in f.options:
+                    singles = self._enumerate_single_stock_candidates(
+                        opt.targets, opt.droplet_nL, opt.units,
+                        final_volume_nL=V, quantum=quantum, max_refine=max_refine
+                    )
+                    twos = self._enumerate_two_stock_candidates(
+                        opt.targets, opt.droplet_nL, opt.units,
+                        final_volume_nL=V, quantum=quantum, max_refine=two_max_refine
+                    ) if allow_two else []
+                    if not singles and not twos:
+                        return {"best": None, "reason": f"No feasible plan (single or two-stock) for option '{f.name}/{opt.name}'."}
+                    bucket.append((opt.name, singles, twos))
+                choice_groups[f.name] = bucket
 
-        except Exception as e:
-            #print(f'Generate experiment error: {e}')
-            droplet_count = 0
-            self.all_droplet_df = pd.DataFrame()
+        # Selection indices (single-stock arrays)
+        add_idx = {name: 0 for name, singles, _ in additives if singles}
+        ch_idx: Dict[Tuple[str, str], int] = {}
+        for gname, bucket in choice_groups.items():
+            for oname, singles, _ in bucket:
+                if singles:
+                    ch_idx[(gname, oname)] = 0
+
+        # Two-stock selections (index into twos), None means single-stock
+        add_two_idx: Dict[str, Optional[int]] = {}
+        for name, singles, twos in additives:
+            add_two_idx[name] = 0 if (not singles and twos) else None
+
+        ch_two_idx: Dict[Tuple[str, str], Optional[int]] = {}
+        for gname, bucket in choice_groups.items():
+            for oname, singles, twos in bucket:
+                ch_two_idx[(gname, oname)] = 0 if (not singles and twos) else None
+
+        # Helpers
+        def selection_counts() -> Tuple[int, float]:
+            tot_stocks = 0
+            sum_conc = 0.0
+            for name, singles, twos in additives:
+                if add_two_idx[name] is not None:
+                    p2 = twos[add_two_idx[name]]
+                    tot_stocks += 2
+                    sum_conc += p2.conc_sum
+                else:
+                    p1 = singles[add_idx[name]]
+                    tot_stocks += 1
+                    sum_conc += p1.stock_concentration
+            for gname, bucket in choice_groups.items():
+                for oname, singles, twos in bucket:
+                    if ch_two_idx[(gname, oname)] is not None:
+                        p2 = twos[ch_two_idx[(gname, oname)]]
+                        tot_stocks += 2
+                        sum_conc += p2.conc_sum
+                    else:
+                        p1 = singles[ch_idx[(gname, oname)]]
+                        tot_stocks += 1
+                        sum_conc += p1.stock_concentration
+            return tot_stocks, sum_conc
+
+        def worst_case_nonfill_volume() -> float:
+            total = 0.0
+            for name, singles, twos in additives:
+                total += (twos[add_two_idx[name]].max_volume_nL
+                        if add_two_idx[name] is not None
+                        else singles[add_idx[name]].max_volume_nL)
+            for gname, bucket in choice_groups.items():
+                m = 0.0
+                for oname, singles, twos in bucket:
+                    v = (twos[ch_two_idx[(gname, oname)]].max_volume_nL
+                        if ch_two_idx[(gname, oname)] is not None
+                        else singles[ch_idx[(gname, oname)]].max_volume_nL)
+                    if v > m:
+                        m = v
+                total += m
+            return total
+
+        # ---- NEW: tie-aware, look-ahead bump for choice options ----
+        def bump_gain_opt(gname: str, oname: str) -> Tuple[float, float]:
+            """
+            Returns (effective_volume_reduction, effective_conc_increase).
+
+            Cases:
+            1) Not at group max => no immediate reduction (0, Δconc_next).
+            2) Unique argmax and next step goes below others_max => true drop.
+            3) Tied at group max:
+            - If next step crosses below others => true drop.
+            - Else use a proxy gain: (local_drop / tie_count, Δconc_next),
+                so ties get "shared" credit and the loop will invest here.
+            4) Unique argmax but next step not enough => look ahead to first
+            k where volume < others_max and charge total Δconc to get there.
+            """
+            bucket = choice_groups[gname]
+
+            # current volumes for each option
+            vols: List[Tuple[str, float]] = []
+            for n, singles, twos in bucket:
+                v = (twos[ch_two_idx[(gname, n)]].max_volume_nL
+                    if ch_two_idx[(gname, n)] is not None
+                    else singles[ch_idx[(gname, n)]].max_volume_nL)
+                vols.append((n, v))
+
+            cur_max = max(v for _, v in vols)
+            tie_names = [n for n, v in vols if abs(v - cur_max) <= 1e-9]
+            tie_count = len(tie_names)
+            others_max = max((v for n, v in vols if n != oname), default=0.0)
+
+            # current & next single for this option
+            singles_this = next(s for n, s, _ in bucket if n == oname)
+            i = ch_idx[(gname, oname)]
+            cur = singles_this[i]
+            nxt = singles_this[i + 1] if (i + 1) < len(singles_this) else None
+            if nxt is None:
+                return (0.0, float("inf"))
+
+            conc_inc_next = max(1e-12, nxt.stock_concentration - cur.stock_concentration)
+
+            # Not at group max => can't reduce group max
+            if cur.max_volume_nL < cur_max - 1e-9:
+                return (0.0, conc_inc_next)
+
+            # If the very next step produces an immediate drop of the group max
+            new_max = max(others_max, nxt.max_volume_nL)
+            if new_max < cur_max - 1e-12:
+                return (cur_max - new_max, conc_inc_next)
+
+            # If we are tied at the max and one step doesn't break the tie,
+            # allocate a proxy "shared" gain to avoid starving the group.
+            if oname in tie_names and tie_count > 1:
+                local_drop = max(0.0, cur.max_volume_nL - nxt.max_volume_nL)
+                if local_drop > 1e-12:
+                    return (local_drop / tie_count, conc_inc_next)
+
+                # If local_drop is (almost) zero, look a bit further ahead for a real drop,
+                # still sharing by tie_count.
+                k = i + 1
+                while k < len(singles_this) and singles_this[k].max_volume_nL >= cur_max - 1e-9:
+                    k += 1
+                if k < len(singles_this):
+                    ahead_drop = max(0.0, cur.max_volume_nL - singles_this[k].max_volume_nL)
+                    total_conc = max(1e-12, singles_this[k].stock_concentration - cur.stock_concentration)
+                    return (ahead_drop / tie_count, total_conc)
+
+                # Can't make progress within available singles
+                return (0.0, conc_inc_next)
+
+            # Unique argmax but next step still above others_max: look ahead to first k < others_max
+            k = i + 1
+            while k < len(singles_this) and singles_this[k].max_volume_nL >= others_max - 1e-9:
+                k += 1
+            if k < len(singles_this):
+                drop = max(0.0, cur_max - max(others_max, singles_this[k].max_volume_nL))
+                total_conc = max(1e-12, singles_this[k].stock_concentration - cur.stock_concentration)
+                return (drop, total_conc)
+
+            return (0.0, conc_inc_next)
+        # ------------------------------------------------------------
+
+        # Single-stock bump helper for additives
+        def bump_gain_add(name: str) -> Tuple[float, float]:
+            singles = dict((n, s) for n, s, _ in additives)[name]
+            i = add_idx[name]
+            if i + 1 >= len(singles):
+                return (0.0, float("inf"))
+            cur = singles[i]
+            nxt = singles[i + 1]
+            return (max(0.0, cur.max_volume_nL - nxt.max_volume_nL),
+                    max(1e-12, nxt.stock_concentration - cur.stock_concentration))
+
+        def can_bump_add(name: str) -> bool:
+            singles = dict((n, s) for n, s, _ in additives)[name]
+            return add_two_idx[name] is None and (add_idx[name] + 1 < len(singles))
+
+        def can_bump_opt(gname: str, oname: str) -> bool:
+            if ch_two_idx[(gname, oname)] is not None:
+                return False
+            singles_this = None
+            for g, bucket in choice_groups.items():
+                if g == gname:
+                    for n, s, _ in bucket:
+                        if n == oname:
+                            singles_this = s
+                            break
+            return singles_this is not None and (ch_idx[(gname, oname)] + 1 < len(singles_this))
+
+        # -----------------------------
+        # Step 1: single-stock only
+        # -----------------------------
+        while True:
+            worst = worst_case_nonfill_volume()
+            if worst <= V + 1e-6:
+                break
+
+            best_ratio = 0.0
+            best_next_conc = float("inf")  # tie-breaker: prefer smaller resulting conc
+            best_key = None
+            best_kind = None
+
+            # Additives
+            for name, singles, _ in additives:
+                if not can_bump_add(name):
+                    continue
+                vol_red, conc_inc = bump_gain_add(name)
+                ratio = vol_red / conc_inc if conc_inc > 0 else 0.0
+                next_conc = singles[add_idx[name] + 1].stock_concentration
+                if (ratio > best_ratio + 1e-12) or (abs(ratio - best_ratio) <= 1e-12 and next_conc < best_next_conc - 1e-12):
+                    best_ratio = ratio
+                    best_next_conc = next_conc
+                    best_key = name
+                    best_kind = "add"
+
+            # Choice options (tie-aware)
+            for gname, bucket in choice_groups.items():
+                for oname, singles, _ in bucket:
+                    if not can_bump_opt(gname, oname):
+                        continue
+                    vol_red_eff, conc_eff = bump_gain_opt(gname, oname)
+                    ratio = vol_red_eff / conc_eff if conc_eff > 0 else 0.0
+                    next_conc = singles[ch_idx[(gname, oname)] + 1].stock_concentration
+                    if (ratio > best_ratio + 1e-12) or (abs(ratio - best_ratio) <= 1e-12 and next_conc < best_next_conc - 1e-12):
+                        best_ratio = ratio
+                        best_next_conc = next_conc
+                        best_key = (gname, oname)
+                        best_kind = "opt"
+
+            if best_key is None:
+                break
+            if best_kind == "add":
+                add_idx[best_key] += 1
+            else:
+                g, o = best_key
+                ch_idx[(g, o)] += 1
+
+        # -----------------------------
+        # Step 2: two-stock switches
+        # -----------------------------
+        if worst_case_nonfill_volume() > V + 1e-6 and allow_two:
+            while True:
+                worst = worst_case_nonfill_volume()
+                if worst <= V + 1e-6:
+                    break
+
+                best_gain = 0.0
+                best_penalty = float("inf")
+                best_switch = None  # ("add", name, idx2) or ("opt", g, o, idx2)
+
+                # Additives
+                for name, singles, twos in additives:
+                    if not twos:
+                        continue
+                    cur_v = singles[add_idx[name]].max_volume_nL if add_two_idx[name] is None else twos[add_two_idx[name]].max_volume_nL
+                    for i2, p2 in enumerate(twos):
+                        if add_two_idx[name] is not None and add_two_idx[name] == i2:
+                            continue
+                        vol_red_local = max(0.0, cur_v - p2.max_volume_nL)
+                        if vol_red_local <= 1e-9:
+                            continue
+                        penalty = p2.conc_sum - (singles[add_idx[name]].stock_concentration if add_two_idx[name] is None else twos[add_two_idx[name]].conc_sum)
+                        if (vol_red_local > best_gain + 1e-9) or (abs(vol_red_local - best_gain) <= 1e-9 and penalty < best_penalty):
+                            best_gain = vol_red_local
+                            best_penalty = penalty
+                            best_switch = ("add", name, i2)
+
+                # Choice groups (+ tie-break same as before)
+                tie_switch = None
+                best_tie_gain = 0.0
+                best_tie_penalty = float("inf")
+                for gname, bucket in choice_groups.items():
+                    vols = []
+                    for oname, singles, twos in bucket:
+                        v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
+                        vols.append((oname, v))
+                    cur_group_max = max(v for _, v in vols)
+                    tie_count = sum(1 for _, v in vols if abs(v - cur_group_max) <= 1e-9)
+                    others_max = {oname: (max(x for n, x in vols if n != oname) if len(vols) > 1 else 0.0) for oname, _ in vols}
+
+                    for oname, singles, twos in bucket:
+                        if not twos:
+                            continue
+                        cur_v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
+                        is_argmax = abs(cur_v - cur_group_max) <= 1e-9
+
+                        for i2, p2 in enumerate(twos):
+                            if ch_two_idx[(gname, oname)] is not None and ch_two_idx[(gname, oname)] == i2:
+                                continue
+                            new_group_max = max(others_max[oname], p2.max_volume_nL) if is_argmax else cur_group_max
+                            vol_red_local = max(0.0, cur_group_max - new_group_max)
+                            penalty = p2.conc_sum - (twos[ch_two_idx[(gname, oname)]].conc_sum if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].stock_concentration)
+
+                            if (vol_red_local > best_gain + 1e-9) or (abs(vol_red_local - best_gain) <= 1e-9 and penalty < best_penalty):
+                                best_gain = vol_red_local
+                                best_penalty = penalty
+                                best_switch = ("opt", gname, oname, i2)
+
+                            if tie_count > 1 and is_argmax:
+                                local_drop = max(0.0, cur_v - p2.max_volume_nL)
+                                if (local_drop > best_tie_gain + 1e-9) or (abs(local_drop - best_tie_gain) <= 1e-9 and penalty < best_tie_penalty):
+                                    best_tie_gain = local_drop
+                                    best_tie_penalty = penalty
+                                    tie_switch = ("opt", gname, oname, i2)
+
+                if best_switch is None and tie_switch is not None:
+                    best_switch = tie_switch
+                if best_switch is None:
+                    return {"best": None, "reason": "Volume budget too tight even after two-stock exploration."}
+
+                if best_switch[0] == "add":
+                    _, name, i2 = best_switch
+                    add_two_idx[name] = i2
+                else:
+                    _, g, o, i2 = best_switch
+                    ch_two_idx[(g, o)] = i2
+
+                if worst_case_nonfill_volume() <= V + 1e-6:
+                    break
+
+        # -----------------------------
+        # De-escalate two-stocks & cool-down (unchanged)
+        # -----------------------------
+        def current_worst() -> float:
+            return worst_case_nonfill_volume()
+
+        def is_two_plan_degenerate(p2: TwoStockPlan) -> bool:
+            a_zero = all(ab[0] == 0 for ab in p2.droplets_per_target.values())
+            b_zero = all(ab[1] == 0 for ab in p2.droplets_per_target.values())
+            return a_zero or b_zero
+
+        # Additives
+        for idx, (name, singles, twos) in enumerate(additives):
+            if add_two_idx.get(name) is None:
+                continue
+            p2 = twos[add_two_idx[name]]
+            if is_two_plan_degenerate(p2):
+                use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
+                drops = {float(t): ab[use_leg] for t, ab in p2.droplets_per_target.items()}
+                max_vol = max((k * p2.droplet_nL for k in drops.values()), default=0.0)
+                fake_single = SingleStockPlan(
+                    delta_per_drop=p2.deltas[use_leg],
+                    stock_concentration=p2.stock_concs[use_leg],
+                    droplet_nL=p2.droplet_nL,
+                    units=p2.units,
+                    droplets_per_target=drops,
+                    max_volume_nL=max_vol,
+                    n_stocks=1,
+                )
+                saved_two = add_two_idx[name]
+                add_two_idx[name] = None
+                singles = [fake_single] + singles
+                add_idx[name] = 0
+                if current_worst() > V + 1e-6:
+                    add_two_idx[name] = saved_two
+                else:
+                    additives[idx] = (name, singles, twos)
+                    continue
+
+            saved_two = add_two_idx[name]
+            best_i = None
+            for i, p1 in enumerate(singles):
+                add_two_idx[name] = None
+                add_idx[name] = i
+                if current_worst() <= V + 1e-6:
+                    best_i = i
+                    break
+            if best_i is None:
+                add_two_idx[name] = saved_two
+
+        # Choice groups
+        for gname, bucket in list(choice_groups.items()):
+            new_bucket = []
+            for oname, singles, twos in bucket:
+                key = (gname, oname)
+                if ch_two_idx.get(key) is None:
+                    new_bucket.append((oname, singles, twos))
+                    continue
+                p2 = twos[ch_two_idx[key]]
+                if is_two_plan_degenerate(p2):
+                    use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
+                    drops = {float(t): ab[use_leg] for t, ab in p2.droplets_per_target.items()}
+                    max_vol = max((k * p2.droplet_nL for k in drops.values()), default=0.0)
+                    fake_single = SingleStockPlan(
+                        delta_per_drop=p2.deltas[use_leg],
+                        stock_concentration=p2.stock_concs[use_leg],
+                        droplet_nL=p2.droplet_nL,
+                        units=p2.units,
+                        droplets_per_target=drops,
+                        max_volume_nL=max_vol,
+                        n_stocks=1,
+                    )
+                    saved_two = ch_two_idx[key]
+                    ch_two_idx[key] = None
+                    singles = [fake_single] + singles
+                    ch_idx[key] = 0
+                    if current_worst() > V + 1e-6:
+                        ch_two_idx[key] = saved_two
+
+                if ch_two_idx[key] is not None:
+                    saved_two = ch_two_idx[key]
+                    best_i = None
+                    for i, p1 in enumerate(singles):
+                        ch_two_idx[key] = None
+                        ch_idx[key] = i
+                        if current_worst() <= V + 1e-6:
+                            best_i = i
+                            break
+                    if best_i is None:
+                        ch_two_idx[key] = saved_two
+                new_bucket.append((oname, singles, twos))
+            choice_groups[gname] = new_bucket
+
+        # Single-stock cool-down (unchanged)
+        if worst_case_nonfill_volume() <= V + 1e-6:
+            changed = True
+            while changed:
+                changed = False
+                for name, singles, _ in additives:
+                    if add_two_idx[name] is not None:
+                        continue
+                    i = add_idx[name]
+                    while i > 0:
+                        prev_i = i - 1
+                        add_idx[name] = prev_i
+                        if worst_case_nonfill_volume() <= V + 1e-6:
+                            changed = True
+                            i = prev_i
+                        else:
+                            add_idx[name] = i
+                            break
+                for gname, bucket in choice_groups.items():
+                    for oname, singles, _ in bucket:
+                        key = (gname, oname)
+                        if ch_two_idx[key] is not None:
+                            continue
+                        i = ch_idx[key]
+                        while i > 0:
+                            prev_i = i - 1
+                            ch_idx[key] = prev_i
+                            if worst_case_nonfill_volume() <= V + 1e-6:
+                                changed = True
+                                i = prev_i
+                            else:
+                                ch_idx[key] = i
+                                break
+
+        # Materialize plans
+        self.plans_per_option.clear()
+        stock_rows = []
+
+        for name, singles, twos in additives:
+            if add_two_idx[name] is not None:
+                p2 = twos[add_two_idx[name]]
+                self.plans_per_option[(name, None)] = {
+                    "n_stocks": 2,
+                    "stocks": [
+                        {"delta_per_drop": p2.deltas[0], "stock_concentration": p2.stock_concs[0], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()}},
+                        {"delta_per_drop": p2.deltas[1], "stock_concentration": p2.stock_concs[1], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()}},
+                    ]
+                }
+                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p2.stock_concs[1], "delta_per_drop": p2.deltas[1], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+            else:
+                p1 = singles[add_idx[name]]
+                self.plans_per_option[(name, None)] = {
+                    "n_stocks": 1,
+                    "stocks": [
+                        {"delta_per_drop": p1.delta_per_drop, "stock_concentration": p1.stock_concentration, "droplet_volume_nL": p1.droplet_nL, "units": p1.units, "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()}}
+                    ]
+                }
+                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
+
+        for gname, bucket in choice_groups.items():
+            for oname, singles, twos in bucket:
+                key = (gname, oname)
+                if ch_two_idx[key] is not None:
+                    p2 = twos[ch_two_idx[key]]
+                    self.plans_per_option[key] = {
+                        "n_stocks": 2,
+                        "stocks": [
+                            {"delta_per_drop": p2.deltas[0], "stock_concentration": p2.stock_concs[0], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()}},
+                            {"delta_per_drop": p2.deltas[1], "stock_concentration": p2.stock_concs[1], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()}},
+                        ]
+                    }
+                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p2.stock_concs[1], "delta_per_drop": p2.deltas[1], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+                else:
+                    p1 = singles[ch_idx[key]]
+                    self.plans_per_option[key] = {
+                        "n_stocks": 1,
+                        "stocks": [
+                            {"delta_per_drop": p1.delta_per_drop, "stock_concentration": p1.stock_concentration, "droplet_volume_nL": p1.droplet_nL, "units": p1.units, "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()}}
+                        ]
+                    }
+                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
+
+        self._stock_rows_cache = stock_rows
+        self._fill_row_cache = None
+        self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
 
         self.stock_updated.emit()
+        return {
+            "best": True,
+            "stocks": selection_counts()[0],
+            "sum_conc": selection_counts()[1],
+            "worst_nonfill_nL": self._last_worst_nonfill_volume_nL
+        }
 
-        # Emit signal to notify that the experiment has been generated
-        self.experiment_generated.emit(self.get_number_of_reactions(),droplet_count)
+    # ------------- Generation & summaries -------------
 
-    def get_number_of_reactions(self):
-        if self.experiment_df.empty:
-            return 0
-        return len(self.experiment_df['unique_id'].unique())
+    def _enumerate_reactions(self) -> List[Dict]:
+        """
+        Build the list of reactions.
+        - If use_subset_design + reduction>1: use pyDOE3.gsd() to generate a balanced
+        generalized subset design over multi-level factors (additives + choice groups).
+        - Else: fall back to the existing full-factorial enumeration.
+        Returns a list of dicts mapping:
+        (additive_name, None) -> target
+        (group_name, option_name) -> target
+        """
+        # ---- Gather factors ----
+        additives = [f for f in self.factors if f.kind == "additive"]
+        choices   = [f for f in self.factors if f.kind == "choice"]
+
+        use_gsd = bool(self.metadata.get("use_subset_design", False))
+        reduction = int(self.metadata.get("reduction_factor", 1))
+        print(f"[ExperimentModel] Enumerating reactions: use_gsd={use_gsd}, reduction={reduction}")
+
+        # ---------- GSD path ----------
+        if use_gsd and reduction > 1:
+            try:
+                from pyDOE3 import gsd  # pip install pyDOE3
+                import numpy as np
+
+                # Build a list of "factor descriptors"
+                # For additives: levels = [target1, target2, ...]
+                # For each choice group: levels = [(option_name, target), ...] across all options
+                facs = []
+
+                # Additives
+                for f in additives:
+                    opt = f.options[0]
+                    levels = sorted(set(float(t) for t in opt.targets))
+                    facs.append({
+                        "kind": "additive",
+                        "key":  (f.name, None),
+                        "levels": levels,  # e.g., [0.0, 1.0, 2.0]
+                    })
+
+                # Choice groups
+                for f in choices:
+                    lvls = []
+                    for opt in f.options:
+                        for t in opt.targets:
+                            lvls.append((opt.name, float(t)))
+                    facs.append({
+                        "kind": "choice",
+                        "group": f.name,
+                        "levels": lvls,    # e.g., [("A",0.0),("A",1.0),("B",0.0),...]
+                    })
+
+                level_counts = [len(fd["levels"]) for fd in facs]
+                if not level_counts:   # No factors configured
+                    return []
+
+                # Use pyDOE3 to get a balanced subset of factor-level combinations
+                # Returns an array of 0-based level indices per factor
+                design = gsd(level_counts, reduction)   # e.g., shape (n_runs, n_factors)
+                design = np.atleast_2d(design).astype(int)
+
+                reactions: List[Dict] = []
+                for row in design:
+                    sel = {}
+                    for fd, idx in zip(facs, row.tolist()):
+                        if fd["kind"] == "additive":
+                            t = fd["levels"][int(idx)]
+                            sel[fd["key"]] = t
+                        else:
+                            oname, t = fd["levels"][int(idx)]
+                            # one option per group by construction
+                            sel[(fd["group"], oname)] = t
+                    reactions.append(sel)
+
+                return reactions
+
+            except Exception as e:
+                # Safety: fall back silently, but leave a breadcrumb in logs
+                print(f"[ExperimentModel] GSD failed or unavailable; falling back to full factorial. Reason: {e}")
+
+        # ---------- Full-factorial fallback (your original logic) ----------
+        # (unchanged from your current implementation)
+        additives_list = additives
+        choices_list = choices
+
+        # Cartesian for additives
+        add_target_lists = []
+        add_keys = []
+        for f in additives_list:
+            opt = f.options[0]
+            add_target_lists.append(opt.targets)
+            add_keys.append((f.name, None))
+
+        add_combos = list(itertools.product(*add_target_lists)) if add_target_lists else [()]
+
+        # For choices, each group contributes a sum over options (option, target) tuples
+        choice_lists = []
+        for f in choices_list:
+            tuples = []  # ( (group, option), targets list )
+            for opt in f.options:
+                tuples.append(((f.name, opt.name), opt.targets))
+            choice_lists.append(tuples)
+
+        # Build per-group choice sets
+        per_group_choices: List[List[Tuple[Tuple[str, str], float]]] = []
+        for tuples in choice_lists:
+            one_group = []
+            for key, tlist in tuples:
+                for t in tlist:
+                    one_group.append((key, t))
+            per_group_choices.append(one_group)
+
+        reactions = []
+        for add_selection in add_combos:
+            if not per_group_choices:
+                selections = {}
+                for k, t in zip(add_keys, add_selection):
+                    selections[k] = t
+                reactions.append(selections)
+            else:
+                for picks in itertools.product(*per_group_choices):
+                    selections = {}
+                    for k, t in zip(add_keys, add_selection):
+                        selections[k] = t
+                    for (g, o), t in picks:
+                        if not any(key[0] == g for key in selections.keys() if key[1] is not None):
+                            selections[(g, o)] = t
+                    reactions.append(selections)
+
+        return reactions
+
+    def generate_experiment(self):
+        """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
+        and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
+        V = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+        reps = int(self.metadata.get("replicates", 1))
+
+        reactions = self._enumerate_reactions()
+        if not reactions:
+            self._reactions_df = pd.DataFrame()
+            self._last_worst_nonfill_volume_nL = 0.0
+            self.experiment_generated.emit(0, 0.0)
+            return
+
+        rows = []
+        worst_nonfill = 0.0
+
+        # Per-stock totals and per-reaction maxima
+        # key: (factor, option_or_empty, stock_conc)
+        stock_totals: Dict[Tuple[str, str, float], int] = {}
+        stock_max_per_rxn_drops: Dict[Tuple[str, str, float], int] = {}
+        stock_drop_vol_nL: Dict[Tuple[str, str, float], float] = {}  # remember droplet nL per stock
+        fill_total_drops = 0
+
+        for rxn in reactions:
+            used_nL = 0.0
+
+            # per reaction, per stock droplet usage (to compute per-reaction maxima)
+            per_rxn_drops: Dict[Tuple[str, str, float], int] = {}
+
+            for key, target in rxn.items():
+                plan = self.plans_per_option.get(key)
+                if plan is None:
+                    continue
+
+                n_stocks = plan["n_stocks"]
+                if n_stocks == 1:
+                    st = plan["stocks"][0]
+                    k = int(st["droplets_per_target"].get(float(target), 0))
+                    used_nL += k * st["droplet_volume_nL"]
+                    tot_key = (key[0], key[1] or "", st["stock_concentration"])
+                    stock_totals[tot_key] = stock_totals.get(tot_key, 0) + k
+                    per_rxn_drops[tot_key] = per_rxn_drops.get(tot_key, 0) + k
+                    stock_drop_vol_nL[tot_key] = float(st["droplet_volume_nL"])
+                else:
+                    st1, st2 = plan["stocks"]
+                    k1 = int(st1["droplets_per_target"].get(float(target), 0))
+                    k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                    used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
+                    tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
+                    tot_key2 = (key[0], key[1] or "", st2["stock_concentration"])
+                    stock_totals[tot_key1] = stock_totals.get(tot_key1, 0) + k1
+                    stock_totals[tot_key2] = stock_totals.get(tot_key2, 0) + k2
+                    per_rxn_drops[tot_key1] = per_rxn_drops.get(tot_key1, 0) + k1
+                    per_rxn_drops[tot_key2] = per_rxn_drops.get(tot_key2, 0) + k2
+                    stock_drop_vol_nL[tot_key1] = float(st1["droplet_volume_nL"])
+                    stock_drop_vol_nL[tot_key2] = float(st2["droplet_volume_nL"])
+
+            # update per-stock per-reaction maxima
+            for k, drops in per_rxn_drops.items():
+                stock_max_per_rxn_drops[k] = max(stock_max_per_rxn_drops.get(k, 0), drops)
+
+            worst_nonfill = max(worst_nonfill, used_nL)
+
+            # fill reagent for this reaction
+            remaining_nL = max(0.0, V - used_nL)
+            fill_drops = int(round(remaining_nL / fill_dv))
+            fill_total_drops += fill_drops
+
+            rows.append({
+                "nonfill_volume_nL": used_nL,
+                "fill_drops": fill_drops
+            })
+
+        # apply replicates to totals (per-reaction maxima do NOT scale with reps)
+        for k in list(stock_totals.keys()):
+            stock_totals[k] *= reps
+        fill_total_drops *= reps
+
+        # Build stock rows cache (with totals AND per-reaction max volume)
+        stock_table = []
+        for row in self._stock_rows_cache:
+            tot_key = (row["factor_name"], row["option_name"], row["stock_concentration"])
+            drops = stock_totals.get(tot_key, 0)
+            dv_nL = float(row["droplet_volume_nL"])
+            vol_uL = drops * dv_nL / 1000.0
+
+            max_drops_one_rxn = stock_max_per_rxn_drops.get(tot_key, 0)
+            max_vol_nL = max_drops_one_rxn * dv_nL
+
+            stock_table.append({
+                **row,
+                "total_droplets": int(drops),
+                "total_volume_uL": round(vol_uL, 3),
+                "max_per_rxn_nL": float(max_vol_nL),
+            })
+        self._stock_rows_cache = stock_table
+
+        # Fill reagent row (total) – keep as before; leave max_per_rxn_nL blank
+        fill_uL = fill_total_drops * fill_dv / 1000.0
+        self._fill_row_cache = {
+            "factor_name": self.metadata.get("fill_reagent_name", "Water"),
+            "option_name": "",
+            "stock_concentration": 1.0,
+            "delta_per_drop": 0.0,
+            "units": "--",
+            "droplet_volume_nL": fill_dv,
+            "total_droplets": int(fill_total_drops),
+            "total_volume_uL": round(fill_uL, 3),
+            "max_per_rxn_nL": "",
+        }
+
+        self._reactions_df = pd.DataFrame(rows)
+        self._last_worst_nonfill_volume_nL = worst_nonfill
+
+        self.experiment_generated.emit(len(reactions) * reps, float(worst_nonfill))
+
+    # ------------- Public getters for the UI -------------
+
+    def get_stock_table_rows(self, include_fill: bool = True) -> List[Dict]:
+        rows = list(self._stock_rows_cache)
+        if include_fill and self._fill_row_cache is not None:
+            rows = rows + [self._fill_row_cache]
+        return rows
+
+    def get_worst_nonfill_volume_nL(self) -> Optional[float]:
+        return self._last_worst_nonfill_volume_nL
+
+    def get_reactions_dataframe(self) -> pd.DataFrame:
+        return self._reactions_df.copy()
     
-    def add_total_droplet_count_to_stock(self):
-        for stock_solution in self.stock_solutions:
-            # #print(f'Stock solution: {stock_solution}')
-            total_droplets = self.all_droplet_df[(self.all_droplet_df['reagent_name'] == stock_solution['reagent_name']) & (self.all_droplet_df['stock_solution'] == stock_solution['concentration'])]['droplet_count'].sum()
-            # #print(f'Total droplets: {total_droplets}')
-            stock_solution['total_droplets'] = total_droplets
-            stock_solution['total_volume'] = round(stock_solution['total_droplets'] * self.metadata['droplet_volume'],2)
+    def get_number_of_reactions(self) -> int:
+        """Total reactions including replicates."""
+        reps = int(self.metadata.get("replicates", 1))
+        base = len(self._reactions_df) if not self._reactions_df.empty else len(self._enumerate_reactions())
+        return reps * base
 
-    def optimize_stock_solutions(self):
-        reagents_data = []
-        for reagent in self.reagents:
-            max_reag_droplets = reagent['max_droplets']
-            if max_reag_droplets < 10:
-                max_reag_droplets = 10  # Ensure a minimum of 10 droplets
-            reagents_data.append((reagent['concentrations'], max_reag_droplets))
+    def get_random_seed(self):
+        return self.metadata.get("random_seed", None)
 
-        max_total_droplets = self.metadata['max_droplets']
-        optimized_solutions, max_droplets_per_reagent = multi_reagent_optimization(reagents_data, max_total_droplets)
-        # #print(f"Optimized stock solutions: {optimized_solutions}")
-        # #print(f"Max droplets per reagent: {max_droplets_per_reagent}")
-        for i in range(len(max_droplets_per_reagent)):
-            self.reagents[i]['max_droplets'] = max_droplets_per_reagent[i]
+    def get_start_row(self) -> int:
+        return int(self.metadata.get("start_row", 0))
 
-            self.update_max_droplets_signal.emit(i)
-    
-    def get_experiment_dataframe(self):
-        """Return the experiment DataFrame."""
-        return self.experiment_df
-    
-    def convert_to_serializable(self,obj):
+    def get_start_col(self) -> int:
+        return int(self.metadata.get("start_col", 0))
+
+
+    # ---------- enumerate reactions as stock-droplet lists ----------
+    def iter_reaction_stock_droplets(self):
+        """
+        Yields, for each reaction (replicated), a list of tuples:
+            (reagent_name, stock_concentration, units, droplet_count)
+        'reagent_name' = additive factor name (for additives) OR option name (for choice groups).
+        """
+        # Make sure we're consistent with the current plan. If nothing was generated yet,
+        # we still compute from current factors/plans (no fill included here).
+        reactions = self._enumerate_reactions()
+        reps = int(self.metadata.get("replicates", 1))
+
+        def _reagent_name_from_key(key: tuple[str, object]) -> str:
+            # additives: (factor_name, None) -> name = factor_name
+            # choices:   (group_name, option_name) -> name = option_name
+            return key[0] if key[1] is None else key[1]
+
+        for rxn in reactions:
+            # Build one base reaction
+            items = []
+            for key, target in rxn.items():
+                plan = self.plans_per_option.get(key)
+                if not plan:
+                    continue
+                if plan["n_stocks"] == 1:
+                    st = plan["stocks"][0]
+                    drops = int(st["droplets_per_target"].get(float(target), 0))
+                    if drops > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st["stock_concentration"]),
+                                    st["units"],
+                                    drops))
+                else:
+                    st1, st2 = plan["stocks"]
+                    k1 = int(st1["droplets_per_target"].get(float(target), 0))
+                    k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                    if k1 > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st1["stock_concentration"]),
+                                    st1["units"],
+                                    k1))
+                    if k2 > 0:
+                        items.append((_reagent_name_from_key(key),
+                                    float(st2["stock_concentration"]),
+                                    st2["units"],
+                                    k2))
+            # Emit with replicates
+            for r in range(reps):
+                yield items
+
+    # ------------- Save/Load (optional; keep simple) -------------
+
+    def to_dict(self) -> Dict:
+        return {
+            "metadata": self.metadata,
+            "factors": [
+                {
+                    "name": f.name,
+                    "kind": f.kind,
+                    "options": [
+                        {
+                            "name": o.name,
+                            "targets": o.targets,
+                            "units": o.units,
+                            "droplet_nL": o.droplet_nL
+                        } for o in f.options
+                    ]
+                } for f in self.factors
+            ]
+        }
+
+    def from_dict(self, d: Dict):
+        self.metadata = d.get("metadata", self.metadata)
+        self.factors = []
+        for f in d.get("factors", []):
+            fs = FactorSpec(name=f["name"], kind=f["kind"], options=[])
+            for o in f["options"]:
+                fs.options.append(OptionSpec(
+                    name=o["name"],
+                    targets=list(o["targets"]),
+                    units=o["units"],
+                    droplet_nL=float(o["droplet_nL"])
+                ))
+            self.factors.append(fs)
+        # clear previous results
+        self.plans_per_option.clear()
+        self._stock_rows_cache.clear()
+        self._fill_row_cache = None
+        self._reactions_df = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL = None
+        self.stock_updated.emit()
+
+    # -----------------------------
+    # Runtime context / calibration
+    # -----------------------------
+    def set_runtime_context(self, well_plate, reaction_collection):
+        """Model will set these right before we write progress/key."""
+        self._runtime_well_plate = well_plate
+        self._runtime_reaction_collection = reaction_collection
+
+    def set_calibration_manager(self, mgr):
+        """Optional; if your app has a calibration manager, wire it here."""
+        self._calibration_manager = mgr
+        if self.calibration_file_path and hasattr(mgr, "update_calibration_file_path"):
+            mgr.update_calibration_file_path(self.calibration_file_path)
+
+    # -----------------------------
+    # Simple getters used by Model
+    # -----------------------------
+    def get_number_of_reactions(self) -> int:
+        df = getattr(self, "_reactions_df", None)
+        reps = int(self.metadata.get("replicates", 1))
+        return (0 if df is None else len(df)) * reps
+
+    def get_random_seed(self) -> Optional[int]:
+        return self.metadata.get("random_seed")
+
+    def get_start_row(self) -> int:
+        return int(self.metadata.get("start_row", 0))
+
+    def get_start_col(self) -> int:
+        return int(self.metadata.get("start_col", 0))
+
+    # -----------------------------
+    # JSON helpers
+    # -----------------------------
+    def convert_to_serializable(self, obj):
+        import numpy as np
         if isinstance(obj, np.generic):
-            return obj.item()  # Convert numpy data types to native Python types
+            return obj.item()
         if isinstance(obj, np.ndarray):
-            return obj.tolist()  # Convert numpy arrays to lists
+            return obj.tolist()          # ndarray -> list
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-    def initialize_experiment(self):
-        """Generates the initial directory for the experiment and all initial files"""
+    # -----------------------------
+    # Path setup / initialization
+    # -----------------------------
+    def initialize_experiment(self, base_dir: Optional[str] = None):
+        """Create Experiments/<name> dir and seed all files."""
+        import os
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        base_experiment_dir = os.path.join(script_dir, "Experiments")
+        base_experiment_dir = base_dir or os.path.join(script_dir, "Experiments")
         if not os.path.exists(base_experiment_dir):
             os.makedirs(base_experiment_dir)
-        self.experiment_dir_path = os.path.join(base_experiment_dir, self.metadata['name'])
-        print(f'Experiment directory: {self.experiment_dir_path}')
+
+        exp_name = self.metadata.get("name", "Untitled")
+        self.experiment_dir_path = os.path.join(base_experiment_dir, exp_name)
         if not os.path.exists(self.experiment_dir_path):
             os.makedirs(self.experiment_dir_path)
-            print(f'Experiment directory created at {self.experiment_dir_path}')
         self.update_all_paths()
+
+        # Ensure files exist
         self.save_experiment()
         self.create_progress_file()
         self.create_key_file()
-        self.calibration_manager.begin_session(self.calibration_file_path)
 
-    def get_experiment_dir(self):
-        """Return the experiment directory path."""
-        return self.experiment_dir_path
-
-    def get_calibration_file_path(self):
-        return self.calibration_file_path
-
-    def rename_experiment(self,new_name):
-        """Rename the experiment directory and update the metadata."""
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        base_experiment_dir = os.path.join(script_dir, "Experiments")
-        new_experiment_dir = os.path.join(base_experiment_dir, new_name)
-        print(f'New experiment directory: {new_experiment_dir}')
-        if os.path.exists(new_experiment_dir):
-            return False
-        os.rename(self.experiment_dir_path, new_experiment_dir)
-        self.metadata['name'] = new_name
-        self.experiment_dir_path = new_experiment_dir
-        self.update_all_paths()
-        self.save_experiment()
-        return True
-    
-    def duplicate_experiment(self,new_name,new_experiment_path,copy_calibrations=False):
-        """Copy the experiment design information and create a new experiment directory using the new name.
-        The progress and calibration files are not copied.
-        """
-        # shutil.copytree(self.experiment_dir_path, new_experiment_path)
-        self.metadata['name'] = new_name
-        self.experiment_dir_path = new_experiment_path
-        self.update_all_paths()
-        self.save_experiment()
-        self.create_progress_file()
-        self.create_key_file()
-        if not copy_calibrations:
-            print('Deleting calibration file')
-            self.calibration_manager.remove_all_calibrations()
-            self.calibration_manager.create_calibration_file(self.calibration_file_path)
-        else:
-            print('Copying calibration file')
-            self.calibration_manager.update_calibration_file_path(self.calibration_file_path)
-            self.calibration_manager.save_calibration_data(self.calibration_file_path)
-        return True
+        # optional calibration file
+        if self.calibration_file_path and not os.path.exists(self.calibration_file_path):
+            with open(self.calibration_file_path, "w") as f:
+                f.write("{}")
+        if self._calibration_manager is not None:
+            # let your calibration manager open/update its session
+            if hasattr(self._calibration_manager, "begin_session"):
+                self._calibration_manager.begin_session(self.calibration_file_path)
 
     def update_all_paths(self):
-        """Update all file paths based on the experiment directory."""
-        if self.experiment_dir_path is None:
+        """Update file paths based on current experiment_dir_path."""
+        import os
+        if not self.experiment_dir_path:
             return
-        self.experiment_file_path = os.path.join(self.experiment_dir_path, "experiment_design.json")
-        self.progress_file_path = os.path.join(self.experiment_dir_path, "progress.json")
-        self.calibration_file_path = os.path.join(self.experiment_dir_path, "calibration.json")
-        self.calibration_manager.update_calibration_file_path(self.calibration_file_path)
-        self.key_file_path = os.path.join(self.experiment_dir_path, "key.csv")
+        self.experiment_file_path   = os.path.join(self.experiment_dir_path, "experiment_design.json")
+        self.progress_file_path     = os.path.join(self.experiment_dir_path, "progress.json")
+        self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
+        self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
+        if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
+            self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
 
-    def save_experiment(self,create_progress=True):
-        """Save all information required to repopulate the model to a JSON file."""
-        data_to_save = {
-            "reagents": self.reagents,
-            "metadata": self.metadata,
-        }
-        with open(self.experiment_file_path, 'w') as file:
-            json.dump(data_to_save, file, indent=4, default=self.convert_to_serializable)
-        print(f"Experiment data saved to {self.experiment_file_path}")
+    # -----------------------------
+    # Save / Load design
+    # -----------------------------
+    def save_experiment(self):
+        """Persist metadata + factors (inputs). Derived plans are recomputed on load."""
+        import json
+        data = self.to_dict()  # you already have to_dict() for v2
+        with open(self.experiment_file_path, "w") as f:
+            json.dump(data, f, indent=4, default=self.convert_to_serializable)  # `default=` lets us serialize numpy etc.
+        self.unsaved_changes = False
 
-        self.reset_unsaved_changes()
+    def load_experiment(self, filename: str, experiment_dir: str):
+        """Load factors + metadata; recompute plans and grid."""
+        import json, os
+        self.experiment_file_path = filename
+        self.experiment_dir_path = experiment_dir
+        self.update_all_paths()
 
-    def create_progress_file(self,file_name=None):
-        """Create a JSON file to store the progress of the experiment."""
+        with open(filename, "r") as f:
+            data = json.load(f)
+
+        # Rehydrate
+        self.from_dict(data)  # resets caches/signals
+
+        # Recompute plans & grid
+        res = self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+        if not res.get("best"):
+            # surface an error in your UI as you prefer
+            print("Optimization on load failed:", res.get("reason", "Unknown"))
+            return
+        self.generate_experiment()  # fills caches, worst-case, etc.
+
+        # If a progress file already exists, read it (Model later applies it)
+        if os.path.exists(self.progress_file_path):
+            self.read_progress_file(self.progress_file_path)
+
+    # -----------------------------
+    # Progress & Key files
+    # -----------------------------
+    def create_progress_file(self, file_name: Optional[str] = None):
+        """Write a `progress.json` snapshot from current well assignments."""
+        import json
         if file_name is not None:
             self.progress_file_path = file_name
 
-        #print(f'Creating progress file at {self.progress_file_path}')
-        self.progress_data = {}
-        for well in self.well_plate.get_all_wells():
-            well_id = well.well_id
-            reaction = well.assigned_reaction
-            
-            if reaction:
-                self.progress_data[well_id] = {
-                    "reaction_id": reaction.unique_id,
-                    "reagents": {
-                        stock_id: {
-                            "target_droplets": reagent.get_target_droplets(),
-                            "added_droplets": reagent.added_droplets
-                        }
-                        for stock_id, reagent in reaction.get_all_reagents().items()
-                    },
-                    "completed": reaction.check_all_complete()
-                }
-        #print(f'Create progress file: {self.progress_file_path}')
-        with open(self.progress_file_path, 'w') as f:
-            json.dump(self.progress_data, f, indent=4)
+        if self._runtime_well_plate is None:
+            # No wells assigned yet – write empty structure
+            with open(self.progress_file_path, "w") as f:
+                json.dump({}, f, indent=4)
+            self.progress_data = {}
+            return
 
-    # Function to convert JSON to pandas DataFrame
-    def progress_to_key(self):
-        data = {}
-
-        for well_id, well_data in self.progress_data.items():
-            reagents = well_data['reagents']
-            data[well_id] = {reagent: details['target_droplets'] for reagent, details in reagents.items()}
-
-        df = pd.DataFrame.from_dict(data, orient='index')
-        return df
-
-    def create_key_file(self,file_name=None):
-        if file_name is not None:
-            self.key_file_path = file_name
-        print(f'Creating key file at {self.key_file_path}')
-        print(self.progress_data)
-        key_df = self.progress_to_key()
-        print(key_df)
-        key_df.to_csv(self.key_file_path, index_label='Well ID')
-        
-
-    def update_progress(self, well_id):
-        """Update the progress of a specific well in the experiment."""
-        well = self.well_plate.get_well(well_id)
-        reaction = well.assigned_reaction
-        
-        # Update the specific entry
-        self.progress_data[well_id] = {
-                "reaction_id": reaction.unique_id,
+        progress = {}
+        for well in self._runtime_well_plate.get_all_wells():
+            rxn = well.get_assigned_reaction()
+            if rxn is None:
+                continue
+            progress[well.well_id] = {
+                "reaction_id": rxn.unique_id,
                 "reagents": {
                     stock_id: {
                         "target_droplets": reagent.get_target_droplets(),
                         "added_droplets": reagent.added_droplets
                     }
-                    for stock_id, reagent in reaction.get_all_reagents().items()
+                    for stock_id, reagent in rxn.get_all_reagents().items()
                 },
-                "completed": reaction.check_all_complete()
+                "completed": rxn.check_all_complete()
             }
 
-        # Save the updated progress back to the file
-        if self.progress_file_path is None:
-            return
-        with open(self.progress_file_path, 'w') as f:
-            json.dump(self.progress_data, f, indent=4)
+        self.progress_data = progress
+        with open(self.progress_file_path, "w") as f:
+            json.dump(progress, f, indent=4)
 
+    def progress_to_key(self) -> "pd.DataFrame":
+        """Make a wide CSV with wells as rows, stock_id as columns, target droplets as values."""
+        import pandas as pd
+        data = {}
+        for well_id, entry in self.progress_data.items():
+            reagents = entry.get("reagents", {})
+            data[well_id] = {sid: d["target_droplets"] for sid, d in reagents.items()}
+        return pd.DataFrame.from_dict(data, orient="index")
 
-    def load_experiment(self, filename,experiment_dir):
-        """Load all information required to repopulate the model from a JSON file."""
-        self.experiment_file_path = filename
-        self.experiment_dir_path = experiment_dir
-        self.update_all_paths()
-        
-        with open(filename, 'r') as file:
-            loaded_data = json.load(file)
+    def create_key_file(self, file_name: Optional[str] = None):
+        if file_name is not None:
+            self.key_file_path = file_name
+        df = self.progress_to_key()
+        df.to_csv(self.key_file_path, index_label="Well ID")
 
-        # Clear current data to avoid duplications or issues
-        self.reagents = []
-        self.metadata = {
-            "replicates": 1,
-            "max_droplets": 20,
-            'droplet_volume': 0.03,
-            'fill_reagent': 'Water'
-        }
-        self.stock_solutions = []
-        self.experiment_df = pd.DataFrame()
-        self.complete_lookup_table = pd.DataFrame()
-        self.all_droplet_df = pd.DataFrame()
-
-        # Load data from the JSON file
-        self.reagents = loaded_data["reagents"]
-        self.metadata = loaded_data["metadata"]
-
-        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
-
-        # Recalculate any necessary information and emit signals to update the view
-        for i in range(len(self.reagents)):
-
-            self.data_updated.emit(i)
-            self.calculate_concentrations(i,calc_experiment=True)
-            # #print(f'finished conc for {i}\n{self.experiment_df}')
-        
-        #print(f"Experiment data loaded from {filename}")
-
-    def read_progress_file(self, progress_file):
-        """Read the progress of the experiment from a JSON file."""
+    def read_progress_file(self, progress_file: str):
+        import json
         self.progress_file_path = progress_file
-        with open(progress_file, 'r') as file:
-            self.progress_data = json.load(file)
+        with open(progress_file, "r") as f:
+            self.progress_data = json.load(f)
 
-    def return_progress_data(self):
-        if self.progress_file_path == None:
-            print('No progress file path set')
+    def return_progress_data(self) -> Dict:
+        import json
+        if not self.progress_file_path:
             return {}
-        with open(self.progress_file_path, 'r') as file:
-            return json.load(file)
+        with open(self.progress_file_path, "r") as f:
+            return json.load(f)
 
     def load_progress(self):
-        print('Loading progress data')
-        if self.return_progress_data() == {}:
-            print('No progress data found in file, writing new progress file')
+        """Apply progress.json into live ReactionComposition objects (requires runtime context)."""
+        if self._runtime_well_plate is None:
+            return
+        data = self.return_progress_data()
+        if not data:
             self.create_progress_file()
-        for well_id, well_data in self.progress_data.items():
-            well = self.well_plate.get_well(well_id)
-            reaction = well.assigned_reaction
-            
-            if reaction and reaction.unique_id == well_data["reaction_id"]:
-                for stock_id, reagent_data in well_data["reagents"].items():
-                    reagent = reaction.get_reagent_by_id(stock_id)
-                    reagent.added_droplets = reagent_data["added_droplets"]
-                    reagent.completed = reagent.is_complete()
+            return
 
-                if well_data["completed"]:
-                    well.state_changed.emit(well_id)
+        # Apply to each well's reaction
+        for well_id, entry in data.items():
+            well = self._runtime_well_plate.get_well(well_id)
+            if well is None:
+                continue
+            rxn = well.get_assigned_reaction()
+            if rxn is None or rxn.unique_id != entry.get("reaction_id"):
+                continue
+            for stock_id, rd in entry.get("reagents", {}).items():
+                reagent = rxn.get_reagent_by_id(stock_id)
+                reagent.added_droplets = rd.get("added_droplets", 0)
+                reagent.completed = reagent.is_complete()
+            if entry.get("completed"):
+                # notify listeners if you want (well emits on record)
+                pass
 
+    # -----------------------------
+    # Rename / duplicate
+    # -----------------------------
+    def rename_experiment(self, new_name: str) -> bool:
+        """Rename experiment dir (if it does not already exist)."""
+        import os
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        base_experiment_dir = os.path.join(script_dir, "Experiments")
+        new_dir = os.path.join(base_experiment_dir, new_name)
+        if os.path.exists(new_dir):
+            return False
+        os.rename(self.experiment_dir_path, new_dir)
+        self.metadata["name"] = new_name
+        self.experiment_dir_path = new_dir
+        self.update_all_paths()
+        self.save_experiment()
+        return True
+
+    def duplicate_experiment(self, new_name: str, new_experiment_path: str, copy_calibrations: bool = False) -> bool:
+        """Copy just the design; progress is new; calibration optionally copied."""
+        import os, json
+        self.metadata["name"] = new_name
+        self.experiment_dir_path = new_experiment_path
+        if not os.path.exists(self.experiment_dir_path):
+            os.makedirs(self.experiment_dir_path)
+        self.update_all_paths()
+        self.save_experiment()
+        self.create_progress_file()
+        self.create_key_file()
+        # calibration handling
+        if not copy_calibrations:
+            with open(self.calibration_file_path, "w") as f:
+                f.write("{}")
+        else:
+            # if you have a manager, ask it to save here
+            if self._calibration_manager is not None and hasattr(self._calibration_manager, "save_calibration_data"):
+                self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
+                self._calibration_manager.save_calibration_data(self.calibration_file_path)
+        return True
+
+    # -----------------------------
+    # Reset (fresh design session)
+    # -----------------------------
     def reset_experiment_model(self):
-        """Reset the experiment model to its initial state."""
-        self.reagents = []
+        """Reset v2 design to a fresh state (keeps class methods)."""
+        import time
+        self.factors = []
         temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
         self.metadata = {
             "name": temp_name,
             "replicates": 1,
-            "max_droplets": 50,
-            'droplet_volume': 0.03,
-            'fill_reagent': 'Water',
-            'random_seed': None,
-            'reduction_factor': 1,
-            'start_row':0,
-            'start_col':0
+            "reduction_factor": 1,
+            "target_reaction_volume_nL": 500.0,
+            "fill_reagent_name": "Fill",
+            "fill_droplet_volume_nL": 10.0,
+            "random_seed": None,
+            "start_row": 0,
+            "start_col": 0,
+            "use_subset": False,
+            "randomize_assignments": False,
         }
-        self.stock_solutions = []
-        self.experiment_df = pd.DataFrame()
-        self.complete_lookup_table = pd.DataFrame()
-        self.all_droplet_df = pd.DataFrame()
+        self.plans_per_option.clear()
+        self._stock_rows_cache.clear()
+        self._fill_row_cache = None
+        self._reactions_df = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL = None
 
         self.experiment_dir_path = None
         self.experiment_file_path = None
@@ -4409,12 +5200,8 @@ class ExperimentModel(QObject):
         self.calibration_file_path = None
         self.key_file_path = None
 
-        self.add_new_stock_solutions_for_reagent(self.metadata['fill_reagent'],[1.0],'--')
-        self.initialize_experiment()
-
         self.unsaved_changes = False
-            
-
+        self.stock_updated.emit()
 
 class StockSolution(QObject):
     '''
@@ -4425,7 +5212,8 @@ class StockSolution(QObject):
         super().__init__()
         self.stock_id = stock_id
         self.reagent_name = reagent_name
-        self.concentration = concentration
+        self.concentration = f"{float(concentration):.2f}"
+        # self.concentration = concentration
         self.units = units
         self.required_volume = required_volume
 
@@ -4496,16 +5284,17 @@ class StockSolutionManager(QObject):
             else:
                 self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units)})
 
-    def add_stock_solution(self, reagent_name, concentration,units,required_volume=None):
-        # Generates a unique identifier for the reagent/concentration pair
-        stock_id = '_'.join([reagent_name,str(concentration),units])
-        self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units,required_volume=required_volume)})
+    def add_stock_solution(self, reagent_name, concentration, units, required_volume=None):
+        stock_id = self._make_stock_id(reagent_name, concentration, units)
+        print('Adding stock solution:',stock_id)
+        self.stock_solutions.update({
+            stock_id: StockSolution(stock_id, reagent_name, float(concentration), units, required_volume=required_volume)
+        })
 
-    def get_stock_solution(self, reagent_name, concentration,units):
+    def get_stock_solution(self, reagent_name, concentration, units):
         """Retrieve a reagent-concentration pair."""
-        unique_id = '_'.join([reagent_name,str(float(concentration)),units])
-        # print('Getting stock solution:',unique_id)
-        return self.stock_solutions.get(unique_id)
+        stock_id = self._make_stock_id(reagent_name, concentration, units)
+        return self.stock_solutions.get(stock_id)
         
     def get_stock_by_id(self, stock_id):
         return self.stock_solutions[stock_id]
@@ -4532,6 +5321,11 @@ class StockSolutionManager(QObject):
     def clear_all_stock_solutions(self):
         self.stock_solutions = {}
 
+    def _make_stock_id(self, reagent_name, concentration, units):
+        conc_str = f"{float(concentration):.2f}"   # <-- 2 decimals, zero-padded
+        return "_".join([reagent_name, conc_str, units])
+
+
 class ReactionComposition(QObject):
     '''
     Represents a reaction composition which will be assigned to a well
@@ -4555,19 +5349,27 @@ class ReactionComposition(QObject):
         return self.reagents
     
     def get_all_target_droplets(self):
-        return {stock_id:reagent.get_target_droplets() for stock_id,reagent in self.reagents.items()}
-    
-    def get_target_droplets_for_stock(self,stock_id):
-        return self.reagents[stock_id].get_target_droplets()
-    
-    def get_remaining_droplets_for_stock(self,stock_id):
-        return self.reagents[stock_id].get_remaining_droplets()
-    
-    def record_stock_print(self,stock_id,droplets):
-        self.reagents[stock_id].add_droplets(droplets)
+        return {stock_id: reagent.get_target_droplets() for stock_id, reagent in self.reagents.items()}
 
-    def check_stock_complete(self,stock_id):
-        return self.reagents[stock_id].is_complete()
+    def get_target_droplets_for_stock(self, stock_id):
+        # If a stock isn’t part of this reaction, required droplets are 0
+        r = self.reagents.get(stock_id)
+        return r.get_target_droplets() if r is not None else 0
+
+    def get_remaining_droplets_for_stock(self, stock_id):
+        r = self.reagents.get(stock_id)
+        return r.get_remaining_droplets() if r is not None else 0
+
+    def record_stock_print(self, stock_id, droplets):
+        # Ignore prints for stocks not present in this reaction
+        r = self.reagents.get(stock_id)
+        if r is not None:
+            r.add_droplets(droplets)
+
+    def check_stock_complete(self, stock_id):
+        # If a stock isn’t part of this reaction, it’s “complete” by definition
+        r = self.reagents.get(stock_id)
+        return True if r is None else r.is_complete()
     
     def check_all_complete(self):
         for reagent in self.reagents.values():
@@ -6328,7 +7130,8 @@ class Model(QObject):
         self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
         self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
-        self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
+        # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
+        self.experiment_model = ExperimentModel()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -6479,63 +7282,135 @@ class Model(QObject):
         self.experiment_file_path = file_path
 
     def load_reactions_from_model(self):
-        stock_solutions = StockSolutionManager()
-        for stock in self.experiment_model.get_all_stock_solutions():
-            stock_solutions.add_stock_solution(stock['reagent_name'],stock['concentration'],stock['units'],required_volume=stock['total_volume'])
-        #print(f'All stock solutions:\n{stock_solutions.get_stock_solution_names()}')
-        #print(f'Stock formated:\n{stock_solutions.get_stock_solution_names_formated()}')
-        reaction_collection = ReactionCollection()
-        if self.experiment_model.all_droplet_df.empty:
-            print("No reactions in the experiment model.")
-            return None, None
-        for unique_id, reaction_df in self.experiment_model.all_droplet_df.groupby('unique_id'):
-            reaction = ReactionComposition(unique_id)
-            for _, row in reaction_df.iterrows():
-                #print(f'Row:{row}')
-                #print(f'Stock Solution:{row["reagent_name"]},{row["stock_solution"]}')
-                current_stock = stock_solutions.get_stock_solution(row['reagent_name'],row['stock_solution'],row['units'])
-                reaction.add_reagent(current_stock, row['droplet_count'])
-            
-            reaction_collection.add_reaction(reaction)
-        return stock_solutions,reaction_collection
+        """
+        Build StockSolutionManager and ReactionCollection from the new ExperimentModel.
+        Includes the Fill reagent as a stock and as a reagent in every reaction.
+        """
+        from math import isfinite, ceil
 
-    def load_experiment_from_model(self,plate_name=None,load_progress=False):
+        ssm = StockSolutionManager()
+
+        # ---------- 1) STOCKS (include fill) ----------
+        stock_rows = self.experiment_model.get_stock_table_rows(include_fill=True)
+
+        for row in stock_rows:
+            reagent_name = row.get("option_name") or row.get("factor_name") or ""
+            conc = float(row.get("stock_concentration", 0.0))
+            units = row.get("units", "mM")
+
+            total_uL = row.get("total_volume_uL", None)
+            if total_uL is None:
+                drops = int(row.get("total_droplets", 0))
+                dv_nL = float(row.get("droplet_volume_nL", 0.0))
+                total_uL = (drops * dv_nL) / 1000.0
+
+            if reagent_name:
+                ssm.add_stock_solution(
+                    reagent_name, conc, units,
+                    required_volume=(total_uL if isfinite(total_uL) else None)
+                )
+
+        # ---------- 2) REACTIONS (non-fill + fill) ----------
+        rc = ReactionCollection()
+
+        # Non-fill parts come from the model helper (your existing function)
+        parts_list = list(self.experiment_model.iter_reaction_stock_droplets())
+
+        # Build fill sequence to match reaction count
+        df = self.experiment_model.get_reactions_dataframe()
+        base_fill = [int(x) for x in df["fill_drops"].tolist()] if not df.empty else []
+        reps = int(self.experiment_model.metadata.get("replicates", 1))
+        # Repeat the base_fill for replicates
+        fill_seq = base_fill * max(1, reps)
+
+        # If counts don't perfectly match, extend/cycle safely
+        if len(fill_seq) and len(parts_list) > len(fill_seq):
+            times = ceil(len(parts_list) / len(fill_seq))
+            fill_seq = (fill_seq * times)[:len(parts_list)]
+        elif len(fill_seq) < len(parts_list):
+            # no fill info -> default to 0
+            fill_seq = [0] * len(parts_list)
+
+        fill_name = self.experiment_model.metadata.get("fill_reagent_name", "Water")
+        fill_units = "--"
+        fill_conc = 1.0  # how the ExperimentModel encodes fill stock
+
+        for idx, parts in enumerate(parts_list):
+            rxn = ReactionComposition(unique_id=f"R{idx+1}")
+
+            # Non-fill reagents
+            for reagent_name, conc, units, drops in parts:
+                stock = ssm.get_stock_solution(reagent_name, conc, units)
+                if stock is None:
+                    ssm.add_stock_solution(reagent_name, conc, units)
+                    stock = ssm.get_stock_solution(reagent_name, conc, units)
+                rxn.add_reagent(stock, int(drops))
+
+            # Fill reagent
+            fill_drops = int(fill_seq[idx]) if idx < len(fill_seq) else 0
+            if fill_drops > 0:
+                fill_stock = ssm.get_stock_solution(fill_name, fill_conc, fill_units)
+                if fill_stock is None:
+                    # Safety net; should exist from stock table, but add if needed
+                    ssm.add_stock_solution(fill_name, fill_conc, fill_units)
+                    fill_stock = ssm.get_stock_solution(fill_name, fill_conc, fill_units)
+                rxn.add_reagent(fill_stock, fill_drops)
+
+            rc.add_reaction(rxn)
+
+        return ssm, rc
+
+    def load_experiment_from_model(self, plate_name=None, load_progress=False):
+        # Bail if nothing was generated
         if self.experiment_model.get_number_of_reactions() == 0:
             print("No reactions in the experiment model.")
             return
+
         self.clear_experiment()
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
-        
+
         stock_solutions, reaction_collection = self.load_reactions_from_model()
         if stock_solutions is None or reaction_collection is None:
             print("No stock solutions or reactions found in the experiment model.")
             self.clear_experiment()
             return
+
         self.stock_solutions = stock_solutions
         self.reaction_collection = reaction_collection
-        #print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
+
+        # Randomization (handled earlier via seed in ExperimentModel->load_reactions_from_model)
         all_reactions = self.reaction_collection.get_all_reactions()
         random_seed = self.experiment_model.get_random_seed()
         if random_seed is not None:
+            import random
             random.seed(random_seed)
             random.shuffle(all_reactions)
 
         start_row = self.experiment_model.get_start_row()
         start_col = self.experiment_model.get_start_col()
 
-        self.well_plate.assign_reactions_to_wells(all_reactions,start_row=start_row,start_col=start_col)
+        self.well_plate.assign_reactions_to_wells(all_reactions, start_row=start_row, start_col=start_col)
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
-        self.experiment_model.update_all_paths()
+
+        # Ensure experiment folder exists and paths are known
+        if not self.experiment_model.experiment_dir_path:
+            self.experiment_model.initialize_experiment()
+        else:
+            self.experiment_model.update_all_paths()
+
+        # Give ExperimentModel a runtime view so it can build progress/key files
+        self.experiment_model.set_runtime_context(self.well_plate, self.reaction_collection)
+
         if load_progress:
-            print('Loading progress in load experiment from model')
+            print("Loading progress in load experiment from model")
             self.experiment_model.load_progress()
         else:
-            print('Creating new progress file from load experiment from model')
+            print("Creating new progress file from load experiment from model")
             self.experiment_model.create_progress_file()
         self.experiment_model.create_key_file()
-        # self.calibration_model.apply_calibrations_to_all_printer_heads()
+
         self.experiment_loaded.emit()
 
     def reload_experiment(self, plate_name=None):

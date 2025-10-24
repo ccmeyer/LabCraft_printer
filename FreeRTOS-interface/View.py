@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,
@@ -344,6 +346,11 @@ class MainWindow(QMainWindow):
 
     def disconnect_successful(self):
         self.disconnected = True
+
+    def complete_experiment_design(self):
+        """Handle completion of experiment design."""
+        print("[MainWindow] Experiment design completed.")
+        self.model.load_experiment_from_model()
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -1285,7 +1292,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.model.well_plate.discard_temp_calibrations()
 
     def open_experiment_designer(self):
-        dialog = ExperimentDesignDialog(self.main_window, self.model)
+        # dialog = ExperimentDesignDialog(self.main_window, self.model)
+        dialog = ExperimentDesignDialog(self.model.experiment_model,self.main_window)
         if dialog.exec():
             print("Experiment file generated and loaded.")
 
@@ -2898,682 +2906,729 @@ class CommandQueueWidget(QGroupBox):
         """Set the background color for a row."""
         for column in range(self.table.columnCount()):
             self.table.item(row, column).setBackground(QtGui.QColor(color))
+        
+import json
+from typing import List, Optional, Tuple, Set
 
+
+from PySide6.QtCore import Qt, Slot, QSignalBlocker
+from PySide6.QtWidgets import (
+    QDialog, QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QLabel, QLineEdit,
+    QPushButton, QTableWidget, QTableWidgetItem, QDoubleSpinBox, QSpinBox, QComboBox,
+    QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QFormLayout, QCheckBox
+)
+
+# Import your model & dataclasses
+from Model import ( FactorSpec, OptionSpec, ExperimentModel)
 
 class ExperimentDesignDialog(QDialog):
-    def __init__(self, main_window, model):
+    """
+    UI for composing reagents (additives and choice groups), optimizing stock solutions,
+    and generating the design using ExperimentModelV2.
+    """
+
+    GROUP_ADDITIVE = "Additive"
+    GROUP_NEW = "New choice group…"
+
+    def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
         self.main_window = main_window
-        self.color_dict = self.main_window.color_dict
-        self.model = model
-        self.experiment_model = self.model.experiment_model
-        self.setWindowTitle("Experiment Design")
-        self.setFixedSize(1500, 600)
+        self.setWindowTitle("Experiment Design (v2)")
+        # 1) wider minimum size
+        self.setMinimumSize(1440, 820)
 
-        self.layout = QHBoxLayout(self)
-        print('NEW WINDOW')
-        self.no_changes = True
-        self.load_progress = False
-        
-        # Table to hold all reagent information
-        self.reagent_table = QTableWidget(0, 13, self)
+        self.model: ExperimentModel = model
+        self.choice_groups: Set[str] = set(
+            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
+        )
+
+        # Debounced auto-update timer (4)
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setInterval(350)  # ms
+        self._auto_timer.timeout.connect(self._recompute_silent)
+
+        # --- Layout scaffolding ---
+        self.root = QHBoxLayout(self)
+
+        # Left side (wider): Reagents table + metadata controls + actions + summary
+        left = QVBoxLayout()
+        self.root.addLayout(left, stretch=3)
+
+        # Right side (narrower): Stock table
+        right = QVBoxLayout()
+        self.root.addLayout(right, stretch=2)
+
+        # --- Reagents table ---
+        self.reagent_table = QTableWidget(0, 6, self)
         self.reagent_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Min Conc", "Max Conc", "Steps", 
-            "Mode", "Manual Input", "Units", "Max Droplets",
-            "Concentrations Preview", "Conc Step Sizes", "Missing", "Used","Delete"
+            "Reagent Name", "Group", "Targets", "Units", "Droplet Vol (nL)", "Delete"
         ])
-        self.reagent_table.setColumnWidth(0, 100)
-        self.reagent_table.setColumnWidth(1, 75)
-        self.reagent_table.setColumnWidth(2, 75)
-        self.reagent_table.setColumnWidth(3, 50)
-        self.reagent_table.setColumnWidth(6, 75)
-        self.reagent_table.setColumnWidth(8, 200)
-        self.reagent_table.setColumnWidth(9, 100)
-        self.reagent_table.setColumnWidth(10, 100)
-        self.reagent_table.setColumnWidth(11, 50)
-        self.reagent_table.setColumnWidth(12, 50)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.reagent_table.setColumnWidth(0, 230)   # Reagent Name (wider)
+        self.reagent_table.setColumnWidth(1, 150)   # Group
+        self.reagent_table.setColumnWidth(2, 230)   # Targets (wider)
+        self.reagent_table.setColumnWidth(3, 90)    # Units
+        self.reagent_table.setColumnWidth(4, 90)   # Droplet vol
+        self.reagent_table.setColumnWidth(5, 90)    # Delete
+        left.addWidget(self.reagent_table)
 
-        self.reagent_table.setWordWrap(True)
+        # --- Controls ---
+        controls = QHBoxLayout()
 
-        # Stock solutions table
-        self.stock_table = QTableWidget(0, 5, self)
+        # 2) Labels on the left, inputs on the right (use QFormLayout)
+        controls_left = QFormLayout()
+        controls_left.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Experiment name
+        self.exp_name_edit = QLineEdit(self.model.metadata.get("name", "Untitled"))
+        controls_left.addRow(QLabel("Experiment Name"), self.exp_name_edit)
+
+        # Replicates
+        self.rep_spin = QSpinBox()
+        self.rep_spin.setMinimum(1)
+        self.rep_spin.setMaximum(9999)
+        self.rep_spin.setValue(int(self.model.metadata.get("replicates", 1)))
+        controls_left.addRow(QLabel("Replicates"), self.rep_spin)
+
+        # Target reaction volume (nL)
+        self.v_spin = QDoubleSpinBox()
+        self.v_spin.setDecimals(1)
+        self.v_spin.setRange(1.0, 1_000_000.0)
+        self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 500.0)))
+        self.v_spin.setSingleStep(50.0)
+        controls_left.addRow(QLabel("Target Reaction Volume (nL)"), self.v_spin)
+
+        # Fill reagent name
+        self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
+        controls_left.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
+
+        # Fill droplet volume
+        self.fill_dv_spin = QDoubleSpinBox()
+        self.fill_dv_spin.setDecimals(1)
+        self.fill_dv_spin.setRange(0.1, 100_000.0)
+        self.fill_dv_spin.setSingleStep(1.0)
+        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", 10.0)))
+        controls_left.addRow(QLabel("Fill Droplet Vol (nL)"), self.fill_dv_spin)
+
+        # (1) Randomize well assignments
+        self.randomize_chk = QCheckBox()
+        self.randomize_chk.setChecked(bool(self.model.metadata.get("randomize_assignments", False)))
+        controls_left.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
+
+        self.random_seed_spin = QSpinBox()
+        self.random_seed_spin.setMinimum(0)
+        self.random_seed_spin.setMaximum(9999999)
+        current_seed = self.model.metadata.get("random_seed", 0)
+        if current_seed is None:
+            current_seed = 0
+        self.random_seed_spin.setValue(int(current_seed))
+        self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
+        # enable/disable behavior
+        self.randomize_chk.toggled.connect(self.random_seed_spin.setEnabled)
+        controls_left.addRow(QLabel("Random seed"), self.random_seed_spin)
+
+        # (2) Use subset design + reduction factor
+        self.subset_chk = QCheckBox()
+        self.subset_chk.setChecked(bool(self.model.metadata.get("use_subset_design", False)))
+        controls_left.addRow(QLabel("Use subset design"), self.subset_chk)
+
+        self.reduction_spin = QSpinBox()
+        self.reduction_spin.setMinimum(1)
+        self.reduction_spin.setMaximum(999)
+        self.reduction_spin.setValue(int(self.model.metadata.get("reduction_factor", 1)))
+        self.reduction_spin.setEnabled(self.subset_chk.isChecked())
+        controls_left.addRow(QLabel("Reduction factor"), self.reduction_spin)
+
+        # enable/disable behavior
+        self.subset_chk.toggled.connect(self.reduction_spin.setEnabled)
+
+        # (3) Start column (0 = leftmost)
+        self.start_col_spin = QSpinBox()
+        self.start_col_spin.setMinimum(0)
+        self.start_col_spin.setMaximum(999)
+        self.start_col_spin.setValue(int(self.model.metadata.get("start_col", 0)))
+        controls_left.addRow(QLabel("Start column (0-based)"), self.start_col_spin)
+
+        # (4) Start row (0 = top row A)
+        self.start_row_spin = QSpinBox()
+        self.start_row_spin.setMinimum(0)
+        self.start_row_spin.setMaximum(999)
+        self.start_row_spin.setValue(int(self.model.metadata.get("start_row", 0)))
+        controls_left.addRow(QLabel("Start row (0-based)"), self.start_row_spin)
+
+        # auto-update on change (keeps dialog responsive like the other controls)
+        def _auto_update():
+            self._on_optimize_and_generate()
+        self.randomize_chk.stateChanged.connect(_auto_update)
+        self.random_seed_spin.valueChanged.connect(_auto_update)
+        self.subset_chk.stateChanged.connect(_auto_update)
+        self.reduction_spin.valueChanged.connect(_auto_update)
+        self.start_col_spin.valueChanged.connect(_auto_update)
+        self.start_row_spin.valueChanged.connect(_auto_update)
+
+        controls_right = QVBoxLayout()
+        # Add reagent button
+        self.add_reagent_btn = QPushButton("Add Reagent")
+        self.add_reagent_btn.clicked.connect(self._on_add_reagent)
+        controls_right.addWidget(self.add_reagent_btn)
+
+        # Optimize & Generate (manual run)
+        self.run_btn = QPushButton("Optimize & Generate")
+        self.run_btn.setStyleSheet("background-color: #b33; color: white; font-weight: bold;")
+        self.run_btn.clicked.connect(self._on_optimize_and_generate)
+        controls_right.addWidget(self.run_btn)
+
+        # --- Save / Load / Finish ---
+        self.save_btn = QPushButton("Save Design…")
+        self.save_btn.clicked.connect(self._on_save_design)
+        controls_right.addWidget(self.save_btn)
+
+        self.load_btn = QPushButton("Load Design…")
+        self.load_btn.clicked.connect(self._on_load_design)
+        controls_right.addWidget(self.load_btn)
+
+        self.finish_btn = QPushButton("Finish")
+        self.finish_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
+        self.finish_btn.clicked.connect(self._on_finish)
+        controls_right.addWidget(self.finish_btn)
+
+        # Summary
+        self.summary_lbl = QLabel("Summary: —")
+        controls_right.addWidget(self.summary_lbl)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setWordWrap(True)  # ✅ wrap long messages
+        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
+        self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)  # ✅ allow horizontal shrink
+        # Cap height to ~2 lines for aesthetics
+        line_h = self.status_lbl.fontMetrics().height()
+        self.status_lbl.setMaximumHeight(int(line_h * 3.6))
+        controls_right.addWidget(self.status_lbl)
+
+        controls_right.addStretch(1)
+
+        controls.addLayout(controls_left, stretch=3)
+        # controls.addLayout(controls_mid, stretch=2)
+        controls.addLayout(controls_right, stretch=2)
+        left.addLayout(controls)
+
+        # 4) Auto-update when metadata changes
+        self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
+        self.rep_spin.valueChanged.connect(self._schedule_auto_update)
+        self.v_spin.valueChanged.connect(self._schedule_auto_update)
+        self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
+        self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
+
+        # --- Stock table (right) ---
+        # 3) Add "Max / Rxn (nL)" column
+        self.stock_table = QTableWidget(0, 9, self)
         self.stock_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Concentration", "Units", "Total\nDroplets", "Total\nVolume (uL)"
+            "Factor/Group", "Option", "Stock Conc", "Δ per drop",
+            "Units", "Drop Vol (nL)", "Max / Rxn (nL)", "Total Drops", "Total Vol (µL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.stock_table.setFixedWidth(350)
-        self.stock_table.setColumnWidth(0, 100)
-        self.stock_table.setColumnWidth(1, 100)
-        self.stock_table.setColumnWidth(2, 50)
-        self.stock_table.setColumnWidth(3, 50)
-        self.stock_table.setColumnWidth(4, 100)
-
-        self.left_layout = QVBoxLayout()
-        self.left_layout.addWidget(self.reagent_table)
-        self.bottom_layout = QHBoxLayout()
-
-        self.right_layout = QVBoxLayout()
-        self.right_layout.addWidget(self.stock_table)
-
-        self.bottom_layout = QHBoxLayout()
-        # Label and spin box for total reactions and replicates
-        self.info_layout = QVBoxLayout()
-
-        # Add text edit field for experiment name
-        self.experiment_name_label = QLabel("Experiment Name:", self)
-        self.experiment_name_input = QLineEdit(self)
-        self.experiment_name_input.setText(self.experiment_model.metadata.get("name", "Experiment"))
-        self.experiment_name_input.textChanged.connect(self.update_experiment_name)
-        self.info_layout.addWidget(self.experiment_name_label)
-        self.info_layout.addWidget(self.experiment_name_input)
-
-        self.replica_label = QLabel("Replicates:", self)
-        self.replicate_spinbox = QSpinBox(self)
-        self.replicate_spinbox.setMinimum(1)
-        self.replicate_spinbox.setMaximum(384)
-        self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
-        self.replicate_spinbox.valueChanged.connect(self.update_model_metadata)
-        self.info_layout.addWidget(self.replica_label)
-        self.info_layout.addWidget(self.replicate_spinbox)
-
-        ## Add a reduction factor spinbox
-        self.reduction_factor_label = QLabel("Reduction Factor:", self)
-        self.reduction_factor_spinbox = QSpinBox(self)
-        self.reduction_factor_spinbox.setMinimum(1)
-        self.reduction_factor_spinbox.setMaximum(10)
-        self.reduction_factor_spinbox.setValue(self.experiment_model.metadata.get("reduction_factor", 1))
-        self.reduction_factor_spinbox.valueChanged.connect(self.update_model_metadata)
-        self.info_layout.addWidget(self.reduction_factor_label)
-        self.info_layout.addWidget(self.reduction_factor_spinbox)
-
-        self.total_droplets_label = QLabel("Total Droplets Available:", self)
-        self.total_droplets_spinbox = QSpinBox(self)
-        self.total_droplets_spinbox.setMinimum(1)
-        self.total_droplets_spinbox.setMaximum(1000)
-        self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
-        self.total_droplets_spinbox.valueChanged.connect(self.update_model_metadata)
-
-        # Add the fill reagent label and input field
-        self.fill_reagent_label = QLabel("Fill Reagent:", self)
-        self.fill_reagent_input = QLineEdit(self)
-        self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))  # Set default value
-        self.fill_reagent_input.textChanged.connect(self.update_fill_reagent)
-
-        self.start_row_label = QLabel("Start Row",self)
-        self.start_row_spinbox = QSpinBox(self)
-        self.start_row_spinbox.setMinimum(0)
-        self.start_row_spinbox.setMaximum(15)
-        self.start_row_spinbox.setValue(self.experiment_model.metadata.get("start_row", 0))
-        self.start_row_spinbox.valueChanged.connect(self.update_model_metadata)
-
-        self.start_col_label = QLabel("Start Col",self)
-        self.start_col_spinbox = QSpinBox(self)
-        self.start_col_spinbox.setMinimum(0)
-        self.start_col_spinbox.setMaximum(23)
-        self.start_col_spinbox.setValue(self.experiment_model.metadata.get("start_col", 0))
-        self.start_col_spinbox.valueChanged.connect(self.update_model_metadata)
-
-        self.total_droplets_used_label = QLabel("Total Droplets Used: 0", self)
-
-        self.total_reactions_label = QLabel("Total Reactions: 0", self)        
-
-        self.info_layout.addWidget(self.total_droplets_label)
-        self.info_layout.addWidget(self.total_droplets_spinbox)
-        self.info_layout.addWidget(self.fill_reagent_label)
-        self.info_layout.addWidget(self.fill_reagent_input)
-        self.info_layout.addWidget(self.start_row_label)
-        self.info_layout.addWidget(self.start_row_spinbox)
-        self.info_layout.addWidget(self.start_col_label)
-        self.info_layout.addWidget(self.start_col_spinbox)
-        self.info_layout.addWidget(self.total_droplets_used_label)
-        self.info_layout.addWidget(self.total_reactions_label)
-
-        self.button_layout = QVBoxLayout()
-        # Button to add a new reagent
-        self.add_reagent_button = QPushButton("Add Reagent")
-        self.add_reagent_button.clicked.connect(self.add_reagent)
-        self.button_layout.addWidget(self.add_reagent_button)
-
-
-        self.randomize_wells_button = QPushButton("Randomize Wells")
-        self.randomize_wells_button.setCheckable(True)
-        self.randomize_wells_button.setChecked(self.experiment_model.metadata.get("randomize_wells", False))
-        self.randomize_wells_button.toggled.connect(self.update_randomize_wells)                       # Checkable button to specify if the wells should be randomized or not       
-        self.button_layout.addWidget(self.randomize_wells_button) 
-        
-        # # Button to update the table
-        # self.update_table_button = QPushButton("Update Table")
-        # self.update_table_button.clicked.connect(self.update_all_model_reagents)
-        # self.button_layout.addWidget(self.update_table_button)
-
-        # Button to create a new experiment
-        self.new_experiment_button = QPushButton("New Experiment")
-        self.new_experiment_button.clicked.connect(self.new_experiment)
-        self.button_layout.addWidget(self.new_experiment_button)
-
-        # Button to load an experiment
-        self.load_experiment_button = QPushButton("Load Experiment")
-        self.load_experiment_button.clicked.connect(self.load_experiment)
-        self.button_layout.addWidget(self.load_experiment_button)
-
-        # Button to save the experiment
-        self.save_experiment_button = QPushButton("Save Experiment")
-        self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-        self.save_experiment_button.clicked.connect(self.save_experiment)
-        self.button_layout.addWidget(self.save_experiment_button)
-
-        # Button to duplicate the experiment and save it as a new one
-        self.duplicate_experiment_button = QPushButton("Duplicate Experiment")
-        self.duplicate_experiment_button.clicked.connect(self.duplicate_experiment)
-        self.button_layout.addWidget(self.duplicate_experiment_button)
-
-        # Button to generate the experiment
-        self.generate_experiment_button = QPushButton("Generate Experiment")
-        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
-        self.generate_experiment_button.clicked.connect(self.close)
-        self.button_layout.addWidget(self.generate_experiment_button)
-
-        self.bottom_layout.addLayout(self.info_layout)
-        self.bottom_layout.addLayout(self.button_layout)
-        self.left_layout.addLayout(self.bottom_layout)
-
-        self.layout.addLayout(self.left_layout)
-        self.layout.addLayout(self.right_layout)
-
-        # Connect model signals
-        self.experiment_model.data_updated.connect(self.update_preview)
-        self.experiment_model.stock_updated.connect(self.update_stock_table)
-        self.experiment_model.experiment_generated.connect(self.update_total_reactions)
-        self.experiment_model.unsaved_changes_signal.connect(self.update_save_button)
-        self.experiment_model.unsaved_changes_signal.connect(self.update_change_tracker)
-
-        self.load_experiment_to_view()
-
-        if self.model.rack_model.get_gripper_printer_head() != None:
-            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Unload gripper to edit or create new experiment",fully_restrict=True)
-        elif self.experiment_in_progress(self.experiment_model.progress_file_path):
-            self.activate_read_only_mode(title="Experiment Design (Read-Only) - Clear progress to edit")
-        else:
-            self.activate_edit_mode()
-
-    def update_save_button(self):
-        """Change the color of the save button if the experiment has unsaved changes."""
-        if self.experiment_model.unsaved_changes:
-            self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-        else:
-            self.save_experiment_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
-    
-    def update_change_tracker(self):
-        """Update the change tracker to indicate if changes have been made."""
-        if self.experiment_model.unsaved_changes:
-            # self.no_changes = False
-            print('Changes made')
-        else:
-            # self.no_changes = True
-            print('No changes made')
-    
-    def update_experiment_name(self):
-        """Update the experiment name in the model."""
-        new_name = self.experiment_name_input.text()
-        self.experiment_model.rename_experiment(new_name)
-
-    def update_randomize_wells(self, checked):
-        """Update the model with the randomize wells setting."""
-        if not checked:
-            self.randomize_wells_button.setText("Randomize Wells")
-            print('Setting the random seed to None')
-            # self.experiment_model.metadata["random_seed"] = None
-            self.experiment_model.change_random_seed(remove_seed=True)
-        else:
-            self.randomize_wells_button.setText("Randomized")
-            self.experiment_model.change_random_seed(remove_seed=False)
-        self.no_changes = False
-
-    def add_reagent(self, name="", min_conc=0.0, max_conc=1.0, steps=2, mode="Linear", manual_input="", units='mM',max_droplets=10,stock_solutions="",droplets_used="",view_only=False):
-        """Add a new reagent row to the table and model."""
-        row_position = self.reagent_table.rowCount()
-        self.reagent_table.insertRow(row_position)
-
-        # Generate a default name for the reagent
-        if not name:
-            name = f"reagent-{row_position + 1}"
-        reagent_name_item = QLineEdit(name)
-        self.reagent_table.setCellWidget(row_position, 0, reagent_name_item)
-
-        min_conc_item = QDoubleSpinBox()
-        min_conc_item.setMinimum(0.0)
-        min_conc_item.setValue(min_conc)
-        self.reagent_table.setCellWidget(row_position, 1, min_conc_item)
-
-        max_conc_item = QDoubleSpinBox()
-        max_conc_item.setMinimum(0.0)
-        max_conc_item.setMaximum(1000.0)
-        max_conc_item.setValue(max_conc)
-        self.reagent_table.setCellWidget(row_position, 2, max_conc_item)
-
-        steps_item = QSpinBox()
-        steps_item.setMinimum(1)
-        steps_item.setValue(steps)
-        self.reagent_table.setCellWidget(row_position, 3, steps_item)
-
-        mode_item = QComboBox()
-        mode_item.addItems(["Linear", "Quadratic", "Logarithmic", "Manual"])
-        mode_item.setCurrentText(mode)
-        self.reagent_table.setCellWidget(row_position, 4, mode_item)
-
-        manual_conc_item = QLineEdit(manual_input)
-        manual_conc_item.setPlaceholderText("e.g., 0.1, 0.5, 1.0")
-        manual_conc_item.setEnabled(mode == "Manual")  # Enabled only if mode is "Manual"
-        self.reagent_table.setCellWidget(row_position, 5, manual_conc_item)
-
-        unit_item = QComboBox()
-        unit_item.addItems(['mM','uM','M','g/L','ng/uL','%','__'])
-        unit_item.setCurrentText(units)
-        self.reagent_table.setCellWidget(row_position, 6, unit_item)
-
-
-        max_droplets_item = QSpinBox()
-        max_droplets_item.setMinimum(1)
-        max_droplets_item.setMaximum(1000)
-        max_droplets_item.setValue(max_droplets)
-        self.reagent_table.setCellWidget(row_position, 7, max_droplets_item)
-
-        preview_item = QTableWidgetItem()
-        preview_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 8, preview_item)
-
-        stock_solutions_item = QLineEdit(stock_solutions)
-        stock_solutions_item.setPlaceholderText("e.g., 0.5, 1, 5")
-        self.reagent_table.setCellWidget(row_position, 9, stock_solutions_item)
-
-        missing_conc_item = QTableWidgetItem()
-        missing_conc_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 10, missing_conc_item)
-
-        droplets_used_item = QTableWidgetItem()
-        droplets_used_item.setTextAlignment(Qt.AlignCenter)
-        self.reagent_table.setItem(row_position, 11, droplets_used_item)
-
-        # Delete button
-        delete_button = QPushButton("Delete")
-        delete_button.clicked.connect(lambda: self.delete_reagent(row_position))
-        self.reagent_table.setCellWidget(row_position, 12, delete_button)
-
-        if not view_only:
-            # Add reagent to model
-            self.experiment_model.add_reagent(
-                name=name,
-                min_conc=min_conc,
-                max_conc=max_conc,
-                steps=steps,
-                mode=mode,
-                manual_input=manual_input,
-                units=units,
-                max_droplets=max_droplets,
-                stock_solutions=stock_solutions
-            )
-
-        # Connect signals after initializing the row to avoid 'NoneType' errors
-        reagent_name_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
-        min_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
-        max_conc_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
-        steps_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
-        mode_item.currentIndexChanged.connect(lambda: self.update_model_reagent(row_position))
-        mode_item.currentIndexChanged.connect(lambda: self.toggle_manual_entry(row_position))
-        unit_item.currentIndexChanged.connect(lambda: self.update_model_reagent(row_position))
-        manual_conc_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
-        max_droplets_item.valueChanged.connect(lambda: self.update_model_reagent(row_position))
-        stock_solutions_item.textChanged.connect(lambda: self.update_model_reagent(row_position))
-        # if not view_only:
-        self.update_model_reagent(row_position)
-        self.no_changes = False
-
-    def delete_reagent(self, row):
-        reagent_name = self.reagent_table.cellWidget(row, 0).text()
-        self.experiment_model.delete_reagent(reagent_name)
-        self.reagent_table.removeRow(row)
-        self.no_changes = False
-
-    def activate_read_only_mode(self,title="Experiment Design (Read-Only)",fully_restrict=False):
-        """Disable all input fields in the table and the rest of the window."""
-        self.setWindowTitle(title)
-        self.experiment_name_input.setReadOnly(True)
-        self.total_droplets_spinbox.setReadOnly(True)
-        self.replicate_spinbox.setReadOnly(True)
-        self.fill_reagent_input.setReadOnly(True)
-        self.randomize_wells_button.setDisabled(True)
-        self.add_reagent_button.setDisabled(True)
-        if fully_restrict:
-            self.load_experiment_button.setDisabled(True)
-            self.duplicate_experiment_button.setDisabled(True)
-            self.new_experiment_button.setDisabled(True)
-            self.save_experiment_button.setDisabled(True)
-            self.generate_experiment_button.setDisabled(True)
-        self.save_experiment_button.setDisabled(True)
-        self.generate_experiment_button.setDisabled(True)
-        self.reagent_table.setDisabled(True)
-        self.stock_table.setDisabled(True)
-        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_gray']}; color: white;")
-
-
-    def activate_edit_mode(self):
-        """Enable all input fields in the table and the rest of the window."""
-        self.setWindowTitle("Experiment Design")
-        self.experiment_name_input.setReadOnly(False)
-        self.total_droplets_spinbox.setReadOnly(False)
-        self.replicate_spinbox.setReadOnly(False)
-        self.fill_reagent_input.setReadOnly(False)
-        self.randomize_wells_button.setDisabled(False)
-        self.add_reagent_button.setDisabled(False)
-        # self.update_table_button.setDisabled(False)
-        self.load_experiment_button.setDisabled(False)
-        self.save_experiment_button.setDisabled(False)
-        self.generate_experiment_button.setDisabled(False)
-        self.reagent_table.setDisabled(False)
-        self.stock_table.setDisabled(False)
-        self.generate_experiment_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
-
-
-    def update_model_reagent(self, row,mark_change=True):
-        """Update the reagent in the model based on the current row values."""
-        name = self.reagent_table.cellWidget(row, 0).text()
-        min_conc = self.reagent_table.cellWidget(row, 1).value()
-        max_conc = self.reagent_table.cellWidget(row, 2).value()
-        steps = self.reagent_table.cellWidget(row, 3).value()
-        mode = self.reagent_table.cellWidget(row, 4).currentText()
-        manual_input = self.reagent_table.cellWidget(row, 5).text()
-        units = self.reagent_table.cellWidget(row, 6).currentText()
-        max_droplets = self.reagent_table.cellWidget(row, 7).value()
-        stock_solutions = self.reagent_table.cellWidget(row, 9).text()
-
-        self.experiment_model.update_reagent(row, name=name, min_conc=min_conc, max_conc=max_conc, steps=steps, mode=mode, manual_input=manual_input, units=units,max_droplets=max_droplets,stock_solutions=stock_solutions)
-        if mark_change:
-            self.no_changes = False
-
-    def update_all_model_reagents(self):
-        """Update all reagents in the model based on the current row values."""
-        for row in range(self.reagent_table.rowCount()):
-            self.update_model_reagent(row,mark_change=False)
-
-    def update_model_metadata(self,mark_change=True):
-        """Update the metadata in the model based on the current values."""
-        replicates = self.replicate_spinbox.value()
-        max_droplets = self.total_droplets_spinbox.value()
-        reduction_factor = self.reduction_factor_spinbox.value()
-        start_row = self.start_row_spinbox.value()
-        start_col = self.start_col_spinbox.value()
-        self.experiment_model.update_metadata(replicates, max_droplets, reduction_factor,start_row,start_col)
-        if mark_change:
-            self.no_changes = False
-
-    def update_fill_reagent(self):
-        """Update the fill reagent in the model based on the current value."""
-        fill_reagent = self.fill_reagent_input.text()
-        self.experiment_model.update_fill_reagent_name(fill_reagent)
-        self.no_changes = False
-
-    def load_experiment_to_view(self):
-        """Load reagents, stock solutions, and metadata from the model to the view."""
-        self.reagent_table.setRowCount(0)  # Clear the table first
-        print("Loading experiment to view")
-
-        # Temporarily disconnect the signals
-        self.experiment_name_input.blockSignals(True)
-        self.total_droplets_spinbox.blockSignals(True)
-        self.replicate_spinbox.blockSignals(True)
-        self.randomize_wells_button.blockSignals(True)
-
-        self.experiment_name_input.setText(self.experiment_model.metadata.get("name", "Untitled Experiment"))
-        self.total_droplets_spinbox.setValue(self.experiment_model.metadata.get("max_droplets", 20))
-        self.replicate_spinbox.setValue(self.experiment_model.metadata.get("replicates", 1))
-        self.fill_reagent_input.setText(self.experiment_model.metadata.get("fill_reagent", 'Water'))
-        if self.experiment_model.metadata['random_seed'] is not None:
-            self.randomize_wells_button.setChecked(True)
-            self.randomize_wells_button.setText("Randomized")
-
-        # Reconnect the signals
-        self.experiment_name_input.blockSignals(False)
-        self.total_droplets_spinbox.blockSignals(False)
-        self.replicate_spinbox.blockSignals(False)
-        self.randomize_wells_button.blockSignals(False)
-        
-        original_reagents = self.experiment_model.get_all_reagents().copy()
-        # print(f"Original reagents: {original_reagents}")
-
-        for i, reagent in enumerate(original_reagents):
-            # print(f"-=-=-Adding reagent: {reagent}-{i}")
-
-            self.add_reagent(
-                name=reagent["name"],
-                min_conc=reagent["min_conc"],
-                max_conc=reagent["max_conc"],
-                steps=reagent["steps"],
-                mode=reagent["mode"],
-                units=reagent['units'],
-                manual_input=reagent["manual_input"],
-                max_droplets=reagent["max_droplets"],
-                stock_solutions=", ".join(map(str, reagent["stock_solutions"])),
-                view_only=True
-            )
-            self.experiment_model.calculate_concentrations(i,calc_experiment=False)
-            self.experiment_model.reset_unsaved_changes()
-            self.no_changes = True
-
-    def save_experiment(self):
-        """Save the current experiment setup to a new directory."""
-        self.update_all_model_reagents()
-        self.experiment_model.save_experiment()
-
-    def experiment_in_progress(self, progress_file_path):
-        with open(progress_file_path, 'r') as file:
-            loaded_data = json.load(file)
-        for well_id, well_data in loaded_data.items():
-            for stock_id, reagent_data in well_data["reagents"].items():
-                if reagent_data["added_droplets"] > 0:
-                    return True
-                
-        return False
-    
-    def new_experiment(self):
-        """Clears all existing experiment design information and data and resets to how the program is at launch"""
-        self.model.clear_experiment()
-        self.experiment_model.reset_experiment_model()
-        self.load_experiment_to_view()
-        self.activate_edit_mode()
-        self.no_changes = False
-        
-    
-    def load_experiment(self):
-        """Load a saved experiment setup from a directory."""
-        # Get the directory where the currently executed script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-
-        # Define the directory for experiments relative to the script location
-        experiment_dir = os.path.join(script_dir, "Experiments")
-
-        # Ensure the directory exists
-        if not os.path.exists(experiment_dir):
-            os.makedirs(experiment_dir)
-
-        # Ask the user to select the experiment directory
-        chosen_dir = QFileDialog.getExistingDirectory(self, "Select Experiment Directory", experiment_dir)
-
-        if chosen_dir:
-            # Define the path for the experiment design JSON file within the selected directory
-            experiment_file_path = os.path.join(chosen_dir, "experiment_design.json")
-
-            # Check if the experiment design file exists
-            if os.path.exists(experiment_file_path):
-                self.experiment_model.load_experiment(experiment_file_path,chosen_dir)
-                print("\n----Finished model loading----\n")
-                self.load_experiment_to_view()
-                self.no_changes = False
-
-                calibration_file_path = os.path.join(chosen_dir, "calibration.json")
-                if os.path.exists(calibration_file_path):
-                    self.model.calibration_model.load_calibration_data(calibration_file_path)
-                else:
-                    self.model.calibration_model.create_calibration_file(calibration_file_path)
-                
-                progress_file_path = os.path.join(chosen_dir, "progress.json")
-                if os.path.exists(progress_file_path):
-                    in_progress = self.experiment_in_progress(progress_file_path)
-                    if in_progress:
-                        resume = QMessageBox.question(self, "Resume previous run?", 
-                                                    "A previous run is saved for this experiment. Do you want to resume the previous run?",
-                                                    QMessageBox.Yes | QMessageBox.No)
-                        if resume == QMessageBox.No:
-                            self.experiment_model.create_progress_file(file_name=progress_file_path)
-                            self.load_progress = False
-                            return
-                        elif resume == QMessageBox.Yes:
-                            self.experiment_model.read_progress_file(progress_file_path)
-                            self.load_progress = True
-                            self.close()
-                    else:
-                        self.activate_edit_mode()
-
-                else:
-                    self.experiment_model.create_progress_file(file_name=progress_file_path) 
-                    self.activate_edit_mode()
-            else:
-                pass
-
-    def duplicate_experiment(self):
-        """Open a dialog to duplicate the experiment and save it as a new one.
-        The user can choose a new directory for the duplicated experiment. The dialogue also has a toggle button to 
-        transfer the calibration data from the original experiment to the duplicated one."""
-        # Open a dialog for a new name for the experiment directory
-        new_experiment_name, ok = QInputDialog.getText(self, "New Experiment Name", "Enter a name for the new experiment:")
-        if not ok:
+        self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        right.addWidget(self.stock_table)
+
+        # --- Hook model signals ---
+        self.model.stock_updated.connect(self._refresh_stock_table)
+        self.model.experiment_generated.connect(self._on_experiment_generated)
+
+        # --- Populate UI from model (if preloaded) ---
+        self._load_factors_into_table()
+
+        # Initial refresh
+        self._refresh_stock_table()
+        self._update_summary_labels(initial=True)
+
+    # -----------------------------
+    # Table row utilities
+    # -----------------------------
+
+    def _make_group_combo(self) -> QComboBox:
+        combo = QComboBox()
+        combo.addItem(self.GROUP_ADDITIVE)
+        for g in sorted(self.choice_groups):
+            combo.addItem(g)
+        combo.addItem(self.GROUP_NEW)
+
+        # 5) Use 'activated' so programmatic setCurrentIndex won't re-trigger the dialog
+        combo.activated.connect(lambda _: self._maybe_create_group(combo))
+        return combo
+
+    def _maybe_create_group(self, combo: QComboBox):
+        if combo.currentText() != self.GROUP_NEW:
             return
-        # Get the directory where the currently executed script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Define the path to the new experiment directory
-        experiment_dir = os.path.join(script_dir, "Experiments", new_experiment_name)
-        
-        # Check if the directory already exists
-        if os.path.exists(experiment_dir):
-            overwrite = QMessageBox.question(self, "Overwrite Existing Experiment?", 
-                                            "An experiment with the same name already exists. Do you want to overwrite it?",
-                                            QMessageBox.Yes | QMessageBox.No)
-            # If the user does want to overwrite, delete the existing directory and its contents and create a new one
-            if overwrite == QMessageBox.Yes:
-                shutil.rmtree(experiment_dir)
-                os.makedirs(experiment_dir)
+
+        name, ok = QInputDialog.getText(self, "Create choice group", "Group name:")
+        if not ok or not name.strip():
+            # revert to Additive if canceled or empty
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, combo.findText(self.GROUP_ADDITIVE)))
+            combo.blockSignals(False)
+            return
+
+        name = name.strip()
+        if name == self.GROUP_ADDITIVE:
+            QMessageBox.warning(self, "Invalid name", "“Additive” is reserved.")
+            combo.blockSignals(True)
+            combo.setCurrentIndex(combo.findText(self.GROUP_ADDITIVE))
+            combo.blockSignals(False)
+            return
+
+        if name in self.choice_groups:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(combo.findText(name))
+            combo.blockSignals(False)
+            return
+
+        # add to set and to all combos
+        self.choice_groups.add(name)
+        for row in range(self.reagent_table.rowCount()):
+            c: QComboBox = self.reagent_table.cellWidget(row, 1)
+            if c.findText(name) < 0:
+                c.blockSignals(True)
+                c.insertItem(c.count() - 1, name)
+                c.blockSignals(False)
+
+        combo.blockSignals(True)
+        combo.setCurrentIndex(combo.findText(name))
+        combo.blockSignals(False)
+
+        # No auto-recompute here; user still needs to assign reagents to that group
+
+    def _parse_targets(self, text: str) -> List[float]:
+        # Accept comma or whitespace separated floats
+        text = (text or "").replace(",", " ")
+        parts = [p for p in text.split() if p.strip()]
+        vals: List[float] = []
+        for p in parts:
+            try:
+                vals.append(float(p))
+            except ValueError:
+                pass
+        # unique + sorted
+        return sorted(set(vals))
+
+    def _add_reagent_row(self, name: str = "", group: str = GROUP_ADDITIVE,
+                        targets: str = "0, 1, 2", units: str = "mM",
+                        droplet_nL: float = 10.0):
+        row = self.reagent_table.rowCount()
+        self.reagent_table.insertRow(row)
+
+        # Name
+        name_edit = QLineEdit(name or f"reagent-{row+1}")
+        name_edit.textEdited.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 0, name_edit)
+
+        # Group
+        group_combo = self._make_group_combo()
+        group_combo.setCurrentIndex(
+            group_combo.findText(group if group in self.choice_groups or group == self.GROUP_ADDITIVE
+                                else self.GROUP_ADDITIVE)
+        )
+        group_combo.activated.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 1, group_combo)
+
+        # Targets
+        tgt_edit = QLineEdit(targets)
+        tgt_edit.textEdited.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 2, tgt_edit)
+
+        # Units
+        units_edit = QLineEdit(units)
+        units_edit.textEdited.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 3, units_edit)
+
+        # Droplet vol
+        dv_spin = QDoubleSpinBox()
+        dv_spin.setDecimals(1)
+        dv_spin.setRange(0.1, 100_000.0)
+        dv_spin.setSingleStep(1.0)
+        dv_spin.setValue(float(droplet_nL))
+        dv_spin.valueChanged.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 4, dv_spin)
+
+        # Delete
+        del_btn = QPushButton("Delete")
+        del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
+        self.reagent_table.setCellWidget(row, 5, del_btn)
+
+    def _delete_row(self, r: int):
+        # remove UI row
+        self.reagent_table.removeRow(r)
+        # reassign delete callbacks to correct row numbers
+        for i in range(self.reagent_table.rowCount()):
+            btn: QPushButton = self.reagent_table.cellWidget(i, 5)
+            try:
+                btn.clicked.disconnect()
+            except Exception:
+                pass
+            btn.clicked.connect(lambda _, rr=i: self._delete_row(rr))
+        # auto recompute after deletion
+        self._schedule_auto_update()
+
+    def _schedule_auto_update(self):
+        # Debounce rapid edits
+        self._auto_timer.start()
+
+    def _recompute_silent(self):
+        # push UI -> model
+        self._rebuild_model_from_table()
+        self._update_metadata_from_controls()
+
+        # Try optimize/generate without popping dialogs on failure (user may be mid-edit)
+        res = self.model.optimize_stock_solutions(
+            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
+        )
+        if not res.get("best"):
+            # keep the stock table as-is; summary shows last successful run
+            return
+
+        self.model.generate_experiment()
+        self._refresh_stock_table()
+        self._update_summary_labels()
+
+    def _load_factors_into_table(self):
+        """Populate the reagent table from the model's current factors (if any)."""
+        self.reagent_table.setRowCount(0)
+        # Additives
+        for f in getattr(self.model, "factors", []):
+            if f.kind == "additive":
+                o = f.options[0]
+                self._add_reagent_row(
+                    name=o.name,
+                    group=self.GROUP_ADDITIVE,
+                    targets=", ".join(str(x) for x in o.targets),
+                    units=o.units,
+                    droplet_nL=o.droplet_nL
+                )
+        # Choice groups
+        for f in getattr(self.model, "factors", []):
+            if f.kind == "choice":
+                self.choice_groups.add(f.name)
+                for o in f.options:
+                    self._add_reagent_row(
+                        name=o.name,
+                        group=f.name,
+                        targets=", ".join(str(x) for x in o.targets),
+                        units=o.units,
+                        droplet_nL=o.droplet_nL
+                    )
+
+    # -----------------------------
+    # Model rebuild & metadata
+    # -----------------------------
+
+    def _rebuild_model_from_table(self):
+        """Clear and rebuild factors in the model based on the table."""
+        # reset all factors
+        self.model.factors.clear()
+        # We'll add groups on demand
+        created_choice_groups: Set[str] = set()
+
+        # iterate rows
+        for row in range(self.reagent_table.rowCount()):
+            name_edit: QLineEdit = self.reagent_table.cellWidget(row, 0)
+            group_combo: QComboBox = self.reagent_table.cellWidget(row, 1)
+            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, 2)
+            units_edit: QLineEdit = self.reagent_table.cellWidget(row, 3)
+            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 4)
+
+            r_name = (name_edit.text() or "").strip()
+            r_group = group_combo.currentText()
+            r_targets = self._parse_targets(tgt_edit.text())
+            r_units = (units_edit.text() or "mM").strip()
+            r_dv = float(dv_spin.value())
+
+            if not r_name or not r_targets:
+                # skip incomplete rows
+                continue
+
+            if r_group == self.GROUP_ADDITIVE:
+                # Each additive is its own factor with a single option named as reagent
+                self.model.add_additive(name=r_name, targets=r_targets, units=r_units, droplet_nL=r_dv)
             else:
-                return
-        else:
-            os.makedirs(experiment_dir)
-        
-        # Ask the user if they would like to transfer the calibration data
-        transfer = QMessageBox.question(self, "Transfer Calibration Data?", 
-                                            "Do you want to transfer the calibration data to the new experiment?",
-                                            QMessageBox.Yes | QMessageBox.No)
-        if transfer == QMessageBox.Yes:
-            copy_calibrations = True
-        else:
-            copy_calibrations = False
+                # ensure group exists once
+                if r_group not in created_choice_groups:
+                    self.model.add_choice_group(r_group)
+                    created_choice_groups.add(r_group)
+                # add option to that group
+                self.model.add_choice_option(group_name=r_group, option_name=r_name,
+                                             targets=r_targets, units=r_units, droplet_nL=r_dv)
 
-        # Execute the duplication in the model
-        self.experiment_model.duplicate_experiment(new_experiment_name, experiment_dir, copy_calibrations=copy_calibrations)
+    def _update_metadata_from_controls(self):
+        # If randomize is checked and no seed yet, create a fresh one
+        randomize = self.randomize_chk.isChecked()
+        seed = int(self.random_seed_spin.value())
 
-        # Load the duplicated experiment to the view
-        self.load_experiment_to_view()
+        self.model.set_metadata(
+            name=self.exp_name_edit.text().strip() or "Untitled",
+            replicates=int(self.rep_spin.value()),
+            target_reaction_volume_nL=float(self.v_spin.value()),
+            fill_reagent_name=self.fill_name_edit.text().strip() or "Water",
+            fill_droplet_volume_nL=float(self.fill_dv_spin.value()),
 
-        # Activate edit mode
-        self.activate_edit_mode()
+            # NEW:
+            randomize_assignments=randomize,
+            random_seed=(seed if randomize else None),
+            use_subset_design=bool(self.subset_chk.isChecked()),
+            reduction_factor=int(self.reduction_spin.value()) if self.subset_chk.isChecked() else 1,
+            start_col=int(self.start_col_spin.value()),
+            start_row=int(self.start_row_spin.value()),
+        )
+        print(f"[ExperimentDesignDialog] metadata updated: {self.model.metadata}")
 
-        # Set the flag to indicate that changes have been made
-        self.no_changes = False
+    # -----------------------------
+    # Actions
+    # -----------------------------
 
+    def _on_add_reagent(self):
+        # Default to Additive (per your request)
+        self._add_reagent_row(group=self.GROUP_ADDITIVE)
+
+    def _on_optimize_and_generate(self):
+        # push UI -> model
+        self._rebuild_model_from_table()
+        self._update_metadata_from_controls()
+
+        # Optimize (prefers fewest stocks, then min conc, then min volume)
+        res = self.model.optimize_stock_solutions(
+            quantum=0.1,      # supports fractional step sizes like 0.2, 0.5, etc.
+            max_refine=60,    # search more single-stock steps if you wish
+            two_max_refine=40,
+            allow_two=True    # enable two-stock fallback where needed
+        )
+        if not res.get("best"):
+            QMessageBox.warning(self, "Optimization failed", res.get("reason", "Unknown error"))
+            return
+
+        # Generate reactions, totals, and fill usage
+        self.model.generate_experiment()
+        # UI updates come from signals; but we also force a local refresh
+        self._refresh_stock_table()
+        self._update_summary_labels()
+
+    # -----------------------------
+    # Stock table & summary updates
+    # -----------------------------
+
+    def _refresh_stock_table(self):
+        rows = self.model.get_stock_table_rows(include_fill=True)
+        self.stock_table.setRowCount(0)
+        for r in rows:
+            rr = self.stock_table.rowCount()
+            self.stock_table.insertRow(rr)
+            self.stock_table.setItem(rr, 0, QTableWidgetItem(str(r.get("factor_name", ""))))
+            self.stock_table.setItem(rr, 1, QTableWidgetItem(str(r.get("option_name", ""))))
+            self.stock_table.setItem(rr, 2, QTableWidgetItem(self._fmt_num(r.get("stock_concentration", ""))))
+            self.stock_table.setItem(rr, 3, QTableWidgetItem(self._fmt_num(r.get("delta_per_drop", ""))))
+            self.stock_table.setItem(rr, 4, QTableWidgetItem(str(r.get("units", ""))))
+            self.stock_table.setItem(rr, 5, QTableWidgetItem(self._fmt_num(r.get("droplet_volume_nL", ""))))
+            # 3) New column: per-reaction max volume (nL)
+            max_nL = r.get("max_per_rxn_nL", "")
+            self.stock_table.setItem(rr, 6, QTableWidgetItem(self._fmt_num(max_nL) if max_nL != "" else ""))
+            self.stock_table.setItem(rr, 7, QTableWidgetItem(str(r.get("total_droplets", ""))))
+            self.stock_table.setItem(rr, 8, QTableWidgetItem(self._fmt_num(r.get("total_volume_uL", ""))))
     
+    def _on_experiment_generated(self, total_reactions: int, worst_nonfill_nL: float):
+        # Update summary when model emits
+        self._update_summary_labels(total_reactions=total_reactions, worst_nonfill_nL=worst_nonfill_nL)
 
-    def toggle_manual_entry(self, row):
-        """Enable or disable the manual entry field based on mode selection."""
-        mode = self.reagent_table.cellWidget(row, 4).currentText()
-        manual_conc_item = self.reagent_table.cellWidget(row, 5)
-        manual_conc_item.setEnabled(mode == "Manual")
-        self.update_model_reagent(row)
+    def _update_summary_labels(self, initial: bool = False, total_reactions: int | None = None, worst_nonfill_nL: float | None = None):
+        if total_reactions is None:
+            df = self.model.get_reactions_dataframe()
+            total_reactions = len(df) * int(self.model.metadata.get("replicates", 1))
+        if worst_nonfill_nL is None:
+            worst_nonfill_nL = self.model.get_worst_nonfill_volume_nL() or 0.0
 
-    def update_preview(self, row):
-        """Update the concentrations preview in the table based on the model."""
-        reagent = self.experiment_model.get_reagent(row)   
-        preview_text = ", ".join(map(str, reagent["concentrations"]))
-        preview_item = self.reagent_table.item(row, 8)
-        if type(preview_item) != type(None):
-            preview_item.setText(preview_text)
-            preview_item.setToolTip(preview_text)
-            preview_item.setTextAlignment(Qt.AlignCenter)
+        self.summary_lbl.setText(
+            f"Summary: Total reactions = {total_reactions}  |  "
+            f"Worst non-fill volume = {self._fmt_num(worst_nonfill_nL)} nL"
+        )
+    
+    def _sync_controls_from_model(self):
+        md = self.model.metadata
 
-        missing_conc_text = ", ".join(map(str, reagent["missing_concentrations"]))
-        missing_conc_item = self.reagent_table.item(row, 10)
-        if type(missing_conc_item) != type(None):
-            missing_conc_item.setText(missing_conc_text)
-            missing_conc_item.setToolTip(missing_conc_text)
-            missing_conc_item.setTextAlignment(Qt.AlignCenter)
+        blockers = []
+        def blk(widget):
+            if widget is not None:
+                blockers.append(QSignalBlocker(widget))
 
-        droplets_used_text = reagent['max_droplets_for_conc']
-        droplets_used_item = self.reagent_table.item(row, 11)
-        if type(droplets_used_item) != type(None):
-            droplets_used_item.setText(str(droplets_used_text))
-            droplets_used_item.setTextAlignment(Qt.AlignCenter)
+        # Block signals while restoring to avoid re-entrancy/races
+        blk(self.exp_name_edit); blk(self.rep_spin); blk(self.v_spin)
+        blk(self.fill_name_edit); blk(self.fill_dv_spin)
+        blk(self.randomize_chk); blk(self.random_seed_spin)
+        blk(self.subset_chk); blk(self.reduction_spin)
+        blk(self.start_col_spin); blk(self.start_row_spin)
 
-    def update_stock_table(self):
-        # Populate the stock table
-        # print("Updating stock table")
-        self.stock_table.setRowCount(0)  # Clear existing rows
-        for stock_solution in self.experiment_model.get_all_stock_solutions():
-            #print(f"---Adding stock solution: {stock_solution}")
-            row_position = self.stock_table.rowCount()
-            self.stock_table.insertRow(row_position)
-            self.stock_table.setItem(row_position, 0, QTableWidgetItem(stock_solution['reagent_name']))
-            self.stock_table.setItem(row_position, 1, QTableWidgetItem(str(stock_solution['concentration'])))
-            self.stock_table.setItem(row_position, 2, QTableWidgetItem(str(stock_solution['units'])))
-            self.stock_table.setItem(row_position, 3, QTableWidgetItem(str(stock_solution['total_droplets'])))
-            self.stock_table.setItem(row_position, 4, QTableWidgetItem(str(stock_solution['total_volume'])))
+        self.exp_name_edit.setText(md.get("name", "Untitled"))
+        self.rep_spin.setValue(int(md.get("replicates", 1)))
+        self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 500.0)))
+        self.fill_name_edit.setText(md.get("fill_reagent_name", "Water"))
+        self.fill_dv_spin.setValue(float(md.get("fill_droplet_volume_nL", 10.0)))
 
-    def complete_experiment_design(self):
-        if self.no_changes:
-            print('No changes made to the experiment design')
-        else:
-            print('Changes made to the experiment design')
-            self.model.load_experiment_from_model(load_progress=self.load_progress)
-            self.no_changes = True
+        if hasattr(self, "randomize_chk"):
+            self.randomize_chk.setChecked(bool(md.get("randomize_assignments", False)))
+        if hasattr(self, "random_seed_spin"):
+            seed = md.get("random_seed", 0) or 0
+            self.random_seed_spin.setValue(int(seed))
+            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
 
-    def generate_experiment(self):
-        """Generate the experiment by asking the model to calculate it."""
-        self.experiment_model.generate_experiment()
+        if hasattr(self, "subset_chk"):
+            self.subset_chk.setChecked(bool(md.get("use_subset_design", False)))
+        if hasattr(self, "reduction_spin"):
+            self.reduction_spin.setValue(int(md.get("reduction_factor", 1)))
+            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
 
-    def update_total_reactions(self, total_reactions, total_droplets_used):
-        """Update the total number of reactions displayed."""
-        #print(f"Updating total reactions: {total_reactions}, total droplets used: {total_droplets_used}")
-        self.total_reactions_label.setText(f"Total Reactions: {total_reactions}")
+        if hasattr(self, "start_col_spin"):
+            self.start_col_spin.setValue(int(md.get("start_col", 0)))
+        if hasattr(self, "start_row_spin"):
+            self.start_row_spin.setValue(int(md.get("start_row", 0)))
+
+        self._recompute_silent()
+
+    def _ensure_experiment_dir(self):
+        """
+        Make sure the experiment folder exists and matches the current name.
+        Will create the folder on first save, or rename it if the name changed.
+        """
+        name = self.exp_name_edit.text().strip() or "Untitled"
+        # initialize paths if missing
+        if not self.model.experiment_dir_path:
+            self.model.initialize_experiment()
+            return
+
+        cur_dirname = os.path.basename(self.model.experiment_dir_path)
+        if cur_dirname != name:
+            # Try to rename; if the target exists, just keep the old folder and warn
+            ok = self.model.rename_experiment(name)
+            if not ok:
+                QMessageBox.warning(self, "Rename failed",
+                                    f"A folder named '{name}' already exists. Keeping the current folder.")
+
+    def _on_save_design(self):
+        """
+        Save the current design (factors + metadata) to Experiments/<name>/experiment_design.json.
+        If needed, optimize/generate so stock table is fresh in the preview.
+        """
+        # Push UI -> model
+        self._rebuild_model_from_table()
+        self._update_metadata_from_controls()
+
+        # Keep tables in sync locally
+        res = self.model.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+        if not res.get("best"):
+            QMessageBox.warning(self, "Optimization failed", res.get("reason", "Unknown error"))
+            return
+        self.model.generate_experiment()
+        self._refresh_stock_table()
+        self._update_summary_labels()
+
+        # Ensure folder exists / name is current, then save
+        self._ensure_experiment_dir()
+        self.model.save_experiment()
+        self._set_status(f"Design saved to: {self.model.experiment_file_path}")
+
+    def _on_load_design(self):
+        # Default directory = Experiments
+        default_dir = None
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            maybe = os.path.join(script_dir, "Experiments")
+            default_dir = maybe if os.path.isdir(maybe) else None
+        except Exception:
+            pass
+
+        exp_dir = QFileDialog.getExistingDirectory(
+            self, "Select Experiment Folder", default_dir or os.getcwd()
+        )
+        if not exp_dir:
+            return
+
+        path = os.path.join(exp_dir, "experiment_design.json")
+        if not os.path.exists(path):
+            self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
+            return
+
+        # Load into the model (recomputes optimization + grid)
+        self.model.load_experiment(path, exp_dir)
+
+        # Repaint UI from model
+        self.choice_groups = set(
+            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
+        )
+        self._load_factors_into_table()
+        self._sync_controls_from_model()
+        self._refresh_stock_table()
+        self._update_summary_labels()
+
+        self._set_status(f"Design loaded from: {exp_dir}")
+
+    def _on_finish(self):
+        """
+        Optimize & generate, save the design (creating/renaming the folder if needed),
+        then close the dialog. Your existing closeEvent handoff will populate the rest
+        of the app (load_experiment_from_model).
+        """
+        # Reuse the same logic as Optimize & Generate
+        self._on_optimize_and_generate()
+
+        # Ensure the folder exists and save the design itself
+        self._ensure_experiment_dir()
+        self.model.save_experiment()
+
+        self._set_status("Design finalized and saved. Closing…")
+
+        # Propogate the experiment to the main window
+        try:
+            print("[ExperimentDesignDialog] attempting closeEvent handoff to parent")
+            if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
+                print("[ExperimentDesignDialog] handing off to main_window")
+                self.main_window.complete_experiment_design()
+        except Exception as e:
+            print(f"[ExperimentDesignDialog] closeEvent handoff error: {e}")
+
+        # Close; your closeEvent wiring can then call model.load_experiment_from_model()
+        self.accept()
+
+    def _set_status(self, msg: str):
+        self.status_lbl.setToolTip(msg)
+        self.status_lbl.setText(msg)
+
+    @staticmethod
+    def _fmt_num(x) -> str:
+        try:
+            xv = float(x)
+            # show as int if very close
+            if abs(xv - round(xv)) < 1e-9:
+                return str(int(round(xv)))
+            return f"{xv:.3f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(x)
         
-        self.total_droplets_used_label.setText(f"Total Droplets Used: {total_droplets_used}")
-        if total_droplets_used > self.total_droplets_spinbox.value():
-            self.total_droplets_used_label.setStyleSheet("color: red;")
-        else:
-            self.total_droplets_used_label.setStyleSheet("color: white;")
-
     def closeEvent(self, event):
-        """Handle the window close event."""
-        # self.update_all_model_reagents()  # Update all reagents before closing
-        # Add check that there are no missing concentrations
-        if self.experiment_model.check_missing_concentrations():
-            self.main_window.popup_message("Missing Concentrations","There are missing concentrations. Please fill in all concentrations before closing the window.")
-            event.ignore()
-            # response = self.main_window.popup_yes_no("Missing Concentrations","There are missing concentrations. Are you sure you want to close the experiment design window?")
-            # if response == '&Yes':
-            #     self.complete_experiment_design()
-            #     event.accept()
-            # else:
-            #     event.ignore()
-        elif self.experiment_model.has_unsaved_changes():
-            self.main_window.popup_message("Unsaved Changes","There are unsaved changes. Please save your changes prior to closing the window.")
-            event.ignore()
-        else:
-            self.complete_experiment_design()
-            event.accept()
-        
+        """
+        When the dialog closes, make sure the model is up-to-date and hand off to the main window.
+        """
+        print("[ExperimentDesignDialog] closeEvent triggered")
+        # Ensure latest edits are reflected in the model and a design exists
+        try:
+            # Debounced path might be pending; force a final recompute
+            self._recompute_silent()
+        except Exception:
+            pass
+
+        # Call parent window's handler if available
+        try:
+            print("[ExperimentDesignDialog] attempting closeEvent handoff to parent")
+            if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
+                print("[ExperimentDesignDialog] handing off to main_window")
+                self.main_window.complete_experiment_design()
+        except Exception as e:
+            print(f"[ExperimentDesignDialog] closeEvent handoff error: {e}")
+
+        super().closeEvent(event)
