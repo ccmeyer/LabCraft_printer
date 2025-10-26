@@ -1016,6 +1016,7 @@ class Machine(QObject):
     disconnect_complete_signal = Signal()  # Signal to stop timers
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
+    require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
 
     def __init__(self,model):
         super().__init__()
@@ -1038,6 +1039,23 @@ class Machine(QObject):
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
         self._tx_paused = False
+
+        # --- Gripper confirmation gate ---
+        # Start with confirmation required so the very first open/close pops the dialog.
+        self._gripper_ack_required = True
+        self._blocked_gripper_command = None
+
+        self._gripper_idle_timer = QTimer(self)
+        self._gripper_idle_timer.setSingleShot(True)
+        self._gripper_idle_timer.timeout.connect(self._on_gripper_idle_timeout)
+
+        # When the gripper actually moves (command completes), if the gate is *not* set,
+        # reset the 10-minute idle timer.
+        self.gripper_open.connect(self._on_gripper_moved)
+        self.gripper_closed.connect(self._on_gripper_moved)
+
+        # Clean-up when disconnected
+        self.disconnect_complete_signal.connect(self._on_disconnect_reset_gripper_timer)
 
         try:
             self.refuel_camera = RefuelCamera()
@@ -1175,6 +1193,10 @@ class Machine(QObject):
         self.stop_execution_timer()
         self.stop_reader_thread()
         self.stop_log_thread()
+        try: self._gripper_idle_timer.stop()
+        except Exception: pass
+        self._gripper_ack_required = True
+        self._blocked_gripper_command = None
 
     def reset_mcu_board(self):
         reset_board()
@@ -1363,15 +1385,32 @@ class Machine(QObject):
         if getattr(self, "_tx_paused", False):
             return
         command = self.command_queue.get_next_command()
-        if command:
-            try:
-                # self.ser.write(command.frame)
-                self.send_command_to_board(command)
-                command.mark_as_sent()
-                print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
-            except Exception as e:
-                print(f"Failed to send command: {e}")
-                self.error_occurred.emit(f"Failed to send command: {e}")
+        if not command:
+            print("No commands to send or maximum sent commands reached.")
+            return
+        
+                # --- Gripper gate interception ---
+        if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER'):
+            if self._gripper_ack_required:
+                # Pause transmission *before* we mark/send anything
+                self._tx_paused = True
+                self._blocked_gripper_command = command
+                action = 'OPEN' if command.command_type == 'OPEN_GRIPPER' else 'CLOSE'
+                # Ask the UI to block and prompt the user
+                self.require_gripper_confirmation.emit(action)
+                return
+            else:
+                # If confirmation is not required, keep the idle timer fresh
+                self._reset_gripper_idle_timer()
+
+        try:
+            # self.ser.write(command.frame)
+            self.send_command_to_board(command)
+            command.mark_as_sent()
+            print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
+        except Exception as e:
+            print(f"Failed to send command: {e}")
+            self.error_occurred.emit(f"Failed to send command: {e}")
         # else:
         #     print("No commands to send or maximum sent commands reached.")
     
@@ -1434,6 +1473,46 @@ class Machine(QObject):
             handler()
 
         self.begin_execution_timer()
+
+    def _reset_gripper_idle_timer(self):
+        # 10 minutes in milliseconds
+        self._gripper_idle_timer.start(10 * 60 * 1000)
+
+    @Slot()
+    def _on_gripper_idle_timeout(self):
+        # After 10 minutes of no gripper activity, require confirmation next time
+        self._gripper_ack_required = True
+
+    @Slot()
+    def _on_gripper_moved(self):
+        # Only reset the timer when we are in the "free running" state
+        if not self._gripper_ack_required:
+            self._reset_gripper_idle_timer()
+
+    @Slot()
+    def confirm_gripper_ready(self):
+        """
+        Called by UI after the user has manually ensured the gripper is in the requested state.
+        This clears the gate, starts the 10-minute timer, and resumes queue transmission.
+        """
+        self._gripper_ack_required = False
+        self._reset_gripper_idle_timer()
+        self._tx_paused = False
+        # Nudge the sender so the blocked command can go out immediately
+        try:
+            self.send_next_command()
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_disconnect_reset_gripper_timer(self):
+        try:
+            self._gripper_idle_timer.stop()
+        except Exception:
+            pass
+        # On next connection we want the first gripper operation to prompt again
+        self._gripper_ack_required = True
+        self._blocked_gripper_command = None
 
     def check_param_limits(self,param,min_val,max_val):
         if param >= min_val and param <= max_val:

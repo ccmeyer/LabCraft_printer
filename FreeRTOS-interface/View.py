@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         self.controller.error_occurred_signal.connect(self.popup_message)
         self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
+        self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -382,6 +383,26 @@ class MainWindow(QMainWindow):
         #     print('Disconnected balance')
 
         event.accept()
+    @Slot(str)
+    def on_require_gripper_confirmation(self, action: str):
+        # action is "OPEN" or "CLOSE"
+        verb = "open" if action.upper() == "OPEN" else "close"
+
+        m = QMessageBox(self)
+        m.setWindowTitle("Gripper confirmation required")
+        m.setIcon(QMessageBox.Warning)
+        m.setText(
+            f"The gripper may stick after being idle.\n\n"
+            f"Please manually {verb} the gripper now.\n\n"
+            f"When done, click Continue to proceed."
+        )
+        m.setStandardButtons(QMessageBox.Ok)
+        m.setDefaultButton(QMessageBox.Ok)
+        m.setModal(True)
+        m.exec()  # blocks until user clicks OK
+
+        # Tell the Machine it can proceed
+        self.machine.confirm_gripper_ready()
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
