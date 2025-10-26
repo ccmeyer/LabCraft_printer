@@ -349,7 +349,7 @@ class CalibrationManager(QObject):
             self, self.model, manual_start=True)
         self.start_active_calibration()
 
-    def start_pressure_sweep_characterization(self, *, p_step=0.2, sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
+    def start_pressure_sweep_characterization(self, *, p_step=0.2, sphere_delay_us=10000, replicates_per_pressure=20, order="desc"):
         self.activeCalibration = PressureSweepCharacterizationProcess(
             self, self.model,
             p_step=p_step,
@@ -1968,7 +1968,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # Set initial binary search bounds for pressure (in psi, for example).
         self.lower_pressure = 0.4   # example minimum pressure
-        self.upper_pressure = 3.0   # example maximum pressure
+        self.upper_pressure = 5.0   # example maximum pressure
         # Start with a candidate near the lower bound.
         self.candidate_pressure = self.model.machine_model.get_current_print_pressure()
         
@@ -2291,7 +2291,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         try:
             lo, hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            lo, hi = 0.2, 3.00  # psi, conservative
+            lo, hi = 0.2, 5.00  # psi, conservative
         return float(lo), float(hi)
 
     def _clampP(self, p: float) -> float:
@@ -2655,7 +2655,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         try:
             hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            hw_lo, hw_hi = 0.3, 3.0
+            hw_lo, hw_hi = 0.3, 5.0
         self.P_MIN = float(hw_lo)
         self.P_MAX = float(hw_hi)
 
@@ -2991,7 +2991,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            p_lo, p_hi = 0.3, 3.0
+            p_lo, p_hi = 0.3, 5.0
         self.min_pressure = float(p_lo)
         self.max_pressure = float(p_hi)
 
@@ -4001,7 +4001,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         try:
             p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
         except Exception:
-            p_lo, p_hi = 0.3, 3.0
+            p_lo, p_hi = 0.3, 5.0
         self.min_pressure, self.max_pressure = float(p_lo), float(p_hi)
         self.pressure_step = 0.02
         self.new_pressure = None
@@ -4567,7 +4567,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  model,
                  *,
                  p_step: float = 0.02,               # pressure grid step (psi)
-                 sphere_delay_us: int = 8000,
+                 sphere_delay_us: int = 10000,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
@@ -4772,7 +4772,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.current_delay_us = None
         self.num_images = self.repl_target
         self.image_counter = 0
-        self.circularity_threshold = 1.15
+        self.circularity_threshold = 1.18
         self.circularity_values = []
         self.droplet_volumes = []
         self.droplet_positions = []
@@ -5516,7 +5516,7 @@ class DropletCameraModel(QObject):
         self.image_height = 1456
 
         self.intensity_threshold = 150
-        self.circularity_threshold = 1.15
+        self.circularity_threshold = 1.18
         self.min_area_threshold = 10
         self.edge_margin = 10
 
@@ -5692,7 +5692,7 @@ class DropletCameraModel(QObject):
         image,
         um_per_pixel=1.5696,
         intensity_threshold=150,
-        circularity_threshold=1.15,
+        circularity_threshold=1.18,
         min_area_threshold=10,
         edge_margin=10,
     ):
