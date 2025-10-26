@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+# Import your model & dataclasses
+from Model import ( FactorSpec, OptionSpec, ExperimentModel)
+
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,
-    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox
+    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox,
+    QTabWidget, QCheckBox, QScrollArea, QFormLayout, QFrame
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
-from PySide6.QtCore import Qt, QTimer, QEventLoop, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, QEventLoop, Signal, Slot, QSignalBlocker
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -23,7 +27,7 @@ import cv2
 from utilities import ShortcutManager
 import CalibrationClasses
 import importlib
-from typing import Mapping, Sequence, Optional, Any
+from typing import Mapping, Sequence, Optional, Any, List, Optional, Tuple, Set
 
 
 class OptionsDialog(QtWidgets.QDialog):
@@ -2907,19 +2911,6 @@ class CommandQueueWidget(QGroupBox):
         for column in range(self.table.columnCount()):
             self.table.item(row, column).setBackground(QtGui.QColor(color))
         
-import json
-from typing import List, Optional, Tuple, Set
-
-
-from PySide6.QtCore import Qt, Slot, QSignalBlocker
-from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QLabel, QLineEdit,
-    QPushButton, QTableWidget, QTableWidgetItem, QDoubleSpinBox, QSpinBox, QComboBox,
-    QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QAbstractItemView, QFormLayout, QCheckBox
-)
-
-# Import your model & dataclasses
-from Model import ( FactorSpec, OptionSpec, ExperimentModel)
 
 class ExperimentDesignDialog(QDialog):
     """
@@ -3079,6 +3070,12 @@ class ExperimentDesignDialog(QDialog):
         self.run_btn.setStyleSheet("background-color: #b33; color: white; font-weight: bold;")
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
         controls_right.addWidget(self.run_btn)
+
+        # --- New Experiment ---
+        self.new_btn = QPushButton("New Experiment")
+        self.new_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold;")
+        self.new_btn.clicked.connect(self._on_new_experiment)
+        controls_right.addWidget(self.new_btn)
 
         # --- Save / Load / Finish ---
         self.save_btn = QPushButton("Save Design…")
@@ -3256,6 +3253,8 @@ class ExperimentDesignDialog(QDialog):
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
         self.reagent_table.setCellWidget(row, 5, del_btn)
+
+        self._schedule_auto_update()
 
     def _delete_row(self, r: int):
         # remove UI row
@@ -3509,6 +3508,74 @@ class ExperimentDesignDialog(QDialog):
             if not ok:
                 QMessageBox.warning(self, "Rename failed",
                                     f"A folder named '{name}' already exists. Keeping the current folder.")
+
+    def _on_new_experiment(self):
+        """
+        Reset the experiment to a fresh state (like app launch):
+        - New Untitled-YYYYMMDD_HHMMSS name
+        - Clear factors, cached tables
+        - Create Experiments/<name>/ with initial files
+        - Refresh UI
+        """
+        # Prefer the model's own reset if available (keeps your existing behavior)
+        if hasattr(self.model, "reset_experiment_model"):
+            try:
+                self.model.reset_experiment_model()
+            except Exception as e:
+                self._set_status(f"New experiment failed (reset_experiment_model): {e}")
+                return
+        else:
+            # Fallback: do a safe manual reset for the new ExperimentModel
+            try:
+                # fresh name
+                temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
+                # metadata defaults
+                self.model.metadata = {
+                    "name": temp_name,
+                    "replicates": 1,
+                    "target_reaction_volume_nL": 500.0,
+                    "fill_reagent_name": "Water",
+                    "fill_droplet_volume_nL": 10.0,
+                    "randomize_assignments": False,
+                    "random_seed": None,
+                    "use_subset_design": False,
+                    "reduction_factor": 1,
+                    "start_row": 0,
+                    "start_col": 0,
+                }
+                # factors + caches
+                self.model.factors = []
+                self.model.plans_per_option.clear()
+                self.model._stock_rows_cache = []
+                self.model._fill_row_cache = None
+                import pandas as pd
+                self.model._reactions_df = pd.DataFrame()
+                self.model._last_worst_nonfill_volume_nL = None
+
+                # create folder + initial files
+                if hasattr(self.model, "initialize_experiment"):
+                    self.model.initialize_experiment()
+            except Exception as e:
+                self._set_status(f"New experiment failed (fallback): {e}")
+                return
+
+        # Repaint UI from the fresh model (avoid auto-update churn while setting)
+        blockers = [
+            QSignalBlocker(self.exp_name_edit), QSignalBlocker(self.rep_spin),
+            QSignalBlocker(self.v_spin), QSignalBlocker(self.fill_name_edit),
+            QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.randomize_chk),
+            QSignalBlocker(self.random_seed_spin), QSignalBlocker(self.subset_chk),
+            QSignalBlocker(self.reduction_spin), QSignalBlocker(self.start_col_spin),
+            QSignalBlocker(self.start_row_spin)
+        ]
+
+        self.choice_groups = set()
+        self._load_factors_into_table()
+        self._sync_controls_from_model()
+        self._refresh_stock_table()
+        self._update_summary_labels()
+
+        self._set_status(f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}")
 
     def _on_save_design(self):
         """
