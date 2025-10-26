@@ -402,7 +402,7 @@ class MainWindow(QMainWindow):
         m.exec()  # blocks until user clicks OK
 
         # Tell the Machine it can proceed
-        self.machine.confirm_gripper_ready()
+        self.controller.machine.confirm_gripper_ready()
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
