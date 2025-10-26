@@ -1,5 +1,11 @@
 import pandas as pd
 import numpy as np
+
+from dataclasses import dataclass, field
+from math import gcd
+from functools import reduce
+from typing import List, Dict, Tuple, Optional, Any, Set
+
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
@@ -9,7 +15,7 @@ import os
 import csv
 import cv2
 import itertools
-from itertools import combinations_with_replacement
+from itertools import combinations_with_replacement, product
 import joblib
 from scipy.optimize import minimize, fsolve
 from scipy.signal import find_peaks
@@ -3643,16 +3649,6 @@ class MassCalibrationModel(QObject):
         pressure_solution = fsolve(func, initial_guess)
         print(f"Pressure solution: {pressure_solution[0]:.2f} psi, initial guess: {initial_guess:.2f} psi")
         return round(pressure_solution[0],2)
-            
-            
-from dataclasses import dataclass, field
-from itertools import product
-from math import gcd
-from functools import reduce
-from typing import List, Dict, Tuple, Optional, Any, Set
-
-import numpy as np
-import pandas as pd
 
 # --------------------------
 # Data structures
@@ -3757,8 +3753,10 @@ class ExperimentModel(QObject):
         self.factors: List[FactorSpec] = []
 
         # Metadata
+        # Format date-time for metadata
+        temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
         self.metadata: Dict = {
-            "name": "Untitled",
+            "name": temp_name,
             "replicates": 1,
             "use_subset_design": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
@@ -4967,8 +4965,8 @@ class ExperimentModel(QObject):
         base_experiment_dir = base_dir or os.path.join(script_dir, "Experiments")
         if not os.path.exists(base_experiment_dir):
             os.makedirs(base_experiment_dir)
-
-        exp_name = self.metadata.get("name", "Untitled")
+        temp_name = "Untitled-" + time.strftime("%Y%m%d_%H%M%S")
+        exp_name = self.metadata.get("name", temp_name)
         self.experiment_dir_path = os.path.join(base_experiment_dir, exp_name)
         if not os.path.exists(self.experiment_dir_path):
             os.makedirs(self.experiment_dir_path)
@@ -5179,7 +5177,7 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "reduction_factor": 1,
             "target_reaction_volume_nL": 500.0,
-            "fill_reagent_name": "Fill",
+            "fill_reagent_name": "Water",
             "fill_droplet_volume_nL": 10.0,
             "random_seed": None,
             "start_row": 0,
