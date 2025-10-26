@@ -1043,7 +1043,7 @@ class Machine(QObject):
         # --- Gripper confirmation gate ---
         # Start with confirmation required so the very first open/close pops the dialog.
         self._gripper_ack_required = True
-        self._blocked_gripper_command = None
+        # self._blocked_gripper_command = None
 
         self._gripper_idle_timer = QTimer(self)
         self._gripper_idle_timer.setSingleShot(True)
@@ -1196,7 +1196,7 @@ class Machine(QObject):
         try: self._gripper_idle_timer.stop()
         except Exception: pass
         self._gripper_ack_required = True
-        self._blocked_gripper_command = None
+        # self._blocked_gripper_command = None
 
     def reset_mcu_board(self):
         reset_board()
@@ -1384,36 +1384,41 @@ class Machine(QObject):
         """
         if getattr(self, "_tx_paused", False):
             return
+
         command = self.command_queue.get_next_command()
         if not command:
-            print("No commands to send or maximum sent commands reached.")
             return
-        
-                # --- Gripper gate interception ---
+
+        # --- Gripper gate (SEND FIRST, then pause & prompt) ---
         if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER'):
             if self._gripper_ack_required:
-                # Pause transmission *before* we mark/send anything
+                # 1) Send now so it actually executes and leaves the queue
+                try:
+                    self.send_command_to_board(command)
+                    command.mark_as_sent()
+                    print(f"Sent command (pre-prompt): {command.command_type} {command.param1} {command.param2} {command.param3}")
+                except Exception as e:
+                    print(f"Failed to send command: {e}")
+                    self.error_occurred.emit(f"Failed to send command: {e}")
+                    return
+
+                # 2) Immediately pause TX and show the popup
                 self._tx_paused = True
-                self._blocked_gripper_command = command
                 action = 'OPEN' if command.command_type == 'OPEN_GRIPPER' else 'CLOSE'
-                # Ask the UI to block and prompt the user
                 self.require_gripper_confirmation.emit(action)
                 return
             else:
-                # If confirmation is not required, keep the idle timer fresh
+                # If we don't need a prompt, keep the idle timer fresh on gripper ops
                 self._reset_gripper_idle_timer()
 
+        # --- Normal path for everything else ---
         try:
-            # self.ser.write(command.frame)
             self.send_command_to_board(command)
             command.mark_as_sent()
             print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
         except Exception as e:
             print(f"Failed to send command: {e}")
             self.error_occurred.emit(f"Failed to send command: {e}")
-        # else:
-        #     print("No commands to send or maximum sent commands reached.")
-    
     
     def pause_commands(self):
         print('Pausing commands')
@@ -1512,7 +1517,7 @@ class Machine(QObject):
             pass
         # On next connection we want the first gripper operation to prompt again
         self._gripper_ack_required = True
-        self._blocked_gripper_command = None
+        # self._blocked_gripper_command = None
 
     def check_param_limits(self,param,min_val,max_val):
         if param >= min_val and param <= max_val:
