@@ -803,32 +803,162 @@ class SerialReader(QThread):
                 self.ackReceived.emit(ack)
 
 class LogReader(QThread):
-    lineReceived = Signal(str)
+    lineReceived   = Signal(str)     # existing
+    statsUpdated   = Signal(object)  # emits a dict with parsed stats (see below)
 
-    def __init__(self, baud=115200, parent=None):
+    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360):
         super().__init__(parent)
-        log_port = "/dev/ttyUSB0"
         self.ser = serial.Serial(log_port, baud, timeout=1)
         self._running = True
+        self._in_stats = False
+        self._stats_block = []
+        self.last_stats = None
+        self.stats_history = deque(maxlen=history_len)  # ~18 minutes if MCU prints every 3s
+        # regex: <task><spaces><time><spaces><percent?> (percent may be absent or have a % sign)
+        self._stats_re = re.compile(
+            r'^\s*(?P<task>.+?)\s+(?P<time>\d+)\s+<?(?P<pct>\d+(?:\.\d+)?)?%?\s*$'
+        )
         print(f"LogReader initialized on {log_port} at {baud} baud")
 
+    # ---------- public helpers for UI/controllers ----------
+    def get_latest_stats(self):
+        """Return the most recently parsed stats dict or None."""
+        return self.last_stats
+
+    def get_task_percent(self, task_name: str):
+        """Convenience helper to fetch a single task's %."""
+        if not self.last_stats:
+            return None
+        entry = self.last_stats["by_task"].get(task_name)
+        return None if not entry else entry["percent"]
+
+    def get_idle_percent(self):
+        """Convenience helper for IDLE %."""
+        return None if not self.last_stats else self.last_stats["idle_percent"]
+
+    # ---------- thread loop ----------
     def run(self):
-        """Continuously read lines and emit them."""
+        """Continuously read lines and emit them + parse stats blocks."""
         while self._running:
             try:
                 line = self.ser.readline()
-                if line:
-                    text = line.decode('ascii',errors="ignore").rstrip("\r\n")
-                    print(f"Log line received: {text}")
-                    self.lineReceived.emit(text)
+                if not line:
+                    continue
+                text = line.decode('ascii', errors="ignore").rstrip("\r\n")
+                # Always emit raw line for anything else listening
+                self.lineReceived.emit(text)
+
+                # Detect start of a stats block
+                if text.strip() == "===LOG===":
+                    self._in_stats = True
+                    self._stats_block = []
+                    continue
+
+                # Accumulate stats lines until a blank line or next marker
+                if self._in_stats:
+                    if text.strip() == "" or text.strip() == "===LOG===":
+                        # end of block (or a nested marker)
+                        self._finish_stats_block()
+                        # if it was a nested marker, keep collecting a new one
+                        if text.strip() == "===LOG===":
+                            self._in_stats = True
+                            self._stats_block = []
+                        else:
+                            self._in_stats = False
+                    else:
+                        self._stats_block.append(text)
+
             except serial.SerialException:
                 break
-    
+
     def stop(self):
         self._running = False
         self.wait(200)
         if self.ser.is_open:
             self.ser.close()
+
+    # ---------- parsing ----------
+    def _finish_stats_block(self):
+        """Parse the accumulated lines in self._stats_block and emit statsUpdated."""
+        lines = self._stats_block
+        rows = []
+        times = []
+
+        # Common headers/separators to ignore (robust to different FreeRTOS prints)
+        def _is_header_or_sep(s: str) -> bool:
+            s_stripped = s.strip().lower()
+            if not s_stripped:
+                return True
+            if set(s_stripped) <= set("-=|+ "):
+                return True
+            # Typical FreeRTOS header contains 'task' and 'time'
+            if ("task" in s_stripped and "time" in s_stripped) or "%" in s_stripped and "task" in s_stripped:
+                return True
+            return False
+
+        for ln in lines:
+            if _is_header_or_sep(ln):
+                continue
+            m = self._stats_re.match(ln)
+            if not m:
+                # Unrecognized line inside stats block; ignore gracefully
+                continue
+            task = m.group("task").strip()
+            t = int(m.group("time"))
+            pct_str = m.group("pct")
+            pct = float(pct_str) if pct_str is not None else None
+            rows.append({"task": task, "time": t, "percent": pct})
+            times.append(t)
+
+        # # If percent column wasn't printed by FreeRTOS, compute it from times
+        # if rows and any(r["percent"] is None for r in rows):
+        #     total = sum(times)
+        #     if total > 0:
+        #         for r in rows:
+        #             r["percent"] = (r["time"] / total) * 100.0
+
+        by_task = {r["task"]: r for r in rows}
+        idle_percent = by_task.get("IDLE", {}).get("percent")
+
+        stats = {
+            "raw": "\n".join(lines),
+            "rows": rows,
+            "by_task": by_task,
+            "idle_percent": idle_percent,
+            "ts": time(),
+        }
+
+        self.last_stats = stats
+        self.stats_history.append(stats)
+        self.statsUpdated.emit(stats)
+
+# class LogReader(QThread):
+#     lineReceived = Signal(str)
+
+#     def __init__(self, baud=115200, parent=None):
+#         super().__init__(parent)
+#         log_port = "/dev/ttyUSB0"
+#         self.ser = serial.Serial(log_port, baud, timeout=1)
+#         self._running = True
+#         print(f"LogReader initialized on {log_port} at {baud} baud")
+
+#     def run(self):
+#         """Continuously read lines and emit them."""
+#         while self._running:
+#             try:
+#                 line = self.ser.readline()
+#                 if line:
+#                     text = line.decode('ascii',errors="ignore").rstrip("\r\n")
+#                     print(f"Log line received: {text}")
+#                     self.lineReceived.emit(text)
+#             except serial.SerialException:
+#                 break
+    
+#     def stop(self):
+#         self._running = False
+#         self.wait(200)
+#         if self.ser.is_open:
+#             self.ser.close()
 
 class Command:
     """
@@ -1284,7 +1414,26 @@ class Machine(QObject):
         """
         self.log_reader = LogReader(self.baud)
         self.log_reader.lineReceived.connect(self.on_log_line_received)
+        self.log_reader.statsUpdated.connect(self.on_stats_updated)
         self.log_reader.start()
+
+    def on_stats_updated(self, stats: dict):
+        print(f"Stats updated: {stats['ts']}, idle={stats.get('idle_percent', 'N/A'):.1f}%")
+        # # Quick access to IDLE %
+        # idle = stats["idle_percent"]
+        # if idle is not None:
+        #     self.idleLabel.setText(f"IDLE: {idle:.1f}%")
+
+        # # Per-task example:
+        # for task_name in ("Printer", "Gripper", "PressureRegulator", "Tmr Svc", "IDLE"):
+        #     entry = stats["by_task"].get(task_name)
+        #     if entry:
+        #         pct = entry["percent"]
+        #         # update your UI elements / charts
+        #         # e.g., self.taskBars[task_name].set_value(pct)
+
+        # If you want to show a table, use stats["rows"]:
+        # rows = [{"task":..., "time":..., "percent":...}, ...]
 
     def stop_log_thread(self):
         """
