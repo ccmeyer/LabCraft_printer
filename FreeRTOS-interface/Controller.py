@@ -709,7 +709,8 @@ class Controller(QObject):
         """Move to the saved location."""
         safe_z = 35000
         current_location = self.model.machine_model.get_current_location()
-        if current_location['Z'] < safe_z:
+        current_z = self.model.machine_model.get_current_position_dict()['Z']
+        if current_z < safe_z:
             print("Already above safe height")
             ignore_safe_height = True
         print(f'Moving to location: {name} from {current_location}')
