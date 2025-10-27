@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
+import tempfile
 import heapq
 import os
 import csv
@@ -5497,9 +5498,10 @@ class WellPlate(QObject):
     clear_all_wells_signal = Signal()  # Signal to notify when all wells are cleared
     plate_format_changed_signal = Signal()  # Signal to notify when the well plate is updated
 
-    def __init__(self, all_plate_data):
+    def __init__(self, all_plate_data,plates_path):
         super().__init__()
         self.all_plate_data = all_plate_data
+        self.plates_path = plates_path
         self.current_plate_data = self.get_default_plate_data()
         self.calibrations = self.current_plate_data['calibrations']
         self.rows = self.current_plate_data['rows']
@@ -5543,28 +5545,64 @@ class WellPlate(QObject):
                 return plate_data
         raise ValueError(f"Plate format '{plate_name}' not found.")        
 
+    # def store_calibrations(self):
+    #     """Save the temporary calibration data to the main calibration data."""
+    #     plate_name = self.get_current_plate_name()
+    #     for plate_data in self.all_plate_data:
+    #         print(plate_data['name'])
+    #         if plate_data['name'] == plate_name:
+    #             plate_data['calibrations'] = self.temp_calibration_data.copy()
+    #             self.calibrations = self.temp_calibration_data.copy()
+    #             # Clear the temporary data after saving
+    #             self.temp_calibration_data.clear()
+    #             return
+    #     raise ValueError(f"Plate format '{plate_name}' not found.")
+
+    # def save_calibrations_to_file(self, file_path='.\\MVC-interface\\Presets\\Plates.json'):
+    #     """Save the current calibration data to a JSON file."""
+    #     try:
+    #         with open(file_path, 'w') as file:
+    #             json.dump(self.all_plate_data, file, indent=4)
+    #         #print(f"Calibration data saved to {file_path}")
+    #     except Exception as e:
+    #         pass
+    #         #print(f"Error saving calibration data to file: {e}")
+
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
         plate_name = self.get_current_plate_name()
         for plate_data in self.all_plate_data:
-            print(plate_data['name'])
             if plate_data['name'] == plate_name:
-                plate_data['calibrations'] = self.temp_calibration_data.copy()
-                self.calibrations = self.temp_calibration_data.copy()
-                # Clear the temporary data after saving
+                new_cals = self.temp_calibration_data.copy()
+                plate_data['calibrations'] = new_cals
+                self.current_plate_data['calibrations'] = new_cals  # be explicit
+                self.calibrations = new_cals
                 self.temp_calibration_data.clear()
                 return
         raise ValueError(f"Plate format '{plate_name}' not found.")
 
-    def save_calibrations_to_file(self, file_path='.\\MVC-interface\\Presets\\Plates.json'):
+    def save_calibrations_to_file(self, file_path=None):
         """Save the current calibration data to a JSON file."""
+        path = file_path or self.plates_path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+
         try:
-            with open(file_path, 'w') as file:
-                json.dump(self.all_plate_data, file, indent=4)
-            #print(f"Calibration data saved to {file_path}")
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(self.all_plate_data, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)  # atomic on POSIX/Windows 10+
+            # print(f"Calibration data saved to {path}")
         except Exception as e:
-            pass
-            #print(f"Error saving calibration data to file: {e}")
+            # If something goes wrong, don't hide it—surface it so you can fix it.
+            print(f"Error saving calibration data to file '{path}': {e}")
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
 
     def discard_temp_calibrations(self):
         """Discard the temporary calibration data."""
@@ -7118,7 +7156,7 @@ class Model(QObject):
         self.location_model.load_locations()  # Load locations at startup
         self.location_model.load_obstacles()
         self.all_plate_data = self.load_all_plate_data(self.plates_path)
-        self.well_plate = WellPlate(self.all_plate_data)
+        self.well_plate = WellPlate(self.all_plate_data,self.plates_path)
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
