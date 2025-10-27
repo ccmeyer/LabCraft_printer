@@ -1579,6 +1579,35 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.reset_mcu_button.clicked.connect(self._on_reset_mcu_requested)
         layout.addWidget(self.reset_mcu_button, row_after_table + 2, 0, 1, 3)
 
+        # === MCU Task Usage table (scrollable) ===
+        self.tasks_group = QtWidgets.QGroupBox("MCU Task Usage")
+        tasks_v = QtWidgets.QVBoxLayout(self.tasks_group)
+
+        self.tasks_table = QtWidgets.QTableWidget(0, 2, self)
+        self.tasks_table.setHorizontalHeaderLabels(["Task", "CPU %"])
+        self.tasks_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.tasks_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.tasks_table.setAlternatingRowColors(True)
+        self.tasks_table.verticalHeader().setVisible(False)
+        self.tasks_table.horizontalHeader().setStretchLastSection(True)
+        self.tasks_table.setSortingEnabled(True)
+        self.tasks_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.tasks_table.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+
+        # Optional: make numbers right-aligned
+        self.tasks_table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter
+        )
+
+        tasks_v.addWidget(self.tasks_table)
+        layout.addWidget(self.tasks_group, row_after_table + 3, 0, 1, 3)
+
+        # Background style to match mid-panel (optional)
+        self.tasks_group.setStyleSheet(
+            f"QGroupBox {{ color: #DDD; border: 1px solid #444; margin-top: 6px; }}"
+            f"QTableWidget {{ background-color: {self.color_dict['darker_gray']}; }}"
+        )        
+
         # Stretch/spacer row so everything stays at the top
         last_row = len(self._axis_rows) + 4  # header(0) + data rows
         spacer = QtWidgets.QSpacerItem(
@@ -1610,6 +1639,8 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # Optional: live log lines
         if hasattr(self.controller, "dfu_output"):
             self.controller.dfu_output.connect(self._on_dfu_output)
+
+        self.controller.machine.log_stats_updated.connect(self._on_stats_updated)
 
         self.set_axis_maxspeed.connect(self.controller.set_axis_maxspeed)
         self.set_axis_accel.connect(self.controller.set_axis_accel)
@@ -1667,6 +1698,51 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 box.setValue(int(max(self._acc_min, min(self._acc_max, int(val)))))
         finally:
             self._updating = False
+
+    # === Slot to update the table ===
+    @QtCore.Slot(object)
+    def _on_stats_updated(self, stats: dict):
+        rows = stats.get("rows", []) or []
+        # Keep current sort settings stable while updating to avoid flicker
+        sorting_enabled = self.tasks_table.isSortingEnabled()
+        if sorting_enabled:
+            self.tasks_table.setSortingEnabled(False)
+
+        self.tasks_table.setRowCount(len(rows))
+        for r_idx, r in enumerate(rows):
+            task_name = r.get("task", "")
+            pct = r.get("percent", None)
+
+            # Name column
+            name_item = QtWidgets.QTableWidgetItem(task_name)
+            name_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            self.tasks_table.setItem(r_idx, 0, name_item)
+
+            # Percent column (numeric sortable)
+            if pct is None:
+                pct_text = "—"
+                pct_value = 0.0
+            else:
+                pct_text = f"{pct:.1f}"
+                pct_value = float(pct)
+
+            pct_item = QtWidgets.QTableWidgetItem(pct_text)
+            pct_item.setFlags(QtCore.Qt.ItemIsEnabled)
+            pct_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            # Use EditRole for numeric sorting
+            pct_item.setData(QtCore.Qt.EditRole, pct_value)
+            self.tasks_table.setItem(r_idx, 1, pct_item)
+
+            # Optional: visually deemphasize IDLE a bit
+            if task_name.strip().upper() == "IDLE":
+                pct_item.setForeground(QtGui.QBrush(QtGui.QColor("#A0E3A0")))
+                name_item.setForeground(QtGui.QBrush(QtGui.QColor("#A0E3A0")))
+
+        # Resize columns to contents once (or occasionally)
+        self.tasks_table.resizeColumnToContents(0)
+
+        if sorting_enabled:
+            self.tasks_table.setSortingEnabled(True)
 
     # ---------- DFU UI handlers ----------
     @QtCore.Slot()

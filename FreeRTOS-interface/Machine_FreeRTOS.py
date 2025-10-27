@@ -925,7 +925,7 @@ class LogReader(QThread):
             "rows": rows,
             "by_task": by_task,
             "idle_percent": idle_percent,
-            "ts": time(),
+            "ts": time.time(),
         }
 
         self.last_stats = stats
@@ -1147,6 +1147,7 @@ class Machine(QObject):
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
+    log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
 
     def __init__(self,model):
         super().__init__()
@@ -1418,22 +1419,7 @@ class Machine(QObject):
         self.log_reader.start()
 
     def on_stats_updated(self, stats: dict):
-        print(f"Stats updated: {stats['ts']}, idle={stats.get('idle_percent', 'N/A'):.1f}%")
-        # # Quick access to IDLE %
-        # idle = stats["idle_percent"]
-        # if idle is not None:
-        #     self.idleLabel.setText(f"IDLE: {idle:.1f}%")
-
-        # # Per-task example:
-        # for task_name in ("Printer", "Gripper", "PressureRegulator", "Tmr Svc", "IDLE"):
-        #     entry = stats["by_task"].get(task_name)
-        #     if entry:
-        #         pct = entry["percent"]
-        #         # update your UI elements / charts
-        #         # e.g., self.taskBars[task_name].set_value(pct)
-
-        # If you want to show a table, use stats["rows"]:
-        # rows = [{"task":..., "time":..., "percent":...}, ...]
+        self.log_stats_updated.emit(stats)
 
     def stop_log_thread(self):
         """
