@@ -734,6 +734,8 @@ class Controller(QObject):
 
         if x_offset:
             target['X'] += x_offset
+        if z_offset:
+            target['Z'] += z_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
 
     def open_gripper(self,handler=None):

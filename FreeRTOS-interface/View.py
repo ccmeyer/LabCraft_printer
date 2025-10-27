@@ -1304,6 +1304,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             response = self.main_window.popup_yes_no("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack. Proceed anyway?")
             if response == "&No":
                 return
+        self.controller.move_to_location('plate',z_offset=500)
         plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
         
         # Execute the dialog and check if the user completes the calibration
