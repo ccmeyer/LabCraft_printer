@@ -957,7 +957,7 @@ class Controller(QObject):
         # self.wait_command()
 
         self.move_to_location('pause',z_offset=True)
-        self.move_to_location('pause')
+        self.move_to_location('pause', ignore_safe_height=True)
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
         self.enable_print_profile()
