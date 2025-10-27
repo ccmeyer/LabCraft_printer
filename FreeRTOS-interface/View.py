@@ -1779,7 +1779,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.tasks_table.setSortingEnabled(True)
 
     @QtCore.Slot(str)
-    def _on_log_message(self, text: str):
+    def _on_log_message_received(self, text: str):
         self._append_log_line(text)
 
     # === Table appender with cap & autoscroll ===

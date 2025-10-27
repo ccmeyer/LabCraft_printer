@@ -882,7 +882,7 @@ class LogReader(QThread):
                         self._stats_block.append(text)
 
                 # Outside of stats: treat as a normal log message
-                if text.strip():
+                elif text.strip():
                     self._record_message(text)
 
             except serial.SerialException:
