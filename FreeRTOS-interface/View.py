@@ -1608,6 +1608,39 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             f"QTableWidget {{ background-color: {self.color_dict['darker_gray']}; }}"
         )        
 
+        # === Log Messages group (scrollable table) ===
+        self.logs_group = QtWidgets.QGroupBox("Log Messages")                    # NEW
+        logs_v = QtWidgets.QVBoxLayout(self.logs_group)                          # NEW
+
+        self.logs_table = QtWidgets.QTableWidget(0, 1, self)                     # NEW
+        self.logs_table.setHorizontalHeaderLabels(["Message"])                   # NEW
+        self.logs_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.logs_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.logs_table.setAlternatingRowColors(True)
+        self.logs_table.verticalHeader().setVisible(False)
+        self.logs_table.horizontalHeader().setStretchLastSection(True)
+        self.logs_table.setWordWrap(False)
+        self.logs_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.logs_table.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        self._log_max_rows = 2000                                                # NEW
+
+        logs_v.addWidget(self.logs_table)                                        # NEW
+        layout.addWidget(self.logs_group, row_after_table + 4, 0, 1, 3)          # NEW
+
+        # Optional style
+        self.logs_group.setStyleSheet(                                           # NEW
+            f"QGroupBox {{ color: #DDD; border: 1px solid #444; margin-top: 6px; }}"
+            f"QTableWidget {{ background-color: {self.color_dict['darker_gray']}; }}"
+        )
+
+        # Stretch/spacer row so everything stays at the top
+        last_row = row_after_table + 5   # after logs_group                      # CHANGED
+        spacer = QtWidgets.QSpacerItem(
+            0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding
+        )
+        layout.addItem(spacer, last_row, 0, 1, 4)
+        layout.setRowStretch(last_row, 1)
+
         # Stretch/spacer row so everything stays at the top
         last_row = len(self._axis_rows) + 4  # header(0) + data rows
         spacer = QtWidgets.QSpacerItem(
@@ -1641,6 +1674,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             self.controller.dfu_output.connect(self._on_dfu_output)
 
         self.controller.machine.log_stats_updated.connect(self._on_stats_updated)
+        self.controller.machine.log_message_received.connect(self._on_log_message_received)
 
         self.set_axis_maxspeed.connect(self.controller.set_axis_maxspeed)
         self.set_axis_accel.connect(self.controller.set_axis_accel)
@@ -1743,6 +1777,31 @@ class SpeedProfilesTab(QtWidgets.QWidget):
 
         if sorting_enabled:
             self.tasks_table.setSortingEnabled(True)
+
+    @QtCore.Slot(str)
+    def _on_log_message(self, text: str):
+        self._append_log_line(text)
+
+    # === Table appender with cap & autoscroll ===
+    def _append_log_line(self, text: str):
+        if not text:
+            return
+        # Cap the rows (remove oldest if needed)
+        rowcount = self.logs_table.rowCount()
+        if rowcount >= self._log_max_rows:
+            # remove top chunk to avoid O(n) per message; drop 50 at once
+            for _ in range(50):
+                if self.logs_table.rowCount() == 0:
+                    break
+                self.logs_table.removeRow(0)
+
+        row = self.logs_table.rowCount()
+        self.logs_table.insertRow(row)
+        item = QtWidgets.QTableWidgetItem(text)
+        item.setFlags(QtCore.Qt.ItemIsEnabled)
+        self.logs_table.setItem(row, 0, item)
+        # Ensure view stays scrolled to latest
+        self.logs_table.scrollToBottom()
 
     # ---------- DFU UI handlers ----------
     @QtCore.Slot()

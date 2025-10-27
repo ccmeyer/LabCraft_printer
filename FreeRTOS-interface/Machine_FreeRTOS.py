@@ -805,6 +805,8 @@ class SerialReader(QThread):
 class LogReader(QThread):
     lineReceived   = Signal(str)     # existing
     statsUpdated   = Signal(object)  # emits a dict with parsed stats (see below)
+    messageReceived = Signal(str)
+    
 
     def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360):
         super().__init__(parent)
@@ -818,9 +820,20 @@ class LogReader(QThread):
         self._stats_re = re.compile(
             r'^\s*(?P<task>.+?)\s+(?P<time>\d+)\s+<?(?P<pct>\d+(?:\.\d+)?)?%?\s*$'
         )
+
+        self.message_history = deque(maxlen=2000)  # NEW: keep up to 2000 recent messages
+        self._level_re = re.compile(r'^\s*\[(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\]\s*(.*)$', re.I)
+
         print(f"LogReader initialized on {log_port} at {baud} baud")
 
     # ---------- public helpers for UI/controllers ----------
+    def get_recent_messages(self):
+        """Return a list of dicts: {'ts': float, 'text': str, 'level': Optional[str]}"""
+        return list(self.message_history)
+
+    def clear_messages(self):
+        self.message_history.clear()
+
     def get_latest_stats(self):
         """Return the most recently parsed stats dict or None."""
         return self.last_stats
@@ -868,6 +881,10 @@ class LogReader(QThread):
                     else:
                         self._stats_block.append(text)
 
+                # Outside of stats: treat as a normal log message
+                if text.strip():
+                    self._record_message(text)
+
             except serial.SerialException:
                 break
 
@@ -910,13 +927,6 @@ class LogReader(QThread):
             rows.append({"task": task, "time": t, "percent": pct})
             times.append(t)
 
-        # # If percent column wasn't printed by FreeRTOS, compute it from times
-        # if rows and any(r["percent"] is None for r in rows):
-        #     total = sum(times)
-        #     if total > 0:
-        #         for r in rows:
-        #             r["percent"] = (r["time"] / total) * 100.0
-
         by_task = {r["task"]: r for r in rows}
         idle_percent = by_task.get("IDLE", {}).get("percent")
 
@@ -931,6 +941,16 @@ class LogReader(QThread):
         self.last_stats = stats
         self.stats_history.append(stats)
         self.statsUpdated.emit(stats)
+
+    def _record_message(self, text: str):
+        level = None
+        m = self._level_re.match(text)
+        if m:
+            level = m.group(1).upper()
+            text  = m.group(2)
+        entry = {"ts": time.time(), "text": text, "level": level}
+        self.message_history.append(entry)
+        self.messageReceived.emit(entry["text"])
 
 # class LogReader(QThread):
 #     lineReceived = Signal(str)
@@ -1148,6 +1168,7 @@ class Machine(QObject):
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
+    log_message_received = Signal(str)  # Signal to emit when a log message is received
 
     def __init__(self,model):
         super().__init__()
@@ -1416,11 +1437,15 @@ class Machine(QObject):
         self.log_reader = LogReader(self.baud)
         self.log_reader.lineReceived.connect(self.on_log_line_received)
         self.log_reader.statsUpdated.connect(self.on_stats_updated)
+        self.log_reader.messageReceived.connect(self.on_log_message_received)
         self.log_reader.start()
 
     def on_stats_updated(self, stats: dict):
         self.log_stats_updated.emit(stats)
 
+    def on_log_message_received(self, message: str):
+        self.log_message_received.emit(message)
+        
     def stop_log_thread(self):
         """
         Stop the log reader thread.
