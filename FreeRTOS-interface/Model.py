@@ -4945,6 +4945,9 @@ class ExperimentModel(QObject):
     def get_start_col(self) -> int:
         return int(self.metadata.get("start_col", 0))
 
+    def get_calibration_file_path(self) -> Optional[str]:
+        return self.calibration_file_path
+
     # -----------------------------
     # JSON helpers
     # -----------------------------
