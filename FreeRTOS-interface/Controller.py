@@ -707,9 +707,11 @@ class Controller(QObject):
 
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False,ignore_safe_height=False):
         """Move to the saved location."""
-        safe_z = 6000
-
+        safe_z = 35000
         current_location = self.model.machine_model.get_current_location()
+        if current_location['Z'] < safe_z:
+            print("Already above safe height")
+            ignore_safe_height = True
         print(f'Moving to location: {name} from {current_location}')
         if 'camera' in [current_location, name] and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
