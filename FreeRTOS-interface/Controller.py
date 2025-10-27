@@ -710,7 +710,15 @@ class Controller(QObject):
         safe_z = 35000
         current_location = self.model.machine_model.get_current_location()
         current_z = self.model.machine_model.get_current_position_dict()['Z']
-        if current_z < safe_z:
+
+        if coords is not None:
+            original_target = coords
+        else:
+            original_target = self.model.location_model.get_location_dict(name)
+
+        target = original_target.copy()
+
+        if current_z < safe_z or (target['Z'] < safe_z):
             print("Already above safe height")
             ignore_safe_height = True
         print(f'Moving to location: {name} from {current_location}')
@@ -723,11 +731,7 @@ class Controller(QObject):
         elif 'Slot' not in current_location and 'Slot' in name and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
-        if coords is not None:
-            original_target = coords
-        else:
-            original_target = self.model.location_model.get_location_dict(name)
-        target = original_target.copy()
+
         if x_offset:
             target['X'] += x_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
