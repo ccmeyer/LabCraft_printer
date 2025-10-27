@@ -1978,7 +1978,7 @@ class Machine(QObject):
         return self.add_command_to_queue('DISABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
 
     def set_gripper_params(self, refresh_period, pulse_duration, handler=None, kwargs=None, manual=False):
-        if self.check_param_limits(refresh_period, 10, 1000) and self.check_param_limits(pulse_duration, 10, 1000):
+        if self.check_param_limits(refresh_period, 1000, 1000000) and self.check_param_limits(pulse_duration, 100, 10000):
             return self.add_command_to_queue('SET_GRIPPER_PARAMS', refresh_period, pulse_duration, 0, handler=handler, kwargs=kwargs, manual=manual)
         else:
             print(f'Gripper parameters out of range: refresh_period={refresh_period}, pulse_duration={pulse_duration}')
