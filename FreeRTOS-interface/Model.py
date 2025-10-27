@@ -5545,29 +5545,6 @@ class WellPlate(QObject):
                 return plate_data
         raise ValueError(f"Plate format '{plate_name}' not found.")        
 
-    # def store_calibrations(self):
-    #     """Save the temporary calibration data to the main calibration data."""
-    #     plate_name = self.get_current_plate_name()
-    #     for plate_data in self.all_plate_data:
-    #         print(plate_data['name'])
-    #         if plate_data['name'] == plate_name:
-    #             plate_data['calibrations'] = self.temp_calibration_data.copy()
-    #             self.calibrations = self.temp_calibration_data.copy()
-    #             # Clear the temporary data after saving
-    #             self.temp_calibration_data.clear()
-    #             return
-    #     raise ValueError(f"Plate format '{plate_name}' not found.")
-
-    # def save_calibrations_to_file(self, file_path='.\\MVC-interface\\Presets\\Plates.json'):
-    #     """Save the current calibration data to a JSON file."""
-    #     try:
-    #         with open(file_path, 'w') as file:
-    #             json.dump(self.all_plate_data, file, indent=4)
-    #         #print(f"Calibration data saved to {file_path}")
-    #     except Exception as e:
-    #         pass
-    #         #print(f"Error saving calibration data to file: {e}")
-
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
         plate_name = self.get_current_plate_name()
@@ -6601,60 +6578,69 @@ class LocationModel(QObject):
     locations_updated = Signal()  # Signal to notify when locations are updated
     current_location_updated = Signal(str)  # Signal to notify when the current location is updated
 
-    def __init__(self, json_file_path='Presets\\Locations.json',obstacle_path='Presets\\Obstacles.json'):
+    def __init__(self, json_file_path=None, obstacle_path=None):
         super().__init__()
-        # Get the directory of the current script    
-        self.json_file_path = json_file_path   
-        self.locations = {}  # Dictionary to hold location data
-        self.obstacle_path = obstacle_path
+
+        # Resolve canonical, OS-agnostic default paths next to your app
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        presets_dir = os.path.join(script_dir, "Presets")
+
+        self.json_file_path = json_file_path or os.path.join(presets_dir, "Locations.json")
+        self.obstacle_path  = obstacle_path  or os.path.join(presets_dir, "Obstacles.json")
+
+        self.locations = {}
         self.boundaries = []
         self.obstacles = []
 
+    # === Atomic file utility ===
+    def _atomic_write_json(self, path: str, obj: dict) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)  # atomic on modern Windows & POSIX
+
+
+    # === Load / Save Locations ===
     def load_locations(self):
         """Load locations from a JSON file."""
         try:
-            with open(self.json_file_path, "r") as file:
+            with open(self.json_file_path, "r", encoding="utf-8") as file:
                 self.locations = json.load(file)
             self.locations_updated.emit()
-            #print(f"Locations loaded from {self.json_file_path}")
         except FileNotFoundError:
-            #print(f"{self.json_file_path} not found. Starting with an empty locations dictionary.")
             self.locations = {}
         except json.JSONDecodeError:
-            #print(f"Error decoding JSON from {self.json_file_path}. Starting with an empty locations dictionary.")
             self.locations = {}
         except Exception as e:
-            pass
-            #print(f"Failed to load locations: {e}")
+            print(f"Failed to load locations '{self.json_file_path}': {e}")
+            self.locations = {}
 
     def save_locations(self):
-        """Save locations to a JSON file."""
+        """Save locations to a JSON file atomically."""
         try:
-            with open(self.json_file_path, "w") as file:
-                json.dump(self.locations, file, indent=4)
-            #print(f"Locations saved to {self.json_file_path}")
-
+            self._atomic_write_json(self.json_file_path, self.locations)
         except Exception as e:
-            #print(f"Failed to save locations: {e}")
-            pass
+            print(f"Failed to save locations '{self.json_file_path}': {e}")
+            # consider re-raising if you want calling code to handle it
 
+    # === Obstacles / Boundaries ===
     def load_obstacles(self):
-        """Load locations from a JSON file."""
+        """Load boundaries and obstacles from a JSON file."""
         try:
-            with open(self.obstacle_path, "r") as file:
+            with open(self.obstacle_path, "r", encoding="utf-8") as file:
                 data = json.load(file)
-                self.boundaries = data['boundaries']
-                self.obstacles = data['obstacles']
-            #print(f"Obstacles loaded from {self.obstacle_path}")
+            self.boundaries = data.get("boundaries", [])
+            self.obstacles = data.get("obstacles", [])
         except FileNotFoundError:
-            #print(f"{self.obstacle_path} not found. Starting with an empty obstacles dictionary.")
-            self.obstacles = {}
+            self.boundaries, self.obstacles = [], []
         except json.JSONDecodeError:
-            #print(f"Error decoding JSON from {self.obstacle_path}. Starting with an empty locations dictionary.")
-            self.obstacles = {}
+            self.boundaries, self.obstacles = [], []
         except Exception as e:
-            pass
-            #print(f"Failed to load locations: {e}")
+            print(f"Failed to load obstacles '{self.obstacle_path}': {e}")
+            self.boundaries, self.obstacles = [], []
 
     def get_obstacles(self):
         return self.obstacles
@@ -6665,7 +6651,7 @@ class LocationModel(QObject):
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
         self.locations[name] = {'X': x, 'Y': y, 'Z': z}
-        self.locations_updated.emit(name)
+        self.locations_updated.emit()
         #print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
@@ -6710,9 +6696,9 @@ class LocationModel(QObject):
     def get_location(self, name):
         """Get a location's coordinates by name in an array [x,y,z]."""
         if name in self.locations:
-            return [self.locations[name]['X'], self.locations[name]['Y'], self.locations[name]['Z']]
-        else:
-            return None
+            loc = self.locations[name]
+            return [loc['X'], loc['Y'], loc['Z']]
+        return None
     
     def get_location_dict(self, name):
         """Get a location's coordinates by name in a dictionary."""
@@ -6731,18 +6717,16 @@ class LocationModel(QObject):
     
     def post_calibration_update(self,calibration_data):
         self.update_pause_location(calibration_data)
-        self.update_plate_locatin(calibration_data)
+        self.update_plate_location(calibration_data)
         self.save_locations()
     
     def update_pause_location(self,coords):
         offset_coords = {'X':coords['X']-500,'Y':coords['Y']-500,'Z':coords['Z']}
         self.update_location_coords('pause',offset_coords)
-        self.locations_updated.emit()
         #print(f"Pause location updated.")
 
     def update_plate_locatin(self,coords):
         self.update_location_coords('plate',coords)
-        self.locations_updated.emit()
         #print(f"Plate location updated.")
 
 class MachineModel(QObject):
