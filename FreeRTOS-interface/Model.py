@@ -5075,15 +5075,75 @@ class ExperimentModel(QObject):
         with open(self.progress_file_path, "w") as f:
             json.dump(progress, f, indent=4)
 
+    # def progress_to_key(self) -> "pd.DataFrame":
+    #     """Make a wide CSV with wells as rows, stock_id as columns, target droplets as values."""
+    #     import pandas as pd
+    #     data = {}
+    #     for well_id, entry in self.progress_data.items():
+    #         reagents = entry.get("reagents", {})
+    #         data[well_id] = {sid: d["target_droplets"] for sid, d in reagents.items()}
+    #     return pd.DataFrame.from_dict(data, orient="index")
+
     def progress_to_key(self) -> "pd.DataFrame":
-        """Make a wide CSV with wells as rows, stock_id as columns, target droplets as values."""
-        import pandas as pd
+        """
+        Make a wide CSV with wells as rows, stock_id-with-droplet-volume as columns,
+        and target droplets as values.
+
+        Column header format:
+        <reagent>_<conc(2dp)>_<units>_<nL_per_drop(1dp)>nL
+        e.g., "NaCl_25.00_mM_10.0nL"
+        """
+        # 1) Lookup of nL_per_drop for each stock_id from the stock table (includes Fill)
+        stock_rows = self.get_stock_table_rows(include_fill=True)
+
+        def _base_sid(row: dict) -> str:
+            name = row.get("option_name") or row.get("factor_name") or ""
+            units = row.get("units", "")
+            conc = row.get("stock_concentration", 0.0)
+            try:
+                conc2 = f"{float(conc):.2f}"
+            except Exception:
+                conc2 = str(conc)
+            return f"{name}_{conc2}_{units}"
+
+        dv_lookup = {
+            _base_sid(r): float(r.get("droplet_volume_nL", 0.0))
+            for r in stock_rows
+        }
+        dv_fallback = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+
+        # 2) Build the table: one value (drops) per (well, stock-with-dv)
         data = {}
         for well_id, entry in self.progress_data.items():
             reagents = entry.get("reagents", {})
-            data[well_id] = {sid: d["target_droplets"] for sid, d in reagents.items()}
-        return pd.DataFrame.from_dict(data, orient="index")
+            row = {}
+            for base_sid, details in reagents.items():
+                drops = int(details.get("target_droplets", 0))
+                nL_per_drop = dv_lookup.get(base_sid, dv_fallback)
+                # Append droplet volume to the ID (single-level header)
+                sid_with_dv = f"{base_sid}_{nL_per_drop:.1f}nL"
+                row[sid_with_dv] = drops
+            data[well_id] = row
 
+        df = pd.DataFrame.from_dict(data, orient="index")
+
+        # Stable column ordering: group by base id, then by nL value
+        def _split_key(k: str):
+            # "<name>_<conc>_<units>_<dv>nL" → (name_conc_units, dv_float)
+            parts = k.rsplit("_", 1)
+            base = parts[0] if parts else k
+            dv = parts[1][:-2] if len(parts) > 1 and parts[1].endswith("nL") else "0"
+            try:
+                dvf = float(dv)
+            except Exception:
+                dvf = 0.0
+            return base, dvf
+
+        if not df.empty:
+            df = df.reindex(sorted(df.columns, key=lambda c: _split_key(str(c))), axis=1)
+
+        return df
+    
     def create_key_file(self, file_name: Optional[str] = None):
         if file_name is not None:
             self.key_file_path = file_name
