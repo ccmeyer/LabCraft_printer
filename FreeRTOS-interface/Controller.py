@@ -707,11 +707,17 @@ class Controller(QObject):
 
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False,ignore_safe_height=False):
         """Move to the saved location."""
-        safe_z = 3000
+        safe_z = 6000
 
         current_location = self.model.machine_model.get_current_location()
         print(f'Moving to location: {name} from {current_location}')
         if 'camera' in [current_location, name] and not ignore_safe_height:
+            print(f'Must move up to safe height before moving to {name} from {current_location}')
+            self.set_absolute_Z(safe_z, manual=manual, override=override)
+        elif 'Slot' in current_location and 'Slot' not in name and not ignore_safe_height:
+            print(f'Must move up to safe height before moving to {name} from {current_location}')
+            self.set_absolute_Z(safe_z, manual=manual, override=override)
+        elif 'Slot' not in current_location and 'Slot' in name and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
         if coords is not None:
@@ -722,18 +728,6 @@ class Controller(QObject):
         if x_offset:
             target['X'] += x_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
-
-        # if direct and current['Z'] > target['Z']:
-        #     up_first = True
-        #     print(f'Moving up first to Z: {target["Z"]}')
-        #     self.set_absolute_Z(target['Z'])
-        #     self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override)
-        # else:
-        #     up_first = False
-        #     print('Moving directly to above target coordinates')
-        #     self.set_absolute_coordinates(target['X'], target['Y'], current['Z'], manual=manual, override=override)
-        #     print(f'Moving down to Z: {target["Z"]}')
-        #     self.set_absolute_Z(target['Z'])
 
     def open_gripper(self,handler=None):
         """Open the gripper."""
