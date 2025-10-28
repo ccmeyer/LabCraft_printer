@@ -2743,7 +2743,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  escalate_to: int = 9,
                  classification_delay_us: int | None = None,
                  reverse_order: bool = True,
-                 safety_clearance_px: int = 600,
+                 safety_clearance_px: int = 300,
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -2787,12 +2787,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # ---- Adaptive step settings ----
         base_step = abs(float(p_step)) if p_step else 0.1
         self.dp_min = 0.01                         # smallest step when near nozzle
-        self.dp_max = 0.10                         # largest allowed step
+        self.dp_max = 0.05                         # largest allowed step
         self.dp     = max(self.dp_min, min(base_step, self.dp_max))
 
         # Special jumps for specific states
-        self.multiple_big_step = 0.40              # when MULTIPLE → drop faster
-        self.none_jump_up      = 0.50              # when NONE → push up to re-acquire
+        self.multiple_big_step = 0.10              # when MULTIPLE → drop faster
+        self.none_jump_up      = 0.10              # when NONE → push up to re-acquire
         
         # Movement heuristics (pixels)
         self.small_move_px = 30                    # “barely moved” threshold
@@ -2803,7 +2803,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.safety_clearance_px       = int(safety_clearance_px)
         self.near_nozzle_px            = int(self.safety_clearance_px * 1.6)
         self.far_nozzle_px             = int(self.safety_clearance_px * 3.0)
-        self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
+        # self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
+        self.auto_stop_on_nozzle_wet   = False
 
         # --- replicate policy ---
         self.min_reps           = int(min_reps)
