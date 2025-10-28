@@ -781,26 +781,42 @@ class SerialReader(QThread):
 
     def run(self):
         while not self.isInterruptionRequested():
-            hdr = self.ser.read(2)
-            if len(hdr)!=2 or hdr[0]!=START_BYTE: continue
-            length = hdr[1]
-            payload = self.ser.read(length)
-            if len(payload) != length: continue
-            tail = self.ser.read(2)
-            if len(tail) != 2: continue
-            rec_crc = tail[0] | (tail[1]<<8)
-            if crc16_x25(payload)!=rec_crc: continue
+            try:
+                if not self.ser or not self.ser.is_open:
+                    break
+                hdr = self.ser.read(2)
+                if len(hdr)!=2 or hdr[0]!=START_BYTE: continue
+                length = hdr[1]
+                payload = self.ser.read(length)
+                if len(payload) != length: continue
+                tail = self.ser.read(2)
+                if len(tail) != 2: continue
+                rec_crc = tail[0] | (tail[1]<<8)
+                if crc16_x25(payload)!=rec_crc: continue
 
-            cmd = payload[0]
-            if cmd == CMD_STATUS:
-                data = parse_tlv_payload(payload[1:])
-                self.status_received.emit(data)
-            else:
-                # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
-                # print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
-                ack = self._parse_ack(payload)
-                print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
-                self.ackReceived.emit(ack)
+                cmd = payload[0]
+                if cmd == CMD_STATUS:
+                    data = parse_tlv_payload(payload[1:])
+                    self.status_received.emit(data)
+                else:
+                    # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
+                    # print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
+                    ack = self._parse_ack(payload)
+                    print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
+                    self.ackReceived.emit(ack)
+
+            except (serial.SerialException, OSError, TypeError, ValueError):
+                break
+
+    def stop(self):
+        # helper to mirror LogReader.stop()
+        self.requestInterruption()
+        try:
+            if hasattr(self.ser, "cancel_read"):
+                self.ser.cancel_read()
+        except Exception:
+            pass
+        self.wait(1000)
 
 class LogReader(QThread):
     lineReceived   = Signal(str)     # existing
@@ -854,7 +870,11 @@ class LogReader(QThread):
         """Continuously read lines and emit them + parse stats blocks."""
         while self._running:
             try:
-                line = self.ser.readline()
+                if not self.ser or not self.ser.is_open:
+                    break
+
+                line = self.ser.read_until(expected=b'\n', size=1024)
+                # line = self.ser.readline()
                 if not line:
                     continue
                 text = line.decode('ascii', errors="ignore").rstrip("\r\n")
@@ -885,14 +905,28 @@ class LogReader(QThread):
                 elif text.strip():
                     self._record_message(text)
 
-            except serial.SerialException:
+            except (serial.SerialException, OSError, TypeError, ValueError):
                 break
 
     def stop(self):
+        # Signal loop to stop
         self._running = False
-        self.wait(200)
-        if self.ser.is_open:
-            self.ser.close()
+        try:
+            # Unblock any pending read so the thread can exit immediately
+            if hasattr(self.ser, "cancel_read"):
+                self.ser.cancel_read()
+        except Exception:
+            pass
+
+        # give the thread time to unwind out of run()
+        self.wait(1000)
+
+        # Close port last
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
 
     # ---------- parsing ----------
     def _finish_stats_block(self):
@@ -1342,9 +1376,27 @@ class Machine(QObject):
     def reset_board(self):
         print('Resetting board')
         self.command_queue.clear_queue()
-        self.stop_execution_timer()
+        # Stop TX timer
+        if getattr(self, 'execution_timer', None):
+            try:
+                self.execution_timer.stop()
+                self.execution_timer.deleteLater()
+            except Exception:
+                pass
+            self.execution_timer = None
+
+        # Cancel any pending ack timers
+        for entry in list(self._pending_acks.values()):
+            try:
+                entry["timer"].stop()
+                entry["timer"].deleteLater()
+            except Exception:
+                pass
+        self._pending_acks.clear()
+
         self.stop_reader_thread()
         self.stop_log_thread()
+
         try: self._gripper_idle_timer.stop()
         except Exception: pass
         self._gripper_ack_required = True
@@ -1355,10 +1407,17 @@ class Machine(QObject):
         
     def disconnect_handler(self):
         self.reset_board()
-        if self.ser is not None:
-            self.ser.close()
+        # Now it's safe to close the main serial
+        try:
+            if self.ser is not None:
+                if self.ser.is_open:
+                    self.ser.close()
+        except Exception:
+            pass
+        finally:
             self.ser = None
             self.port = None
+
         self.disconnect_complete_signal.emit()
 
     def disconnect_board(self, error=False):
@@ -1423,8 +1482,12 @@ class Machine(QObject):
         Stop the serial reader thread.
         """
         if self.reader is not None:
-            self.reader.requestInterruption()
-            self.reader.wait(200)
+            try:
+                self.reader.stop()
+            except Exception:
+                # fallback to old behavior
+                self.reader.requestInterruption()
+                self.reader.wait(1000)
             self.reader = None
             print('Serial reader thread stopped')
         else:
