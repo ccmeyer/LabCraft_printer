@@ -2743,7 +2743,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  escalate_to: int = 9,
                  classification_delay_us: int | None = None,
                  reverse_order: bool = True,
-                 safety_clearance_px: int = 300,
+                 safety_clearance_px: int = 600,
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -2779,17 +2779,30 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.P_MIN = float(hw_lo)
         self.P_MAX = float(hw_hi)
 
+        # Requested scan range (we still honor the user’s start/end direction)
         p0, p1 = float(min(p_start, p_end)), float(max(p_start, p_end))
-        step = abs(float(p_step)) if p_step != 0 else 0.05
-        pressures = make_pressure_grid(p0, p1, step, self.P_MIN, self.P_MAX)
+        self._p_lo = max(self.P_MIN, p0)
+        self._p_hi = min(self.P_MAX, p1)
 
-        # HIGH → LOW by default
-        self.pressure_list = list(reversed(pressures)) if reverse_order else list(pressures)
-        self.pressure_index = 0
+        # ---- Adaptive step settings ----
+        base_step = abs(float(p_step)) if p_step else 0.1
+        self.dp_min = 0.01                         # smallest step when near nozzle
+        self.dp_max = 0.10                         # largest allowed step
+        self.dp     = max(self.dp_min, min(base_step, self.dp_max))
+
+        # Special jumps for specific states
+        self.multiple_big_step = 0.40              # when MULTIPLE → drop faster
+        self.none_jump_up      = 0.50              # when NONE → push up to re-acquire
+        
+        # Movement heuristics (pixels)
+        self.small_move_px = 30                    # “barely moved” threshold
+        self.large_move_px = 100                    # “moved a lot” threshold
 
         # --- thresholds & safety ---
         self.nozzle_area_threshold     = 8000
         self.safety_clearance_px       = int(safety_clearance_px)
+        self.near_nozzle_px            = int(self.safety_clearance_px * 1.6)
+        self.far_nozzle_px             = int(self.safety_clearance_px * 3.0)
         self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
 
         # --- replicate policy ---
@@ -2807,8 +2820,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # --- flags ---
         self._current_pressure   = None
-        self._early_stop         = False
-        self._stop_reason        = None
+        self._next_pressure        = float(self._p_hi)  # start at high bound
+        self._prev_pressure        = None
+        self._prev_dy              = None               # previous (median) distance to nozzle in px
+        self._early_stop           = False
+        self._stop_reason          = None
         self._terminate_at_pressure = None
 
         try:
@@ -2894,32 +2910,41 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onApplyPressure(self):
-        if self.pressure_index >= len(self.pressure_list):
+        # Out-of-range or done?
+        if self._next_pressure is None:
             self.finalize.emit(); return
 
-        # Only reset replicate state when the pressure CHANGES
-        target = float(self.pressure_list[self.pressure_index])
-        if self._current_pressure != target:
-            self._current_pressure = target
-            self.reps = []
-            self.replicates_target = self.min_reps
-            self._invalid_skip_count = 0
-            self._discard_next = True
+        # If we’ve scanned below the requested low bound, finish
+        if self._next_pressure < (self._p_lo - 1e-6):
+            self.stageChanged.emit("Reached lower pressure bound; finalizing")
+            self.finalize.emit(); return
 
-            settings = {
-                "print_pressure": self._current_pressure,
-                "num_droplets": 1,
-                "flash_delay": int(self.classify_delay_us)
-            }
-            self.stageChanged.emit(
-                f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs "
-                f"({self.pressure_index+1}/{len(self.pressure_list)})"
-            )
-            def _after(): self.pressureApplied.emit()
-            self.calibration_manager.changeSettingsRequested.emit(settings, _after)
-        else:
-            # Already at this pressure (should only happen if we re-enter apply due to logic error)
-            self.pressureApplied.emit()
+        # Clamp to hardware limits
+        target = float(max(self.P_MIN, min(self.P_MAX, self._next_pressure)))
+
+        # If the clamp doesn’t change pressure and we can’t move further, finish
+        if self._current_pressure is not None and abs(target - self._current_pressure) < 1e-9:
+            self.stageChanged.emit("No further pressure change possible; finalizing")
+            self.finalize.emit(); return
+
+        # Set up for this pressure
+        self._current_pressure = target
+        self._next_pressure = None
+        self.reps = []
+        self.replicates_target = self.min_reps
+        self._invalid_skip_count = 0
+        self._discard_next = True
+
+        settings = {
+            "print_pressure": self._current_pressure,
+            "num_droplets": 1,
+            "flash_delay": int(self.classify_delay_us)
+        }
+        self.stageChanged.emit(
+            f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs"
+        )
+        def _after(): self.pressureApplied.emit()
+        self.calibration_manager.changeSettingsRequested.emit(settings, _after)
 
     @Slot()
     def onCaptureReplicate(self):
@@ -2932,7 +2957,6 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyzeReplicate(self):
-        # Discard one settling frame just after a pressure change
         if self._discard_next:
             self._discard_next = False
             self.stageChanged.emit("Settling shot discarded; capturing again")
@@ -2950,20 +2974,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.presentImageSignal.emit(overlay)
 
         nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
-        if droplets is not None and len(droplets) > 0:
-            if len(droplets) == 1:
-                dy_below = [(cy - ny) for (cx, cy) in droplets if cy >= ny]
-                if dy_below:
-                    min_dy = min(dy_below)
-                    if min_dy < self.safety_clearance_px:
-                        self._early_stop = True
-                        self._stop_reason = f"Droplet too close to nozzle (dy={int(min_dy)} px < {self.safety_clearance_px})"
-                        self._terminate_at_pressure = float(self._current_pressure)
-                        self.stageChanged.emit(
-                            f"Safety stop: droplet too close (dy={int(min_dy)} px) at {self._current_pressure:.3f} psi"
-                        )
-                        self.finalize.emit()
-                        return
+        dy_min = None
+        if droplets:
+            dy_list = [ (cy - ny) for (cx, cy) in droplets if cy >= ny ]
+            if dy_list:
+                dy_min = min(dy_list)
+                if dy_min < self.safety_clearance_px:
+                    self._early_stop = True
+                    self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
+                    self._terminate_at_pressure = float(self._current_pressure)
+                    self.stageChanged.emit(
+                        f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
+                    )
+                    self.finalize.emit()
+                    return
 
         cls = self._classify_from_detection(droplets)
         if cls == "invalid":
@@ -2977,6 +3001,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         rep = {
             "cls": cls,
             "center_px": (None if not droplets else droplets[0]),
+            "dy_min_px": (None if dy_min is None else int(dy_min)),
             "nozzle_attached_area": int(nozzle_area or 0),
             "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
         }
@@ -2985,32 +3010,34 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onDecide(self):
-        # Need more replicates at THIS pressure?
+        # Need more reps at THIS pressure?
         if len(self.reps) < self.replicates_target:
-            self.continueReplicate.emit()   # <-- go straight back to capture (no re-apply)
+            self.continueReplicate.emit()
             return
 
-        # After the first 3, if unanimous we’re done; otherwise escalate to 7
+        # Early short-circuit: unanimity among first few reps
         if self.replicates_target == self.min_reps:
             classes = [r["cls"] for r in self.reps]
             if len(set(classes)) == 1:
                 verdict = classes[0]
                 self._store_pressure_summary(verdict, escalated=False)
+                self._choose_next_pressure(verdict)
                 self._advance_or_finish()
                 return
             self.stageChanged.emit("Replicates disagree → escalating to 7 total")
             self.replicates_target = self.escalate_to
-            self.continueReplicate.emit()   # <-- more reps at SAME pressure
+            self.continueReplicate.emit()
             return
 
-        # At 7 total → majority
+        # At escalate_to total reps → majority vote
         if len(self.reps) >= self.escalate_to:
             verdict = self._majority_verdict(self.reps)
             self._store_pressure_summary(verdict, escalated=True)
+            self._choose_next_pressure(verdict)
             self._advance_or_finish()
             return
 
-        # Otherwise keep sampling up to target at the SAME pressure
+        # Otherwise continue sampling to target
         self.continueReplicate.emit()
 
     @Slot()
@@ -3055,26 +3082,96 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "n_reps": len(self.reps),
             "escalated": bool(escalated),
             "verdict": verdict,
+            "dy_min_px_med": self._median_dy(self.reps),
             "replicates": self.reps[:]
         }
         self.samples.append(rec)
 
-    def _advance_or_finish(self):
-        self.pressure_index += 1
-        self._current_pressure = None
-        if self.pressure_index >= len(self.pressure_list):
+    def _median_dy(self, reps):
+        vals = [r.get("dy_min_px") for r in reps if r.get("dy_min_px") is not None]
+        if not vals:
+            return None
+        from statistics import median
+        return int(median(vals))
+
+    def _choose_next_pressure(self, verdict: str):
+        """
+        Decide the next pressure and update self._next_pressure and self.dp.
+        Uses movement (Δdy), proximity to nozzle, and detection class.
+        """
+        dy_med = self._median_dy(self.reps)
+        moved_px = None
+        if dy_med is not None and self._prev_dy is not None and self._prev_pressure is not None:
+            moved_px = abs(dy_med - self._prev_dy)
+
+        # If nozzle looks wet and user wants auto stop, stop here
+        if any(r.get("nozzle_wet") for r in self.reps) and self.auto_stop_on_nozzle_wet:
+            self._early_stop = True
+            self._stop_reason = "Nozzle wet detected during scan"
+            self._terminate_at_pressure = float(self._current_pressure)
             self.finalize.emit()
-        else:
-            self.continueScan.emit()   # goes to state_apply → sets next pressure
+            return
+
+        # Adaptive step logic
+        if verdict == "multiple":
+            # Move down quickly out of multi-droplet regime
+            self.dp = max(self.dp, self.multiple_big_step)
+            next_p = self._current_pressure - self.dp
+
+        elif verdict == "single":
+            # Movement-based adjustment
+            if moved_px is not None:
+                if moved_px < self.small_move_px:
+                    # Barely moved: increase |Δp|
+                    self.dp = min(self.dp_max, max(self.dp + 0.15, self.dp * 1.8))
+                elif moved_px > self.large_move_px:
+                    # Moved a lot: shrink |Δp|
+                    self.dp = max(self.dp_min, min(self.dp - 0.10, self.dp * 0.6))
+
+            # Proximity-based adjustment
+            if dy_med is not None:
+                if dy_med <= self.near_nozzle_px:
+                    # Getting close → go gentle
+                    self.dp = max(self.dp_min, min(self.dp, 0.08))
+                elif dy_med >= self.far_nozzle_px:
+                    # Far away → we can go faster
+                    self.dp = min(self.dp_max, max(self.dp, 0.25))
+
+            next_p = self._current_pressure - self.dp
+
+        else:  # verdict == "none" or "ambiguous"
+            # Too low or unclear → jump up to re-acquire
+            up = max(self.dp, self.none_jump_up)
+            self.dp = min(self.dp_max, max(self.dp, 0.20))
+            next_p = self._current_pressure + up
+
+        # Clamp and record history anchors
+        next_p = float(max(self.P_MIN, min(self.P_MAX, next_p)))
+        self._prev_dy = dy_med if dy_med is not None else self._prev_dy
+        self._prev_pressure = self._current_pressure
+        self._next_pressure = next_p
+
+    def _advance_or_finish(self):
+        if self._early_stop:
+            self.finalize.emit()
+            return
+        if self._next_pressure is None:
+            self.finalize.emit()
+            return
+        # If walking off the scan range, finish
+        if self._next_pressure < (self._p_lo - 1e-6):
+            self.finalize.emit()
+            return
+        self.continueScan.emit()   # → state_apply (will use _next_pressure)
 
     def _compute_single_bands(self):
         singles = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") == "single"])
         if not singles:
             return []
         diffs = [b - a for a, b in zip(singles[:-1], singles[1:])]
-        default_step = (self.pressure_list[0] - self.pressure_list[1]) if len(self.pressure_list) > 1 else 0.05
-        step = (sorted(diffs)[len(diffs)//2] if diffs else abs(default_step))
-        tol = abs(step) * 1.25 + 1e-6
+        # Use median spacing if available; otherwise fall back to current dp or 0.05
+        typical = (sorted(diffs)[len(diffs)//2] if diffs else max(self.dp_min, min(self.dp, 0.05)))
+        tol = abs(typical) * 1.25 + 1e-6
         bands, band_start, prev = [], singles[0], singles[0]
         for p in singles[1:]:
             if (p - prev) <= tol:
