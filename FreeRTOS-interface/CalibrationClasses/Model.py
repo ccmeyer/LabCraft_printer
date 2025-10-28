@@ -2833,7 +2833,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._phase = "scan"                       # scan | refine_upper | refine_lower
         self._upper_bracket = None                 # [lo(single), hi(multiple)]
         self._lower_bracket = None                 # [lo(none/too_close), hi(single)]
-        self._edge_eps = 0.02                        # stop refining upper/lower once bracket ≤ 0.01 psi
+        self._edge_eps = 0.01                        # stop refining upper/lower once bracket ≤ 0.01 psi
         self._prev_verdict = None
         self._first_single_pressure = None
         self._min_single_pressure = None
@@ -2842,6 +2842,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._lower_edge_locked = False          
         self._lower_edge_value  = None
         self._lower_snap_eps    = self._edge_eps
+
+        self._straddle_bracket  = None          # [lo(none-side), hi(multiple-side)]
+        self._bisect_eps        = max(self._edge_eps, 0.01)  # tighter convergence for gap-bisection
 
         # Upward seek params (used if first verdict is SINGLE)
         self._seek_step = max(self.dp_min, min(0.05, self.dp))  # gentle initial nudge up
@@ -3139,6 +3142,39 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         winners = [k for k, v in counts.items() if v == max_ct]
         return winners[0] if len(winners) == 1 else "ambiguous"
 
+    def _effective_step_caps(self):
+        """
+        Returns (dp_max_eff, multi_big_eff, none_jump_eff) based on pulse width
+        and any active bracket width (upper/lower/straddle).
+        """
+        pw = self._pulse_width_us or 1500
+        # Clamp PW range we care about (t in [0,1] for ~1200→2100 us)
+        lo_pw, hi_pw = 1200.0, 2100.0
+        t = 0.0 if pw <= lo_pw else (1.0 if pw >= hi_pw else (pw - lo_pw) / (hi_pw - lo_pw))
+
+        # Base caps vs PW: higher PW → smaller steps
+        dp_max_pw     = 0.05 - t * (0.05 - 0.02)  # 0.05 at low PW → 0.02 at high PW
+        big_step_pw   = 0.10 - t * (0.10 - 0.04)  # for MULTIPLE downward nudge
+        none_jump_pw  = 0.10 - t * (0.10 - 0.04)  # for NONE upward nudge
+
+        # Further cap by any known bracket width (don’t step more than ~45% of the bracket)
+        widths = []
+        if self._upper_bracket:
+            widths.append(abs(self._upper_bracket[1] - self._upper_bracket[0]))
+        if self._lower_bracket:
+            widths.append(abs(self._lower_bracket[1] - self._lower_bracket[0]))
+        if self._straddle_bracket:
+            widths.append(abs(self._straddle_bracket[1] - self._straddle_bracket[0]))
+
+        if widths:
+            w = max(2*self.dp_min, min(widths))  # use smallest active bracket, but not absurdly tiny
+            cap_by_bracket = max(self.dp_min, 0.45 * w)
+            dp_max_pw   = min(dp_max_pw, cap_by_bracket)
+            big_step_pw = min(big_step_pw, cap_by_bracket)
+            none_jump_pw = min(none_jump_pw, cap_by_bracket)
+
+        return dp_max_pw, big_step_pw, none_jump_pw
+
     def _store_pressure_summary(self, verdict: str, escalated: bool):
         rec = {
             "pressure": float(self._current_pressure),
@@ -3165,16 +3201,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         return int(median(vals))
 
     def _choose_next_pressure(self, verdict: str):
-        # If we're currently refining an edge, do nothing here.
         if self._phase != "scan":
             return
+
+        dp_max_eff, multi_big_eff, none_jump_eff = self._effective_step_caps()
 
         dy_med = self._median_dy(self.reps)
         moved_px = None
         if dy_med is not None and self._prev_dy is not None and self._prev_pressure is not None:
             moved_px = abs(dy_med - self._prev_dy)
 
-        # (If you re-enable nozzle-wet auto stop, keep this as-is)
         if any(r.get("nozzle_wet") for r in self.reps) and self.auto_stop_on_nozzle_wet:
             self._early_stop = True
             self._stop_reason = "Nozzle wet detected during scan"
@@ -3183,42 +3219,33 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return
 
         if verdict == "multiple":
-            # Keep the "move down faster" idea, but cap it so we don’t overshoot edges too hard
-            self.dp = min(self.dp_max, max(self.dp, 0.10))
-            next_p = self._current_pressure - self.dp
+            # Downward nudge but obey PW/Bracket caps
+            step = min(dp_max_eff, max(self.dp, multi_big_eff))
+            next_p = self._current_pressure - step
 
         elif verdict == "single":
-            # Movement-based adjustment
+            # Movement-sensitive tuning, then obey cap
             if moved_px is not None:
                 if moved_px < self.small_move_px:
-                    # barely moved → grow step aggressively
-                    self.dp = min(self.dp_max, max(self.dp * 1.9, self.dp + 0.10))
+                    self.dp = min(dp_max_eff, max(self.dp * 1.9, self.dp + 0.10))
                 elif moved_px > self.large_move_px:
-                    # moved a lot → shrink, but not all the way to dp_min
                     self.dp = max(max(self.dp_min, 0.02), min(self.dp * 0.6, self.dp - 0.06))
-
-            # Proximity-based adjustment – avoid pinning to dp_min near nozzle
             if dy_med is not None:
                 if dy_med <= self.near_nozzle_px:
-                    # still go gentle, but ensure some forward progress
                     self.dp = max(max(self.dp_min, 0.03), min(self.dp, 0.06))
                 elif dy_med >= self.far_nozzle_px:
-                    # far from nozzle → ensure a decent stride
-                    self.dp = min(self.dp_max, max(self.dp, 0.10))
-
+                    self.dp = min(dp_max_eff, max(self.dp, 0.10))
+            self.dp = min(self.dp, dp_max_eff)
             next_p = self._current_pressure - self.dp
 
         else:  # verdict == "none"
-            up = max(self.dp, self.none_jump_up)
-            self.dp = min(self.dp_max, max(self.dp, 0.20))
-            # Propose upward step, but constrain relative to lowest known SINGLE if present
+            up = max(self.dp, none_jump_eff)
+            self.dp = min(dp_max_eff, max(self.dp, none_jump_eff))
             proposed = self._current_pressure + up
             if self._min_single_pressure is not None:
-                # If we're close to the known lower SINGLE, snap to it
                 if (self._min_single_pressure - self._current_pressure) <= max(self._lower_snap_eps, 0.02):
                     next_p = float(self._min_single_pressure)
                 else:
-                    # Do not overshoot above the lowest SINGLE
                     next_p = float(min(proposed, self._min_single_pressure))
             else:
                 next_p = float(proposed)
@@ -3281,7 +3308,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     f"Refining lower edge between {hi:.3f} psi (single) and {lo:.3f} psi (none)"
                 )
                 return True
-
+            
+            # STRADDLE: immediate MULTIPLE→NONE or NONE→MULTIPLE without seeing SINGLE.
+            if prev_v in ("multiple", "none") and verdict in ("multiple", "none") and prev_v != verdict and prev_p is not None:
+                lo = min(prev_p if prev_v == "none" else cur, cur if verdict == "none" else prev_p)
+                hi = max(prev_p if prev_v == "multiple" else cur, cur if verdict == "multiple" else prev_p)
+                # Ensure lo < hi and lo is the NONE side, hi is the MULTIPLE side
+                if lo > hi:
+                    lo, hi = hi, lo
+                self._straddle_bracket = [lo, hi]
+                self._phase = "bisect_gap"
+                self.dp = max(self.dp_min, min(self.dp, (hi - lo) / 2.0))
+                self._next_pressure = (lo + hi) / 2.0
+                self.stageChanged.emit(f"Straddle detected ({prev_v}→{verdict}) → bisection in [{lo:.3f}, {hi:.3f}]")
+                return True
+            
             return False
 
         # ---------- RE-ACQUIRE UP: climb until SINGLE or MULTIPLE appears ----------
@@ -3343,7 +3384,44 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._next_pressure = next_up
             self.stageChanged.emit(f"Seeking MULTIPLE upward → next {self._next_pressure:.3f} psi")
             return True
+        
+        # ---------- BISECT GAP: between NONE (lo) and MULTIPLE (hi) until SINGLE or convergence ----------
+        if self._phase == "bisect_gap":
+            lo, hi = self._straddle_bracket
+            # Tighten by verdict
+            if verdict == "single":
+                # Found a SINGLE → start refining lower edge immediately
+                self._lower_bracket = [lo, max(lo, min(hi, self._current_pressure))]
+                self._phase = "refine_lower"
+                width = self._lower_bracket[1] - self._lower_bracket[0]
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = sum(self._lower_bracket) / 2.0
+                self.stageChanged.emit(
+                    f"Single found in gap → refining lower edge in [{self._lower_bracket[0]:.3f}, {self._lower_bracket[1]:.3f}]"
+                )
+                return True
 
+            if verdict == "multiple":
+                hi = min(hi, self._current_pressure) if self._current_pressure < hi else self._current_pressure
+            else:  # none or ambiguous → treat as NONE side
+                lo = max(lo, self._current_pressure) if self._current_pressure > lo else self._current_pressure
+
+            if hi < lo:
+                lo, hi = hi, lo
+            self._straddle_bracket = [lo, hi]
+            width = hi - lo
+
+            if width <= self._bisect_eps:
+                # Converged without a clean SINGLE; try a gentle step inside the gap (toward NONE side)
+                candidate = float(max(self.P_MIN, min(self.P_MAX, hi - max(width*0.25, self.dp_min))))
+                self._phase = "scan"
+                self._next_pressure = candidate
+                self.stageChanged.emit(f"Gap converged (≤{self._bisect_eps:.3f}) → probing {candidate:.3f} psi")
+            else:
+                self._next_pressure = (lo + hi) / 2.0
+                self.stageChanged.emit(f"Bisect gap → next {(lo+hi)/2.0:.3f} psi")
+            return True
+        
         # ---------- Refine UPPER edge ----------
         if self._phase == "refine_upper":
             lo, hi = self._upper_bracket
