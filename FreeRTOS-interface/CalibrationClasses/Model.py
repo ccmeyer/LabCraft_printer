@@ -73,6 +73,8 @@ class CalibrationManager(QObject):
     captureFailed = Signal(str)
     position_diff_dict_signal = Signal(dict, dict)
 
+    readinessChanged = Signal(dict)   # {"pressure_scan": {"missing": [...], "ready": bool}, ...}
+
     # Map alternate phase names to canonical keys
     PHASE_ALIASES = {
         "pressure": "pressure_calibration",
@@ -247,23 +249,32 @@ class CalibrationManager(QObject):
         self.calibration_queue = []
 
     def start_calibration_queue(self):
-        if len(self.calibration_queue) > 0:
-            next_cal = self.calibration_queue.pop(0)
-            if next_cal == 'nozzle_position':
-                self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
-            elif next_cal == 'nozzle_focus':
-                self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
-            elif next_cal == 'droplet_emergence':
-                self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
-            elif next_cal == 'pressure':
-                self.activeCalibration = PressureCalibrationProcess(self, self.model)
-            elif next_cal == 'trajectory':
-                self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
-            elif next_cal == 'droplet_search':
-                self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
-            self.start_active_calibration()
-        else:
+        if not self.calibration_queue:
             self.calibrationStageChanged.emit("No calibrations in queue.", "red")
+            self.calibrationQueueCompleted.emit()
+            return
+
+        next_cal = self.calibration_queue.pop(0)
+
+        mapping = {
+            'nozzle_position': NozzlePositionCalibrationProcess,
+            'nozzle_focus': NozzleFocusCalibrationProcess,
+            'droplet_emergence': DropletEmergenceCalibrationProcess,
+            'pressure': PressureCalibrationProcess,
+            'pressure_scan': PressureBandCalibrationProcess,
+            'trajectory': TrajectoryCalibrationProcess,
+            'droplet_search': DropletSearchCalibrationProcess,
+        }
+        proc_cls = mapping.get(next_cal)
+        if not proc_cls:
+            self.calibrationStageChanged.emit(f"Unknown calibration '{next_cal}'", "red")
+            self.start_calibration_queue()  # try next
+            return
+
+        if not self._try_start_process(proc_cls):
+            # Stop the queue on error to avoid cascading failures.
+            self.calibrationStageChanged.emit("Calibration queue stopped due to missing prerequisites.", "red")
+            self.clear_calibration_queue()
             self.calibrationQueueCompleted.emit()
 
     def start_active_calibration(self):
@@ -328,30 +339,22 @@ class CalibrationManager(QObject):
             kwargs["p_start"] = float(p_lo)
         if p_hi is not None:
             kwargs["p_end"] = float(p_hi)
-
-        self.activeCalibration = PressureBandCalibrationProcess(self, self.model, **kwargs)
-        self.start_active_calibration()
+        self._try_start_process(PressureBandCalibrationProcess, **kwargs)
 
     def start_trajectory_calibration(self):
-        self.activeCalibration = TrajectoryCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(TrajectoryCalibrationProcess)
 
     def start_pressure_trajectory_calibration(self):
-        self.activeCalibration = PressureTrajectoryCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(PressureTrajectoryCalibrationProcess)
 
     def start_droplet_search_calibration(self):
-        self.activeCalibration = DropletSearchCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(DropletSearchCalibrationProcess)
 
     def start_manual_droplet_characterization(self, *, start_delay_us: int | None = None):
-        self.activeCalibration = DropletSearchCalibrationProcess(
-            self, self.model, manual_start=True)
-        self.start_active_calibration()
+        self._try_start_process(DropletSearchCalibrationProcess, manual_start=True)
 
     def start_pressure_sweep_characterization(self, *, p_step=0.2, sphere_delay_us=10000, replicates_per_pressure=20, order="desc"):
-        self.activeCalibration = PressureSweepCharacterizationProcess(
-            self, self.model,
+        self._try_start_process(PressureSweepCharacterizationProcess,
             p_step=p_step,
             sphere_delay_us=sphere_delay_us,
             replicates_per_pressure=replicates_per_pressure,
@@ -360,8 +363,7 @@ class CalibrationManager(QObject):
         self.start_active_calibration()
 
     def start_droplet_timecourse_process(self):
-        self.activeCalibration = DropletTimecourseProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(DropletTimecourseProcess)
 
     # ------------- Settings snapshot -------------
 
@@ -419,18 +421,34 @@ class CalibrationManager(QObject):
 
     # ------------- Cross-step setters/getters -------------
 
-    def set_background_image(self, background): self.background_image = background
-    def set_nozzle_center(self, center): self.nozzle_center = center
-    def set_nozzle_center_image_position(self, center): self.nozzle_center_image_position = center
-    def set_trajectory_vector(self, vector): self.droplet_trajectory_vector = vector
-    def set_trajectory_delay(self, delay): self.trajectory_delay = delay
-    def set_min_start_delay(self, delay): self.min_start_delay = delay
-    def set_intermediate_droplet_position(self, position): self.intermediate_droplet_position = position
+    def set_background_image(self, background): 
+        self.background_image = background
+        self._emit_readiness()
+    def set_nozzle_center(self, center): 
+        self.nozzle_center = center
+        self._emit_readiness()
+    def set_nozzle_center_image_position(self, center): 
+        self.nozzle_center_image_position = center
+        self._emit_readiness()
+    def set_trajectory_vector(self, vector): 
+        self.droplet_trajectory_vector = vector
+        self._emit_readiness()
+    def set_trajectory_delay(self, delay): 
+        self.trajectory_delay = delay
+        self._emit_readiness()
+    def set_min_start_delay(self, delay): 
+        self.min_start_delay = delay
+        self._emit_readiness()
+    def set_intermediate_droplet_position(self, position): 
+        self.intermediate_droplet_position = position
+        self._emit_readiness()
     def set_primary_pressure_band(self, result): 
         print("Setting primary pressure band:", result)
         self._last_pressure_scan_result = result
+        self._emit_readiness()
     def set_pressure_trajectory_result(self, result_dict):
         self._pressure_traj_result = result_dict
+        self._emit_readiness()
 
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
@@ -634,6 +652,45 @@ class CalibrationManager(QObject):
             return getattr(ph, "serial", None) or getattr(ph, "id", None) or str(ph)
         except Exception:
             return None
+
+    def _process_missing(self, proc_cls) -> list[str]:
+        fn = getattr(proc_cls, "missing_requirements", None)
+        if callable(fn):
+            return list(fn(self)) or []
+        return []
+
+    def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
+        missing = self._process_missing(proc_cls)
+        phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls(self, self.model), "phase_name", "unknown")
+
+        if missing:
+            msg = f"{phase_name.replace('_',' ').title()} prerequisites missing: {', '.join(missing)}"
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
+
+        self.activeCalibration = proc_cls(self, self.model, *args, **kwargs)
+        self.start_active_calibration()
+        return True
+
+    def _emit_readiness(self):
+        # Add other processes here as you adopt this pattern
+        pressure_calibration_missing = PressureCalibrationProcess.missing_requirements(self)
+        pressure_scan_missing = PressureBandCalibrationProcess.missing_requirements(self)
+        trajectory_missing = TrajectoryCalibrationProcess.missing_requirements(self)
+        trajectory_scan_missing = PressureTrajectoryCalibrationProcess.missing_requirements(self)
+        droplet_characterization_missing = DropletSearchCalibrationProcess.missing_requirements(self)
+        pressure_sweep_characterization_missing = PressureSweepCharacterizationProcess.missing_requirements(self)
+
+        readiness = {
+            "pressure_calibration": len(pressure_calibration_missing) == 0,
+            "pressure_scan": len(pressure_scan_missing) == 0,
+            "droplet_trajectory": len(trajectory_missing) == 0,
+            "pressure_trajectory": len(trajectory_scan_missing) == 0,
+            "droplet_characterization": len(droplet_characterization_missing) == 0,
+            "pressure_sweep_characterization": len(pressure_sweep_characterization_missing) == 0
+        }
+        self.readinessChanged.emit(readiness)
 
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
@@ -1960,6 +2017,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError(f"PressureBandCalibrationProcess requires: {', '.join(missing_requirements)}.")
         self.phase_name = "pressure_calibration"
 
         self.nozzle_position = None
@@ -2142,6 +2202,20 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # Set the initial state.
         self.state_machine.setInitialState(self.state_initial_position)
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        return missing
 
     @Slot()
     def onInitialPosition(self):
@@ -2632,6 +2706,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
+
+        missing_requirements = PressureBandCalibrationProcess.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError(f"PressureBandCalibrationProcess requires: {', '.join(missing_requirements)}.")
+        
         self.phase_name = "pressure_scan"
 
         # --- prerequisites ---
@@ -2736,6 +2815,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                   self.state_analyze, self.state_decide, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare_bg)
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        return missing
 
     # ---------- public ----------
     @Slot()
@@ -3072,6 +3165,20 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.addState(self.state_final)
         self.state_machine.setInitialState(self.state_capture_droplet)
 
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        return missing
+
     # ---------- helpers ----------
     def _clampP(self, p: float) -> float:
         return max(self.min_pressure, min(self.max_pressure, float(p)))
@@ -3386,6 +3493,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                  delay_floor_margin_us: int = 300,           # emergence+PW+margin is the earliest allowed
                  parent=None):
         super().__init__(calibration_manager, model, parent)
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError("Cannot start PressureTrajectoryCalibrationProcess; missing prerequisites: "
+                               + ", ".join(missing_requirements))
+        
         self.phase_name = "pressure_trajectory"
 
         # --- prerequisites ---
@@ -3502,6 +3614,20 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                   self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare_bg)
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        return missing
 
     # ----------------- state handlers -----------------
 
@@ -3980,6 +4106,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def __init__(self, calibration_manager, model, parent=None,
                  *, manual_start: bool = False, start_delay_us: int | None = None):
         super().__init__(calibration_manager, model, parent)
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError("Cannot start DropletSearchCalibrationProcess; missing prerequisites: "
+                               + ", ".join(missing_requirements))
         self.phase_name = "droplet_search"
         self.manual_start = bool(manual_start)
 
@@ -4172,6 +4302,22 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         else:
             self.state_machine.setInitialState(self.state_move_to_target)
         # <<<
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        if cm.get_trajectory_vector() is None:
+            missing.append("Trajectory vector")
+        return missing
 
     # ----- utils -----
     def _import_calibration_data(self, *, manual_mode: bool):
@@ -4574,6 +4720,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  focus_ok_threshold: float = 5_000_000,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError("Cannot start PressureSweepCharacterizationProcess; missing prerequisites: "
+                               + ", ".join(missing_requirements))
         self.phase_name = "pressure_sweep_characterization"
 
         # ---------- prerequisites ----------
@@ -4583,8 +4733,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.prev_background       = self.calibration_manager.get_background_image()
 
         # pull per-pressure trajectory fits
-        traj = (getattr(self.calibration_manager, "get_pressure_trajectory_result", None) or
-                getattr(self.calibration_manager, "get_pressure_trajectory_results", None))
+        traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
         traj = traj() if callable(traj) else None
 
         if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and traj and traj.get("pressures")):
@@ -4743,6 +4892,22 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.state_machine.addState(s)
 
         self.state_machine.setInitialState(self.state_pick)
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        """Return a list of human-readable missing prerequisites."""
+        missing = []
+        if cm.get_nozzle_center() is None:
+            missing.append("Nozzle center (machine coords)")
+        if cm.get_nozzle_center_image_position() is None:
+            missing.append("Nozzle center (image coords)")
+        if cm.get_background_image() is None:
+            missing.append("Background image")
+        if cm.get_emergence_time() is None:
+            missing.append("Emergence time")
+        if cm.get_pressure_trajectory_result() is None:
+            missing.append("Pressure trajectory scan results")
+        return missing
 
     # ---------- helpers (generic) ----------
     def _get_axis_bounds_safe(self, axis:str, default_span:int):

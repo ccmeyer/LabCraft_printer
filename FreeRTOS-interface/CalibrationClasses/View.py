@@ -591,6 +591,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
 
+        self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
+        self.model.calibration_manager._emit_readiness()
+
         self.set_exposure_time(self.droplet_camera_model.exposure_time)
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
         self.set_flash_duration(self.droplet_camera_model.flash_duration)
@@ -1151,6 +1154,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_all_button.setText("Stop Calibration")
             self.controller.start_all_calibrations()
+
+    def on_readiness_changed(self, readiness: dict):
+        """
+        Updates the UI based on the readiness of each calibration component.
+        """
+        # self.calibrate_nozzle_button.setEnabled(readiness.get('nozzle_position', False))
+        # self.calibrate_focus_button.setEnabled(readiness.get('nozzle_focus', False))
+        # self.calibrate_emergence_button.setEnabled(readiness.get('droplet_emergence', False))
+        self.calibrate_pressure_button.setEnabled(readiness.get('pressure_calibration', False))
+        self.calibrate_trajectory_button.setEnabled(readiness.get('droplet_trajectory', False))
+        self.calibrate_search_button.setEnabled(readiness.get('droplet_search', False))
+        self.calibrate_pressure_scan_button.setEnabled(readiness.get('pressure_scan', False))
+        self.scan_trajectory_button.setEnabled(readiness.get('trajectory_pressure_scan', False))
+        self.calibrate_timecourse_button.setEnabled(readiness.get('droplet_timecourse', False))
+        self.calibrate_characterization_button.setEnabled(readiness.get('droplet_characterization', False))
+        self.calibrate_pressure_sweep_button.setEnabled(readiness.get('pressure_sweep_characterization', False))
+        # self.calibrate_all_button.setEnabled(all(readiness.values()))
 
     # def update_stage(self, stage):
     #     """
