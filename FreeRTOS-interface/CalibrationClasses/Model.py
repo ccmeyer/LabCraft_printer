@@ -2787,16 +2787,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # ---- Adaptive step settings ----
         base_step = abs(float(p_step)) if p_step else 0.1
         self.dp_min = 0.01                         # smallest step when near nozzle
-        self.dp_max = 0.05                         # largest allowed step
+        self.dp_max = 0.10                         # largest allowed step
         self.dp     = max(self.dp_min, min(base_step, self.dp_max))
 
         # Special jumps for specific states
         self.multiple_big_step = 0.10              # when MULTIPLE → drop faster
-        self.none_jump_up      = 0.10              # when NONE → push up to re-acquire
+        self.none_jump_up      = 0.20              # when NONE → push up to re-acquire
         
         # Movement heuristics (pixels)
-        self.small_move_px = 10                    # “barely moved” threshold
-        self.large_move_px = 60                    # “moved a lot” threshold
+        self.small_move_px = 8                    # “barely moved” threshold
+        self.large_move_px = 40                    # “moved a lot” threshold
 
         # --- thresholds & safety ---
         self.nozzle_area_threshold     = 8000
@@ -2836,11 +2836,17 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._edge_eps = 0.02                        # stop refining upper/lower once bracket ≤ 0.01 psi
         self._prev_verdict = None
         self._first_single_pressure = None
+        self._min_single_pressure = None
 
         # Upward seek params (used if first verdict is SINGLE)
-        self._seek_step = max(self.dp_min, min(0.03, self.dp))  # gentle initial nudge up
-        self._seek_step_max = 0.10
-        self._seek_growth = 1.6
+        self._seek_step = max(self.dp_min, min(0.05, self.dp))  # gentle initial nudge up
+        self._seek_step_max = 0.30
+        self._seek_growth = 1.7
+
+        # Upward re-acquire params (used if first verdict is NONE or “too close”)
+        self._reacquire_step = 0.10
+        self._reacquire_step_max = 0.20
+        self._reacquire_growth = 1.7
 
         try:
             self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
@@ -3006,16 +3012,24 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 dy_min = min(dy_list)
 
         # ---- SAFETY: ignore "too close" if MULTIPLE ----
-        # We only stop early if the droplet is single (or none) AND too close.
+        # If "too close" and this is the FIRST point, do NOT terminate.
         if (cls != "multiple") and (dy_min is not None) and (dy_min < self.safety_clearance_px):
-            self._early_stop = True
-            self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
-            self._terminate_at_pressure = float(self._current_pressure)
-            self.stageChanged.emit(
-                f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
-            )
-            self.finalize.emit()
-            return
+            if self._prev_verdict is None:
+                self.stageChanged.emit(
+                    "First sample is too close to nozzle → increasing pressure to re-acquire safely"
+                )
+                # Let decision logic handle upward seek; treat as a normal SINGLE result.
+                pass
+            else:
+                self._early_stop = True
+                self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
+                self._terminate_at_pressure = float(self._current_pressure)
+                self.stageChanged.emit(
+                    f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
+                )
+                self.finalize.emit()
+                return
+
 
         # Nozzle-wet handling stays as-is (we log per-rep; final stop handled in _choose_next_pressure)
         if cls == "invalid":
@@ -3139,6 +3153,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         }
         self.samples.append(rec)
 
+        # Track lowest SINGLE tested so far (for skipping duplicates after upper-edge refine)
+        if verdict == "single":
+            if self._min_single_pressure is None:
+                self._min_single_pressure = rec["pressure"]
+            else:
+                self._min_single_pressure = min(self._min_single_pressure, rec["pressure"])
+
     def _median_dy(self, reps):
         vals = [r.get("dy_min_px") for r in reps if r.get("dy_min_px") is not None]
         if not vals:
@@ -3170,17 +3191,23 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             next_p = self._current_pressure - self.dp
 
         elif verdict == "single":
+            # Movement-based adjustment
             if moved_px is not None:
                 if moved_px < self.small_move_px:
-                    self.dp = min(self.dp_max, max(self.dp + 0.15, self.dp * 1.8))
+                    # barely moved → grow step aggressively
+                    self.dp = min(self.dp_max, max(self.dp * 1.9, self.dp + 0.10))
                 elif moved_px > self.large_move_px:
-                    self.dp = max(self.dp_min, min(self.dp - 0.10, self.dp * 0.6))
+                    # moved a lot → shrink, but not all the way to dp_min
+                    self.dp = max(max(self.dp_min, 0.02), min(self.dp * 0.6, self.dp - 0.06))
 
+            # Proximity-based adjustment – avoid pinning to dp_min near nozzle
             if dy_med is not None:
                 if dy_med <= self.near_nozzle_px:
-                    self.dp = max(self.dp_min, min(self.dp, 0.08))
+                    # still go gentle, but ensure some forward progress
+                    self.dp = max(max(self.dp_min, 0.03), min(self.dp, 0.06))
                 elif dy_med >= self.far_nozzle_px:
-                    self.dp = min(self.dp_max, max(self.dp, 0.25))
+                    # far from nozzle → ensure a decent stride
+                    self.dp = min(self.dp_max, max(self.dp, 0.10))
 
             next_p = self._current_pressure - self.dp
 
@@ -3195,31 +3222,36 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._next_pressure = next_p
 
     def _maybe_start_or_update_brackets(self, verdict: str) -> bool:
-        """
-        Returns True if this method set _next_pressure (i.e., handled next step),
-        otherwise False (caller should use _choose_next_pressure).
-        """
         cur = self._current_pressure
         prev_p = self._prev_pressure
         prev_v = self._prev_verdict
 
-        # ---------- Start refine modes ----------
+        # ---------- Start modes ----------
         if self._phase == "scan":
-            # Case A: FIRST verdict is SINGLE -> seek upward to find MULTIPLE side, then refine upper
+            # NEW: FIRST verdict NONE/AMBIGUOUS → Re-acquire upward (bounds were too low)
+            if prev_v is None and verdict in ("none", "ambiguous"):
+                self._phase = "reacquire_up"
+                self._next_pressure = float(min(self.P_MAX, cur + self._reacquire_step))
+                self.stageChanged.emit(
+                    f"First point {verdict.upper()} @ {cur:.3f} psi → re-acquiring upward (+{self._reacquire_step:.2f} psi)"
+                )
+                return True
+
+            # FIRST verdict SINGLE → seek upward to find MULTIPLE (upper-edge)
             if verdict == "single" and self.backtrack_after_first_single and prev_v is None:
                 self._first_single_pressure = cur
                 self._phase = "seek_upper"
                 self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
                 self.stageChanged.emit(
-                    f"First point SINGLE @ {cur:.3f} psi → seeking MULTIPLE upward (+{self._seek_step:.3f} psi)"
+                    f"First point SINGLE @ {cur:.3f} psi → seeking MULTIPLE upward (+{self._seek_step:.2f} psi)"
                 )
                 return True
 
-            # Case B: MULTIPLE -> SINGLE transition: refine upper edge
+            # MULTIPLE → SINGLE transition → refine upper
             if (verdict == "single" and self.backtrack_after_first_single
                 and prev_v == "multiple" and prev_p is not None):
-                lo = min(cur, prev_p)   # single side (lower pressure)
-                hi = max(cur, prev_p)   # multiple side (higher pressure)
+                lo = min(cur, prev_p)   # single side (lower)
+                hi = max(cur, prev_p)   # multiple side (higher)
                 self._upper_bracket = [lo, hi]
                 self._phase = "refine_upper"
                 width = hi - lo
@@ -3230,7 +3262,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # Case C: SINGLE -> NONE transition: refine lower edge
+            # SINGLE → NONE transition → refine lower
             if (verdict == "none" and prev_v == "single" and prev_p is not None):
                 lo = min(cur, prev_p)   # none side (lower)
                 hi = max(cur, prev_p)   # single side (higher)
@@ -3244,14 +3276,44 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            return False  # no refine started
+            return False
 
-        # ---------- SEEK UPPER: climb until MULTIPLE found, then refine upper ----------
-        if self._phase == "seek_upper":
-            # If we reached MULTIPLE, create bracket and switch to refine_upper
+        # ---------- RE-ACQUIRE UP: climb until SINGLE or MULTIPLE appears ----------
+        if self._phase == "reacquire_up":
             if verdict == "multiple":
-                lo = min(self._first_single_pressure, cur)   # single side (lower)
-                hi = max(self._first_single_pressure, cur)   # multiple side (higher)
+                # Found multi at higher P → resume normal downward scan immediately
+                self._phase = "scan"
+                self.dp = min(self.dp_max, max(self.dp, 0.12))
+                self._next_pressure = float(max(self.P_MIN, cur - self.dp))
+                self.stageChanged.emit("Re-acquired MULTIPLE at higher pressure → scanning down")
+                return True
+            if verdict == "single":
+                # Got SINGLE at higher P → immediately start seek_upper to bracket upper edge
+                self._first_single_pressure = cur
+                self._phase = "seek_upper"
+                self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
+                self.stageChanged.emit("Re-acquired SINGLE at higher pressure → seeking MULTIPLE upward")
+                return True
+
+            # Still NONE/AMBIG – keep going up, grow step
+            next_up = float(min(self.P_MAX, cur + self._reacquire_step))
+            if next_up <= cur + 1e-9:
+                # Can't go higher → give up and scan down anyway
+                self._phase = "scan"
+                self._next_pressure = float(max(self.P_MIN, cur - max(self.dp_min, 0.05)))
+                self.stageChanged.emit("Re-acquire hit upper limit; scanning down")
+                return True
+            self._reacquire_step = min(self._reacquire_step_max, max(self._reacquire_step * self._reacquire_growth,
+                                                                    self._reacquire_step + 0.05))
+            self._next_pressure = next_up
+            self.stageChanged.emit(f"Re-acquiring upward → next {self._next_pressure:.3f} psi")
+            return True
+
+        # ---------- SEEK UPPER: climb until MULTIPLE, then refine upper ----------
+        if self._phase == "seek_upper":
+            if verdict == "multiple":
+                lo = min(self._first_single_pressure, cur)
+                hi = max(self._first_single_pressure, cur)
                 self._upper_bracket = [lo, hi]
                 self._phase = "refine_upper"
                 width = hi - lo
@@ -3262,29 +3324,26 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # If still SINGLE (or ambiguous/none), keep nudging up until bounds
+            # keep stepping up
             next_up = float(min(self.P_MAX, cur + self._seek_step))
-            if next_up <= cur + 1e-9:  # can’t go higher
-                # Give up on upper MULTIPLE; resume downward scan
-                self.stageChanged.emit(
-                    f"Seek upper hit limit near {cur:.3f} psi without MULTIPLE; resuming downward scan"
-                )
+            if next_up <= cur + 1e-9:
+                # No MULTIPLE above: resume scan down from the first SINGLE
                 self._phase = "scan"
-                self._next_pressure = float(max(self.P_MIN, self._first_single_pressure - max(self.dp_min, 0.02)))
+                resume_from = self._first_single_pressure if self._first_single_pressure is not None else cur
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, 0.02)))
+                self.stageChanged.emit("Seek upper hit limit; resuming downward scan")
                 return True
-
-            # Grow the upward step (capped)
-            self._seek_step = min(self._seek_step_max, max(self._seek_step * self._seek_growth, self._seek_step + 0.01))
+            self._seek_step = min(self._seek_step_max, max(self._seek_step * self._seek_growth, self._seek_step + 0.02))
             self._next_pressure = next_up
             self.stageChanged.emit(f"Seeking MULTIPLE upward → next {self._next_pressure:.3f} psi")
             return True
 
-        # ---------- Continue refine: UPPER edge ----------
+        # ---------- Refine UPPER edge ----------
         if self._phase == "refine_upper":
             lo, hi = self._upper_bracket
             if verdict == "multiple":
                 hi = max(hi, cur) if cur > hi else cur
-            elif verdict in ("single", "none", "ambiguous"):
+            else:  # single/none/ambiguous → tighten single side
                 lo = min(lo, cur) if cur < lo else cur
 
             if hi < lo:
@@ -3295,19 +3354,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if width <= self._edge_eps:
                 self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); resume scan")
                 self._phase = "scan"
-                # Resume just below the single-side bound
-                self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
+                # NEW: jump to just below the LOWEST SINGLE we have already tested, to avoid retesting
+                resume_from = self._min_single_pressure if self._min_single_pressure is not None else lo
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, 0.02)))
             else:
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = (lo + hi) / 2.0
             return True
 
-        # ---------- Continue refine: LOWER edge ----------
+        # ---------- Refine LOWER edge (unchanged except for style) ----------
         if self._phase == "refine_lower":
             lo, hi = self._lower_bracket
             if verdict in ("none", "ambiguous"):
                 lo = min(lo, cur) if cur < lo else cur
-            else:  # treat single/multiple as "single side" for lower edge
+            else:  # treat single/multiple as "single side"
                 hi = max(hi, cur) if cur > hi else cur
 
             if hi < lo:
