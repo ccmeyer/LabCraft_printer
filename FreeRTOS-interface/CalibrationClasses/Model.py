@@ -2743,7 +2743,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  escalate_to: int = 9,
                  classification_delay_us: int | None = None,
                  reverse_order: bool = True,
-                 safety_clearance_px: int = 300,
+                 safety_clearance_px: int = 400,
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -5225,12 +5225,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  calibration_manager,
                  model,
                  *,
-                 p_step: float = 0.02,               # pressure grid step (psi)
+                 p_step: float = None,               # pressure grid step (psi)
                  sphere_delay_us: int = 10000,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
                  focus_ok_threshold: float = 5_000_000,
+                 num_samples: int = 4,
+                 min_pressure_separation: float = 0.005,
+                 max_search_cycles: int = 4,
+                 max_recentre_moves: int = 5,
+                 max_oob_total: int = 12,
+                 lightweight_overlays: bool = True,
+                 present_every_k: int = 3,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
@@ -5244,12 +5251,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.nozzle_center_px      = self.calibration_manager.get_nozzle_center_image_position()
         self.emergence_time_us     = self.calibration_manager.get_emergence_time()
         self.prev_background       = self.calibration_manager.get_background_image()
+        
+        get_band = getattr(self.calibration_manager, "get_primary_pressure_band", None)
+        self.primary_band = get_band() if callable(get_band) else None
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
-        traj = traj() if callable(traj) else None
+        self.traj = traj() if callable(traj) else None
 
-        if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and traj and traj.get("pressures")):
+        if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and self.traj and self.traj.get("pressures")):
             self.calibrationError.emit("Sweep requires nozzle center, background, emergence, and trajectory scan results.")
             self._ready = False
         else:
@@ -5258,27 +5268,25 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         # list of (pressure, fit) we’ll actually use (build grid from traj min/max using scan step)
         self.plan = []
         if self._ready:
-            all_tested = [float(rec.get("pressure")) for rec in traj["pressures"] if "pressure" in rec]
-            if not all_tested:
-                self.calibrationError.emit("Trajectory scan returned no tested pressures.")
-                self._ready = False
-            else:
+            all_tested = [float(rec.get("pressure")) for rec in self.traj["pressures"] if "pressure" in rec]
+            if self.primary_band and len(self.primary_band) == 2:
+                p_lo, p_hi = float(min(self.primary_band)), float(max(self.primary_band))
+            elif all_tested:
                 p_lo, p_hi = min(all_tested), max(all_tested)
+            else:
+                self.calibrationError.emit("Sweep needs a single band or trajectory pressures to plan.")
+                self._ready = False
 
-                # step size from the pressure-scan spin box (robust fallbacks)
-                step = float(p_step or 0.02)
-                if step <= 0:
-                    step = 0.02
 
-                grid = self._make_pressure_grid(p_lo, p_hi, step)
+            if self._ready:
+                # 2) Build evenly-spaced set with min-separation guard
+                grid = self._make_pressure_set_by_count(p_lo, p_hi, int(num_samples), float(min_pressure_separation))
 
-                # Collect valid fit points for interpolation
-                fit_pts = [
-                    (float(rec["pressure"]),
-                    float(rec["fit"].get("vx_px_per_us", 0.0)),
-                    float(rec["fit"].get("vy_px_per_us", 0.0)))
-                    for rec in traj["pressures"] if rec.get("fit")
-                ]
+                # 3) Prepare velocity interpolation from trajectory fits
+                fit_pts = [(float(rec["pressure"]),
+                            float(rec.get("fit", {}).get("vx_px_per_us", 0.0)),
+                            float(rec.get("fit", {}).get("vy_px_per_us", 0.0)))
+                           for rec in (traj["pressures"] if traj else []) if rec.get("fit")]
                 if not fit_pts:
                     self.calibrationError.emit("Trajectory scan had no valid fits to interpolate velocities.")
                     self._ready = False
@@ -5288,15 +5296,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     VX_fit = np.array([t[1] for t in fit_pts], dtype=float)
                     VY_fit = np.array([t[2] for t in fit_pts], dtype=float)
 
-                    # piecewise-linear interpolation; numpy.interp clamps to ends
                     for p in grid:
                         vx = float(np.interp(p, P_fit, VX_fit))
                         vy = float(np.interp(p, P_fit, VY_fit))
                         self.plan.append({"pressure": float(round(p, 3)), "vx": vx, "vy": vy})
 
-            if self._ready and not self.plan:
-                self.calibrationError.emit("No pressures to characterize after planning.")
-                self._ready = False
+        if self._ready and not self.plan:
+            self.calibrationError.emit("No pressures to characterize after planning.")
+            self._ready = False
 
         if order.lower().startswith("desc"):
             self.plan.sort(key=lambda r: r["pressure"], reverse=True)
@@ -5310,6 +5317,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.edge_guard_px     = int(edge_guard_px)
         self.repl_target       = int(replicates_per_pressure)
         self.focus_ok_threshold = float(focus_ok_threshold)
+
+        self.max_search_cycles   = int(max_search_cycles)
+        self.max_recentre_moves  = int(max_recentre_moves)
+        self.max_oob_total       = int(max_oob_total)
+
+        self.lightweight_overlays = bool(lightweight_overlays)
+        self.present_every_k      = int(max(1, present_every_k))
 
         self.boundary_tol_px = 250          # pixels around image center accepted as "in-bounds"
         self.center_first_tol_px = 140      # first center attempt tolerance
@@ -5444,6 +5458,37 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return
         self.calibration_manager.moveAbsoluteRequested.emit((X, Y, Z), self.moveDone.emit)
 
+    def _make_pressure_set_by_count(self, p_lo: float, p_hi: float, n: int, min_sep: float=0.005) -> list[float]:
+        lo, hi = (float(min(p_lo, p_hi)), float(max(p_lo, p_hi)))
+        width = hi - lo
+        if n <= 1:
+            return [round((lo + hi) * 0.5, 3)]
+        # enforce feasible n under min separation
+        max_points = int(width // max(min_sep, 1e-6)) + 1
+        n_eff = max(2, min(n, max_points))  # always include both ends
+        vals = list(np.linspace(lo, hi, n_eff))
+        # drop candidates that violate min_sep after rounding/uniqueness
+        out = []
+        for v in sorted({round(x, 3) for x in vals}):
+            if not out or (v - out[-1]) >= (min_sep - 1e-9):
+                out.append(v)
+        # Guarantee exact lo/hi are present
+        if out[0] != round(lo, 3):
+            out[0] = round(lo, 3)
+        if out[-1] != round(hi, 3):
+            out[-1] = round(hi, 3)
+        # If spacing collapsed, trim middle points until all gaps ≥ min_sep
+        def gaps_ok(seq):
+            return all((seq[i+1]-seq[i]) >= (min_sep - 1e-9) for i in range(len(seq)-1))
+        while len(out) > 2 and not gaps_ok(out):
+            # remove the closest pair's middle index (bias to remove a middle)
+            diffs = [(out[i+1]-out[i], i) for i in range(len(out)-1)]
+            _, i = min(diffs, key=lambda t: t[0])
+            # drop whichever of {i or i+1} is more interior
+            drop = i+1 if (i+1) < (len(out)-1) else i
+            out.pop(drop)
+        return out
+
     def _reset_char_buffers(self):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
@@ -5477,6 +5522,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._lost_count, self._lost_limit = 0, 5
         self._oob_streak = 0
         self._oob_positions = []
+
+        # search & OOB/recenter guards (reset each pressure)
+        self._search_fail_cycles = 0      # times we exhausted delay sweep + nudged
+        self._recentre_moves = 0          # number of recenter moves issued during characterization
+        self._oob_total = 0               # total OOB hits seen during characterization
+        self._bad_reason = None           # reason string when we abort this pressure
 
     # ---------- per-pressure planning ----------
     def _compute_stage_scales_steps_per_px(self):
@@ -5599,15 +5650,24 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onSetDelay(self):
         if self._delay_try_index >= len(self._delay_offsets_us):
-            # simple nudge along predicted path and restart delay sweep
+            # exhausted a sweep → count one "search cycle"
             self._delay_try_index = 0
+            self._search_fail_cycles += 1
+            if self._search_fail_cycles > self.max_search_cycles:
+                self.stageChanged.emit("Inconsistent imaging: too many delay sweeps → skip pressure")
+                self._bad_reason = "search_fail_cycles"
+                self._record_pressure_result(valid=False, reason=self._bad_reason)
+                self.i += 1
+                self.nextPressure.emit()
+                return
+
             nudge = 0.002
             self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
             self._safe_move_abs(
                 self._predict_target_xyz(self.vec_steps_per_s,
-                                        self.target_delay_us + int(1000 * nudge))
+                                         self.target_delay_us + int(1000 * nudge))
             )
-            return  # <<< wait for moveDone
+            return  # wait for moveDone (transition already wired)
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
         self._delay_try_index += 1
         self.current_delay_us = self._clamp_delay(d)
@@ -5849,7 +5909,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._reset_char_buffers()
         self.nextPressure.emit()
 
-    def _record_pressure_result(self, valid: bool):
+    def _record_pressure_result(self, valid: bool, reason: str | None = None):
         self.samples.append({
             "pressure": float(self.cur_pressure),
             "delay_us": int(self.current_delay_us or self.target_delay_us),
@@ -5861,7 +5921,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "focus_values": [],
             "circularity_values": [],
             "mean_position_machine": None,
-            "valid": bool(valid)
+            "valid": bool(valid),
+            "invalid_reason": (None if valid else (reason or "unspecified"))
         })
     
     def _annotate_char_summary_image(self, mean_center, mean_vol, cv_vol):
@@ -5922,7 +5983,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # OOB sample
         self._oob_streak += 1
+        self._oob_total  += 1
         self._oob_positions.append(tuple(map(int, center_px)))
+
+                # Hard limits on OOB behavior
+        if self._oob_total >= self.max_oob_total:
+            self.stageChanged.emit("Inconsistent imaging: too many out-of-bounds hits → skip pressure")
+            self._bad_reason = "oob_total_limit"
+            self._record_pressure_result(valid=False, reason=self._bad_reason)
+            self.i += 1
+            self.nextPressure.emit()
+            return True  # (we are leaving anyway)
 
         if self._oob_streak < 2:
             # First miss → just flag it, no movement
@@ -5945,7 +6016,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_streak = 0
         self._oob_positions.clear()
         self._char_need_capture = True  # get a fresh frame after motion
-
+        
+        self._recentre_moves += 1               # NEW: count recenter moves
+        if self._recentre_moves > self.max_recentre_moves:
+            self.stageChanged.emit("Inconsistent imaging: too many recenter moves → skip pressure")
+            self._bad_reason = "recentre_limit"
+            self._record_pressure_result(valid=False, reason=self._bad_reason)
+            self.i += 1
+            self.nextPressure.emit()
+            return True
+        
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True
 
