@@ -2,7 +2,7 @@ from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,
-    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox
+    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox,QGraphicsOpacityEffect
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
@@ -1158,25 +1158,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def on_readiness_changed(self, readiness: dict):
         """
         Updates the UI based on the readiness of each calibration component.
+        Applies a clear visual indication for inactive buttons.
         """
-        # self.calibrate_nozzle_button.setEnabled(readiness.get('nozzle_position', False))
-        # self.calibrate_focus_button.setEnabled(readiness.get('nozzle_focus', False))
-        # self.calibrate_emergence_button.setEnabled(readiness.get('droplet_emergence', False))
-        self.calibrate_pressure_button.setEnabled(readiness.get('pressure_calibration', False))
-        self.calibrate_trajectory_button.setEnabled(readiness.get('droplet_trajectory', False))
-        self.calibrate_search_button.setEnabled(readiness.get('droplet_search', False))
-        self.calibrate_pressure_scan_button.setEnabled(readiness.get('pressure_scan', False))
-        self.scan_trajectory_button.setEnabled(readiness.get('trajectory_pressure_scan', False))
-        self.calibrate_timecourse_button.setEnabled(readiness.get('droplet_timecourse', False))
-        self.calibrate_characterization_button.setEnabled(readiness.get('droplet_characterization', False))
-        self.calibrate_pressure_sweep_button.setEnabled(readiness.get('pressure_sweep_characterization', False))
-        # self.calibrate_all_button.setEnabled(all(readiness.values()))
+        mapping = {
+            'pressure_calibration':            self.calibrate_pressure_button,
+            'pressure_scan':                   self.calibrate_pressure_scan_button,
+            'droplet_trajectory':              self.calibrate_trajectory_button,
+            'trajectory_pressure_scan':        self.scan_trajectory_button,
+            'droplet_characterization':        self.calibrate_characterization_button,  # (same readiness as search)
+            'pressure_sweep_characterization': self.calibrate_pressure_sweep_button,
+        }
 
-    # def update_stage(self, stage):
-    #     """
-    #     Updates the stage label based on the calibration stage.
-    #     """
-    #     self.stageLabel.setText(f"Status: {stage}")
+        # If you also want the search button to mirror "droplet_characterization":
+        if 'droplet_characterization' in readiness:
+            r = readiness['droplet_characterization']
+            self._set_btn_state(self.calibrate_search_button, bool(r.get('ready')), r.get('missing'))
+
+        for key, btn in mapping.items():
+            info = readiness.get(key, {})
+            self._set_btn_state(btn, bool(info.get('ready')), info.get('missing'))
+            
+    def _set_btn_state(self, btn: QtWidgets.QPushButton, ready: bool, missing: list[str] | None = None):
+        """
+        Uniform visual treatment for inactive buttons:
+        - disabled state
+        - greyed (opacity ~0.35)
+        - forbidden cursor
+        - tooltip listing missing prerequisites
+        """
+        btn.setEnabled(ready)
+
+        # Tooltip + cursor
+        if ready:
+            btn.setToolTip("")
+            btn.setCursor(Qt.ArrowCursor)
+        else:
+            reason = ", ".join(missing or [])
+            btn.setToolTip(f"Unavailable. Missing: {reason}" if reason else "Unavailable.")
+            btn.setCursor(Qt.ForbiddenCursor)
+
+        # Opacity effect (more obvious than default disabled styling)
+        eff = btn.graphicsEffect()
+        if ready:
+            if isinstance(eff, QGraphicsOpacityEffect):
+                btn.setGraphicsEffect(None)  # remove to restore native look
+            # Clear any custom stylesheet if you added some elsewhere
+            btn.setStyleSheet("")
+        else:
+            if not isinstance(eff, QGraphicsOpacityEffect):
+                eff = QGraphicsOpacityEffect(btn)
+                btn.setGraphicsEffect(eff)
+            eff.setOpacity(0.35)  # tweak to taste
 
     def update_stage_and_log(self, stage: str, color_name: str):
         # Update the small status label
