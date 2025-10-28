@@ -2795,8 +2795,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.none_jump_up      = 0.10              # when NONE → push up to re-acquire
         
         # Movement heuristics (pixels)
-        self.small_move_px = 30                    # “barely moved” threshold
-        self.large_move_px = 100                    # “moved a lot” threshold
+        self.small_move_px = 10                    # “barely moved” threshold
+        self.large_move_px = 60                    # “moved a lot” threshold
 
         # --- thresholds & safety ---
         self.nozzle_area_threshold     = 8000
@@ -2833,8 +2833,14 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._phase = "scan"                       # scan | refine_upper | refine_lower
         self._upper_bracket = None                 # [lo(single), hi(multiple)]
         self._lower_bracket = None                 # [lo(none/too_close), hi(single)]
-        self._edge_eps = max(self.dp_min, 0.01)    # target edge resolution (psi)
+        self._edge_eps = 0.02                        # stop refining upper/lower once bracket ≤ 0.01 psi
         self._prev_verdict = None
+        self._first_single_pressure = None
+
+        # Upward seek params (used if first verdict is SINGLE)
+        self._seek_step = max(self.dp_min, min(0.03, self.dp))  # gentle initial nudge up
+        self._seek_step_max = 0.10
+        self._seek_growth = 1.6
 
         try:
             self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
@@ -3193,14 +3199,23 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         Returns True if this method set _next_pressure (i.e., handled next step),
         otherwise False (caller should use _choose_next_pressure).
         """
-        # Convenience
         cur = self._current_pressure
         prev_p = self._prev_pressure
         prev_v = self._prev_verdict
 
         # ---------- Start refine modes ----------
         if self._phase == "scan":
-            # MULTIPLE -> SINGLE transition: refine the UPPER edge
+            # Case A: FIRST verdict is SINGLE -> seek upward to find MULTIPLE side, then refine upper
+            if verdict == "single" and self.backtrack_after_first_single and prev_v is None:
+                self._first_single_pressure = cur
+                self._phase = "seek_upper"
+                self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
+                self.stageChanged.emit(
+                    f"First point SINGLE @ {cur:.3f} psi → seeking MULTIPLE upward (+{self._seek_step:.3f} psi)"
+                )
+                return True
+
+            # Case B: MULTIPLE -> SINGLE transition: refine upper edge
             if (verdict == "single" and self.backtrack_after_first_single
                 and prev_v == "multiple" and prev_p is not None):
                 lo = min(cur, prev_p)   # single side (lower pressure)
@@ -3215,7 +3230,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # SINGLE -> NONE transition: refine the LOWER edge (only if we didn't safety-stop early)
+            # Case C: SINGLE -> NONE transition: refine lower edge
             if (verdict == "none" and prev_v == "single" and prev_p is not None):
                 lo = min(cur, prev_p)   # none side (lower)
                 hi = max(cur, prev_p)   # single side (higher)
@@ -3231,6 +3246,39 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
             return False  # no refine started
 
+        # ---------- SEEK UPPER: climb until MULTIPLE found, then refine upper ----------
+        if self._phase == "seek_upper":
+            # If we reached MULTIPLE, create bracket and switch to refine_upper
+            if verdict == "multiple":
+                lo = min(self._first_single_pressure, cur)   # single side (lower)
+                hi = max(self._first_single_pressure, cur)   # multiple side (higher)
+                self._upper_bracket = [lo, hi]
+                self._phase = "refine_upper"
+                width = hi - lo
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = (lo + hi) / 2.0
+                self.stageChanged.emit(
+                    f"Found MULTIPLE @ {cur:.3f} psi → refining upper edge in [{lo:.3f}, {hi:.3f}]"
+                )
+                return True
+
+            # If still SINGLE (or ambiguous/none), keep nudging up until bounds
+            next_up = float(min(self.P_MAX, cur + self._seek_step))
+            if next_up <= cur + 1e-9:  # can’t go higher
+                # Give up on upper MULTIPLE; resume downward scan
+                self.stageChanged.emit(
+                    f"Seek upper hit limit near {cur:.3f} psi without MULTIPLE; resuming downward scan"
+                )
+                self._phase = "scan"
+                self._next_pressure = float(max(self.P_MIN, self._first_single_pressure - max(self.dp_min, 0.02)))
+                return True
+
+            # Grow the upward step (capped)
+            self._seek_step = min(self._seek_step_max, max(self._seek_step * self._seek_growth, self._seek_step + 0.01))
+            self._next_pressure = next_up
+            self.stageChanged.emit(f"Seeking MULTIPLE upward → next {self._next_pressure:.3f} psi")
+            return True
+
         # ---------- Continue refine: UPPER edge ----------
         if self._phase == "refine_upper":
             lo, hi = self._upper_bracket
@@ -3239,12 +3287,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             elif verdict in ("single", "none", "ambiguous"):
                 lo = min(lo, cur) if cur < lo else cur
 
-            if hi < lo: lo, hi = hi, lo
+            if hi < lo:
+                lo, hi = hi, lo
             width = hi - lo
             self._upper_bracket = [lo, hi]
 
             if width <= self._edge_eps:
-                self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi; resuming downward scan")
+                self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); resume scan")
                 self._phase = "scan"
                 # Resume just below the single-side bound
                 self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
@@ -3258,17 +3307,17 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             lo, hi = self._lower_bracket
             if verdict in ("none", "ambiguous"):
                 lo = min(lo, cur) if cur < lo else cur
-            else:  # treat single/multiple as "single side" for the lower edge bracket
+            else:  # treat single/multiple as "single side" for lower edge
                 hi = max(hi, cur) if cur > hi else cur
 
-            if hi < lo: lo, hi = hi, lo
+            if hi < lo:
+                lo, hi = hi, lo
             width = hi - lo
             self._lower_bracket = [lo, hi]
 
             if width <= self._edge_eps:
-                self.stageChanged.emit(f"Lower edge ≈ {lo:.3f}–{hi:.3f} psi; continuing")
+                self.stageChanged.emit(f"Lower edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); continuing")
                 self._phase = "scan"
-                # Continue slightly below the edge to confirm NONE region
                 self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
             else:
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
@@ -3295,21 +3344,48 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return
 
         self.continueScan.emit()   # → state_apply (will use _next_pressure)
+    
     def _compute_single_bands(self):
+        if not self.samples:
+            return []
+
+        # Gather singles and non-singles
         singles = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") == "single"])
         if not singles:
             return []
-        diffs = [b - a for a, b in zip(singles[:-1], singles[1:])]
-        # Use median spacing if available; otherwise fall back to current dp or 0.05
-        typical = (sorted(diffs)[len(diffs)//2] if diffs else max(self.dp_min, min(self.dp, 0.05)))
-        tol = abs(typical) * 1.25 + 1e-6
-        bands, band_start, prev = [], singles[0], singles[0]
-        for p in singles[1:]:
-            if (p - prev) <= tol:
-                prev = p; continue
-            bands.append([band_start, prev]); band_start = p; prev = p
-        bands.append([band_start, prev])
-        bands.sort(key=lambda ab: (ab[1]-ab[0]), reverse=True)
+
+        non_single = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") != "single"])
+
+        def has_separator(a: float, b: float) -> bool:
+            lo, hi = (a, b) if a <= b else (b, a)
+            # Is there any TESTED non-single strictly in between?
+            for p in non_single:
+                if lo < p < hi:
+                    return True
+            return False
+
+        # Build bands by merging across gaps unless a tested non-single lies between
+        bands = []
+        band_lo = band_hi = singles[0]
+        for s in singles[1:]:
+            if has_separator(band_hi, s):
+                # finalize current band
+                lo, hi = (band_lo, band_hi) if band_lo <= band_hi else (band_hi, band_lo)
+                bands.append([lo, hi])
+                band_lo = band_hi = s
+            else:
+                # merge/extend band
+                if s < band_lo:
+                    band_lo = s
+                if s > band_hi:
+                    band_hi = s
+
+        # finalize last
+        lo, hi = (band_lo, band_hi) if band_lo <= band_hi else (band_hi, band_lo)
+        bands.append([lo, hi])
+
+        # Sort by width (largest first) to keep your previous behavior
+        bands.sort(key=lambda ab: (ab[1] - ab[0]), reverse=True)
         return bands
     
 class TrajectoryCalibrationProcess(BaseCalibrationProcess):
