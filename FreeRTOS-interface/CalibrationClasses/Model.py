@@ -2828,6 +2828,14 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._stop_reason          = None
         self._terminate_at_pressure = None
 
+        # --- edge refine / backtrack ---
+        self.backtrack_after_first_single = True   # new: enable upper-edge backtrack
+        self._phase = "scan"                       # scan | refine_upper | refine_lower
+        self._upper_bracket = None                 # [lo(single), hi(multiple)]
+        self._lower_bracket = None                 # [lo(none/too_close), hi(single)]
+        self._edge_eps = max(self.dp_min, 0.01)    # target edge resolution (psi)
+        self._prev_verdict = None
+
         try:
             self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
         except Exception:
@@ -3037,9 +3045,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if len(set(classes)) == 1:
                 verdict = classes[0]
                 self._store_pressure_summary(verdict, escalated=False)
+
+                # Try starting/updating edge refinement first
+                if self._maybe_start_or_update_brackets(verdict):
+                    # record history and move on
+                    self._prev_verdict = verdict
+                    self._prev_pressure = self._current_pressure
+                    self._advance_or_finish()
+                    return
+
+                # Otherwise, normal adaptive step
                 self._choose_next_pressure(verdict)
+                self._prev_verdict = verdict
+                self._prev_pressure = self._current_pressure
                 self._advance_or_finish()
                 return
+
             self.stageChanged.emit("Replicates disagree → escalating to 7 total")
             self.replicates_target = self.escalate_to
             self.continueReplicate.emit()
@@ -3049,11 +3070,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if len(self.reps) >= self.escalate_to:
             verdict = self._majority_verdict(self.reps)
             self._store_pressure_summary(verdict, escalated=True)
+
+            if self._maybe_start_or_update_brackets(verdict):
+                self._prev_verdict = verdict
+                self._prev_pressure = self._current_pressure
+                self._advance_or_finish()
+                return
+
             self._choose_next_pressure(verdict)
+            self._prev_verdict = verdict
+            self._prev_pressure = self._current_pressure
             self._advance_or_finish()
             return
 
-        # Otherwise continue sampling to target
+        # Otherwise continue sampling to target at the SAME pressure
         self.continueReplicate.emit()
 
     @Slot()
@@ -3111,62 +3141,141 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         return int(median(vals))
 
     def _choose_next_pressure(self, verdict: str):
-        """
-        Decide the next pressure and update self._next_pressure and self.dp.
-        Uses movement (Δdy), proximity to nozzle, and detection class.
-        """
+        # If we're currently refining an edge, do nothing here.
+        if self._phase != "scan":
+            return
+
         dy_med = self._median_dy(self.reps)
         moved_px = None
         if dy_med is not None and self._prev_dy is not None and self._prev_pressure is not None:
             moved_px = abs(dy_med - self._prev_dy)
 
-        # If nozzle looks wet and user wants auto stop, stop here
+        # (If you re-enable nozzle-wet auto stop, keep this as-is)
         if any(r.get("nozzle_wet") for r in self.reps) and self.auto_stop_on_nozzle_wet:
             self._early_stop = True
             self._stop_reason = "Nozzle wet detected during scan"
             self._terminate_at_pressure = float(self._current_pressure)
-            print("Nozzle wet detected; stopping scan")
             self.finalize.emit()
             return
 
-        # Adaptive step logic
         if verdict == "multiple":
-            # Move down quickly out of multi-droplet regime
-            self.dp = max(self.dp, self.multiple_big_step)
+            # Keep the "move down faster" idea, but cap it so we don’t overshoot edges too hard
+            self.dp = min(self.dp_max, max(self.dp, 0.10))
             next_p = self._current_pressure - self.dp
 
         elif verdict == "single":
-            # Movement-based adjustment
             if moved_px is not None:
                 if moved_px < self.small_move_px:
-                    # Barely moved: increase |Δp|
                     self.dp = min(self.dp_max, max(self.dp + 0.15, self.dp * 1.8))
                 elif moved_px > self.large_move_px:
-                    # Moved a lot: shrink |Δp|
                     self.dp = max(self.dp_min, min(self.dp - 0.10, self.dp * 0.6))
 
-            # Proximity-based adjustment
             if dy_med is not None:
                 if dy_med <= self.near_nozzle_px:
-                    # Getting close → go gentle
                     self.dp = max(self.dp_min, min(self.dp, 0.08))
                 elif dy_med >= self.far_nozzle_px:
-                    # Far away → we can go faster
                     self.dp = min(self.dp_max, max(self.dp, 0.25))
 
             next_p = self._current_pressure - self.dp
 
-        else:  # verdict == "none" or "ambiguous"
-            # Too low or unclear → jump up to re-acquire
+        else:  # none/ambiguous
             up = max(self.dp, self.none_jump_up)
             self.dp = min(self.dp_max, max(self.dp, 0.20))
             next_p = self._current_pressure + up
 
-        # Clamp and record history anchors
         next_p = float(max(self.P_MIN, min(self.P_MAX, next_p)))
         self._prev_dy = dy_med if dy_med is not None else self._prev_dy
         self._prev_pressure = self._current_pressure
         self._next_pressure = next_p
+
+    def _maybe_start_or_update_brackets(self, verdict: str) -> bool:
+        """
+        Returns True if this method set _next_pressure (i.e., handled next step),
+        otherwise False (caller should use _choose_next_pressure).
+        """
+        # Convenience
+        cur = self._current_pressure
+        prev_p = self._prev_pressure
+        prev_v = self._prev_verdict
+
+        # ---------- Start refine modes ----------
+        if self._phase == "scan":
+            # MULTIPLE -> SINGLE transition: refine the UPPER edge
+            if (verdict == "single" and self.backtrack_after_first_single
+                and prev_v == "multiple" and prev_p is not None):
+                lo = min(cur, prev_p)   # single side (lower pressure)
+                hi = max(cur, prev_p)   # multiple side (higher pressure)
+                self._upper_bracket = [lo, hi]
+                self._phase = "refine_upper"
+                width = hi - lo
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = (lo + hi) / 2.0
+                self.stageChanged.emit(
+                    f"Refining upper edge between {hi:.3f} psi (multi) and {lo:.3f} psi (single)"
+                )
+                return True
+
+            # SINGLE -> NONE transition: refine the LOWER edge (only if we didn't safety-stop early)
+            if (verdict == "none" and prev_v == "single" and prev_p is not None):
+                lo = min(cur, prev_p)   # none side (lower)
+                hi = max(cur, prev_p)   # single side (higher)
+                self._lower_bracket = [lo, hi]
+                self._phase = "refine_lower"
+                width = hi - lo
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = (lo + hi) / 2.0
+                self.stageChanged.emit(
+                    f"Refining lower edge between {hi:.3f} psi (single) and {lo:.3f} psi (none)"
+                )
+                return True
+
+            return False  # no refine started
+
+        # ---------- Continue refine: UPPER edge ----------
+        if self._phase == "refine_upper":
+            lo, hi = self._upper_bracket
+            if verdict == "multiple":
+                hi = max(hi, cur) if cur > hi else cur
+            elif verdict in ("single", "none", "ambiguous"):
+                lo = min(lo, cur) if cur < lo else cur
+
+            if hi < lo: lo, hi = hi, lo
+            width = hi - lo
+            self._upper_bracket = [lo, hi]
+
+            if width <= self._edge_eps:
+                self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi; resuming downward scan")
+                self._phase = "scan"
+                # Resume just below the single-side bound
+                self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
+            else:
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = (lo + hi) / 2.0
+            return True
+
+        # ---------- Continue refine: LOWER edge ----------
+        if self._phase == "refine_lower":
+            lo, hi = self._lower_bracket
+            if verdict in ("none", "ambiguous"):
+                lo = min(lo, cur) if cur < lo else cur
+            else:  # treat single/multiple as "single side" for the lower edge bracket
+                hi = max(hi, cur) if cur > hi else cur
+
+            if hi < lo: lo, hi = hi, lo
+            width = hi - lo
+            self._lower_bracket = [lo, hi]
+
+            if width <= self._edge_eps:
+                self.stageChanged.emit(f"Lower edge ≈ {lo:.3f}–{hi:.3f} psi; continuing")
+                self._phase = "scan"
+                # Continue slightly below the edge to confirm NONE region
+                self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
+            else:
+                self.dp = max(self.dp_min, min(self.dp, width/2.0))
+                self._next_pressure = (lo + hi) / 2.0
+            return True
+
+        return False
 
     def _advance_or_finish(self):
         if self._early_stop:
