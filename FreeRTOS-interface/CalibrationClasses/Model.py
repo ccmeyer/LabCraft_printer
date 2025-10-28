@@ -2787,12 +2787,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # ---- Adaptive step settings ----
         base_step = abs(float(p_step)) if p_step else 0.1
         self.dp_min = 0.01                         # smallest step when near nozzle
-        self.dp_max = 0.10                         # largest allowed step
+        self.dp_max = 0.05                         # largest allowed step
         self.dp     = max(self.dp_min, min(base_step, self.dp_max))
 
         # Special jumps for specific states
         self.multiple_big_step = 0.10              # when MULTIPLE → drop faster
-        self.none_jump_up      = 0.20              # when NONE → push up to re-acquire
+        self.none_jump_up      = 0.10              # when NONE → push up to re-acquire
         
         # Movement heuristics (pixels)
         self.small_move_px = 8                    # “barely moved” threshold
@@ -2837,15 +2837,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._prev_verdict = None
         self._first_single_pressure = None
         self._min_single_pressure = None
+        self._upper_edge_locked = False
 
         # Upward seek params (used if first verdict is SINGLE)
         self._seek_step = max(self.dp_min, min(0.05, self.dp))  # gentle initial nudge up
-        self._seek_step_max = 0.30
+        self._seek_step_max = 0.20
         self._seek_growth = 1.7
 
         # Upward re-acquire params (used if first verdict is NONE or “too close”)
         self._reacquire_step = 0.10
-        self._reacquire_step_max = 0.20
+        self._reacquire_step_max = 0.10
         self._reacquire_growth = 1.7
 
         try:
@@ -3238,7 +3239,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return True
 
             # FIRST verdict SINGLE → seek upward to find MULTIPLE (upper-edge)
-            if verdict == "single" and self.backtrack_after_first_single and prev_v is None:
+            if verdict == "single" and self.backtrack_after_first_single and prev_v is None and not self._upper_edge_locked:
                 self._first_single_pressure = cur
                 self._phase = "seek_upper"
                 self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
@@ -3249,7 +3250,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
             # MULTIPLE → SINGLE transition → refine upper
             if (verdict == "single" and self.backtrack_after_first_single
-                and prev_v == "multiple" and prev_p is not None):
+                and prev_v == "multiple" and prev_p is not None and not self._upper_edge_locked):
                 lo = min(cur, prev_p)   # single side (lower)
                 hi = max(cur, prev_p)   # multiple side (higher)
                 self._upper_bracket = [lo, hi]
@@ -3354,6 +3355,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if width <= self._edge_eps:
                 self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); resume scan")
                 self._phase = "scan"
+                self._upper_edge_locked = True
+                self._upper_bracket = None
+                self._first_single_pressure = None
                 # NEW: jump to just below the LOWEST SINGLE we have already tested, to avoid retesting
                 resume_from = self._min_single_pressure if self._min_single_pressure is not None else lo
                 self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, 0.02)))
