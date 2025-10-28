@@ -2839,6 +2839,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._min_single_pressure = None
         self._upper_edge_locked = False
 
+        self._lower_edge_locked = False          
+        self._lower_edge_value  = None
+        self._lower_snap_eps    = self._edge_eps
+
         # Upward seek params (used if first verdict is SINGLE)
         self._seek_step = max(self.dp_min, min(0.05, self.dp))  # gentle initial nudge up
         self._seek_step_max = 0.20
@@ -3055,57 +3059,49 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onDecide(self):
-        # Need more reps at THIS pressure?
-        if len(self.reps) < self.replicates_target:
-            self.continueReplicate.emit()
-            return
+        # Short-circuit: if any non-single appears, decide immediately
+        classes = [r["cls"] for r in self.reps]
 
-        # Early short-circuit: unanimity among first few reps
-        if self.replicates_target == self.min_reps:
-            classes = [r["cls"] for r in self.reps]
-            if len(set(classes)) == 1:
-                verdict = classes[0]
-                self._store_pressure_summary(verdict, escalated=False)
-
-                # Try starting/updating edge refinement first
-                if self._maybe_start_or_update_brackets(verdict):
-                    # record history and move on
-                    self._prev_verdict = verdict
-                    self._prev_pressure = self._current_pressure
-                    self._advance_or_finish()
-                    return
-
-                # Otherwise, normal adaptive step
-                self._choose_next_pressure(verdict)
-                self._prev_verdict = verdict
-                self._prev_pressure = self._current_pressure
-                self._advance_or_finish()
-                return
-
-            self.stageChanged.emit("Replicates disagree → escalating to 7 total")
-            self.replicates_target = self.escalate_to
-            self.continueReplicate.emit()
-            return
-
-        # At escalate_to total reps → majority vote
-        if len(self.reps) >= self.escalate_to:
-            verdict = self._majority_verdict(self.reps)
-            self._store_pressure_summary(verdict, escalated=True)
-
+        if "multiple" in classes:
+            verdict = "multiple"
+            self._store_pressure_summary(verdict, escalated=False)
             if self._maybe_start_or_update_brackets(verdict):
                 self._prev_verdict = verdict
                 self._prev_pressure = self._current_pressure
-                self._advance_or_finish()
-                return
-
+                self._advance_or_finish(); return
             self._choose_next_pressure(verdict)
             self._prev_verdict = verdict
             self._prev_pressure = self._current_pressure
-            self._advance_or_finish()
+            self._advance_or_finish(); return
+
+        if ("none" in classes) and ("multiple" not in classes):
+            verdict = "none"
+            self._store_pressure_summary(verdict, escalated=False)
+            if self._maybe_start_or_update_brackets(verdict):
+                self._prev_verdict = verdict
+                self._prev_pressure = self._current_pressure
+                self._advance_or_finish(); return
+            self._choose_next_pressure(verdict)
+            self._prev_verdict = verdict
+            self._prev_pressure = self._current_pressure
+            self._advance_or_finish(); return
+
+        # All observed so far are single; collect enough reps for confidence
+        if len(self.reps) < self.min_reps:
+            self.continueReplicate.emit()
             return
 
-        # Otherwise continue sampling to target at the SAME pressure
-        self.continueReplicate.emit()
+        # After min_reps, still all single → call it SINGLE
+        verdict = "single"
+        self._store_pressure_summary(verdict, escalated=False)
+        if self._maybe_start_or_update_brackets(verdict):
+            self._prev_verdict = verdict
+            self._prev_pressure = self._current_pressure
+            self._advance_or_finish(); return
+        self._choose_next_pressure(verdict)
+        self._prev_verdict = verdict
+        self._prev_pressure = self._current_pressure
+        self._advance_or_finish()
 
     @Slot()
     def onCalibrationCompleted(self):
@@ -3212,10 +3208,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
             next_p = self._current_pressure - self.dp
 
-        else:  # none/ambiguous
+        else:  # verdict == "none"
             up = max(self.dp, self.none_jump_up)
             self.dp = min(self.dp_max, max(self.dp, 0.20))
-            next_p = self._current_pressure + up
+            # Propose upward step, but constrain relative to lowest known SINGLE if present
+            proposed = self._current_pressure + up
+            if self._min_single_pressure is not None:
+                # If we're close to the known lower SINGLE, snap to it
+                if (self._min_single_pressure - self._current_pressure) <= max(self._lower_snap_eps, 0.02):
+                    next_p = float(self._min_single_pressure)
+                else:
+                    # Do not overshoot above the lowest SINGLE
+                    next_p = float(min(proposed, self._min_single_pressure))
+            else:
+                next_p = float(proposed)
 
         next_p = float(max(self.P_MIN, min(self.P_MAX, next_p)))
         self._prev_dy = dy_med if dy_med is not None else self._prev_dy
@@ -3227,9 +3233,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         prev_p = self._prev_pressure
         prev_v = self._prev_verdict
 
-        # ---------- Start modes ----------
         if self._phase == "scan":
-            # NEW: FIRST verdict NONE/AMBIGUOUS → Re-acquire upward (bounds were too low)
+            # Re-acquire upward if the first point was NONE/AMBIG (unchanged)
             if prev_v is None and verdict in ("none", "ambiguous"):
                 self._phase = "reacquire_up"
                 self._next_pressure = float(min(self.P_MAX, cur + self._reacquire_step))
@@ -3238,7 +3243,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # FIRST verdict SINGLE → seek upward to find MULTIPLE (upper-edge)
+            # FIRST SINGLE → seek upper (only if upper not yet locked)
             if verdict == "single" and self.backtrack_after_first_single and prev_v is None and not self._upper_edge_locked:
                 self._first_single_pressure = cur
                 self._phase = "seek_upper"
@@ -3248,11 +3253,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # MULTIPLE → SINGLE transition → refine upper
+            # MULTIPLE → SINGLE → refine upper (only if upper not yet locked)
             if (verdict == "single" and self.backtrack_after_first_single
                 and prev_v == "multiple" and prev_p is not None and not self._upper_edge_locked):
-                lo = min(cur, prev_p)   # single side (lower)
-                hi = max(cur, prev_p)   # multiple side (higher)
+                lo = min(cur, prev_p)
+                hi = max(cur, prev_p)
                 self._upper_bracket = [lo, hi]
                 self._phase = "refine_upper"
                 width = hi - lo
@@ -3263,10 +3268,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 )
                 return True
 
-            # SINGLE → NONE transition → refine lower
-            if (verdict == "none" and prev_v == "single" and prev_p is not None):
-                lo = min(cur, prev_p)   # none side (lower)
-                hi = max(cur, prev_p)   # single side (higher)
+            # SINGLE → NONE → refine lower (but not if already locked)
+            if (verdict == "none" and prev_v == "single" and prev_p is not None and not self._lower_edge_locked):
+                lo = min(cur, prev_p)  # none side (lower)
+                hi = max(cur, prev_p)  # single side (higher)
                 self._lower_bracket = [lo, hi]
                 self._phase = "refine_lower"
                 width = hi - lo
@@ -3371,7 +3376,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             lo, hi = self._lower_bracket
             if verdict in ("none", "ambiguous"):
                 lo = min(lo, cur) if cur < lo else cur
-            else:  # treat single/multiple as "single side"
+            else:  # single/multiple → tighten the single side
                 hi = max(hi, cur) if cur > hi else cur
 
             if hi < lo:
@@ -3380,9 +3385,30 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._lower_bracket = [lo, hi]
 
             if width <= self._edge_eps:
-                self.stageChanged.emit(f"Lower edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); continuing")
+                # SNAP to the lowest known SINGLE if we're close, and lock the lower edge
+                snap_to = None
+                if self._min_single_pressure is not None:
+                    # If the single-side bound is within eps of our known lowest single, snap to it
+                    if abs(self._min_single_pressure - hi) <= self._lower_snap_eps or \
+                    abs(self._min_single_pressure - lo) <= self._lower_snap_eps:
+                        snap_to = float(self._min_single_pressure)
+
+                self._lower_edge_locked = True
+                self._lower_edge_value  = float(snap_to if snap_to is not None else hi)
+
+                self.stageChanged.emit(
+                    f"Lower edge locked at ~{self._lower_edge_value:.3f} psi (≤ {self._edge_eps:.2f})."
+                )
+
+                # If upper also locked, we're done
+                if self._upper_edge_locked:
+                    self.finalize.emit()
+                    return True
+
+                # Otherwise resume scan from just below the lowest SINGLE to continue normal sweep
                 self._phase = "scan"
-                self._next_pressure = float(max(self.P_MIN, lo - max(self.dp_min, width/2.0)))
+                resume_from = self._min_single_pressure if self._min_single_pressure is not None else self._lower_edge_value
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, width/2.0)))
             else:
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = (lo + hi) / 2.0
