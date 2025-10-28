@@ -2912,7 +2912,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     def onApplyPressure(self):
         # Out-of-range or done?
         if self._next_pressure is None:
-            self.finalize.emit(); return
+            print("Next pressure is None")
+            # Synthesize a fallback next step instead of finalizing
+            fallback = (self._current_pressure if self._current_pressure is not None else self._p_hi)
+            fallback = float(max(self.P_MIN, min(self.P_MAX, fallback - max(self.dp, self.dp_min))))
+            self._next_pressure = fallback
 
         # If we’ve scanned below the requested low bound, finish
         if self._next_pressure < (self._p_lo - 1e-6):
@@ -2922,10 +2926,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # Clamp to hardware limits
         target = float(max(self.P_MIN, min(self.P_MAX, self._next_pressure)))
 
-        # If the clamp doesn’t change pressure and we can’t move further, finish
+        # If the clamp doesn't change pressure, try ONE nudge down before giving up
         if self._current_pressure is not None and abs(target - self._current_pressure) < 1e-9:
-            self.stageChanged.emit("No further pressure change possible; finalizing")
-            self.finalize.emit(); return
+            # Nudge by dp_min
+            target = float(max(self.P_MIN, min(self.P_MAX, self._current_pressure - max(self.dp_min, 0.01))))
+            if abs(target - self._current_pressure) < 1e-9:
+                self.stageChanged.emit("No further pressure change possible; finalizing")
+                self.finalize.emit(); return
 
         # Set up for this pressure
         self._current_pressure = target
@@ -2945,7 +2952,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         )
         def _after(): self.pressureApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
-
+        
     @Slot()
     def onCaptureReplicate(self):
         self._capture_with_policy(
@@ -2973,30 +2980,38 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         )
         self.presentImageSignal.emit(overlay)
 
+        # Classify first so safety-stop logic can depend on class
+        cls = self._classify_from_detection(droplets)
+
         nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
         dy_min = None
         if droplets:
-            dy_list = [ (cy - ny) for (cx, cy) in droplets if cy >= ny ]
+            dy_list = [(cy - ny) for (cx, cy) in droplets if cy >= ny]
             if dy_list:
                 dy_min = min(dy_list)
-                if dy_min < self.safety_clearance_px:
-                    self._early_stop = True
-                    self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
-                    self._terminate_at_pressure = float(self._current_pressure)
-                    self.stageChanged.emit(
-                        f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
-                    )
-                    self.finalize.emit()
-                    return
 
-        cls = self._classify_from_detection(droplets)
+        # ---- SAFETY: ignore "too close" if MULTIPLE ----
+        # We only stop early if the droplet is single (or none) AND too close.
+        if (cls != "multiple") and (dy_min is not None) and (dy_min < self.safety_clearance_px):
+            self._early_stop = True
+            self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
+            self._terminate_at_pressure = float(self._current_pressure)
+            self.stageChanged.emit(
+                f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
+            )
+            self.finalize.emit()
+            return
+
+        # Nozzle-wet handling stays as-is (we log per-rep; final stop handled in _choose_next_pressure)
         if cls == "invalid":
             self._invalid_skip_count += 1
             self.stageChanged.emit("Nozzle-contact / invalid replicate → re-capturing")
             if self._invalid_skip_count > self._invalid_skip_cap:
                 self.calibrationError.emit("Too many invalid replicates at this pressure.")
-                self.finalize.emit(); return
-            self.replicateReady.emit(); return
+                self.finalize.emit()
+                return
+            self.replicateReady.emit()
+            return
 
         rep = {
             "cls": cls,
@@ -3109,6 +3124,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self._early_stop = True
             self._stop_reason = "Nozzle wet detected during scan"
             self._terminate_at_pressure = float(self._current_pressure)
+            print("Nozzle wet detected; stopping scan")
             self.finalize.emit()
             return
 
@@ -3153,17 +3169,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     def _advance_or_finish(self):
         if self._early_stop:
+            print("Early stop triggered")
             self.finalize.emit()
             return
+
+        # If next pressure didn't get set (e.g., unanimous SINGLE on first point), synthesize a safe step
         if self._next_pressure is None:
-            self.finalize.emit()
-            return
+            base = (self._current_pressure if self._current_pressure is not None else self._p_hi)
+            self._next_pressure = float(max(self.P_MIN, min(self.P_MAX, base - max(self.dp, self.dp_min))))
+
         # If walking off the scan range, finish
         if self._next_pressure < (self._p_lo - 1e-6):
+            print("Next pressure below scan range")
             self.finalize.emit()
             return
-        self.continueScan.emit()   # → state_apply (will use _next_pressure)
 
+        self.continueScan.emit()   # → state_apply (will use _next_pressure)
     def _compute_single_bands(self):
         singles = sorted([rec["pressure"] for rec in self.samples if rec.get("verdict") == "single"])
         if not singles:
