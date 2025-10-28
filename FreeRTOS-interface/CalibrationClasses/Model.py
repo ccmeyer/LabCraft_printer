@@ -1731,19 +1731,19 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     # ---- tuning / safety ----
     DELAY_MIN = 1500          # μs
     DELAY_MAX = 8000          # μs
-    COARSE_STEP = 300
-    FINE_STEP   = 60
-    BIG_JUMP_US = 500         # used during "visibility escalation"
-    MAX_EVALS   = 40
+    COARSE_STEP = 500
+    FINE_STEP   = 100
+    BIG_JUMP_US = 800         # used during "visibility escalation"
+    MAX_EVALS   = 50
     REPLICATES  = 3
     MONO_TOL_FRAC = 0.10      # monotonic tolerance (10% increase considered suspicious)
 
     # acceptable area band (target window)
-    MIN_AREA = 1000
-    MAX_AREA = 2000
+    MIN_AREA = 3000
+    MAX_AREA = 6000
 
     # start-delay model vs pulse width (μs)
-    START_DELAY_BASE_US = 5800
+    START_DELAY_BASE_US = 5000
     START_DELAY_REF_PW  = 3000
     START_DELAY_SLOPE   = 0.5   # +0.5 μs delay per +1 μs pulse width
 
