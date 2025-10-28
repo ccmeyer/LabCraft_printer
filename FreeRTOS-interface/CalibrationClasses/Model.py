@@ -674,21 +674,18 @@ class CalibrationManager(QObject):
         return True
 
     def _emit_readiness(self):
-        # Add other processes here as you adopt this pattern
-        pressure_calibration_missing = PressureCalibrationProcess.missing_requirements(self)
-        pressure_scan_missing = PressureBandCalibrationProcess.missing_requirements(self)
-        trajectory_missing = TrajectoryCalibrationProcess.missing_requirements(self)
-        trajectory_scan_missing = PressureTrajectoryCalibrationProcess.missing_requirements(self)
-        droplet_characterization_missing = DropletSearchCalibrationProcess.missing_requirements(self)
-        pressure_sweep_characterization_missing = PressureSweepCharacterizationProcess.missing_requirements(self)
+        # Helper to pack readiness + missing list for each process class
+        def pack(proc_cls):
+            missing = proc_cls.missing_requirements(self)
+            return {"ready": len(missing) == 0, "missing": missing}
 
         readiness = {
-            "pressure_calibration": len(pressure_calibration_missing) == 0,
-            "pressure_scan": len(pressure_scan_missing) == 0,
-            "droplet_trajectory": len(trajectory_missing) == 0,
-            "pressure_trajectory": len(trajectory_scan_missing) == 0,
-            "droplet_characterization": len(droplet_characterization_missing) == 0,
-            "pressure_sweep_characterization": len(pressure_sweep_characterization_missing) == 0
+            "pressure_calibration":           pack(PressureCalibrationProcess),
+            "pressure_scan":                  pack(PressureBandCalibrationProcess),
+            "droplet_trajectory":             pack(TrajectoryCalibrationProcess),
+            "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
+            "droplet_characterization":       pack(DropletSearchCalibrationProcess),
+            "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
         }
         self.readinessChanged.emit(readiness)
 
