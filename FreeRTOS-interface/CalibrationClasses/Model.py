@@ -5685,7 +5685,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 return  # will come back here via moveDone→state_setDelay
 
             # If probes are exhausted, proceed with your existing nudge/cycle logic
-            self._vertical_probe_tries = 0  # reset for future sweeps at this pressure
+            self._vertical_probe_tries = 0
             self._search_fail_cycles += 1
             if self._search_fail_cycles >= self.max_search_cycles:
                 self.stageChanged.emit("Inconsistent imaging: too many delay sweeps → skip pressure")
@@ -5702,6 +5702,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                                         self.target_delay_us + int(1000 * nudge))
             )
             return  # wait for moveDone
+
+        d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
+        self._delay_try_index += 1
+        self.current_delay_us = self._clamp_delay(d)
+        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} µs (search)")
+        self.calibration_manager.changeSettingsRequested.emit(
+            {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+            self.delayApplied.emit
+        )
 
     @Slot()
     def onCaptureDroplet(self):
