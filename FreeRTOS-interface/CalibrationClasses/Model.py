@@ -234,9 +234,9 @@ class CalibrationManager(QObject):
         self.add_calibration_to_queue('nozzle_position')
         self.add_calibration_to_queue('nozzle_focus')
         self.add_calibration_to_queue('droplet_emergence')
-        self.add_calibration_to_queue('pressure')
-        self.add_calibration_to_queue('trajectory')
-        self.add_calibration_to_queue('droplet_search')
+        self.add_calibration_to_queue('pressure_scan')
+        self.add_calibration_to_queue('pressure_trajectory')
+        self.add_calibration_to_queue('pressure_sweep_characterization')
         self.start_calibration_queue()
 
     def add_calibration_to_queue(self, calibration_name):
@@ -264,6 +264,8 @@ class CalibrationManager(QObject):
             'pressure_scan': PressureBandCalibrationProcess,
             'trajectory': TrajectoryCalibrationProcess,
             'droplet_search': DropletSearchCalibrationProcess,
+            'pressure_trajectory': PressureTrajectoryCalibrationProcess,
+            'pressure_sweep_characterization': PressureSweepCharacterizationProcess,
         }
         proc_cls = mapping.get(next_cal)
         if not proc_cls:
