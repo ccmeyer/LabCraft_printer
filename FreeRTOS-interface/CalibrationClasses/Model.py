@@ -5652,7 +5652,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             # exhausted a sweep → count one "search cycle"
             self._delay_try_index = 0
             self._search_fail_cycles += 1
-            if self._search_fail_cycles > self.max_search_cycles:
+            if self._search_fail_cycles >= self.max_search_cycles:
                 self.stageChanged.emit("Inconsistent imaging: too many delay sweeps → skip pressure")
                 self._bad_reason = "search_fail_cycles"
                 self._record_pressure_result(valid=False, reason=self._bad_reason)
@@ -5741,6 +5741,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
         dX = int(max(-1200, min(1200, dX)))
         dZ = int(max(-1200, min(1200, dZ)))
+
+        # Count recenter attempt during centering
+        self._recentre_moves += 1
+        print('Recenter counter (onCenter):', self._recentre_moves)
+        self.stageChanged.emit(f"Centering recenter #{self._recentre_moves}/{self.max_recentre_moves}")
+        if self._recentre_moves >= self.max_recentre_moves:
+            self.stageChanged.emit("Inconsistent imaging: too many recenter moves (centering) → skip pressure")
+            self._bad_reason = "recentre_limit_center"
+            self._record_pressure_result(valid=False, reason=self._bad_reason)
+            self.i += 1
+            self.nextPressure.emit()
+            return
+        
         self.stageChanged.emit(f"Recentering move (clamped): {dX},{0},{dZ}")
         self._safe_move_abs(self._clamp_xyz(
             self.model.machine_model.get_current_position_dict()['X'] + dX,
@@ -5795,8 +5808,36 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # If not tightly centered, recenter immediately before any focus work
         if not self._is_within(center_px, self.center_first_tol_px):
+            # Count as a recenter attempt (center-first path)
+            self._recentre_moves += 1
+            print('Recenter counter (onCharacterizeLoop):', self._recentre_moves)
+
+            self.stageChanged.emit(f"Center-first recenter #{self._recentre_moves}/{self.max_recentre_moves}")
+
+            # If it's far outside the broader boundary, count as OOB too
+            if not self._is_within(center_px, self.boundary_tol_px):
+                self._oob_total += 1
+                self.stageChanged.emit(f"OOB (center-first path): total={self._oob_total}/{self.max_oob_total}")
+                if self._oob_total >= self.max_oob_total:
+                    self.stageChanged.emit("Inconsistent imaging: too many out-of-bounds hits → skip pressure")
+                    self._bad_reason = "oob_total_limit_centerfirst"
+                    self._record_pressure_result(valid=False, reason=self._bad_reason)
+                    self.i += 1
+                    self.nextPressure.emit()
+                    return
+
+            # Recenter-move guard
+            if self._recentre_moves >= self.max_recentre_moves:
+                self.stageChanged.emit("Inconsistent imaging: too many recenter moves (center-first) → skip pressure")
+                self._bad_reason = "recentre_limit_centerfirst"
+                self._record_pressure_result(valid=False, reason=self._bad_reason)
+                self.i += 1
+                self.nextPressure.emit()
+                return
+
+            # Proceed with the move
             self._recentre_immediate(center_px)
-            return  # will recapture after move
+            return
         
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
@@ -5851,8 +5892,6 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
-
-        self._update_y_focus_offset()
 
         if self._check_boundary_and_maybe_recentre(center_px):
             # A recenter move was issued (average of 2 consecutive OOB hits).
@@ -6017,7 +6056,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._char_need_capture = True  # get a fresh frame after motion
         
         self._recentre_moves += 1               # NEW: count recenter moves
-        if self._recentre_moves > self.max_recentre_moves:
+        print('Recenter counter (check_boundary):', self._recentre_moves)
+        if self._recentre_moves >= self.max_recentre_moves:
             self.stageChanged.emit("Inconsistent imaging: too many recenter moves → skip pressure")
             self._bad_reason = "recentre_limit"
             self._record_pressure_result(valid=False, reason=self._bad_reason)
