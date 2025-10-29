@@ -2767,7 +2767,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 pw = int(self.model.machine_model.get_print_pulse_width())
             except Exception:
                 pw = 1500
-            classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1300))
+            classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1000))
         self.classify_delay_us = int(classification_delay_us)
 
         # --- pressure bounds ---
@@ -3989,6 +3989,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     setNextDelay      = Signal()   # advance to another delay at same pressure
     advancePressure   = Signal()   # advance to next pressure
     finalize          = Signal()   # finish entirely
+    reapplyPressure   = Signal()   # reapply the current pressure
 
     def __init__(self,
                  calibration_manager,
@@ -4059,6 +4060,14 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.edge_guard_px                    = int(edge_guard_px)
         self.miss_streak_limit                = int(miss_streak_limit)
         self.delay_floor_margin_us            = int(delay_floor_margin_us)
+        
+        self._pending_pressure_adjustment = None  # float | None
+        self._adjust_attempts_at_pressure = 0
+        self._adjust_attempts_limit = 5          # avoid infinite loops
+
+        # Low-pressure detection thresholds (tunable)
+        self._min_radial_growth_px  = 4.0        # net |r(t_last) - r(t_first)| must exceed this
+        self._reverse_step_px       = 1.0        # allow small noise; require >1 px reversal to trigger
 
         # earliest allowable delay (do not go earlier than this)
         try:
@@ -4119,6 +4128,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.state_decide.addTransition(self.continueCapture, self.state_capture)   # more reps at same delay
         self.state_decide.addTransition(self.setNextDelay,    self.state_set_delay) # move to another delay
         self.state_decide.addTransition(self.advancePressure, self.state_apply)     # next pressure
+        self.state_decide.addTransition(self.reapplyPressure, self.state_apply)
 
         # register states
         for s in (self.state_prepare_bg, self.state_apply, self.state_set_delay,
@@ -4172,6 +4182,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self._stop_delays_after_this = False
             self._discard_next = bool(self.discard_first_after_pressure)
             self._max_delay_allowed_us = None
+            self._pending_pressure_adjustment = None
+            self._adjust_attempts_at_pressure = 0
+            self._saw_multiple_this_pressure = False
 
             # reset completion map for this pressure
             self._completed = [False] * len(self.delays_us)
@@ -4247,6 +4260,22 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         edge_close_now = False
         abs_center = None
 
+        # High-pressure edge case – multiple droplets → schedule a downward adjust & reapply
+        if droplets and (len(droplets) > 1):
+            new_p = round(float(self._current_pressure) - 0.01, 3)
+            self.stageChanged.emit(
+                f"Multiple droplets detected at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
+            )
+            self._pending_pressure_adjustment = new_p
+            self._saw_multiple_this_pressure = True
+            # Continue to present overlay and let state flow into onDecide()
+            try:
+                self.presentImageSignal.emit(overlay)
+            except Exception:
+                pass
+            self.timepointReady.emit()
+            return
+
         if droplets and (len(droplets) == 1):
             (cx, cy) = droplets[0]
             nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
@@ -4286,6 +4315,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onDecide(self):
+        if self._pending_pressure_adjustment is not None:
+            self._restart_current_pressure_with(self._pending_pressure_adjustment,
+                                                reason="multiple_droplets")
+            return
         # 1) too many fails at this delay → mark completed (skipped) and move on
         if self._failed_caps_this_delay >= self.max_failed_captures_per_delay:
             self.stageChanged.emit(
@@ -4321,6 +4354,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             t_now  = int(self.delays_us[self.d_index])
             self.points.append({"t_us": t_now, "center_px": (dx_med, dy_med)})
             self._mark_current_delay_completed(aggregated=True)
+
+            # Low-pressure edge case — check radial growth vs. nozzle across delays
+            if self._should_raise_low_pressure_due_to_retraction():
+                new_p = round(float(self._current_pressure) + 0.01, 3)
+                self.stageChanged.emit(
+                    f"Weak/negative radial motion at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
+                )
+                self._restart_current_pressure_with(new_p, reason="low_pressure_retraction")
+                return
 
             if self._stop_delays_after_this and len(self.points) >= self.min_points:
                 self.stageChanged.emit("Near edge and have enough points → finishing this pressure")
@@ -4400,6 +4442,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._stop_delays_after_this = False
         self._max_delay_allowed_us = None
         self._completed = [False] * len(self.delays_us)
+        self._pending_pressure_adjustment = None
+        self._adjust_attempts_at_pressure = 0
+        self._saw_multiple_this_pressure = False
 
         if self.p_index >= len(self.pressures):
             self.finalize.emit()
@@ -4597,6 +4642,93 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         eg = self.edge_guard_px
         cv2.rectangle(overlay, (eg, eg), (w-1-eg, h-1-eg), (80, 80, 80), 1)
         return overlay
+
+    def _should_raise_low_pressure_due_to_retraction(self) -> bool:
+        """
+        Return True if aggregated points at the current pressure show that the droplet
+        is not moving away from the nozzle (flat) or is reversing toward it.
+        Uses radial distance r = sqrt(dx^2+dy^2) vs. delay.
+        """
+        if len(self.points) < 2:
+            return False
+
+        pts = sorted(self.points, key=lambda p: p["t_us"])
+        r = [float(math.hypot(p["center_px"][0], p["center_px"][1])) for p in pts]
+
+        # Net growth across the window
+        net = r[-1] - r[0]
+        if net <= self._min_radial_growth_px:
+            return True
+
+        # Local reversal on last step (be tolerant to noise)
+        if len(r) >= 2 and (r[-1] < (r[-2] - self._reverse_step_px)):
+            return True
+
+        return False
+    
+    def _restart_current_pressure_with(self, new_pressure: float, *, reason: str):
+        """
+        Do NOT advance p_index. Replace the current pressure value with `new_pressure`,
+        reset per-pressure state, optionally update the band, then jump back to state_apply.
+        """
+        # safety clamp to hardware bounds if available
+        try:
+            lo, hi = self.model.machine_model.get_print_pressure_bounds()
+            new_pressure = float(min(max(new_pressure, lo), hi))
+        except Exception:
+            pass
+        new_pressure = round(float(new_pressure), 3)
+
+        # Guard against infinite loops
+        self._adjust_attempts_at_pressure += 1
+        if self._adjust_attempts_at_pressure > self._adjust_attempts_limit:
+            self.stageChanged.emit(
+                f"Adjustment limit reached at pressure slot → skipping this slot (reason: {reason})"
+            )
+            # record a no-fit sample and move on to the next pressure
+            self.samples.append({
+                "pressure": float(self._current_pressure),
+                "points": self.points[:],
+                "fit": None,
+                "note": f"skipped after repeated '{reason}' adjustments"
+            })
+            self._pending_pressure_adjustment = None
+            self._finish_pressure_and_advance()
+            return
+
+        # Update the pressure list for this index (stay on this slot)
+        if 0 <= self.p_index < len(self.pressures):
+            self.pressures[self.p_index] = new_pressure
+
+        # Optional: try to update the primary pressure band on the manager
+        try:
+            band = self.calibration_manager.get_primary_pressure_band()
+            if isinstance(band, (list, tuple)) and len(band) == 2:
+                lo, hi = float(min(band)), float(max(band))
+                if reason == "low_pressure_retraction":
+                    lo = min(hi, new_pressure)
+                elif reason == "multiple_droplets":
+                    hi = max(lo, new_pressure)
+                setter = getattr(self.calibration_manager, "set_primary_pressure_band", None)
+                if callable(setter):
+                    setter((round(lo, 3), round(hi, 3)))
+        except Exception:
+            pass
+
+        # Reset per-pressure state
+        self._current_pressure = None
+        self.points = []
+        self._completed = [False] * len(self.delays_us)
+        self._reset_delay_state()
+        self._miss_streak = 0
+        self._stop_delays_after_this = False
+        self._max_delay_allowed_us = None
+        self._pending_pressure_adjustment = None
+        self._saw_multiple_this_pressure = False
+        self._discard_next = bool(self.discard_first_after_pressure)
+
+        # Jump back to apply state for this same p_index
+        self.reapplyPressure.emit()
     
 class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     """
