@@ -642,6 +642,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.update_stage_and_log("Calibration Queue Completed","green")
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
+        self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
 
     def on_calibration_error(self, error_message):
         """
@@ -650,6 +651,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.update_stage_and_log("Calibration Error", "red")
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
+        self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
 
     def reset_calibration_buttons(self):
@@ -783,6 +785,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_all_button.setText("Stop Calibration")
             self.controller.start_all_calibrations()
+
+    def toggle_start_pw_sweep(self):
+        """
+        Start/stop running 'Calibrate All' for a sweep of pulse widths.
+        Uses CalibrationManager's built-in sweep orchestration.
+        """
+        mgr = self.model.calibration_manager
+
+        # If a sweep is active, stop it
+        if mgr.is_pulsewidth_sweep_active():
+            self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
+            mgr.stop_pulsewidth_sweep()
+            return
+
+        # If a calibration is currently running (single or queue), stop it first
+        if mgr.activeCalibration is not None or len(mgr.calibration_queue) > 0:
+            # mirror your other toggle patterns (stop via controller)
+            try:
+                self.controller.stop_calibration()
+            except Exception:
+                pass  # if controller not available, fall back to manager.stop()
+            mgr.stop()
+            # After stopping, fall through to start fresh
+
+        # Read and validate PW range
+        pw_start = int(self.pw_start_spin.value())
+        pw_end   = int(self.pw_end_spin.value())
+        pw_step  = int(self.pw_step_spin.value())
+
+        if pw_step <= 0:
+            QtWidgets.QMessageBox.warning(self, "Invalid step", "Pulse width step must be > 0.")
+            return
+        if pw_start == pw_end:
+            QtWidgets.QMessageBox.warning(self, "Invalid range", "Start and end pulse widths cannot be equal.")
+            return
+
+        # Update button and kick off sweep
+        self.calibrate_all_pw_button.setText("Stop PW Range")
+        mgr.start_pulsewidth_sweep(pw_start, pw_end, pw_step)
 
     def on_readiness_changed(self, readiness: dict):
         """
