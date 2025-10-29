@@ -908,9 +908,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         # pressure search (psi)
         self.max_pressure_levels = 3          # total pressure levels: base + two bumps
-        self.pressure_step = 0.1              # psi per bump
+        self.pressure_step = 0.2              # psi per bump
         self.min_print_pressure = 0.35        # safe fallback bounds if model doesn’t expose them
-        self.max_print_pressure = 1.00
+        self.max_print_pressure = 2.00
+
+        self.no_signal_min_fg_px = 120  # min foreground pixels to consider "signal" present
 
         # recenter loop guard
         self.max_recenter_iterations = 8
@@ -1076,47 +1078,75 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         bg, dr = self.background_image, self.droplet_image
 
         status, nozzle_px, n_contours, debug_img = self._detect_nozzle_point(bg, dr)
+
         if status == "OK":
-            # success; move toward top-center
             if n_contours > 1:
                 self.stageChanged.emit(f"Multiple contours found ({n_contours}); using top-most candidate.")
-
             self.presentImageSignal.emit(debug_img)
             self._recenter_or_finish(nozzle_px)
             return
 
-        # Not found → advance scan plan: delays first, then pressure bumps (bounded)
-        advanced, settings = self._advance_scan_plan()
-        if not advanced:
-            self.calibrationError.emit(
-                "No droplet/nozzle detected after scanning delays and pressure levels."
+        if status == "NO_SIGNAL":
+            # Substantial pressure bump and immediate retest
+            advanced, settings_or_err = self._escalate_pressure_on_no_signal()
+            if not advanced:
+                self.calibrationError.emit(settings_or_err)  # error message string
+                return
+            self.stageChanged.emit(settings_or_err.get("_stage_msg", "Raising pressure and retesting"))
+            # apply new pressure (and keep current delay)
+            self.calibration_manager.changeSettingsRequested.emit(
+                {k: v for k, v in settings_or_err.items() if not k.startswith("_")},
+                self.calibration_manager.emitSettingsChangeCompleted
             )
             return
 
-        # Apply new settings and loop: Analyze -> (settingsChangeCompleted) -> CaptureDroplet -> Analyze
+        # status == "NONE" → keep your existing delay-scan plan, then (smaller) pressure bump
+        advanced, settings = self._advance_scan_plan()
+        if not advanced:
+            self.calibrationError.emit("No droplet/nozzle detected after scanning delays and pressure levels.")
+            return
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
-    # def isCentered(self, center):
-    #     img_width, img_height = self.model.droplet_camera_model.get_image_size()
-    #     ideal_center = (img_width // 2, img_height // 2)
-    #     tolerance = 0.01
-    #     return (abs(center[0] - ideal_center[0]) <= tolerance * img_width and
-    #             abs(center[1] - ideal_center[1]) <= tolerance * img_height)
     # ----------------- Helpers: detection & movement -----------------
+
+    def _escalate_pressure_on_no_signal(self):
+        """
+        For frames with effectively no foreground after Otsu:
+        bump pressure by +0.2 psi up to a hard ceiling (≤ 2.0 psi or hardware max).
+        Returns (True, settings_dict) or (False, error_message).
+        """
+        try:
+            cur = float(self.model.machine_model.get_current_print_pressure())
+        except Exception:
+            # fall back to last known base or min
+            cur = float(self._base_pressure if self._base_pressure is not None else self.min_print_pressure)
+
+        ceiling = float(self._pressure_ceiling_psi)
+        if cur >= ceiling - 1e-9:
+            return (False, f"Unable to detect nozzle: increased pressure up to {ceiling:.3f} psi without any signal.")
+
+        new_p = float(min(ceiling, cur + self.escalate_pressure_step))
+        msg = f"No signal in diff → raising pressure to {new_p:.3f} psi and retesting"
+        # keep current flash delay; ensure one droplet
+        settings = {
+            "num_droplets": 1,
+            "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
+            "print_pressure": new_p,
+            "_stage_msg": msg,  # internal note for UI stage text
+        }
+        return (True, settings)
 
     def _detect_nozzle_point(self, bg, dr):
         """
         Return (status, (x,y), n_contours, debug_img)
-        status: "OK" or "NONE"
-        (x,y):  (x_mid_of_bounding_box, top_y_of_contour) for the chosen candidate
-        Robust diff with thresholding + morphology, then contour filtering.
+        status ∈ {"OK", "NONE", "NO_SIGNAL"}
+        - NO_SIGNAL: Otsu mask has too few foreground pixels → likely nothing ejected.
+        - NONE: some foreground but no valid contour after filtering (noise/specks).
         """
         if bg is None or dr is None:
-            return ("NONE", None, 0, None)
+            return ("NO_SIGNAL", None, 0, None)
 
-        a = dr
-        b = bg
-        # diff → gray
+        a = dr; b = bg
         if a.ndim == 3 and a.shape[2] == 3:
             diff = cv2.absdiff(a, b)
             gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
@@ -1124,15 +1154,17 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             diff = cv2.absdiff(a, b)
             gray = diff if diff.ndim == 2 else cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
 
-        # denoise + threshold
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if np.count_nonzero(th) < 10:
-            # fallback if Otsu gives almost nothing
-            t = max(10, int(np.mean(blur) + 3 * np.std(blur)))
-            _, th = cv2.threshold(blur, t, 255, cv2.THRESH_BINARY)
 
-        # clean specks
+        # Otsu only; no fallback to mean+3σ (that was causing false positives)
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        fg_px = int(np.count_nonzero(th))
+        if fg_px < int(self.no_signal_min_fg_px):
+            dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            return ("NO_SIGNAL", None, 0, dbg)
+
+        # clean specks (then look for contours)
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
@@ -1142,32 +1174,25 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        # basic area filter
+        # area filter (keep only plausible stream/nozzle contours)
         areas = [cv2.contourArea(c) for c in contours]
         keep = [(c, a) for (c, a) in zip(contours, areas) if a >= 2000]
         if not keep:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        # choose the lowest contour (max y); tie-break by larger area
         def contour_bottom_y(contour):
             ys = contour[:, :, 1].flatten()
             return int(ys.max())
 
-        keep_sorted = sorted(
-            keep,
-            key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1])
-        )
-        chosen, chosen_area = keep_sorted[0]
+        keep_sorted = sorted(keep, key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1]))
+        chosen, _ = keep_sorted[0]
         n = len(keep)
 
-        # compute top y from contour and horizontal middle from bounding box
         ys = chosen[:, :, 1].flatten()
         top_y = int(ys.min())
-
         x, y, w, h = cv2.boundingRect(chosen)
         mid_x = int(round(x + w / 2.0))
-
         nozzle_xy = (mid_x, top_y)
 
         # debug overlay
@@ -1175,13 +1200,10 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             dbg = a.copy()
         else:
             dbg = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
-
-        # contour and bbox
         cv2.drawContours(dbg, [chosen], -1, (0, 255, 0), 2)
-        cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)  # orange box
-        # top edge line + point
+        cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)
         cv2.line(dbg, (x, top_y), (x + w, top_y), (0, 200, 255), 1)
-        cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)  # chosen nozzle point
+        cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)
 
         return ("OK", nozzle_xy, n, dbg)
 
