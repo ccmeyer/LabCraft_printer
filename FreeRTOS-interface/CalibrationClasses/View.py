@@ -116,6 +116,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.droplet_camera_model = model.droplet_camera_model
         self.controller = controller
 
+        # Hardware bounds for pressures (used globally)
+        try:
+            self.hw_lo, self.hw_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            self.hw_lo, self.hw_hi = 0.10, 5.00
+
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
 
@@ -130,366 +136,162 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.camera_timer.timeout.connect(self.capture_image)
         self.capturing = False
 
-        # Track whether we are in multi-capture mode:
-        self.multi_capturing = False
-
-        # Stores the steps in the process (positions/moves or captures) in a queue:
-        self.multi_capture_queue = []
-
-        # A timer that processes one step of multi-capture at a time
-        self.multi_capture_timer = QtCore.QTimer(self)
-        self.multi_capture_timer.setInterval(500)  # e.g. 500 ms per step
-        self.multi_capture_timer.timeout.connect(self.next_multi_capture_step)
-
-
-        self.setWindowTitle("Droplet Imaging New")
+        self.setWindowTitle("Droplet Imaging")
         self.resize(1200, 1000)
 
-        self.layout = QtWidgets.QHBoxLayout()
+        # =========================
+        # Main two-column layout
+        # =========================
+        self.layout = QtWidgets.QHBoxLayout(self)
 
-        self.button_layout = QtWidgets.QGridLayout()
+        # ---------- LEFT PANEL (fixed width): two groups ----------
+        left_panel = QtWidgets.QWidget()
+        left_panel_v = QtWidgets.QVBoxLayout(left_panel)
+        left_panel_v.setContentsMargins(6, 6, 6, 6)
+        left_panel_v.setSpacing(8)
 
+        # --- Group 1: Manual Controls ---
+        manual_group = QtWidgets.QGroupBox("Manual Controls")
+        manual_grid = QtWidgets.QGridLayout(manual_group)
+        manual_grid.setHorizontalSpacing(8)
+        manual_grid.setVerticalSpacing(6)
         row = 0
-    
-        # Add a label to show the number of recorded flashes
+
+        # Counters
         self.flash_count_label = QtWidgets.QLabel("Flashes: 0")
-        self.button_layout.addWidget(self.flash_count_label, row, 0, 1, 2)
-        row += 1
-
         self.trigger_count_label = QtWidgets.QLabel("Triggers: 0")
-        self.button_layout.addWidget(self.trigger_count_label, row, 0, 1, 2)
-        row += 1
+        manual_grid.addWidget(self.flash_count_label,   row, 0, 1, 2); row += 1
+        manual_grid.addWidget(self.trigger_count_label, row, 0, 1, 2); row += 1
 
-        # Add a spinbox to set the duration of the flash
-        self.flash_duration_label = QtWidgets.QLabel("Flash Duration (us):")
+        # Flash duration
+        self.flash_duration_label = QtWidgets.QLabel("Flash Duration (µs):")
         self.flash_duration_spinbox = QtWidgets.QSpinBox()
         self.flash_duration_spinbox.setRange(0, 10000)
         self.flash_duration_spinbox.setSingleStep(1000)
         self.flash_duration_spinbox.setValue(self.droplet_camera_model.flash_duration)
-        self.button_layout.addWidget(self.flash_duration_label, row, 0)
-        self.button_layout.addWidget(self.flash_duration_spinbox, row, 1)
-        row += 1
+        manual_grid.addWidget(self.flash_duration_label,  row, 0)
+        manual_grid.addWidget(self.flash_duration_spinbox,row, 1); row += 1
 
-        # Add a spinbox to set the delay before the flash
-        self.flash_delay_label = QtWidgets.QLabel("Flash Delay (us):")
+        # Flash delay
+        self.flash_delay_label = QtWidgets.QLabel("Flash Delay (µs):")
         self.flash_delay_spinbox = QtWidgets.QSpinBox()
         self.flash_delay_spinbox.setRange(0, 50000)
         self.flash_delay_spinbox.setSingleStep(100)
         self.flash_delay_spinbox.setValue(self.droplet_camera_model.flash_delay)
-        self.button_layout.addWidget(self.flash_delay_label, row, 0)
-        self.button_layout.addWidget(self.flash_delay_spinbox, row, 1)
-        row += 1
+        manual_grid.addWidget(self.flash_delay_label,  row, 0)
+        manual_grid.addWidget(self.flash_delay_spinbox,row, 1); row += 1
 
-        # Add a spinbox to set the number of droplets to print before imaging
+        # Number of droplets (pre-imaging)
         self.num_droplets_label = QtWidgets.QLabel("Number of droplets:")
         self.num_droplets_spinbox = QtWidgets.QSpinBox()
         self.num_droplets_spinbox.setRange(0, 20)
         self.num_droplets_spinbox.setSingleStep(1)
         self.num_droplets_spinbox.setValue(self.droplet_camera_model.num_droplets)
-        self.button_layout.addWidget(self.num_droplets_label, row, 0)
-        self.button_layout.addWidget(self.num_droplets_spinbox, row, 1)
-        row += 1
+        manual_grid.addWidget(self.num_droplets_label,  row, 0)
+        manual_grid.addWidget(self.num_droplets_spinbox,row, 1); row += 1
 
-        # Add a spinbox to set the print pulse width
-        self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
+        # Print pulse width
+        self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width (µs):")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
         self.print_pulse_width_spinbox.setRange(0, 10000)
         self.print_pulse_width_spinbox.setSingleStep(50)
         self.print_pulse_width_spinbox.setValue(self.model.machine_model.get_print_pulse_width())
-        self.button_layout.addWidget(self.print_pulse_width_label, row, 0)
-        self.button_layout.addWidget(self.print_pulse_width_spinbox, row, 1)
-        row += 1
+        manual_grid.addWidget(self.print_pulse_width_label,  row, 0)
+        manual_grid.addWidget(self.print_pulse_width_spinbox,row, 1); row += 1
 
-        # Add a spinbox for exposure time
+        # Exposure time
         self.exposure_time_label = QtWidgets.QLabel("Exposure Time (ms):")
         self.exposure_time_spinbox = QtWidgets.QSpinBox()
-        self.exposure_time_spinbox.setRange(0, 1000000)
+        self.exposure_time_spinbox.setRange(0, 1_000_000)
         self.exposure_time_spinbox.setSingleStep(2000)
         self.exposure_time_spinbox.setValue(self.droplet_camera_model.exposure_time)
-        self.button_layout.addWidget(self.exposure_time_label, row, 0)
-        self.button_layout.addWidget(self.exposure_time_spinbox, row, 1)
-        row += 1
+        manual_grid.addWidget(self.exposure_time_label,  row, 0)
+        manual_grid.addWidget(self.exposure_time_spinbox,row, 1); row += 1
 
-        # Add a button to trigger a flash
+        # Trigger flash
         self.flash_button = QtWidgets.QPushButton("Trigger Flash")
         self.flash_button.clicked.connect(self.toggle_flash)
-        self.button_layout.addWidget(self.flash_button, row, 0, 1, 2)
-        row += 1
+        manual_grid.addWidget(self.flash_button, row, 0, 1, 2); row += 1
 
-        # Add line to separate buttons
-        self.button_layout.addWidget(QtWidgets.QLabel(" "), row, 0, 1, 2)
-        row += 1
+        # --- Group 2: Calibration (with Starting Pressure) ---
+        calib_group = QtWidgets.QGroupBox("Calibration")
+        calib_grid = QtWidgets.QGridLayout(calib_group)
+        calib_grid.setHorizontalSpacing(8)
+        calib_grid.setVerticalSpacing(6)
+        crow = 0
 
-        # # Add text edit box for the directory name to save images in
-        # self.save_directory_label = QtWidgets.QLabel("Save Directory:")
-        # self.save_directory_edit = QtWidgets.QLineEdit()
-        # self.save_directory_edit.setText(self.droplet_camera_model.dir_name)
-        # self.button_layout.addWidget(self.save_directory_label, row, 0)
-        # self.button_layout.addWidget(self.save_directory_edit, row, 1)
-        # row += 1
-
-        # # Add a button to toggle whether the captured image should be saved
-        # self.save_button = QtWidgets.QPushButton("Save Images")
-        # self.save_button.clicked.connect(self.toggle_saving)
-        # self.button_layout.addWidget(self.save_button, row, 0, 1, 2)
-        # row += 1
-
-        # # Add a button for repeated image capture
-        # self.repeat_capture_button = QtWidgets.QPushButton("Start Repeated Capture")
-        # self.repeat_capture_button.clicked.connect(self.toggle_repeat_capture)
-        # self.button_layout.addWidget(self.repeat_capture_button, row, 0, 1, 2)
-        # # self.layout.addLayout(self.button_layout)
-        # row += 1
-
-        # self.multi_start_label = QtWidgets.QLabel("Multi-Capture Start Delay (us):")
-        # self.multi_start_spinbox = QtWidgets.QSpinBox()
-        # self.multi_start_spinbox.setRange(0, 50000)
-        # self.multi_start_spinbox.setSingleStep(100)
-        # self.multi_start_spinbox.setValue(15000)
-        # self.button_layout.addWidget(self.multi_start_label, row, 0)
-        # self.button_layout.addWidget(self.multi_start_spinbox, row, 1)
-        # row += 1
-
-        # self.multi_end_label = QtWidgets.QLabel("Multi-Capture End Delay (us):")
-        # self.multi_end_spinbox = QtWidgets.QSpinBox()
-        # self.multi_end_spinbox.setRange(0, 50000)
-        # self.multi_end_spinbox.setSingleStep(100)
-        # self.multi_end_spinbox.setValue(15000)
-        # self.button_layout.addWidget(self.multi_end_label, row, 0)
-        # self.button_layout.addWidget(self.multi_end_spinbox, row, 1)
-        # row += 1
-
-        # self.multi_steps_label = QtWidgets.QLabel("Number of Time Steps:")
-        # self.multi_steps_spinbox = QtWidgets.QSpinBox()
-        # self.multi_steps_spinbox.setRange(1, 1000)
-        # self.multi_steps_spinbox.setValue(1)
-        # self.button_layout.addWidget(self.multi_steps_label, row, 0)
-        # self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
-        # row += 1
-
-        # self.frame_shift_label = QtWidgets.QLabel("Percent of frame:")
-        # self.frame_shift_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.frame_shift_spinbox.setDecimals(1)
-        # self.frame_shift_spinbox.setRange(0, 1)
-        # self.frame_shift_spinbox.setSingleStep(0.1)
-        # self.frame_shift_spinbox.setValue(1)
-        # self.button_layout.addWidget(self.frame_shift_label, row, 0)
-        # self.button_layout.addWidget(self.frame_shift_spinbox, row, 1)
-        # row += 1
-
-        # self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
-        # self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
-        # self.multi_frames_below_spinbox.setRange(0, 100)
-        # self.multi_frames_below_spinbox.setValue(0)
-        # self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
-        # self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
-        # row += 1
-
-        # # Add spin box for multi-execute timer interval
-        # self.multi_timer_interval_label = QtWidgets.QLabel("Timer Interval (ms):")
-        # self.multi_timer_interval_spinbox = QtWidgets.QSpinBox()
-        # self.multi_timer_interval_spinbox.setRange(0, 10000)
-        # self.multi_timer_interval_spinbox.setSingleStep(100)
-        # self.multi_timer_interval_spinbox.setValue(500)
-        # self.button_layout.addWidget(self.multi_timer_interval_label, row, 0)
-        # self.button_layout.addWidget(self.multi_timer_interval_spinbox, row, 1)
-        # row += 1
-
-        # # Add spin box for replicate images of each condition
-        # self.multi_replicate_label = QtWidgets.QLabel("Replicate Images:")
-        # self.multi_replicate_spinbox = QtWidgets.QSpinBox()
-        # self.multi_replicate_spinbox.setRange(1, 100)
-        # self.multi_replicate_spinbox.setValue(10)
-        # self.button_layout.addWidget(self.multi_replicate_label, row, 0)
-        # self.button_layout.addWidget(self.multi_replicate_spinbox, row, 1)
-        # row += 1
-
-        # # Button to start/stop the multi-capture
-        # self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
-        # self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
-        # self.button_layout.addWidget(self.multi_capture_button, row, 0, 1, 2)
-        # row += 1
-
-        # # Button to toggle analysis of captured images
-        # self.analyze_button = QtWidgets.QPushButton("Analyze Images")
-        # self.analyze_button.clicked.connect(self.toggle_analyzing)
-        # self.button_layout.addWidget(self.analyze_button, row, 0, 1, 2)
-        # row += 1
-
-        # intensity_threshold, circularity_threshold, min_area, edge_margin = self.droplet_camera_model.get_analysis_parameters()
-        # print(f'Analysis parameters: {min_area}, {intensity_threshold}, {circularity_threshold}, {edge_margin}')
-        
-        # Add a spin box to set the min area threshold for the analysis
-        # self.min_area_label = QtWidgets.QLabel("Min Area Threshold:")
-        # self.min_area_spinbox = QtWidgets.QSpinBox()
-        # self.min_area_spinbox.setRange(0, 10000000)
-        # self.min_area_spinbox.setSingleStep(1000)
-        # self.min_area_spinbox.setValue(min_area)
-        # self.button_layout.addWidget(self.min_area_label, row, 0)
-        # self.button_layout.addWidget(self.min_area_spinbox, row, 1)
-        # row += 1
-
-        # Add a spin box to set the intensity threshold for the analysis
-        # self.intensity_threshold_label = QtWidgets.QLabel("Intensity Threshold:")
-        # self.intensity_threshold_spinbox = QtWidgets.QSpinBox()
-        # self.intensity_threshold_spinbox.setRange(0, 255)
-        # self.intensity_threshold_spinbox.setSingleStep(10)
-        # self.intensity_threshold_spinbox.setValue(intensity_threshold)
-        # self.button_layout.addWidget(self.intensity_threshold_label, row, 0)
-        # self.button_layout.addWidget(self.intensity_threshold_spinbox, row, 1)
-        # row += 1
-
-        # Add a spin box to set the circularity threshold for the analysis
-        # self.circularity_threshold_label = QtWidgets.QLabel("Circularity Threshold:")
-        # self.circularity_threshold_spinbox = QtWidgets.QDoubleSpinBox()
-        # self.circularity_threshold_spinbox.setDecimals(2)
-        # self.circularity_threshold_spinbox.setRange(0, 2)
-        # self.circularity_threshold_spinbox.setSingleStep(0.1)
-        # self.circularity_threshold_spinbox.setValue(circularity_threshold)
-        # self.button_layout.addWidget(self.circularity_threshold_label, row, 0)
-        # self.button_layout.addWidget(self.circularity_threshold_spinbox, row, 1)
-        # row += 1
-
-        # Add a spin box to set the edge margin for the analysis
-        # self.edge_margin_label = QtWidgets.QLabel("Edge Margin:")
-        # self.edge_margin_spinbox = QtWidgets.QSpinBox()
-        # self.edge_margin_spinbox.setRange(0, 1000)
-        # self.edge_margin_spinbox.setSingleStep(5)
-        # self.edge_margin_spinbox.setValue(edge_margin)
-        # self.button_layout.addWidget(self.edge_margin_label, row, 0)
-        # self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
-        # row += 1
-
-        # Line to separate buttons
-        self.button_layout.addWidget(QtWidgets.QLabel("--- Calibrations ---"), row, 0, 1, 2)
-        row += 1
-
-        # Add a button to trigger the nozzle position calibration
-        self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
-        self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
-        self.button_layout.addWidget(self.calibrate_nozzle_button, row, 0, 1, 2)
-        row += 1
-
-        # Add a button to trigger the nozzle focus calibration
-        self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
-        self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
-        self.button_layout.addWidget(self.calibrate_focus_button, row, 0, 1, 2)
-        row += 1
-
-        # Add a button to trigger the droplet emergence calibration
-        self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
-        self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
-        self.button_layout.addWidget(self.calibrate_emergence_button, row, 0, 1, 2)
-        row += 1
-
-        # # Add a button to trigger the pressure calibration
-        # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
-        # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
-        # self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
-        # row += 1
-
-        # --- Pressure Scan controls (low / high / step) ---
-        # Try to use hardware bounds if available
-        try:
-            hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
-        except Exception:
-            hw_lo, hw_hi = 0.1, 5.0
-
-        self.scan_p_lo_label = QtWidgets.QLabel("Scan Pressure Low (psi):")
-        self.scan_p_lo_spin = QtWidgets.QDoubleSpinBox()
-        self.scan_p_lo_spin.setDecimals(2)
-        self.scan_p_lo_spin.setRange(hw_lo, hw_hi)
-        self.scan_p_lo_spin.setSingleStep(0.01)
-
-        self.scan_p_hi_label = QtWidgets.QLabel("Scan Pressure High (psi):")
-        self.scan_p_hi_spin = QtWidgets.QDoubleSpinBox()
-        self.scan_p_hi_spin.setDecimals(2)
-        self.scan_p_hi_spin.setRange(hw_lo, hw_hi)
-        self.scan_p_hi_spin.setSingleStep(0.01)
-
-        # Sensible defaults around current pressure
+        # Starting Pressure (psi) – replaces min/max/step
+        self.start_pressure_label = QtWidgets.QLabel("Starting Pressure (psi):")
+        self.start_pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.start_pressure_spin.setDecimals(2)
+        self.start_pressure_spin.setRange(self.hw_lo, self.hw_hi)
+        self.start_pressure_spin.setSingleStep(0.01)
         try:
             cur_p = float(self.model.machine_model.get_current_print_pressure())
+            cur_p = min(max(cur_p, self.hw_lo), self.hw_hi)
         except Exception:
-            cur_p = (hw_lo + hw_hi) / 2.0
-        default_lo = max(hw_lo, cur_p - 0.10)
-        default_hi = min(hw_hi, cur_p + 0.10)
-        self.scan_p_lo_spin.setValue(round(default_lo, 2))
-        self.scan_p_hi_spin.setValue(round(default_hi, 2))
+            cur_p = (self.hw_lo + self.hw_hi) / 2.0
+        self.start_pressure_spin.setValue(round(cur_p, 2))
+        calib_grid.addWidget(self.start_pressure_label, crow, 0)
+        calib_grid.addWidget(self.start_pressure_spin,  crow, 1); crow += 1
 
-        self.scan_p_step_label = QtWidgets.QLabel("Scan Step (psi):")
-        self.scan_p_step_spin = QtWidgets.QDoubleSpinBox()
-        self.scan_p_step_spin.setDecimals(2)
-        self.scan_p_step_spin.setRange(0.01, max(0.01, hw_hi - hw_lo))
-        self.scan_p_step_spin.setSingleStep(0.01)
-        self.scan_p_step_spin.setValue(0.01)
+        # Calibration buttons
+        self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
+        self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
+        calib_grid.addWidget(self.calibrate_nozzle_button, crow, 0, 1, 2); crow += 1
 
-        self.button_layout.addWidget(self.scan_p_lo_label, row, 0)
-        self.button_layout.addWidget(self.scan_p_lo_spin,  row, 1); row += 1
-        self.button_layout.addWidget(self.scan_p_hi_label, row, 0)
-        self.button_layout.addWidget(self.scan_p_hi_spin,  row, 1); row += 1
-        self.button_layout.addWidget(self.scan_p_step_label, row, 0)
-        self.button_layout.addWidget(self.scan_p_step_spin,  row, 1); row += 1
+        self.calibrate_focus_button = QtWidgets.QPushButton("Calibrate Nozzle Focus")
+        self.calibrate_focus_button.clicked.connect(self.toggle_start_focus_calibration)
+        calib_grid.addWidget(self.calibrate_focus_button, crow, 0, 1, 2); crow += 1
 
-        # Add a button to trigger the pressure scan
+        self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
+        self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
+        calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
+
         self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
         self.calibrate_pressure_scan_button.clicked.connect(self.toggle_start_pressure_scan_calibration)
-        self.button_layout.addWidget(self.calibrate_pressure_scan_button, row, 0, 1, 2)
-        row += 1
-
-        # # Add a button to trigger the droplet trajectory calibration
-        # self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
-        # self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
-        # self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
-        # row += 1
+        calib_grid.addWidget(self.calibrate_pressure_scan_button, crow, 0, 1, 2); crow += 1
 
         self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
         self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
-        self.button_layout.addWidget(self.scan_trajectory_button, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.scan_trajectory_button, crow, 0, 1, 2); crow += 1
 
-        # # Add a button to trigger the droplet search calibration
-        # self.calibrate_search_button = QtWidgets.QPushButton("Calibrate Droplet Search")
-        # self.calibrate_search_button.clicked.connect(self.toggle_start_search_calibration)
-        # self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
-        # row += 1
-
-        # Add a button to trigger the droplet characterization calibration
         self.calibrate_characterization_button = QtWidgets.QPushButton("Characterize Droplets")
         self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
-        self.button_layout.addWidget(self.calibrate_characterization_button, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.calibrate_characterization_button, crow, 0, 1, 2); crow += 1
 
-        # Add a button to trigger the pressure sweep characterization calibration
         self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
         self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
-        self.button_layout.addWidget(self.calibrate_pressure_sweep_button, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
-        # Add a button to trigger droplet timecourse imaging
         self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
         self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
-        self.button_layout.addWidget(self.calibrate_timecourse_button, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.calibrate_timecourse_button, crow, 0, 1, 2); crow += 1
 
-        # Add a button to trigger all calibrations
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
-        self.button_layout.addWidget(self.calibrate_all_button, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.calibrate_all_button, crow, 0, 1, 2); crow += 1
 
-        # Add a label that updates with the state of the calibration
+        # Status
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
-        self.button_layout.addWidget(self.stageLabel, row, 0, 1, 2)
-        row += 1
+        calib_grid.addWidget(self.stageLabel, crow, 0, 1, 2); crow += 1
 
+        # Add groups to left panel
+        left_panel_v.addWidget(manual_group)
+        left_panel_v.addWidget(calib_group)
+        left_panel_v.addStretch(1)
 
-        self.button_container_layout = QtWidgets.QVBoxLayout()
-        self.button_container_layout.addLayout(self.button_layout)
-        self.button_container_layout.addStretch()  # Add a stretch at the bottom to push everything up
-        self.layout.addLayout(self.button_container_layout)
+        # Keep left panel a stable width so buttons/labels don't resize
+        left_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        # Use size hint to set a fixed width after contents are laid out
+        left_panel.adjustSize()
+        left_panel.setFixedWidth(max(380, left_panel.sizeHint().width()))
 
-        # Add vertical layout for the image and analysis below it
+        # Add left panel to main layout
+        self.layout.addWidget(left_panel, 0)
+        self.layout.setStretchFactor(left_panel, 0)
+
+        # ---------- RIGHT PANEL (image + analysis/logs): expands ----------
         self.analysis_layout = QtWidgets.QVBoxLayout()
 
         self.image_label = QLabel("No image captured yet.")
@@ -498,49 +300,36 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.image_label.setFixedWidth(480)
         self.analysis_layout.addWidget(self.image_label)
 
-        # Create a container widget for the motor position labels.
+        # Motor diffs table (unchanged)
         self.diff_widget = QWidget()
-        # Create a grid layout for the diff labels and set its alignment to top left.
         self.diff_layout = QGridLayout(self.diff_widget)
         self.diff_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
-                # Add column headers
         motor_label = QLabel('Motor')
         current_label = QLabel('Current')
         target_label = QLabel('Diff')
         motor_label.setAlignment(Qt.AlignCenter)
         current_label.setAlignment(Qt.AlignCenter)
         target_label.setAlignment(Qt.AlignCenter)
-
         self.diff_layout.addWidget(motor_label, 0, 0)
         self.diff_layout.addWidget(current_label, 0, 1)
         self.diff_layout.addWidget(target_label, 0, 2)
 
-        # Labels to display motor positions.
         self.diff_labels = {
             'X': {'current': QLabel('0'), 'diff': QLabel('0')},
             'Y': {'current': QLabel('0'), 'diff': QLabel('0')},
             'Z': {'current': QLabel('0'), 'diff': QLabel('0')},
         }
-
-        row = 1
+        r = 1
         for motor, positions in self.diff_labels.items():
-            # Create a fixed-size motor label.
-            motor_label = QLabel(motor)
-            motor_label.setAlignment(Qt.AlignCenter)
-            motor_label.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-            # Set fixed size policies for current and diff labels.
+            ml = QLabel(motor); ml.setAlignment(Qt.AlignCenter)
             positions['current'].setAlignment(Qt.AlignCenter)
-            positions['current'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             positions['diff'].setAlignment(Qt.AlignCenter)
-            positions['diff'].setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-            
-            self.diff_layout.addWidget(motor_label, row, 0)
-            self.diff_layout.addWidget(positions['current'], row, 1)
-            self.diff_layout.addWidget(positions['diff'], row, 2)
-            row += 1
+            self.diff_layout.addWidget(ml,                 r, 0)
+            self.diff_layout.addWidget(positions['current'], r, 1)
+            self.diff_layout.addWidget(positions['diff'],   r, 2)
+            r += 1
 
-        # Add the diff_widget (which now contains the grid of labels) to the analysis layout.
         self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
 
         self.log_label = QtWidgets.QLabel("Calibration Log")
@@ -557,38 +346,33 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stage_table.setAlternatingRowColors(True)
         self.stage_table.horizontalHeader().setStretchLastSection(True)
         self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.stage_table.setMinimumHeight(200)   # ensures it’s visible; grows with dialog
+        self.stage_table.setMinimumHeight(200)
         self.analysis_layout.addWidget(self.stage_table)
 
-        # Finally, add the analysis_layout to your main layout.
-        self.layout.addLayout(self.analysis_layout)
+        # Add RIGHT to main layout; give it stretch to expand
+        right_container = QtWidgets.QWidget()
+        right_container.setLayout(self.analysis_layout)
+        right_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.layout.addWidget(right_container, 1)
+        self.layout.setStretchFactor(right_container, 1)
 
-        self.setLayout(self.layout)
-
+        # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
-        
         self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
-        
+
         self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
         self.flash_delay_spinbox.valueChanged.connect(self.set_flash_delay)
         self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
-        # self.save_directory_edit.textChanged.connect(self.set_save_directory)
         self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
-        # self.multi_timer_interval_spinbox.valueChanged.connect(self.set_multi_timer_interval)
-        # self.min_area_spinbox.valueChanged.connect(self.update_analysis_parameters)
-        # self.intensity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
-        # self.circularity_threshold_spinbox.valueChanged.connect(self.update_analysis_parameters)
-        # self.edge_margin_spinbox.valueChanged.connect(self.update_analysis_parameters)
 
-        # Connect the model's calibration stage signal to update the UI.
-        # self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage)
+        self.start_pressure_spinbox.valueChanged.connect(self.set_start_pressure)
+
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
-
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
@@ -615,20 +399,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Y(-5,manual=True))
         self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(25,manual=True))
         self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-25,manual=True))
-        
-        # self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_X(5, manual=True))
-        # self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_X(-5, manual=True))
-        # self.shortcut_manager.add_shortcut('Up', 'Move up', lambda: self.controller.set_relative_Z(-25, manual=True))
-        # self.shortcut_manager.add_shortcut('Down', 'Move down', lambda: self.controller.set_relative_Z(25, manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+Left', 'Move left', lambda: self.controller.set_relative_X(50, manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+Right', 'Move right', lambda: self.controller.set_relative_X(-50, manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.controller.set_relative_Z(-250, manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.controller.set_relative_Z(250, manual=True))
-        
-        # self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Y(2,manual=True))
-        # self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Y(-2,manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(10,manual=True))
-        # self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-10,manual=True))
         
         self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
@@ -743,16 +513,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         edge_margin = self.edge_margin_spinbox.value()
         self.model.droplet_camera_model.set_analysis_parameters(intensity_threshold, circularity_threshold, min_area, edge_margin)
 
-    def toggle_multi_capture(self):
-        """
-        Toggles the multi-capture process on/off using one button.
-        """
-        if not self.multi_capturing:
-            # START multi-capture
-            self.start_multi_capture()
-        else:
-            # STOP multi-capture
-            self.stop_multi_capture()
 
     def set_flash_duration(self, duration):
         """
@@ -784,17 +544,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.controller.set_exposure_time(exposure_time)
 
-    def set_multi_timer_interval(self, interval):
+    def set_start_pressure(self, pressure):
         """
-        Sets the interval for the multi-capture timer.
+        Sets the starting pressure for calibration.
         """
-        self.multi_capture_timer.setInterval(interval)
-
-    def set_save_directory(self, directory):
-        """
-        Sets the directory to save images in.
-        """
-        self.controller.set_save_directory(directory)
+        self.controller.set_start_pressure(pressure)
 
     def update_flash_info(self):
         """
@@ -825,118 +579,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def stop_droplet_camera(self):
         self.controller.stop_droplet_camera()
-
-    def start_multi_capture(self):
-        start_delay = self.multi_start_spinbox.value()
-        end_delay = self.multi_end_spinbox.value()
-        num_steps = self.multi_steps_spinbox.value()
-        frames_below = self.multi_frames_below_spinbox.value()
-        shift_percent = self.frame_shift_spinbox.value()
-        replicates = self.multi_replicate_spinbox.value()
-
-        if num_steps < 1 or start_delay > end_delay:
-            QtWidgets.QMessageBox.warning(
-                self, "Invalid Parameters",
-                "Check that end_delay >= start_delay and num_steps > 0."
-            )
-            return
-
-        # Build the time delay list
-        if num_steps == 1:
-            time_delays = [start_delay]
-        else:
-            step_size = (end_delay - start_delay) / (num_steps - 1)
-            time_delays = [int(round(start_delay + i * step_size)) 
-                        for i in range(num_steps)]
-
-        # Clear any old queue
-        self.multi_capture_queue.clear()
-
-        # We'll create a queue of (action, data) items.
-        # For each 'position', we add a set of captures for each time_delay
-        # Then, if not last position, we add a "move" step.
-
-        for position_index in range(frames_below + 1):
-            # Add capture actions for each time in time_delays
-            for delay in time_delays:
-                # We'll store ('capture', delay)
-                for replicate in range(replicates):
-                    self.multi_capture_queue.append(('capture', delay))
-            
-            # Move up after finishing this position, except for the last one
-            if position_index < frames_below:
-                self.multi_capture_queue.append(('move', (0,-shift_percent)))
-                # -> This will call self.move_fraction_of_frame(0, 1) when triggered
-                self.multi_capture_queue.append(('skip',0))
-                # -> This gives the machine time to get to the target lcation prior to the next capture
-
-        # Return to the original position
-        self.multi_capture_queue.append(('move', (0,frames_below*shift_percent)))
-
-        # Mark capturing as True and update button text
-        self.multi_capturing = True
-        self.multi_capture_button.setText("Stop Multi-Capture")
-
-        # Start the timer that processes each step
-        self.multi_capture_timer.start()
-
-    def stop_multi_capture(self):
-        self.multi_capture_timer.stop()
-        self.multi_capturing = False
-        self.multi_capture_button.setText("Execute Multi-Capture")
-        self.multi_capture_queue.clear()
-
-    def next_multi_capture_step(self):
-        """
-        Processes the next item in the multi-capture queue (non-blocking).
-        Called periodically by self.multi_capture_timer.
-        """
-        # If we've run out of steps or the user requested stop:
-        if not self.multi_capture_queue or not self.multi_capturing:
-            self.finish_multi_capture()
-            return
-
-        action, data = self.multi_capture_queue.pop(0)  # pop front of list
-
-        if action == 'capture':
-            if delay is not None:
-                delay = data
-                # Set spinbox and flash delay
-                self.flash_delay_spinbox.setValue(delay)
-                time.sleep(0.05)
-            # Trigger a capture
-            self.controller.capture_droplet_image()
-
-        elif action == 'move':
-            # data is (x_fraction, y_fraction)
-            (x_fraction, y_fraction) = data
-            self.move_fraction_of_frame(x_fraction, y_fraction)
-
-        elif action == 'skip':
-            return
-
-        elif action == 'droplet':
-            self.num_droplets_spinbox.setValue(data)
-
-
-        # Once this method returns, the UI is free to process events, so it's non-blocking.
-        # We'll pick up the next step on the next timer tick.
-    
-    def finish_multi_capture(self):
-        """
-        Called when the multi-capture sequence is complete or aborted.
-        """
-        self.multi_capture_timer.stop()
-        self.multi_capturing = False
-        self.multi_capture_queue.clear()
-        self.multi_capture_button.setText("Execute Multi-Capture")
-
-        # Optionally show a message that we completed all steps
-        QtWidgets.QMessageBox.information(
-            self,
-            "Multi-Capture Complete",
-            "All requested positions and time delays have been captured."
-        )
 
     def on_calibration_completed(self):
         """
@@ -969,9 +611,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
-        # self.calibrate_pressure_button.setText("Calibrate Pressure")
-        # self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
-        # self.calibrate_search_button.setText("Calibrate Droplet Search")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
         self.scan_trajectory_button.setText("Scan Trajectory Pressures")
         self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
@@ -1017,19 +656,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
 
-    def toggle_start_pressure_calibration(self):
-        """
-        Toggles whether the pressure calibration should be started.
-        """
-        if self.model.calibration_manager.activeCalibration is not None:
-            print('Stopping calibration')
-            self.calibrate_pressure_button.setText("Calibrate Pressure")
-            self.controller.stop_calibration()
-        else:
-            print('Starting calibration')
-            self.calibrate_pressure_button.setText("Stop Calibration")
-            self.controller.start_pressure_calibration()
-
     def toggle_start_pressure_scan_calibration(self):
         """
         Start/stop the pressure scan using UI-provided low/high/step.
@@ -1040,36 +666,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.stop_calibration()
             return
 
-        # Read & validate inputs
-        p_lo  = float(self.scan_p_lo_spin.value())
-        p_hi  = float(self.scan_p_hi_spin.value())
-        step  = float(self.scan_p_step_spin.value())
-
-        if p_hi <= p_lo:
-            QtWidgets.QMessageBox.warning(self, "Invalid range",
-                                          "High pressure must be greater than low pressure.")
-            return
-        if step <= 0 or step > (p_hi - p_lo):
-            QtWidgets.QMessageBox.warning(self, "Invalid step",
-                                          "Step must be > 0 and ≤ (High - Low).")
-            return
-
-        # Launch
-        self.calibrate_pressure_scan_button.setText("Stop Calibration")
-        self.controller.start_pressure_scan_calibration(p_lo, p_hi, step)
-
-    def toggle_start_trajectory_calibration(self):
-        """
-        Toggles whether the droplet trajectory calibration should be started.
-        """
-        if self.model.calibration_manager.activeCalibration is not None:
-            print('Stopping calibration')
-            self.calibrate_trajectory_button.setText("Calibrate Droplet Trajectory")
-            self.controller.stop_calibration()
         else:
-            print('Starting calibration')
-            self.calibrate_trajectory_button.setText("Stop Calibration")
-            self.controller.start_trajectory_calibration()
+            # Launch
+            self.calibrate_pressure_scan_button.setText("Stop Calibration")
+            self.controller.start_pressure_scan_calibration()
 
     def toggle_start_pressure_trajectory_calibration(self):
         """
@@ -1083,19 +683,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.scan_trajectory_button.setText("Stop Calibration")
             self.controller.start_pressure_trajectory_calibration()
-
-    def toggle_start_search_calibration(self):
-        """
-        Toggles whether the droplet search calibration should be started.
-        """
-        if self.model.calibration_manager.activeCalibration is not None:
-            print('Stopping calibration')
-            self.calibrate_search_button.setText("Calibrate Droplet Search")
-            self.controller.stop_calibration()
-        else:
-            print('Starting calibration')
-            self.calibrate_search_button.setText("Stop Calibration")
-            self.controller.start_droplet_search_calibration()
 
     def toggle_start_characterization_calibration(self):
         """
@@ -1177,7 +764,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         for key, btn in mapping.items():
             info = readiness.get(key, {})
             self._set_btn_state(btn, bool(info.get('ready')), info.get('missing'))
-            
+
+    def _get_start_p(self) -> float:
+        return float(self.start_pressure_spin.value())
+       
     def _set_btn_state(self, btn: QtWidgets.QPushButton, ready: bool, missing: list[str] | None = None):
         """
         Uniform visual treatment for inactive buttons:

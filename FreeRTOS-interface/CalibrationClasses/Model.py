@@ -102,6 +102,9 @@ class CalibrationManager(QObject):
         self._run_id = None
         self._run_idx = None
 
+        # Cross-step tunable parameters
+        self.start_pressure = 0.8
+
         # Cross-step ephemeral cache (images, etc.)
         self.background_image = None
         self.nozzle_center = None
@@ -329,18 +332,13 @@ class CalibrationManager(QObject):
     #     self.activeCalibration = PressureBandCalibrationProcess(self, self.model)
     #     self.start_active_calibration()
 
-    def start_pressure_scan_calibration(self, *, p_lo: float | None = None, p_hi: float | None = None, step: float | None = None):
+    def start_pressure_scan_calibration(self, *, start_pressure: float | None = None):
         """
         Start the pressure-band scan with optional user-defined range and step.
         """
         kwargs = {}
-        if step is not None:
-            kwargs["p_step"] = float(step)
-        # If your PressureBandCalibrationProcess supports user bounds, pass them:
-        if p_lo is not None:
-            kwargs["p_start"] = float(p_lo)
-        if p_hi is not None:
-            kwargs["p_end"] = float(p_hi)
+        if start_pressure is not None:
+            kwargs["start_pressure"] = float(start_pressure)
         self._try_start_process(PressureBandCalibrationProcess, **kwargs)
 
     def start_trajectory_calibration(self):
@@ -422,6 +420,8 @@ class CalibrationManager(QObject):
 
     # ------------- Cross-step setters/getters -------------
 
+    def set_start_pressure(self, pressure):
+        self.start_pressure = pressure
     def set_background_image(self, background): 
         self.background_image = background
         self._emit_readiness()
@@ -474,6 +474,7 @@ class CalibrationManager(QObject):
         self._pressure_traj_result = result_dict
         self._emit_readiness()
 
+    def get_start_pressure(self): return self.start_pressure
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
     def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
@@ -2827,9 +2828,6 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     finalize        = Signal()
 
     def __init__(self, calibration_manager, model,
-                 p_start: float = 0.3,
-                 p_end: float = 0.8,
-                 p_step: float = 0.01,
                  *,
                  min_reps: int = 5,
                  escalate_to: int = 9,
@@ -2847,6 +2845,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.phase_name = "pressure_scan"
 
         # --- prerequisites ---
+        self.start_pressure     = self.calibration_manager.get_start_pressure()
         self.nozzle_center_px   = self.calibration_manager.get_nozzle_center_image_position()
         self.background_image   = self.calibration_manager.get_background_image()
         self.emergence_time_us  = self.calibration_manager.get_emergence_time()
@@ -2872,15 +2871,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.P_MAX = float(hw_hi)
 
         # Requested scan range (we still honor the user’s start/end direction)
-        p0, p1 = float(min(p_start, p_end)), float(max(p_start, p_end))
-        self._p_lo = max(self.P_MIN, p0)
-        self._p_hi = min(self.P_MAX, p1)
+        # p0, p1 = float(min(p_start, p_end)), float(max(p_start, p_end))
+        # self._p_lo = max(self.P_MIN, p0)
+        # self._p_hi = min(self.P_MAX, p1)
 
         # ---- Adaptive step settings ----
-        base_step = abs(float(p_step)) if p_step else 0.1
+        # base_step = abs(float(p_step)) if p_step else 0.1
         self.dp_min = 0.01                         # smallest step when near nozzle
         self.dp_max = 0.05                         # largest allowed step
-        self.dp     = max(self.dp_min, min(base_step, self.dp_max))
+        # self.dp     = max(self.dp_min, min(base_step, self.dp_max))
+        self.dp     = max(self.dp_min, self.dp_max)
 
         # Special jumps for specific states
         self.multiple_big_step = 0.10              # when MULTIPLE → drop faster
@@ -2913,7 +2913,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # --- flags ---
         self._current_pressure   = None
-        self._next_pressure        = float(self._p_hi)  # start at high bound
+        self._next_pressure        = float(self.start_pressure)  # start at the starting pressure
         self._prev_pressure        = None
         self._prev_dy              = None               # previous (median) distance to nozzle in px
         self._early_stop           = False
@@ -3035,12 +3035,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if self._next_pressure is None:
             print("Next pressure is None")
             # Synthesize a fallback next step instead of finalizing
-            fallback = (self._current_pressure if self._current_pressure is not None else self._p_hi)
+            fallback = (self._current_pressure if self._current_pressure is not None else self.start_pressure)
             fallback = float(max(self.P_MIN, min(self.P_MAX, fallback - max(self.dp, self.dp_min))))
             self._next_pressure = fallback
 
         # If we’ve scanned below the requested low bound, finish
-        if self._next_pressure < (self._p_lo - 1e-6):
+        if self._next_pressure < (self.P_MIN - 1e-6):
             self.stageChanged.emit("Reached lower pressure bound; finalizing")
             self.finalize.emit(); return
 
@@ -3594,11 +3594,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # If next pressure didn't get set (e.g., unanimous SINGLE on first point), synthesize a safe step
         if self._next_pressure is None:
-            base = (self._current_pressure if self._current_pressure is not None else self._p_hi)
+            base = (self._current_pressure if self._current_pressure is not None else self.start_pressure)
             self._next_pressure = float(max(self.P_MIN, min(self.P_MAX, base - max(self.dp, self.dp_min))))
 
         # If walking off the scan range, finish
-        if self._next_pressure < (self._p_lo - 1e-6):
+        if self._next_pressure < (self.P_MIN - 1e-6):
             print("Next pressure below scan range")
             self.finalize.emit()
             return
