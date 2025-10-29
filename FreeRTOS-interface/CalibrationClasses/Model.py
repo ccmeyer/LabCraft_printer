@@ -102,6 +102,16 @@ class CalibrationManager(QObject):
         self._run_id = None
         self._run_idx = None
 
+        # --- Pulse-Width Sweep State ---
+        self._pw_sweep_active = False
+        self._pw_values = []     # list[int] pulse widths in µs
+        self._pw_index  = -1     # current index in _pw_values
+
+        # --- Async apply-PW wait plumbing ---
+        self._pw_apply_timer = None         # QTimer guard
+        self._pw_apply_slot = None          # one-off slot connected to settingsChangeCompleted
+        self._pw_apply_token = None         # uniqueness token to ignore stale callbacks
+
         # Cross-step tunable parameters
         self.start_pressure = 0.8
         self.num_pressure_tests = 4
@@ -121,6 +131,7 @@ class CalibrationManager(QObject):
         self.calibration_queue = []
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
+        self.calibrationQueueCompleted.connect(self._on_queue_completed_for_pw_sweep)
 
     # ------------- Session / File management -------------
 
@@ -297,6 +308,12 @@ class CalibrationManager(QObject):
             self.activeCalibration.start()
 
     def stop(self):
+        # --- Clear PW sweep state, if any ---
+        self._pw_sweep_active = False
+        self._pw_values = []
+        self._pw_index = -1
+        self._cancel_pw_apply_wait()
+
         if self.activeCalibration is not None:
             # Prefer graceful finalize if the process supports it
             if hasattr(self.activeCalibration, "requestGracefulStop"):
@@ -311,6 +328,206 @@ class CalibrationManager(QObject):
             self.clear_calibration_queue()
         self.calibrationStageChanged.emit("Calibration stopped","orange")
         self.calibrationError.emit("Calibration terminated by user")
+
+    # =================== Pulse-Width Sweep Orchestration ===================
+
+    def is_pulsewidth_sweep_active(self) -> bool:
+        return bool(self._pw_sweep_active)
+
+    def stop_pulsewidth_sweep(self):
+        """Abort any in-progress PW sweep and stop any running calibration."""
+        if self._pw_sweep_active:
+            self._pw_sweep_active = False
+            self._pw_values = []
+            self._pw_index = -1
+            self.calibrationStageChanged.emit("Pulse-width sweep stopped by user", "orange")
+        # Also stop any active calibration/queue
+        self._cancel_pw_apply_wait()
+        self.stop()
+
+    def start_pulsewidth_sweep(self, pw_start_us: int, pw_end_us: int, pw_step_us: int):
+        """
+        Run 'Calibrate All' for each pulse width in [start, end] with given step (inclusive).
+        Supports start > end (will step downward).
+        """
+        # Guard: active run or queue?
+        if self.activeCalibration is not None or len(self.calibration_queue) > 0:
+            self.calibrationStageChanged.emit(
+                "Cannot start PW sweep while a calibration is running. Stop it first.", "red"
+            )
+            self.calibrationError.emit("Busy: active calibration")
+            return
+
+        # Validate
+        try:
+            s = int(pw_start_us); e = int(pw_end_us); st = int(pw_step_us)
+        except Exception:
+            self.calibrationStageChanged.emit("Invalid PW sweep values (must be integers).", "red")
+            self.calibrationError.emit("Invalid PW sweep values")
+            return
+        if st == 0:
+            self.calibrationStageChanged.emit("Pulse width step must be non-zero.", "red")
+            self.calibrationError.emit("Invalid step")
+            return
+
+        # Build inclusive list with correct step sign
+        if s <= e and st < 0:
+            st = -st
+        if s > e and st > 0:
+            st = -st
+
+        vals = []
+        cur = s
+        if st > 0:
+            while cur <= e:
+                vals.append(cur)
+                cur += st
+        else:
+            while cur >= e:
+                vals.append(cur)
+                cur += st
+
+        if not vals:
+            self.calibrationStageChanged.emit("No pulse widths generated for sweep.", "red")
+            self.calibrationError.emit("Empty PW set")
+            return
+
+        # Initialize state and kick off first PW
+        self._pw_sweep_active = True
+        self._pw_values = vals
+        self._pw_index = -1
+        self.calibrationStageChanged.emit(
+            f"Starting pulse-width sweep: {vals[0]}→{vals[-1]} µs (n={len(vals)}, step={abs(st)} µs)", "dark_blue"
+        )
+        self._advance_pw_sweep()
+
+    def _cancel_pw_apply_wait(self):
+        """Cancel any in-flight 'apply PW and wait' guard + one-off slot."""
+        # timer
+        if self._pw_apply_timer is not None:
+            try:
+                self._pw_apply_timer.stop()
+                self._pw_apply_timer.deleteLater()
+            except Exception:
+                pass
+            finally:
+                self._pw_apply_timer = None
+        # temporary slot
+        if self._pw_apply_slot is not None:
+            try:
+                self.settingsChangeCompleted.disconnect(self._pw_apply_slot)
+            except Exception:
+                pass
+            finally:
+                self._pw_apply_slot = None
+        # token
+        self._pw_apply_token = None
+
+
+    def _apply_print_width_and_wait(self, pw_us: int, *, timeout_ms: int = 10000):
+        """
+        Asynchronously apply print pulse width using changeSettingsRequested and do not proceed
+        until the controller confirms via either:
+        - the provided callback, or
+        - settingsChangeCompleted
+        Also uses a guard timeout. On success, queues Calibrate All for this PW.
+        On failure/timeout, aborts the PW sweep and raises a calibrationError.
+        """
+        # Clear any previous wait
+        self._cancel_pw_apply_wait()
+
+        # If sweep was cancelled mid-flight, do nothing
+        if not self._pw_sweep_active:
+            return
+
+        self.calibrationStageChanged.emit(
+            f"Applying print pulse width = {pw_us} µs…", "dark_blue"
+        )
+
+        token = object()
+        self._pw_apply_token = token
+
+        fired = {"done": False}
+
+        def _finish(ok: bool, why: str):
+            # Single-fire; ignore stale or cancelled cases
+            if fired["done"] or self._pw_apply_token is not token or not self._pw_sweep_active:
+                return
+            fired["done"] = True
+
+            # cleanup guards
+            self._cancel_pw_apply_wait()
+
+            if not ok:
+                self.calibrationStageChanged.emit(
+                    f"Failed to apply PW {pw_us} µs ({why}). Stopping sweep.", "red"
+                )
+                # Stop sweep + any activity
+                self._pw_sweep_active = False
+                self._pw_values = []
+                self._pw_index = -1
+                # propagate an error for UI feedback
+                self.calibrationError.emit(f"Pulse-width apply failed: {why}")
+                # ensure queues are cleared & active process stopped
+                self.stop()
+                return
+
+            # Success → queue “Calibrate All” for this PW
+            self.calibrationStageChanged.emit(
+                f"PW applied: {pw_us} µs. Running Calibrate All…", "blue"
+            )
+            self.clear_calibration_queue()
+            self.add_all_calibrations_to_queue()
+
+        # One-off slot for settingsChangeCompleted
+        def _slot_settings_applied():
+            _finish(True, "settingsChangeCompleted")
+
+        self._pw_apply_slot = _slot_settings_applied
+        self.settingsChangeCompleted.connect(self._pw_apply_slot)
+
+        # Guard timeout
+        self._pw_apply_timer = QTimer(self)
+        self._pw_apply_timer.setSingleShot(True)
+        self._pw_apply_timer.timeout.connect(lambda: _finish(False, "timeout"))
+        self._pw_apply_timer.start(int(timeout_ms))
+
+        # Controller will call this when settings application finishes
+        def _cb(*args, **kwargs):
+            _finish(True, "callback")
+
+        # Emit the change request (controller consumes dict & callback)
+        # NOTE: If your controller expects a different key name, adjust "print_width" here.
+        self.changeSettingsRequested.emit({"print_width": int(pw_us)}, _cb)
+
+    def _advance_pw_sweep(self):
+        """Move to next PW in the sweep; apply PW (async) and then run Calibrate All."""
+        if not self._pw_sweep_active:
+            return
+
+        self._pw_index += 1
+        if self._pw_index >= len(self._pw_values):
+            # Done
+            self._pw_sweep_active = False
+            self._pw_values = []
+            self._pw_index = -1
+            self.calibrationStageChanged.emit("Pulse-width sweep completed.", "green")
+            self.calibrationQueueCompleted.emit()
+            return
+
+        pw = int(self._pw_values[self._pw_index])
+        self.calibrationStageChanged.emit(
+            f"PW sweep [{self._pw_index+1}/{len(self._pw_values)}]: target = {pw} µs", "blue"
+        )
+
+        # Apply PW via controller (with callback) and only proceed on confirmation
+        self._apply_print_width_and_wait(pw)
+
+    @Slot()
+    def _on_queue_completed_for_pw_sweep(self):
+        """When a per-PW queue finishes, advance to the next PW if sweep is active."""
+        if self._pw_sweep_active:
+            self._advance_pw_sweep()
 
     # --- Methods to start individual calibration processes ---
     def start_nozzle_calibration(self):

@@ -281,6 +281,37 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
         calib_grid.addWidget(self.calibrate_all_button, crow, 0, 1, 2); crow += 1
 
+        # ---- Pulse-Width Sweep controls ----
+        self.pw_start_label = QtWidgets.QLabel("PW Start (µs):")
+        self.pw_start_spin  = QtWidgets.QSpinBox()
+        self.pw_start_spin.setRange(0, 10000)
+        self.pw_start_spin.setSingleStep(50)
+
+        self.pw_end_label = QtWidgets.QLabel("PW End (µs):")
+        self.pw_end_spin  = QtWidgets.QSpinBox()
+        self.pw_end_spin.setRange(0, 10000)
+        self.pw_end_spin.setSingleStep(50)
+
+        self.pw_step_label = QtWidgets.QLabel("PW Step (µs):")
+        self.pw_step_spin  = QtWidgets.QSpinBox()
+        self.pw_step_spin.setRange(1, 10000)
+        self.pw_step_spin.setSingleStep(50)
+
+        self.pw_start_spin.setValue(1300)
+        self.pw_end_spin.setValue(1800)
+        self.pw_step_spin.setValue(50)
+
+        calib_grid.addWidget(self.pw_start_label, crow, 0)
+        calib_grid.addWidget(self.pw_start_spin,  crow, 1); crow += 1
+        calib_grid.addWidget(self.pw_end_label,   crow, 0)
+        calib_grid.addWidget(self.pw_end_spin,    crow, 1); crow += 1
+        calib_grid.addWidget(self.pw_step_label,  crow, 0)
+        calib_grid.addWidget(self.pw_step_spin,   crow, 1); crow += 1
+
+        self.calibrate_all_pw_button = QtWidgets.QPushButton("Calibrate All (PW Range)")
+        self.calibrate_all_pw_button.clicked.connect(self.toggle_start_pw_sweep)
+        calib_grid.addWidget(self.calibrate_all_pw_button, crow, 0, 1, 2); crow += 1
+
         # Status
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         calib_grid.addWidget(self.stageLabel, crow, 0, 1, 2); crow += 1
