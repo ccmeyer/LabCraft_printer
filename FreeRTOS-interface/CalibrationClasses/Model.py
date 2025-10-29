@@ -2769,8 +2769,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model,
                  p_start: float = 0.3,
-                 p_end: float = 2.5,
-                 p_step: float = 0.05,
+                 p_end: float = 0.8,
+                 p_step: float = 0.01,
                  *,
                  min_reps: int = 5,
                  escalate_to: int = 9,
