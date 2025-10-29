@@ -220,142 +220,142 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(QtWidgets.QLabel(" "), row, 0, 1, 2)
         row += 1
 
-        # Add text edit box for the directory name to save images in
-        self.save_directory_label = QtWidgets.QLabel("Save Directory:")
-        self.save_directory_edit = QtWidgets.QLineEdit()
-        self.save_directory_edit.setText(self.droplet_camera_model.dir_name)
-        self.button_layout.addWidget(self.save_directory_label, row, 0)
-        self.button_layout.addWidget(self.save_directory_edit, row, 1)
-        row += 1
+        # # Add text edit box for the directory name to save images in
+        # self.save_directory_label = QtWidgets.QLabel("Save Directory:")
+        # self.save_directory_edit = QtWidgets.QLineEdit()
+        # self.save_directory_edit.setText(self.droplet_camera_model.dir_name)
+        # self.button_layout.addWidget(self.save_directory_label, row, 0)
+        # self.button_layout.addWidget(self.save_directory_edit, row, 1)
+        # row += 1
 
-        # Add a button to toggle whether the captured image should be saved
-        self.save_button = QtWidgets.QPushButton("Save Images")
-        self.save_button.clicked.connect(self.toggle_saving)
-        self.button_layout.addWidget(self.save_button, row, 0, 1, 2)
-        row += 1
+        # # Add a button to toggle whether the captured image should be saved
+        # self.save_button = QtWidgets.QPushButton("Save Images")
+        # self.save_button.clicked.connect(self.toggle_saving)
+        # self.button_layout.addWidget(self.save_button, row, 0, 1, 2)
+        # row += 1
 
-        # Add a button for repeated image capture
-        self.repeat_capture_button = QtWidgets.QPushButton("Start Repeated Capture")
-        self.repeat_capture_button.clicked.connect(self.toggle_repeat_capture)
-        self.button_layout.addWidget(self.repeat_capture_button, row, 0, 1, 2)
-        # self.layout.addLayout(self.button_layout)
-        row += 1
+        # # Add a button for repeated image capture
+        # self.repeat_capture_button = QtWidgets.QPushButton("Start Repeated Capture")
+        # self.repeat_capture_button.clicked.connect(self.toggle_repeat_capture)
+        # self.button_layout.addWidget(self.repeat_capture_button, row, 0, 1, 2)
+        # # self.layout.addLayout(self.button_layout)
+        # row += 1
 
-        self.multi_start_label = QtWidgets.QLabel("Multi-Capture Start Delay (us):")
-        self.multi_start_spinbox = QtWidgets.QSpinBox()
-        self.multi_start_spinbox.setRange(0, 50000)
-        self.multi_start_spinbox.setSingleStep(100)
-        self.multi_start_spinbox.setValue(15000)
-        self.button_layout.addWidget(self.multi_start_label, row, 0)
-        self.button_layout.addWidget(self.multi_start_spinbox, row, 1)
-        row += 1
+        # self.multi_start_label = QtWidgets.QLabel("Multi-Capture Start Delay (us):")
+        # self.multi_start_spinbox = QtWidgets.QSpinBox()
+        # self.multi_start_spinbox.setRange(0, 50000)
+        # self.multi_start_spinbox.setSingleStep(100)
+        # self.multi_start_spinbox.setValue(15000)
+        # self.button_layout.addWidget(self.multi_start_label, row, 0)
+        # self.button_layout.addWidget(self.multi_start_spinbox, row, 1)
+        # row += 1
 
-        self.multi_end_label = QtWidgets.QLabel("Multi-Capture End Delay (us):")
-        self.multi_end_spinbox = QtWidgets.QSpinBox()
-        self.multi_end_spinbox.setRange(0, 50000)
-        self.multi_end_spinbox.setSingleStep(100)
-        self.multi_end_spinbox.setValue(15000)
-        self.button_layout.addWidget(self.multi_end_label, row, 0)
-        self.button_layout.addWidget(self.multi_end_spinbox, row, 1)
-        row += 1
+        # self.multi_end_label = QtWidgets.QLabel("Multi-Capture End Delay (us):")
+        # self.multi_end_spinbox = QtWidgets.QSpinBox()
+        # self.multi_end_spinbox.setRange(0, 50000)
+        # self.multi_end_spinbox.setSingleStep(100)
+        # self.multi_end_spinbox.setValue(15000)
+        # self.button_layout.addWidget(self.multi_end_label, row, 0)
+        # self.button_layout.addWidget(self.multi_end_spinbox, row, 1)
+        # row += 1
 
-        self.multi_steps_label = QtWidgets.QLabel("Number of Time Steps:")
-        self.multi_steps_spinbox = QtWidgets.QSpinBox()
-        self.multi_steps_spinbox.setRange(1, 1000)
-        self.multi_steps_spinbox.setValue(1)
-        self.button_layout.addWidget(self.multi_steps_label, row, 0)
-        self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
-        row += 1
+        # self.multi_steps_label = QtWidgets.QLabel("Number of Time Steps:")
+        # self.multi_steps_spinbox = QtWidgets.QSpinBox()
+        # self.multi_steps_spinbox.setRange(1, 1000)
+        # self.multi_steps_spinbox.setValue(1)
+        # self.button_layout.addWidget(self.multi_steps_label, row, 0)
+        # self.button_layout.addWidget(self.multi_steps_spinbox, row, 1)
+        # row += 1
 
-        self.frame_shift_label = QtWidgets.QLabel("Percent of frame:")
-        self.frame_shift_spinbox = QtWidgets.QDoubleSpinBox()
-        self.frame_shift_spinbox.setDecimals(1)
-        self.frame_shift_spinbox.setRange(0, 1)
-        self.frame_shift_spinbox.setSingleStep(0.1)
-        self.frame_shift_spinbox.setValue(1)
-        self.button_layout.addWidget(self.frame_shift_label, row, 0)
-        self.button_layout.addWidget(self.frame_shift_spinbox, row, 1)
-        row += 1
+        # self.frame_shift_label = QtWidgets.QLabel("Percent of frame:")
+        # self.frame_shift_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.frame_shift_spinbox.setDecimals(1)
+        # self.frame_shift_spinbox.setRange(0, 1)
+        # self.frame_shift_spinbox.setSingleStep(0.1)
+        # self.frame_shift_spinbox.setValue(1)
+        # self.button_layout.addWidget(self.frame_shift_label, row, 0)
+        # self.button_layout.addWidget(self.frame_shift_spinbox, row, 1)
+        # row += 1
 
-        self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
-        self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
-        self.multi_frames_below_spinbox.setRange(0, 100)
-        self.multi_frames_below_spinbox.setValue(0)
-        self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
-        self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
-        row += 1
+        # self.multi_frames_below_label = QtWidgets.QLabel("Frames Below Start:")
+        # self.multi_frames_below_spinbox = QtWidgets.QSpinBox()
+        # self.multi_frames_below_spinbox.setRange(0, 100)
+        # self.multi_frames_below_spinbox.setValue(0)
+        # self.button_layout.addWidget(self.multi_frames_below_label, row, 0)
+        # self.button_layout.addWidget(self.multi_frames_below_spinbox, row, 1)
+        # row += 1
 
-        # Add spin box for multi-execute timer interval
-        self.multi_timer_interval_label = QtWidgets.QLabel("Timer Interval (ms):")
-        self.multi_timer_interval_spinbox = QtWidgets.QSpinBox()
-        self.multi_timer_interval_spinbox.setRange(0, 10000)
-        self.multi_timer_interval_spinbox.setSingleStep(100)
-        self.multi_timer_interval_spinbox.setValue(500)
-        self.button_layout.addWidget(self.multi_timer_interval_label, row, 0)
-        self.button_layout.addWidget(self.multi_timer_interval_spinbox, row, 1)
-        row += 1
+        # # Add spin box for multi-execute timer interval
+        # self.multi_timer_interval_label = QtWidgets.QLabel("Timer Interval (ms):")
+        # self.multi_timer_interval_spinbox = QtWidgets.QSpinBox()
+        # self.multi_timer_interval_spinbox.setRange(0, 10000)
+        # self.multi_timer_interval_spinbox.setSingleStep(100)
+        # self.multi_timer_interval_spinbox.setValue(500)
+        # self.button_layout.addWidget(self.multi_timer_interval_label, row, 0)
+        # self.button_layout.addWidget(self.multi_timer_interval_spinbox, row, 1)
+        # row += 1
 
-        # Add spin box for replicate images of each condition
-        self.multi_replicate_label = QtWidgets.QLabel("Replicate Images:")
-        self.multi_replicate_spinbox = QtWidgets.QSpinBox()
-        self.multi_replicate_spinbox.setRange(1, 100)
-        self.multi_replicate_spinbox.setValue(10)
-        self.button_layout.addWidget(self.multi_replicate_label, row, 0)
-        self.button_layout.addWidget(self.multi_replicate_spinbox, row, 1)
-        row += 1
+        # # Add spin box for replicate images of each condition
+        # self.multi_replicate_label = QtWidgets.QLabel("Replicate Images:")
+        # self.multi_replicate_spinbox = QtWidgets.QSpinBox()
+        # self.multi_replicate_spinbox.setRange(1, 100)
+        # self.multi_replicate_spinbox.setValue(10)
+        # self.button_layout.addWidget(self.multi_replicate_label, row, 0)
+        # self.button_layout.addWidget(self.multi_replicate_spinbox, row, 1)
+        # row += 1
 
-        # Button to start/stop the multi-capture
-        self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
-        self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
-        self.button_layout.addWidget(self.multi_capture_button, row, 0, 1, 2)
-        row += 1
+        # # Button to start/stop the multi-capture
+        # self.multi_capture_button = QtWidgets.QPushButton("Execute Multi-Capture")
+        # self.multi_capture_button.clicked.connect(self.toggle_multi_capture)
+        # self.button_layout.addWidget(self.multi_capture_button, row, 0, 1, 2)
+        # row += 1
 
-        # Button to toggle analysis of captured images
-        self.analyze_button = QtWidgets.QPushButton("Analyze Images")
-        self.analyze_button.clicked.connect(self.toggle_analyzing)
-        self.button_layout.addWidget(self.analyze_button, row, 0, 1, 2)
-        row += 1
+        # # Button to toggle analysis of captured images
+        # self.analyze_button = QtWidgets.QPushButton("Analyze Images")
+        # self.analyze_button.clicked.connect(self.toggle_analyzing)
+        # self.button_layout.addWidget(self.analyze_button, row, 0, 1, 2)
+        # row += 1
 
-        intensity_threshold, circularity_threshold, min_area, edge_margin = self.droplet_camera_model.get_analysis_parameters()
-        print(f'Analysis parameters: {min_area}, {intensity_threshold}, {circularity_threshold}, {edge_margin}')
+        # intensity_threshold, circularity_threshold, min_area, edge_margin = self.droplet_camera_model.get_analysis_parameters()
+        # print(f'Analysis parameters: {min_area}, {intensity_threshold}, {circularity_threshold}, {edge_margin}')
         
         # Add a spin box to set the min area threshold for the analysis
-        self.min_area_label = QtWidgets.QLabel("Min Area Threshold:")
-        self.min_area_spinbox = QtWidgets.QSpinBox()
-        self.min_area_spinbox.setRange(0, 10000000)
-        self.min_area_spinbox.setSingleStep(1000)
-        self.min_area_spinbox.setValue(min_area)
+        # self.min_area_label = QtWidgets.QLabel("Min Area Threshold:")
+        # self.min_area_spinbox = QtWidgets.QSpinBox()
+        # self.min_area_spinbox.setRange(0, 10000000)
+        # self.min_area_spinbox.setSingleStep(1000)
+        # self.min_area_spinbox.setValue(min_area)
         # self.button_layout.addWidget(self.min_area_label, row, 0)
         # self.button_layout.addWidget(self.min_area_spinbox, row, 1)
         # row += 1
 
         # Add a spin box to set the intensity threshold for the analysis
-        self.intensity_threshold_label = QtWidgets.QLabel("Intensity Threshold:")
-        self.intensity_threshold_spinbox = QtWidgets.QSpinBox()
-        self.intensity_threshold_spinbox.setRange(0, 255)
-        self.intensity_threshold_spinbox.setSingleStep(10)
-        self.intensity_threshold_spinbox.setValue(intensity_threshold)
+        # self.intensity_threshold_label = QtWidgets.QLabel("Intensity Threshold:")
+        # self.intensity_threshold_spinbox = QtWidgets.QSpinBox()
+        # self.intensity_threshold_spinbox.setRange(0, 255)
+        # self.intensity_threshold_spinbox.setSingleStep(10)
+        # self.intensity_threshold_spinbox.setValue(intensity_threshold)
         # self.button_layout.addWidget(self.intensity_threshold_label, row, 0)
         # self.button_layout.addWidget(self.intensity_threshold_spinbox, row, 1)
         # row += 1
 
         # Add a spin box to set the circularity threshold for the analysis
-        self.circularity_threshold_label = QtWidgets.QLabel("Circularity Threshold:")
-        self.circularity_threshold_spinbox = QtWidgets.QDoubleSpinBox()
-        self.circularity_threshold_spinbox.setDecimals(2)
-        self.circularity_threshold_spinbox.setRange(0, 2)
-        self.circularity_threshold_spinbox.setSingleStep(0.1)
-        self.circularity_threshold_spinbox.setValue(circularity_threshold)
+        # self.circularity_threshold_label = QtWidgets.QLabel("Circularity Threshold:")
+        # self.circularity_threshold_spinbox = QtWidgets.QDoubleSpinBox()
+        # self.circularity_threshold_spinbox.setDecimals(2)
+        # self.circularity_threshold_spinbox.setRange(0, 2)
+        # self.circularity_threshold_spinbox.setSingleStep(0.1)
+        # self.circularity_threshold_spinbox.setValue(circularity_threshold)
         # self.button_layout.addWidget(self.circularity_threshold_label, row, 0)
         # self.button_layout.addWidget(self.circularity_threshold_spinbox, row, 1)
         # row += 1
 
         # Add a spin box to set the edge margin for the analysis
-        self.edge_margin_label = QtWidgets.QLabel("Edge Margin:")
-        self.edge_margin_spinbox = QtWidgets.QSpinBox()
-        self.edge_margin_spinbox.setRange(0, 1000)
-        self.edge_margin_spinbox.setSingleStep(5)
-        self.edge_margin_spinbox.setValue(edge_margin)
+        # self.edge_margin_label = QtWidgets.QLabel("Edge Margin:")
+        # self.edge_margin_spinbox = QtWidgets.QSpinBox()
+        # self.edge_margin_spinbox.setRange(0, 1000)
+        # self.edge_margin_spinbox.setSingleStep(5)
+        # self.edge_margin_spinbox.setValue(edge_margin)
         # self.button_layout.addWidget(self.edge_margin_label, row, 0)
         # self.button_layout.addWidget(self.edge_margin_spinbox, row, 1)
         # row += 1
@@ -382,13 +382,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_emergence_button, row, 0, 1, 2)
         row += 1
 
-        # Add a button to trigger the pressure calibration
-        self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
-        self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
-        self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
-        row += 1
+        # # Add a button to trigger the pressure calibration
+        # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
+        # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
+        # self.button_layout.addWidget(self.calibrate_pressure_button, row, 0, 1, 2)
+        # row += 1
 
-                # --- Pressure Scan controls (low / high / step) ---
+        # --- Pressure Scan controls (low / high / step) ---
         # Try to use hardware bounds if available
         try:
             hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
@@ -437,22 +437,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.button_layout.addWidget(self.calibrate_pressure_scan_button, row, 0, 1, 2)
         row += 1
 
-        # Add a button to trigger the droplet trajectory calibration
-        self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
-        self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
-        self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
-        row += 1
+        # # Add a button to trigger the droplet trajectory calibration
+        # self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
+        # self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
+        # self.button_layout.addWidget(self.calibrate_trajectory_button, row, 0, 1, 2)
+        # row += 1
 
         self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
         self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
         self.button_layout.addWidget(self.scan_trajectory_button, row, 0, 1, 2)
         row += 1
 
-        # Add a button to trigger the droplet search calibration
-        self.calibrate_search_button = QtWidgets.QPushButton("Calibrate Droplet Search")
-        self.calibrate_search_button.clicked.connect(self.toggle_start_search_calibration)
-        self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
-        row += 1
+        # # Add a button to trigger the droplet search calibration
+        # self.calibrate_search_button = QtWidgets.QPushButton("Calibrate Droplet Search")
+        # self.calibrate_search_button.clicked.connect(self.toggle_start_search_calibration)
+        # self.button_layout.addWidget(self.calibrate_search_button, row, 0, 1, 2)
+        # row += 1
 
         # Add a button to trigger the droplet characterization calibration
         self.calibrate_characterization_button = QtWidgets.QPushButton("Characterize Droplets")
