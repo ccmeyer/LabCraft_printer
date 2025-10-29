@@ -220,7 +220,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.setVerticalSpacing(6)
         crow = 0
 
-        # Starting Pressure (psi) – replaces min/max/step
+        # Starting Pressure (psi)
         self.start_pressure_label = QtWidgets.QLabel("Starting Pressure (psi):")
         self.start_pressure_spin = QtWidgets.QDoubleSpinBox()
         self.start_pressure_spin.setDecimals(2)
@@ -234,6 +234,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.start_pressure_spin.setValue(round(cur_p, 2))
         calib_grid.addWidget(self.start_pressure_label, crow, 0)
         calib_grid.addWidget(self.start_pressure_spin,  crow, 1); crow += 1
+
+        # Number of pressures to test in characterization process
+        self.num_pressure_tests_label = QtWidgets.QLabel("Number of pressures to sample")
+        self.num_pressure_tests_spin = QtWidgets.QSpinBox()
+        self.num_pressure_tests_spin.setRange(2, 20)
+        self.num_pressure_tests_spin.setSingleStep(1)
+        self.num_pressure_tests_spin.setValue(4)
+        calib_grid.addWidget(self.num_pressure_tests_label, crow, 0)
+        calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
         # Calibration buttons
         self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
@@ -367,7 +376,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
         self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
 
-        self.start_pressure_spinbox.valueChanged.connect(self.set_start_pressure)
+        self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
+        self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
 
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
@@ -382,7 +392,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_flash_delay(self.droplet_camera_model.flash_delay)
         self.set_flash_duration(self.droplet_camera_model.flash_duration)
         self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
-        
+        self.set_start_pressure(self.start_pressure_spin.value())
+        self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -550,6 +561,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.controller.set_start_pressure(pressure)
 
+    def set_num_pressure_tests(self, num_tests):
+        """
+        Sets the number of pressure tests for characterization.
+        """
+        self.controller.set_num_pressure_tests(num_tests)
+
     def update_flash_info(self):
         """
         Updates the flash info.
@@ -701,12 +718,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Toggles whether the pressure sweep characterization calibration should be started.
         """
-        step  = float(self.scan_p_step_spin.value())
-        if step <= 0:
-            QtWidgets.QMessageBox.warning(self, "Invalid step",
-                                          "Step must be > 0.")
-            return
-
         if self.model.calibration_manager.activeCalibration is not None:
             print('Stopping calibration')
             self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
@@ -714,7 +725,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             print('Starting calibration')
             self.calibrate_pressure_sweep_button.setText("Stop Calibration")
-            self.controller.start_pressure_sweep_characterization(p_step=step)
+            self.controller.start_pressure_sweep_characterization()
 
     def toggle_start_timecourse_calibration(self):
         """
@@ -748,18 +759,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Applies a clear visual indication for inactive buttons.
         """
         mapping = {
-            'pressure_calibration':            self.calibrate_pressure_button,
+            # 'pressure_calibration':            self.calibrate_pressure_button,
             'pressure_scan':                   self.calibrate_pressure_scan_button,
-            'droplet_trajectory':              self.calibrate_trajectory_button,
+            # 'droplet_trajectory':              self.calibrate_trajectory_button,
             'trajectory_pressure_scan':        self.scan_trajectory_button,
             'droplet_characterization':        self.calibrate_characterization_button,  # (same readiness as search)
             'pressure_sweep_characterization': self.calibrate_pressure_sweep_button,
         }
 
-        # If you also want the search button to mirror "droplet_characterization":
-        if 'droplet_characterization' in readiness:
-            r = readiness['droplet_characterization']
-            self._set_btn_state(self.calibrate_search_button, bool(r.get('ready')), r.get('missing'))
+        # # If you also want the search button to mirror "droplet_characterization":
+        # if 'droplet_characterization' in readiness:
+        #     r = readiness['droplet_characterization']
+        #     self._set_btn_state(self.calibrate_search_button, bool(r.get('ready')), r.get('missing'))
 
         for key, btn in mapping.items():
             info = readiness.get(key, {})

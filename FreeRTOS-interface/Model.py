@@ -6886,6 +6886,9 @@ class MachineModel(QObject):
         self.psi_offset = 1638
         self.psi_max = 15
 
+        self.P_MAX = 5.0
+        self.P_MIN = 0.3
+
         self.regulating_print_pressure = False
         self.regulating_refuel_pressure = False
 
@@ -7086,6 +7089,9 @@ class MachineModel(QObject):
     def update_gripper_pulse_duration(self, duration):
         self.gripper_pulse_duration = int(duration)
         self.printing_parameters_updated.emit()
+
+    def get_print_pressure_bounds(self):
+        return self.P_MIN, self.P_MAX
 
     def get_gripper_settings(self):
         return self.gripper_refresh_period, self.gripper_pulse_duration

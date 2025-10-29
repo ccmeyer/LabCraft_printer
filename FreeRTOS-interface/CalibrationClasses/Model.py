@@ -104,6 +104,7 @@ class CalibrationManager(QObject):
 
         # Cross-step tunable parameters
         self.start_pressure = 0.8
+        self.num_pressure_tests = 4
 
         # Cross-step ephemeral cache (images, etc.)
         self.background_image = None
@@ -422,6 +423,8 @@ class CalibrationManager(QObject):
 
     def set_start_pressure(self, pressure):
         self.start_pressure = pressure
+    def set_num_pressure_tests(self, num_tests):
+        self.num_pressure_tests = num_tests
     def set_background_image(self, background): 
         self.background_image = background
         self._emit_readiness()
@@ -475,6 +478,7 @@ class CalibrationManager(QObject):
         self._emit_readiness()
 
     def get_start_pressure(self): return self.start_pressure
+    def get_num_pressure_tests(self): return self.num_pressure_tests
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
     def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
@@ -4123,7 +4127,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 pressures = [round(p_lo, 3), p_mid, round(p_hi, 3)]
             else:
                 try:
-                    cur = float(self.model.machine_model.get_print_pressure())
+                    cur = float(self.model.machine_model.get_target_print_pressure())
                 except Exception:
                     hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
                     cur = (hw_lo + hw_hi) * 0.5
@@ -5453,13 +5457,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  calibration_manager,
                  model,
                  *,
-                 p_step: float = None,               # pressure grid step (psi)
                  sphere_delay_us: int = 10000,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
                  focus_ok_threshold: float = 5_000_000,
-                 num_samples: int = 4,
                  min_pressure_separation: float = 0.005,
                  max_search_cycles: int = 4,
                  max_recenter_moves: int = 10,
@@ -5475,6 +5477,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.phase_name = "pressure_sweep_characterization"
 
         # ---------- prerequisites ----------
+        self.num_samples           = self.calibration_manager.get_num_pressure_tests()
         self.nozzle_center_machine = self.calibration_manager.get_nozzle_center()
         self.nozzle_center_px      = self.calibration_manager.get_nozzle_center_image_position()
         self.emergence_time_us     = self.calibration_manager.get_emergence_time()
@@ -5508,7 +5511,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
             if self._ready:
                 # 2) Build evenly-spaced set with min-separation guard
-                grid = self._make_pressure_set_by_count(p_lo, p_hi, int(num_samples), float(min_pressure_separation))
+                grid = self._make_pressure_set_by_count(p_lo, p_hi, int(self.num_samples), float(min_pressure_separation))
 
                 # 3) Prepare velocity interpolation from trajectory fits
                 fit_pts = [(float(rec["pressure"]),

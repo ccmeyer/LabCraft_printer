@@ -1164,6 +1164,9 @@ class Controller(QObject):
     def set_start_pressure(self, pressure):
         self.model.calibration_manager.set_start_pressure(pressure)
 
+    def set_num_pressure_tests(self, num_tests):
+        self.model.calibration_manager.set_num_pressure_tests(num_tests)
+
     def start_nozzle_calibration(self):
         # Tell the Model to start the nozzle position calibration.
         self.model.calibration_manager.start_nozzle_calibration()
@@ -1179,13 +1182,8 @@ class Controller(QObject):
     def start_pressure_scan_calibration(self):
         self.model.calibration_manager.start_pressure_scan_calibration()
 
-    def start_pressure_sweep_characterization(self, p_step=0.2,sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
-        self.model.calibration_manager.start_pressure_sweep_characterization(
-            p_step=p_step,
-            sphere_delay_us=sphere_delay_us,
-            replicates_per_pressure=replicates_per_pressure,
-            order=order
-        )
+    def start_pressure_sweep_characterization(self):
+        self.model.calibration_manager.start_pressure_sweep_characterization()
     
     def start_droplet_timecourse_process(self):
         self.model.calibration_manager.start_droplet_timecourse_process()
