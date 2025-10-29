@@ -2742,7 +2742,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                  escalate_to: int = 9,
                  classification_delay_us: int | None = None,
                  reverse_order: bool = True,
-                 safety_clearance_px: int = 400,
+                 safety_clearance_px: int = 350,
                  auto_stop_on_nozzle_wet: bool = True,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -5236,7 +5236,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  num_samples: int = 4,
                  min_pressure_separation: float = 0.005,
                  max_search_cycles: int = 4,
-                 max_recentre_moves: int = 5,
+                 max_recentre_moves: int = 10,
                  max_oob_total: int = 12,
                  lightweight_overlays: bool = True,
                  present_every_k: int = 3,
@@ -6120,7 +6120,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             delta = curY - baseY
             a = float(self._y_focus_ema_alpha)
             self._y_focus_offset_steps = int(round((1.0 - a) * self._y_focus_offset_steps + a * delta))
-            self.stageChanged.emit(f"Focus OK → update Y-offset = {self._y_focus_offset_steps} steps (EMA)")
+            # self.stageChanged.emit(f"Focus OK → update Y-offset = {self._y_focus_offset_steps} steps (EMA)")
         except Exception as e:
             # Non-fatal: just log
             self.stageChanged.emit(f"Could not update Y-offset (using previous): {e}")
