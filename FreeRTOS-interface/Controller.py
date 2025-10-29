@@ -1161,6 +1161,9 @@ class Controller(QObject):
         # 2) Also notify the calibration layer (optional, but handy for QState transitions)
         self.model.calibration_manager.captureFailed.emit(msg)
 
+    def set_start_pressure(self, pressure):
+        self.model.calibration_manager.set_start_pressure(pressure)
+
     def start_nozzle_calibration(self):
         # Tell the Model to start the nozzle position calibration.
         self.model.calibration_manager.start_nozzle_calibration()
@@ -1173,11 +1176,9 @@ class Controller(QObject):
         # Tell the Model to start the droplet emergence calibration.
         self.model.calibration_manager.start_droplet_emergence_calibration()
 
-    def start_pressure_scan_calibration(self, p_lo: float, p_hi: float, step: float):
-        # Forward the user-selected scan range to the CalibrationManager
-        self.model.calibration_manager.start_pressure_scan_calibration(
-            p_lo=p_lo, p_hi=p_hi, step=step
-        )
+    def start_pressure_scan_calibration(self):
+        self.model.calibration_manager.start_pressure_scan_calibration()
+
     def start_pressure_sweep_characterization(self, p_step=0.2,sphere_delay_us=8000, replicates_per_pressure=20, order="desc"):
         self.model.calibration_manager.start_pressure_sweep_characterization(
             p_step=p_step,
