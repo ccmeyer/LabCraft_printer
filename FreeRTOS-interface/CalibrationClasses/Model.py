@@ -5038,6 +5038,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         tol = 150
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
+            if not getattr(self, "_xz_offset_updated_this_pressure", False):
+                self._update_xz_track_offset()
+                self._xz_offset_updated_this_pressure = True
             self._centered = True
             self._char_need_capture = True   # first entry to char should capture
             self.emitDropletCentered()
@@ -5329,9 +5332,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_streak = 0                # consecutive out-of-bound hits
         self._oob_positions = []            # recent out-of-bound centers (pixels)
 
+        # --- offsets (persist across pressures) ---
         self._y_focus_offset_steps = 0            # persistent Y offset (steps) for best focus so far
         self._y_focus_ema_alpha    = 0.35         # EMA smoothing (0..1). Higher = react faster
-        
+        self._x_track_offset_steps = 0            # persistent X offset in steps
+        self._z_track_offset_steps = 0            # persistent Z offset in steps
+        self._xz_offset_ema_alpha  = 0.35         # EMA smoothing for X/Z bias
+        self._xz_offset_updated_this_pressure = False
+
         # delay clamps (safety)
         self.min_delay_us, self.max_delay_us = 0, 50000
 
@@ -5339,6 +5347,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._reset_char_buffers()
         self._centered = False
         self._char_need_capture = False
+
+        self._vertical_probe_tries = 0
+        self._max_vertical_probes = 2
 
         # stage bounds safety
         self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
@@ -5530,11 +5541,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_streak = 0
         self._oob_positions = []
 
+        self._xz_offset_updated_this_pressure = False
+
         # search & OOB/recenter guards (reset each pressure)
         self._search_fail_cycles = 0      # times we exhausted delay sweep + nudged
         self._recentre_moves = 0          # number of recenter moves issued during characterization
         self._oob_total = 0               # total OOB hits seen during characterization
         self._bad_reason = None           # reason string when we abort this pressure
+
+        self._vertical_probe_tries = 0    # how many half-frame-up probes we've tried (max 2)
+        self._max_vertical_probes  = 2
 
     # ---------- per-pressure planning ----------
     def _compute_stage_scales_steps_per_px(self):
@@ -5632,9 +5648,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onMoveToTarget(self):
-        # predict stage target at target_delay_us
         tgt = self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
-        tgt = (tgt[0], int(tgt[1] + self._y_focus_offset_steps), tgt[2])
+        # apply persistent corrections
+        tgt = ( int(tgt[0] + self._x_track_offset_steps),
+                int(tgt[1] + self._y_focus_offset_steps),
+                int(tgt[2] + self._z_track_offset_steps) )
         self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} µs → {tgt}")
         self._safe_move_abs(tgt)
 
@@ -5657,8 +5675,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onSetDelay(self):
         if self._delay_try_index >= len(self._delay_offsets_us):
-            # exhausted a sweep → count one "search cycle"
+            # exhausted a sweep
             self._delay_try_index = 0
+
+            # try up to two half-frame-up probes BEFORE counting a search cycle
+            if self._vertical_probe_tries < self._max_vertical_probes:
+                self._vertical_probe_tries += 1
+                self._probe_half_frame_up()
+                return  # will come back here via moveDone→state_setDelay
+
+            # If probes are exhausted, proceed with your existing nudge/cycle logic
+            self._vertical_probe_tries = 0  # reset for future sweeps at this pressure
             self._search_fail_cycles += 1
             if self._search_fail_cycles >= self.max_search_cycles:
                 self.stageChanged.emit("Inconsistent imaging: too many delay sweeps → skip pressure")
@@ -5672,17 +5699,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
             self._safe_move_abs(
                 self._predict_target_xyz(self.vec_steps_per_s,
-                                         self.target_delay_us + int(1000 * nudge))
+                                        self.target_delay_us + int(1000 * nudge))
             )
-            return  # wait for moveDone (transition already wired)
-        d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
-        self._delay_try_index += 1
-        self.current_delay_us = self._clamp_delay(d)
-        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} µs (search)")
-        self.calibration_manager.changeSettingsRequested.emit(
-            {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
-            self.delayApplied.emit
-        )
+            return  # wait for moveDone
 
     @Slot()
     def onCaptureDroplet(self):
@@ -5710,6 +5729,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.presentImageSignal.emit(overlay)
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
+        self._vertical_probe_tries = 0
         if self._centered:
             # In replicate mode: go straight to characterization (don’t re-center)
             self.readyToCharacterize.emit()
@@ -5813,6 +5833,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         # ---------- CENTER FIRST ----------
         center_px = tuple(map(int, result.get("center", (0, 0))))
         self.presentImageSignal.emit(annotated)
+        if self._is_within(center_px, self.center_first_tol_px) and not getattr(self, "_xz_offset_updated_this_pressure", False):
+            self._update_xz_track_offset()
+            self._xz_offset_updated_this_pressure = True
 
         # If not tightly centered, recenter immediately before any focus work
         if not self._is_within(center_px, self.center_first_tol_px):
@@ -6092,6 +6115,52 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         except Exception as e:
             # Non-fatal: just log
             self.stageChanged.emit(f"Could not update Y-offset (using previous): {e}")
+    
+    def _update_xz_track_offset(self):
+        """
+        Update persistent X/Z bias (steps) so future predicted targets include this correction.
+        Uses EMA toward the difference between 'predicted' and 'actual centered' pose.
+        """
+        try:
+            # prefer the searched-and-found delay for accuracy
+            used_delay = int(self.current_delay_us) if self.current_delay_us is not None else int(self.target_delay_us)
+            predX, predY, predZ = self._predict_target_xyz(self.vec_steps_per_s, used_delay)
+            cur = self.model.machine_model.get_current_position_dict()
+            ex = int(cur['X']) - int(predX)
+            ez = int(cur['Z']) - int(predZ)
+            a  = float(self._xz_offset_ema_alpha)
+            self._x_track_offset_steps = int(round((1.0 - a) * self._x_track_offset_steps + a * ex))
+            self._z_track_offset_steps = int(round((1.0 - a) * self._z_track_offset_steps + a * ez))
+            self.stageChanged.emit(
+                f"Trajectory bias update → X:{self._x_track_offset_steps} Z:{self._z_track_offset_steps} (EMA)"
+            )
+        except Exception as e:
+            self.stageChanged.emit(f"Could not update X/Z bias: {e}")
+    
+    def _probe_half_frame_up(self):
+        """
+        Move the FoV 'up' by half a frame so we can see droplets closer to the nozzle.
+        We interpret 'up' as negative image-y. Using kz [steps/px], we translate to a Z move.
+        """
+        try:
+            if self.background_image is not None:
+                H, W = self.background_image.shape[:2]
+            elif getattr(self, "droplet_image", None) is not None:
+                H, W = self.droplet_image.shape[:2]
+            else:
+                # conservative default if we somehow don't have an image yet
+                H, W = 1080, 1920
+
+            kx, ky, kz = self._compute_stage_scales_steps_per_px()
+            dy_px = - (H // 2)   # 'up' in image (if your sign is opposite, change to +H//2)
+            dZ = int(round(kz * dy_px))
+
+            cur = self.model.machine_model.get_current_position_dict()
+            tgt = (cur['X'], cur['Y'], cur['Z'] + dZ)
+            self.stageChanged.emit(f"No droplet after sweep → half-frame UP probe #{self._vertical_probe_tries}/{self._max_vertical_probes}")
+            self._safe_move_abs(self._clamp_xyz(*tgt))  # state_setDelay has a moveDone→state_setDelay transition
+        except Exception as e:
+            self.stageChanged.emit(f"Half-frame probe failed: {e}")
 
     @Slot()
     def onCompleted(self):
