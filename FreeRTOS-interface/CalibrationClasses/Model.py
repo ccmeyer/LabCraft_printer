@@ -5417,6 +5417,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                   self.state_char, self.state_anBatch, self.state_final):
             self.state_machine.addState(s)
 
+        _all_pressure_states = (
+            self.state_pick, self.state_applyP, self.state_move, self.state_prepBG,
+            self.state_capBG, self.state_setDelay, self.state_capture, self.state_analyze,
+            self.state_center, self.state_char, self.state_anBatch
+        )
+        for st in _all_pressure_states:
+            st.addTransition(self.nextPressure, self.state_pick)
+
         self.state_machine.setInitialState(self.state_pick)
 
     @staticmethod
