@@ -441,9 +441,32 @@ class CalibrationManager(QObject):
     def set_intermediate_droplet_position(self, position): 
         self.intermediate_droplet_position = position
         self._emit_readiness()
-    def set_primary_pressure_band(self, result): 
+    def set_primary_pressure_band(self, result):
         print("Setting primary pressure band:", result)
-        self._last_pressure_scan_result = result
+        # Normalize inputs:
+        if isinstance(result, dict):
+            # Merge into existing dict result if present
+            cur = self._last_pressure_scan_result if isinstance(self._last_pressure_scan_result, dict) else {}
+            cur = dict(cur)  # shallow copy
+            cur.update(result)
+            # Ensure primary_band is a clean 2-float list if present
+            if "primary_band" in cur and isinstance(cur["primary_band"], (list, tuple)) and len(cur["primary_band"]) == 2:
+                lo, hi = cur["primary_band"]
+                cur["primary_band"] = [float(lo), float(hi)]
+            self._last_pressure_scan_result = cur
+
+        elif isinstance(result, (list, tuple)) and len(result) == 2:
+            # Update-only semantics: keep existing result dict, just replace the band
+            cur = self._last_pressure_scan_result if isinstance(self._last_pressure_scan_result, dict) else {}
+            cur = dict(cur)
+            lo, hi = result
+            cur["primary_band"] = [float(lo), float(hi)]
+            self._last_pressure_scan_result = cur
+
+        else:
+            # Ignore invalid input types
+            return
+
         self._emit_readiness()
     def set_pressure_trajectory_result(self, result_dict):
         self._pressure_traj_result = result_dict
@@ -461,9 +484,18 @@ class CalibrationManager(QObject):
         res = self._last_pressure_scan_result
         if not res:
             return None
-        band = res.get("primary_band")
-        if band and len(band) == 2:
-            return float(band[0]), float(band[1])
+
+        # Back-compat: if someone shoved a tuple/list in here, accept it
+        if isinstance(res, (list, tuple)) and len(res) == 2:
+            lo, hi = res
+            return float(lo), float(hi)
+
+        if isinstance(res, dict):
+            band = res.get("primary_band")
+            if isinstance(band, (list, tuple)) and len(band) == 2:
+                lo, hi = band
+                return float(lo), float(hi)
+
         return None
     
     def get_pressure_trajectory_result(self):
@@ -4711,7 +4743,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                     hi = max(lo, new_pressure)
                 setter = getattr(self.calibration_manager, "set_primary_pressure_band", None)
                 if callable(setter):
-                    setter((round(lo, 3), round(hi, 3)))
+                    # Before (problematic): setter((round(lo, 3), round(hi, 3)))
+                    setter({"primary_band": (round(lo, 3), round(hi, 3))})
         except Exception:
             pass
 
