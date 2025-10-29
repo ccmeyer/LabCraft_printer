@@ -932,6 +932,16 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._base_pressure = None
         self._pressure_level = 0  # 0=base,1=+step,2=+2*step
 
+        # --- Fixed thresholding controls (replaces Otsu for nozzle detection) ---
+        self.fixed_thresh_value = 30         # 8-bit gray value; tune 20–45
+        self.no_signal_min_fg_px = 120       # already present; keep/tune 80–200
+        self.min_stream_bbox_h_px = 10       # reject tiny blobs
+        self.search_top_band_frac = 0.60     # top_y must be within top 60% of image
+
+        # --- Warm-up (throwaway) frame control ---
+        self._throwaway_pending = False      # set True when we want to discard next droplet frame
+
+
         # Define states
         self.state_initial_position = QState()
         self.state_prepare_background = QState()
@@ -1046,20 +1056,20 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onPrepareDroplet(self):
-        # Reset the scan plan for this search loop
         self.stageChanged.emit("Preparing droplet capture (init scan plan)")
         self._base_delay_us = int(self.initial_flash_delay_us)
         self._delay_idx = 0
         self._base_pressure = float(self.model.machine_model.get_current_print_pressure())
         self._pressure_level = 0
 
+        # First shot is a warm-up to discard
+        self._throwaway_pending = True
+
         settings = {
             "num_droplets": 1,
             "flash_delay": int(self._clamp_delay(self._base_delay_us)),
-            # don't force pressure yet; use whatever current pressure is for the first shot
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
-
     @Slot()
     def onCaptureDroplet(self):
         # Slightly more aggressive retries for flash timing hiccups
@@ -1077,6 +1087,19 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Analyzing diff to locate nozzle")
         bg, dr = self.background_image, self.droplet_image
 
+        # If a warm-up frame was requested, discard this one and re-capture
+        if self._throwaway_pending:
+            self._throwaway_pending = False
+            self.stageChanged.emit("Discarding warm-up droplet frame")
+            # Re-shoot with the *same* settings (one droplet, current delay/pressure)
+            settings = {
+                "num_droplets": 1,
+                "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
+                # keep current pressure (no key needed if your stack preserves it)
+            }
+            self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+            return
+
         status, nozzle_px, n_contours, debug_img = self._detect_nozzle_point(bg, dr)
 
         if status == "OK":
@@ -1092,6 +1115,9 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             if not advanced:
                 self.calibrationError.emit(settings_or_err)  # error message string
                 return
+            
+            # After a pressure change, discard the next droplet frame
+            self._throwaway_pending = True
             self.stageChanged.emit(settings_or_err.get("_stage_msg", "Raising pressure and retesting"))
             # apply new pressure (and keep current delay)
             self.calibration_manager.changeSettingsRequested.emit(
@@ -1105,6 +1131,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         if not advanced:
             self.calibrationError.emit("No droplet/nozzle detected after scanning delays and pressure levels.")
             return
+        if "print_pressure" in settings:
+            self._throwaway_pending = True
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
     # ----------------- Helpers: detection & movement -----------------
@@ -1121,11 +1149,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             # fall back to last known base or min
             cur = float(self._base_pressure if self._base_pressure is not None else self.min_print_pressure)
 
-        ceiling = float(self._pressure_ceiling_psi)
+        ceiling = float(self.max_print_pressure)
         if cur >= ceiling - 1e-9:
             return (False, f"Unable to detect nozzle: increased pressure up to {ceiling:.3f} psi without any signal.")
 
-        new_p = float(min(ceiling, cur + self.escalate_pressure_step))
+        new_p = float(min(ceiling, cur + self.pressure_step))
         msg = f"No signal in diff → raising pressure to {new_p:.3f} psi and retesting"
         # keep current flash delay; ensure one droplet
         settings = {
@@ -1156,15 +1184,15 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # Otsu only; no fallback to mean+3σ (that was causing false positives)
-        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # FIXED THRESHOLD (no Otsu). This prevents adapting to background speckle.
+        _, th = cv2.threshold(blur, int(self.fixed_thresh_value), 255, cv2.THRESH_BINARY)
 
         fg_px = int(np.count_nonzero(th))
         if fg_px < int(self.no_signal_min_fg_px):
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NO_SIGNAL", None, 0, dbg)
 
-        # clean specks (then look for contours)
+        # Morphological clean-up
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
@@ -1174,35 +1202,44 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        # area filter (keep only plausible stream/nozzle contours)
-        areas = [cv2.contourArea(c) for c in contours]
-        keep = [(c, a) for (c, a) in zip(contours, areas) if a >= 2000]
-        if not keep:
+        H, W = gray.shape[:2]
+        top_band_limit = int(self.search_top_band_frac * H)
+
+        # Filter: area, min bbox height, and contour top must be in the upper band
+        kept = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 2000:
+                continue
+            x, y, w, h = cv2.boundingRect(c)
+            if h < self.min_stream_bbox_h_px:
+                continue
+            ys = c[:, :, 1].flatten()
+            top_y = int(ys.min())
+            if top_y > top_band_limit:
+                continue
+            kept.append((c, area, top_y, x, y, w, h))
+
+        if not kept:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             return ("NONE", None, 0, dbg)
 
-        def contour_bottom_y(contour):
-            ys = contour[:, :, 1].flatten()
+        # Prefer the contour with the lowest *bottom* (closest to nozzle top origin) and larger area
+        def bottom_y(c):
+            ys = c[:, :, 1].flatten()
             return int(ys.max())
 
-        keep_sorted = sorted(keep, key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1]))
-        chosen, _ = keep_sorted[0]
-        n = len(keep)
-
-        ys = chosen[:, :, 1].flatten()
-        top_y = int(ys.min())
-        x, y, w, h = cv2.boundingRect(chosen)
+        kept.sort(key=lambda t: (-bottom_y(t[0]), -t[1]))
+        chosen, _, top_y, x, y, w, h = kept[0]
+        n = len(kept)
         mid_x = int(round(x + w / 2.0))
-        nozzle_xy = (mid_x, top_y)
+        nozzle_xy = (mid_x, int(top_y))
 
-        # debug overlay
-        if a.ndim == 3 and a.shape[2] == 3:
-            dbg = a.copy()
-        else:
-            dbg = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
+        # Debug overlay
+        dbg = a.copy() if (a.ndim == 3 and a.shape[2] == 3) else cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
         cv2.drawContours(dbg, [chosen], -1, (0, 255, 0), 2)
         cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 165, 0), 1)
-        cv2.line(dbg, (x, top_y), (x + w, top_y), (0, 200, 255), 1)
+        cv2.line(dbg, (x, int(top_y)), (x + w, int(top_y)), (0, 200, 255), 1)
         cv2.circle(dbg, nozzle_xy, 4, (255, 0, 0), -1)
 
         return ("OK", nozzle_xy, n, dbg)
