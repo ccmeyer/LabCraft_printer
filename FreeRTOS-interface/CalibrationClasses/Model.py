@@ -360,7 +360,6 @@ class CalibrationManager(QObject):
             replicates_per_pressure=replicates_per_pressure,
             order=order
         )
-        self.start_active_calibration()
 
     def start_droplet_timecourse_process(self):
         self._try_start_process(DropletTimecourseProcess)
@@ -5286,7 +5285,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 fit_pts = [(float(rec["pressure"]),
                             float(rec.get("fit", {}).get("vx_px_per_us", 0.0)),
                             float(rec.get("fit", {}).get("vy_px_per_us", 0.0)))
-                           for rec in (traj["pressures"] if traj else []) if rec.get("fit")]
+                           for rec in (self.traj["pressures"] if self.traj else []) if rec.get("fit")]
                 if not fit_pts:
                     self.calibrationError.emit("Trajectory scan had no valid fits to interpolate velocities.")
                     self._ready = False
