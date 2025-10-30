@@ -212,10 +212,10 @@ class DropletCamera(QObject):
 
     # --- GPIO ---
     def _trigger_high(self): 
-        print("[Pi] trigger HIGH")
+        # print("[Pi] trigger HIGH")
         self._trig_line.set_value(1)
     def _trigger_low(self): 
-        print("[Pi] trigger LOW")
+        # print("[Pi] trigger LOW")
         self._trig_line.set_value(0)
 
     # --- camera lifecycle ---
@@ -321,9 +321,9 @@ class DropletCamera(QObject):
             "cap_id": int(self._cap_id),
         }
         self._cap_done.set()
-        print(f"[Chosen] mean={mean:.1f} reason={reason} "
-              f"Exp(us)={md.get('ExposureTime') if md else None} "
-              f"FrameDur(us)={md.get('FrameDuration') if md else None}")
+        # print(f"[Chosen] mean={mean:.1f} reason={reason} "
+        #       f"Exp(us)={md.get('ExposureTime') if md else None} "
+        #       f"FrameDur(us)={md.get('FrameDuration') if md else None}")
 
         # Only emit if allowed (wrappers will re-emit after a successful retry)
         if self._emit_on_complete:

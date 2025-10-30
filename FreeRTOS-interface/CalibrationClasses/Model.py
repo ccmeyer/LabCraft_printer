@@ -1016,13 +1016,13 @@ class BaseCalibrationProcess(QObject):
         guard_timer_ref = {"t": None}  # so we can cancel from inner callback
 
         def _arm_one_attempt():
-            # Stage text (with retry suffix after the first attempt)
-            if state["attempt"] == 1:
-                self.stageChanged.emit(stage_text)
-            else:
-                self.stageChanged.emit(stage_text + retry_stage_suffix.format(
-                    i=state["attempt"], n=attempts_total
-                ))
+            # # Stage text (with retry suffix after the first attempt)
+            # if state["attempt"] == 1:
+            #     self.stageChanged.emit(stage_text)
+            # else:
+            #     self.stageChanged.emit(stage_text + retry_stage_suffix.format(
+            #         i=state["attempt"], n=attempts_total
+            #     ))
 
             # Start a guard timeout for this attempt
             guard_timer_ref["t"] = self._start_timeout(
@@ -1247,7 +1247,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onInitialPosition(self):
-        self.stageChanged.emit("Moving to initial position")
+        self.stageChanged.emit("Nozzle Pos - Moving to initial position")
         # Get the location of the camera in the location model
         initial_position = self.model.location_model.get_location_dict('camera')
         move_vector = (initial_position['X'], initial_position['Y'], initial_position['Z'])
@@ -1257,7 +1257,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onPrepareBackground(self):
-        self.stageChanged.emit("Preparing background (0 droplets)")
+        self.stageChanged.emit("Nozzle Pos - Preparing background (0 droplets)")
         # Request to change droplet settings (0 droplets). The callback emits a signal.
         settings = {
             "num_droplets": 0,
@@ -1278,7 +1278,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onPrepareDroplet(self):
-        self.stageChanged.emit("Preparing droplet capture (init scan plan)")
+        self.stageChanged.emit("Nozzle Pos - Preparing droplet capture (init scan plan)")
         self._base_delay_us = int(self.initial_flash_delay_us)
         self._delay_idx = 0
         self._base_pressure = float(self.model.machine_model.get_current_print_pressure())
@@ -1306,13 +1306,13 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyze(self):
-        self.stageChanged.emit("Analyzing diff to locate nozzle")
+        self.stageChanged.emit("Nozzle Pos - Analyzing diff to locate nozzle")
         bg, dr = self.background_image, self.droplet_image
 
         # If a warm-up frame was requested, discard this one and re-capture
         if self._throwaway_pending:
             self._throwaway_pending = False
-            self.stageChanged.emit("Discarding warm-up droplet frame")
+            self.stageChanged.emit("Nozzle Pos - Discarding warm-up droplet frame")
             # Re-shoot with the *same* settings (one droplet, current delay/pressure)
             settings = {
                 "num_droplets": 1,
@@ -1326,7 +1326,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         if status == "OK":
             if n_contours > 1:
-                self.stageChanged.emit(f"Multiple contours found ({n_contours}); using top-most candidate.")
+                self.stageChanged.emit(f"Nozzle Pos - Multiple contours found ({n_contours}); using top-most candidate.")
             self.presentImageSignal.emit(debug_img)
             self._recenter_or_finish(nozzle_px)
             return
@@ -1351,7 +1351,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # status == "NONE" → keep your existing delay-scan plan, then (smaller) pressure bump
         advanced, settings = self._advance_scan_plan()
         if not advanced:
-            self.calibrationError.emit("No droplet/nozzle detected after scanning delays and pressure levels.")
+            self.calibrationError.emit("Nozzle Pos - No droplet/nozzle detected after scanning delays and pressure levels.")
             return
         if "print_pressure" in settings:
             self._throwaway_pending = True
