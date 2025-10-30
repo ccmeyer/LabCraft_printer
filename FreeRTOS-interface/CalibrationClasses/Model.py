@@ -2251,10 +2251,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         # When scanning down, accept as soon as we enter the target window
         if self.MIN_AREA <= agg_area <= self.MAX_AREA:
             self.stageChanged.emit("Target area window reached")
-            self.calibrationDataUpdated.emit({
-                'measurements': self.measurements,
-                'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
-            })
+            # self.calibrationDataUpdated.emit({
+            #     'measurements': self.measurements,
+            #     'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
+            # })
             machine_pos = self.model.machine_model.get_current_position_dict()
             self.calibration_manager.set_nozzle_center_image_position(center)
             self.calibration_manager.set_nozzle_center(machine_pos)
@@ -2288,10 +2288,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             else:
                 # In window
                 self.stageChanged.emit("Target area window reached (fine adjust)")
-                self.calibrationDataUpdated.emit({
-                    'measurements': self.measurements,
-                    'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
-                })
+                # self.calibrationDataUpdated.emit({
+                #     'measurements': self.measurements,
+                #     'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
+                # })
                 machine_pos = self.model.machine_model.get_current_position_dict()
                 self.calibration_manager.set_nozzle_center_image_position(center)
                 self.calibration_manager.set_nozzle_center(machine_pos)
@@ -3425,6 +3425,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         result = {
             "pulse_width_us": self._pulse_width_us,
             "delay_us": int(self.classify_delay_us),
+            "start_pressure": float(self.start_pressure),
             "pressure_bounds": [self.P_MIN, self.P_MAX],
             "pressures": self.samples,
             "single_bands": bands,
@@ -4463,6 +4464,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             missing.append("Background image")
         if cm.get_emergence_time() is None:
             missing.append("Emergence time")
+        if cm.get_primary_pressure_band() is None:
+            missing.append("Primary pressure band")
         return missing
 
     # ----------------- state handlers -----------------
