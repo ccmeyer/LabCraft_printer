@@ -498,7 +498,7 @@ class CalibrationManager(QObject):
 
         # Emit the change request (controller consumes dict & callback)
         # NOTE: If your controller expects a different key name, adjust "print_width" here.
-        self.changeSettingsRequested.emit({"print_width": int(pw_us)}, _cb)
+        self.changeSettingsRequested.emit({"print_pulse_width": int(pw_us)}, _cb)
 
     def _advance_pw_sweep(self):
         """Move to next PW in the sweep; apply PW (async) and then run Calibrate All."""
@@ -2307,6 +2307,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Droplet emergence calibration complete")
+        self.calibrationDataUpdated.emit({
+                'measurements': self.measurements,
+                'result': {'flash_delay': self.candidate_delay}
+            })
         self.calibrationCompleted.emit()
 
     # ---------- helpers ----------
@@ -6421,9 +6425,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "mean_center_px": mean_center,
                 "mean_volume": mean_vol,
                 "cv_volume_percent": cv_vol,
-                "positions_px": [tuple(map(int, p)) for p in self.droplet_positions],
+                # "positions_px": [tuple(map(int, p)) for p in self.droplet_positions],
                 "volumes": [float(v) for v in self.droplet_volumes],
-                "focus_values": [float(f) for f in self.droplet_focus],
+                # "focus_values": [float(f) for f in self.droplet_focus],
                 "circularity_values": [float(c) for c in self.circularity_values],
                 "mean_position_machine": drop_machine,
                 "multiple_detections": int(self.multiple_droplet_hits),
@@ -6443,9 +6447,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "mean_center_px": None,
             "mean_volume": None,
             "cv_volume_percent": None,
-            "positions_px": [],
+            # "positions_px": [],
             "volumes": [],
-            "focus_values": [],
+            # "focus_values": [],
             "circularity_values": [],
             "mean_position_machine": None,
             "valid": bool(valid),
