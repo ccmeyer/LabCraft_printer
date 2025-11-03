@@ -4786,7 +4786,18 @@ class ExperimentModel(QObject):
             "total_volume_uL": round(fill_uL, 3),
             "max_per_rxn_nL": "",
         }
-
+        # --- replicate-expand the row list so _reactions_df matches actual run order ---
+        base_rows = rows
+        rows = []
+        n_base = len(base_rows)
+        for r in range(reps):
+            for i, row in enumerate(base_rows):
+                rows.append({
+                    **row,
+                    "replicate": r + 1,            # 1-based replicate index (optional)
+                    "reaction_index": i,           # index within base design (optional)
+                    "global_index": r * n_base + i # absolute run index (optional)
+                })
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
 
@@ -4806,11 +4817,11 @@ class ExperimentModel(QObject):
     def get_reactions_dataframe(self) -> pd.DataFrame:
         return self._reactions_df.copy()
     
-    def get_number_of_reactions(self) -> int:
-        """Total reactions including replicates."""
-        reps = int(self.metadata.get("replicates", 1))
-        base = len(self._reactions_df) if not self._reactions_df.empty else len(self._enumerate_reactions())
-        return reps * base
+    # def get_number_of_reactions(self) -> int:
+    #     """Total reactions including replicates."""
+    #     reps = int(self.metadata.get("replicates", 1))
+    #     base = len(self._reactions_df) if not self._reactions_df.empty else len(self._enumerate_reactions())
+    #     return reps * base
 
     def get_random_seed(self):
         return self.metadata.get("random_seed", None)
@@ -4827,49 +4838,50 @@ class ExperimentModel(QObject):
         """
         Yields, for each reaction (replicated), a list of tuples:
             (reagent_name, stock_concentration, units, droplet_count)
-        'reagent_name' = additive factor name (for additives) OR option name (for choice groups).
+        'reagent_name' = additive factor name (additives) OR option name (choice groups).
         """
-        # Make sure we're consistent with the current plan. If nothing was generated yet,
-        # we still compute from current factors/plans (no fill included here).
         reactions = self._enumerate_reactions()
         reps = int(self.metadata.get("replicates", 1))
 
         def _reagent_name_from_key(key: tuple[str, object]) -> str:
-            # additives: (factor_name, None) -> name = factor_name
-            # choices:   (group_name, option_name) -> name = option_name
             return key[0] if key[1] is None else key[1]
 
-        for rxn in reactions:
-            # Build one base reaction
-            items = []
-            for key, target in rxn.items():
-                plan = self.plans_per_option.get(key)
-                if not plan:
-                    continue
-                if plan["n_stocks"] == 1:
-                    st = plan["stocks"][0]
-                    drops = int(st["droplets_per_target"].get(float(target), 0))
-                    if drops > 0:
-                        items.append((_reagent_name_from_key(key),
-                                    float(st["stock_concentration"]),
-                                    st["units"],
-                                    drops))
-                else:
-                    st1, st2 = plan["stocks"]
-                    k1 = int(st1["droplets_per_target"].get(float(target), 0))
-                    k2 = int(st2["droplets_per_target"].get(float(target), 0))
-                    if k1 > 0:
-                        items.append((_reagent_name_from_key(key),
-                                    float(st1["stock_concentration"]),
-                                    st1["units"],
-                                    k1))
-                    if k2 > 0:
-                        items.append((_reagent_name_from_key(key),
-                                    float(st2["stock_concentration"]),
-                                    st2["units"],
-                                    k2))
-            # Emit with replicates
-            for r in range(reps):
+        # replicate OUTER → reaction INNER (matches _reactions_df)
+        for r in range(reps):
+            for rxn in reactions:
+                items = []
+                for key, target in rxn.items():
+                    plan = self.plans_per_option.get(key)
+                    if not plan:
+                        continue
+                    if plan["n_stocks"] == 1:
+                        st = plan["stocks"][0]
+                        drops = int(st["droplets_per_target"].get(float(target), 0))
+                        if drops > 0:
+                            items.append((
+                                _reagent_name_from_key(key),
+                                float(st["stock_concentration"]),
+                                st["units"],
+                                drops
+                            ))
+                    else:
+                        st1, st2 = plan["stocks"]
+                        k1 = int(st1["droplets_per_target"].get(float(target), 0))
+                        k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                        if k1 > 0:
+                            items.append((
+                                _reagent_name_from_key(key),
+                                float(st1["stock_concentration"]),
+                                st1["units"],
+                                k1
+                            ))
+                        if k2 > 0:
+                            items.append((
+                                _reagent_name_from_key(key),
+                                float(st2["stock_concentration"]),
+                                st2["units"],
+                                k2
+                            ))
                 yield items
 
     # ------------- Save/Load (optional; keep simple) -------------
@@ -4932,9 +4944,12 @@ class ExperimentModel(QObject):
     # Simple getters used by Model
     # -----------------------------
     def get_number_of_reactions(self) -> int:
-        df = getattr(self, "_reactions_df", None)
+        """Total reactions including replicates."""
+        if hasattr(self, "_reactions_df") and not self._reactions_df.empty:
+            return len(self._reactions_df)
+        # Fallback if generate_experiment() hasn't been called yet
         reps = int(self.metadata.get("replicates", 1))
-        return (0 if df is None else len(df)) * reps
+        return reps * len(self._enumerate_reactions())
 
     def get_random_seed(self) -> Optional[int]:
         return self.metadata.get("random_seed")

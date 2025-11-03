@@ -3081,8 +3081,11 @@ class ExperimentDesignDialog(QDialog):
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
         self.main_window = main_window
+        self.color_dict = getattr(
+            self.main_window, "color_dict",
+            {"dark_red": "#8a0303","blue": "#1e64b4","dark_blue": "#1b3a57", "light_blue": "#3b82f6"}
+        )
         self.setWindowTitle("Experiment Design (v2)")
-        # 1) wider minimum size
         self.setMinimumSize(1440, 820)
 
         self.model: ExperimentModel = model
@@ -3096,18 +3099,18 @@ class ExperimentDesignDialog(QDialog):
         self._auto_timer.setInterval(350)  # ms
         self._auto_timer.timeout.connect(self._recompute_silent)
 
-        # --- Layout scaffolding ---
+        # -------------------------
+        # Root layout: LEFT (narrow) | RIGHT (wide)
+        # -------------------------
         self.root = QHBoxLayout(self)
 
-        # Left side (wider): Reagents table + metadata controls + actions + summary
-        left = QVBoxLayout()
-        self.root.addLayout(left, stretch=3)
+        left = QVBoxLayout()                # single column for all controls/buttons
+        self.root.addLayout(left, stretch=1)  # make left narrower
 
-        # Right side (narrower): Stock table
-        right = QVBoxLayout()
-        self.root.addLayout(right, stretch=2)
+        right = QVBoxLayout()                 # tables column (wide)
+        self.root.addLayout(right, stretch=3) # make right wider
 
-        # --- Reagents table ---
+        # ---------- Reagents table (top-right) ----------
         self.reagent_table = QTableWidget(0, 6, self)
         self.reagent_table.setHorizontalHeaderLabels([
             "Reagent Name", "Group", "Targets", "Units", "Droplet Vol (nL)", "Delete"
@@ -3118,166 +3121,12 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setColumnWidth(1, 150)   # Group
         self.reagent_table.setColumnWidth(2, 230)   # Targets (wider)
         self.reagent_table.setColumnWidth(3, 90)    # Units
-        self.reagent_table.setColumnWidth(4, 90)   # Droplet vol
+        self.reagent_table.setColumnWidth(4, 90)    # Droplet vol
         self.reagent_table.setColumnWidth(5, 90)    # Delete
-        left.addWidget(self.reagent_table)
+        right.addWidget(self.reagent_table)
 
-        # --- Controls ---
-        controls = QHBoxLayout()
-
-        # 2) Labels on the left, inputs on the right (use QFormLayout)
-        controls_left = QFormLayout()
-        controls_left.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        # Experiment name
-        self.exp_name_edit = QLineEdit(self.model.metadata.get("name", "Untitled"))
-        controls_left.addRow(QLabel("Experiment Name"), self.exp_name_edit)
-
-        # Replicates
-        self.rep_spin = QSpinBox()
-        self.rep_spin.setMinimum(1)
-        self.rep_spin.setMaximum(9999)
-        self.rep_spin.setValue(int(self.model.metadata.get("replicates", 1)))
-        controls_left.addRow(QLabel("Replicates"), self.rep_spin)
-
-        # Target reaction volume (nL)
-        self.v_spin = QDoubleSpinBox()
-        self.v_spin.setDecimals(1)
-        self.v_spin.setRange(1.0, 1_000_000.0)
-        self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 500.0)))
-        self.v_spin.setSingleStep(50.0)
-        controls_left.addRow(QLabel("Target Reaction Volume (nL)"), self.v_spin)
-
-        # Fill reagent name
-        self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
-        controls_left.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
-
-        # Fill droplet volume
-        self.fill_dv_spin = QDoubleSpinBox()
-        self.fill_dv_spin.setDecimals(1)
-        self.fill_dv_spin.setRange(0.1, 100_000.0)
-        self.fill_dv_spin.setSingleStep(1.0)
-        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", 10.0)))
-        controls_left.addRow(QLabel("Fill Droplet Vol (nL)"), self.fill_dv_spin)
-
-        # (1) Randomize well assignments
-        self.randomize_chk = QCheckBox()
-        self.randomize_chk.setChecked(bool(self.model.metadata.get("randomize_assignments", False)))
-        controls_left.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
-
-        self.random_seed_spin = QSpinBox()
-        self.random_seed_spin.setMinimum(0)
-        self.random_seed_spin.setMaximum(9999999)
-        current_seed = self.model.metadata.get("random_seed", 0)
-        if current_seed is None:
-            current_seed = 0
-        self.random_seed_spin.setValue(int(current_seed))
-        self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
-        # enable/disable behavior
-        self.randomize_chk.toggled.connect(self.random_seed_spin.setEnabled)
-        controls_left.addRow(QLabel("Random seed"), self.random_seed_spin)
-
-        # (2) Use subset design + reduction factor
-        self.subset_chk = QCheckBox()
-        self.subset_chk.setChecked(bool(self.model.metadata.get("use_subset_design", False)))
-        controls_left.addRow(QLabel("Use subset design"), self.subset_chk)
-
-        self.reduction_spin = QSpinBox()
-        self.reduction_spin.setMinimum(1)
-        self.reduction_spin.setMaximum(999)
-        self.reduction_spin.setValue(int(self.model.metadata.get("reduction_factor", 1)))
-        self.reduction_spin.setEnabled(self.subset_chk.isChecked())
-        controls_left.addRow(QLabel("Reduction factor"), self.reduction_spin)
-
-        # enable/disable behavior
-        self.subset_chk.toggled.connect(self.reduction_spin.setEnabled)
-
-        # (3) Start column (0 = leftmost)
-        self.start_col_spin = QSpinBox()
-        self.start_col_spin.setMinimum(0)
-        self.start_col_spin.setMaximum(999)
-        self.start_col_spin.setValue(int(self.model.metadata.get("start_col", 0)))
-        controls_left.addRow(QLabel("Start column (0-based)"), self.start_col_spin)
-
-        # (4) Start row (0 = top row A)
-        self.start_row_spin = QSpinBox()
-        self.start_row_spin.setMinimum(0)
-        self.start_row_spin.setMaximum(999)
-        self.start_row_spin.setValue(int(self.model.metadata.get("start_row", 0)))
-        controls_left.addRow(QLabel("Start row (0-based)"), self.start_row_spin)
-
-        # auto-update on change (keeps dialog responsive like the other controls)
-        def _auto_update():
-            self._on_optimize_and_generate()
-        self.randomize_chk.stateChanged.connect(_auto_update)
-        self.random_seed_spin.valueChanged.connect(_auto_update)
-        self.subset_chk.stateChanged.connect(_auto_update)
-        self.reduction_spin.valueChanged.connect(_auto_update)
-        self.start_col_spin.valueChanged.connect(_auto_update)
-        self.start_row_spin.valueChanged.connect(_auto_update)
-
-        controls_right = QVBoxLayout()
-        # Add reagent button
-        self.add_reagent_btn = QPushButton("Add Reagent")
-        self.add_reagent_btn.clicked.connect(self._on_add_reagent)
-        controls_right.addWidget(self.add_reagent_btn)
-
-        # Optimize & Generate (manual run)
-        self.run_btn = QPushButton("Optimize & Generate")
-        self.run_btn.setStyleSheet("background-color: #b33; color: white; font-weight: bold;")
-        self.run_btn.clicked.connect(self._on_optimize_and_generate)
-        controls_right.addWidget(self.run_btn)
-
-        # --- New Experiment ---
-        self.new_btn = QPushButton("New Experiment")
-        self.new_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold;")
-        self.new_btn.clicked.connect(self._on_new_experiment)
-        controls_right.addWidget(self.new_btn)
-
-        # --- Save / Load / Finish ---
-        self.save_btn = QPushButton("Save Design…")
-        self.save_btn.clicked.connect(self._on_save_design)
-        controls_right.addWidget(self.save_btn)
-
-        self.load_btn = QPushButton("Load Design…")
-        self.load_btn.clicked.connect(self._on_load_design)
-        controls_right.addWidget(self.load_btn)
-
-        self.finish_btn = QPushButton("Finish")
-        self.finish_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
-        self.finish_btn.clicked.connect(self._on_finish)
-        controls_right.addWidget(self.finish_btn)
-
-        # Summary
-        self.summary_lbl = QLabel("Summary: —")
-        controls_right.addWidget(self.summary_lbl)
-
-        self.status_lbl = QLabel("")
-        self.status_lbl.setWordWrap(True)  # ✅ wrap long messages
-        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
-        self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)  # ✅ allow horizontal shrink
-        # Cap height to ~2 lines for aesthetics
-        line_h = self.status_lbl.fontMetrics().height()
-        self.status_lbl.setMaximumHeight(int(line_h * 3.6))
-        controls_right.addWidget(self.status_lbl)
-
-        controls_right.addStretch(1)
-
-        controls.addLayout(controls_left, stretch=3)
-        # controls.addLayout(controls_mid, stretch=2)
-        controls.addLayout(controls_right, stretch=2)
-        left.addLayout(controls)
-
-        # 4) Auto-update when metadata changes
-        self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
-        self.rep_spin.valueChanged.connect(self._schedule_auto_update)
-        self.v_spin.valueChanged.connect(self._schedule_auto_update)
-        self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
-        self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
-
-        # --- Stock table (right) ---
-        # 3) Add "Max / Rxn (nL)" column
+        # ---------- Stock table (bottom-right) ----------
+        # Add "Max / Rxn (nL)" column
         self.stock_table = QTableWidget(0, 9, self)
         self.stock_table.setHorizontalHeaderLabels([
             "Factor/Group", "Option", "Stock Conc", "Δ per drop",
@@ -3287,14 +3136,149 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         right.addWidget(self.stock_table)
 
-        # --- Hook model signals ---
+        # =========================
+        # right COLUMN (single stack)
+        # =========================
+        controls_col = QVBoxLayout()
+        left.addLayout(controls_col)
+
+        # --- Form-like controls stacked at top of right column ---
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # Experiment name
+        self.exp_name_edit = QLineEdit(self.model.metadata.get("name", "Untitled"))
+        form.addRow(QLabel("Experiment Name"), self.exp_name_edit)
+
+        # Replicates
+        self.rep_spin = QSpinBox()
+        self.rep_spin.setMinimum(1); self.rep_spin.setMaximum(9999)
+        self.rep_spin.setValue(int(self.model.metadata.get("replicates", 1)))
+        form.addRow(QLabel("Replicates"), self.rep_spin)
+
+        # Target reaction volume (nL)
+        self.v_spin = QDoubleSpinBox()
+        self.v_spin.setDecimals(1)
+        self.v_spin.setRange(1.0, 1_000_000.0)
+        self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 500.0)))
+        self.v_spin.setSingleStep(50.0)
+        form.addRow(QLabel("Target Reaction Volume (nL)"), self.v_spin)
+
+        # Fill reagent name
+        self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
+        form.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
+
+        # Fill droplet volume
+        self.fill_dv_spin = QDoubleSpinBox()
+        self.fill_dv_spin.setDecimals(1)
+        self.fill_dv_spin.setRange(0.1, 100_000.0)
+        self.fill_dv_spin.setSingleStep(1.0)
+        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", 10.0)))
+        form.addRow(QLabel("Fill Droplet Vol (nL)"), self.fill_dv_spin)
+
+        # Randomize well assignments + seed
+        self.randomize_chk = QCheckBox()
+        self.randomize_chk.setChecked(bool(self.model.metadata.get("randomize_assignments", False)))
+        form.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
+
+        self.random_seed_spin = QSpinBox()
+        self.random_seed_spin.setMinimum(0); self.random_seed_spin.setMaximum(9999999)
+        current_seed = self.model.metadata.get("random_seed", 0) or 0
+        self.random_seed_spin.setValue(int(current_seed))
+        self.randomize_chk.toggled.connect(self.random_seed_spin.setEnabled)
+        self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
+        form.addRow(QLabel("Random seed"), self.random_seed_spin)
+
+        # Use subset design + reduction factor
+        self.subset_chk = QCheckBox()
+        self.subset_chk.setChecked(bool(self.model.metadata.get("use_subset_design", False)))
+        form.addRow(QLabel("Use subset design"), self.subset_chk)
+
+        self.reduction_spin = QSpinBox()
+        self.reduction_spin.setMinimum(1); self.reduction_spin.setMaximum(999)
+        self.reduction_spin.setValue(int(self.model.metadata.get("reduction_factor", 1)))
+        self.subset_chk.toggled.connect(self.reduction_spin.setEnabled)
+        self.reduction_spin.setEnabled(self.subset_chk.isChecked())
+        form.addRow(QLabel("Reduction factor"), self.reduction_spin)
+
+        # Start column/row
+        self.start_col_spin = QSpinBox()
+        self.start_col_spin.setMinimum(0); self.start_col_spin.setMaximum(999)
+        self.start_col_spin.setValue(int(self.model.metadata.get("start_col", 0)))
+        form.addRow(QLabel("Start column (0-based)"), self.start_col_spin)
+
+        self.start_row_spin = QSpinBox()
+        self.start_row_spin.setMinimum(0); self.start_row_spin.setMaximum(999)
+        self.start_row_spin.setValue(int(self.model.metadata.get("start_row", 0)))
+        form.addRow(QLabel("Start row (0-based)"), self.start_row_spin)
+
+        # Add the form to the left-hand column
+        controls_col.addLayout(form)
+
+        # --- Buttons stacked below the form ---
+        self.add_reagent_btn = QPushButton("Add Reagent")
+        self.add_reagent_btn.clicked.connect(self._on_add_reagent)
+        controls_col.addWidget(self.add_reagent_btn)
+
+        self.run_btn = new_btn = QPushButton("Optimize and Generate")
+        # self.run_btn.setStyleSheet("background-color: #b33; color: white;")
+        self.run_btn.clicked.connect(self._on_optimize_and_generate)
+        controls_col.addWidget(self.run_btn)
+
+        self.new_btn = QPushButton("New Experiment")
+        # self.new_btn.setStyleSheet(f"background-color: {self.color_dict['blue']}; color: white;")
+        self.new_btn.clicked.connect(self._on_new_experiment)
+        controls_col.addWidget(self.new_btn)
+
+        self.save_btn = QPushButton("Save Design…")
+        self.save_btn.clicked.connect(self._on_save_design)
+        controls_col.addWidget(self.save_btn)
+
+        self.load_btn = QPushButton("Load Design…")
+        self.load_btn.clicked.connect(self._on_load_design)
+        controls_col.addWidget(self.load_btn)
+
+        self.finish_btn = QPushButton("Finish")
+        self.finish_btn.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
+        self.finish_btn.clicked.connect(self._on_finish)
+        controls_col.addWidget(self.finish_btn)
+
+        # Summary & status
+        self.summary_lbl = QLabel("Summary: —")
+        controls_col.addWidget(self.summary_lbl)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
+        self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
+        line_h = self.status_lbl.fontMetrics().height()
+        self.status_lbl.setMaximumHeight(int(line_h * 3.6))
+        controls_col.addWidget(self.status_lbl)
+
+        controls_col.addStretch(1)
+
+        # ---- Auto-update bindings ----
+        def _auto_update():
+            self._on_optimize_and_generate()
+        self.randomize_chk.stateChanged.connect(_auto_update)
+        self.random_seed_spin.valueChanged.connect(_auto_update)
+        self.subset_chk.stateChanged.connect(_auto_update)
+        self.reduction_spin.valueChanged.connect(_auto_update)
+        self.start_col_spin.valueChanged.connect(_auto_update)
+        self.start_row_spin.valueChanged.connect(_auto_update)
+
+        self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
+        self.rep_spin.valueChanged.connect(self._schedule_auto_update)
+        self.v_spin.valueChanged.connect(self._schedule_auto_update)
+        self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
+        self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
+
+        # ---- Model hooks & initial render ----
         self.model.stock_updated.connect(self._refresh_stock_table)
         self.model.experiment_generated.connect(self._on_experiment_generated)
 
-        # --- Populate UI from model (if preloaded) ---
         self._load_factors_into_table()
-
-        # Initial refresh
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
 
@@ -3597,7 +3581,7 @@ class ExperimentDesignDialog(QDialog):
     def _update_summary_labels(self, initial: bool = False, total_reactions: int | None = None, worst_nonfill_nL: float | None = None):
         if total_reactions is None:
             df = self.model.get_reactions_dataframe()
-            total_reactions = len(df) * int(self.model.metadata.get("replicates", 1))
+            total_reactions = len(df)
         if worst_nonfill_nL is None:
             worst_nonfill_nL = self.model.get_worst_nonfill_volume_nL() or 0.0
 
