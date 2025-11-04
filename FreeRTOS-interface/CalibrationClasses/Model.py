@@ -58,6 +58,7 @@ class CalibrationManager(QObject):
     calibrationCompleted = Signal()
     calibrationError = Signal(str)
     calibrationQueueCompleted = Signal()
+    characterizationSummaryUpdated = Signal()  # Notify UI to rebuild the summary table
 
     analyzedImageUpdated = Signal(object)
 
@@ -825,6 +826,13 @@ class CalibrationManager(QObject):
 
         self._save_atomic()
 
+        # Notify listeners to refresh the summary table when relevant
+        if phase_key == "pressure_sweep_characterization":
+            try:
+                self.characterizationSummaryUpdated.emit()
+            except Exception:
+                pass
+
     def _try_append_flat_rows_from_payload(self, run_obj, phase_key, payload):
         """
         Try to normalize per-droplet replicates into flat rows.
@@ -943,6 +951,51 @@ class CalibrationManager(QObject):
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
         }
         self.readinessChanged.emit(readiness)
+
+    def get_pressure_sweep_summary_rows(self):
+        cur_stock = self._safe_get_stock_solution()
+        runs = self.data.get("runs") or []
+        if cur_stock is None or not runs:
+            return []
+
+        matching = [(idx, run) for idx, run in enumerate(runs) if run.get("stock_solution") == cur_stock]
+        if not matching:
+            return []
+
+        run_ids_in_order = [run.get("run_id") for _, run in matching]
+        id_to_run_no = {rid: i + 1 for i, rid in enumerate(run_ids_in_order)}
+
+        rows = []
+        for _, run in matching:
+            rid = run.get("run_id")
+            run_no = id_to_run_no.get(rid)
+            for step in run.get("steps", {}).get("pressure_sweep_characterization", []):
+                pw = (step.get("settings") or {}).get("print_width")
+                ts = step.get("timestamp")
+                pressures = (step.get("result") or {}).get("pressures") or []
+                for p in pressures:
+                    rows.append({
+                        "run_no": run_no,
+                        "pw_us": p.get("delay_us") and pw or pw,  # keep pw; (line left simple—pw from settings)
+                        "pressure_psi": p.get("pressure"),
+                        "mean_nL": p.get("mean_volume"),
+                        "cv_pct": p.get("cv_volume_percent"),
+                        "valid": p.get("valid"),
+                        "invalid_reason": p.get("invalid_reason"),
+                        "timestamp": ts,
+                    })
+
+        # Multi-key sort: PW → Pressure → Run # (None values go last)
+        def _last_if_none(val, fill):
+            return (val is None, fill if val is None else val)
+
+        rows.sort(key=lambda r: (
+            _last_if_none(r["pw_us"],        10**9),
+            _last_if_none(r["pressure_psi"], 10**9),
+            _last_if_none(r["run_no"],       10**9),
+            r["timestamp"] or ""
+        ))
+        return rows
 
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.

@@ -319,6 +319,37 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add groups to left panel
         left_panel_v.addWidget(manual_group)
         left_panel_v.addWidget(calib_group)
+
+        # --- Group 3: Characterization Summary ---
+        summary_group = QtWidgets.QGroupBox("Characterization Summary")
+        summary_v = QtWidgets.QVBoxLayout(summary_group)
+
+        self.summary_table = QtWidgets.QTableWidget()
+        self.summary_table = QtWidgets.QTableWidget()
+        self.summary_table.setColumnCount(6)
+        self.summary_table.setHorizontalHeaderLabels(
+            ["Run #", "PW (µs)", "Pressure (psi)", "Mean (nL)", "CV (%)", "Valid"]
+        )
+        self.summary_table.verticalHeader().setVisible(False)
+        self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.summary_table.setAlternatingRowColors(True)
+        self.summary_table.horizontalHeader().setStretchLastSection(True)
+        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+
+        self.summary_table.setMinimumHeight(180)
+        self.summary_table.setMaximumHeight(300)
+        self.summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.summary_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+        self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+
+        summary_v.addWidget(self.summary_table)
+        left_panel_v.addWidget(summary_group)
+
         left_panel_v.addStretch(1)
 
         # Keep left panel a stable width so buttons/labels don't resize
@@ -415,6 +446,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
+        self.model.calibration_manager.characterizationSummaryUpdated.connect(self.populate_summary_table)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
@@ -425,6 +457,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
         self.set_start_pressure(self.start_pressure_spin.value())
         self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
+        self.populate_summary_table()
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -908,6 +941,70 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # Auto-scroll to the newest row
         self.stage_table.scrollToBottom()
+
+    def populate_summary_table(self):
+        mgr = self.model.calibration_manager
+        rows = mgr.get_pressure_sweep_summary_rows()
+
+        # Keep the manager-provided multi-key order (PW → Pressure → Run #)
+        self.summary_table.setSortingEnabled(False)
+        self.summary_table.setRowCount(0)
+
+        # Subtle, readable “muted” text for invalid rows.
+        # Try theme value first; fall back to semi-transparent light text for dark themes.
+        muted_hex = (self.color_dict.get("muted_text")
+                    or self.color_dict.get("light_gray")
+                    or self.color_dict.get("gray")
+                    or None)
+        if muted_hex:
+            muted_brush = QBrush(QColor(muted_hex))
+        else:
+            muted_brush = QBrush(QColor(255, 255, 255, 150))  # 150/255 alpha = ~60% opacity on dark bg
+
+        def _mk(text):
+            it = QtWidgets.QTableWidgetItem(text)
+            it.setTextAlignment(Qt.AlignCenter)
+            return it
+
+        def _fmt(x, ndigits=2):
+            return "" if x is None else f"{x:.{ndigits}f}"
+
+        for r in rows:
+            i = self.summary_table.rowCount()
+            self.summary_table.insertRow(i)
+
+            run_item  = _mk("" if r.get("run_no") is None else str(r["run_no"]))
+            pw_item   = _mk(_fmt(r["pw_us"], 0))
+            p_item    = _mk(_fmt(r["pressure_psi"], 3))
+            mean_item = _mk(_fmt(r["mean_nL"], 3))
+            cv_item   = _mk(_fmt(r["cv_pct"], 2))
+
+            valid = r.get("valid")
+            valid_text = "✓" if valid is True else ("✗" if valid is False else "")
+            valid_item = _mk(valid_text)
+
+            # NEW: subtle styling — valid rows use default dark theme;
+            # invalid rows get muted (faded) text and optional italic to de-emphasize.
+            if valid is False:
+                for it in (run_item, pw_item, p_item, mean_item, cv_item, valid_item):
+                    it.setForeground(muted_brush)
+                    f = it.font()
+                    f.setItalic(True)
+                    it.setFont(f)
+                reason = r.get("invalid_reason")
+                if reason:
+                    tip = f"Invalid: {reason}"
+                    for it in (run_item, pw_item, p_item, mean_item, cv_item, valid_item):
+                        it.setToolTip(tip)
+
+            # No extra styling for valid rows (keeps your dark theme + alternating row colors)
+
+            self.summary_table.setItem(i, 0, run_item)
+            self.summary_table.setItem(i, 1, pw_item)
+            self.summary_table.setItem(i, 2, p_item)
+            self.summary_table.setItem(i, 3, mean_item)
+            self.summary_table.setItem(i, 4, cv_item)
+            self.summary_table.setItem(i, 5, valid_item)
 
     def center_nozzle(self):
         self.controller.center_nozzle_in_camera(position='top')
