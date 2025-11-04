@@ -1106,15 +1106,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             mean_item = _mk(_fmt(r["mean_nL"], 3))
             cv_item   = _mk(_fmt(r["cv_pct"], 2))
 
-            # Keep raw numbers accessible even if display text is formatted
-            pw_item.setData(Qt.UserRole, r.get("pw_us"))
-            p_item.setData(Qt.UserRole, r.get("pressure_psi"))
-            valid_item.setData(Qt.UserRole, r.get("valid"))
-            # (optional) keep invalid reason for tooltips/confirm
-            run_item.setData(Qt.UserRole, r.get("run_no"))
-            mean_item.setData(Qt.UserRole, r.get("mean_nL"))
-            cv_item.setData(Qt.UserRole, r.get("cv_pct"))
-
             valid = r.get("valid")
             valid_text = "✓" if valid is True else ("✗" if valid is False else "")
             valid_item = _mk(valid_text)
@@ -1133,6 +1124,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     for it in (run_item, pw_item, p_item, mean_item, cv_item, valid_item):
                         it.setToolTip(tip)
 
+            # Keep raw numbers accessible even if display text is formatted
+            pw_item.setData(Qt.UserRole, r.get("pw_us"))
+            p_item.setData(Qt.UserRole, r.get("pressure_psi"))
+            valid_item.setData(Qt.UserRole, r.get("valid"))
+            # (optional) keep invalid reason for tooltips/confirm
+            run_item.setData(Qt.UserRole, r.get("run_no"))
+            mean_item.setData(Qt.UserRole, r.get("mean_nL"))
+            cv_item.setData(Qt.UserRole, r.get("cv_pct"))
+            
             # No extra styling for valid rows (keeps your dark theme + alternating row colors)
 
             self.summary_table.setItem(i, 0, run_item)

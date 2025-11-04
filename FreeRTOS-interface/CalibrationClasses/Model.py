@@ -183,6 +183,7 @@ class CalibrationManager(QObject):
             f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})",
             "dark_blue"
         )
+        self.characterizationSummaryUpdated.emit()
 
     def end_session(self):
         """Stamp end time for the current run."""
