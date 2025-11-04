@@ -572,9 +572,8 @@ class CalibrationManager(QObject):
     def start_manual_droplet_characterization(self, *, start_delay_us: int | None = None):
         self._try_start_process(DropletSearchCalibrationProcess, manual_start=True)
 
-    def start_pressure_sweep_characterization(self, *, p_step=0.2, sphere_delay_us=10000, replicates_per_pressure=20, order="desc"):
+    def start_pressure_sweep_characterization(self, *, sphere_delay_us=10000, replicates_per_pressure=20, order="desc"):
         self._try_start_process(PressureSweepCharacterizationProcess,
-            p_step=p_step,
             sphere_delay_us=sphere_delay_us,
             replicates_per_pressure=replicates_per_pressure,
             order=order
@@ -2107,7 +2106,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     # acceptable area band (target window)
     MIN_AREA = 3000
-    MAX_AREA = 6000
+    MAX_AREA = 7000
 
     # start-delay model vs pulse width (μs)
     START_DELAY_BASE_US = 5000
