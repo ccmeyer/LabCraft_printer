@@ -339,6 +339,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
         self.summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        
+        # Allow selecting entire rows (single selection)
+        self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
 
         self.summary_table.setMinimumHeight(180)
         self.summary_table.setMaximumHeight(300)
@@ -348,6 +352,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
         summary_v.addWidget(self.summary_table)
+
+        # Load Selected button
+        self.load_selected_button = QtWidgets.QPushButton("Load selected")
+        self.load_selected_button.setEnabled(False)
+        self.load_selected_button.setToolTip("Select a row above, then click to apply its PW & pressure.")
+        self.load_selected_button.clicked.connect(self.load_selected_summary_row)
+        summary_v.addWidget(self.load_selected_button)
+
         left_panel_v.addWidget(summary_group)
 
         left_panel_v.addStretch(1)
@@ -440,6 +452,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
+        self.summary_table.itemSelectionChanged.connect(self._update_load_button_state)
+        # Double-click on any cell loads that row immediately
+        self.summary_table.itemDoubleClicked.connect(self._handle_summary_double_click)
 
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
@@ -942,6 +957,118 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Auto-scroll to the newest row
         self.stage_table.scrollToBottom()
 
+    def _selected_summary_row(self):
+        """Return (row_index, dict_of_raw_values) from the selected table row or (None, None)."""
+        sel = self.summary_table.selectionModel().selectedRows()
+        if not sel:
+            return None, None
+        row = sel[0].row()
+
+        def _raw(col):
+            it = self.summary_table.item(row, col)
+            return None if it is None else it.data(Qt.UserRole)
+
+        # Columns: 0=Run #, 1=PW, 2=Pressure, 3=Mean, 4=CV, 5=Valid
+        raw = {
+            "run_no":       _raw(0),
+            "pw_us":        _raw(1),
+            "pressure_psi": _raw(2),
+            "mean_nL":      _raw(3),
+            "cv_pct":       _raw(4),
+            "valid":        _raw(5),
+            # optional: also keep display text for messages
+            "_row": row,
+        }
+        return row, raw
+
+    def _update_load_button_state(self):
+        """Enable the Load button only when we have a usable selection."""
+        _, raw = self._selected_summary_row()
+        ok = bool(raw and raw.get("pw_us") is not None and raw.get("pressure_psi") is not None)
+        self.load_selected_button.setEnabled(ok)
+
+    def _handle_summary_double_click(self, _item):
+        """Double-click loads immediately (same as pressing the button)."""
+        self.load_selected_summary_row()
+
+    def load_selected_summary_row(self):
+        """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
+        _, raw = self._selected_summary_row()
+        if not raw:
+            return
+
+        pw = raw.get("pw_us")
+        pres = raw.get("pressure_psi")
+        valid = raw.get("valid")
+        run_no = raw.get("run_no")
+
+        if pw is None or pres is None:
+            QtWidgets.QMessageBox.information(self, "Nothing to load", "Selected row is missing PW or Pressure.")
+            return
+
+        # Clamp pressure to hardware bounds
+        try:
+            pres = float(pres)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Invalid pressure", "Could not parse pressure value.")
+            return
+        pres = min(max(pres, self.hw_lo), self.hw_hi)
+
+        try:
+            pw = int(round(float(pw)))
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Invalid pulse width", "Could not parse pulse width value.")
+            return
+
+        # Optional confirm if the row was flagged invalid
+        if valid is False:
+            reason = "This condition was flagged invalid."
+            QtWidgets.QMessageBox.information(self, "Loading flagged condition", reason)
+
+        # Prefer the same atomic path your calibration uses:
+        # ask the CalibrationManager to apply *both* settings in one go and wait for ack.
+        mgr = self.model.calibration_manager
+        self.stageLabel.setText(f"Status: Applying PW {pw} µs, Pressure {pres:.3f} psi (Run {run_no or '—'})…")
+
+        def _after_apply(*_):
+            # Reflect values into UI spinboxes without re-triggering handlers
+            self.print_pulse_width_spinbox.blockSignals(True)
+            self.print_pulse_width_spinbox.setValue(pw)
+            self.print_pulse_width_spinbox.blockSignals(False)
+
+            # We don't have a dedicated "live print pressure" spinbox in this panel;
+            # if you add one later, mirror pres into it here.
+            self.update_stage_and_log(f"Loaded PW {pw} µs & {pres:.3f} psi from Run {run_no or '—'}", "blue")
+
+        try:
+            # Use the existing manager→controller pathway for consistency/ack
+            mgr.changeSettingsRequested.emit({"print_pulse_width": pw, "print_pressure": pres}, _after_apply)
+        except Exception:
+            # Fallback: call controller methods if direct setters exist
+            applied_ok = False
+            try:
+                if hasattr(self.controller, "set_print_pulse_width"):
+                    self.controller.set_print_pulse_width(pw, manual=True)
+                    applied_ok = True
+            except Exception:
+                pass
+            try:
+                # If your controller exposes set_print_pressure(value, manual=...), use it.
+                if hasattr(self.controller, "set_print_pressure"):
+                    self.controller.set_print_pressure(pres, manual=True)
+                    applied_ok = True
+            except Exception:
+                pass
+
+            if applied_ok:
+                _after_apply()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Apply failed",
+                    "Could not apply settings via manager or controller."
+                )
+
     def populate_summary_table(self):
         mgr = self.model.calibration_manager
         rows = mgr.get_pressure_sweep_summary_rows()
@@ -978,6 +1105,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             p_item    = _mk(_fmt(r["pressure_psi"], 3))
             mean_item = _mk(_fmt(r["mean_nL"], 3))
             cv_item   = _mk(_fmt(r["cv_pct"], 2))
+
+            # Keep raw numbers accessible even if display text is formatted
+            pw_item.setData(Qt.UserRole, r.get("pw_us"))
+            p_item.setData(Qt.UserRole, r.get("pressure_psi"))
+            valid_item.setData(Qt.UserRole, r.get("valid"))
+            # (optional) keep invalid reason for tooltips/confirm
+            run_item.setData(Qt.UserRole, r.get("run_no"))
+            mean_item.setData(Qt.UserRole, r.get("mean_nL"))
+            cv_item.setData(Qt.UserRole, r.get("cv_pct"))
 
             valid = r.get("valid")
             valid_text = "✓" if valid is True else ("✗" if valid is False else "")

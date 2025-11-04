@@ -4817,12 +4817,6 @@ class ExperimentModel(QObject):
     def get_reactions_dataframe(self) -> pd.DataFrame:
         return self._reactions_df.copy()
     
-    # def get_number_of_reactions(self) -> int:
-    #     """Total reactions including replicates."""
-    #     reps = int(self.metadata.get("replicates", 1))
-    #     base = len(self._reactions_df) if not self._reactions_df.empty else len(self._enumerate_reactions())
-    #     return reps * base
-
     def get_random_seed(self):
         return self.metadata.get("random_seed", None)
 
