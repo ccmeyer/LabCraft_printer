@@ -3761,7 +3761,8 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "use_subset_design": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
-            "target_reaction_volume_nL": 500.0,
+            "target_reaction_volume_nL": 500.0, # PRINTED volume budget
+            "final_reaction_volume_nL": 500.0, # includes non-printed (fill) volume
             "fill_reagent_name": "Water",
             "fill_droplet_volume_nL": 10.0,
             "randomize_assignments": False,
@@ -3877,6 +3878,7 @@ class ExperimentModel(QObject):
         units: str,
         *,
         final_volume_nL: float,
+        volume_budget_nL: float,
         quantum: float = 0.1,
         max_refine: int = 30,
         kmax_multiples: int = 12,
@@ -3898,7 +3900,7 @@ class ExperimentModel(QObject):
         base = _base_step_for_targets(xs, quantum)
 
         # Cap on drops if this reagent alone filled the volume.
-        max_drops_cap = max(1, int(math.floor(final_volume_nL / max(droplet_nL, 1e-9))))
+        max_drops_cap = max(1, int(math.floor(volume_budget_nL / max(droplet_nL, 1e-9))))
 
         # Build delta set on the quantum grid
         delta_set: Set[float] = set()
@@ -4019,7 +4021,14 @@ class ExperimentModel(QObject):
         two_max_refine: int = 30,
         allow_two: bool = True
     ) -> Dict:
-        V = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        # V_print = how much volume we are allowed to PRINT (old meaning of target)
+        V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        # V_final = the actual final well volume after prefill + printing
+        V_final = float(self.metadata.get("final_reaction_volume_nL", V_print))
+
+        # Safety: never allow printed budget to exceed final volume (quiet clamp)
+        if V_print > V_final:
+            V_print = V_final
 
         # Build candidate lists
         additives: List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]] = []
@@ -4030,11 +4039,12 @@ class ExperimentModel(QObject):
                 o = f.options[0]
                 singles = self._enumerate_single_stock_candidates(
                     o.targets, o.droplet_nL, o.units,
-                    final_volume_nL=V, quantum=quantum, max_refine=max_refine
+                    final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
                 )
                 twos = self._enumerate_two_stock_candidates(
                     o.targets, o.droplet_nL, o.units,
-                    final_volume_nL=V, quantum=quantum, max_refine=two_max_refine
+                    final_volume_nL=V_final, volume_budget_nL=V_print,
+                    quantum=quantum, max_refine=two_max_refine
                 ) if allow_two else []
                 if not singles and not twos:
                     return {"best": None, "reason": f"No feasible plan (single or two-stock) for additive '{f.name}'."}
@@ -4044,11 +4054,12 @@ class ExperimentModel(QObject):
                 for opt in f.options:
                     singles = self._enumerate_single_stock_candidates(
                         opt.targets, opt.droplet_nL, opt.units,
-                        final_volume_nL=V, quantum=quantum, max_refine=max_refine
+                        final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
                     )
                     twos = self._enumerate_two_stock_candidates(
                         opt.targets, opt.droplet_nL, opt.units,
-                        final_volume_nL=V, quantum=quantum, max_refine=two_max_refine
+                        final_volume_nL=V_final, volume_budget_nL=V_print,
+                        quantum=quantum, max_refine=two_max_refine
                     ) if allow_two else []
                     if not singles and not twos:
                         return {"best": None, "reason": f"No feasible plan (single or two-stock) for option '{f.name}/{opt.name}'."}
@@ -4228,7 +4239,7 @@ class ExperimentModel(QObject):
         # -----------------------------
         while True:
             worst = worst_case_nonfill_volume()
-            if worst <= V + 1e-6:
+            if worst <= V_print + 1e-6:
                 break
 
             best_ratio = 0.0
@@ -4274,10 +4285,10 @@ class ExperimentModel(QObject):
         # -----------------------------
         # Step 2: two-stock switches
         # -----------------------------
-        if worst_case_nonfill_volume() > V + 1e-6 and allow_two:
+        if worst_case_nonfill_volume() > V_print + 1e-6 and allow_two:
             while True:
                 worst = worst_case_nonfill_volume()
-                if worst <= V + 1e-6:
+                if worst <= V_print + 1e-6:
                     break
 
                 best_gain = 0.0
@@ -4351,7 +4362,7 @@ class ExperimentModel(QObject):
                     _, g, o, i2 = best_switch
                     ch_two_idx[(g, o)] = i2
 
-                if worst_case_nonfill_volume() <= V + 1e-6:
+                if worst_case_nonfill_volume() <= V_print + 1e-6:
                     break
 
         # -----------------------------
@@ -4387,7 +4398,7 @@ class ExperimentModel(QObject):
                 add_two_idx[name] = None
                 singles = [fake_single] + singles
                 add_idx[name] = 0
-                if current_worst() > V + 1e-6:
+                if current_worst() > V_print + 1e-6:
                     add_two_idx[name] = saved_two
                 else:
                     additives[idx] = (name, singles, twos)
@@ -4398,7 +4409,7 @@ class ExperimentModel(QObject):
             for i, p1 in enumerate(singles):
                 add_two_idx[name] = None
                 add_idx[name] = i
-                if current_worst() <= V + 1e-6:
+                if current_worst() <= V_print + 1e-6:
                     best_i = i
                     break
             if best_i is None:
@@ -4430,7 +4441,7 @@ class ExperimentModel(QObject):
                     ch_two_idx[key] = None
                     singles = [fake_single] + singles
                     ch_idx[key] = 0
-                    if current_worst() > V + 1e-6:
+                    if current_worst() > V_print + 1e-6:
                         ch_two_idx[key] = saved_two
 
                 if ch_two_idx[key] is not None:
@@ -4439,7 +4450,7 @@ class ExperimentModel(QObject):
                     for i, p1 in enumerate(singles):
                         ch_two_idx[key] = None
                         ch_idx[key] = i
-                        if current_worst() <= V + 1e-6:
+                        if current_worst() <= V_print + 1e-6:
                             best_i = i
                             break
                     if best_i is None:
@@ -4448,7 +4459,7 @@ class ExperimentModel(QObject):
             choice_groups[gname] = new_bucket
 
         # Single-stock cool-down (unchanged)
-        if worst_case_nonfill_volume() <= V + 1e-6:
+        if worst_case_nonfill_volume() <= V_print + 1e-6:
             changed = True
             while changed:
                 changed = False
@@ -4459,7 +4470,7 @@ class ExperimentModel(QObject):
                     while i > 0:
                         prev_i = i - 1
                         add_idx[name] = prev_i
-                        if worst_case_nonfill_volume() <= V + 1e-6:
+                        if worst_case_nonfill_volume() <= V_print + 1e-6:
                             changed = True
                             i = prev_i
                         else:
@@ -4474,7 +4485,7 @@ class ExperimentModel(QObject):
                         while i > 0:
                             prev_i = i - 1
                             ch_idx[key] = prev_i
-                            if worst_case_nonfill_volume() <= V + 1e-6:
+                            if worst_case_nonfill_volume() <= V_print + 1e-6:
                                 changed = True
                                 i = prev_i
                             else:
@@ -5252,6 +5263,7 @@ class ExperimentModel(QObject):
             "target_reaction_volume_nL": 500.0,
             "fill_reagent_name": "Water",
             "fill_droplet_volume_nL": 10.0,
+            "final_reaction_volume_nL": 500.0,
             "random_seed": None,
             "start_row": 0,
             "start_col": 0,

@@ -368,7 +368,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         left_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         # Use size hint to set a fixed width after contents are laid out
         left_panel.adjustSize()
-        left_panel.setFixedWidth(max(380, left_panel.sizeHint().width()))
+        left_panel.setFixedWidth(max(500, left_panel.sizeHint().width()))
 
         # Add left panel to main layout
         self.layout.addWidget(left_panel, 0)
@@ -1201,8 +1201,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.stop_read_camera()
         self.controller.disable_print_profile()
         event.accept()
-
-
 
 class RefuelCameraWindow(QtWidgets.QDialog):
     def __init__(self,main_window,model,controller):

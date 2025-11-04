@@ -3163,6 +3163,17 @@ class ExperimentDesignDialog(QDialog):
         self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 500.0)))
         self.v_spin.setSingleStep(50.0)
         form.addRow(QLabel("Target Reaction Volume (nL)"), self.v_spin)
+        
+        self.final_v_spin = QDoubleSpinBox()
+        self.final_v_spin.setDecimals(1)
+        self.final_v_spin.setRange(1.0, 1_000_000.0)
+        # default to metadata value or fall back to target if absent
+        self.final_v_spin.setValue(float(self.model.metadata.get(
+            "final_reaction_volume_nL",
+            self.model.metadata.get("target_reaction_volume_nL", 500.0)
+        )))
+        self.final_v_spin.setSingleStep(50.0)
+        form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
 
         # Fill reagent name
         self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
@@ -3271,6 +3282,7 @@ class ExperimentDesignDialog(QDialog):
         self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
         self.rep_spin.valueChanged.connect(self._schedule_auto_update)
         self.v_spin.valueChanged.connect(self._schedule_auto_update)
+        self.final_v_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
         self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
 
@@ -3511,8 +3523,7 @@ class ExperimentDesignDialog(QDialog):
             target_reaction_volume_nL=float(self.v_spin.value()),
             fill_reagent_name=self.fill_name_edit.text().strip() or "Water",
             fill_droplet_volume_nL=float(self.fill_dv_spin.value()),
-
-            # NEW:
+            final_reaction_volume_nL=float(self.final_v_spin.value()),
             randomize_assignments=randomize,
             random_seed=(seed if randomize else None),
             use_subset_design=bool(self.subset_chk.isChecked()),
@@ -3600,6 +3611,7 @@ class ExperimentDesignDialog(QDialog):
 
         # Block signals while restoring to avoid re-entrancy/races
         blk(self.exp_name_edit); blk(self.rep_spin); blk(self.v_spin)
+        blk(self.final_v_spin)
         blk(self.fill_name_edit); blk(self.fill_dv_spin)
         blk(self.randomize_chk); blk(self.random_seed_spin)
         blk(self.subset_chk); blk(self.reduction_spin)
@@ -3610,6 +3622,10 @@ class ExperimentDesignDialog(QDialog):
         self.v_spin.setValue(float(md.get("target_reaction_volume_nL", 500.0)))
         self.fill_name_edit.setText(md.get("fill_reagent_name", "Water"))
         self.fill_dv_spin.setValue(float(md.get("fill_droplet_volume_nL", 10.0)))
+        self.final_v_spin.setValue(float(md.get(
+            "final_reaction_volume_nL",
+            md.get("target_reaction_volume_nL", 500.0)
+        )))
 
         if hasattr(self, "randomize_chk"):
             self.randomize_chk.setChecked(bool(md.get("randomize_assignments", False)))
