@@ -225,6 +225,30 @@ class CalibrationManager(QObject):
         with open(file_path, 'r') as file:
             self.data = json.load(file)
 
+    def ensure_loaded(self):
+        """
+        Lazily load calibration data from the configured path so callers like
+        get_pressure_sweep_summary_rows() can work on first open.
+        """
+        if self.calibration_file_path is None:
+            try:
+                path = self.model.experiment_model.get_calibration_file_path()
+            except Exception:
+                path = None
+            # Default sensibly if model didn't provide a path
+            if not path:
+                path = os.path.abspath("calibration.json")
+            self.calibration_file_path = path
+
+        # If file exists, load it into self.data once
+        if os.path.exists(self.calibration_file_path) and not (self.data.get("runs")):
+            try:
+                with open(self.calibration_file_path, "r") as f:
+                    self.data = json.load(f)
+            except Exception:
+                # keep empty structure on failure
+                self.data = {"schema_version": 1, "runs": []}
+
     def remove_all_calibrations(self):
         self.data = {"schema_version": 1, "runs": []}
         self._save_atomic()
@@ -953,10 +977,25 @@ class CalibrationManager(QObject):
         self.readinessChanged.emit(readiness)
 
     def get_pressure_sweep_summary_rows(self):
-        cur_stock = self._safe_get_stock_solution()
+        # Ensure self.data is populated from disk on first use
+        self.ensure_loaded()
+
         runs = self.data.get("runs") or []
-        if cur_stock is None or not runs:
+        if not runs:
             return []
+
+        # Prefer currently loaded stock from the head; fall back to last-run stock if unknown at open.
+        cur_stock = self._safe_get_stock_solution()
+        if cur_stock is None:
+            # Choose the most recent run's stock_solution (last in list)
+            for run in reversed(runs):
+                s = run.get("stock_solution")
+                if s:
+                    cur_stock = s
+                    break
+
+        if cur_stock is None:
+            return []  # still nothing known to filter by
 
         matching = [(idx, run) for idx, run in enumerate(runs) if run.get("stock_solution") == cur_stock]
         if not matching:
@@ -976,7 +1015,7 @@ class CalibrationManager(QObject):
                 for p in pressures:
                     rows.append({
                         "run_no": run_no,
-                        "pw_us": p.get("delay_us") and pw or pw,  # keep pw; (line left simple—pw from settings)
+                        "pw_us": pw,  # <-- fix: always use PW from settings
                         "pressure_psi": p.get("pressure"),
                         "mean_nL": p.get("mean_volume"),
                         "cv_pct": p.get("cv_volume_percent"),
