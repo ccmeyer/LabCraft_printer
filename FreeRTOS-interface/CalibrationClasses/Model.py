@@ -2146,7 +2146,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     # acceptable area band (target window)
     MIN_AREA = 3000
-    MAX_AREA = 7000
+    MAX_AREA = 8000
 
     # start-delay model vs pulse width (μs)
     START_DELAY_BASE_US = 5000
@@ -2307,18 +2307,18 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.measurements.append((self.candidate_delay, agg_area))
 
         # Enforce monotonic trend: as we DECREASE delay, area should not INCREASE
-        if self._prev_area is not None and agg_area > (1.0 + self.MONO_TOL_FRAC) * self._prev_area:
-            self.stageChanged.emit(
-                f"Non-monotonic increase detected (prev={self._prev_area}, now={agg_area}). Treating as noise."
-            )
-            # Push further down to bypass spurious edge/glare
-            next_delay = self.candidate_delay - self.FINE_STEP
-            self._set_next_delay(next_delay)
-            if self._eval_count >= self.MAX_EVALS:
-                self.calibrationError.emit("Emergence search did not converge (max evaluations)")
-                return
-            self.continueSearch.emit()
-            return
+        # if self._prev_area is not None and agg_area > (1.0 + self.MONO_TOL_FRAC) * self._prev_area:
+        #     self.stageChanged.emit(
+        #         f"Non-monotonic increase detected (prev={self._prev_area}, now={agg_area}). Treating as noise."
+        #     )
+        #     # Push further down to bypass spurious edge/glare
+        #     next_delay = self.candidate_delay - self.FINE_STEP
+        #     self._set_next_delay(next_delay)
+        #     if self._eval_count >= self.MAX_EVALS:
+        #         self.calibrationError.emit("Emergence search did not converge (max evaluations)")
+        #         return
+        #     self.continueSearch.emit()
+        #     return
 
         # Phase logic
         if self._phase == "seek_visible":
@@ -5373,8 +5373,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             missing.append("Background image")
         if cm.get_emergence_time() is None:
             missing.append("Emergence time")
-        if cm.get_trajectory_vector() is None:
-            missing.append("Trajectory vector")
         return missing
 
     # ----- utils -----
@@ -5735,6 +5733,28 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         cv2.putText(img, f"Mean vol: {mean_vol:.2f}", (10, 32), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
         cv2.putText(img, f"CV vol: {cv_vol:.2f}%", (10, 64), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
         return img
+
+    def _update_xz_track_offset(self):
+        """
+        Update persistent X/Z bias (steps) so future predicted targets include this correction.
+        Uses EMA toward the difference between 'predicted' and 'actual centered' pose.
+        """
+        try:
+            # prefer the searched-and-found delay for accuracy
+            used_delay = int(self.current_delay_us) if self.current_delay_us is not None else int(self.target_delay_us)
+            predX, predY, predZ = self._predict_target_xyz(self.vec_steps_per_s, used_delay)
+            cur = self.model.machine_model.get_current_position_dict()
+            ex = int(cur['X']) - int(predX)
+            ez = int(cur['Z']) - int(predZ)
+            a  = float(self._xz_offset_ema_alpha)
+            self._x_track_offset_steps = int(round((1.0 - a) * self._x_track_offset_steps + a * ex))
+            self._z_track_offset_steps = int(round((1.0 - a) * self._z_track_offset_steps + a * ez))
+            self.stageChanged.emit(
+                f"Trajectory bias update → X:{self._x_track_offset_steps} Z:{self._z_track_offset_steps} (EMA)"
+            )
+        except Exception as e:
+            self.stageChanged.emit(f"Could not update X/Z bias: {e}")
+    
 
     # emitters
     def emitContinueSearch(self): self.continueSearch.emit()
