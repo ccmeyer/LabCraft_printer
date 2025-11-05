@@ -3747,6 +3747,7 @@ class ExperimentModel(QObject):
     # Signals to mirror the classic API
     stock_updated = Signal()
     experiment_generated = Signal(int, float)  # (n_reactions, worst_nonfill_volume_nL)
+    targets_unreachable = Signal(object)  # list[dict]
 
     def __init__(self):
         super().__init__()
@@ -4502,8 +4503,22 @@ class ExperimentModel(QObject):
                 self.plans_per_option[(name, None)] = {
                     "n_stocks": 2,
                     "stocks": [
-                        {"delta_per_drop": p2.deltas[0], "stock_concentration": p2.stock_concs[0], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()}},
-                        {"delta_per_drop": p2.deltas[1], "stock_concentration": p2.stock_concs[1], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()}},
+                        {
+                            "delta_per_drop": p2.deltas[0],
+                            "stock_concentration": p2.stock_concs[0],
+                            "droplet_volume_nL": p2.droplet_nL,
+                            "units": p2.units,
+                            "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()},
+                            "quantum": quantum
+                         },
+                        {
+                            "delta_per_drop": p2.deltas[1],
+                            "stock_concentration": p2.stock_concs[1],
+                            "droplet_volume_nL": p2.droplet_nL,
+                            "units": p2.units,
+                            "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()},
+                            "quantum": quantum
+                        },
                     ]
                 }
                 stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
@@ -4513,7 +4528,14 @@ class ExperimentModel(QObject):
                 self.plans_per_option[(name, None)] = {
                     "n_stocks": 1,
                     "stocks": [
-                        {"delta_per_drop": p1.delta_per_drop, "stock_concentration": p1.stock_concentration, "droplet_volume_nL": p1.droplet_nL, "units": p1.units, "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()}}
+                        {
+                            "delta_per_drop": p1.delta_per_drop, 
+                            "stock_concentration": p1.stock_concentration,
+                            "droplet_volume_nL": p1.droplet_nL,
+                            "units": p1.units,
+                            "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
+                            "quantum": quantum,
+                        }
                     ]
                 }
                 stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
@@ -4526,8 +4548,22 @@ class ExperimentModel(QObject):
                     self.plans_per_option[key] = {
                         "n_stocks": 2,
                         "stocks": [
-                            {"delta_per_drop": p2.deltas[0], "stock_concentration": p2.stock_concs[0], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()}},
-                            {"delta_per_drop": p2.deltas[1], "stock_concentration": p2.stock_concs[1], "droplet_volume_nL": p2.droplet_nL, "units": p2.units, "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()}},
+                            {
+                                "delta_per_drop": p2.deltas[0],
+                                "stock_concentration": p2.stock_concs[0],
+                                "droplet_volume_nL": p2.droplet_nL,
+                                "units": p2.units,
+                                "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()},
+                                "quantum": quantum
+                            },
+                            {
+                                "delta_per_drop": p2.deltas[1],
+                                "stock_concentration": p2.stock_concs[1],
+                                "droplet_volume_nL": p2.droplet_nL,
+                                "units": p2.units,
+                                "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()},
+                                "quantum": quantum
+                            },
                         ]
                     }
                     stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
@@ -4537,7 +4573,14 @@ class ExperimentModel(QObject):
                     self.plans_per_option[key] = {
                         "n_stocks": 1,
                         "stocks": [
-                            {"delta_per_drop": p1.delta_per_drop, "stock_concentration": p1.stock_concentration, "droplet_volume_nL": p1.droplet_nL, "units": p1.units, "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()}}
+                            {
+                                "delta_per_drop": p1.delta_per_drop,
+                                "stock_concentration": p1.stock_concentration,
+                                "droplet_volume_nL": p1.droplet_nL,
+                                "units": p1.units,
+                                "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
+                                "quantum": quantum
+                            },
                         ]
                     }
                     stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
@@ -4686,6 +4729,48 @@ class ExperimentModel(QObject):
 
         return reactions
 
+    def _resolve_drops_for_target(self, st: dict, target: float):
+        """
+        Robustly resolve droplet count for 'target' using the per-stock mapping.
+        Returns (drops: int, matched_key: float|None, unreachable: bool, nearest_key: float|None).
+        """
+        dp = st.get("droplets_per_target", {}) or {}
+        if not dp:
+            return 0, None, (abs(target) > 1e-12), None
+
+        t_raw = float(target)
+        # Exact fast path
+        if t_raw in dp:
+            return int(dp[t_raw]), t_raw, False, t_raw
+
+        q = float(st.get("quantum", 0.1))
+        # Snap to same grid used during optimization
+        t_q = round(t_raw / q) * q
+        # Normalize to avoid repr noise
+        t_q = float(f"{t_q:.12g}")
+
+        # Try direct with snapped value
+        if t_q in dp:
+            return int(dp[t_q]), t_q, False, t_q
+
+        # Near-match within half-quantum (and small epsilon)
+        half = q * 0.5 + 1e-12
+        for k in dp.keys():
+            if abs(k - t_raw) <= half or abs(k - t_q) <= 1e-12:
+                return int(dp[k]), k, False, k
+
+        # As a last resort, nearest key within tiny epsilon (float dust)
+        nearest_key = min(dp.keys(), key=lambda k: abs(k - t_raw))
+        if abs(nearest_key - t_raw) <= 1e-6:
+            return int(dp[nearest_key]), nearest_key, False, nearest_key
+
+        # Zero target is always "reachable" as 0 drops even if not stored explicitly
+        if abs(t_raw) <= 1e-12:
+            return 0, 0.0, False, 0.0
+
+        # True unreachable for this stock's mapping
+        return 0, None, True, nearest_key
+
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
         and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
@@ -4701,6 +4786,7 @@ class ExperimentModel(QObject):
             return
 
         rows = []
+        issues = []
         worst_nonfill = 0.0
 
         # Per-stock totals and per-reaction maxima
@@ -4724,16 +4810,27 @@ class ExperimentModel(QObject):
                 n_stocks = plan["n_stocks"]
                 if n_stocks == 1:
                     st = plan["stocks"][0]
-                    k = int(st["droplets_per_target"].get(float(target), 0))
+                    # k = int(st["droplets_per_target"].get(float(target), 0))
+                    k, mk, unreachable, nearest = self._resolve_drops_for_target(st, float(target))
                     used_nL += k * st["droplet_volume_nL"]
                     tot_key = (key[0], key[1] or "", st["stock_concentration"])
                     stock_totals[tot_key] = stock_totals.get(tot_key, 0) + k
                     per_rxn_drops[tot_key] = per_rxn_drops.get(tot_key, 0) + k
                     stock_drop_vol_nL[tot_key] = float(st["droplet_volume_nL"])
+                    if unreachable:
+                        issues.append({
+                            "where": key,  # (factor, option or None)
+                            "target": float(target),
+                            "stock_concentration": float(st["stock_concentration"]),
+                            "units": st.get("units", ""),
+                            "suggested_nearest": float(nearest) if nearest is not None else None,
+                        })
                 else:
                     st1, st2 = plan["stocks"]
-                    k1 = int(st1["droplets_per_target"].get(float(target), 0))
-                    k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                    k1, mk1, un1, nearest1 = self._resolve_drops_for_target(st1, float(target))
+                    k2, mk2, un2, nearest2 = self._resolve_drops_for_target(st2, float(target))
+                    # k1 = int(st1["droplets_per_target"].get(float(target), 0))
+                    # k2 = int(st2["droplets_per_target"].get(float(target), 0))
                     used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
                     tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
                     tot_key2 = (key[0], key[1] or "", st2["stock_concentration"])
@@ -4743,6 +4840,15 @@ class ExperimentModel(QObject):
                     per_rxn_drops[tot_key2] = per_rxn_drops.get(tot_key2, 0) + k2
                     stock_drop_vol_nL[tot_key1] = float(st1["droplet_volume_nL"])
                     stock_drop_vol_nL[tot_key2] = float(st2["droplet_volume_nL"])
+                    if (un1 and abs(float(target)) > 1e-12) or (un2 and abs(float(target)) > 1e-12):
+                        issues.append({
+                            "where": key,
+                            "target": float(target),
+                            "stock_concentration": (float(st1["stock_concentration"]), float(st2["stock_concentration"])),
+                            "units": st1.get("units", ""),
+                            "suggested_nearest": (float(nearest1) if nearest1 is not None else None,
+                                                float(nearest2) if nearest2 is not None else None),
+                        })
 
             # update per-stock per-reaction maxima
             for k, drops in per_rxn_drops.items():
@@ -4811,7 +4917,9 @@ class ExperimentModel(QObject):
                 })
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
-
+        if issues:
+            # Fire a signal so the UI can pop a warning dialog/banner.
+            self.targets_unreachable.emit(issues)
         self.experiment_generated.emit(len(reactions) * reps, float(worst_nonfill))
 
     # ------------- Public getters for the UI -------------
@@ -4861,7 +4969,8 @@ class ExperimentModel(QObject):
                         continue
                     if plan["n_stocks"] == 1:
                         st = plan["stocks"][0]
-                        drops = int(st["droplets_per_target"].get(float(target), 0))
+                        # drops = int(st["droplets_per_target"].get(float(target), 0))
+                        drops, _, _, _ = self._resolve_drops_for_target(st, float(target))
                         if drops > 0:
                             items.append((
                                 _reagent_name_from_key(key),
@@ -4871,8 +4980,8 @@ class ExperimentModel(QObject):
                             ))
                     else:
                         st1, st2 = plan["stocks"]
-                        k1 = int(st1["droplets_per_target"].get(float(target), 0))
-                        k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                        k1, _, _, _ = self._resolve_drops_for_target(st1, float(target))
+                        k2, _, _, _ = self._resolve_drops_for_target(st2, float(target))
                         if k1 > 0:
                             items.append((
                                 _reagent_name_from_key(key),
