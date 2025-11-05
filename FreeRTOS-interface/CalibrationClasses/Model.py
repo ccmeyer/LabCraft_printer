@@ -851,7 +851,7 @@ class CalibrationManager(QObject):
         self._save_atomic()
 
         # Notify listeners to refresh the summary table when relevant
-        if phase_key == "pressure_sweep_characterization":
+        if phase_key in ("pressure_sweep_characterization", "droplet_search"):
             try:
                 self.characterizationSummaryUpdated.emit()
             except Exception:
@@ -984,18 +984,16 @@ class CalibrationManager(QObject):
         if not runs:
             return []
 
-        # Prefer currently loaded stock from the head; fall back to last-run stock if unknown at open.
+        # Prefer current stock; fallback to most recent known stock
         cur_stock = self._safe_get_stock_solution()
         if cur_stock is None:
-            # Choose the most recent run's stock_solution (last in list)
             for run in reversed(runs):
                 s = run.get("stock_solution")
                 if s:
                     cur_stock = s
                     break
-
         if cur_stock is None:
-            return []  # still nothing known to filter by
+            return []
 
         matching = [(idx, run) for idx, run in enumerate(runs) if run.get("stock_solution") == cur_stock]
         if not matching:
@@ -1008,6 +1006,8 @@ class CalibrationManager(QObject):
         for _, run in matching:
             rid = run.get("run_id")
             run_no = id_to_run_no.get(rid)
+
+            # ---- (A) Full sweep steps: each step contains result["pressures"] list
             for step in run.get("steps", {}).get("pressure_sweep_characterization", []):
                 pw = (step.get("settings") or {}).get("print_width")
                 ts = step.get("timestamp")
@@ -1015,16 +1015,48 @@ class CalibrationManager(QObject):
                 for p in pressures:
                     rows.append({
                         "run_no": run_no,
-                        "pw_us": pw,  # <-- fix: always use PW from settings
+                        "pw_us": pw,
                         "pressure_psi": p.get("pressure"),
                         "mean_nL": p.get("mean_volume"),
                         "cv_pct": p.get("cv_volume_percent"),
                         "valid": p.get("valid"),
                         "invalid_reason": p.get("invalid_reason"),
                         "timestamp": ts,
+                        "phase": "sweep",
                     })
 
-        # Multi-key sort: PW → Pressure → Run # (None values go last)
+            # ---- (B) Droplet-search steps: single pressure at current PW/pressure
+            for step in run.get("steps", {}).get("droplet_search", []):
+                ts = step.get("timestamp")
+                res = (step.get("result") or {})
+                settings = (step.get("settings") or {})
+
+                # Prefer settings snapshot; fallback to fields we added in (2)
+                pw = settings.get("print_width")
+                pr = settings.get("print_pressure")
+                if pw is None:
+                    pw = res.get("print_pulse_width_us")
+                if pr is None:
+                    pr = res.get("pressure")
+
+                mean_nL = res.get("mean_volume")
+                cv_pct  = res.get("cv_volume_percent")
+
+                # Only add a row if we have something meaningful
+                if (pw is not None) and (pr is not None) and (mean_nL is not None):
+                    rows.append({
+                        "run_no": run_no,
+                        "pw_us": pw,
+                        "pressure_psi": pr,
+                        "mean_nL": mean_nL,
+                        "cv_pct": cv_pct,
+                        "valid": bool(res.get("valid", True)),
+                        "invalid_reason": None if res.get("valid", True) else "invalid",
+                        "timestamp": ts,
+                        "phase": "search",
+                    })
+
+        # Sort: PW → Pressure → Run # → Timestamp
         def _last_if_none(val, fill):
             return (val is None, fill if val is None else val)
 
@@ -1035,7 +1067,7 @@ class CalibrationManager(QObject):
             r["timestamp"] or ""
         ))
         return rows
-
+    
 class BaseCalibrationProcess(QObject):
     # Signal to update the current stage text.
     stageChanged = Signal(str)
@@ -5686,7 +5718,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             return self._abort("Droplets not circular enough — consider a later delay.")
 
         mean_vol = float(np.mean(self.droplet_volumes))
-        cv_vol = float(np.std(self.droplet_volumes) / (mean_vol + 1e-9) * 100.0)
+        cv_vol   = float(np.std(self.droplet_volumes) / (mean_vol + 1e-9) * 100.0)
         mean_center = tuple(np.mean(np.array(self.droplet_positions), axis=0).astype(int))
         final_img = self._annotate_final(mean_center, mean_vol, cv_vol)
         self.presentImageSignal.emit(final_img)
@@ -5696,17 +5728,29 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             mean_center, machine_position
         )
 
+        # NEW: include current pressure & pulse width for easy summarization
+        cur_pressure = float(self.model.machine_model.get_current_print_pressure())
+        cur_pw_us    = int(self.model.machine_model.get_print_pulse_width() or 0)
+
         results = {
+            # harmonize with sweep fields
+            "pressure": cur_pressure,                       # convenience field
             "delay_us": int(self.current_delay_us),
-            "positions_px": self.droplet_positions,
-            "droplet_positions": self.droplet_positions,
-            "droplet_volumes": [float(v) for v in self.droplet_volumes],
-            "circularity_values": [float(c) for c in self.circularity_values],
-            "droplet_focus": [float(f) for f in self.droplet_focus],
             "mean_center_px": mean_center,
             "mean_volume": mean_vol,
             "cv_volume_percent": cv_vol,
             "mean_position_machine": drop_machine,
+            "valid": True,
+
+            # keep detailed arrays as before
+            "droplet_positions": self.droplet_positions,
+            "positions_px": self.droplet_positions,         # alias retained
+            "droplet_volumes": [float(v) for v in self.droplet_volumes],
+            "circularity_values": [float(c) for c in self.circularity_values],
+            "droplet_focus": [float(f) for f in self.droplet_focus],
+
+            # pulse width convenience for downstream use
+            "print_pulse_width_us": cur_pw_us,
         }
 
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": results})
@@ -6773,19 +6817,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         else:
             # Back-compat: original behavior (single emit with all pressures)
-        result = {
-            "pressures": self.samples,
-            "order": "desc",
-            "sphere_delay_us": int(self.sphere_delay_us),
-            "nozzle_center_px": self.nozzle_center_px,
-            "nozzle_center_machine": self.nozzle_center_machine,
-            "emergence_time_us": int(self.emergence_time_us),
-        }
-        self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+            result = {
+                "pressures": self.samples,
+                "order": "desc",
+                "sphere_delay_us": int(self.sphere_delay_us),
+                "nozzle_center_px": self.nozzle_center_px,
+                "nozzle_center_machine": self.nozzle_center_machine,
+                "emergence_time_us": int(self.emergence_time_us),
+            }
+            self.calibrationDataUpdated.emit({"measurements": [], "result": result})
 
         self.stageChanged.emit("Pressure sweep characterization complete")
         self.calibrationCompleted.emit()
-
+        
 class DropletTimecourseProcess(BaseCalibrationProcess):
     """
     Capture a time course of the droplet generation process.
