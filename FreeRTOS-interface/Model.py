@@ -3790,6 +3790,7 @@ class ExperimentModel(QObject):
         self.experiment_file_path: Optional[str] = None
         self.progress_file_path: Optional[str] = None
         self.key_file_path: Optional[str] = None
+        self.concentration_key_file_path: Optional[str] = None
         self.calibration_file_path: Optional[str] = None
         self.progress_data: Dict[str, Dict] = {}
         self.unsaved_changes: bool = False
@@ -5092,7 +5093,7 @@ class ExperimentModel(QObject):
     # Path setup / initialization
     # -----------------------------
     def initialize_experiment(self, base_dir: Optional[str] = None):
-        """Create Experiments/<name> dir and seed all files."""
+        """Create Experiments/<name> dir and seed files. Only write key CSVs once wells are assigned."""
         import os
         script_dir = os.path.dirname(os.path.abspath(__file__))
         base_experiment_dir = base_dir or os.path.join(script_dir, "Experiments")
@@ -5105,17 +5106,22 @@ class ExperimentModel(QObject):
             os.makedirs(self.experiment_dir_path)
         self.update_all_paths()
 
-        # Ensure files exist
+        # Always save the design and seed a progress.json (may be empty now)
         self.save_experiment()
         self.create_progress_file()
-        self.create_key_file()
+
+        # Only write key CSVs if we already have assignments
+        if self._has_runtime_assignments():
+            self._ensure_design_ready()
+            self._ensure_progress_populated()
+            self.create_key_file()
+            self.create_concentration_key_file()
 
         # optional calibration file
         if self.calibration_file_path and not os.path.exists(self.calibration_file_path):
             with open(self.calibration_file_path, "w") as f:
                 f.write("{}")
         if self._calibration_manager is not None:
-            # let your calibration manager open/update its session
             if hasattr(self._calibration_manager, "begin_session"):
                 self._calibration_manager.begin_session(self.calibration_file_path)
 
@@ -5128,6 +5134,7 @@ class ExperimentModel(QObject):
         self.progress_file_path     = os.path.join(self.experiment_dir_path, "progress.json")
         self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
         self.key_file_path          = os.path.join(self.experiment_dir_path, "key.csv")
+        self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
             self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
 
@@ -5276,8 +5283,154 @@ class ExperimentModel(QObject):
     def create_key_file(self, file_name: Optional[str] = None):
         if file_name is not None:
             self.key_file_path = file_name
+        # Make sure we have plans, reactions, and progress
+        self._ensure_design_ready()
+        self._ensure_progress_populated()
         df = self.progress_to_key()
+        if df.empty:
+            # Nothing assigned yet; don't write a misleading header-only CSV
+            return
         df.to_csv(self.key_file_path, index_label="Well ID")
+
+    def progress_to_concentration_key(self) -> "pd.DataFrame":
+        """
+        Make a wide CSV with wells as rows and columns "<reagent_name>_<units>",
+        containing the *final concentrations* in each well.
+
+        For each reagent stock used in a well:
+            contribution = stock_concentration * (drops * droplet_nL) / final_volume_nL
+        Units match the stock's units (e.g., mM).
+        """
+        # Final well volume (NOT just printed)
+        V_final_nL = float(self.metadata.get(
+            "final_reaction_volume_nL",
+            self.metadata.get("target_reaction_volume_nL", 500.0)
+        ))
+
+        # Build a lookup from the stock table (includes all optimized stocks)
+        stock_rows = self.get_stock_table_rows(include_fill=True)
+
+        def _base_sid(row: dict) -> str:
+            # Must exactly match the ID format used in progress.json
+            name  = row.get("option_name") or row.get("factor_name") or ""
+            units = row.get("units", "")
+            conc  = row.get("stock_concentration", 0.0)
+            try:
+                conc2 = f"{float(conc):.2f}"
+            except Exception:
+                conc2 = str(conc)
+            return f"{name}_{conc2}_{units}"
+
+        # base_sid -> metadata for concentration math
+        stock_info = {}
+        for r in stock_rows:
+            sid = _base_sid(r)
+            stock_info[sid] = {
+                "reagent_name": (r.get("option_name") or r.get("factor_name") or ""),
+                "units": r.get("units", ""),
+                "stock_conc": float(r.get("stock_concentration", 0.0)),  # in reagent units
+                "dv_nL": float(r.get("droplet_volume_nL", 0.0)),
+            }
+
+        data = {}
+        for well_id, entry in (self.progress_data or {}).items():
+            reagents = entry.get("reagents", {})
+            row = {}
+            for base_sid, details in reagents.items():
+                drops = int(details.get("target_droplets", 0))
+                info = stock_info.get(base_sid)
+                if not info or drops <= 0:
+                    continue
+
+                c_stock = info["stock_conc"]     # e.g., mM
+                dv = info["dv_nL"]
+                if dv <= 0.0 or V_final_nL <= 0.0:
+                    continue
+
+                # Contribution to final concentration for this stock
+                contrib = c_stock * (drops * dv) / V_final_nL
+
+                # Column name: "<reagent_name>_<units>"
+                col = f'{info["reagent_name"]}_{info["units"]}'.strip("_")
+                row[col] = row.get(col, 0.0) + contrib
+
+            data[well_id] = row
+
+        df = pd.DataFrame.from_dict(data, orient="index")
+
+        # Stable column ordering by reagent name then units
+        def _split_col(c: str):
+            parts = str(c).rsplit("_", 1)
+            name = parts[0] if parts else c
+            units = parts[1] if len(parts) > 1 else ""
+            return (name.lower(), units.lower())
+
+        if not df.empty:
+            df = df.reindex(sorted(df.columns, key=_split_col), axis=1)
+
+        return df
+    
+    def create_concentration_key_file(self, file_name: Optional[str] = None, decimals: int = 4):
+        if file_name is not None:
+            self.concentration_key_file_path = file_name
+        # Make sure we have plans, reactions, and progress
+        self._ensure_design_ready()
+        self._ensure_progress_populated()
+        df = self.progress_to_concentration_key()
+        if df.empty:
+            # Nothing assigned yet; don't write a misleading header-only CSV
+            return
+        if decimals is not None and isinstance(decimals, int):
+            df = df.round(decimals)
+        df.to_csv(self.concentration_key_file_path, index_label="Well ID")
+    
+    def write_keys_now(self):
+        """
+        Public convenience: rebuild progress from current assignments, then write both CSVs.
+        """
+        self._ensure_design_ready()
+        self._ensure_progress_populated()
+        # If still nothing, silently do nothing
+        if not self.progress_data:
+            return
+        self.create_key_file()
+        self.create_concentration_key_file()
+    
+    def _has_runtime_assignments(self) -> bool:
+        """Return True iff we have a well_plate and at least one well has a reaction."""
+        wp = self._runtime_well_plate
+        if wp is None:
+            return False
+        try:
+            for w in wp.get_all_wells():
+                if getattr(w, "get_assigned_reaction", None) and w.get_assigned_reaction() is not None:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _ensure_design_ready(self):
+        """
+        Make sure stock plans and reactions exist before writing key files.
+        Safe to call multiple times.
+        """
+        if not self.plans_per_option:
+            res = self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+            if not res.get("best"):
+                raise RuntimeError(f"Optimization failed: {res.get('reason', 'Unknown')}")
+        if self._reactions_df.empty:
+            self.generate_experiment()
+
+    def _ensure_progress_populated(self):
+        """
+        Ensure self.progress_data reflects current well assignments.
+        If assignments exist and progress is empty, rebuild it now.
+        """
+        if self.progress_data:
+            return
+        # if a progress.json already exists with {}, we still prefer to rebuild from runtime
+        if self._has_runtime_assignments():
+            self.create_progress_file()   # will repopulate from current assignments
 
     def read_progress_file(self, progress_file: str):
         import json
@@ -5346,6 +5499,7 @@ class ExperimentModel(QObject):
         self.save_experiment()
         self.create_progress_file()
         self.create_key_file()
+        self.create_concentration_key_file()
         # calibration handling
         if not copy_calibrations:
             with open(self.calibration_file_path, "w") as f:
@@ -5368,16 +5522,16 @@ class ExperimentModel(QObject):
         self.metadata = {
             "name": temp_name,
             "replicates": 1,
+            "use_subset_design": False,   # <-- keep key consistent
             "reduction_factor": 1,
             "target_reaction_volume_nL": 500.0,
+            "final_reaction_volume_nL": 500.0,
             "fill_reagent_name": "Water",
             "fill_droplet_volume_nL": 10.0,
-            "final_reaction_volume_nL": 500.0,
+            "randomize_assignments": False,
             "random_seed": None,
             "start_row": 0,
             "start_col": 0,
-            "use_subset": False,
-            "randomize_assignments": False,
         }
         self.plans_per_option.clear()
         self._stock_rows_cache.clear()
@@ -7629,6 +7783,7 @@ class Model(QObject):
             print("Creating new progress file from load experiment from model")
             self.experiment_model.create_progress_file()
         self.experiment_model.create_key_file()
+        self.experiment_model.create_concentration_key_file()
 
         self.experiment_loaded.emit()
 
