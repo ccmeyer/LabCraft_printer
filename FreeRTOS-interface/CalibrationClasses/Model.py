@@ -1226,6 +1226,175 @@ class BaseCalibrationProcess(QObject):
         finally:
             self._active_timers.discard(timer)
 
+class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
+    """
+    Purpose: give a newly loaded printer head a forceful first ejection so it begins behaving normally.
+    This process *does not* search or measure anything; it:
+      1) snapshots current settings
+      2) applies priming settings (pressure +1 psi, PW=3500 us, flash_delay=10000, 1 droplet)
+      3) captures & presents the image
+      4) restores the original settings
+    """
+    phase_name = "head_prime"
+
+    # ---------- minimal readiness check ----------
+    # @staticmethod
+    # def missing_requirements(calibration_manager) -> list[str]:
+    #     m = calibration_manager.model
+    #     missing = []
+    #     # Machine connected & can report pressure
+    #     try:
+    #         _ = m.machine_model.get_current_print_pressure()
+    #     except Exception:
+    #         missing.append("machine connection")
+    #     # Camera available
+    #     try:
+    #         _ = m.droplet_camera_model.get_image_size()
+    #     except Exception:
+    #         missing.append("droplet camera")
+    #     return missing
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+
+        # Snapshots
+        self._orig = None
+        self._priming = None
+        self.captured_image = None
+
+        # Safety bounds if machine_model doesn't expose them
+        self._min_print_pressure_fallback = 0.35
+        self._max_print_pressure_fallback = 3.00
+
+        # ---- States ----
+        self.state_apply_prime   = QState()
+        self.state_capture       = QState()
+        self.state_restore       = QState()
+        self.state_final         = QFinalState()
+
+        # ---- Wiring ----
+        self.state_apply_prime.entered.connect(self.onApplyPrimingSettings)
+        self.state_capture.entered.connect(self.onCapture)
+        self.state_restore.entered.connect(self.onRestoreOriginal)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+
+        # Transitions
+        t1 = QSignalTransition()
+        t1.setSenderObject(self.calibration_manager)
+        t1.setSignal(b"2settingsChangeCompleted()")
+        t1.setTargetState(self.state_capture)
+        self.state_apply_prime.addTransition(t1)
+
+        t2 = QSignalTransition()
+        t2.setSenderObject(self.calibration_manager)
+        t2.setSignal(b"2captureCompleted()")
+        t2.setTargetState(self.state_restore)
+        self.state_capture.addTransition(t2)
+
+        t3 = QSignalTransition()
+        t3.setSenderObject(self.calibration_manager)
+        t3.setSignal(b"2settingsChangeCompleted()")
+        t3.setTargetState(self.state_final)
+        self.state_restore.addTransition(t3)
+
+        self.state_machine.addState(self.state_apply_prime)
+        self.state_machine.addState(self.state_capture)
+        self.state_machine.addState(self.state_restore)
+        self.state_machine.addState(self.state_final)
+        self.state_machine.setInitialState(self.state_apply_prime)
+
+    # ---------- helpers ----------
+    def _clamp_pressure(self, p: float) -> float:
+        mm = self.model.machine_model
+        pmin = float(getattr(mm, "min_print_pressure", self._min_print_pressure_fallback))
+        pmax = float(getattr(mm, "max_print_pressure", self._max_print_pressure_fallback))
+        return max(pmin, min(pmax, float(p)))
+
+    # ---------- state handlers ----------
+    @Slot()
+    def onApplyPrimingSettings(self):
+        self.stageChanged.emit("Head Prime – Snapshotting & applying priming settings")
+
+        # Snapshot current settings from the manager helper (stable with your stack)
+        self._orig = dict(self.calibration_manager.get_current_settings() or {})
+
+        cur_pressure = float(self._orig.get("print_pressure", 0.0))
+        priming_pressure = self._clamp_pressure(cur_pressure + 1.0)
+
+        self._priming = {
+            "num_droplets": 1,
+            "print_pulse_width": int(3500),
+            "flash_delay": int(10000),
+            "print_pressure": float(priming_pressure),
+        }
+
+        # Apply priming settings; proceed when controller emits settingsChangeCompleted
+        self.calibration_manager.changeSettingsRequested.emit(
+            self._priming,
+            self.calibration_manager.emitSettingsChangeCompleted
+        )
+
+    @Slot()
+    def onCapture(self):
+        self.stageChanged.emit("Head Prime – Capturing single priming image")
+
+        # Capture (with small retry policy) and present image immediately on success
+        def _on_success(frame):
+            # Surface image to the UI
+            self.presentImageSignal.emit(frame)
+            self.captured_image = frame
+
+        self._capture_with_policy(
+            set_attr="captured_image",
+            stage_text="Capturing priming image",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            on_success=_on_success,
+            final_error_msg="Failed to capture image during head prime."
+        )
+
+    @Slot()
+    def onRestoreOriginal(self):
+        self.stageChanged.emit("Head Prime – Restoring original settings")
+
+        # Only restore keys we changed; keep other user settings untouched
+        restore = {}
+        if self._orig is not None:
+            if "num_droplets" in self._orig:
+                restore["num_droplets"] = int(self._orig["num_droplets"])
+            if "flash_delay" in self._orig:
+                restore["flash_delay"] = int(self._orig["flash_delay"])
+            if "print_width" in self._orig:  # snapshot key name → controller key name
+                restore["print_pulse_width"] = int(self._orig["print_width"])
+            if "print_pressure" in self._orig:
+                restore["print_pressure"] = float(self._orig["print_pressure"])
+
+        # Emit a row to persist what we did (lightweight — no arrays)
+        try:
+            payload = {
+                "result": {
+                    "action": "head_prime",
+                    "priming_settings": self._priming,
+                    "original_settings": {
+                        "num_droplets": self._orig.get("num_droplets"),
+                        "flash_delay": self._orig.get("flash_delay"),
+                        "print_pulse_width_us": self._orig.get("print_width"),
+                        "print_pressure": self._orig.get("print_pressure"),
+                    },
+                    "captured": self.captured_image is not None,
+                }
+            }
+            self.calibrationDataUpdated.emit(payload)
+        except Exception:
+            pass
+
+        # Restore and move to final on settingsChangeCompleted
+        self.calibration_manager.changeSettingsRequested.emit(
+            restore,
+            self.calibration_manager.emitSettingsChangeCompleted
+        )
+
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     """
     Identify the nozzle by diffing background vs droplet image. If not found,
