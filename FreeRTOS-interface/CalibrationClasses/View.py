@@ -711,6 +711,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Resets the calibration buttons to their default state.
         """
+        self.prime_head_button.setText("Prime Printer Head")
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
