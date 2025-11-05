@@ -3661,6 +3661,7 @@ class OptionSpec:
     targets: List[float]           # desired final concentrations for this option
     units: str                     # e.g. 'mM'
     droplet_nL: float              # droplet volume for this reagent
+    starting_conc: float = 0.0     # starting concentration for this reagent
 
 
 @dataclass
@@ -3804,23 +3805,23 @@ class ExperimentModel(QObject):
 
     # ------------- Factor management -------------
 
-    def add_additive(self, name: str, targets: List[float], units: str, droplet_nL: float):
+    def add_additive(self, name: str, targets: List[float], units: str, droplet_nL: float, starting_conc: float = 0.0):
         self.factors.append(FactorSpec(
             name=name, kind="additive",
-            options=[OptionSpec(name=f"{name}", targets=list(targets), units=units, droplet_nL=float(droplet_nL))]
+            options=[OptionSpec(name=f"{name}", targets=list(targets), units=units, droplet_nL=float(droplet_nL), starting_conc=float(starting_conc or 0.0))]
         ))
 
     def add_choice_group(self, group_name: str):
         self.factors.append(FactorSpec(name=group_name, kind="choice", options=[]))
 
-    def add_choice_option(self, group_name: str, option_name: str, targets: List[float], units: str, droplet_nL: float):
+    def add_choice_option(self, group_name: str, option_name: str, targets: List[float], units: str, droplet_nL: float, starting_conc: float = 0.0):
         for f in self.factors:
             if f.name == group_name and f.kind == "choice":
-                f.options.append(OptionSpec(option_name, list(targets), units, float(droplet_nL)))
+                f.options.append(OptionSpec(option_name, list(targets), units,
+                                            float(droplet_nL), float(starting_conc or 0.0)))
                 return
-        # auto-create group if missing
         self.add_choice_group(group_name)
-        self.add_choice_option(group_name, option_name, targets, units, droplet_nL)
+        self.add_choice_option(group_name, option_name, targets, units, droplet_nL, starting_conc)
 
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
@@ -4023,6 +4024,12 @@ class ExperimentModel(QObject):
         two_max_refine: int = 30,
         allow_two: bool = True
     ) -> Dict:
+
+        def _adj_targets(opt) -> List[float]:
+            s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+            # clamp negatives if user set starting > some target
+            return sorted(set(max(0.0, float(t) - s) for t in opt.targets))
+        
         # V_print = how much volume we are allowed to PRINT (old meaning of target)
         V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
         # V_final = the actual final well volume after prefill + printing
@@ -4039,12 +4046,13 @@ class ExperimentModel(QObject):
         for f in self.factors:
             if f.kind == "additive":
                 o = f.options[0]
+                t_adj = _adj_targets(o) 
                 singles = self._enumerate_single_stock_candidates(
-                    o.targets, o.droplet_nL, o.units,
+                    t_adj, o.droplet_nL, o.units,
                     final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
                 )
                 twos = self._enumerate_two_stock_candidates(
-                    o.targets, o.droplet_nL, o.units,
+                    t_adj, o.droplet_nL, o.units,
                     final_volume_nL=V_final, volume_budget_nL=V_print,
                     quantum=quantum, max_refine=two_max_refine
                 ) if allow_two else []
@@ -4054,12 +4062,13 @@ class ExperimentModel(QObject):
             else:
                 bucket = []
                 for opt in f.options:
+                    t_adj = _adj_targets(opt)
                     singles = self._enumerate_single_stock_candidates(
-                        opt.targets, opt.droplet_nL, opt.units,
+                        t_adj, opt.droplet_nL, opt.units,
                         final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
                     )
                     twos = self._enumerate_two_stock_candidates(
-                        opt.targets, opt.droplet_nL, opt.units,
+                        t_adj, opt.droplet_nL, opt.units,
                         final_volume_nL=V_final, volume_budget_nL=V_print,
                         quantum=quantum, max_refine=two_max_refine
                     ) if allow_two else []
@@ -4790,6 +4799,16 @@ class ExperimentModel(QObject):
         issues = []
         worst_nonfill = 0.0
 
+        # Map (factor, option_or_None) -> starting_conc and units
+        start_lookup: Dict[Tuple[str, Optional[str]], Tuple[float, str]] = {}
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                start_lookup[(f.name, None)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
+            else:
+                for o in f.options:
+                    start_lookup[(f.name, o.name)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
+
         # Per-stock totals and per-reaction maxima
         # key: (factor, option_or_empty, stock_conc)
         stock_totals: Dict[Tuple[str, str, float], int] = {}
@@ -4812,7 +4831,9 @@ class ExperimentModel(QObject):
                 if n_stocks == 1:
                     st = plan["stocks"][0]
                     # k = int(st["droplets_per_target"].get(float(target), 0))
-                    k, mk, unreachable, nearest = self._resolve_drops_for_target(st, float(target))
+                    s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
+                    t_add = max(0.0, float(target) - float(s))
+                    k, mk, unreachable, nearest = self._resolve_drops_for_target(st, t_add)
                     used_nL += k * st["droplet_volume_nL"]
                     tot_key = (key[0], key[1] or "", st["stock_concentration"])
                     stock_totals[tot_key] = stock_totals.get(tot_key, 0) + k
@@ -4828,10 +4849,11 @@ class ExperimentModel(QObject):
                         })
                 else:
                     st1, st2 = plan["stocks"]
-                    k1, mk1, un1, nearest1 = self._resolve_drops_for_target(st1, float(target))
-                    k2, mk2, un2, nearest2 = self._resolve_drops_for_target(st2, float(target))
-                    # k1 = int(st1["droplets_per_target"].get(float(target), 0))
-                    # k2 = int(st2["droplets_per_target"].get(float(target), 0))
+                    s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
+                    t_add = max(0.0, float(target) - float(s))
+                    k1, mk1, un1, nearest1 = self._resolve_drops_for_target(st1, t_add)
+                    k2, mk2, un2, nearest2 = self._resolve_drops_for_target(st2, t_add)
+
                     used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
                     tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
                     tot_key2 = (key[0], key[1] or "", st2["stock_concentration"])
@@ -4949,18 +4971,22 @@ class ExperimentModel(QObject):
 
     # ---------- enumerate reactions as stock-droplet lists ----------
     def iter_reaction_stock_droplets(self):
-        """
-        Yields, for each reaction (replicated), a list of tuples:
-            (reagent_name, stock_concentration, units, droplet_count)
-        'reagent_name' = additive factor name (additives) OR option name (choice groups).
-        """
         reactions = self._enumerate_reactions()
         reps = int(self.metadata.get("replicates", 1))
 
         def _reagent_name_from_key(key: tuple[str, object]) -> str:
             return key[0] if key[1] is None else key[1]
 
-        # replicate OUTER → reaction INNER (matches _reactions_df)
+        # starting conc lookup (same as in generate_experiment)
+        start_lookup: Dict[Tuple[str, Optional[str]], float] = {}
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                start_lookup[(f.name, None)] = float(getattr(o, "starting_conc", 0.0) or 0.0)
+            else:
+                for o in f.options:
+                    start_lookup[(f.name, o.name)] = float(getattr(o, "starting_conc", 0.0) or 0.0)
+
         for r in range(reps):
             for rxn in reactions:
                 items = []
@@ -4968,37 +4994,32 @@ class ExperimentModel(QObject):
                     plan = self.plans_per_option.get(key)
                     if not plan:
                         continue
+                    s = start_lookup.get(key, 0.0)
+                    t_add = max(0.0, float(target) - float(s))
                     if plan["n_stocks"] == 1:
                         st = plan["stocks"][0]
-                        # drops = int(st["droplets_per_target"].get(float(target), 0))
-                        drops, _, _, _ = self._resolve_drops_for_target(st, float(target))
+                        drops, _, _, _ = self._resolve_drops_for_target(st, t_add)
                         if drops > 0:
-                            items.append((
-                                _reagent_name_from_key(key),
-                                float(st["stock_concentration"]),
-                                st["units"],
-                                drops
-                            ))
+                            items.append((_reagent_name_from_key(key),
+                                        float(st["stock_concentration"]),
+                                        st["units"],
+                                        drops))
                     else:
                         st1, st2 = plan["stocks"]
-                        k1, _, _, _ = self._resolve_drops_for_target(st1, float(target))
-                        k2, _, _, _ = self._resolve_drops_for_target(st2, float(target))
+                        k1, _, _, _ = self._resolve_drops_for_target(st1, t_add)
+                        k2, _, _, _ = self._resolve_drops_for_target(st2, t_add)
                         if k1 > 0:
-                            items.append((
-                                _reagent_name_from_key(key),
-                                float(st1["stock_concentration"]),
-                                st1["units"],
-                                k1
-                            ))
+                            items.append((_reagent_name_from_key(key),
+                                        float(st1["stock_concentration"]),
+                                        st1["units"],
+                                        k1))
                         if k2 > 0:
-                            items.append((
-                                _reagent_name_from_key(key),
-                                float(st2["stock_concentration"]),
-                                st2["units"],
-                                k2
-                            ))
+                            items.append((_reagent_name_from_key(key),
+                                        float(st2["stock_concentration"]),
+                                        st2["units"],
+                                        k2))
                 yield items
-
+                
     # ------------- Save/Load (optional; keep simple) -------------
 
     def to_dict(self) -> Dict:
@@ -5013,7 +5034,8 @@ class ExperimentModel(QObject):
                             "name": o.name,
                             "targets": o.targets,
                             "units": o.units,
-                            "droplet_nL": o.droplet_nL
+                            "droplet_nL": o.droplet_nL,
+                            "starting_conc": getattr(o, "starting_conc", 0.0)
                         } for o in f.options
                     ]
                 } for f in self.factors
@@ -5030,7 +5052,8 @@ class ExperimentModel(QObject):
                     name=o["name"],
                     targets=list(o["targets"]),
                     units=o["units"],
-                    droplet_nL=float(o["droplet_nL"])
+                    droplet_nL=float(o["droplet_nL"]),
+                    starting_conc=float(o.get("starting_conc", 0.0))
                 ))
             self.factors.append(fs)
         # clear previous results
@@ -5294,24 +5317,18 @@ class ExperimentModel(QObject):
 
     def progress_to_concentration_key(self) -> "pd.DataFrame":
         """
-        Make a wide CSV with wells as rows and columns "<reagent_name>_<units>",
-        containing the *final concentrations* in each well.
-
-        For each reagent stock used in a well:
-            contribution = stock_concentration * (drops * droplet_nL) / final_volume_nL
-        Units match the stock's units (e.g., mM).
+        Wide CSV with wells as rows and columns "<reagent_name>_<units>",
+        containing the final concentrations in each well = starting + added.
         """
-        # Final well volume (NOT just printed)
         V_final_nL = float(self.metadata.get(
             "final_reaction_volume_nL",
             self.metadata.get("target_reaction_volume_nL", 500.0)
         ))
 
-        # Build a lookup from the stock table (includes all optimized stocks)
+        # Stock rows (includes Fill)
         stock_rows = self.get_stock_table_rows(include_fill=True)
 
         def _base_sid(row: dict) -> str:
-            # Must exactly match the ID format used in progress.json
             name  = row.get("option_name") or row.get("factor_name") or ""
             units = row.get("units", "")
             conc  = row.get("stock_concentration", 0.0)
@@ -5321,44 +5338,92 @@ class ExperimentModel(QObject):
                 conc2 = str(conc)
             return f"{name}_{conc2}_{units}"
 
-        # base_sid -> metadata for concentration math
+        # base_sid -> stock metadata for 'added' part
         stock_info = {}
         for r in stock_rows:
             sid = _base_sid(r)
             stock_info[sid] = {
                 "reagent_name": (r.get("option_name") or r.get("factor_name") or ""),
                 "units": r.get("units", ""),
-                "stock_conc": float(r.get("stock_concentration", 0.0)),  # in reagent units
+                "stock_conc": float(r.get("stock_concentration", 0.0)),
                 "dv_nL": float(r.get("droplet_volume_nL", 0.0)),
             }
+
+        # Build lookups for starting conc, by reagent name (additives) or option name (choices)
+        starting_by_reagent: Dict[str, Tuple[float, str]] = {}
+        # Also track groups → options for inference
+        group_to_options: Dict[str, List[str]] = {}
+
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                starting_by_reagent[o.name] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
+            else:
+                group_to_options[f.name] = [o.name for o in f.options]
+                for o in f.options:
+                    starting_by_reagent[o.name] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
 
         data = {}
         for well_id, entry in (self.progress_data or {}).items():
             reagents = entry.get("reagents", {})
             row = {}
+
+            # 1) Added concentration from actual drops
             for base_sid, details in reagents.items():
                 drops = int(details.get("target_droplets", 0))
                 info = stock_info.get(base_sid)
                 if not info or drops <= 0:
                     continue
-
-                c_stock = info["stock_conc"]     # e.g., mM
+                c_stock = info["stock_conc"]
                 dv = info["dv_nL"]
                 if dv <= 0.0 or V_final_nL <= 0.0:
                     continue
-
-                # Contribution to final concentration for this stock
                 contrib = c_stock * (drops * dv) / V_final_nL
-
-                # Column name: "<reagent_name>_<units>"
                 col = f'{info["reagent_name"]}_{info["units"]}'.strip("_")
                 row[col] = row.get(col, 0.0) + contrib
+
+            # 2) Add starting concentrations.
+            #    For additives: always add (they're present in every well).
+            #    For choices: add only for the option present in this well. We infer presence
+            #    if any stock for that option is listed in reagents (even with 0 drops).
+            present_reagent_names = set()
+            for base_sid in reagents.keys():
+                info = stock_info.get(base_sid)
+                if info:
+                    present_reagent_names.add(info["reagent_name"])
+
+            # Additives: defined as those options whose name equals factor name (your encoding)
+            for f in self.factors:
+                if f.kind == "additive":
+                    o = f.options[0]
+                    s_val, s_units = starting_by_reagent.get(o.name, (0.0, ""))
+                    if s_val != 0.0:
+                        col = f"{o.name}_{s_units}".strip("_")
+                        row[col] = row.get(col, 0.0) + s_val
+
+            # Choices: exactly one option per group should be present in each well.
+            for f in self.factors:
+                if f.kind != "choice":
+                    continue
+                chosen = None
+                for o in f.options:
+                    if o.name in present_reagent_names:
+                        chosen = o
+                        break
+                # Fallback: if none detected (e.g., all zero drops and omitted),
+                # we can't unambiguously assign; skip silently.
+                if chosen is None:
+                    continue
+                s_val, s_units = starting_by_reagent.get(chosen.name, (0.0, ""))
+                if s_val != 0.0:
+                    col = f"{chosen.name}_{s_units}".strip("_")
+                    row[col] = row.get(col, 0.0) + s_val
 
             data[well_id] = row
 
         df = pd.DataFrame.from_dict(data, orient="index")
 
-        # Stable column ordering by reagent name then units
+        # Stable column ordering
         def _split_col(c: str):
             parts = str(c).rsplit("_", 1)
             name = parts[0] if parts else c

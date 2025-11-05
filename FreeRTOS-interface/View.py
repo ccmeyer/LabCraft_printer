@@ -3111,18 +3111,19 @@ class ExperimentDesignDialog(QDialog):
         self.root.addLayout(right, stretch=3) # make right wider
 
         # ---------- Reagents table (top-right) ----------
-        self.reagent_table = QTableWidget(0, 6, self)
+        self.reagent_table = QTableWidget(0, 7, self)
         self.reagent_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Group", "Targets", "Units", "Droplet Vol (nL)", "Delete"
+            "Reagent Name", "Group", "Starting", "Targets", "Units", "Droplet Vol (nL)", "Delete"
         ])
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.reagent_table.setColumnWidth(0, 230)   # Reagent Name (wider)
+        self.reagent_table.setColumnWidth(0, 200)   # Reagent Name (wider)
         self.reagent_table.setColumnWidth(1, 150)   # Group
-        self.reagent_table.setColumnWidth(2, 230)   # Targets (wider)
-        self.reagent_table.setColumnWidth(3, 90)    # Units
-        self.reagent_table.setColumnWidth(4, 90)    # Droplet vol
-        self.reagent_table.setColumnWidth(5, 90)    # Delete
+        self.reagent_table.setColumnWidth(2, 90)   # Starting
+        self.reagent_table.setColumnWidth(3, 230)   # Targets (wider)
+        self.reagent_table.setColumnWidth(4, 90)    # Units
+        self.reagent_table.setColumnWidth(5, 90)    # Droplet vol
+        self.reagent_table.setColumnWidth(6, 90)    # Delete
         right.addWidget(self.reagent_table)
 
         # ---------- Stock table (bottom-right) ----------
@@ -3365,7 +3366,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _add_reagent_row(self, name: str = "", group: str = GROUP_ADDITIVE,
                         targets: str = "0, 1, 2", units: str = "mM",
-                        droplet_nL: float = 10.0):
+                        droplet_nL: float = 10.0, starting_conc: float = 0.0):
         row = self.reagent_table.rowCount()
         self.reagent_table.insertRow(row)
 
@@ -3383,15 +3384,25 @@ class ExperimentDesignDialog(QDialog):
         group_combo.activated.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 1, group_combo)
 
+        
+        # Starting concentration
+        start_spin = QDoubleSpinBox()
+        start_spin.setDecimals(6)
+        start_spin.setRange(0.0, 1e9)
+        start_spin.setSingleStep(0.1)
+        start_spin.setValue(float(starting_conc or 0.0))
+        start_spin.valueChanged.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 2, start_spin)
+
         # Targets
         tgt_edit = QLineEdit(targets)
         tgt_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, 2, tgt_edit)
+        self.reagent_table.setCellWidget(row, 3, tgt_edit)
 
         # Units
         units_edit = QLineEdit(units)
         units_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, 3, units_edit)
+        self.reagent_table.setCellWidget(row, 4, units_edit)
 
         # Droplet vol
         dv_spin = QDoubleSpinBox()
@@ -3400,27 +3411,24 @@ class ExperimentDesignDialog(QDialog):
         dv_spin.setSingleStep(1.0)
         dv_spin.setValue(float(droplet_nL))
         dv_spin.valueChanged.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, 4, dv_spin)
+        self.reagent_table.setCellWidget(row, 5, dv_spin)
 
         # Delete
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
-        self.reagent_table.setCellWidget(row, 5, del_btn)
+        self.reagent_table.setCellWidget(row, 6, del_btn)
 
         self._schedule_auto_update()
 
     def _delete_row(self, r: int):
-        # remove UI row
         self.reagent_table.removeRow(r)
-        # reassign delete callbacks to correct row numbers
         for i in range(self.reagent_table.rowCount()):
-            btn: QPushButton = self.reagent_table.cellWidget(i, 5)
+            btn: QPushButton = self.reagent_table.cellWidget(i, 6)  # column 6 now
             try:
                 btn.clicked.disconnect()
             except Exception:
                 pass
             btn.clicked.connect(lambda _, rr=i: self._delete_row(rr))
-        # auto recompute after deletion
         self._schedule_auto_update()
 
     def _schedule_auto_update(self):
@@ -3456,7 +3464,8 @@ class ExperimentDesignDialog(QDialog):
                     group=self.GROUP_ADDITIVE,
                     targets=", ".join(str(x) for x in o.targets),
                     units=o.units,
-                    droplet_nL=o.droplet_nL
+                    droplet_nL=o.droplet_nL,
+                    starting_conc=getattr(o, "starting_conc", 0.0)
                 )
         # Choice groups
         for f in getattr(self.model, "factors", []):
@@ -3468,7 +3477,8 @@ class ExperimentDesignDialog(QDialog):
                         group=f.name,
                         targets=", ".join(str(x) for x in o.targets),
                         units=o.units,
-                        droplet_nL=o.droplet_nL
+                        droplet_nL=o.droplet_nL,
+                        starting_conc=getattr(o, "starting_conc", 0.0)
                     )
 
     # -----------------------------
@@ -3486,12 +3496,14 @@ class ExperimentDesignDialog(QDialog):
         for row in range(self.reagent_table.rowCount()):
             name_edit: QLineEdit = self.reagent_table.cellWidget(row, 0)
             group_combo: QComboBox = self.reagent_table.cellWidget(row, 1)
-            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, 2)
-            units_edit: QLineEdit = self.reagent_table.cellWidget(row, 3)
-            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 4)
+            start_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 2)
+            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, 3)
+            units_edit: QLineEdit = self.reagent_table.cellWidget(row, 4)
+            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 5)
 
             r_name = (name_edit.text() or "").strip()
             r_group = group_combo.currentText()
+            r_start = float(start_spin.value() if start_spin is not None else 0.0)
             r_targets = self._parse_targets(tgt_edit.text())
             r_units = (units_edit.text() or "mM").strip()
             r_dv = float(dv_spin.value())
@@ -3502,7 +3514,9 @@ class ExperimentDesignDialog(QDialog):
 
             if r_group == self.GROUP_ADDITIVE:
                 # Each additive is its own factor with a single option named as reagent
-                self.model.add_additive(name=r_name, targets=r_targets, units=r_units, droplet_nL=r_dv)
+                self.model.add_additive(name=r_name, targets=r_targets,
+                                        units=r_units, droplet_nL=r_dv,
+                                        starting_conc=r_start)
             else:
                 # ensure group exists once
                 if r_group not in created_choice_groups:
@@ -3510,7 +3524,8 @@ class ExperimentDesignDialog(QDialog):
                     created_choice_groups.add(r_group)
                 # add option to that group
                 self.model.add_choice_option(group_name=r_group, option_name=r_name,
-                                             targets=r_targets, units=r_units, droplet_nL=r_dv)
+                                             targets=r_targets, units=r_units, droplet_nL=r_dv,
+                                             starting_conc=r_start)
 
     def _update_metadata_from_controls(self):
         # If randomize is checked and no seed yet, create a fresh one
