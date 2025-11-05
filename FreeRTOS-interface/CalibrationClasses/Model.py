@@ -78,6 +78,7 @@ class CalibrationManager(QObject):
 
     # Map alternate phase names to canonical keys
     PHASE_ALIASES = {
+        "head_prime": "head_prime",
         "pressure": "pressure_calibration",
         "pressure_calibration": "pressure_calibration",
         "pressure_scan": "pressure_scan",
@@ -298,6 +299,7 @@ class CalibrationManager(QObject):
         next_cal = self.calibration_queue.pop(0)
 
         mapping = {
+            'head_prime': HeadPrimeCalibrationProcess,
             'nozzle_position': NozzlePositionCalibrationProcess,
             'nozzle_focus': NozzleFocusCalibrationProcess,
             'droplet_emergence': DropletEmergenceCalibrationProcess,
@@ -556,6 +558,9 @@ class CalibrationManager(QObject):
             self._advance_pw_sweep()
 
     # --- Methods to start individual calibration processes ---
+    def start_head_prime_calibration(self):
+        self._try_start_process(HeadPrimeCalibrationProcess)
+    
     def start_nozzle_calibration(self):
         self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
         self.start_active_calibration()

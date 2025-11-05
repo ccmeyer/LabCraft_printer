@@ -1167,6 +1167,10 @@ class Controller(QObject):
     def set_num_pressure_tests(self, num_tests):
         self.model.calibration_manager.set_num_pressure_tests(num_tests)
 
+    def start_head_prime_calibration(self):
+        # Tell the Model to start the head priming calibration.
+        self.model.calibration_manager.start_head_prime_calibration()
+
     def start_nozzle_calibration(self):
         # Tell the Model to start the nozzle position calibration.
         self.model.calibration_manager.start_nozzle_calibration()

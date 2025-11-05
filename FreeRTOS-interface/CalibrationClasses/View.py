@@ -245,6 +245,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
         # Calibration buttons
+
+        self.prime_head_button = QtWidgets.QPushButton("Prime Printer Head")
+        self.prime_head_button.clicked.connect(self.toggle_start_head_prime_calibration)
+        calib_grid.addWidget(self.prime_head_button, crow, 0, 1, 2); crow += 1
+
         self.calibrate_nozzle_button = QtWidgets.QPushButton("Calibrate Nozzle Position")
         self.calibrate_nozzle_button.clicked.connect(self.toggle_start_nozzle_calibration)
         calib_grid.addWidget(self.calibrate_nozzle_button, crow, 0, 1, 2); crow += 1
@@ -714,6 +719,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
         self.calibrate_characterization_button.setText("Characterize Droplets")
         self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
+
+    def toggle_start_head_prime_calibration(self):
+        """
+        Toggles whether the printer head priming should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.prime_head_button.setText("Prime Printer Head")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.prime_head_button.setText("Stop Calibration")
+            self.controller.start_head_prime_calibration()
 
     def toggle_start_nozzle_calibration(self):
         """
