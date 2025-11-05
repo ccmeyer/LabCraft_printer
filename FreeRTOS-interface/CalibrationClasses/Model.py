@@ -5897,6 +5897,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_streak = 0                # consecutive out-of-bound hits
         self._oob_positions = []            # recent out-of-bound centers (pixels)
 
+        self._incremental_emitted = False
+
         # --- offsets (persist across pressures) ---
         self._y_focus_offset_steps = 0            # persistent Y offset (steps) for best focus so far
         self._y_focus_ema_alpha    = 0.35         # EMA smoothing (0..1). Higher = react faster
@@ -6531,21 +6533,21 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             except Exception:
                 pass
 
-            self.samples.append({
+            rec = {                                        # <- name it so we can emit it
                 "pressure": float(self.cur_pressure),
                 "delay_us": int(self.current_delay_us),
                 "mean_center_px": mean_center,
                 "mean_volume": mean_vol,
                 "cv_volume_percent": cv_vol,
-                # "positions_px": [tuple(map(int, p)) for p in self.droplet_positions],
                 "volumes": [float(v) for v in self.droplet_volumes],
-                # "focus_values": [float(f) for f in self.droplet_focus],
                 "circularity_values": [float(c) for c in self.circularity_values],
                 "mean_position_machine": drop_machine,
                 "multiple_detections": int(self.multiple_droplet_hits),
                 "y_focus_offset_steps": int(self._y_focus_offset_steps),
                 "valid": True
-            })
+            }
+            self.samples.append(rec)
+            self._emit_incremental_pressure_step(rec)      # <- NEW incremental emit
 
         # advance plan
         self.i += 1
@@ -6553,7 +6555,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.nextPressure.emit()
 
     def _record_pressure_result(self, valid: bool, reason: str | None = None):
-        self.samples.append({
+        rec = {
             "pressure": float(self.cur_pressure),
             "delay_us": int(self.current_delay_us or self.target_delay_us),
             "mean_center_px": None,
@@ -6566,7 +6568,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "mean_position_machine": None,
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
-        })
+        }
+        
+        self.samples.append(rec)
+        self._emit_incremental_pressure_step(rec)  # <- NEW incremental emit
     
     def _annotate_char_summary_image(self, mean_center, mean_vol, cv_vol):
         """
@@ -6735,9 +6740,39 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self._safe_move_abs(self._clamp_xyz(*tgt))  # state_setDelay has a moveDone→state_setDelay transition
         except Exception as e:
             self.stageChanged.emit(f"Half-frame probe failed: {e}")
+    
+    def _emit_incremental_pressure_step(self, pressure_entry: dict) -> None:
+        """
+        Emit a single-pressure result so the UI can update immediately.
+        Includes run metadata but only one pressure record in 'pressures'.
+        """
+        result = {
+            "pressures": [pressure_entry],                     # <- exactly one pressure
+            "order": "desc",                                   # keep same metadata as final
+            "sphere_delay_us": int(self.sphere_delay_us),
+            "nozzle_center_px": self.nozzle_center_px,
+            "nozzle_center_machine": self.nozzle_center_machine,
+            "emergence_time_us": int(self.emergence_time_us),
+        }
+        self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+        self._incremental_emitted = True
 
     @Slot()
     def onCompleted(self):
+        if self._incremental_emitted:
+            # We've already emitted each pressure; just stamp metadata + completion.
+            result = {
+                "pressures": [],  # nothing new here; avoids duplicates in summary rows
+                "order": "desc",
+                "sphere_delay_us": int(self.sphere_delay_us),
+                "nozzle_center_px": self.nozzle_center_px,
+                "nozzle_center_machine": self.nozzle_center_machine,
+                "emergence_time_us": int(self.emergence_time_us),
+                "complete": True
+            }
+            self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+        else:
+            # Back-compat: original behavior (single emit with all pressures)
         result = {
             "pressures": self.samples,
             "order": "desc",
@@ -6747,6 +6782,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "emergence_time_us": int(self.emergence_time_us),
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
+
         self.stageChanged.emit("Pressure sweep characterization complete")
         self.calibrationCompleted.emit()
 
