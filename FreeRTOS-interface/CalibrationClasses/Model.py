@@ -185,6 +185,7 @@ class CalibrationManager(QObject):
             "dark_blue"
         )
         self.characterizationSummaryUpdated.emit()
+        self._emit_readiness()
 
     def end_session(self):
         """Stamp end time for the current run."""
@@ -655,10 +656,26 @@ class CalibrationManager(QObject):
         self.calibrationStageChanged.emit("No nozzle position calibration available", "red")
         return None
 
-    def get_emergence_time(self):
+    def get_emergence_time(self, *, quiet: bool = True):
+        """
+        Return the last recorded emergence delay for the current run, or None.
+        Pure lookup (no logging). If quiet=False, emit a one-shot warning.
+        Accept multiple possible key names used by processes.
+        """
         recs = self._latest_step_list("droplet_emergence")
         if recs:
-            return recs[-1].get("result", {}).get("flash_delay")
+            res = (recs[-1].get("result") or {})
+            # Accept alternative field names
+            val = (res.get("flash_delay")
+                or res.get("flash_delay_us")
+                or res.get("delay_us"))
+            if val is None:
+                # Fallback to settings snapshot stored with the step
+                val = (recs[-1].get("settings") or {}).get("flash_delay")
+            return val
+
+        # Only complain if the caller explicitly asks
+        if not quiet:
         self.calibrationStageChanged.emit("No droplet emergence calibration available", "red")
         return None
 
@@ -791,6 +808,7 @@ class CalibrationManager(QObject):
     def onCalibrationCompleted(self):
         self.calibrationStageChanged.emit("Calibration completed successfully", "green")
         self.activeCalibration = None
+        self._emit_readiness()
         self.calibrationCompleted.emit()
         if len(self.calibration_queue) > 0:
             self.calibrationStageChanged.emit("Starting next calibration in queue...", "blue")
