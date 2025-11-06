@@ -5778,25 +5778,35 @@ class ExperimentModel(QObject):
         Public convenience: rebuild progress from current assignments, then write both CSVs.
         """
         self._ensure_design_ready()
-        self._ensure_progress_populated()
-        # If still nothing, silently do nothing
+        # Always rebuild snapshot from the live reaction collection
+        self.create_progress_file()
         if not self.progress_data:
             return
         self.create_key_file()
         self.create_concentration_key_file()
     
     def _has_runtime_assignments(self) -> bool:
-        """Return True iff we have a well_plate and at least one well has a reaction."""
-        wp = self._runtime_well_plate
-        if wp is None:
+        """
+        Returns True if we have a live reaction collection to update.
+        Duck-typed to work with your existing object.
+        """
+        rc = getattr(self, "_runtime_reaction_collection", None)
+        if rc is None:
             return False
-        try:
-            for w in wp.get_all_wells():
-                if getattr(w, "get_assigned_reaction", None) and w.get_assigned_reaction() is not None:
-                    return True
-        except Exception:
-            pass
-        return False
+
+        # Common patterns we’ve seen in your codebase:
+        if hasattr(rc, "get_num_reactions") and callable(rc.get_num_reactions):
+            try:
+                return rc.get_num_reactions() > 0
+            except Exception:
+                pass
+        if hasattr(rc, "size"):
+            try:
+                return int(rc.size) > 0
+            except Exception:
+                pass
+        # Fallback: assume if object exists, it’s in use
+        return True
 
     def _ensure_design_ready(self):
         """
@@ -6064,6 +6074,17 @@ class Reagent(QObject):
         else:
             self.completed = False
             return False
+
+    def set_target_droplets(self, droplets: int, *, preserve_progress: bool = True):
+        """Update the target count; optionally clamp or reset progress."""
+        new_target = int(max(0, droplets))
+        self.target_droplets = new_target
+        if preserve_progress:
+            # If we've already printed more than the new target, clamp down.
+            self.added_droplets = min(self.added_droplets, self.target_droplets)
+        else:
+            self.added_droplets = 0
+        self.completed = self.is_complete()
     
 class StockSolutionManager(QObject):
     '''
@@ -6189,6 +6210,14 @@ class ReactionComposition(QObject):
 
     def get_reagent_by_id(self,stock_id):
         return self.reagents[stock_id]
+
+    def set_reagent_target_droplets(self, stock_id: str, droplets: int, *, preserve_progress: bool = True) -> bool:
+        r = self.reagents.get(stock_id)
+        if r is None:
+            # We assume the reagent set doesn't change when dv changes; silently ignore.
+            return False
+        r.set_target_droplets(droplets, preserve_progress=preserve_progress)
+        return True
     
 
 
@@ -6243,6 +6272,52 @@ class ReactionCollection(QObject):
     def clear_all_reactions(self):
         """Clear all reactions from the collection."""
         self.reactions = {}
+
+    # ---- helpers -------------------------------------------------
+    @staticmethod
+    def _stock_id_from_tuple(reagent_name: str, concentration: float, units: str) -> str:
+        # Must match StockSolutionManager._make_stock_id format exactly
+        conc_str = f"{float(concentration):.2f}"
+        return "_".join([reagent_name, conc_str, units])
+
+    def _reaction_by_index(self, index: int) -> ReactionComposition | None:
+        rxns = list(self.reactions.values())
+        if 0 <= index < len(rxns):
+            return rxns[index]
+        return None
+
+    # ---- APIs ExperimentModel._rebind_runtime_assignments_to_current_plans() tries ----
+    def set_reaction_items_for_index(self, index: int, items: list[tuple[str, float, str, int]],
+                                     *, preserve_progress: bool = True) -> bool:
+        """
+        items: [(reagent_name, stock_conc, units, drops), ...] for one reaction.
+        Only updates targets for reagents that already exist in the reaction.
+        """
+        rxn = self._reaction_by_index(index)
+        if rxn is None:
+            return False
+
+        # Update provided items
+        for reagent_name, conc, units, drops in items:
+            sid = self._stock_id_from_tuple(reagent_name, conc, units)
+            rxn.set_reagent_target_droplets(sid, int(drops), preserve_progress=preserve_progress)
+
+        # Re-validate completion flags for this reaction
+        rxn.check_all_complete()
+        return True
+
+    def reset_from_iterator(self, iterator, *, preserve_progress: bool = True) -> bool:
+        """Batch update: iterator yields items for reaction 0, 1, 2, ..."""
+        for idx, items in enumerate(iterator):
+            self.set_reaction_items_for_index(idx, items, preserve_progress=preserve_progress)
+        return True
+
+    def replace_all_reaction_items(self, items_list: list[list[tuple[str, float, str, int]]],
+                                   *, preserve_progress: bool = True) -> bool:
+        """Batch update from a materialized list."""
+        for idx, items in enumerate(items_list):
+            self.set_reaction_items_for_index(idx, items, preserve_progress=preserve_progress)
+        return True
     
 class Well(QObject):
     '''
@@ -6292,7 +6367,7 @@ class Well(QObject):
         return self.assigned_reaction.check_stock_complete(stock_id)
 
     def check_all_complete(self):
-        return self.assign_reaction.check_all_complete()
+        return self.assigned_reaction.check_all_complete() if self.assigned_reaction else True
 
 class WellPlate(QObject):
     well_state_changed_signal = Signal(str)  # Signal to notify when the state of a well changes, sending the well ID
