@@ -4945,6 +4945,179 @@ class ExperimentModel(QObject):
             self.targets_unreachable.emit(issues)
         self.experiment_generated.emit(len(reactions) * reps, float(worst_nonfill))
 
+    def find_option_by_reagent_name(self, reagent_name: str) -> tuple[tuple[str, Optional[str]], OptionSpec] | None:
+        """
+        Return ((factor_name, option_or_None), OptionSpec) for a reagent display name.
+        Additives encode option.name == factor.name.
+        Choice groups use option.name.
+        """
+        if not reagent_name:
+            return None
+        # Additives
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                if o.name == reagent_name or f.name == reagent_name:
+                    return ((f.name, None), o)
+        # Choices
+        for f in self.factors:
+            if f.kind == "choice":
+                for o in f.options:
+                    if o.name == reagent_name:
+                        return ((f.name, o.name), o)
+        return None
+
+
+    def get_targets_for_key(self, key: tuple[str, Optional[str]]) -> list[float]:
+        """Return raw *final* targets as authored in the design (no starting subtraction)."""
+        fac, opt = key
+        for f in self.factors:
+            if f.name != fac:
+                continue
+            if f.kind == "additive":
+                return list(f.options[0].targets)
+            else:
+                for o in f.options:
+                    if o.name == opt:
+                        return list(o.targets)
+        return []
+
+
+    def get_plan_for_key(self, key: tuple[str, Optional[str]]) -> dict | None:
+        """Ensure plans exist and return plans_per_option[key]."""
+        if not self.plans_per_option:
+            # Safe: compute plans if caller came in early
+            self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+        return self.plans_per_option.get(key)
+
+
+    def _nearest_two_stock(self, t_add: float, d1: float, d2: float) -> tuple[int, int, float]:
+        """
+        Solve min |a*d1 + b*d2 - t_add| over nonnegative ints (a,b) with a simple bounded search.
+        Returns (a,b, err). Bound a to reasonable limit to keep fast.
+        """
+        if d1 <= 0 or d2 <= 0:
+            return (0, 0, abs(t_add))
+        a_max = int(round(t_add / d1)) + 6  # small slack
+        best = (0, 0, float("inf"))
+        for a in range(max(0, a_max + 1)):
+            rem = t_add - a * d1
+            b = 0 if rem <= 0 else int(round(rem / d2))
+            b = max(0, b)
+            err = abs(a * d1 + b * d2 - t_add)
+            # tie-break on smaller (a+b) to keep printed volume small
+            if (err < best[2] - 1e-12) or (abs(err - best[2]) <= 1e-12 and (a + b) < (best[0] + best[1])):
+                best = (a, b, err)
+        return best
+
+
+    def preview_requantized_for_option(
+        self,
+        key: tuple[str, Optional[str]],
+        new_droplet_nL: float,
+        *,
+        quantum: float = 0.1
+    ) -> dict:
+        """
+        PREVIEW ONLY. Keep existing stock concentration(s) for 'key' but recompute the mapping
+        using 'new_droplet_nL'. Returns dict with per-target rows and summary.
+        """
+        plan = self.get_plan_for_key(key)
+        if not plan:
+            return {"ok": False, "reason": "No stock plan available for this reagent."}
+
+        # starting conc & units for this option
+        start_lookup = {}
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                start_lookup[(f.name, None)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
+            else:
+                for o in f.options:
+                    start_lookup[(f.name, o.name)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
+
+        starting, units = start_lookup.get(key, (0.0, ""))
+
+        V_final = float(self.metadata.get("final_reaction_volume_nL", self.metadata.get("target_reaction_volume_nL", 500.0)))
+        if V_final <= 0 or new_droplet_nL <= 0:
+            return {"ok": False, "reason": "Invalid volumes."}
+
+        # current (original) droplet volume per this plan (all legs share the same nL)
+        old_dv = None
+        if plan["n_stocks"] == 1:
+            old_dv = float(plan["stocks"][0]["droplet_volume_nL"])
+        else:
+            old_dv = float(plan["stocks"][0]["droplet_volume_nL"])
+
+        targets_final = self.get_targets_for_key(key)
+        rows = []
+        max_printed_nL_new = 0.0
+
+        def _orig_k_for(t_final: float, st: dict) -> int:
+            # helper to compute original k from the saved mapping (t_add grid)
+            t_add = max(0.0, float(t_final) - float(starting))
+            k, _, _, _ = self._resolve_drops_for_target(st, t_add)
+            return int(k)
+
+        if plan["n_stocks"] == 1:
+            st0 = plan["stocks"][0]
+            c_stock = float(st0["stock_concentration"])
+            d_new = (c_stock * new_droplet_nL) / V_final  # new delta per drop (final-units)
+            for t in targets_final:
+                t_add = max(0.0, float(t) - float(starting))
+                k_new = int(round(t_add / d_new)) if d_new > 0 else 0
+                k_new = max(0, k_new)
+                achieved_add = k_new * d_new
+                achieved_final = starting + achieved_add
+                err = achieved_final - float(t)
+                printed_nL_new = k_new * new_droplet_nL
+                printed_nL_old = _orig_k_for(t, st0) * old_dv
+                rows.append({
+                    "target_final": float(t),
+                    "starting": float(starting),
+                    "delta_per_drop": float(d_new),
+                    "achieved_final": float(achieved_final),
+                    "error": float(err),
+                    "drops": int(k_new),
+                    "printed_nL_new": float(printed_nL_new),
+                    "printed_nL_old": float(printed_nL_old),
+                    "printed_nL_shift": float(printed_nL_new - printed_nL_old),
+                    "units": units,
+                })
+                max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
+            return {"ok": True, "n_stocks": 1, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
+
+        # two-stock case
+        st1, st2 = plan["stocks"]
+        c1 = float(st1["stock_concentration"]); d1 = (c1 * new_droplet_nL) / V_final
+        c2 = float(st2["stock_concentration"]); d2 = (c2 * new_droplet_nL) / V_final
+        for t in targets_final:
+            t_add = max(0.0, float(t) - float(starting))
+            a, b, err_add = self._nearest_two_stock(t_add, d1, d2)
+            achieved_add = a * d1 + b * d2
+            achieved_final = starting + achieved_add
+            # compute old printed volume (sum of legs)
+            k1_old = _orig_k_for(t, st1)
+            k2_old = _orig_k_for(t, st2)
+            printed_nL_old = (k1_old + k2_old) * old_dv
+            printed_nL_new = (a + b) * new_droplet_nL
+            rows.append({
+                "target_final": float(t),
+                "starting": float(starting),
+                "delta_per_drop_leg1": float(d1),
+                "delta_per_drop_leg2": float(d2),
+                "achieved_final": float(achieved_final),
+                "error": float(achieved_final - float(t)),
+                "drops": (int(a), int(b)),
+                "printed_nL_new": float(printed_nL_new),
+                "printed_nL_old": float(printed_nL_old),
+                "printed_nL_shift": float(printed_nL_new - printed_nL_old),
+                "units": units,
+            })
+            max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
+        return {"ok": True, "n_stocks": 2, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
+
+
     # ------------- Public getters for the UI -------------
 
     def get_stock_table_rows(self, include_fill: bool = True) -> List[Dict]:

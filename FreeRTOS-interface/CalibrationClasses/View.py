@@ -420,6 +420,47 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
 
+        # --- Group 3: Design ↔ Calibration Bridge (preview only in Step 1) ---
+        bridge_group = QtWidgets.QGroupBox("Design ↔ Calibration Bridge")
+        bridge_v = QtWidgets.QVBoxLayout(bridge_group)
+
+        # Top labels (design targets & droplet nL)
+        self.bridge_reagent_label = QtWidgets.QLabel("Reagent: —")
+        self.bridge_design_dv_label = QtWidgets.QLabel("Design droplet volume (nL): —")
+        self.bridge_design_targets_label = QtWidgets.QLabel("Design targets: —")
+        self.bridge_design_stock_label = QtWidgets.QLabel("Stock concentration(s): —")
+
+        # Preview controls
+        preview_h = QtWidgets.QHBoxLayout()
+        self.bridge_preview_btn = QtWidgets.QPushButton("Preview from last characterization")
+        self.bridge_preview_btn.clicked.connect(self._bridge_preview_from_last_char)
+        preview_h.addWidget(self.bridge_preview_btn)
+
+        # Table for preview results
+        self.bridge_table = QtWidgets.QTableWidget(0, 7, bridge_group)
+        self.bridge_table.setHorizontalHeaderLabels([
+            "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+        ])
+        self.bridge_table.horizontalHeader().setStretchLastSection(True)
+        self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+
+        # Apply button (disabled in Step 1)
+        self.bridge_apply_btn = QtWidgets.QPushButton("Apply new droplet volume to design")
+        self.bridge_apply_btn.setEnabled(False)  # Step 1: preview only
+        self.bridge_apply_btn.clicked.connect(self._bridge_apply_new_volume_disabled)
+
+        # assemble
+        bridge_v.addWidget(self.bridge_reagent_label)
+        bridge_v.addWidget(self.bridge_design_dv_label)
+        bridge_v.addWidget(self.bridge_design_targets_label)
+        bridge_v.addWidget(self.bridge_design_stock_label)
+        bridge_v.addLayout(preview_h)
+        bridge_v.addWidget(self.bridge_table)
+        bridge_v.addWidget(self.bridge_apply_btn)
+
+        self.analysis_layout.addWidget(bridge_group)
+
+
         self.log_label = QtWidgets.QLabel("Calibration Log")
         self.log_label.setStyleSheet("font-weight: bold;")
         self.analysis_layout.addWidget(self.log_label)
@@ -975,6 +1016,132 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # Auto-scroll to the newest row
         self.stage_table.scrollToBottom()
+
+    def _bridge_get_calibration_manager(self):
+        # Prefer the ExperimentModel-attached manager if present.
+        return self.model.calibration_manager
+
+    def _bridge_get_current_reagent_name(self) -> str | None:
+        # Try via calibration manager (stable with your existing _safe_get_stock_solution)
+        cm = self._bridge_get_calibration_manager()
+        if cm is not None:
+            try:
+                r = cm._safe_get_stock_solution()
+                if r:
+                    return str(r)
+            except Exception:
+                pass
+        # Fallback to printer head in gripper
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+            if ph:
+                return ph.get_reagent_name()
+        except Exception:
+            pass
+        return None
+
+    def _bridge_refresh_design_labels(self):
+        em = self.model.experiment_model
+        reagent = self._bridge_get_current_reagent_name()
+        key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
+
+        self.bridge_reagent_label.setText(f"Reagent: {reagent or '—'}")
+
+        if not key_opt:
+            self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
+            self.bridge_design_targets_label.setText("Design targets: —")
+            self.bridge_design_stock_label.setText("Stock concentration(s): —")
+            return
+
+        key, opt = key_opt
+        self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {opt.droplet_nL:.3f}")
+        targets = em.get_targets_for_key(key)
+        self.bridge_design_targets_label.setText("Design targets: " + (", ".join(f"{t:g}" for t in targets) if targets else "—"))
+
+        plan = em.get_plan_for_key(key)
+        if not plan:
+            self.bridge_design_stock_label.setText("Stock concentration(s): —")
+        else:
+            if plan["n_stocks"] == 1:
+                scs = [plan["stocks"][0]["stock_concentration"]]
+            else:
+                scs = [plan["stocks"][0]["stock_concentration"], plan["stocks"][1]["stock_concentration"]]
+            try:
+                units = plan["stocks"][0].get("units", "")
+            except Exception:
+                units = ""
+            scs_txt = ", ".join(f"{float(c):.4g}" for c in scs)
+            self.bridge_design_stock_label.setText(f"Stock concentration(s): {scs_txt} {units}")
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # populate the labels when the dialog appears
+        self._bridge_refresh_design_labels()
+
+    def _bridge_preview_from_last_char(self):
+        cm = self._bridge_get_calibration_manager()
+        if cm is None:
+            QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
+            return
+        mean_nL = cm.get_last_characterization_mean_nL()
+        if not mean_nL:
+            QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
+            return
+
+        em = self.model.experiment_model
+        reagent = self._bridge_get_current_reagent_name()
+        key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
+        if not key_opt:
+            QtWidgets.QMessageBox.warning(self, "Preview", "Could not match current reagent to the experiment design.")
+            return
+        key, _opt = key_opt
+
+        preview = em.preview_requantized_for_option(key, float(mean_nL))
+        if not preview.get("ok"):
+            QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
+            return
+
+        # Fill table
+        self._bridge_fill_preview_table(preview)
+        # In step 1 we still keep apply disabled (we’ll enable in Step 2)
+        self.bridge_apply_btn.setEnabled(False)
+
+    def _bridge_fill_preview_table(self, preview: dict):
+        rows = preview.get("rows") or []
+        nstocks = preview.get("n_stocks", 1)
+        self.bridge_table.clearContents()
+        self.bridge_table.setRowCount(len(rows))
+
+        if nstocks == 1:
+            # columns: Target, Achievable, Error, Drops, Δ/drop, Printed nL (new), Δ printed nL
+            for r, row in enumerate(rows):
+                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(f'{row["target_final"]:.6g} {row["units"]}'))
+                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(f'{row["achieved_final"]:.6g} {row["units"]}'))
+                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(f'{row["error"]:+.3g}'))
+                self.bridge_table.setItem(r, 3, QtWidgets.QTableWidgetItem(str(row["drops"])))
+                self.bridge_table.setItem(r, 4, QtWidgets.QTableWidgetItem(f'{row["delta_per_drop"]:.6g} {row["units"]}/drop'))
+                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(f'{row["printed_nL_new"]:.3f} nL'))
+                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(f'{row["printed_nL_shift"]:+.3f} nL'))
+        else:
+            # For two-stock, show a+b and indicate tuple in 'Drops'; Δ/drop shows "d1 | d2"
+            for r, row in enumerate(rows):
+                drops = row["drops"]; a, b = drops
+                dtxt = f'{row["delta_per_drop_leg1"]:.6g} | {row["delta_per_drop_leg2"]:.6g} {row["units"]}/drop'
+                self.bridge_table.setItem(r, 0, QtWidgets.QTableWidgetItem(f'{row["target_final"]:.6g} {row["units"]}'))
+                self.bridge_table.setItem(r, 1, QtWidgets.QTableWidgetItem(f'{row["achieved_final"]:.6g} {row["units"]}'))
+                self.bridge_table.setItem(r, 2, QtWidgets.QTableWidgetItem(f'{row["error"]:+.3g}'))
+                self.bridge_table.setItem(r, 3, QtWidgets.QTableWidgetItem(f'({a},{b}) = {a+b}'))
+                self.bridge_table.setItem(r, 4, QtWidgets.QTableWidgetItem(dtxt))
+                self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(f'{row["printed_nL_new"]:.3f} nL'))
+                self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(f'{row["printed_nL_shift"]:+.3f} nL'))
+
+        self.bridge_table.resizeColumnsToContents()
+        self.bridge_table.resizeRowsToContents()
+
+    def _bridge_apply_new_volume_disabled(self):
+        QtWidgets.QMessageBox.information(self, "Apply (Step 2)", 
+            "This preview looks good! In the next step we'll add the 'Apply' action "
+            "to update droplet counts & concentration key in the design.")
 
     def _selected_summary_row(self):
         """Return (row_index, dict_of_raw_values) from the selected table row or (None, None)."""

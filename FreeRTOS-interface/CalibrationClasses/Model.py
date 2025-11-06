@@ -676,7 +676,7 @@ class CalibrationManager(QObject):
 
         # Only complain if the caller explicitly asks
         if not quiet:
-        self.calibrationStageChanged.emit("No droplet emergence calibration available", "red")
+            self.calibrationStageChanged.emit("No droplet emergence calibration available", "red")
         return None
 
     def is_in_initial_position(self):
@@ -998,6 +998,29 @@ class CalibrationManager(QObject):
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
         }
         self.readinessChanged.emit(readiness)
+
+    def get_last_characterization_mean_nL(self) -> float | None:
+        """
+        Return the most recent mean droplet volume (nL) for the *current* stock solution,
+        preferring droplet_search rows, else the latest valid sweep row.
+        """
+        try:
+            rows = self.get_pressure_sweep_summary_rows()
+        except Exception:
+            rows = []
+        if not rows:
+            return None
+
+        # prefer 'search' rows, newest first
+        def _key(r):
+            # sort by phase preference, then timestamp
+            phase_rank = 0 if r.get("phase") == "search" else 1
+            return (phase_rank, r.get("timestamp") or "")
+        rows = sorted([r for r in rows if r.get("mean_nL") is not None and (r.get("valid", True))], key=_key)
+        if not rows:
+            return None
+        # take the last (newest) by our ordering
+        return float(rows[-1]["mean_nL"])
 
     def get_pressure_sweep_summary_rows(self):
         # Ensure self.data is populated from disk on first use
