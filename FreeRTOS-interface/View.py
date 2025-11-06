@@ -3387,9 +3387,9 @@ class ExperimentDesignDialog(QDialog):
         
         # Starting concentration
         start_spin = QDoubleSpinBox()
-        start_spin.setDecimals(6)
+        start_spin.setDecimals(2)
         start_spin.setRange(0.0, 1e9)
-        start_spin.setSingleStep(0.1)
+        start_spin.setSingleStep(1)
         start_spin.setValue(float(starting_conc or 0.0))
         start_spin.valueChanged.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 2, start_spin)
