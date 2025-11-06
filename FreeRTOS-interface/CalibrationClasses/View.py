@@ -1108,7 +1108,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Fill table
         self._bridge_fill_preview_table(preview)
         # In step 1 we still keep apply disabled (we’ll enable in Step 2)
-        self.bridge_apply_btn.setEnabled(False)
+        self.bridge_apply_btn.setEnabled(True)
 
     def _bridge_fill_preview_table(self, preview: dict):
         rows = preview.get("rows") or []
