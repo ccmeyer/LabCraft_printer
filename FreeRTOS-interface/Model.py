@@ -5117,6 +5117,153 @@ class ExperimentModel(QObject):
             max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
         return {"ok": True, "n_stocks": 2, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
 
+    def find_key_for_reagent(self, reagent_name: str, group_name: str | None = None) -> tuple[str, str | None]:
+        """
+        Resolve a reagent into the (factor_name, option_name_or_None) key used in plans_per_option.
+        - For additives, reagent_name == factor name, option is None.
+        - For choice groups, reagent_name == option name. If group_name is given, prefer that group.
+        Raises ValueError if not uniquely resolvable.
+        """
+        matches: list[tuple[str, str | None]] = []
+
+        for f in self.factors:
+            if f.kind == "additive":
+                o = f.options[0]
+                if o.name == reagent_name or f.name == reagent_name:
+                    matches.append((f.name, None))
+            else:  # choice
+                for o in f.options:
+                    if o.name == reagent_name:
+                        if group_name is None or group_name == f.name:
+                            matches.append((f.name, o.name))
+
+        if not matches:
+            raise ValueError(f"Reagent '{reagent_name}' not found in design.")
+        # If multiple matches (same option name across groups), require group_name
+        if len(matches) > 1 and group_name is None:
+            raise ValueError(f"Reagent '{reagent_name}' matches multiple groups; pass group_name.")
+        return matches[0]
+
+
+    # ---------- apply a new droplet size while keeping stock concentration fixed ----------
+    def apply_droplet_volume_for_option(
+        self,
+        factor_name: str,
+        option_name: str | None,
+        new_droplet_nL: float,
+        *,
+        write_keys_if_assigned: bool = True,
+    ) -> dict:
+        """
+        Rebind a specific option (or additive) to a NEW droplet volume, but KEEP the
+        already-chosen stock concentration the same. We recompute the droplets-per-target
+        mapping by rounding to the nearest integer multiple of delta:
+
+            delta = stock_concentration * new_droplet_nL / final_reaction_volume_nL
+
+        Rounding to nearest ensures the per-reagent printed-volume change is ≤ 0.5 drop, and the
+        fill reagent will absorb the difference so well volume stays at V.
+
+        Returns a small summary dict for UI debug/logging.
+        """
+        key = (factor_name, option_name)
+        plan = self.plans_per_option.get(key)
+        if not plan:
+            raise ValueError(f"No stock plan for {key}; run optimize_stock_solutions() first.")
+
+        if plan.get("n_stocks", 1) != 1:
+            # (You can extend this to 2-stock later; see note below.)
+            raise NotImplementedError("Step 2 currently supports single-stock reagents only.")
+
+        # ---- Fetch the OptionSpec so we can update its droplet_nL persistently ----
+        opt_obj = None
+        for f in self.factors:
+            if f.name == factor_name:
+                if f.kind == "additive":
+                    opt_obj = f.options[0]
+                else:
+                    for o in f.options:
+                        if o.name == option_name:
+                            opt_obj = o
+                            break
+                break
+        if opt_obj is None:
+            raise ValueError(f"Design contains no OptionSpec for {key}")
+
+        # ---- Inputs for delta ----
+        st = plan["stocks"][0]
+        c_stock = float(st["stock_concentration"])
+        units = st.get("units", opt_obj.units)
+        V_final = float(self.metadata.get("final_reaction_volume_nL",
+                                        self.metadata.get("target_reaction_volume_nL", 500.0)))
+        new_dv = float(new_droplet_nL)
+        if new_dv <= 0.0 or V_final <= 0.0:
+            raise ValueError("new_droplet_nL and final_reaction_volume_nL must be positive.")
+
+        delta = c_stock * new_dv / V_final
+
+        # ---- Targets & starting concentration (convert "final targets" → additive-only targets) ----
+        s_start = float(getattr(opt_obj, "starting_conc", 0.0) or 0.0)
+        # Exact t_add values must match what generate_experiment() computes.
+        targets_final = [float(t) for t in opt_obj.targets]
+        t_add_list = [max(0.0, t - s_start) for t in targets_final]
+
+        # ---- Rebuild droplets_per_target: key WITH t_add so resolve is exact ---
+        # Use rounding to nearest integer; guarantees ≤ 0.5 drop volume deviation.
+        dp: dict[float, int] = {}
+        for t_add in t_add_list:
+            k = 0 if delta <= 0 else int(round(t_add / delta))
+            k = max(0, k)
+            # normalize key to avoid float dust and to match resolve path
+            key_t = float(f"{t_add:.12g}")
+            dp[key_t] = k
+
+        # ---- Patch the live plan & stock table cache ----
+        st["droplet_volume_nL"] = new_dv
+        st["delta_per_drop"] = delta
+        st["units"] = units
+        st["droplets_per_target"] = dp
+        # keep quantum small so future near-match logic is permissive but irrelevant (we use exact t_add keys)
+        st["quantum"] = 1e-6
+
+        # Update the persistent design object so saves/loads reflect the new dv
+        opt_obj.droplet_nL = new_dv
+
+        # Update the cached stock rows so UI tables reflect new dv
+        updated_row = None
+        for r in self._stock_rows_cache:
+            if (
+                r.get("factor_name") == factor_name
+                and (r.get("option_name") or "") == (option_name or "")
+                and float(r.get("stock_concentration", -1)) == c_stock
+            ):
+                r["droplet_volume_nL"] = new_dv
+                r["delta_per_drop"] = delta
+                updated_row = r
+                break
+
+        # ---- Recompute the experiment so droplet counts and fill update everywhere ----
+        self.generate_experiment()
+
+        # Optionally rewrite keys immediately if wells are assigned (so conc_key reflects new final concs)
+        if write_keys_if_assigned and self._has_runtime_assignments():
+            self.write_keys_now()
+
+        # mark unsaved since design object changed
+        self.unsaved_changes = True
+
+        return {
+            "factor": factor_name,
+            "option": option_name,
+            "stock_concentration": c_stock,
+            "units": units,
+            "new_droplet_nL": new_dv,
+            "delta_per_drop": delta,
+            "example_map": dict(list(dp.items())[: min(5, len(dp))]),
+            "stock_row_updated": bool(updated_row),
+            "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
+        }
+
 
     # ------------- Public getters for the UI -------------
 
