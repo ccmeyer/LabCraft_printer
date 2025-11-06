@@ -5245,6 +5245,10 @@ class ExperimentModel(QObject):
         # ---- Recompute the experiment so droplet counts and fill update everywhere ----
         self.generate_experiment()
 
+        # ---- Rebind per-well droplet counts to match the new mapping ----
+        if self._has_runtime_assignments():
+            self._rebind_runtime_assignments_to_current_plans()
+
         # Optionally rewrite keys immediately if wells are assigned (so conc_key reflects new final concs)
         if write_keys_if_assigned and self._has_runtime_assignments():
             self.write_keys_now()
@@ -5816,6 +5820,71 @@ class ExperimentModel(QObject):
         # if a progress.json already exists with {}, we still prefer to rebuild from runtime
         if self._has_runtime_assignments():
             self.create_progress_file()   # will repopulate from current assignments
+
+    def _has_runtime_assignments(self) -> bool:
+        """
+        Heuristic check: do we have a runtime reaction collection / assignments?
+        Safe even if those objects are missing or have different APIs.
+        """
+        rc = getattr(self, "_runtime_reaction_collection", None)
+        if rc is None:
+            return False
+        try:
+            # Prefer explicit counters if present
+            if hasattr(rc, "n_assigned"):
+                return bool(rc.n_assigned)
+            if hasattr(rc, "size"):
+                return rc.size > 0
+            if hasattr(rc, "get_number_of_reactions"):
+                return rc.get_number_of_reactions() > 0
+        except Exception:
+            pass
+        # Fallback: presence of the object is good enough
+        return True
+
+
+    def _rebind_runtime_assignments_to_current_plans(self) -> bool:
+        """
+        Force per-well droplet counts in the runtime collection to match the
+        current plans_per_option mapping. Tries several common method names
+        so this stays robust across small interface differences.
+        Returns True if we successfully pushed new counts; False otherwise.
+        """
+        rc = getattr(self, "_runtime_reaction_collection", None)
+        if rc is None:
+            return False
+
+        it = self.iter_reaction_stock_droplets()
+
+        try:
+            # Most explicit: set each reaction's items
+            if hasattr(rc, "set_reaction_items_for_index"):
+                for idx, items in enumerate(it):
+                    rc.set_reaction_items_for_index(idx, items)
+                return True
+
+            # Bulk reset from an iterator
+            if hasattr(rc, "reset_from_iterator"):
+                rc.reset_from_iterator(self.iter_reaction_stock_droplets())
+                return True
+
+            # Bulk replace with a list
+            if hasattr(rc, "replace_all_reaction_items"):
+                rc.replace_all_reaction_items(list(self.iter_reaction_stock_droplets()))
+                return True
+
+            # Clear + append pattern
+            if hasattr(rc, "clear") and hasattr(rc, "append_reaction_items"):
+                rc.clear()
+                for items in self.iter_reaction_stock_droplets():
+                    rc.append_reaction_items(items)
+                return True
+
+        except Exception as e:
+            print(f"[ExperimentModel] WARNING: rebind of runtime assignments failed: {e}")
+
+        return False
+
 
     def read_progress_file(self, progress_file: str):
         import json
