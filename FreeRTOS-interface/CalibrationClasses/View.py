@@ -136,6 +136,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.camera_timer.timeout.connect(self.capture_image)
         self.capturing = False
 
+        self._bridge_preview_payload = None
+
         self.setWindowTitle("Droplet Imaging")
         self.resize(1200, 1000)
 
@@ -1073,6 +1075,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 units = ""
             scs_txt = ", ".join(f"{float(c):.4g}" for c in scs)
             self.bridge_design_stock_label.setText(f"Stock concentration(s): {scs_txt} {units}")
+        self._bridge_clear_preview()
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -1178,7 +1181,126 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{nie}\n\n(For Step 2 we only support single-stock reagents.)")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Apply failed", str(e))
-            
+
+    def _bridge_clear_preview(self):
+        self._bridge_preview_payload = None
+        self.bridge_apply_btn.setEnabled(False)
+        self.bridge_table.setRowCount(0)
+
+    def _populate_bridge_preview_table(self, preview: dict):
+        rows = preview.get("rows", [])
+        self.bridge_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            # small helpers
+            def it(v): 
+                return QtWidgets.QTableWidgetItem("" if v is None else str(v))
+            # columns: "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+            self.bridge_table.setItem(i, 0, it(f"{float(r['target_final']):.6g}"))
+            self.bridge_table.setItem(i, 1, it(f"{float(r['achieved_final']):.6g}"))
+            self.bridge_table.setItem(i, 2, it(f"{float(r['error']):+.6g}"))
+
+            drops = r.get("drops")
+            drops_txt = f"{drops[0]}+{drops[1]}" if isinstance(drops, tuple) else str(int(drops))
+            self.bridge_table.setItem(i, 3, it(drops_txt))
+
+            if "delta_per_drop" in r:
+                d_txt = f"{float(r['delta_per_drop']):.6g}"
+            else:
+                d_txt = f"{float(r['delta_per_drop_leg1']):.6g}|{float(r['delta_per_drop_leg2']):.6g}"
+            self.bridge_table.setItem(i, 4, it(d_txt))
+
+            self.bridge_table.setItem(i, 5, it(f"{float(r['printed_nL_new']):.3f}"))
+            self.bridge_table.setItem(i, 6, it(f"{float(r['printed_nL_shift']):+.3f}"))
+
+    def _bridge_preview_from_last_char(self):
+        cm = self._bridge_get_calibration_manager()
+        if cm is None:
+            QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
+            return
+        mean_nL = cm.get_last_characterization_mean_nL()
+        if not mean_nL:
+            QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
+            return
+
+        em = self.model.experiment_model
+        reagent = self._bridge_get_current_reagent_name()
+        if not reagent:
+            QtWidgets.QMessageBox.warning(self, "Preview", "No current reagent detected.")
+            return
+
+        try:
+            key = em.find_key_for_reagent(reagent)  # -> (factor_name, option_or_None)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Preview", str(e))
+            return
+
+        # build preview
+        preview = em.preview_requantized_for_option(key, float(mean_nL), quantum=0.1)
+        if not preview.get("ok"):
+            QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
+            return
+
+        # Fill table and stash payload for Apply
+        self._populate_bridge_preview_table(preview)
+        self._bridge_preview_payload = {
+            "factor_name": key[0],
+            "option_name": key[1],
+            "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
+            "n_stocks": int(preview.get("n_stocks", 1)),
+        }
+
+        # Enable Apply only for single-stock in Step 2
+        can_apply = self._bridge_preview_payload["n_stocks"] == 1
+        self.bridge_apply_btn.setEnabled(can_apply)
+        self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
+
+    def _apply_previewed_droplet_volume(self):
+        payload = getattr(self, "_bridge_preview_payload", None)
+        if not payload:
+            QtWidgets.QMessageBox.information(self, "Apply", "Nothing to apply.")
+            return
+
+        if payload.get("n_stocks", 1) != 1:
+            QtWidgets.QMessageBox.warning(self, "Apply", "Two-stock plans aren’t supported for auto-apply yet.")
+            return
+
+        em = self.model.experiment_model
+        key = (payload["factor_name"], payload["option_name"])
+        plan = em.get_plan_for_key(key)
+        if not plan:
+            QtWidgets.QMessageBox.warning(self, "Apply", "No stock plan found; optimize first.")
+            return
+
+        try:
+            cur_dv = float(plan["stocks"][0]["droplet_volume_nL"])
+        except Exception:
+            cur_dv = None
+        new_dv = float(payload["new_droplet_nL"])
+
+        # If truly identical, tell user; otherwise call through to the model
+        if cur_dv is not None and abs(new_dv - cur_dv) < 1e-9:
+            QtWidgets.QMessageBox.information(self, "Apply", "New droplet volume equals current design; nothing to change.")
+            return
+
+        try:
+            em.apply_droplet_volume_for_option(
+                payload["factor_name"], payload["option_name"], new_dv, write_keys_if_assigned=True
+            )
+        except NotImplementedError as e:
+            QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))
+            return
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
+            return
+
+        # Clean up UI, reflect the change
+        self._bridge_clear_preview()
+        self._bridge_refresh_design_labels()
+        QtWidgets.QMessageBox.information(
+            self, "Applied",
+            f"Updated {payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''} to {new_dv:.3f} nL."
+        )
+        
     def _selected_summary_row(self):
         """Return (row_index, dict_of_raw_values) from the selected table row or (None, None)."""
         sel = self.summary_table.selectionModel().selectedRows()
