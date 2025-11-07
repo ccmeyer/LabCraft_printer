@@ -280,17 +280,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
         calib_grid.addWidget(self.scan_trajectory_button, crow, 0, 1, 2); crow += 1
 
-        self.calibrate_droplet_search_button = QtWidgets.QPushButton("Search for Droplets")
-        self.calibrate_droplet_search_button.clicked.connect(self.toggle_start_droplet_search_calibration)
-        calib_grid.addWidget(self.calibrate_droplet_search_button, crow, 0, 1, 2); crow += 1
+        # self.calibrate_droplet_search_button = QtWidgets.QPushButton("Search for Droplets")
+        # self.calibrate_droplet_search_button.clicked.connect(self.toggle_start_droplet_search_calibration)
+        # calib_grid.addWidget(self.calibrate_droplet_search_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
+        self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
+        calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
         self.calibrate_characterization_button = QtWidgets.QPushButton("Manually Characterize Droplets")
         self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
         calib_grid.addWidget(self.calibrate_characterization_button, crow, 0, 1, 2); crow += 1
-
-        # self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
-        # self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
-        # calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
         self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
         self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
