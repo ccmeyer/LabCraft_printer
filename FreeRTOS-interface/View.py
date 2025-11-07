@@ -3111,9 +3111,9 @@ class ExperimentDesignDialog(QDialog):
         self.root.addLayout(right, stretch=3) # make right wider
 
         # ---------- Reagents table (top-right) ----------
-        self.reagent_table = QTableWidget(0, 7, self)
+        self.reagent_table = QTableWidget(0, 8, self)
         self.reagent_table.setHorizontalHeaderLabels([
-            "Reagent Name", "Group", "Starting", "Targets", "Units", "Droplet Vol (nL)", "Delete"
+            "Reagent Name", "Group", "Starting", "Targets", "Units", "Set Stock Conc", "Droplet Vol (nL)", "Delete"
         ])
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -3122,8 +3122,9 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setColumnWidth(2, 90)   # Starting
         self.reagent_table.setColumnWidth(3, 230)   # Targets (wider)
         self.reagent_table.setColumnWidth(4, 90)    # Units
-        self.reagent_table.setColumnWidth(5, 90)    # Droplet vol
-        self.reagent_table.setColumnWidth(6, 90)    # Delete
+        self.reagent_table.setColumnWidth(5, 120)   # Set Stock Conc
+        self.reagent_table.setColumnWidth(6, 90)    # Droplet vol
+        self.reagent_table.setColumnWidth(7, 90)    # Delete
         right.addWidget(self.reagent_table)
 
         # ---------- Stock table (bottom-right) ----------
@@ -3366,16 +3367,17 @@ class ExperimentDesignDialog(QDialog):
 
     def _add_reagent_row(self, name: str = "", group: str = GROUP_ADDITIVE,
                         targets: str = "0, 1, 2", units: str = "mM",
-                        droplet_nL: float = 10.0, starting_conc: float = 0.0):
+                        droplet_nL: float = 10.0, starting_conc: float = 0.0,
+                        forced_stock_conc: float | None = None):
         row = self.reagent_table.rowCount()
         self.reagent_table.insertRow(row)
 
-        # Name
+        # 0 Name
         name_edit = QLineEdit(name or f"reagent-{row+1}")
         name_edit.textEdited.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 0, name_edit)
 
-        # Group
+        # 1 Group
         group_combo = self._make_group_combo()
         group_combo.setCurrentIndex(
             group_combo.findText(group if group in self.choice_groups or group == self.GROUP_ADDITIVE
@@ -3384,46 +3386,52 @@ class ExperimentDesignDialog(QDialog):
         group_combo.activated.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 1, group_combo)
 
-        
-        # Starting concentration
+        # 2 Starting concentration
         start_spin = QDoubleSpinBox()
-        start_spin.setDecimals(2)
-        start_spin.setRange(0.0, 1e9)
-        start_spin.setSingleStep(1)
+        start_spin.setDecimals(4)
+        start_spin.setRange(0.0, 1e12)
+        start_spin.setSingleStep(0.1)
         start_spin.setValue(float(starting_conc or 0.0))
         start_spin.valueChanged.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 2, start_spin)
 
-        # Targets
+        # 3 Targets
         tgt_edit = QLineEdit(targets)
         tgt_edit.textEdited.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 3, tgt_edit)
 
-        # Units
+        # 4 Units
         units_edit = QLineEdit(units)
         units_edit.textEdited.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, 4, units_edit)
 
-        # Droplet vol
+        # 5 Set Stock Conc (blank => optimize)
+        stock_edit = QLineEdit("" if forced_stock_conc in (None, 0.0) else str(forced_stock_conc))
+        stock_edit.setPlaceholderText("auto")
+        stock_edit.setToolTip("Leave blank to auto-optimize. Enter a positive number to force the stock concentration.")
+        stock_edit.textEdited.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, 5, stock_edit)
+
+        # 6 Droplet vol
         dv_spin = QDoubleSpinBox()
         dv_spin.setDecimals(1)
         dv_spin.setRange(0.1, 100_000.0)
         dv_spin.setSingleStep(1.0)
         dv_spin.setValue(float(droplet_nL))
         dv_spin.valueChanged.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, 5, dv_spin)
+        self.reagent_table.setCellWidget(row, 6, dv_spin)
 
-        # Delete
+        # 7 Delete
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
-        self.reagent_table.setCellWidget(row, 6, del_btn)
+        self.reagent_table.setCellWidget(row, 7, del_btn)
 
         self._schedule_auto_update()
 
     def _delete_row(self, r: int):
         self.reagent_table.removeRow(r)
         for i in range(self.reagent_table.rowCount()):
-            btn: QPushButton = self.reagent_table.cellWidget(i, 6)  # column 6 now
+            btn: QPushButton = self.reagent_table.cellWidget(i, 7)  # delete is col 7 now
             try:
                 btn.clicked.disconnect()
             except Exception:
@@ -3451,6 +3459,7 @@ class ExperimentDesignDialog(QDialog):
         self.model.generate_experiment()
         self._refresh_stock_table()
         self._update_summary_labels()
+        self._apply_target_color_state()
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
@@ -3465,7 +3474,8 @@ class ExperimentDesignDialog(QDialog):
                     targets=", ".join(str(x) for x in o.targets),
                     units=o.units,
                     droplet_nL=o.droplet_nL,
-                    starting_conc=getattr(o, "starting_conc", 0.0)
+                    starting_conc=getattr(o, "starting_conc", 0.0),
+                    forced_stock_conc=getattr(o, "forced_stock_conc", None)
                 )
         # Choice groups
         for f in getattr(self.model, "factors", []):
@@ -3478,55 +3488,62 @@ class ExperimentDesignDialog(QDialog):
                         targets=", ".join(str(x) for x in o.targets),
                         units=o.units,
                         droplet_nL=o.droplet_nL,
-                        starting_conc=getattr(o, "starting_conc", 0.0)
+                        starting_conc=getattr(o, "starting_conc", 0.0),
+                        forced_stock_conc=getattr(o, "forced_stock_conc", None)
                     )
 
     # -----------------------------
     # Model rebuild & metadata
     # -----------------------------
-
+    def _parse_float_or_none(self, s: str) -> float | None:
+        s = (s or "").strip()
+        if not s:
+            return None
+        try:
+            v = float(s)
+            return v if v > 0 else None
+        except ValueError:
+            return None
+        
     def _rebuild_model_from_table(self):
         """Clear and rebuild factors in the model based on the table."""
-        # reset all factors
         self.model.factors.clear()
-        # We'll add groups on demand
         created_choice_groups: Set[str] = set()
 
-        # iterate rows
         for row in range(self.reagent_table.rowCount()):
             name_edit: QLineEdit = self.reagent_table.cellWidget(row, 0)
             group_combo: QComboBox = self.reagent_table.cellWidget(row, 1)
             start_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 2)
             tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, 3)
             units_edit: QLineEdit = self.reagent_table.cellWidget(row, 4)
-            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 5)
+            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, 5)
+            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, 6)
 
             r_name = (name_edit.text() or "").strip()
             r_group = group_combo.currentText()
             r_start = float(start_spin.value() if start_spin is not None else 0.0)
             r_targets = self._parse_targets(tgt_edit.text())
             r_units = (units_edit.text() or "mM").strip()
+            r_forced = self._parse_float_or_none(stock_edit.text())
             r_dv = float(dv_spin.value())
 
             if not r_name or not r_targets:
-                # skip incomplete rows
                 continue
 
             if r_group == self.GROUP_ADDITIVE:
-                # Each additive is its own factor with a single option named as reagent
                 self.model.add_additive(name=r_name, targets=r_targets,
                                         units=r_units, droplet_nL=r_dv,
-                                        starting_conc=r_start)
+                                        starting_conc=r_start,
+                                        forced_stock_conc=r_forced)
             else:
-                # ensure group exists once
                 if r_group not in created_choice_groups:
                     self.model.add_choice_group(r_group)
                     created_choice_groups.add(r_group)
-                # add option to that group
                 self.model.add_choice_option(group_name=r_group, option_name=r_name,
-                                             targets=r_targets, units=r_units, droplet_nL=r_dv,
-                                             starting_conc=r_start)
-
+                                            targets=r_targets, units=r_units, droplet_nL=r_dv,
+                                            starting_conc=r_start,
+                                            forced_stock_conc=r_forced)
+        
     def _update_metadata_from_controls(self):
         # If randomize is checked and no seed yet, create a fresh one
         randomize = self.randomize_chk.isChecked()
@@ -3577,6 +3594,46 @@ class ExperimentDesignDialog(QDialog):
         # UI updates come from signals; but we also force a local refresh
         self._refresh_stock_table()
         self._update_summary_labels()
+        self._apply_target_color_state()
+
+    def _apply_target_color_state(self):
+        """
+        Colors each Targets cell red if a forced stock exists and at least one target is unreachable
+        for that reagent (based on the model's preview map). Also sets a helpful tooltip.
+        """
+        preview = {}
+        try:
+            preview = self.model.get_unreachable_preview_map() or {}
+        except Exception:
+            preview = {}
+
+        for row in range(self.reagent_table.rowCount()):
+            name_edit: QLineEdit = self.reagent_table.cellWidget(row, 0)
+            group_combo: QComboBox = self.reagent_table.cellWidget(row, 1)
+            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, 5)
+            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, 3)
+
+            reagent_name = (name_edit.text() or "").strip()
+            group_name = group_combo.currentText()
+
+            # If no forced stock, clear any styling
+            if not (stock_edit.text() or "").strip():
+                tgt_edit.setStyleSheet("")
+                tgt_edit.setToolTip("")
+                continue
+
+            # Map to key used by the model
+            key = (reagent_name, None) if group_name == self.GROUP_ADDITIVE else (group_name, reagent_name)
+            unreachable = preview.get(key, [])
+
+            if unreachable:
+                tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("dark_red", "#8a0303"))
+                # Pretty tooltip list
+                msg = "Unreachable with forced stock:\n" + ", ".join(str(x) for x in unreachable)
+                tgt_edit.setToolTip(msg)
+            else:
+                tgt_edit.setStyleSheet("")
+                tgt_edit.setToolTip("")
 
     # -----------------------------
     # Stock table & summary updates
