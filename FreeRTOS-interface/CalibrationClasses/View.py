@@ -1046,10 +1046,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _bridge_refresh_design_labels(self):
         em = self.model.experiment_model
         reagent = self._bridge_get_current_reagent_name()
-        key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
-
         self.bridge_reagent_label.setText(f"Reagent: {reagent or '—'}")
 
+        # Special case: fill reagent
+        if reagent and reagent == em.get_fill_reagent_name():
+            dv = float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+            self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {dv:.3f}  (fill)")
+            self.bridge_design_targets_label.setText("Design targets: — (fill top-up)")
+            self.bridge_design_stock_label.setText("Stock concentration(s): —")
+            self._bridge_clear_preview()
+            return
+
+        # Normal reagents (unchanged)
+        key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
         if not key_opt:
             self.bridge_design_dv_label.setText("Design droplet volume (nL): —")
             self.bridge_design_targets_label.setText("Design targets: —")
@@ -1059,8 +1068,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         key, opt = key_opt
         self.bridge_design_dv_label.setText(f"Design droplet volume (nL): {opt.droplet_nL:.3f}")
         targets = em.get_targets_for_key(key)
-        self.bridge_design_targets_label.setText("Design targets: " + (", ".join(f"{t:g}" for t in targets) if targets else "—"))
-
+        self.bridge_design_targets_label.setText(
+            "Design targets: " + (", ".join(f"{t:g}" for t in targets) if targets else "—")
+        )
         plan = em.get_plan_for_key(key)
         if not plan:
             self.bridge_design_stock_label.setText("Stock concentration(s): —")
@@ -1076,39 +1086,39 @@ class DropletImagingDialog(QtWidgets.QDialog):
             scs_txt = ", ".join(f"{float(c):.4g}" for c in scs)
             self.bridge_design_stock_label.setText(f"Stock concentration(s): {scs_txt} {units}")
         self._bridge_clear_preview()
-
+        
     def showEvent(self, ev):
         super().showEvent(ev)
         # populate the labels when the dialog appears
         self._bridge_refresh_design_labels()
 
-    def _bridge_preview_from_last_char(self):
-        cm = self._bridge_get_calibration_manager()
-        if cm is None:
-            QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
-            return
-        mean_nL = cm.get_last_characterization_mean_nL()
-        if not mean_nL:
-            QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
-            return
+    # def _bridge_preview_from_last_char(self):
+    #     cm = self._bridge_get_calibration_manager()
+    #     if cm is None:
+    #         QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
+    #         return
+    #     mean_nL = cm.get_last_characterization_mean_nL()
+    #     if not mean_nL:
+    #         QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
+    #         return
 
-        em = self.model.experiment_model
-        reagent = self._bridge_get_current_reagent_name()
-        key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
-        if not key_opt:
-            QtWidgets.QMessageBox.warning(self, "Preview", "Could not match current reagent to the experiment design.")
-            return
-        key, _opt = key_opt
+    #     em = self.model.experiment_model
+    #     reagent = self._bridge_get_current_reagent_name()
+    #     key_opt = em.find_option_by_reagent_name(reagent) if reagent else None
+    #     if not key_opt:
+    #         QtWidgets.QMessageBox.warning(self, "Preview", "Could not match current reagent to the experiment design.")
+    #         return
+    #     key, _opt = key_opt
 
-        preview = em.preview_requantized_for_option(key, float(mean_nL))
-        if not preview.get("ok"):
-            QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
-            return
+    #     preview = em.preview_requantized_for_option(key, float(mean_nL))
+    #     if not preview.get("ok"):
+    #         QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
+    #         return
 
-        # Fill table
-        self._bridge_fill_preview_table(preview)
-        # In step 1 we still keep apply disabled (we’ll enable in Step 2)
-        self.bridge_apply_btn.setEnabled(True)
+    #     # Fill table
+    #     self._bridge_fill_preview_table(preview)
+    #     # In step 1 we still keep apply disabled (we’ll enable in Step 2)
+    #     self.bridge_apply_btn.setEnabled(True)
 
     def _bridge_fill_preview_table(self, preview: dict):
         rows = preview.get("rows") or []
@@ -1217,9 +1227,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if cm is None:
             QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
             return
+
         mean_nL = cm.get_last_characterization_mean_nL()
         if not mean_nL:
             QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
+            return
+        try:
+            mean_nL = float(mean_nL)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Preview", "Characterization mean is not numeric.")
+            return
+        if mean_nL <= 0:
+            QtWidgets.QMessageBox.warning(self, "Preview", "Characterization mean must be > 0.")
             return
 
         em = self.model.experiment_model
@@ -1228,19 +1247,53 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Preview", "No current reagent detected.")
             return
 
+        # --- Special case: fill reagent
+        if reagent == em.get_fill_reagent_name():
+            preview = em.preview_fill_requantized(mean_nL)
+            if not preview.get("ok"):
+                QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
+                return
+
+            # Reuse the existing table with a single summary row
+            self.bridge_table.clearContents()
+            self.bridge_table.setRowCount(1)
+            row = preview["rows"][0]
+
+            def _it(txt):
+                return QtWidgets.QTableWidgetItem("" if txt is None else str(txt))
+
+            # Columns: "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+            self.bridge_table.setItem(0, 0, _it("—"))                      # Target
+            self.bridge_table.setItem(0, 1, _it("—"))                      # Achievable
+            self.bridge_table.setItem(0, 2, _it("—"))                      # Error
+            self.bridge_table.setItem(0, 3, _it(preview["total_drops_new"]))      # Drops (total)
+            self.bridge_table.setItem(0, 4, _it(f'{mean_nL:.6g} nL/drop'))        # Δ/drop (repurposed)
+            self.bridge_table.setItem(0, 5, _it(f'{row["printed_nL_new"]:.3f} nL'))
+            self.bridge_table.setItem(0, 6, _it(f'{row["printed_nL_shift"]:+.3f} nL'))
+            self.bridge_table.resizeColumnsToContents()
+            self.bridge_table.resizeRowsToContents()
+
+            # Stash payload and enable Apply
+            self._bridge_preview_payload = {
+                "is_fill": True,
+                "new_fill_nL": float(mean_nL),
+            }
+            self.bridge_apply_btn.setEnabled(True)
+            self.bridge_apply_btn.setToolTip("")
+            return
+
+        # --- Normal reagents (unchanged logic)
         try:
             key = em.find_key_for_reagent(reagent)  # -> (factor_name, option_or_None)
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Preview", str(e))
             return
 
-        # build preview
         preview = em.preview_requantized_for_option(key, float(mean_nL), quantum=0.1)
         if not preview.get("ok"):
             QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
             return
 
-        # Fill table and stash payload for Apply
         self._populate_bridge_preview_table(preview)
         self._bridge_preview_payload = {
             "factor_name": key[0],
@@ -1248,23 +1301,50 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
         }
-
-        # Enable Apply only for single-stock in Step 2
         can_apply = self._bridge_preview_payload["n_stocks"] == 1
         self.bridge_apply_btn.setEnabled(can_apply)
         self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
-
+    
     def _apply_previewed_droplet_volume(self):
         payload = getattr(self, "_bridge_preview_payload", None)
         if not payload:
             QtWidgets.QMessageBox.information(self, "Apply", "Nothing to apply.")
             return
 
+        em = self.model.experiment_model
+
+        # --- Special case: fill reagent
+        if payload.get("is_fill"):
+            try:
+                out = em.apply_fill_droplet_volume(float(payload["new_fill_nL"]), write_keys_if_assigned=True)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
+                return
+
+            # Refresh UI tables that show the per-stock + fill totals
+            if hasattr(self.main_window, "refresh_stock_table"):
+                try:
+                    self.main_window.refresh_stock_table()
+                except Exception:
+                    pass
+
+            self._bridge_clear_preview()
+            self._bridge_refresh_design_labels()
+            QtWidgets.QMessageBox.information(
+                self, "Applied (Fill)",
+                (
+                    f"Updated fill droplet volume to {out['new_fill_nL']:.3f} nL."
+                    f"\nTotal fill drops: {out['total_drops_old']} → {out['total_drops_new']} "
+                    f"({out['total_drops_delta']:+d})"
+                )
+            )
+            return
+
+        # --- Normal reagents (existing logic) ---
         if payload.get("n_stocks", 1) != 1:
             QtWidgets.QMessageBox.warning(self, "Apply", "Two-stock plans aren’t supported for auto-apply yet.")
             return
 
-        em = self.model.experiment_model
         key = (payload["factor_name"], payload["option_name"])
         plan = em.get_plan_for_key(key)
         if not plan:
@@ -1277,7 +1357,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             cur_dv = None
         new_dv = float(payload["new_droplet_nL"])
 
-        # If truly identical, tell user; otherwise call through to the model
         if cur_dv is not None and abs(new_dv - cur_dv) < 1e-9:
             QtWidgets.QMessageBox.information(self, "Apply", "New droplet volume equals current design; nothing to change.")
             return
@@ -1293,7 +1372,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
             return
 
-        # Clean up UI, reflect the change
         self._bridge_clear_preview()
         self._bridge_refresh_design_labels()
         QtWidgets.QMessageBox.information(

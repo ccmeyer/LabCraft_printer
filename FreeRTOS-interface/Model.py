@@ -4163,7 +4163,7 @@ class ExperimentModel(QObject):
                             return {"best": None, "reason": f"No feasible plan (single or two-stock) for option '{f.name}/{opt.name}'."}
                         bucket.append((opt.name, singles, twos))
                 choice_groups[f.name] = bucket
-                
+
         # Selection indices (single-stock arrays)
         add_idx = {name: 0 for name, singles, _ in additives if singles}
         ch_idx: Dict[Tuple[str, str], int] = {}
@@ -5991,6 +5991,96 @@ class ExperimentModel(QObject):
             print(f"[ExperimentModel] WARNING: rebind of runtime assignments failed: {e}")
 
         return False
+
+    def get_fill_reagent_name(self) -> str:
+        return str(self.metadata.get("fill_reagent_name", "Water"))
+
+    def preview_fill_requantized(self, new_fill_droplet_nL: float) -> dict:
+        """
+        Preview effect of changing ONLY the fill droplet size on total drop counts.
+        Does not mutate state.
+        """
+        try:
+            new_fill_droplet_nL = float(new_fill_droplet_nL)
+        except Exception:
+            return {"ok": False, "reason": "Invalid fill droplet volume."}
+        if new_fill_droplet_nL <= 0:
+            return {"ok": False, "reason": "Fill droplet volume must be > 0."}
+
+        # Ensure we have a current reactions frame with nonfill volumes.
+        if self._reactions_df is None or self._reactions_df.empty or "nonfill_volume_nL" not in self._reactions_df.columns:
+            # Safe regen using current plans/metadata; this uses current fill dv (old)
+            self.generate_experiment()
+
+        df = self._reactions_df
+        if df is None or df.empty or "nonfill_volume_nL" not in df.columns:
+            return {"ok": False, "reason": "No reaction grid available to preview."}
+
+        V_print = float(self.metadata.get("target_reaction_volume_nL", 500.0))
+        old_fill_dv = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+
+        # Per-reaction calculation of old/new fill drops
+        remaining = (V_print - df["nonfill_volume_nL"]).clip(lower=0.0)
+        drops_old = (remaining / old_fill_dv).round().astype(int)
+        drops_new = (remaining / new_fill_droplet_nL).round().astype(int)
+
+        total_old = int(drops_old.sum())
+        total_new = int(drops_new.sum())
+
+        printed_nL_old = float(total_old * old_fill_dv)
+        printed_nL_new = float(total_new * new_fill_droplet_nL)
+
+        # Construct a lightweight, table-friendly "rows" payload (single summary row)
+        rows = [{
+            "target_final": None,
+            "achieved_final": None,
+            "error": 0.0,
+            "drops": total_new,
+            "delta_per_drop": new_fill_droplet_nL,    # repurpose this column to show nL/drop for fill
+            "printed_nL_new": printed_nL_new,
+            "printed_nL_old": printed_nL_old,
+            "printed_nL_shift": printed_nL_new - printed_nL_old,
+            "units": "--",
+        }]
+
+        return {
+            "ok": True,
+            "is_fill": True,
+            "rows": rows,
+            "new_fill_droplet_nL": new_fill_droplet_nL,
+            "total_drops_old": total_old,
+            "total_drops_new": total_new,
+            "total_drops_delta": total_new - total_old,
+        }
+
+    def apply_fill_droplet_volume(self, new_fill_droplet_nL: float, *, write_keys_if_assigned: bool = True) -> dict:
+        """
+        Set the fill droplet size and recompute experiment so all totals refresh.
+        """
+        new_fill_droplet_nL = float(new_fill_droplet_nL)
+        if new_fill_droplet_nL <= 0.0:
+            raise ValueError("Fill droplet volume must be > 0.")
+
+        old = float(self.metadata.get("fill_droplet_volume_nL", 10.0))
+
+        # Preview before we apply, so we can report useful deltas after recompute
+        prev = self.preview_fill_requantized(new_fill_droplet_nL)
+        # Apply
+        self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
+        self.generate_experiment()
+
+        # If wells are already assigned and you want the CSVs to reflect the new totals immediately:
+        if write_keys_if_assigned and self._has_runtime_assignments():
+            self.write_keys_now()
+
+        self.unsaved_changes = True
+        return {
+            "old_fill_nL": old,
+            "new_fill_nL": new_fill_droplet_nL,
+            "total_drops_old": prev.get("total_drops_old"),
+            "total_drops_new": prev.get("total_drops_new"),
+            "total_drops_delta": prev.get("total_drops_delta"),
+        }
 
 
     def read_progress_file(self, progress_file: str):
