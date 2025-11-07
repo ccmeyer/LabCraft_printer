@@ -277,12 +277,12 @@ class CalibrationManager(QObject):
         self.add_calibration_to_queue('nozzle_position')
         self.add_calibration_to_queue('nozzle_focus')
         self.add_calibration_to_queue('droplet_emergence')
-        self.add_calibration_to_queue('pressure')
-        self.add_calibration_to_queue('trajectory')
-        self.add_calibration_to_queue('droplet_search')
-        # self.add_calibration_to_queue('pressure_scan')
-        # self.add_calibration_to_queue('pressure_trajectory')
-        # self.add_calibration_to_queue('pressure_sweep_characterization')
+        # self.add_calibration_to_queue('pressure')
+        # self.add_calibration_to_queue('trajectory')
+        # self.add_calibration_to_queue('droplet_search')
+        self.add_calibration_to_queue('pressure_scan')
+        self.add_calibration_to_queue('pressure_trajectory')
+        self.add_calibration_to_queue('pressure_sweep_characterization')
         self.start_calibration_queue()
 
     def add_calibration_to_queue(self, calibration_name):
@@ -995,9 +995,11 @@ class CalibrationManager(QObject):
         readiness = {
             "pressure_calibration":           pack(PressureCalibrationProcess),
             "pressure_scan":                  pack(PressureBandCalibrationProcess),
-            "trajectory":                     pack(TrajectoryCalibrationProcess),
+            "droplet_trajectory":             pack(TrajectoryCalibrationProcess),
+            # "trajectory":                     pack(TrajectoryCalibrationProcess),
             "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
-            "droplet_search":                 pack(DropletSearchCalibrationProcess),
+            # "droplet_search":                 pack(DropletSearchCalibrationProcess),
+            "droplet_characterization":       pack(DropletSearchCalibrationProcess),
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
         }
         self.readinessChanged.emit(readiness)
