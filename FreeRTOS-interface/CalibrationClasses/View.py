@@ -264,21 +264,33 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
         calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
 
-        self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
-        self.calibrate_pressure_scan_button.clicked.connect(self.toggle_start_pressure_scan_calibration)
-        calib_grid.addWidget(self.calibrate_pressure_scan_button, crow, 0, 1, 2); crow += 1
+        self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
+        self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
+        calib_grid.addWidget(self.calibrate_pressure_button, crow, 0, 1, 2); crow += 1
 
-        self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
-        self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
-        calib_grid.addWidget(self.scan_trajectory_button, crow, 0, 1, 2); crow += 1
+        # self.calibrate_pressure_scan_button = QtWidgets.QPushButton("Scan Pressures")
+        # self.calibrate_pressure_scan_button.clicked.connect(self.toggle_start_pressure_scan_calibration)
+        # calib_grid.addWidget(self.calibrate_pressure_scan_button, crow, 0, 1, 2); crow += 1
 
-        self.calibrate_characterization_button = QtWidgets.QPushButton("Characterize Droplets")
+        self.calibrate_trajectory_button = QtWidgets.QPushButton("Calibrate Droplet Trajectory")
+        self.calibrate_trajectory_button.clicked.connect(self.toggle_start_trajectory_calibration)
+        calib_grid.addWidget(self.calibrate_trajectory_button, crow, 0, 1, 2); crow += 1
+
+        # self.scan_trajectory_button = QtWidgets.QPushButton("Scan Trajectory Pressures")
+        # self.scan_trajectory_button.clicked.connect(self.toggle_start_pressure_trajectory_calibration)
+        # calib_grid.addWidget(self.scan_trajectory_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_droplet_search_button = QtWidgets.QPushButton("Search for Droplets")
+        self.calibrate_droplet_search_button.clicked.connect(self.toggle_start_droplet_search_calibration)
+        calib_grid.addWidget(self.calibrate_droplet_search_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_characterization_button = QtWidgets.QPushButton("Manually Characterize Droplets")
         self.calibrate_characterization_button.clicked.connect(self.toggle_start_characterization_calibration)
         calib_grid.addWidget(self.calibrate_characterization_button, crow, 0, 1, 2); crow += 1
 
-        self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
-        self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
-        calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
+        # self.calibrate_pressure_sweep_button = QtWidgets.QPushButton("Pressure Sweep Characterization")
+        # self.calibrate_pressure_sweep_button.clicked.connect(self.toggle_start_pressure_sweep_calibration)
+        # calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
         self.calibrate_timecourse_button = QtWidgets.QPushButton("Droplet Timecourse Imaging")
         self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
@@ -759,11 +771,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
-        self.calibrate_pressure_scan_button.setText("Scan Pressures")
-        self.scan_trajectory_button.setText("Scan Trajectory Pressures")
+        self.calibrate_pressure_button.setText("Calibrate Pressure")
+        self.calibrate_droplet_search_button.setText("Search for Droplets")
+        # self.calibrate_pressure_scan_button.setText("Scan Pressures")
+        # self.scan_trajectory_button.setText("Scan Trajectory Pressures")
         self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
-        self.calibrate_characterization_button.setText("Characterize Droplets")
-        self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
+        self.calibrate_characterization_button.setText("Manually Characterize Droplets")
+        # self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
 
     def toggle_start_head_prime_calibration(self):
         """
@@ -817,6 +831,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
 
+    def toggle_start_pressure_calibration(self):
+        """
+        Toggles whether the pressure calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_pressure_button.setText("Calibrate Pressure")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_pressure_button.setText("Stop Calibration")
+            self.controller.start_pressure_calibration()
+
     def toggle_start_pressure_scan_calibration(self):
         """
         Start/stop the pressure scan using UI-provided low/high/step.
@@ -844,6 +871,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.scan_trajectory_button.setText("Stop Calibration")
             self.controller.start_pressure_trajectory_calibration()
+
+    def toggle_start_droplet_search_calibration(self):
+        """
+        Toggles whether the droplet search calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_search_button.setText("Search for Droplets")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_search_button.setText("Stop Calibration")
+            self.controller.start_droplet_search_calibration()
 
     def toggle_start_characterization_calibration(self):
         """
@@ -942,12 +982,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Applies a clear visual indication for inactive buttons.
         """
         mapping = {
-            # 'pressure_calibration':            self.calibrate_pressure_button,
-            'pressure_scan':                   self.calibrate_pressure_scan_button,
-            # 'droplet_trajectory':              self.calibrate_trajectory_button,
-            'trajectory_pressure_scan':        self.scan_trajectory_button,
+            'pressure_calibration':            self.calibrate_pressure_button,
+            # 'pressure_scan':                   self.calibrate_pressure_scan_button,
+            'droplet_trajectory':              self.calibrate_trajectory_button,
+            # 'trajectory_pressure_scan':        self.scan_trajectory_button,
+            'droplet_search':                  self.calibrate_search_button,
             'droplet_characterization':        self.calibrate_characterization_button,  # (same readiness as search)
-            'pressure_sweep_characterization': self.calibrate_pressure_sweep_button,
+            # 'pressure_sweep_characterization': self.calibrate_pressure_sweep_button,
         }
 
         # # If you also want the search button to mirror "droplet_characterization":
