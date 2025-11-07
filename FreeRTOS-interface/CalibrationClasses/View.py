@@ -516,6 +516,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.itemSelectionChanged.connect(self._update_load_button_state)
         # Double-click on any cell loads that row immediately
         self.summary_table.itemDoubleClicked.connect(self._handle_summary_double_click)
+        self.summary_table.itemSelectionChanged.connect(self._on_summary_selection_changed)
 
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
@@ -1269,10 +1270,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Preview", "No calibration manager available.")
             return
 
-        mean_nL = cm.get_last_characterization_mean_nL()
-        if not mean_nL:
-            QtWidgets.QMessageBox.information(self, "Preview", "No recent characterization found for this stock.")
+        mean_nL, source = self._preferred_char_mean_nL()
+        if mean_nL is None:
+            QtWidgets.QMessageBox.information(
+                self, "Preview",
+                "No characterization found (selected row has no mean and no recent result exists)."
+            )
             return
+
         try:
             mean_nL = float(mean_nL)
         except Exception:
@@ -1288,14 +1293,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Preview", "No current reagent detected.")
             return
 
-        # --- Special case: fill reagent
+        # Optional: warn if selected row was flagged invalid (still allow preview)
+        if source == "selected":
+            _, raw = self._selected_summary_row()
+            if raw and raw.get("valid") is False:
+                QtWidgets.QMessageBox.information(
+                    self, "Using flagged condition",
+                    "The selected row was flagged invalid; preview will still use its mean volume."
+                )
+
+        # --- Special case: fill reagent ---
         if reagent == em.get_fill_reagent_name():
             preview = em.preview_fill_requantized(mean_nL)
             if not preview.get("ok"):
                 QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
                 return
 
-            # Reuse the existing table with a single summary row
+            # Reuse the existing single-row table fill
             self.bridge_table.clearContents()
             self.bridge_table.setRowCount(1)
             row = preview["rows"][0]
@@ -1303,12 +1317,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             def _it(txt):
                 return QtWidgets.QTableWidgetItem("" if txt is None else str(txt))
 
-            # Columns: "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
-            self.bridge_table.setItem(0, 0, _it("—"))                      # Target
-            self.bridge_table.setItem(0, 1, _it("—"))                      # Achievable
-            self.bridge_table.setItem(0, 2, _it("—"))                      # Error
-            self.bridge_table.setItem(0, 3, _it(preview["total_drops_new"]))      # Drops (total)
-            self.bridge_table.setItem(0, 4, _it(f'{mean_nL:.6g} nL/drop'))        # Δ/drop (repurposed)
+            self.bridge_table.setItem(0, 0, _it("—"))
+            self.bridge_table.setItem(0, 1, _it("—"))
+            self.bridge_table.setItem(0, 2, _it("—"))
+            self.bridge_table.setItem(0, 3, _it(preview["total_drops_new"]))
+            self.bridge_table.setItem(0, 4, _it(f'{mean_nL:.6g} nL/drop'))
             self.bridge_table.setItem(0, 5, _it(f'{row["printed_nL_new"]:.3f} nL'))
             self.bridge_table.setItem(0, 6, _it(f'{row["printed_nL_shift"]:+.3f} nL'))
             self.bridge_table.resizeColumnsToContents()
@@ -1323,7 +1336,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_apply_btn.setToolTip("")
             return
 
-        # --- Normal reagents (unchanged logic)
+        # --- Normal reagents ---
         try:
             key = em.find_key_for_reagent(reagent)  # -> (factor_name, option_or_None)
         except Exception as e:
@@ -1345,7 +1358,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         can_apply = self._bridge_preview_payload["n_stocks"] == 1
         self.bridge_apply_btn.setEnabled(can_apply)
         self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
-    
+        self.stageLabel.setText(f"Status: Preview using {'selected row' if source=='selected' else 'latest'} ({mean_nL:.3f} nL)")
+
     def _apply_previewed_droplet_volume(self):
         payload = getattr(self, "_bridge_preview_payload", None)
         if not payload:
@@ -1453,6 +1467,49 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _handle_summary_double_click(self, _item):
         """Double-click loads immediately (same as pressing the button)."""
         self.load_selected_summary_row()
+
+    # NEW: return the selected row's mean droplet volume (nL) or None
+    def _selected_summary_mean_nL(self) -> float | None:
+        _, raw = self._selected_summary_row()
+        if not raw:
+            return None
+        val = raw.get("mean_nL")
+        try:
+            v = float(val) if val is not None else None
+            return v if (v is not None and v > 0) else None
+        except Exception:
+            return None
+
+    # NEW: choose selected-row mean if available; else fall back to latest
+    def _preferred_char_mean_nL(self):
+        """
+        Returns (mean_nL, source) where source ∈ {"selected", "latest"} or (None, None)
+        """
+        sel = self._selected_summary_mean_nL()
+        if sel is not None:
+            return sel, "selected"
+        cm = self._bridge_get_calibration_manager()
+        if cm is None:
+            return None, None
+        m = cm.get_last_characterization_mean_nL()
+        try:
+            return (float(m) if m is not None else None), "latest"
+        except Exception:
+            return None, None
+        
+    # NEW: keep preview button label/tooltips in sync with selection
+    def _update_preview_button_label(self):
+        if self._selected_summary_mean_nL() is not None:
+            self.bridge_preview_btn.setText("Preview from selected row")
+            self.bridge_preview_btn.setToolTip("Uses the selected table row’s mean droplet volume.")
+        else:
+            self.bridge_preview_btn.setText("Preview from last characterization")
+            self.bridge_preview_btn.setToolTip("Uses the most recent valid characterization for this stock.")
+
+    # NEW: one slot to update both controls when selection changes
+    def _on_summary_selection_changed(self):
+        self._update_load_button_state()
+        self._update_preview_button_label()
 
     def load_selected_summary_row(self):
         """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
