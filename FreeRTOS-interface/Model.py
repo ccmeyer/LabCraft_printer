@@ -3804,6 +3804,13 @@ class ExperimentModel(QObject):
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
 
+        # --- uploaded design support ---
+        # If not None: a list of dicts representing explicit reactions
+        # keyed by (factor_name, None) -> final target conc.
+        self._uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] | None = None
+        # Remember source file (optional, for UI / save)
+        self._uploaded_design_source: str | None = None
+
     # ------------- Factor management -------------
 
     def add_additive(self, name: str, targets: List[float], units: str, droplet_nL: float,
@@ -4706,6 +4713,13 @@ class ExperimentModel(QObject):
         (additive_name, None) -> target
         (group_name, option_name) -> target
         """
+
+        # ---------- Uploaded design path ----------
+        if self._uploaded_reactions is not None:
+            # Each entry is already a mapping (factor_name, None) -> final target conc
+            # just return a shallow copy to avoid accidental mutation.
+            return [dict(r) for r in self._uploaded_reactions]
+
         # ---- Gather factors ----
         additives = [f for f in self.factors if f.kind == "additive"]
         choices   = [f for f in self.factors if f.kind == "choice"]
@@ -4867,6 +4881,150 @@ class ExperimentModel(QObject):
 
         # True unreachable for this stock's mapping
         return 0, None, True, nearest_key
+
+    # -----------------------------
+    # Uploaded design API
+    # -----------------------------
+    def has_uploaded_design(self) -> bool:
+        return self._uploaded_reactions is not None
+
+    def clear_uploaded_design(self):
+        """Reset back to normal (factor-defined) design."""
+        self._uploaded_reactions = None
+        self._uploaded_design_source = None
+        # Keep factors; UI will rebuild them as usual.
+        # Recompute plans/grid on next optimize/generate.
+        self.plans_per_option.clear()
+        self._stock_rows_cache.clear()
+        self._fill_row_cache = None
+        self._reactions_df = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL = None
+        self.stock_updated.emit()
+
+    def set_uploaded_design_from_dataframe(
+        self,
+        df: "pd.DataFrame",
+        *,
+        units_default: str = "",
+        droplet_nL_default: float = 10.0,
+        starting_conc_default: float = 0.0,
+        source_path: str | None = None,
+    ):
+        """
+        Interpret a wide DataFrame where each column is a reagent with embedded
+        units in the header, and each row is one reaction.
+
+        Expected column header format (flexible but simple):
+
+            <ReagentName> [<units>]
+
+        Examples:
+            "NaCl mM"
+            "MgCl2 (mM)"
+            "Buffer"
+
+        We'll parse:
+          - reagent name: everything before the first "(" or last space
+          - units: last token or content in parentheses, if it looks unit-like.
+        """
+        import re
+
+        # -------- 1) Parse columns → (name, units) --------
+        col_specs: list[tuple[str, str, str]] = []   # (col_name, reagent_name, units)
+        for col in df.columns:
+            raw = str(col).strip()
+            if not raw:
+                continue
+
+            units = units_default
+            name = raw
+
+            # Try parentheses first: "Name (units)"
+            m = re.match(r"^(.*)\((.+)\)\s*$", raw)
+            if m:
+                name = m.group(1).strip()
+                units = m.group(2).strip()
+            else:
+                # Fall back to last token heuristic: "Name units"
+                parts = raw.split()
+                if len(parts) > 1:
+                    name = " ".join(parts[:-1]).strip()
+                    units = parts[-1].strip()
+
+            if not name:
+                name = raw
+            col_specs.append((col, name, units))
+
+        # -------- 2) Build factors list from these columns --------
+        self.factors.clear()
+        for _, reagent_name, units in col_specs:
+            # We'll populate targets after we know all columns
+            fac = FactorSpec(name=reagent_name, kind="additive", options=[
+                OptionSpec(
+                    name=reagent_name,
+                    targets=[],            # fill shortly
+                    units=units or units_default or "arb",
+                    droplet_nL=float(droplet_nL_default),
+                    starting_conc=float(starting_conc_default),
+                )
+            ])
+            self.factors.append(fac)
+
+        # Map reagent_name -> OptionSpec to fill targets
+        opt_by_name: dict[str, OptionSpec] = {}
+        for f in self.factors:
+            if f.kind == "additive" and f.options:
+                opt_by_name[f.name] = f.options[0]
+
+        # -------- 3) For each column, extract targets and build reaction dicts --------
+        # We'll keep a list of per-row reaction dicts keyed by (factor_name, None).
+        uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
+
+        # Pre-collect all column vectors as floats
+        col_values: dict[str, list[float]] = {}
+        for col_name, reagent_name, _units in col_specs:
+            vals: list[float] = []
+            for v in df[col_name].tolist():
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    vals.append(0.0)
+                else:
+                    try:
+                        vals.append(float(v))
+                    except Exception:
+                        vals.append(0.0)
+            col_values[reagent_name] = vals
+
+        n_rows = len(df.index)
+
+        # fill targets list with unique values per reagent (final concentrations)
+        for reagent_name, vals in col_values.items():
+            opt = opt_by_name.get(reagent_name)
+            if not opt:
+                continue
+            uniq = sorted(set(float(v) for v in vals))
+            opt.targets = uniq
+
+        # build per-row reactions
+        for i in range(n_rows):
+            rxn: dict[tuple[str, Optional[str]], float] = {}
+            for reagent_name, vals in col_values.items():
+                if i < len(vals):
+                    v = float(vals[i])
+                else:
+                    v = 0.0
+                key = (reagent_name, None)  # additive style
+                rxn[key] = v
+            uploaded_reactions.append(rxn)
+
+        self._uploaded_reactions = uploaded_reactions
+        self._uploaded_design_source = source_path
+        # clear downstream caches; UI will re-optimize/generate
+        self.plans_per_option.clear()
+        self._stock_rows_cache.clear()
+        self._fill_row_cache = None
+        self._reactions_df = pd.DataFrame()
+        self._last_worst_nonfill_volume_nL = None
+        self.stock_updated.emit()
 
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
@@ -5434,7 +5592,11 @@ class ExperimentModel(QObject):
     # ------------- Save/Load (optional; keep simple) -------------
 
     def to_dict(self) -> Dict:
-        return {
+        """
+        Serialize the design input (metadata + factors) plus, if present,
+        any explicit uploaded/manual reaction set.
+        """
+        data: Dict[str, object] = {
             "metadata": self.metadata,
             "factors": [
                 {
@@ -5443,29 +5605,77 @@ class ExperimentModel(QObject):
                     "options": [
                         {
                             "name": o.name,
-                            "targets": o.targets,
+                            "targets": list(o.targets),
                             "units": o.units,
-                            "droplet_nL": o.droplet_nL,
-                            "starting_conc": getattr(o, "starting_conc", 0.0),
-                            "forced_stock_conc": getattr(o, "forced_stock_conc", None),
-                        } for o in f.options
-                    ]
-                } for f in self.factors
-            ]
+                            "droplet_nL": float(o.droplet_nL),
+                            "starting_conc": float(getattr(o, "starting_conc", 0.0) or 0.0),
+                            "forced_stock_conc": (
+                                float(getattr(o, "forced_stock_conc"))
+                                if getattr(o, "forced_stock_conc", None) is not None
+                                else None
+                            ),
+                        }
+                        for o in f.options
+                    ],
+                }
+                for f in self.factors
+            ],
         }
 
+        # If this design is driven by an explicit uploaded reaction list,
+        # serialize it as well so we can restore it on load.
+        if self._uploaded_reactions is not None:
+            import os
+
+            serialized_rxns: list[list[dict]] = []
+            for rxn in self._uploaded_reactions:
+                # Represent each reaction as a list of {factor, option, target}
+                row: list[dict] = []
+                for (fac, opt), val in rxn.items():
+                    row.append(
+                        {
+                            "factor": fac,
+                            "option": opt,
+                            "target": float(val),
+                        }
+                    )
+                serialized_rxns.append(row)
+
+            csv_name = None
+            if self._uploaded_design_source:
+                try:
+                    csv_name = os.path.basename(self._uploaded_design_source)
+                except Exception:
+                    csv_name = self._uploaded_design_source
+
+            data["uploaded_design"] = {
+                "reactions": serialized_rxns,
+                # Just the filename; full path is reconstructed using experiment_dir_path
+                "csv_filename": csv_name,
+            }
+
+        return data
+
     def from_dict(self, d: Dict):
+        """
+        Rehydrate metadata, factors, and (optionally) an uploaded/manual
+        reaction list from a design dictionary.
+        """
+        import os
+
+        # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
         self.factors = []
+
         for f in d.get("factors", []):
             fs = FactorSpec(name=f["name"], kind=f["kind"], options=[])
-            for o in f["options"]:
+            for o in f.get("options", []):
                 opt = OptionSpec(
                     name=o["name"],
-                    targets=list(o["targets"]),
-                    units=o["units"],
-                    droplet_nL=float(o["droplet_nL"]),
-                    starting_conc=float(o.get("starting_conc", 0.0))
+                    targets=list(o.get("targets", [])),
+                    units=o.get("units", ""),
+                    droplet_nL=float(o.get("droplet_nL", 10.0)),
+                    starting_conc=float(o.get("starting_conc", 0.0)),
                 )
                 if "forced_stock_conc" in o and o["forced_stock_conc"] is not None:
                     try:
@@ -5474,12 +5684,55 @@ class ExperimentModel(QObject):
                         setattr(opt, "forced_stock_conc", None)
                 fs.options.append(opt)
             self.factors.append(fs)
-        # clear previous results
+
+        # --- clear derived caches ---
         self.plans_per_option.clear()
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
         self._last_worst_nonfill_volume_nL = None
+
+        # --- uploaded/manual design state (NEW) ---
+        self._uploaded_reactions = None
+        self._uploaded_design_source = None
+
+        ud = d.get("uploaded_design")
+        if isinstance(ud, dict):
+            raw_rxns = ud.get("reactions") or []
+            uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
+
+            for rxn_list in raw_rxns:
+                # Expect a list of {factor, option, target}
+                rxn_map: dict[tuple[str, Optional[str]], float] = {}
+                if isinstance(rxn_list, list):
+                    for spec in rxn_list:
+                        if not isinstance(spec, dict):
+                            continue
+                        fac = spec.get("factor")
+                        if not fac:
+                            continue
+                        opt = spec.get("option", None)
+                        tgt = spec.get("target", 0.0)
+                        try:
+                            v = float(tgt)
+                        except Exception:
+                            v = 0.0
+                        rxn_map[(fac, opt)] = v
+                if rxn_map:
+                    uploaded_reactions.append(rxn_map)
+
+            if uploaded_reactions:
+                self._uploaded_reactions = uploaded_reactions
+
+            csv_fn = ud.get("csv_filename")
+            if csv_fn:
+                if self.experiment_dir_path:
+                    self._uploaded_design_source = os.path.join(self.experiment_dir_path, csv_fn)
+                else:
+                    # Design-only load (no experiment dir yet) – store as-is
+                    self._uploaded_design_source = csv_fn
+
+        # Notify UI that the stock table needs rebuilding
         self.stock_updated.emit()
 
     # -----------------------------
@@ -5550,6 +5803,11 @@ class ExperimentModel(QObject):
             os.makedirs(self.experiment_dir_path)
         self.update_all_paths()
 
+        # if this design uses an uploaded/manual reaction list,
+        # write a CSV representation into the experiment directory.
+        if self._uploaded_reactions is not None:
+            self._materialize_uploaded_design_csv()
+
         # Always save the design and seed a progress.json (may be empty now)
         self.save_experiment()
         self.create_progress_file()
@@ -5605,6 +5863,12 @@ class ExperimentModel(QObject):
 
         # Rehydrate
         self.from_dict(data)  # resets caches/signals
+        
+        # If this design has an uploaded/manual reaction list, make sure a CSV
+        # exists in the experiment directory for the user to re-import later.
+        if self._uploaded_reactions is not None and self.experiment_dir_path:
+            if not self._uploaded_design_source or not os.path.exists(self._uploaded_design_source):
+                self._materialize_uploaded_design_csv()
 
         # Recompute plans & grid
         res = self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
@@ -5654,15 +5918,6 @@ class ExperimentModel(QObject):
         self.progress_data = progress
         with open(self.progress_file_path, "w") as f:
             json.dump(progress, f, indent=4)
-
-    # def progress_to_key(self) -> "pd.DataFrame":
-    #     """Make a wide CSV with wells as rows, stock_id as columns, target droplets as values."""
-    #     import pandas as pd
-    #     data = {}
-    #     for well_id, entry in self.progress_data.items():
-    #         reagents = entry.get("reagents", {})
-    #         data[well_id] = {sid: d["target_droplets"] for sid, d in reagents.items()}
-    #     return pd.DataFrame.from_dict(data, orient="index")
 
     def progress_to_key(self) -> "pd.DataFrame":
         """
@@ -5881,6 +6136,88 @@ class ExperimentModel(QObject):
             return
         self.create_key_file()
         self.create_concentration_key_file()
+
+    def _materialize_uploaded_design_csv(self) -> Optional[str]:
+        """
+        If we have an uploaded/manual design (self._uploaded_reactions),
+        write a canonical CSV representation into the experiment directory.
+
+        Returns the path if written, else None.
+        """
+        if self._uploaded_reactions is None:
+            return None
+        if not self.experiment_dir_path:
+            return None
+
+        try:
+            import os
+            import pandas as pd  # safe even if already imported at module level
+
+            # Collect all (factor, option) keys that appear in any reaction
+            all_keys: set[tuple[str, Optional[str]]] = set()
+            for rxn in self._uploaded_reactions:
+                all_keys.update(rxn.keys())
+            if not all_keys:
+                return None
+
+            # Consistent ordering: by factor name then option name (if any)
+            sorted_keys = sorted(all_keys, key=lambda k: (k[0], k[1] or ""))
+
+            # Build column headers: use current factors/options to get display name + units
+            key_to_col: Dict[tuple[str, Optional[str]], str] = {}
+            for fac, opt in sorted_keys:
+                display_name = None
+                units = ""
+
+                for f in self.factors:
+                    if f.name != fac:
+                        continue
+                    if f.kind == "additive":
+                        if not f.options:
+                            continue
+                        o = f.options[0]
+                        display_name = o.name
+                        units = o.units
+                    else:
+                        for o in f.options:
+                            if opt is None or o.name == opt:
+                                display_name = o.name
+                                units = o.units
+                                break
+                    if display_name is not None:
+                        break
+
+                if display_name is None:
+                    # Fallback: something deterministic
+                    display_name = fac if opt is None else f"{fac}/{opt}"
+
+                header = display_name
+                if units:
+                    header = f"{header} {units}"
+                key_to_col[(fac, opt)] = header
+
+            # Build rows
+            rows: list[dict[str, float]] = []
+            for rxn in self._uploaded_reactions:
+                row: dict[str, float] = {}
+                for key in sorted_keys:
+                    header = key_to_col[key]
+                    v = float(rxn.get(key, 0.0))
+                    row[header] = v
+                rows.append(row)
+
+            df = pd.DataFrame(rows)
+
+            dest = os.path.join(self.experiment_dir_path, "uploaded_design.csv")
+            df.to_csv(dest, index=False)
+
+            # Remember this path so it can be reported / re-encoded in the JSON
+            self._uploaded_design_source = dest
+            return dest
+
+        except Exception as e:
+            print(f"[ExperimentModel] WARNING: could not materialize uploaded design CSV: {e}")
+            return None
     
     def _has_runtime_assignments(self) -> bool:
         """
@@ -6147,6 +6484,11 @@ class ExperimentModel(QObject):
         if not os.path.exists(self.experiment_dir_path):
             os.makedirs(self.experiment_dir_path)
         self.update_all_paths()
+
+        # also materialize the uploaded design CSV into the new folder, if any
+        if self._uploaded_reactions is not None:
+            self._materialize_uploaded_design_csv()
+
         self.save_experiment()
         self.create_progress_file()
         self.create_key_file()
@@ -6196,6 +6538,11 @@ class ExperimentModel(QObject):
         self.progress_data = {}
         self.calibration_file_path = None
         self.key_file_path = None
+
+        # clear any uploaded/manual reaction list state
+        self._uploaded_reactions = None
+        self._uploaded_design_source = None
+
 
         self.unsaved_changes = False
         self.stock_updated.emit()

@@ -17,6 +17,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import json
 import os
 import random
@@ -3078,6 +3079,15 @@ class ExperimentDesignDialog(QDialog):
     GROUP_ADDITIVE = "Additive"
     GROUP_NEW = "New choice group…"
 
+    COL_REAGENT_NAME = 0
+    COL_GROUP        = 1
+    COL_STARTING     = 2
+    COL_TARGETS      = 3
+    COL_UNITS        = 4
+    COL_SET_STOCK    = 5
+    COL_DROPLET      = 6
+    COL_DELETE       = 7
+
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
         self.main_window = main_window
@@ -3092,6 +3102,11 @@ class ExperimentDesignDialog(QDialog):
         self.choice_groups: Set[str] = set(
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
+
+        # Uploaded design UI state
+        self._uploaded_design_active: bool = bool(self.model.has_uploaded_design())
+        self._uploaded_design_path: str | None = getattr(self.model, "_uploaded_design_source", None)
+
 
         # Debounced auto-update timer (4)
         self._auto_timer = QTimer(self)
@@ -3233,6 +3248,15 @@ class ExperimentDesignDialog(QDialog):
         self.add_reagent_btn.clicked.connect(self._on_add_reagent)
         controls_col.addWidget(self.add_reagent_btn)
 
+        # --- Manual design vs uploaded design controls ---
+        self.upload_design_btn = QPushButton("Upload reaction design (CSV)…")
+        self.upload_design_btn.clicked.connect(self._on_upload_design)
+        controls_col.addWidget(self.upload_design_btn)
+
+        self.reset_upload_btn = QPushButton("Reset uploaded design")
+        self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
+        controls_col.addWidget(self.reset_upload_btn)
+
         self.run_btn = new_btn = QPushButton("Optimize and Generate")
         # self.run_btn.setStyleSheet("background-color: #b33; color: white;")
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
@@ -3295,6 +3319,8 @@ class ExperimentDesignDialog(QDialog):
         self._load_factors_into_table()
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
+        self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
+
 
     # -----------------------------
     # Table row utilities
@@ -3491,6 +3517,219 @@ class ExperimentDesignDialog(QDialog):
                         starting_conc=getattr(o, "starting_conc", 0.0),
                         forced_stock_conc=getattr(o, "forced_stock_conc", None)
                     )
+    # -----------------------------
+    # Uploaded design mode toggling
+    # -----------------------------
+    def _apply_uploaded_design_mode_to_ui(self, active: bool):
+        """
+        Turn CSV-upload mode on/off.
+
+        When active:
+          - Disable manual *structure* editing (adding/removing reagents, changing groups/targets/units).
+          - Keep 'Starting', 'Set Stock Conc', and 'Droplet Vol' fully editable.
+        """
+        self._uploaded_design_active = bool(active)
+
+        #
+        # Top-level controls:
+        #
+        # These should be disabled when a custom design CSV is in control of the reactions.
+        #
+        self.add_reagent_btn.setEnabled(not active)
+        # If you have any "Remove reagent", "Clone reagent", etc. buttons, disable them here too.
+
+        # You may or may not want to disable subset-design controls;
+        # with an uploaded design they're usually meaningless, so I disable them:
+        self.subset_chk.setEnabled(not active)
+        self.reduction_spin.setEnabled(not active and self.subset_chk.isChecked())
+
+        # "New experiment" and "Load Design…" usually remain allowed so user can leave upload-mode.
+        # If in your previous version you disabled them, you can keep that behavior if you prefer.
+        # self.new_btn.setEnabled(not active)
+        # self.load_btn.setEnabled(not active)
+
+        #
+        # Per-row reagent table behavior:
+        #
+        #  Lock these columns:
+        #    - Reagent Name (0)
+        #    - Group (1)
+        #    - Targets (3)
+        #    - Units (4)
+        #    - Delete (7)
+        #
+        #  Keep editable:
+        #    - Starting (2)
+        #    - Set Stock Conc (5)
+        #    - Droplet Vol (6)
+        #
+        lock_cols = {
+            self.COL_REAGENT_NAME,
+            self.COL_GROUP,
+            self.COL_TARGETS,
+            self.COL_UNITS,
+            self.COL_DELETE,
+        }
+
+        for row in range(self.reagent_table.rowCount()):
+            for col in range(self.reagent_table.columnCount()):
+                w = self.reagent_table.cellWidget(row, col)
+                if w is None:
+                    continue
+
+                if col in lock_cols:
+                    # Structural / identity columns – freeze when active
+                    if isinstance(w, QLineEdit):
+                        w.setReadOnly(active)
+                    elif isinstance(w, QComboBox):
+                        w.setEnabled(not active)
+                    elif isinstance(w, QPushButton):
+                        w.setEnabled(not active)
+                    else:
+                        w.setEnabled(not active)
+                else:
+                    # Starting conc, Set Stock, Droplet Vol – always editable
+                    if isinstance(w, QLineEdit):
+                        w.setReadOnly(False)
+                    else:
+                        w.setEnabled(True)
+    # def _apply_uploaded_design_mode_to_ui(self):
+        # """
+        # When an uploaded design is active:
+        # - Reagent table stays visible but cells become read-only.
+        # - Add Reagent / group / subset design controls are disabled.
+        # - Upload button disabled; Reset button enabled.
+        # """
+        # active = self._uploaded_design_active
+
+        # # Reagent table: disable edits but still allow viewing
+        # self.reagent_table.setDisabled(active)
+
+        # # Manual design buttons
+        # self.add_reagent_btn.setDisabled(active)
+
+        # # Subset design controls aren't meaningful for explicit designs
+        # self.subset_chk.setDisabled(active)
+        # self.reduction_spin.setDisabled(active)
+
+        # # Upload/reset buttons
+        # self.upload_design_btn.setDisabled(active)
+        # self.reset_upload_btn.setEnabled(active)
+
+        # # A small status hint
+        # if active:
+        #     src = self._uploaded_design_path or "(unsaved CSV)"
+        #     self.status_lbl.setText(
+        #         f"Using uploaded reaction design from: {src}. "
+        #         "Manual reagent editing is disabled. Click 'Reset uploaded design' to revert."
+        #     )
+        # else:
+        #     # Only clear status if nothing else has set it
+        #     if "Using uploaded reaction design" in self.status_lbl.text():
+        #         self.status_lbl.setText("")
+
+    def _on_upload_design(self):
+        """
+        Let user pick a CSV containing explicit reactions.
+        Each column is a reagent final concentration; each row is a reaction.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select reaction design CSV",
+            "",
+            "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading CSV", f"Could not read file:\n{e}")
+            return
+
+        if df.empty:
+            QMessageBox.warning(self, "Empty file", "The selected CSV has no data.")
+            return
+
+        # Push into the model – this will rebuild factors and uploaded reactions.
+        # We default to same droplet volume and units assumptions used elsewhere.
+        self.model.set_uploaded_design_from_dataframe(
+            df,
+            units_default="",                    # user units come from header; blank defaults to "arb"
+            droplet_nL_default=10.0,
+            starting_conc_default=0.0,
+            source_path=path,
+        )
+
+        # Update local flags
+        self._uploaded_design_active = True
+        self._uploaded_design_path = path
+
+        # Rebuild UI from the model's new factors
+        self.choice_groups = set(
+            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
+        )
+        self._load_factors_into_table()
+
+        # Immediately optimize & generate using the uploaded design
+        res = self.model.optimize_stock_solutions(
+            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
+        )
+        if not res.get("best"):
+            QMessageBox.warning(
+                self,
+                "Optimization failed",
+                f"Could not find feasible stock solutions for the uploaded design:\n{res.get('reason','Unknown')}"
+            )
+            # Keep the design for inspection, but stock table may be empty.
+        else:
+            self.model.generate_experiment()
+
+        self._refresh_stock_table()
+        self._update_summary_labels()
+        self._apply_target_color_state()
+        self._apply_uploaded_design_mode_to_ui(active=True)
+
+    def _on_reset_uploaded_design(self):
+        if not self._uploaded_design_active and not self.model.has_uploaded_design():
+            return
+
+        resp = QMessageBox.question(
+            self,
+            "Reset uploaded design",
+            "This will discard the imported reaction design and return to manual design mode.\n\n"
+            "Existing reagents will remain in the table, but you can edit them again.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        # Clear model's uploaded design
+        self.model.clear_uploaded_design()
+        self._uploaded_design_active = False
+        self._uploaded_design_path = None
+
+        # We keep the current factors (the uploaded design already set them).
+        # Just rebuild table UI from whatever is now in model.factors.
+        self.choice_groups = set(
+            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
+        )
+        self._load_factors_into_table()
+
+        # Re-optimize and generate in standard mode
+        res = self.model.optimize_stock_solutions(
+            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
+        )
+        if res.get("best"):
+            self.model.generate_experiment()
+
+        self._refresh_stock_table()
+        self._update_summary_labels()
+        self._apply_target_color_state()
+        self._apply_uploaded_design_mode_to_ui(active=False)
 
     # -----------------------------
     # Model rebuild & metadata
@@ -3852,6 +4091,11 @@ class ExperimentDesignDialog(QDialog):
 
         # Load into the model (recomputes optimization + grid)
         self.model.load_experiment(path, exp_dir)
+
+        # After loading, refresh uploaded-design UI state
+        self._uploaded_design_active = self.model.has_uploaded_design()
+        self._uploaded_design_path = getattr(self.model, "_uploaded_design_source", None)
+        self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
 
         # Repaint UI from model
         self.choice_groups = set(
