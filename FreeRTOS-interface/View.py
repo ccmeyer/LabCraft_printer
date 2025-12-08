@@ -3320,6 +3320,8 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
         self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
+        # Also enforce manual-assignment locking if applicable
+        self._apply_manual_assignment_lock_state()
 
 
     # -----------------------------
@@ -3593,40 +3595,7 @@ class ExperimentDesignDialog(QDialog):
                         w.setReadOnly(False)
                     else:
                         w.setEnabled(True)
-    # def _apply_uploaded_design_mode_to_ui(self):
-        # """
-        # When an uploaded design is active:
-        # - Reagent table stays visible but cells become read-only.
-        # - Add Reagent / group / subset design controls are disabled.
-        # - Upload button disabled; Reset button enabled.
-        # """
-        # active = self._uploaded_design_active
-
-        # # Reagent table: disable edits but still allow viewing
-        # self.reagent_table.setDisabled(active)
-
-        # # Manual design buttons
-        # self.add_reagent_btn.setDisabled(active)
-
-        # # Subset design controls aren't meaningful for explicit designs
-        # self.subset_chk.setDisabled(active)
-        # self.reduction_spin.setDisabled(active)
-
-        # # Upload/reset buttons
-        # self.upload_design_btn.setDisabled(active)
-        # self.reset_upload_btn.setEnabled(active)
-
-        # # A small status hint
-        # if active:
-        #     src = self._uploaded_design_path or "(unsaved CSV)"
-        #     self.status_lbl.setText(
-        #         f"Using uploaded reaction design from: {src}. "
-        #         "Manual reagent editing is disabled. Click 'Reset uploaded design' to revert."
-        #     )
-        # else:
-        #     # Only clear status if nothing else has set it
-        #     if "Using uploaded reaction design" in self.status_lbl.text():
-        #         self.status_lbl.setText("")
+        self._apply_manual_assignment_lock_state()
 
     def _on_upload_design(self):
         """
@@ -3730,6 +3699,60 @@ class ExperimentDesignDialog(QDialog):
         self._update_summary_labels()
         self._apply_target_color_state()
         self._apply_uploaded_design_mode_to_ui(active=False)
+
+    def _manual_assignments_active(self) -> bool:
+        """
+        Return True if the ExperimentModel currently has explicit
+        well assignments (manual layout) configured.
+        """
+        em = self.model
+        try:
+            if hasattr(em, "has_explicit_well_assignments") and callable(em.has_explicit_well_assignments):
+                return bool(em.has_explicit_well_assignments())
+            wells = getattr(em, "_uploaded_well_ids", None)
+            return bool(wells)
+        except Exception:
+            return False
+
+    def _apply_manual_assignment_lock_state(self):
+        """
+        When explicit well assignments are present:
+          - Force replicates to 0 in the UI and disable the spinbox.
+          - Disable randomize checkbox.
+          - Disable random seed spinbox (regardless of randomize state).
+        """
+        active = self._manual_assignments_active()
+
+        # Replicates spin: when manual layout is active, force 1 and lock.
+        if hasattr(self, "rep_spin") and self.rep_spin is not None:
+            blocker = QSignalBlocker(self.rep_spin)
+            if active:
+                # Allow 1 in the spinbox so it matches metadata
+                if self.rep_spin.minimum() != 1:
+                    self.rep_spin.setMinimum(1)
+                if self.rep_spin.value() != 1:
+                    self.rep_spin.setValue(1)
+                self.rep_spin.setEnabled(False)
+            else:
+                # Restore normal behavior
+                if self.rep_spin.minimum() != 1:
+                    self.rep_spin.setMinimum(1)
+                self.rep_spin.setEnabled(True)
+
+        # Randomize checkbox
+        if hasattr(self, "randomize_chk") and self.randomize_chk is not None:
+            self.randomize_chk.setEnabled(not active)
+
+        # Random seed spinbox: only enabled if not manual & randomize is checked
+        if hasattr(self, "random_seed_spin") and self.random_seed_spin is not None:
+            self.random_seed_spin.setEnabled(
+                (not active) and self.randomize_chk.isChecked()
+            )
+
+        if hasattr(self, "start_col_spin") and self.start_col_spin is not None:
+            self.start_col_spin.setEnabled(not active)
+        if hasattr(self, "start_row_spin") and self.start_row_spin is not None:
+            self.start_row_spin.setEnabled(not active)
 
     # -----------------------------
     # Model rebuild & metadata
@@ -3957,6 +3980,7 @@ class ExperimentDesignDialog(QDialog):
             self.start_row_spin.setValue(int(md.get("start_row", 0)))
 
         self._recompute_silent()
+        self._apply_manual_assignment_lock_state()
 
     def _ensure_experiment_dir(self):
         """

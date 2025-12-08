@@ -3810,6 +3810,8 @@ class ExperimentModel(QObject):
         self._uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] | None = None
         # Remember source file (optional, for UI / save)
         self._uploaded_design_source: str | None = None
+        # optional explicit well assignment, one per uploaded reaction row
+        self._uploaded_well_ids: list[Optional[str]] | None = None
 
     # ------------- Factor management -------------
 
@@ -4892,6 +4894,8 @@ class ExperimentModel(QObject):
         """Reset back to normal (factor-defined) design."""
         self._uploaded_reactions = None
         self._uploaded_design_source = None
+        self._uploaded_well_ids = None
+
         # Keep factors; UI will rebuild them as usual.
         # Recompute plans/grid on next optimize/generate.
         self.plans_per_option.clear()
@@ -4911,10 +4915,13 @@ class ExperimentModel(QObject):
         source_path: str | None = None,
     ):
         """
-        Interpret a wide DataFrame where each column is a reagent with embedded
-        units in the header, and each row is one reaction.
+        Interpret a wide DataFrame where each row is one reaction and each column
+        is a reagent with embedded units in the header.
 
-        Expected column header format (flexible but simple):
+        Optionally, a column named something like "Well", "Well ID", "well_id", etc.
+        can be present to explicitly pin reactions to wells (e.g., "A1", "B3", ...).
+
+        Expected reagent column header format (flexible):
 
             <ReagentName> [<units>]
 
@@ -4922,16 +4929,44 @@ class ExperimentModel(QObject):
             "NaCl mM"
             "MgCl2 (mM)"
             "Buffer"
-
-        We'll parse:
-          - reagent name: everything before the first "(" or last space
-          - units: last token or content in parentheses, if it looks unit-like.
         """
         import re
 
-        # -------- 1) Parse columns → (name, units) --------
+        # Work on a copy so we don't mutate the caller's DataFrame
+        df_in = df.copy()
+
+        # -------- 0) Optional well-assignment column --------
+        well_col = None
+        for col in df_in.columns:
+            name = str(col).strip().lower()
+            if name in ("well", "well id", "well_id", "wellid", "well position", "well_position"):
+                well_col = col
+                break
+
+        uploaded_well_ids: list[Optional[str]] | None = None
+        if well_col is not None:
+            wells_raw = df_in[well_col].tolist()
+            uploaded_well_ids = []
+            for v in wells_raw:
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    uploaded_well_ids.append(None)
+                else:
+                    s = str(v).strip()
+                    uploaded_well_ids.append(s if s else None)
+
+            # Drop the well column from the design matrix before parsing reagents
+            df_in = df_in.drop(columns=[well_col])
+
+            # If all entries are None/blank, treat as "no explicit assignments"
+            if not any(w for w in uploaded_well_ids):
+                uploaded_well_ids = None
+
+        # Store (or clear) well assignments for this uploaded design
+        self._uploaded_well_ids = uploaded_well_ids
+
+        # -------- 1) Parse reagent columns → (name, units) --------
         col_specs: list[tuple[str, str, str]] = []   # (col_name, reagent_name, units)
-        for col in df.columns:
+        for col in df_in.columns:
             raw = str(col).strip()
             if not raw:
                 continue
@@ -4955,19 +4990,22 @@ class ExperimentModel(QObject):
                 name = raw
             col_specs.append((col, name, units))
 
-        # -------- 2) Build factors list from these columns --------
+        # -------- 2) Build factors list from these reagent columns --------
         self.factors.clear()
         for _, reagent_name, units in col_specs:
-            # We'll populate targets after we know all columns
-            fac = FactorSpec(name=reagent_name, kind="additive", options=[
-                OptionSpec(
-                    name=reagent_name,
-                    targets=[],            # fill shortly
-                    units=units or units_default or "arb",
-                    droplet_nL=float(droplet_nL_default),
-                    starting_conc=float(starting_conc_default),
-                )
-            ])
+            fac = FactorSpec(
+                name=reagent_name,
+                kind="additive",
+                options=[
+                    OptionSpec(
+                        name=reagent_name,
+                        targets=[],  # fill shortly
+                        units=units or units_default or "arb",
+                        droplet_nL=float(droplet_nL_default),
+                        starting_conc=float(starting_conc_default),
+                    )
+                ],
+            )
             self.factors.append(fac)
 
         # Map reagent_name -> OptionSpec to fill targets
@@ -4976,15 +5014,11 @@ class ExperimentModel(QObject):
             if f.kind == "additive" and f.options:
                 opt_by_name[f.name] = f.options[0]
 
-        # -------- 3) For each column, extract targets and build reaction dicts --------
-        # We'll keep a list of per-row reaction dicts keyed by (factor_name, None).
-        uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
-
-        # Pre-collect all column vectors as floats
+        # -------- 3) Pre-collect column values as floats --------
         col_values: dict[str, list[float]] = {}
         for col_name, reagent_name, _units in col_specs:
             vals: list[float] = []
-            for v in df[col_name].tolist():
+            for v in df_in[col_name].tolist():
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     vals.append(0.0)
                 else:
@@ -4994,9 +5028,9 @@ class ExperimentModel(QObject):
                         vals.append(0.0)
             col_values[reagent_name] = vals
 
-        n_rows = len(df.index)
+        n_rows = len(df_in.index)
 
-        # fill targets list with unique values per reagent (final concentrations)
+        # Fill targets list with unique values per reagent (final concentrations)
         for reagent_name, vals in col_values.items():
             opt = opt_by_name.get(reagent_name)
             if not opt:
@@ -5004,27 +5038,43 @@ class ExperimentModel(QObject):
             uniq = sorted(set(float(v) for v in vals))
             opt.targets = uniq
 
-        # build per-row reactions
+        # -------- 4) Build per-row reactions --------
+        uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
+
         for i in range(n_rows):
             rxn: dict[tuple[str, Optional[str]], float] = {}
             for reagent_name, vals in col_values.items():
-                if i < len(vals):
-                    v = float(vals[i])
-                else:
-                    v = 0.0
+                v = float(vals[i]) if i < len(vals) else 0.0
                 key = (reagent_name, None)  # additive style
                 rxn[key] = v
             uploaded_reactions.append(rxn)
 
+        # -------- 5) Store uploaded design state and clear caches --------
         self._uploaded_reactions = uploaded_reactions
         self._uploaded_design_source = source_path
-        # clear downstream caches; UI will re-optimize/generate
+
         self.plans_per_option.clear()
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
         self._last_worst_nonfill_volume_nL = None
         self.stock_updated.emit()
+    
+    def has_explicit_well_assignments(self) -> bool:
+        """
+        True if the uploaded design included a well column with at least one
+        non-empty entry.
+        """
+        return bool(self._uploaded_well_ids and any(w is not None for w in self._uploaded_well_ids))
+
+    def get_explicit_well_assignments(self) -> list[Optional[str]] | None:
+        """
+        Returns a shallow copy of the uploaded well IDs, one per base reaction
+        (before replicates), or None if no explicit well mapping exists.
+        """
+        if not self.has_explicit_well_assignments():
+            return None
+        return list(self._uploaded_well_ids)
 
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
@@ -5629,7 +5679,6 @@ class ExperimentModel(QObject):
 
             serialized_rxns: list[list[dict]] = []
             for rxn in self._uploaded_reactions:
-                # Represent each reaction as a list of {factor, option, target}
                 row: list[dict] = []
                 for (fac, opt), val in rxn.items():
                     row.append(
@@ -5652,6 +5701,12 @@ class ExperimentModel(QObject):
                 "reactions": serialized_rxns,
                 # Just the filename; full path is reconstructed using experiment_dir_path
                 "csv_filename": csv_name,
+                # persist well IDs (or None)
+                "well_ids": (
+                    list(self._uploaded_well_ids)
+                    if self._uploaded_well_ids is not None
+                    else None
+                ),
             }
 
         return data
@@ -5692,9 +5747,10 @@ class ExperimentModel(QObject):
         self._reactions_df = pd.DataFrame()
         self._last_worst_nonfill_volume_nL = None
 
-        # --- uploaded/manual design state (NEW) ---
+        # --- uploaded/manual design state ---
         self._uploaded_reactions = None
         self._uploaded_design_source = None
+        self._uploaded_well_ids = None
 
         ud = d.get("uploaded_design")
         if isinstance(ud, dict):
@@ -5723,6 +5779,23 @@ class ExperimentModel(QObject):
 
             if uploaded_reactions:
                 self._uploaded_reactions = uploaded_reactions
+
+            # restore well IDs, if present
+            well_ids = ud.get("well_ids")
+            if isinstance(well_ids, list):
+                normalized: list[Optional[str]] = []
+                for w in well_ids:
+                    if w is None:
+                        normalized.append(None)
+                    else:
+                        s = str(w).strip()
+                        normalized.append(s or None)
+                # Only keep if at least one non-None
+                self._uploaded_well_ids = (
+                    normalized if any(x is not None for x in normalized) else None
+                )
+            else:
+                self._uploaded_well_ids = None
 
             csv_fn = ud.get("csv_filename")
             if csv_fn:
@@ -6142,7 +6215,8 @@ class ExperimentModel(QObject):
         If we have an uploaded/manual design (self._uploaded_reactions),
         write a canonical CSV representation into the experiment directory.
 
-        Returns the path if written, else None.
+        If explicit well IDs were supplied originally, they will be written
+        as a "Well ID" column.
         """
         if self._uploaded_reactions is None:
             return None
@@ -6151,7 +6225,7 @@ class ExperimentModel(QObject):
 
         try:
             import os
-            import pandas as pd  # safe even if already imported at module level
+            import pandas as pd  # safe even if already imported
 
             # Collect all (factor, option) keys that appear in any reaction
             all_keys: set[tuple[str, Optional[str]]] = set()
@@ -6196,10 +6270,14 @@ class ExperimentModel(QObject):
                     header = f"{header} {units}"
                 key_to_col[(fac, opt)] = header
 
-            # Build rows
-            rows: list[dict[str, float]] = []
-            for rxn in self._uploaded_reactions:
-                row: dict[str, float] = {}
+            # Build rows; include Well ID if available
+            rows: list[dict[str, object]] = []
+            well_ids = self._uploaded_well_ids or []
+            for idx, rxn in enumerate(self._uploaded_reactions):
+                row: dict[str, object] = {}
+                # Optional "Well ID" column
+                if well_ids and idx < len(well_ids):
+                    row["Well ID"] = well_ids[idx] or ""
                 for key in sorted_keys:
                     header = key_to_col[key]
                     v = float(rxn.get(key, 0.0))
@@ -7230,6 +7308,54 @@ class WellPlate(QObject):
         self.wells = self.create_wells()
         self.clear_all_wells_signal.emit()
 
+    def clear_all_reaction_assignments(self):
+        """
+        Remove the assigned reaction from every well without recreating the wells
+        or touching calibration / excluded_well state.
+        """
+        for well in self.wells.values():
+            well.assigned_reaction = None
+
+    def assign_reactions_to_specific_wells(self, reactions, well_ids):
+        """
+        Assign each reaction to an explicit well ID.
+
+        Args:
+            reactions (list[ReactionComposition]): reactions in the desired order.
+            well_ids (list[str]): same-length list of well IDs (e.g. ['A1','B1',...]).
+
+        Returns:
+            dict: {reaction.unique_id: well_id}
+        """
+        if len(reactions) != len(well_ids):
+            raise ValueError(
+                f"Number of reactions ({len(reactions)}) does not match "
+                f"number of well IDs ({len(well_ids)})."
+            )
+
+        reaction_assignment = {}
+
+        for reaction, well_id in zip(reactions, well_ids):
+            wid = str(well_id).strip().upper()
+            well = self.wells.get(wid)
+
+            if well is None:
+                raise ValueError(f"Well '{wid}' does not exist in the current plate.")
+
+            if wid in self.excluded_wells:
+                raise ValueError(f"Well '{wid}' is in the excluded_wells set.")
+
+            if well.assigned_reaction is not None:
+                raise ValueError(
+                    f"Well '{wid}' already has an assigned reaction "
+                    f"('{well.assigned_reaction.unique_id}')."
+                )
+
+            well.assign_reaction(reaction)
+            reaction_assignment[reaction.unique_id] = wid
+
+        return reaction_assignment
+
     def reset_all_wells_for_stock(self,stock_id):
         for well in self.wells.values():
             if well.assigned_reaction is not None:
@@ -7237,7 +7363,6 @@ class WellPlate(QObject):
                 # well.state_changed.emit(well.well_id)
         self.well_state_changed_signal.emit('all')
         
-
     def reset_all_wells(self):
         for well in self.wells.values():
             if well.assigned_reaction is not None:
@@ -8817,16 +8942,61 @@ class Model(QObject):
 
         # Randomization (handled earlier via seed in ExperimentModel->load_reactions_from_model)
         all_reactions = self.reaction_collection.get_all_reactions()
-        random_seed = self.experiment_model.get_random_seed()
-        if random_seed is not None:
-            import random
-            random.seed(random_seed)
-            random.shuffle(all_reactions)
+        
+        # ---- 1) Check for manual well assignments ----
+        manual_well_ids = self._get_manual_well_assignments()
+        using_manual_assignments = manual_well_ids is not None
 
+        if using_manual_assignments:
+            # Enforce 1:1 mapping between reactions and wells
+            if len(manual_well_ids) != len(all_reactions):
+                raise ValueError(
+                    f"Manual well assignments ({len(manual_well_ids)}) "
+                    f"must match the number of reactions ({len(all_reactions)})."
+                )
+
+            # When manual well assignments are used, treat "replicates" as 0
+            # so the runtime / metadata clearly reflect that layout is explicit.
+            try:
+                original_reps = int(self.experiment_model.metadata.get("replicates", 1))
+            except Exception:
+                original_reps = self.experiment_model.metadata.get("replicates", 1)
+
+            # Preserve original value for reference if you want it later
+            if "_original_replicates" not in self.experiment_model.metadata:
+                self.experiment_model.metadata["_original_replicates"] = original_reps
+
+            self.experiment_model.metadata["replicates"] = 0
+
+            # IMPORTANT: do NOT randomize when manual assignments are provided.
+            # The user expects the i-th reaction to go to the i-th specified well.
+        else:
+            # ---- 2) Automatic mode: optional randomization as before ----
+            random_seed = self.experiment_model.get_random_seed()
+            if random_seed is not None:
+                import random
+                random.seed(random_seed)
+                random.shuffle(all_reactions)
+
+        # ---- 3) Assign reactions to wells ----
         start_row = self.experiment_model.get_start_row()
         start_col = self.experiment_model.get_start_col()
 
-        self.well_plate.assign_reactions_to_wells(all_reactions, start_row=start_row, start_col=start_col)
+        if using_manual_assignments:
+            # Explicit reaction → well mapping
+            self.well_plate.assign_reactions_to_specific_wells(
+                all_reactions,
+                manual_well_ids
+            )
+        else:
+            # Existing automatic zig-zag behaviour
+            self.well_plate.assign_reactions_to_wells(
+                all_reactions,
+                start_row=start_row,
+                start_col=start_col
+            )
+
+        # Apply calibration & printer head assignment as before
         self.well_plate.apply_calibration_data()
         self.assign_printer_heads()
 
@@ -8839,16 +9009,51 @@ class Model(QObject):
         # Give ExperimentModel a runtime view so it can build progress/key files
         self.experiment_model.set_runtime_context(self.well_plate, self.reaction_collection)
 
+        # Progress/key/concentration key files
         if load_progress:
-            print("Loading progress in load experiment from model")
+            print("Loading progress in load_experiment_from_model()")
             self.experiment_model.load_progress()
         else:
-            print("Creating new progress file from load experiment from model")
+            print("Creating new progress file from load_experiment_from_model()")
             self.experiment_model.create_progress_file()
+
         self.experiment_model.create_key_file()
         self.experiment_model.create_concentration_key_file()
 
         self.experiment_loaded.emit()
+
+
+    # ----------------- helper: manual well assignments -----------------
+    def _get_manual_well_assignments(self):
+        """
+        Return a list of well IDs (e.g. ['A1','B1',...]) in reaction order,
+        or None if manual assignments are not being used.
+
+        This is intentionally defensive and will work with either:
+        - ExperimentModel.get_explicit_well_assignments() / has_explicit_well_assignments()
+        - or an attribute `manual_well_assignments` (list of well IDs).
+        """
+        em = self.experiment_model
+
+        # Preferred explicit API
+        has_manual = getattr(em, "has_explicit_well_assignments", None)
+        if callable(has_manual) and not has_manual():
+            return None
+
+        get_manual = getattr(em, "get_explicit_well_assignments", None)
+        if callable(get_manual):
+            wells = get_manual()
+            print(f"Using manual well assignments from has_explicit_well_assignments(): {wells}")
+        else:
+            # Fallback: plain attribute
+            wells = getattr(em, "_uploaded_well_ids", None)
+
+        if not wells:
+            return None
+        print(f"Using manual well assignments: {wells}")
+        # Normalize to list of upper-case strings
+        normalized = [str(w).strip().upper() for w in wells if w is not None and str(w).strip()]
+        return normalized if normalized else None
 
     def reload_experiment(self, plate_name=None):
         """Reload the experiment from the last loaded file."""
@@ -8858,14 +9063,43 @@ class Model(QObject):
             print("No experiment file path found. Please load an experiment file.")
 
     def update_well_plate(self):
-        if self.reaction_collection is not None:
+        """
+        Rebuild well → reaction assignments using either:
+        - manual assignments, if present, or
+        - automatic zig-zag from start_row/start_col, as before.
+        """
+        if self.reaction_collection is None:
+            print("No experiment data loaded.")
+            return
+
+        all_reactions = self.reaction_collection.get_all_reactions()
+        manual_well_ids = self._get_manual_well_assignments()
+        using_manual_assignments = manual_well_ids is not None
+
+        # Clear only reaction assignments (keep calibrations & excluded_wells)
+        self.well_plate.clear_all_reaction_assignments()
+
+        if using_manual_assignments:
+            if len(manual_well_ids) != len(all_reactions):
+                raise ValueError(
+                    f"Manual well assignments ({len(manual_well_ids)}) "
+                    f"must match the number of reactions ({len(all_reactions)}) "
+                    f"in update_well_plate()."
+                )
+            self.well_plate.assign_reactions_to_specific_wells(
+                all_reactions,
+                manual_well_ids
+            )
+        else:
             start_row = self.experiment_model.get_start_row()
             start_col = self.experiment_model.get_start_col()
+            self.well_plate.assign_reactions_to_wells(
+                all_reactions,
+                start_row=start_row,
+                start_col=start_col
+            )
 
-            self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions(),start_row=start_row,start_col=start_col)
-            self.experiment_loaded.emit()
-        else:
-            print("No experiment data loaded.")
+        self.experiment_loaded.emit()
 
     def clear_experiment(self):
         """Clear all experiment data and reset the well plate."""
