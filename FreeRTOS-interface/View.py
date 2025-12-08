@@ -152,7 +152,7 @@ class MainWindow(QMainWindow):
 
         self.speed_profiles_tab = SpeedProfilesTab(self, self.model, self.controller, self.color_dict)
         self.speed_profiles_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
-        tab_widget.addTab(self.speed_profiles_tab, "Speed Profiles")
+        tab_widget.addTab(self.speed_profiles_tab, "Firmware")
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
