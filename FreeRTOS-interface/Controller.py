@@ -246,6 +246,10 @@ class Controller(QObject):
         """Clear the command queue."""
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
+        try:
+            self.update_expected_with_current()
+        except Exception:
+            pass
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
@@ -636,6 +640,12 @@ class Controller(QObject):
             self.expected_location = self.model.machine_model.get_current_location()
         except Exception:
             self.expected_location = None
+
+        # resync rack expected state when queue drains
+        try:
+            self.model.rack_model.sync_expected_to_actual()
+        except Exception:
+            pass
     
     def update_location_handler(self,name=None):
         """Update the current location."""
@@ -711,22 +721,25 @@ class Controller(QObject):
             if status == False:
                 print('Cannot pick up: Commands are still running')
                 return
-        is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
+        # is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot)
+        is_valid, error_msg = self.model.rack_model.verify_transfer_to_gripper(slot, use_expected=True)
         if is_valid:
+            # update expected rack state NOW (so subsequent queued ops see it)
+            ok, msg = self.model.rack_model.plan_transfer_to_gripper(slot)
+            if not ok:
+                print(f"Plan pickup failed: {msg}")
+                return
+
             self.open_gripper()
-            # self.wait_command()
-            #print(f'Picking up printer head from slot {slot}')
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=8000,coords=coords)
 
             self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
-            # self.wait_command()
             self.move_to_location(name,x_offset=3000,coords=coords,override=True,ignore_safe_height=True)
-            # self.model.calibration_model.update_calibration_models(self.model.rack_model.get_gripper_printer_head())
         else:
-            #print(f'Error: {error_msg}')
+            print(f'Error: {error_msg}')
             pass
 
     def drop_off_handler(self,slot):
@@ -740,18 +753,21 @@ class Controller(QObject):
             if status == False:
                 print('Cannot drop off: Commands are still running')
                 return
-        is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot)
+        is_valid, error_msg = self.model.rack_model.verify_transfer_from_gripper(slot, use_expected=True)
         if is_valid:
-            #print(f'Dropping off printer head to slot {slot}')
+            # update expected rack state NOW (so subsequent queued ops see it)
+            ok, msg = self.model.rack_model.plan_transfer_from_gripper(slot)
+            if not ok:
+                print(f"Plan dropoff failed: {msg}")
+                return
+            
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
             self.move_to_location(name,x_offset=3000,coords=coords)
             self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
-            # self.wait_command()
             self.move_to_location(name,x_offset=8000,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper()
-            # self.wait_command()
         else:
             print(f'Error: {error_msg}')
             return

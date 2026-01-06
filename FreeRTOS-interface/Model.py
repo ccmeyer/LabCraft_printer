@@ -7765,6 +7765,11 @@ class RackModel(QObject):
         self.slots = [Slot(i, None) for i in range(num_slots)]
         self.gripper_printer_head = None
         self.gripper_slot_number = None
+        # --- expected rack state (used for planning / queuing) ---
+        self.expected_slot_printer_heads = [None for _ in range(num_slots)]
+        self.expected_gripper_printer_head = None
+        self.expected_gripper_slot_number = None
+
         self.calibrations = {}
         if location_data is not None:
             self.process_location_data(location_data)
@@ -7773,6 +7778,26 @@ class RackModel(QObject):
         self.temp_calibration_data = {}
     
         self.apply_calibration_data()
+
+        # keep expected in sync on startup
+        self.sync_expected_to_actual()
+
+    def sync_expected_to_actual(self):
+        """Force expected rack contents to match the current (actual) rack model."""
+        self.expected_slot_printer_heads = [s.printer_head for s in self.slots]
+        self.expected_gripper_printer_head = self.gripper_printer_head
+        self.expected_gripper_slot_number = self.gripper_slot_number
+
+    def _get_state(self, use_expected: bool):
+        if use_expected:
+            slot_heads = self.expected_slot_printer_heads
+            gripper_head = self.expected_gripper_printer_head
+            gripper_slot = self.expected_gripper_slot_number
+        else:
+            slot_heads = [s.printer_head for s in self.slots]
+            gripper_head = self.gripper_printer_head
+            gripper_slot = self.gripper_slot_number
+        return slot_heads, gripper_head, gripper_slot
 
     def apply_calibration_data(self):
         if self.calibrations['rack_position_Left'] == {} or self.calibrations['rack_position_Right'] == {}:
@@ -7879,6 +7904,7 @@ class RackModel(QObject):
             slot.change_printer_head(printer_head)
             slot.set_locked(False)
             self.slot_updated.emit()
+            self.sync_expected_to_actual()
             #print(f"Slot {slot_number} updated with printer head: {printer_head.get_stock_id()}, {printer_head.color}")
 
     def lock_slot(self, slot_number):
@@ -7926,9 +7952,10 @@ class RackModel(QObject):
         self.gripper_slot_number = None
         self.slot_updated.emit()
         self.gripper_updated.emit()
+        self.sync_expected_to_actual()
         print("All slots cleared.")
     
-    def verify_transfer_to_gripper(self, slot_number):
+    def verify_transfer_to_gripper(self, slot_number, use_expected: bool = False):
         """
         Verify if the transfer of the printer head from a slot to the gripper is valid.
 
@@ -7940,16 +7967,16 @@ class RackModel(QObject):
         - str: Error message if the transfer is not valid, empty string otherwise.
         """
         if 0 <= slot_number < len(self.slots):
+            slot_heads, gripper_head, _ = self._get_state(use_expected)
             slot = self.slots[slot_number]
-            if slot.printer_head is not None and slot.confirmed:
-                if self.gripper_printer_head is None:
+
+            if slot_heads[slot_number] is not None and slot.confirmed:
+                if gripper_head is None:
                     return True, ""
-                else:
-                    return False, "Gripper is already holding a printer head."
-            else:
-                return False, f"Slot {slot_number} is not confirmed or empty."
-        else:
-            return False, f"Slot number {slot_number} is out of range."
+                return False, "Gripper is already holding a printer head."
+            return False, f"Slot {slot_number} is not confirmed or empty."
+        return False, f"Slot number {slot_number} is out of range."
+
 
     def transfer_to_gripper(self, slot_number):
         """
@@ -7967,12 +7994,14 @@ class RackModel(QObject):
             self.lock_slot(slot_number)
             self.slot_updated.emit()
             self.gripper_updated.emit()
+            # expected should now match actual at this point
+            self.sync_expected_to_actual()
             #print(f"Printer head from slot {slot_number} transferred to gripper.")
         else:
             self.error_occurred.emit(error_msg)
             print(error_msg)
 
-    def verify_transfer_from_gripper(self, slot_number):
+    def verify_transfer_from_gripper(self, slot_number, use_expected: bool = False):
         """
         Verify if the transfer of the printer head from the gripper to a slot is valid.
 
@@ -7984,16 +8013,39 @@ class RackModel(QObject):
         - str: Error message if the transfer is not valid, empty string otherwise.
         """
         if 0 <= slot_number < len(self.slots):
-            slot = self.slots[slot_number]
-            if slot_number == self.gripper_slot_number:
-                if slot.printer_head is None and self.gripper_printer_head is not None:
-                    return True, ""
-                else:
-                    return False, "Slot is already occupied or gripper is empty."
-            else:
-                return False, f"Printer head can only be unloaded to its original slot {self.gripper_slot_number}."
-        else:
-            return False, f"Slot number {slot_number} is out of range."
+            slot_heads, gripper_head, gripper_slot = self._get_state(use_expected)
+
+            if gripper_slot is None or gripper_head is None:
+                return False, "Gripper is empty."
+            if slot_number != gripper_slot:
+                return False, f"Printer head can only be unloaded to its original slot {gripper_slot}."
+            if slot_heads[slot_number] is not None:
+                return False, "Slot is already occupied."
+            return True, ""
+        return False, f"Slot number {slot_number} is out of range."
+    
+    # ---------- planning transitions (expected-only) ----------
+    def plan_transfer_to_gripper(self, slot_number):
+        ok, msg = self.verify_transfer_to_gripper(slot_number, use_expected=True)
+        if not ok:
+            return False, msg
+
+        # move head from expected slot -> expected gripper
+        self.expected_gripper_printer_head = self.expected_slot_printer_heads[slot_number]
+        self.expected_gripper_slot_number = slot_number
+        self.expected_slot_printer_heads[slot_number] = None
+        return True, ""
+
+    def plan_transfer_from_gripper(self, slot_number):
+        ok, msg = self.verify_transfer_from_gripper(slot_number, use_expected=True)
+        if not ok:
+            return False, msg
+
+        # move head from expected gripper -> expected slot
+        self.expected_slot_printer_heads[slot_number] = self.expected_gripper_printer_head
+        self.expected_gripper_printer_head = None
+        self.expected_gripper_slot_number = None
+        return True, ""
 
     def transfer_from_gripper(self, slot_number):
         """
@@ -8011,6 +8063,8 @@ class RackModel(QObject):
             self.gripper_slot_number = None
             self.slot_updated.emit()
             self.gripper_updated.emit()
+            # expected should now match actual at this point
+            self.sync_expected_to_actual()
             #print(f"Printer head transferred from gripper to slot {slot_number}.")
         else:
             self.error_occurred.emit(error_msg)
