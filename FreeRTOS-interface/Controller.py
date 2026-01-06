@@ -651,7 +651,8 @@ class Controller(QObject):
         safe_z = 35000
         # current_location = self.model.machine_model.get_current_location()
         current_location = str(getattr(self, "expected_location", None) or "")
-        current_z = self.model.machine_model.get_current_position_dict()['Z']
+        # current_z = self.model.machine_model.get_current_position_dict()['Z']
+        current_z = self.expected_position['Z']
 
         if coords is not None:
             original_target = coords
@@ -752,8 +753,8 @@ class Controller(QObject):
             self.close_gripper()
             # self.wait_command()
         else:
-            #print(f'Error: {error_msg}')
-            pass
+            print(f'Error: {error_msg}')
+            return
 
     def swap_printer_head(self, slot_number, new_printer_head):
         """Handle swapping of printer heads."""
