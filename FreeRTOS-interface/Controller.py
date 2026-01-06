@@ -24,6 +24,13 @@ class Controller(QObject):
     dfu_finished = QtCore.Signal(bool, str)
     dfu_output   = QtCore.Signal(str)
 
+    # Preprogrammed sequence signals
+    sequence_state_changed = QtCore.Signal(str)         # "idle" | "countdown" | "running"
+    sequence_countdown_s   = QtCore.Signal(float)       # seconds remaining
+    sequence_started       = QtCore.Signal(str)         # seq_id
+    sequence_completed     = QtCore.Signal(str)         # seq_id
+    sequence_error         = QtCore.Signal(str)         # message
+
     def __init__(self, machine, model):
         super().__init__()
 
@@ -67,6 +74,26 @@ class Controller(QObject):
         # # self.model.calibration_manager.dropletChangeRequested.connect(self.handle_droplet_change_request)
         # self.model.calibration_manager.changeSettingsRequested.connect(self.handle_settings_change_request)
         # self.machine.droplet_camera.image_captured_signal.connect(self._on_image_captured)
+
+        # --- Preprogrammed sequences runner ---
+        self._seq_state   = "idle"
+        self._seq_id      = None
+        self._seq_params  = {}
+        self._seq_deadline_monotonic = 0.0
+
+        self._seq_timer = QtCore.QTimer(self)
+        self._seq_timer.setInterval(100)  # 10 Hz countdown updates
+        self._seq_timer.timeout.connect(self._on_seq_tick)
+
+        # Detect end-of-sequence when queue drains
+        self.machine.command_queue.commands_completed.connect(self._on_commands_completed_for_sequence)
+
+        # Registry of available sequences
+        self._sequence_builders = {
+            "pickup_slot_imager_return": self._seq_pickup_slot_imager_return,
+            "led_on_wait_off":           self._seq_led_on_wait_off,
+            "imager_plate_imager":       self._seq_imager_plate_imager,
+        }
 
     def connect_droplet_camera_signals(self):
         """Connect the droplet camera signals to the controller."""
@@ -450,101 +477,6 @@ class Controller(QObject):
         # 5) update expected end position
         self.update_expected_position(x=x, y=y, z=z)
         return True
-
-    # def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
-    #     """Set the absolute coordinates for the machine, using XY moves when possible."""
-    #     new_position = {'X': x, 'Y': y, 'Z': z}
-
-    #     # 1) collision check
-    #     if not override and self.check_collision(self.expected_position, new_position):
-    #         print('Collision detected')
-    #         return False
-
-    #     # 2) build the ordered list of single-axis moves
-    #     cmds = []
-    #     cur = self.expected_position
-    #     # if Z is changing, handle Z ordering specially
-    #     if cur['Z'] != z:
-    #         if z < cur['Z']:
-    #             # up: Z, then Y, then X
-    #             if z != cur['Z']: cmds.append(('Z', z))
-    #             if y != cur['Y']:   cmds.append(('Y', y))
-    #             if x != cur['X']:   cmds.append(('X', x))
-    #         else:
-    #             # down: Y, X, Z
-    #             if y != cur['Y']:   cmds.append(('Y', y))
-    #             if x != cur['X']:   cmds.append(('X', x))
-    #             if z != cur['Z']:   cmds.append(('Z', z))
-    #     else:
-    #         # Z unchanged: maybe both X and Y
-    #         if y != cur['Y']: cmds.append(('Y', y))
-    #         if x != cur['X']: cmds.append(('X', x))
-
-    #     # 3) nothing to do
-    #     if not cmds:
-    #         if handler: handler()
-    #         self.update_expected_position(x=x, y=y, z=z)
-    #         return True
-
-    #     # 4) collapse any contiguous X+Y into one XY
-    #     combined = []
-    #     i = 0
-    #     while i < len(cmds):
-    #         axis, val = cmds[i]
-    #         if axis in ('X', 'Y'):
-    #             # start a block
-    #             block = {axis: val}
-    #             i += 1
-    #             # collect any immediately following Y/X
-    #             while i < len(cmds) and cmds[i][0] in ('X', 'Y'):
-    #                 a, v = cmds[i]
-    #                 block[a] = v
-    #                 i += 1
-    #             # if both X and Y present, emit XY
-    #             if 'X' in block and 'Y' in block:
-    #                 combined.append(('XY', (block['X'], block['Y'])))
-    #             else:
-    #                 # only one axis in block
-    #                 if 'X' in block: combined.append(('X', block['X']))
-    #                 if 'Y' in block: combined.append(('Y', block['Y']))
-    #         else:
-    #             # Z or other
-    #             combined.append((axis, val))
-    #             i += 1
-
-    #     # 5) dispatch
-    #     for idx, (axis, val) in enumerate(combined):
-    #         is_last = (idx == len(combined) - 1)
-    #         cb = handler if is_last else None
-
-    #         if axis == 'XY':
-    #             x_val, y_val = val
-    #             self.machine.set_absolute_XY(x_val, y_val,
-    #                                         manual=manual,
-    #                                         handler=cb,
-    #                                         kwargs=kwargs)
-    #         elif axis == 'X':
-    #             self.machine.set_absolute_X(val,
-    #                                     manual=manual,
-    #                                     handler=cb,
-    #                                     kwargs=kwargs)
-    #         elif axis == 'Y':
-    #             self.machine.set_absolute_Y(val,
-    #                                     manual=manual,
-    #                                     handler=cb,
-    #                                     kwargs=kwargs)
-    #         elif axis == 'Z':
-    #             self.machine.set_absolute_Z(val,
-    #                                     manual=manual,
-    #                                     handler=cb,
-    #                                     kwargs=kwargs)
-    #         else:
-    #             # unexpected
-    #             raise ValueError(f"Unknown axis {axis}")
-
-    #     # 6) update expected
-    #     self.update_expected_position(x=x, y=y, z=z)
-    #     return True
 
     def set_relative_print_pressure(self, pressure,manual=False):
         """Set the relative pressure for the machine."""
@@ -1253,3 +1185,168 @@ class Controller(QObject):
         print(f'-Centering nozzle at position: {target_position}')
         self.set_absolute_coordinates(target_position['X'],target_position['Y'],target_position['Z'],handler=callback)
 
+    def start_preprogrammed_sequence(self, seq_id: str, delay_s: float = 0.0, **params):
+        """
+        Start a named sequence after a delay with countdown shown in UI.
+        During countdown, TX is hard-paused (Machine.set_sequence_pause(True)).
+        """
+        if seq_id not in getattr(self, "_sequence_builders", {}):
+            self.sequence_error.emit(f"Unknown sequence: {seq_id}")
+            return
+
+        if self._seq_state in ("countdown", "running"):
+            self.sequence_error.emit("A sequence is already in progress.")
+            return
+
+        # Basic safety checks
+        try:
+            if not self.model.machine_model.is_connected():
+                self.sequence_error.emit("Machine is not connected.")
+                return
+        except Exception:
+            # If your model API differs, you can remove this check
+            pass
+
+        if not self.machine.check_if_all_completed():
+            self.sequence_error.emit("Cannot start: command queue is not empty.")
+            return
+
+        delay_s = max(0.0, float(delay_s))
+        self._seq_id = seq_id
+        self._seq_params = dict(params)
+
+        # Hard-pause TX during countdown so nothing can move early
+        self.machine.set_sequence_pause(True)
+
+        if delay_s <= 0.0:
+            self.sequence_countdown_s.emit(0.0)
+            self._begin_sequence()
+            return
+
+        self._seq_deadline_monotonic = time.monotonic() + delay_s
+        self._seq_state = "countdown"
+        self.sequence_state_changed.emit(self._seq_state)
+        self.sequence_countdown_s.emit(delay_s)
+        self._seq_timer.start()
+
+    def cancel_preprogrammed_sequence(self):
+        """Cancels only the countdown stage (does not try to stop an already-running queue)."""
+        if self._seq_state != "countdown":
+            return
+        self._seq_timer.stop()
+        self._seq_state = "idle"
+        self.sequence_state_changed.emit(self._seq_state)
+        self.sequence_countdown_s.emit(0.0)
+        self._seq_id = None
+        self._seq_params = {}
+        self.machine.set_sequence_pause(False)
+
+    def _on_seq_tick(self):
+        remaining = self._seq_deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            self._seq_timer.stop()
+            self.sequence_countdown_s.emit(0.0)
+            self._begin_sequence()
+            return
+        self.sequence_countdown_s.emit(remaining)
+
+    def _begin_sequence(self):
+        # Re-check queue: if anything got queued during countdown, abort
+        if not self.machine.check_if_all_completed():
+            self._abort_sequence("Queue became non-empty during countdown; aborting.")
+            return
+
+        seq_id = self._seq_id
+        builder = self._sequence_builders.get(seq_id)
+        if builder is None:
+            self._abort_sequence(f"Unknown sequence: {seq_id}")
+            return
+
+        self._seq_state = "running"
+        self.sequence_state_changed.emit(self._seq_state)
+        self.sequence_started.emit(seq_id)
+
+        # Keep TX paused while we enqueue the whole block
+        self.machine.set_sequence_pause(True)
+
+        try:
+            builder()  # enqueue commands using controller/machine methods
+        except Exception as e:
+            self._abort_sequence(f"Sequence build failed: {e}")
+            return
+        finally:
+            # Ensure TX is resumed even if builder raises (abort handles state too)
+            pass
+
+        # Resume TX and nudge sender
+        self.machine.set_sequence_pause(False)
+        try:
+            self.machine.send_next_command()
+        except Exception:
+            pass
+
+        # If a sequence enqueued nothing (edge case), complete immediately
+        if self.machine.check_if_all_completed():
+            self._finish_sequence()
+
+    def _abort_sequence(self, msg: str):
+        self._seq_timer.stop()
+        self.machine.set_sequence_pause(False)
+        self._seq_state = "idle"
+        self.sequence_state_changed.emit(self._seq_state)
+        self.sequence_error.emit(msg)
+        self._seq_id = None
+        self._seq_params = {}
+        self.sequence_countdown_s.emit(0.0)
+
+    def _finish_sequence(self):
+        seq_id = self._seq_id
+        self._seq_state = "idle"
+        self.sequence_state_changed.emit(self._seq_state)
+        if seq_id:
+            self.sequence_completed.emit(seq_id)
+        self._seq_id = None
+        self._seq_params = {}
+        self.sequence_countdown_s.emit(0.0)
+
+    def _on_commands_completed_for_sequence(self):
+        """Called whenever the queue drains; if we’re running a sequence, mark it done."""
+        if self._seq_state == "running":
+            self._finish_sequence()
+
+    # -------------------------
+    # Example sequence builders
+    # -------------------------
+
+    def _seq_pickup_slot_imager_return(self):
+        """
+        Pick up a head from a slot, move to imager, return to same slot.
+        NOTE: Adjust location names if yours differ.
+        """
+        slot_1based = int(self._seq_params.get("slot", 1))
+        slot = max(1, min(slot_1based, 4)) - 1
+
+        # These calls enqueue many commands:
+        self.pick_up_printer_head(slot)
+        self.move_to_location("camera")      # <-- change if your imager location is named differently
+        self.drop_off_printer_head(slot)
+
+    def _seq_led_on_wait_off(self):
+        """
+        Turn LEDs on, wait N seconds (firmware WAIT), then off.
+        """
+        on_s = float(self._seq_params.get("on_s", 5.0))
+        on_ms = max(1, int(on_s * 1000))
+
+        self.machine.LED_on()
+        self.machine.wait_ms(on_ms)
+        self.machine.LED_off()
+
+    def _seq_imager_plate_imager(self):
+        """
+        Move from imager to plate and back.
+        NOTE: Adjust location names if yours differ.
+        """
+        self.move_to_location("camera")   # imager
+        self.move_to_location("plate")    # plate
+        self.move_to_location("camera")   # back

@@ -1225,6 +1225,7 @@ class Machine(QObject):
         self._connection_attempts = 0
         self._tx_mutex = QMutex()
         self._tx_paused = False
+        self._sequence_pause = False  # blocks TX during UI countdowns
 
         # --- Gripper confirmation gate ---
         # Start with confirmation required so the very first open/close pops the dialog.
@@ -1605,7 +1606,7 @@ class Machine(QObject):
         """
         Send the next command in the queue to the machine.
         """
-        if getattr(self, "_tx_paused", False):
+        if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
 
         command = self.command_queue.get_next_command()
@@ -1683,6 +1684,8 @@ class Machine(QObject):
             on_timeout=lambda: self._on_clear_ack(handler, timed_out=True)
         )        
 
+    def set_sequence_pause(self, paused: bool):
+        self._sequence_pause = bool(paused)
 
     def _on_clear_ack(self, handler=None, timed_out=False):
         if timed_out:
@@ -1960,7 +1963,14 @@ class Machine(QObject):
     
     def wait_command(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('WAIT',200,0,0,handler=handler,kwargs=kwargs,manual=manual)
-
+    
+    def wait_ms(self, ms: int, handler=None, kwargs=None, manual=False):
+        """Queue a firmware WAIT for ms milliseconds (param1=ms)."""
+        ms = int(ms)
+        if self.check_param_limits(ms, 1, 600000):  # 1 ms .. 10 min (adjust as you like)
+            return self.add_command_to_queue('WAIT', ms, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        return False
+    
     def print_droplets(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
         return self.add_command_to_queue('DISPENSE',int(droplet_count),0,0,handler=handler,kwargs=kwargs,manual=manual)

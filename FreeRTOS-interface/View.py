@@ -153,6 +153,11 @@ class MainWindow(QMainWindow):
         self.speed_profiles_tab = SpeedProfilesTab(self, self.model, self.controller, self.color_dict)
         self.speed_profiles_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         tab_widget.addTab(self.speed_profiles_tab, "Firmware")
+
+        self.sequences_tab = PreprogrammedSequencesTab(self, self.model, self.controller, self.color_dict)
+        self.sequences_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+        tab_widget.addTab(self.sequences_tab, "Sequences")
+
         mid_layout.addWidget(tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
@@ -495,145 +500,6 @@ class ConnectionWidget(QGroupBox):
             self.machine_connect_button.setStyleSheet(
                 f"background-color: {self.color_dict['light_blue']}; color: white;"
             )
-
-# class ConnectionWidget(QGroupBox):
-#     connect_machine_requested = QtCore.Signal(str)
-#     connect_balance_requested = QtCore.Signal(str)
-#     refresh_ports_requested = QtCore.Signal()
-
-#     def __init__(self, main_window,model,controller):
-#         super().__init__("CONNECTION")
-#         self.main_window = main_window
-#         self.color_dict = self.main_window.color_dict
-#         self.model = model
-#         self.controller = controller
-
-#         self.init_ui()
-
-#         # Connect signals from the model to update the view
-#         self.model.machine_model.ports_updated.connect(self.update_machine_ports)
-#         self.model.machine_model.ports_updated.connect(self.update_balance_ports)
-#         self.model.machine_model.machine_state_updated.connect(self.update_machine_connect_button)
-#         self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
-
-#         # Connect signals from the view to the controller
-#         self.connect_machine_requested.connect(self.controller.connect_machine)
-#         self.connect_balance_requested.connect(self.controller.connect_balance)
-#         self.refresh_ports_requested.connect(self.controller.update_available_ports)
-
-#         # Populate ports initially
-#         self.refresh_ports()
-
-#     def init_ui(self):
-#         """Initialize the user interface."""
-#         self.setLayout(QGridLayout())
-
-#         # Labels
-#         self.layout().addWidget(QLabel("Device"), 0, 0)
-#         self.layout().addWidget(QLabel("COM Port"), 0, 1)
-#         self.layout().addWidget(QLabel("Connect"), 0, 2)
-
-#         # Machine row
-#         self.machine_label = QLabel("Machine")
-#         self.machine_port_combobox = QComboBox()
-#         self.machine_connect_button = QPushButton("Connect")
-#         self.machine_connect_button.setCheckable(True)
-#         self.machine_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
-#         self.machine_connect_button.clicked.connect(self.request_machine_connect_change)
-#         self.update_machine_connect_button(self.model.machine_model.machine_connected)
-
-#         self.layout().addWidget(self.machine_label, 1, 0)
-#         self.layout().addWidget(self.machine_port_combobox, 1, 1)
-#         self.layout().addWidget(self.machine_connect_button, 1, 2)
-        
-#         # Balance row
-#         self.balance_label = QLabel("Balance")
-#         self.balance_port_combobox = QComboBox()
-#         self.balance_connect_button = QPushButton("Connect")
-#         self.balance_connect_button.setCheckable(True)
-#         self.balance_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
-#         self.balance_connect_button.clicked.connect(self.request_balance_connect_change)
-#         self.update_balance_connect_button(self.model.machine_model.balance_connected)
-
-#         self.layout().addWidget(self.balance_label, 2, 0)
-#         self.layout().addWidget(self.balance_port_combobox, 2, 1)
-#         self.layout().addWidget(self.balance_connect_button, 2, 2)
-
-#         # Refresh button
-#         self.refresh_button = QPushButton("Refresh Ports")
-#         self.refresh_button.setFocusPolicy(QtCore.Qt.NoFocus)
-#         self.refresh_button.clicked.connect(self.refresh_ports)
-#         self.layout().addWidget(self.refresh_button, 3, 1, 1, 2)
-
-#     def update_machine_ports(self, ports):
-#         """Update the COM port selections for the machine."""
-#         ports_with_virtual = ports + ["Virtual"]
-#         self.machine_port_combobox.clear()
-#         self.machine_port_combobox.addItems(ports_with_virtual)
-#         default_port = self.model.get_default_machine_port()
-#         if default_port in ports:
-#             self.machine_port_combobox.setCurrentText(default_port)
-#         else:
-#             self.machine_port_combobox.setCurrentText(ports_with_virtual[0])
-
-#     def update_balance_ports(self, ports):
-#         """Update the COM port selections for the balance."""
-#         ports_with_virtual = ports + ["Virtual"]
-#         self.balance_port_combobox.clear()
-#         self.balance_port_combobox.addItems(ports_with_virtual)
-#         default_port = self.model.get_default_balance_port()
-#         if default_port in ports:
-#             self.balance_port_combobox.setCurrentText(default_port)
-#         else:
-#             self.balance_port_combobox.setCurrentText(ports_with_virtual[0])
-
-#     def request_machine_connect_change(self):
-#         """Handle machine connection request."""
-#         if self.model.machine_model.machine_connected:
-#             self.controller.disconnect_machine()
-#         else:
-#             self.connect_machine()
-
-#     def connect_machine(self):
-#         """Handle machine connection request."""
-#         port = self.machine_port_combobox.currentText()
-#         self.connect_machine_requested.emit(port)
-
-#     def request_balance_connect_change(self):
-#         """Handle balance connection request."""
-#         if self.model.machine_model.balance_connected:
-#             self.controller.disconnect_balance()
-#         else:
-#             self.connect_balance()
-
-#     def connect_balance(self):
-#         """Handle balance connection request."""
-#         port = self.balance_port_combobox.currentText()
-#         self.connect_balance_requested.emit(port)
-
-#     def refresh_ports(self):
-#         """Handle refresh ports request."""
-#         self.refresh_ports_requested.emit()
-
-#     def update_machine_connect_button(self, machine_connected):
-#         """Update the machine connect button text and color based on the connection state."""
-#         print(f"---Machine connected: {machine_connected}")
-#         if machine_connected:
-#             self.machine_connect_button.setText("Disconnect")
-#             self.machine_connect_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-#         else:
-#             self.machine_connect_button.setText("Connect")
-#             self.machine_connect_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
-
-#     def update_balance_connect_button(self, balance_connected):
-#         """Update the balance connect button text and color based on the connection state."""
-#         if balance_connected:
-#             self.balance_connect_button.setText("Disconnect")
-#             self.balance_connect_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-#         else:
-#             self.balance_connect_button.setText("Connect")
-#             self.balance_connect_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
-
 
 class CustomSpinBox(QtWidgets.QDoubleSpinBox):
     valueChangedByStep = QtCore.Signal(int)
@@ -1912,6 +1778,192 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 return None
 
         return None
+
+class PreprogrammedSequencesTab(QtWidgets.QWidget):
+    def __init__(self, main_window, model, controller, color_dict):
+        super().__init__()
+        self.main_window = main_window
+        self.model = model
+        self.controller = controller
+        self.color_dict = color_dict
+
+        self._build_ui()
+        self._wire_signals()
+        self._set_state("idle")
+
+    def _build_ui(self):
+        self.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(12)
+
+        # --- Delay / Countdown row ---
+        top = QtWidgets.QGroupBox("Start Delay")
+        top_layout = QtWidgets.QGridLayout(top)
+
+        top_layout.addWidget(QtWidgets.QLabel("Delay before start (s):"), 0, 0)
+        self.delay_spin = QtWidgets.QDoubleSpinBox()
+        self.delay_spin.setRange(0, 120)
+        self.delay_spin.setDecimals(1)
+        self.delay_spin.setSingleStep(0.5)
+        self.delay_spin.setValue(5.0)
+        self.delay_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+        top_layout.addWidget(self.delay_spin, 0, 1)
+
+        self.countdown_label = QtWidgets.QLabel("Ready")
+        f = self.countdown_label.font()
+        f.setPointSize(14)
+        f.setBold(True)
+        self.countdown_label.setFont(f)
+        self.countdown_label.setAlignment(Qt.AlignCenter)
+        top_layout.addWidget(self.countdown_label, 1, 0, 1, 2)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel Countdown")
+        self.cancel_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.cancel_btn.clicked.connect(self.controller.cancel_preprogrammed_sequence)
+        top_layout.addWidget(self.cancel_btn, 2, 0, 1, 2)
+
+        outer.addWidget(top)
+
+        # --- Sequences list ---
+        seq_box = QtWidgets.QGroupBox("Preprogrammed Sequences")
+        seq_layout = QtWidgets.QGridLayout(seq_box)
+        seq_layout.setColumnStretch(0, 1)
+        seq_layout.setColumnStretch(1, 0)
+
+        # 1) Pickup slot -> imager -> return
+        self.pickup_btn = QtWidgets.QPushButton("Pickup Slot → Imager → Return")
+        self.pickup_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.pickup_slot_spin = QtWidgets.QSpinBox()
+        self.pickup_slot_spin.setRange(1, 4)
+        self.pickup_slot_spin.setValue(1)
+        self.pickup_slot_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        seq_layout.addWidget(self.pickup_btn,        0, 0)
+        seq_layout.addWidget(QtWidgets.QLabel("Slot:"), 0, 1)
+        seq_layout.addWidget(self.pickup_slot_spin,  0, 2)
+
+        # 2) LED on -> wait -> off
+        self.led_btn = QtWidgets.QPushButton("LED On → Wait → LED Off")
+        self.led_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.led_wait_spin = QtWidgets.QDoubleSpinBox()
+        self.led_wait_spin.setRange(0.1, 120.0)
+        self.led_wait_spin.setDecimals(1)
+        self.led_wait_spin.setSingleStep(0.5)
+        self.led_wait_spin.setValue(5.0)
+        self.led_wait_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        seq_layout.addWidget(self.led_btn,           1, 0)
+        seq_layout.addWidget(QtWidgets.QLabel("On-time (s):"), 1, 1)
+        seq_layout.addWidget(self.led_wait_spin,     1, 2)
+
+        # 3) Imager -> plate -> imager
+        self.move_btn = QtWidgets.QPushButton("Imager → Plate → Imager")
+        self.move_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        seq_layout.addWidget(self.move_btn,          2, 0, 1, 3)
+
+        outer.addWidget(seq_box)
+        outer.addStretch(1)
+
+        # Bind button actions
+        self.pickup_btn.clicked.connect(self._run_pickup_sequence)
+        self.led_btn.clicked.connect(self._run_led_sequence)
+        self.move_btn.clicked.connect(self._run_move_sequence)
+
+    def _wire_signals(self):
+        self.controller.sequence_state_changed.connect(self._set_state)
+        self.controller.sequence_countdown_s.connect(self._on_countdown)
+        self.controller.sequence_error.connect(self._on_error)
+        self.controller.sequence_completed.connect(self._on_completed)
+
+        # If your model has a machine_state_updated signal, keep enable/disable fresh
+        if hasattr(self.model, "machine_state_updated"):
+            self.model.machine_state_updated.connect(self._refresh_enabled)
+
+        # Also refresh once at startup
+        self._refresh_enabled()
+
+    def _refresh_enabled(self):
+        connected = True
+        try:
+            connected = bool(self.model.machine_model.is_connected())
+        except Exception:
+            pass
+
+        idle = (getattr(self.controller, "_seq_state", "idle") == "idle")
+        enable = connected and idle
+
+        # enable main controls only when idle
+        self.pickup_btn.setEnabled(enable)
+        self.pickup_slot_spin.setEnabled(enable)
+        self.led_btn.setEnabled(enable)
+        self.led_wait_spin.setEnabled(enable)
+        self.move_btn.setEnabled(enable)
+        self.delay_spin.setEnabled(enable)
+
+        # cancel only during countdown
+        self.cancel_btn.setEnabled(getattr(self.controller, "_seq_state", "idle") == "countdown")
+
+    def _format_seconds(self, s: float) -> str:
+        s = max(0.0, float(s))
+        return f"{s:.1f}s"
+
+    def _set_state(self, state: str):
+        if state == "idle":
+            self.countdown_label.setText("Ready")
+        elif state == "countdown":
+            # countdown label gets updated by _on_countdown
+            pass
+        elif state == "running":
+            self.countdown_label.setText("Running…")
+        else:
+            self.countdown_label.setText(state)
+        self._refresh_enabled()
+
+    def _on_countdown(self, remaining_s: float):
+        # Only show countdown when counting down
+        if getattr(self.controller, "_seq_state", "") == "countdown":
+            self.countdown_label.setText(f"Starting in {self._format_seconds(remaining_s)}")
+
+    def _on_error(self, msg: str):
+        self.main_window.popup_message("Sequence Error", msg)
+        self._refresh_enabled()
+
+    def _on_completed(self, seq_id: str):
+        self.countdown_label.setText("Done")
+        self._refresh_enabled()
+
+    # -----------------
+    # Run button actions
+    # -----------------
+
+    def _run_pickup_sequence(self):
+        delay = float(self.delay_spin.value())
+        slot  = int(self.pickup_slot_spin.value())
+        self.controller.start_preprogrammed_sequence(
+            "pickup_slot_imager_return",
+            delay_s=delay,
+            slot=slot
+        )
+
+    def _run_led_sequence(self):
+        delay = float(self.delay_spin.value())
+        on_s  = float(self.led_wait_spin.value())
+        self.controller.start_preprogrammed_sequence(
+            "led_on_wait_off",
+            delay_s=delay,
+            on_s=on_s
+        )
+
+    def _run_move_sequence(self):
+        delay = float(self.delay_spin.value())
+        self.controller.start_preprogrammed_sequence(
+            "imager_plate_imager",
+            delay_s=delay
+        )
 
 class BaseCalibrationDialog(QDialog):
     def __init__(self, main_window, model, controller, title, steps, name_dict,offsets):
