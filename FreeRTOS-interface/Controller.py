@@ -37,6 +37,7 @@ class Controller(QObject):
         self.machine = machine
         self.model = model
         self.expected_position = self.model.machine_model.get_current_position_dict()
+        self.expected_location = self.model.machine_model.get_current_location()
 
         self._dfu_thread: DfuUpdateWorker | None = None
 
@@ -614,6 +615,10 @@ class Controller(QObject):
         """Handle the home complete signal."""
         self.model.machine_model.handle_home_complete()
         self.update_expected_position(x=500, y=500, z=500)
+        try:
+            self.expected_location = self.model.machine_model.get_current_location()
+        except Exception:
+            self.expected_location = "Home"
 
     def update_expected_position(self, x=None, y=None, z=None):
         """Update the expected position after a move."""
@@ -627,6 +632,10 @@ class Controller(QObject):
     def update_expected_with_current(self):
         """Update the expected position with the current position."""
         self.expected_position = self.model.machine_model.get_current_position_dict()
+        try:
+            self.expected_location = self.model.machine_model.get_current_location()
+        except Exception:
+            self.expected_location = None
     
     def update_location_handler(self,name=None):
         """Update the current location."""
@@ -640,7 +649,8 @@ class Controller(QObject):
     def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False,ignore_safe_height=False):
         """Move to the saved location."""
         safe_z = 35000
-        current_location = self.model.machine_model.get_current_location()
+        # current_location = self.model.machine_model.get_current_location()
+        current_location = str(getattr(self, "expected_location", None) or "")
         current_z = self.model.machine_model.get_current_position_dict()['Z']
 
         if coords is not None:
@@ -669,7 +679,8 @@ class Controller(QObject):
         if z_offset:
             target['Z'] += z_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
-
+        self.expected_location = name
+        
     def open_gripper(self,handler=None):
         """Open the gripper."""
         self.machine.open_gripper(handler=handler)
@@ -1255,6 +1266,8 @@ class Controller(QObject):
         if not self.machine.check_if_all_completed():
             self._abort_sequence("Queue became non-empty during countdown; aborting.")
             return
+        
+        self.update_expected_with_current()
 
         seq_id = self._seq_id
         builder = self._sequence_builders.get(seq_id)
