@@ -250,6 +250,16 @@ class DropletCamera(QObject):
             self.camera = None
         self._trigger_low()
 
+    def get_last_capture_result(self) -> dict | None:
+        """
+        Returns the last capture result dict produced by _complete_capture_locked.
+        Safe to call from Qt thread.
+        """
+        with self._cv:  # uses the same lock as the grabber
+            if isinstance(self._cap_result, dict):
+                return dict(self._cap_result)
+            return None
+
     def change_exposure_time(self, exposure_time_us, handler=None):
         self.exposure_time = int(exposure_time_us)
         if self.camera:

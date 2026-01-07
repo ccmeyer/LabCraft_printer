@@ -29,6 +29,7 @@ import math
 import matplotlib.pyplot as plt
 from enum import Enum
 from collections import deque
+import queue
 
 import os, json, time, uuid, tempfile, threading
 import numpy as np
@@ -7087,6 +7088,11 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_timecourse"
+        self._save_dir = None
+
+        # ensure we stop saving on success or error
+        self.calibrationCompleted.connect(self._cleanup_saving)
+        self.calibrationError.connect(self._cleanup_saving_on_error)
 
         # --- prerequisites ---
         self.emergence_time_us = self.calibration_manager.get_emergence_time()
@@ -7137,6 +7143,63 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         for s in (self.state_prepare, self.state_apply, self.state_capture, self.state_annot, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare)
+
+    def start(self):
+        # Pick a sensible default root: next to calibration.json, in droplet_imager_captures/
+        root = self.model.droplet_camera_model.get_save_root_directory()
+        if not root:
+            try:
+                cal_path = self.manager.calibration_file_path
+                if not cal_path:
+                    cal_path = self.model.experiment_model.get_calibration_file_path()
+                base_dir = os.path.dirname(os.path.abspath(cal_path))
+            except Exception:
+                base_dir = os.getcwd()
+            root = os.path.join(base_dir, "droplet_imager_captures")
+
+        self._save_dir = self.model.droplet_camera_model.start_saving(
+            root_dir=root,
+            prefix="droplet_timecourse",
+            create_subdir=True,
+            image_ext="jpg",
+            jpeg_quality=95,
+        )
+
+        # Helpful UI log
+        try:
+            self.stageChanged.emit(f"Timecourse saving frames to: {self._save_dir}")
+        except Exception:
+            pass
+
+        # Optional: persist path in calibration.json for traceability
+        try:
+            self.calibrationDataUpdated.emit({
+                "event": "timecourse_capture_started",
+                "save_dir": self._save_dir,
+            })
+        except Exception:
+            pass
+
+        super().start()  # run your existing FSM / logic
+
+    def _cleanup_saving(self, *args):
+        try:
+            if self.model and getattr(self.model, "droplet_camera_model", None):
+                self.model.droplet_camera_model.stop_saving()
+        except Exception:
+            pass
+
+    def _cleanup_saving_on_error(self, *args):
+        self._cleanup_saving()
+
+    def stop(self):
+        # if your BaseCalibrationProcess has stop(), keep it
+        self._cleanup_saving()
+        super().stop()
+
+    def requestGracefulStop(self, *args, **kwargs):
+        self._cleanup_saving()
+        return super().requestGracefulStop(*args, **kwargs)
 
     # ---------- helpers ----------
     def _put_delay_stamp(self, img, delay_us: int):
@@ -7273,8 +7336,27 @@ class DropletCameraModel(QObject):
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
-        self.dir_name = "Untitled"
-        self.save_dir = os.path.join(self.script_dir, self.dir_name)
+        # self.dir_name = "Untitled"
+        # self.save_dir = os.path.join(self.script_dir, self.dir_name)
+
+        # --- Saving state ---
+        self._save_root_dir = None        # user-set “root” directory
+        self._save_dir = None             # active run directory
+        self._saving_enabled = False
+
+        self._save_prefix = "frame"
+        self._save_ext = "jpg"
+        self._jpeg_quality = 95
+        self._save_index = 0
+
+        self._save_queue = queue.Queue(maxsize=256)
+        self._save_stop_evt = threading.Event()
+        self._save_thread = None
+        self._meta_fp = None
+        self._meta_lock = threading.Lock()
+
+        # optional: store last capture info
+        self._last_capture_info = None
 
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
@@ -7333,11 +7415,170 @@ class DropletCameraModel(QObject):
         else:
             return self.latest_frame
 
-    def start_saving(self):
-        self.saving_active = True
+    def start_saving(
+        self,
+        *,
+        root_dir: str | None = None,
+        prefix: str = "capture",
+        create_subdir: bool = True,
+        image_ext: str = "jpg",
+        jpeg_quality: int = 95,
+    ):
+        """
+        Enables saving of every captured frame into a *new directory*.
+        Returns the active save directory.
+        """
+        # If already saving, stop and start fresh (new folder)
+        if self._saving_enabled:
+            self.stop_saving()
+
+        root = root_dir or self._save_root_dir
+        if not root:
+            # reasonable fallback if nothing else is configured
+            root = os.path.abspath(os.path.join(os.getcwd(), "droplet_imager_captures"))
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = f"{prefix}_{ts}" if create_subdir else ""
+
+        if create_subdir:
+            save_dir = self._make_unique_dir(root, folder_name)
+        else:
+            save_dir = os.path.abspath(root)
+            os.makedirs(save_dir, exist_ok=True)
+
+        self._save_dir = save_dir
+        self._save_prefix = "frame"
+        self._save_ext = image_ext.lstrip(".").lower()
+        self._jpeg_quality = int(jpeg_quality)
+        self._save_index = 0
+
+        # metadata jsonl
+        try:
+            meta_path = os.path.join(self._save_dir, "metadata.jsonl")
+            self._meta_fp = open(meta_path, "a", buffering=1)
+        except Exception as e:
+            self._meta_fp = None
+            print(f"[DropletCameraModel] Could not open metadata.jsonl: {e}")
+
+        self._saving_enabled = True
+        self._start_save_thread()
+
+        print(f"[DropletCameraModel] Saving enabled -> {self._save_dir}")
+        return self._save_dir
 
     def stop_saving(self):
-        self.saving_active = False
+        """
+        Stops saving and flushes the writer queue.
+        """
+        if not self._saving_enabled:
+            return
+
+        self._saving_enabled = False
+
+        # try to flush queued work quickly
+        try:
+            # wait a bit for queue to drain
+            self._save_queue.join()
+        except Exception:
+            pass
+
+        self._stop_save_thread()
+
+        # close metadata file
+        try:
+            if self._meta_fp:
+                self._meta_fp.close()
+        except Exception:
+            pass
+        self._meta_fp = None
+
+        print(f"[DropletCameraModel] Saving stopped (dir was {self._save_dir})")
+        self._save_dir = None
+
+    def set_save_directory(self, directory: str | None):
+        """
+        Sets the *root* directory where new capture subfolders will be created.
+        """
+        self._save_root_dir = directory
+
+    def get_save_root_directory(self) -> str | None:
+        return self._save_root_dir
+
+    def get_active_save_directory(self) -> str | None:
+        return self._save_dir
+
+    def is_saving(self) -> bool:
+        return bool(self._saving_enabled)
+
+    def _make_unique_dir(self, parent: str, name: str) -> str:
+        os.makedirs(parent, exist_ok=True)
+        out = os.path.join(parent, name)
+        if not os.path.exists(out):
+            os.makedirs(out, exist_ok=True)
+            return out
+        # if it exists, add suffix
+        for i in range(1, 1000):
+            cand = f"{out}_{i:03d}"
+            if not os.path.exists(cand):
+                os.makedirs(cand, exist_ok=True)
+                return cand
+        raise RuntimeError("Could not create a unique capture directory (too many collisions).")
+
+    def _start_save_thread(self):
+        if self._save_thread and self._save_thread.is_alive():
+            return
+        self._save_stop_evt.clear()
+        self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
+        self._save_thread.start()
+
+    def _stop_save_thread(self):
+        self._save_stop_evt.set()
+        if self._save_thread:
+            self._save_thread.join(timeout=3.0)
+            self._save_thread = None
+
+    def _save_worker(self):
+        """
+        Background writer: pulls (path, image_rgb, meta_dict) and writes to disk.
+        """
+        while (not self._save_stop_evt.is_set()) or (not self._save_queue.empty()):
+            try:
+                item = self._save_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if item is None:
+                continue
+
+            path, img_rgb, meta = item
+            try:
+                # cv2.imwrite expects BGR; your frames are RGB
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+                if self._save_ext.lower() in ("jpg", "jpeg"):
+                    cv2.imwrite(
+                        path,
+                        img_bgr,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), int(self._jpeg_quality)]
+                    )
+                else:
+                    # png or others
+                    cv2.imwrite(path, img_bgr)
+
+                # append metadata jsonl
+                if self._meta_fp:
+                    with self._meta_lock:
+                        self._meta_fp.write(json.dumps(meta, default=str) + "\n")
+                        self._meta_fp.flush()
+
+            except Exception as e:
+                # don’t crash the writer; log and continue
+                print(f"[DropletCameraModel] Failed to save {path}: {e}")
+            finally:
+                try:
+                    self._save_queue.task_done()
+                except Exception:
+                    pass
 
     def start_analyzing(self):
         self.analysis_active = True
@@ -7362,20 +7603,49 @@ class DropletCameraModel(QObject):
         self.dir_name = dir
         self.save_dir = os.path.join(self.image_dir, self.dir_name)
     
-    def update_image(self,frame):
-        self.latest_frame = frame
-        if self.analysis_active:
-            print('Analyzing...')
-            results, self.analyzed_image = self.analyze_droplets(
-                frame,
-                intensity_threshold=self.intensity_threshold,
-                circularity_threshold=self.circularity_threshold,
-                min_area_threshold=self.min_area_threshold,
-                edge_margin=self.edge_margin
-            )
+    def update_image(self, frame: np.ndarray, capture_info: dict | None = None):
+        """
+        Called by Controller when a new droplet image arrives.
+        """
+        if frame is None:
+            return
+
+        # store image (whatever you currently do)
+        self._last_capture_info = capture_info
+        self.original_image = frame  # or frame.copy() if you prefer
+
+        # --- enqueue save if enabled ---
+        if self._saving_enabled and self._save_dir:
+            self._save_index += 1
+            fname = f"{self._save_prefix}_{self._save_index:06d}.{self._save_ext}"
+            fpath = os.path.join(self._save_dir, fname)
+
+            # snapshot metadata at capture time
+            try:
+                num_flashes, flash_duration, flash_delay, num_droplets, exposure_time = self.get_image_metadata()
+            except Exception:
+                num_flashes = flash_duration = flash_delay = num_droplets = exposure_time = None
+
+            meta = {
+                "index": self._save_index,
+                "filename": fname,
+                "saved_at": datetime.now().isoformat(),
+                "num_flashes": num_flashes,
+                "flash_duration_us": flash_duration,
+                "flash_delay_us": flash_delay,
+                "num_droplets": num_droplets,
+                "exposure_time_us": exposure_time,
+                "capture_info": capture_info,  # includes cap_id/reason/threshold/mean if provided
+            }
+
+            # hand a copy to the writer to avoid accidental mutation
+            try:
+                self._save_queue.put_nowait((fpath, frame.copy(), meta))
+            except queue.Full:
+                print("[DropletCameraModel] Save queue full — dropping frame.")
+
+        # continue your usual flow (emit, analyze, etc.)
         self.droplet_image_updated.emit()
-        if self.saving_active:
-            self.save_frame()
 
     def compute_tenengrad_variance(self, gray, mask=None):
         """

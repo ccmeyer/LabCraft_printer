@@ -1097,8 +1097,15 @@ class Controller(QObject):
         callback is waiting, calls it.
         """
         frame = self.machine.droplet_camera.get_latest_frame()
+
+        cap_info = None
+        try:
+            cap_info = self.machine.droplet_camera.get_last_capture_result()
+        except Exception:
+            cap_info = None
+            
         # Update the model and/or view (assuming your model has such a method)
-        self.model.droplet_camera_model.update_image(frame)
+        self.model.droplet_camera_model.update_image(frame, capture_info=cap_info)
         
         # If a callback was set for the capture, call it.
         if self.pending_capture_callback:
