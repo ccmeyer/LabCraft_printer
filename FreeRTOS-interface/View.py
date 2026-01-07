@@ -139,26 +139,26 @@ class MainWindow(QMainWindow):
         mid_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
-        tab_widget = QtWidgets.QTabWidget()
-        tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.setFocusPolicy(QtCore.Qt.NoFocus)
 
         self.well_plate_widget = WellPlateWidget(self,self.model, self.controller)
         self.well_plate_widget.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
-        tab_widget.addTab(self.well_plate_widget, "Well Plate")
+        self.tab_widget.addTab(self.well_plate_widget, "Well Plate")
 
         self.movement_box = MovementBox(self, self.model, self.controller)
         self.movement_box.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
-        tab_widget.addTab(self.movement_box, "Movement")
+        self.tab_widget.addTab(self.movement_box, "Movement")
 
         self.speed_profiles_tab = SpeedProfilesTab(self, self.model, self.controller, self.color_dict)
         self.speed_profiles_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
-        tab_widget.addTab(self.speed_profiles_tab, "Firmware")
+        self.tab_widget.addTab(self.speed_profiles_tab, "Firmware")
 
         self.sequences_tab = PreprogrammedSequencesTab(self, self.model, self.controller, self.color_dict)
         self.sequences_tab.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
-        tab_widget.addTab(self.sequences_tab, "Sequences")
+        self.tab_widget.addTab(self.sequences_tab, "Sequences")
 
-        mid_layout.addWidget(tab_widget)
+        mid_layout.addWidget(self.tab_widget)
 
         self.rack_box = RackBox(self,self.model,self.controller)
         self.rack_box.setFixedHeight(250)
@@ -253,6 +253,14 @@ class MainWindow(QMainWindow):
         transparent_pixmap = QtGui.QPixmap.fromImage(transparent_image)
         transparent_icon = QtGui.QIcon(transparent_pixmap)
         return transparent_icon
+
+    def show_well_plate_tab(self):
+        """Switch the center tab widget to the Well Plate tab."""
+        if not hasattr(self, "tab_widget") or not hasattr(self, "well_plate_widget"):
+            return
+        idx = self.tab_widget.indexOf(self.well_plate_widget)
+        if idx != -1:
+            self.tab_widget.setCurrentIndex(idx)
 
     def popup_message(self, title, message):
         """Display a popup message with a title and message."""
@@ -1787,6 +1795,9 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.controller = controller
         self.color_dict = color_dict
 
+        self._auto_switch_threshold_s = 2.0
+        self._switched_to_well_plate = False
+
         self._build_ui()
         self._wire_signals()
         self._set_state("idle")
@@ -1913,8 +1924,10 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
 
     def _set_state(self, state: str):
         if state == "idle":
+            self._switched_to_well_plate = False
             self.countdown_label.setText("Ready")
         elif state == "countdown":
+            self._switched_to_well_plate = False
             # countdown label gets updated by _on_countdown
             pass
         elif state == "running":
@@ -1924,10 +1937,17 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self._refresh_enabled()
 
     def _on_countdown(self, remaining_s: float):
-        # Only show countdown when counting down
-        if getattr(self.controller, "_seq_state", "") == "countdown":
-            self.countdown_label.setText(f"Starting in {self._format_seconds(remaining_s)}")
+        if getattr(self.controller, "_seq_state", "") != "countdown":
+            return
 
+        self.countdown_label.setText(f"Starting in {self._format_seconds(remaining_s)}")
+
+        if (remaining_s <= self._auto_switch_threshold_s) and (not self._switched_to_well_plate):
+            # Switch UI to Well Plate tab for recordings
+            if hasattr(self.main_window, "show_well_plate_tab"):
+                self.main_window.show_well_plate_tab()
+            self._switched_to_well_plate = True
+            
     def _on_error(self, msg: str):
         self.main_window.popup_message("Sequence Error", msg)
         self._refresh_enabled()
