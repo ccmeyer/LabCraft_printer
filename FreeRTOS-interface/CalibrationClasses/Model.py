@@ -5427,7 +5427,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # Images / measurements
         self.background_image = None
         self.droplet_image = None
-        self.num_images = 20
+        self.num_images = 100
         self.image_counter = 0
         self.circularity_threshold = 1.15
         self.droplet_positions, self.droplet_focus = [], []
@@ -5437,6 +5437,14 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # --- lifecycle/guards ---
         self._aborted = False
         self._finished = False
+
+        # --- see if we should save in this run ---
+        self._save_enabled = bool(self.manual_start)  # you said you want this in manual start mode
+        self._save_started_here = False
+        self._save_dir = None
+
+        self._bg_saved = False
+        self._last_capture = None  # dict returned by camera_model.save_frame_with_metadata()
 
         # Pressure guardrails
         try:
@@ -5645,6 +5653,74 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 self._ready = False
                 self._abort("Must complete trajectory + nozzle center + emergence first")
 
+    def _ensure_saving(self):
+        if not self._save_enabled:
+            return
+        cam = self.model.droplet_camera_model
+        if not cam.is_saving():
+            self._save_dir = cam.start_saving(prefix="droplet_search", root_dir=cam.get_save_root_directory())
+            self._save_started_here = True
+
+    def _stop_saving_if_started(self):
+        if self._save_started_here:
+            try:
+                self.model.droplet_camera_model.stop_saving()
+            except Exception:
+                pass
+            self._save_started_here = False
+
+    def _save_capture(self, frame, *, stage: str, extra: dict | None = None) -> dict | None:
+        """
+        Save a raw captured frame + metadata for this process.
+        Returns the camera_model saved dict (index/filename/path).
+        """
+        if not self._save_enabled:
+            return None
+        self._ensure_saving()
+
+        cam = self.model.droplet_camera_model
+
+        # capture context
+        try:
+            cur_pressure = float(self.model.machine_model.get_current_print_pressure())
+        except Exception:
+            cur_pressure = None
+        try:
+            cur_pw_us = int(self.model.machine_model.get_print_pulse_width() or 0)
+        except Exception:
+            cur_pw_us = None
+
+        info = {
+            "process": "DropletSearchCalibrationProcess",
+            "manual_start": bool(self.manual_start),
+            "stage": stage,
+            "flash_delay_us": int(getattr(self, "current_delay_us", -1)) if getattr(self, "current_delay_us", None) is not None else None,
+            "print_pressure_psi": cur_pressure,
+            "print_pulse_width_us": cur_pw_us,
+            "replicate_index": int(self.image_counter) if hasattr(self, "image_counter") else None,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if extra:
+            info.update(extra)
+
+        saved = cam.save_frame_with_metadata(frame, capture_info=info)
+        self._last_capture = saved
+        return saved
+
+    def _save_overlay(self, image, *, role: str, frame_index: int, meta_extra: dict | None = None):
+        if not self._save_enabled:
+            return
+        self._ensure_saving()
+        self.model.droplet_camera_model.save_aux_image(
+            image, index=int(frame_index), role=role, meta_extra=meta_extra
+        )
+
+    def _append_analysis(self, record: dict):
+        if not self._save_enabled:
+            return
+        self._ensure_saving()
+        self.model.droplet_camera_model.append_analysis_record(record)
+
     def _clamp_delay(self, d_us:int)->int:
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
 
@@ -5706,6 +5782,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def _abort(self, msg: str):
         if self._aborted:
             return
+        self._stop_saving_if_started()
         self._aborted = True
         try:
             self.state_machine.stop()
@@ -5732,6 +5809,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def onPrepareBackground(self):
         if self._is_dead():
             return
+        if self._save_enabled:
+            self._ensure_saving()
         self.stageChanged.emit("Capturing background at target")
         self.calibration_manager.changeSettingsRequested.emit(
             {"num_droplets": 0},
@@ -5751,8 +5830,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onSetDelay(self):
+        if self._save_enabled and (self.background_image is not None) and (not self._bg_saved):
+            self._save_capture(self.background_image, stage="background", extra={"num_droplets_setting": 0})
+            self._bg_saved = True
+        
         if self._is_dead():
             return
+        
         if self._delay_try_index < len(self.delay_offsets_us):
             d_us = self.target_delay_us + self.delay_offsets_us[self._delay_try_index]
             self._delay_try_index += 1
@@ -5795,9 +5879,31 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if self._is_dead():
             return
         self.stageChanged.emit("Analyzing droplet for contour")
+
+        saved = self._save_capture(self.droplet_image, stage="search_capture")
+        frame_idx = saved["index"] if saved else None
+
         contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
             self.droplet_image, self.background_image
         )
+
+        if frame_idx is not None and overlay is not None:
+            self._save_overlay(
+                overlay,
+                role="search_overlay",
+                frame_index=frame_idx,
+                meta_extra={"stage": "search_overlay", "had_contour": bool(contour is not None)}
+            )
+
+            self._append_analysis({
+                "kind": "search_result",
+                "frame_index": int(frame_idx),
+                "flash_delay_us": int(self.current_delay_us),
+                "found": bool(contour is not None),
+                "center_px": None if contour is None else tuple(map(int, (x + w//2, y + h//2))),
+                "timestamp": datetime.now().isoformat(),
+            })
+
         if contour is None:
             self.stageChanged.emit("No droplet: trying next delay/position")
             self.presentImageSignal.emit(overlay)
@@ -5855,6 +5961,38 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         result, annotated = self.model.droplet_camera_model.characterize_droplet(
             self.droplet_image, self.background_image
         )
+
+        # Save the *raw* frame that produced this characterization result
+        saved = self._save_capture(self.droplet_image, stage="characterization_capture", extra={
+            "attempt_image_counter": int(self.image_counter),
+        })
+        frame_idx = saved["index"] if saved else None
+
+        # Save annotated image + per-frame analysis record
+        if frame_idx is not None:
+            if annotated is not None:
+                self._save_overlay(
+                    annotated,
+                    role="char_annotated",
+                    frame_index=frame_idx,
+                    meta_extra={"stage": "characterization_annotated"}
+                )
+
+            # record result (even if focus is low; you can filter later)
+            if isinstance(result, dict):
+                self._append_analysis({
+                    "kind": "characterization_result",
+                    "frame_index": int(frame_idx),
+                    "replicate_index": int(self.image_counter),
+                    "flash_delay_us": int(getattr(self, "current_delay_us", -1)),
+                    "center_px": result.get("center"),
+                    "volume_nL": result.get("volume"),
+                    "circularity": result.get("circularity"),
+                    "circularity_ellipse": result.get("circularity_ellipse"),
+                    "focus": result.get("focus"),
+                    "timestamp": datetime.now().isoformat(),
+                })
+
         if result is None:
             self.stageChanged.emit("Capture failed → recapturing")
             self.emitContinueCharacterization()
@@ -5974,6 +6112,25 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             "print_pulse_width_us": cur_pw_us,
         }
 
+        # Persist the full result payload for later plotting without re-running
+        if self._save_enabled:
+            self.model.droplet_camera_model.write_json("droplet_search_summary.json", {
+                "measurements": self.measurements,
+                "result": results
+            })
+
+            # Also stream a final record
+            self._append_analysis({
+                "kind": "final_summary",
+                "mean_volume_nL": results.get("mean_volume"),
+                "cv_volume_percent": results.get("cv_volume_percent"),
+                "mean_center_px": results.get("mean_center_px"),
+                "delay_us": results.get("delay_us"),
+                "pressure": results.get("pressure"),
+                "print_pulse_width_us": results.get("print_pulse_width_us"),
+                "timestamp": datetime.now().isoformat(),
+            })
+
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": results})
         self.emitCharacterizationCompleted()
 
@@ -5987,6 +6144,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             pass
         self.stageChanged.emit("Droplet search + characterization complete")
+        self._stop_saving_if_started()
         self.calibrationCompleted.emit()
 
     # helpers
@@ -7083,8 +7241,8 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model,
                  *,
-                 step_us: int = 200,
-                 window_us: int = 8000,
+                 step_us: int = 50,
+                 window_us: int = 6000,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_timecourse"
@@ -7311,7 +7469,7 @@ class DropletCameraModel(QObject):
     def __init__(self,steps_conv_path):
         super().__init__()
         print("\n--- DropletCameraModel initialized ---\n")
-        self.latest_image = None
+        self.latest_frame = None
         self.analyzed_image = None
         self.reading = False
         self.signal = False
@@ -7353,13 +7511,29 @@ class DropletCameraModel(QObject):
         self._save_stop_evt = threading.Event()
         self._save_thread = None
         self._meta_fp = None
+        self._analysis_fp = None
         self._meta_lock = threading.Lock()
+        self._analysis_lock = threading.Lock()
+
+        # Track last saved capture
+        self._last_saved = None  # dict with index/filename/path/etc.
 
         # optional: store last capture info
         self._last_capture_info = None
 
         self.steps_conv_path = steps_conv_path
         self.intercept_cx, self.intercept_cy, self.A, self.A_inv = self.load_step_calibration(self.steps_conv_path)
+
+    @staticmethod
+    def _json_default(o):
+        # makes numpy + tuples json-friendly
+        if isinstance(o, (np.integer, np.floating)):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, (tuple, set)):
+            return list(o)
+        return str(o)
 
     def get_image_size(self):
         return self.image_width, self.image_height
@@ -7460,6 +7634,14 @@ class DropletCameraModel(QObject):
             self._meta_fp = None
             print(f"[DropletCameraModel] Could not open metadata.jsonl: {e}")
 
+        # analysis jsonl (NEW)
+        try:
+            analysis_path = os.path.join(self._save_dir, "analysis.jsonl")
+            self._analysis_fp = open(analysis_path, "a", buffering=1)
+        except Exception as e:
+            self._analysis_fp = None
+            print(f"[DropletCameraModel] Could not open analysis.jsonl: {e}")
+
         self._saving_enabled = True
         self._start_save_thread()
 
@@ -7492,14 +7674,134 @@ class DropletCameraModel(QObject):
             pass
         self._meta_fp = None
 
+        try:
+            if self._analysis_fp:
+                self._analysis_fp.close()
+        except Exception:
+            pass
+        self._analysis_fp = None
+
         print(f"[DropletCameraModel] Saving stopped (dir was {self._save_dir})")
         self._save_dir = None
+        self._last_saved = None
+
+    def save_frame_with_metadata(self, frame: np.ndarray, *, capture_info: dict | None = None) -> dict | None:
+        """
+        Save a captured frame into the active run folder, returning a dict describing the saved item:
+        {"index":..., "filename":..., "path":..., "saved_at":...}
+        This does NOT emit UI signals; it’s safe to call from calibration processes.
+        """
+        if frame is None or not self._saving_enabled or not self._save_dir:
+            return None
+
+        self._save_index += 1
+        idx = self._save_index
+        fname = f"frame_{idx:06d}.{self._save_ext}"
+        fpath = os.path.join(self._save_dir, fname)
+
+        # snapshot metadata
+        try:
+            num_flashes, flash_duration, flash_delay, num_droplets, exposure_time = self.get_image_metadata()
+        except Exception:
+            num_flashes = flash_duration = flash_delay = num_droplets = exposure_time = None
+
+        meta = {
+            "kind": "frame",
+            "index": idx,
+            "filename": fname,
+            "saved_at": datetime.now().isoformat(),
+            "num_flashes": num_flashes,
+            "flash_duration_us": flash_duration,
+            "flash_delay_us": flash_delay,
+            "num_droplets": num_droplets,
+            "exposure_time_us": exposure_time,
+            "capture_info": capture_info,
+        }
+
+        try:
+            self._save_queue.put_nowait((fpath, frame.copy(), meta))
+        except queue.Full:
+            print("[DropletCameraModel] Save queue full — dropping frame.")
+            return None
+
+        self._last_saved = {"index": idx, "filename": fname, "path": fpath, "saved_at": meta["saved_at"]}
+        return dict(self._last_saved)
+
+    def save_aux_image(self, image: np.ndarray, *, index: int, role: str, meta_extra: dict | None = None) -> str | None:
+        """
+        Save an auxiliary image (overlay/annotated/final) tied to an existing frame index.
+        Filename example: overlay_000123.jpg
+        """
+        if image is None or not self._saving_enabled or not self._save_dir:
+            return None
+
+        fname = f"{role}_{int(index):06d}.{self._save_ext}"
+        fpath = os.path.join(self._save_dir, fname)
+
+        meta = {
+            "kind": role,
+            "index": int(index),
+            "filename": fname,
+            "guessed_pair_frame": f"frame_{int(index):06d}.{self._save_ext}",
+            "saved_at": datetime.now().isoformat(),
+        }
+        if meta_extra:
+            meta.update(meta_extra)
+
+        try:
+            self._save_queue.put_nowait((fpath, image.copy(), meta))
+            return fpath
+        except queue.Full:
+            print("[DropletCameraModel] Save queue full — dropping aux image.")
+            return None
+
+    def append_analysis_record(self, record: dict):
+        """
+        Append a single JSON line to analysis.jsonl (stream-friendly).
+        """
+        if not self._analysis_fp:
+            return
+        try:
+            with self._analysis_lock:
+                self._analysis_fp.write(json.dumps(record, default=self._json_default) + "\n")
+                self._analysis_fp.flush()
+        except Exception as e:
+            print(f"[DropletCameraModel] Failed to write analysis record: {e}")
+
+    def write_json(self, filename: str, data: dict):
+        """
+        Convenience: write a full JSON file into the active run folder.
+        """
+        if not self._save_dir:
+            return
+        try:
+            path = os.path.join(self._save_dir, filename)
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2, default=self._json_default)
+        except Exception as e:
+            print(f"[DropletCameraModel] Failed to write {filename}: {e}")
 
     def set_save_directory(self, directory: str | None):
         """
-        Sets the *root* directory where new capture subfolders will be created.
+        Backwards-compatible setter:
+        - If `directory` is absolute -> use as root.
+        - If relative (e.g. "MyExperiment") -> create under self.image_dir/MyExperiment.
+        This sets the *root* directory where new timestamped run folders will be created.
         """
-        self._save_root_dir = directory
+        if directory is None:
+            self._save_root_dir = None
+            return
+
+        if os.path.isabs(directory):
+            root = directory
+        else:
+            # Keep your old behavior of saving under .../Images/<name>
+            root = os.path.join(self.image_dir, directory)
+
+        self._save_root_dir = os.path.abspath(root)
+
+    def get_save_root_directory(self) -> str | None:
+        return self._save_root_dir
 
     def get_save_root_directory(self) -> str | None:
         return self._save_root_dir
@@ -7599,9 +7901,9 @@ class DropletCameraModel(QObject):
     def get_analysis_parameters(self):
         return self.intensity_threshold, self.circularity_threshold, self.min_area_threshold, self.edge_margin
 
-    def set_save_directory(self,dir):
-        self.dir_name = dir
-        self.save_dir = os.path.join(self.image_dir, self.dir_name)
+    # def set_save_directory(self,dir):
+    #     self.dir_name = dir
+    #     self.save_dir = os.path.join(self.image_dir, self.dir_name)
     
     def update_image(self, frame: np.ndarray, capture_info: dict | None = None):
         """
@@ -7612,7 +7914,7 @@ class DropletCameraModel(QObject):
 
         # store image (whatever you currently do)
         self._last_capture_info = capture_info
-        self.original_image = frame  # or frame.copy() if you prefer
+        self.latest_frame = frame  # or frame.copy() if you prefer
 
         # --- enqueue save if enabled ---
         if self._saving_enabled and self._save_dir:

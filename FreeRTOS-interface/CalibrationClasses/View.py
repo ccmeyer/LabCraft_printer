@@ -983,7 +983,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Applies a clear visual indication for inactive buttons.
         """
         mapping = {
-            'pressure_calibration':            self.calibrate_pressure_button,
+            # 'pressure_calibration':            self.calibrate_pressure_button,
             'pressure_scan':                   self.calibrate_pressure_scan_button,
             # 'droplet_trajectory':              self.calibrate_trajectory_button,
             'trajectory_pressure_scan':        self.scan_trajectory_button,
