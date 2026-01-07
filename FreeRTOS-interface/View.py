@@ -116,7 +116,7 @@ class MainWindow(QMainWindow):
 
         # Create the left panel with the motor positions
         left_panel = QtWidgets.QWidget()
-        left_panel.setFixedWidth(350)
+        left_panel.setFixedWidth(450)
         left_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         left_layout = QtWidgets.QVBoxLayout(left_panel)
         
@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
         self.layout.addWidget(left_panel)
 
         mid_panel = QtWidgets.QWidget()
-        mid_panel.setFixedWidth(800)
+        mid_panel.setFixedWidth(1000)
         mid_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         mid_layout = QtWidgets.QVBoxLayout(mid_panel)
 
@@ -169,7 +169,7 @@ class MainWindow(QMainWindow):
 
         # Add other widgets to the right panel as needed
         right_panel = QtWidgets.QWidget()
-        right_panel.setFixedWidth(350)
+        right_panel.setFixedWidth(450)
         right_panel.setStyleSheet(f"background-color: {self.color_dict['darker_gray']};")
         right_layout = QtWidgets.QVBoxLayout(right_panel)
 
