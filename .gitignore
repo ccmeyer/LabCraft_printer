@@ -11,6 +11,8 @@ Pyside6_interface/Experiments
 Pyside6_interface/Calibrations/droplet_images
 MVC-interface/Experiments
 Documentation/Nozzle_fabrication/*.gcode
+Documentation/Nozzle_K40_cutting/*
+droplet_imager_captures/
 MVC-interface/*.ipynb
 MVC-interface/Images/*
 MVC-interface/Logs/*
