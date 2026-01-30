@@ -14,8 +14,8 @@ CMD_STATUS = 0x02
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
 TAG_LED_REMAIN    = 0x11
-TAG_PRINT_P       = 0x12
-TAG_REFUEL_P      = 0x13
+TAG_PRINT_P       = 0x14
+TAG_REFUEL_P      = 0x15
 TAG_X_POS         = 0x20
 TAG_Y_POS         = 0x21
 TAG_Z_POS         = 0x22
