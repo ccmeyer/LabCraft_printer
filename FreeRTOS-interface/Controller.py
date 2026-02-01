@@ -10,6 +10,8 @@ import numpy as np
 import os
 import serial
 
+from hardware.profile import CURRENT_PROFILE, HardwareProfile
+from hardware.null_devices import NullCamera
 
 class Controller(QObject):
     """Controller class for the application."""
@@ -31,11 +33,15 @@ class Controller(QObject):
     sequence_completed     = QtCore.Signal(str)         # seq_id
     sequence_error         = QtCore.Signal(str)         # message
 
-    def __init__(self, machine, model):
+    def __init__(self, machine, model, profile: HardwareProfile = CURRENT_PROFILE):
         super().__init__()
 
         self.machine = machine
         self.model = model
+        self.profile = profile
+        self.balance = None  # to be set for legacy if needed
+        self._port_info = {}  # device -> ListPortInfo
+
         self.expected_position = self.model.machine_model.get_current_position_dict()
         self.expected_location = self.model.machine_model.get_current_location()
 
@@ -47,6 +53,15 @@ class Controller(QObject):
         self._boot_chip  = "gpiochip0"; self._boot_off = 24
         self._rst_chip   = "gpiochip0"; self._rst_off  = 23
         self._cwd        = None  # or Path("/home/labcraft/LabCraft_printer")
+
+        self._ui_dir = Path(__file__).resolve().parent              # LabCraft_Printer/FreeRTOS-interface
+        self._repo_root = self._ui_dir.parent                       # LabCraft_Printer
+
+        self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
+        self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
+
+        self._bin_path_current = (self._repo_root / "firmware" / "freeRTOS_LabCraft.bin").resolve()
+        self._bin_path_legacy  = (self._repo_root / "firmware" / "freeRTOS_LabCraft_legacy.bin").resolve()
 
         # This variable will temporarily hold the callback for the next capture.
         self.pending_capture_callback = None
@@ -114,7 +129,7 @@ class Controller(QObject):
         self.model.calibration_manager.moveAbsoluteRequested.disconnect()
         self.model.calibration_manager.changeSettingsRequested.disconnect()
         self.machine.droplet_camera.image_captured_signal.disconnect()
-
+        self.machine.droplet_camera.capture_failed_signal.disconnect()
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -122,7 +137,6 @@ class Controller(QObject):
 
     def handle_error(self, error_message):
         """Handle errors from the machine."""
-        pass
         #print(f"Error occurred: {error_message}")
         self.error_occurred_signal.emit('Error Occurred',error_message)
 
@@ -148,34 +162,95 @@ class Controller(QObject):
         self.model.machine_model.disconnect_machine()
     
     def update_available_ports(self):
-        # Get a list of all connected COM ports
-        ports = comports()
-        active_ports = []
-        
-        for port in ports:
-            port_name = port.device
-            if "ttyAMA" in port_name:
+        ports = []
+        self._port_info = {}
+
+        for p in comports():
+            dev = p.device  # e.g. "COM3" on Windows, "/dev/ttyACM0" on Linux
+            if not dev:
                 continue
-            # Check if the port exists in the /dev directory
-            if os.path.exists(port_name):
-                try:
-                    # Try to open the port to ensure it is active
-                    with serial.Serial(port_name) as ser:
-                        active_ports.append(port_name)
-                except (OSError, serial.SerialException):
-                    # Port exists but cannot be opened (not active)
-                    continue
+            if "ttyAMA" in dev:  # keep your Pi filter
+                continue
 
-        # return active_ports
-        self.model.machine_model.update_ports(active_ports)
+            ports.append(dev)
+            self._port_info[dev] = p
 
-    def connect_machine(self, port):
-        """Connect to the machine."""
+        self.model.machine_model.update_ports(ports)
+
+    def _classify_port(self, port: str) -> str | None:
+            """
+            Return "mcu", "balance", or None (unknown).
+            Uses cached comports metadata if available.
+            """
+            info = self._port_info.get(port)
+            if info is None:
+                # refresh metadata if needed
+                for p in comports():
+                    if p.device == port:
+                        info = p
+                        break
+            print(f"Classifying port {port} with info: {info}")
+            if info is None:
+                return None
+
+            vid = getattr(info, "vid", None)
+            desc = (getattr(info, "description", "") or "").lower()
+            manuf = (getattr(info, "manufacturer", "") or "").lower()
+
+            # MCU heuristics
+            if vid == 0x0483 or "CP210" in desc or "stm" in desc or "stmicro" in manuf:
+                return "mcu"
+
+            # Balance heuristics (best-effort)
+            if any(k in desc for k in ("Prolific","balance", "scale", "ohaus", "sartorius", "mettler", "toledo")):
+                return "balance"
+
+            return None
+
+    @QtCore.Slot(str)
+    def connect_machine(self, port: str):
+        kind = self._classify_port(port)
+        if kind == "balance":
+            self.error_occurred_signal.emit(
+                "Connection Error", f"Port {port} looks like the BALANCE/scale, not the MCU. Please choose the MCU port."
+            )
+            return
         self.machine.connect_board(port)
 
     def disconnect_machine(self):
         """Disconnect from the machine."""
         self.machine.disconnect_board()
+    # @QtCore.Slot()
+    # def disconnect_machine(self):
+    #     # self.machine.reset_board()
+    #     # try:
+    #     #     if getattr(self.machine, "ser", None):
+    #     #         self.machine.ser.close()
+    #     # except Exception:
+    #     #     pass
+    #     self.model.machine_model.disconnect_machine()
+
+    @QtCore.Slot(str)
+    def connect_balance(self, port: str):
+        if self.balance is None:
+            self.error_occurred_signal.emit("Connection Error","Balance support is not enabled in this build/profile.")
+            return
+
+        kind = self._classify_port(port)
+        if kind == "mcu":
+            self.error_occurred_signal.emit(
+               "Connection Error", f"Port {port} looks like the MCU, not the balance. Please choose the balance port."
+            )
+            return
+
+        self.balance.connect_balance(port)
+
+    @QtCore.Slot()
+    def disconnect_balance(self):
+        if self.balance:
+            self.balance.close_connection()
+        self.model.machine_model.disconnect_balance()
+
 
     def update_machine_connection_status(self, status):
         """Update the machine connection status."""
@@ -204,23 +279,30 @@ class Controller(QObject):
     # def update_firmware(self, bin_path: str):
     #     self.machine.update_firmware(bin_path)
 
-    def start_firmware_update(self):
+    def start_firmware_update(self,manual: bool=False):
+        print("[Controller] Starting firmware update..., manual mode =", manual)
         if self._dfu_thread and self._dfu_thread.isRunning():
             return  # already running
-        w = DfuUpdateWorker(
+
+        bin_path = self._bin_path_legacy if manual else self._bin_path_current
+
+        self._dfu_thread = DfuUpdateWorker(
             dfu_script=self._dfu_script,
-            bin_path=self._bin_path,
+            bin_path=bin_path,
             cwd=self._cwd,
             boot_chip=self._boot_chip, boot_off=self._boot_off,
             rst_chip=self._rst_chip,   rst_off=self._rst_off,
+            manual=manual,
+            timeout_s=20.0,
+            # optionally:
+            dfu_vidpid="0483:df11",
+            flash_address="0x08000000"
         )
-        w.progress.connect(self.dfu_progress)
-        w.stage.connect(self.dfu_stage)
-        w.finished.connect(self.dfu_finished)
-        w.output.connect(self.dfu_output)
-        # Retain ref so it isn’t GC’d
-        self._dfu_thread = w
-        w.start()
+        self._dfu_thread.progress.connect(self.dfu_progress)
+        self._dfu_thread.stage.connect(self.dfu_stage)
+        self._dfu_thread.finished.connect(self.dfu_finished)
+        self._dfu_thread.output.connect(self.dfu_output)
+        self._dfu_thread.start()
 
     def reset_mcu_board(self):
         """Reset the MCU board."""
@@ -528,13 +610,13 @@ class Controller(QObject):
     def check_print_syringe_position(self):
         """Checks the syringe position and resets it if nearly at the limit."""
         current_p = self.model.machine_model.get_current_p_motor()
-        if current_p > 22500:
+        if current_p > 95000:
             self.reset_print_syringe()
     
     def check_refuel_syringe_position(self):
         """Checks the syringe position and resets it if nearly at the limit."""
         current_r = self.model.machine_model.get_current_r_motor()
-        if current_r > 18000:
+        if current_r > 95000:
             self.reset_refuel_syringe()
 
     def pause_machine(self):
@@ -656,9 +738,12 @@ class Controller(QObject):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset=False,z_offset=False,manual=False,coords=None,override=False,ignore_safe_height=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset: int = 0,z_offset: int = 0,manual=False,coords=None,override=False,ignore_safe_height=False):
         """Move to the saved location."""
-        safe_z = 35000
+        if self.profile.name != "legacy":
+            safe_z = 35000
+        else:
+            safe_z = 5000
         # current_location = self.model.machine_model.get_current_location()
         current_location = str(getattr(self, "expected_location", None) or "")
         # current_z = self.model.machine_model.get_current_position_dict()['Z']
@@ -684,10 +769,17 @@ class Controller(QObject):
         elif 'Slot' not in current_location and 'Slot' in name and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             self.set_absolute_Z(safe_z, manual=manual, override=override)
+        if 'balance' in [current_location, name]:
+            # if not ignore_safe_height:
+            print(f'Must move up to safe height before moving to {name} from {current_location}')
+            self.set_absolute_Z(safe_z, manual=manual, override=override)
+            print("Must move to safe Y before moving to or from balance")
+            self.set_absolute_Y(15000, manual=manual, override=override)
+            self.set_absolute_X(target['X'], manual=manual, override=override)
 
-        if x_offset:
+        if x_offset != 0:
             target['X'] += x_offset
-        if z_offset:
+        if z_offset != 0:
             target['Z'] += z_offset
         self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
         self.expected_location = name
@@ -796,22 +888,29 @@ class Controller(QObject):
             self.error_occurred_signal.emit('Error','Pressure regulation is not enabled')
             print('Cannot print: Pressure regulation is not enabled')
             return
+        if self.profile.name != "legacy":
+            # fall back to your current implementation
+            return self.machine.print_droplets(droplets, handler=handler, kwargs=kwargs, manual=manual)
+        
+        # --- legacy behavior ---
         printer_head = self.model.rack_model.get_gripper_printer_head()
         if printer_head is not None:
             if printer_head.check_calibration_complete():
-                print('Controller: using calibrations to change pulse width')
-                vol, res, target, bias, pred_model, resistance_pulse_width = printer_head.get_prediction_data()
-                if expected_volume is not None:
-                    #print(f'Controller: using expected volume: {expected_volume}')
-                    vol = expected_volume
-                new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias, prediction_model=pred_model,resistance_pulse_width=resistance_pulse_width)
-                if abs(self.model.machine_model.get_print_pulse_width() - new_pulse_width) > 2:
-                    self.set_print_pulse_width(new_pulse_width,manual=False)
+                # print('Controller: using calibrations to change pulse width')
+                # vol, res, target, bias, pred_model, resistance_pulse_width = printer_head.get_prediction_data()
+                # if expected_volume is not None:
+                #     #print(f'Controller: using expected volume: {expected_volume}')
+                #     vol = expected_volume
+                # new_pulse_width = self.model.calibration_model.predict_pulse_width(vol, res, target, bias=bias, prediction_model=pred_model,resistance_pulse_width=resistance_pulse_width)
+                # if abs(self.model.machine_model.get_print_pulse_width() - new_pulse_width) > 2:
+                #     self.set_print_pulse_width(new_pulse_width,manual=False)
             
                 if handler is None:
                     handler = self.volume_update_handler
                     kwargs = {'droplet_count':droplets}
                 else:
+                    if kwargs is None:
+                        kwargs = {}
                     kwargs['update_volume'] = True
             else:
                 print('Controller: using default pulse width')
@@ -826,10 +925,10 @@ class Controller(QObject):
         """Activate the refuel valve a specified number of times without printing."""
         self.machine.refuel_only(droplets,manual=manual)
 
-    def print_calibration_droplets(self,droplets,manual=False,pressure=None):
+    def print_calibration_droplets(self,droplets,manual=False,pressure=None,pulse_width=None):
         """Print a specified number of droplets for calibration."""
         print('Controller: Printing calibration droplets')
-        self.machine.print_calibration_droplets(droplets,manual=manual,pressure=pressure)
+        self.machine.print_calibration_droplets(droplets,manual=manual,pressure=pressure,pulse_width=pulse_width)
 
     def start_mass_stabilization_timer(self):
         """Create a single shot timer that when triggered it will signal the model to check for the final stable mass."""
@@ -853,7 +952,7 @@ class Controller(QObject):
             # self.exit_print_mode()
             self.disable_print_profile()
             self.move_to_location('pause')
-            self.move_to_location('pause',z_offset=True)
+            self.move_to_location('pause',z_offset=-5000)
             self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
             self.model.experiment_model.update_progress(well_id)
             self.array_complete.emit()
@@ -925,7 +1024,7 @@ class Controller(QObject):
         self.close_gripper()
         # self.wait_command()
 
-        self.move_to_location('pause',z_offset=True)
+        self.move_to_location('pause',z_offset=-5000)
         self.move_to_location('pause', ignore_safe_height=True)
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
@@ -957,10 +1056,9 @@ class Controller(QObject):
                 continue
             well_coords = well.get_coordinates()
             self.set_absolute_coordinates(well_coords['X'],well_coords['Y'],well_coords['Z'],override=True)
-            #print(f'Printing {target_droplets} droplets to well {well.well_id}')
+            print(f'Printing {target_droplets} droplets to well {well.well_id}')
             is_last_iteration = i == len(wells_with_droplets) - 1
             if update_volume:
-                expected_volume -= target_droplets * droplet_volume / 1000
                 if expected_volume < 10:
                     self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.refill_printer_head_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
                     print('---Printer head needs to be reloaded---')
@@ -969,6 +1067,8 @@ class Controller(QObject):
                 self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
             else:
                 self.print_droplets(target_droplets,expected_volume=expected_volume, handler=self.last_well_complete_handler,kwargs={'well_id':well.well_id,'stock_id':current_stock_id,'target_droplets':target_droplets,'update_volume':update_volume})
+            if update_volume:
+                expected_volume -= target_droplets * droplet_volume / 1000  # convert to uL
             
     def enable_print_profile(self):
         """Enable the print profile."""
@@ -1220,6 +1320,42 @@ class Controller(QObject):
         print(f'-Centering nozzle at position: {target_position}')
         self.set_absolute_coordinates(target_position['X'],target_position['Y'],target_position['Z'],handler=callback)
 
+    # --------------------------
+    # Legacy commands
+    # --------------------------
+    def update_balance_prediction_models(self, target_volume: float):
+        """Called by MassCalibrationDialog.handle_model_change(...)"""
+        if not self.balance or self.profile.name != "legacy":
+            return
+        pred_path = self.model.calibration_model.get_selected_model_path()
+        res_path  = self.model.calibration_model.get_selected_resistance_model_path()
+        if pred_path and res_path:
+            self.balance.update_prediction_models(pred_path, res_path, target_volume)
+    
+    # def start_mass_stabilization_timer(self):
+    #     from PySide6 import QtCore
+    #     QtCore.QTimer.singleShot(2000, self.model.calibration_model.check_for_final_mass)
+
+    # def print_calibration_droplets(self, droplets, manual=False, pulse_width=None):
+    #     """Used by MassCalibrationDialog when initial mass is captured."""
+    #     if pulse_width is None:
+    #         pulse_width = int(getattr(self.model.machine_model, "pulse_width", 0) or 0)
+
+    #     # ensure controller/machine uses that pulse width
+    #     if pulse_width:
+    #         self.set_print_pulse_width(pulse_width, manual=False)
+
+    #     # if virtual balance is running, enqueue a simulated droplet event
+    #     if self.balance and getattr(self.balance, "simulate", False):
+    #         self.machine.balance_droplets.append([int(droplets), int(pulse_width)])
+
+    #     # print droplets; when finished, wait then allow final mass capture
+    #     self.machine.print_droplets(int(droplets), handler=self.start_mass_stabilization_timer, kwargs={}, manual=manual)
+
+
+    # -------------------------
+    # Preprogrammed sequences
+    # -------------------------
     def start_preprogrammed_sequence(self, seq_id: str, delay_s: float = 0.0, **params):
         """
         Start a named sequence after a delay with countdown shown in UI.

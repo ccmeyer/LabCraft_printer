@@ -3,7 +3,10 @@ from PySide6.QtWidgets import QApplication, QSplashScreen
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor, QPixmap
-import os
+import os, json
+
+from hardware.profile import get_profile
+from legacy.mass_calibration import MassCalibrationModel, Balance
 
 def set_dark_theme(app):
     app.setStyle(QStyleFactory.create("Fusion"))
@@ -38,6 +41,10 @@ def set_dark_theme(app):
         }
     """)
 
+def load_settings(file_path):
+    with open(file_path, 'r') as file:
+        return json.load(file)
+
 def main():
     app = QApplication(sys.argv)
 
@@ -53,14 +60,39 @@ def main():
     from Controller import Controller
     from View import MainWindow
 
-    # Initialize components
-    model = Model()
+    settings = load_settings(os.path.join(script_dir, 'Presets','Settings.json'))
 
-    machine = Machine(model)
-    controller = Controller(machine, model)
+    profile = get_profile(settings.get("HARDWARE_PROFILE", "current"))
+
+
+    # Initialize components
+    model = Model(profile=profile)
+
+    machine = Machine(model,profile=profile)
+    controller = Controller(machine, model, profile=profile)
+
+    if profile.name == "legacy":
+        model.calibration_model = MassCalibrationModel(
+            machine_model=model.machine_model,
+            printer_head_manager=model.printer_head_manager,
+            rack_model=model.rack_model,
+            prediction_model_dir=model.predictive_model_dir,
+        )
+
+        controller.balance = Balance(machine=machine, model=model)
+
+        # mass updates -> calibration model
+        controller.balance.balance_mass_updated_signal.connect(model.calibration_model.update_mass)
+        controller.balance.connected_signal.connect(lambda ok: model.machine_model.connect_balance() if ok else model.machine_model.disconnect_balance())
+        # optional: forward balance errors to your existing popup system
+        controller.balance.balance_error_signal.connect(controller.error_occurred_signal.emit)
+    else:
+        # leave your current calibration model untouched
+        # model.calibration_model = CurrentCalibrationModel(...)
+        pass
 
     set_dark_theme(app)
-    view = MainWindow(model,controller)
+    view = MainWindow(model,controller, profile=profile)
 
     # Delay for the splash screen to simulate loading tasks
     QTimer.singleShot(100, lambda: (splash.finish(view), view.show()))  # 2000 ms = 2 seconds

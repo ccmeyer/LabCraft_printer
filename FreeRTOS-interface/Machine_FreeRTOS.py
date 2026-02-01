@@ -21,6 +21,9 @@ import shutil
 import subprocess
 import glob
 
+from hardware.profile import CURRENT_PROFILE, HardwareProfile
+from hardware.null_devices import NullCamera
+
 try:
     from picamera2 import Picamera2
     import gpiod
@@ -996,34 +999,6 @@ class LogReader(QThread):
         self.message_history.append(entry)
         self.messageReceived.emit(entry["text"])
 
-# class LogReader(QThread):
-#     lineReceived = Signal(str)
-
-#     def __init__(self, baud=115200, parent=None):
-#         super().__init__(parent)
-#         log_port = "/dev/ttyUSB0"
-#         self.ser = serial.Serial(log_port, baud, timeout=1)
-#         self._running = True
-#         print(f"LogReader initialized on {log_port} at {baud} baud")
-
-#     def run(self):
-#         """Continuously read lines and emit them."""
-#         while self._running:
-#             try:
-#                 line = self.ser.readline()
-#                 if line:
-#                     text = line.decode('ascii',errors="ignore").rstrip("\r\n")
-#                     print(f"Log line received: {text}")
-#                     self.lineReceived.emit(text)
-#             except serial.SerialException:
-#                 break
-    
-#     def stop(self):
-#         self._running = False
-#         self.wait(200)
-#         if self.ser.is_open:
-#             self.ser.close()
-
 class Command:
     """
     Represents a command to be sent to the machine.
@@ -1214,8 +1189,13 @@ class Machine(QObject):
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
     log_message_received = Signal(str)  # Signal to emit when a log message is received
 
-    def __init__(self,model):
+    def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE):
         super().__init__()
+        self.model = model
+        self.profile = profile
+
+        self.balance_droplets = []   # <-- for legacy Balance simulation queue
+
         self.command_queue = CommandQueue()
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
@@ -1237,6 +1217,9 @@ class Machine(QObject):
         self._tx_paused = False
         self._sequence_pause = False  # blocks TX during UI countdowns
 
+        self.execution_timer = QTimer(self)
+        self.execution_timer.timeout.connect(self.send_next_command)
+
         # --- Gripper confirmation gate ---
         # Start with confirmation required so the very first open/close pops the dialog.
         self._gripper_ack_required = True
@@ -1254,17 +1237,38 @@ class Machine(QObject):
         # Clean-up when disconnected
         self.disconnect_complete_signal.connect(self._on_disconnect_reset_gripper_timer)
 
-        try:
-            self.refuel_camera = RefuelCamera()
-        except Exception as e:
-            print(f'Error initializing refuel camera: {e}')
-            self.refuel_camera = None
+        # Cameras (ONLY if profile supports)
+        if self.profile.has_refuel_camera:
+            try:
+                self.refuel_camera = RefuelCamera()
+            except Exception as e:
+                print(f"Error initializing refuel camera: {e}")
+                self.refuel_camera = NullCamera()
+        else:
+            self.refuel_camera = NullCamera()
 
-        try:
-            self.droplet_camera = DropletCamera()
-        except Exception as e:
-            print(f'Error initializing droplet camera: {e}')
-            self.droplet_camera = None
+        if self.profile.has_droplet_camera:
+            try:
+                self.droplet_camera = DropletCamera()
+            except Exception as e:
+                print(f"Error initializing droplet camera: {e}")
+                self.droplet_camera = NullCamera()
+        else:
+            self.droplet_camera = NullCamera()
+
+        self.log_reader = None
+
+        # try:
+        #     self.refuel_camera = RefuelCamera()
+        # except Exception as e:
+        #     print(f'Error initializing refuel camera: {e}')
+        #     self.refuel_camera = None
+
+        # try:
+        #     self.droplet_camera = DropletCamera()
+        # except Exception as e:
+        #     print(f'Error initializing droplet camera: {e}')
+        #     self.droplet_camera = None
 
     def _alloc_ctl_seq32(self) -> int:
         n = self._next_ctl_seq32
@@ -1342,7 +1346,7 @@ class Machine(QObject):
     def connect_board(self, port):
         try:
             self.port = port
-            self.ser = serial.Serial('/dev/ttyAMA0', self.baud, timeout=0.1)
+            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
             
@@ -1363,7 +1367,8 @@ class Machine(QObject):
             self.machine_connected_signal.emit(False)
     @Slot()
     def _on_hello_ack(self):
-        self.begin_log_thread()
+        if self.profile.has_log_channel:
+            self.begin_log_thread()
         self.begin_execution_timer()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
@@ -1380,8 +1385,15 @@ class Machine(QObject):
             self._connection_attempts += 1
             self.reset_mcu_board()
             print(f"Resetting board and retrying connection ({self._connection_attempts}/6)…")
+            self.connect_board(self.port)
         else:
-            print("Max connection attempts reached. Please check the machine.")
+            msg = (
+                f"No HELLO_ACK from device on {self.port}. "
+                "This usually means the wrong COM port (e.g. balance selected instead of MCU) "
+                "or the board is not running the expected firmware."
+            )
+            print(msg)
+            self.error_occurred.emit(msg)
             self.machine_connected_signal.emit(False)
 
     def reset_board(self):
@@ -1417,7 +1429,7 @@ class Machine(QObject):
         reset_board()
         
     def disconnect_handler(self):
-        self.reset_board()
+        # self.reset_board()
         # Now it's safe to close the main serial
         try:
             if self.ser is not None:
@@ -1508,11 +1520,19 @@ class Machine(QObject):
         """
         Start the log reader thread to read logs from the machine.
         """
-        self.log_reader = LogReader(self.baud)
-        self.log_reader.lineReceived.connect(self.on_log_line_received)
-        self.log_reader.statsUpdated.connect(self.on_stats_updated)
-        self.log_reader.messageReceived.connect(self.on_log_message_received)
-        self.log_reader.start()
+        if not self.profile.has_log_channel:
+            self.log_reader = None
+            return
+
+        try:
+            self.log_reader = LogReader(self.baud)
+            self.log_reader.lineReceived.connect(self.on_log_line_received)
+            self.log_reader.statsUpdated.connect(self.on_stats_updated)
+            self.log_reader.messageReceived.connect(self.on_log_message_received)
+            self.log_reader.start()
+        except Exception as e:
+            print(f"Could not start log thread: {e}")
+            self.log_reader = None
 
     def on_stats_updated(self, stats: dict):
         self.log_stats_updated.emit(stats)
@@ -1525,22 +1545,26 @@ class Machine(QObject):
         Stop the log reader thread.
         """
         if self.log_reader is not None:
-            self.log_reader.stop()
-            self.log_reader.wait(200)
+            try:
+                self.log_reader.stop()
+                self.log_reader.wait(200)
+            except Exception:
+                pass
             self.log_reader = None
-            print('Log reader thread stopped')
-        else:
-            print('No log reader thread to stop')
+            print("Log reader thread stopped")
 
     def begin_execution_timer(self):
         print('Starting execution timer')
-        self.execution_timer = QTimer()
-        self.execution_timer.timeout.connect(self.send_next_command)
-        self.execution_timer.start(90)  # Update every 100 ms
+        if self.execution_timer is None:
+            self.execution_timer = QTimer(self)
+            self.execution_timer.timeout.connect(self.send_next_command)
+        if not self.execution_timer.isActive():
+            self.execution_timer.start(90)
 
     def stop_execution_timer(self):
         print('Stopping execution timer')
-        self.execution_timer.stop()
+        if self.execution_timer.isActive():
+            self.execution_timer.stop()
 
     def update_status(self, data):
         """
@@ -1713,7 +1737,7 @@ class Machine(QObject):
         if handler:
             handler()
 
-        self.begin_execution_timer()
+        # self.begin_execution_timer()
 
     def _reset_gripper_idle_timer(self):
         # 10 minutes in milliseconds
@@ -1917,10 +1941,10 @@ class Machine(QObject):
             return self.add_command_to_queue('SET_WIDTH_R',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def enter_print_mode(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('PRINT_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('ENABLE_PRINT_PROFILE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def exit_print_mode(self,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('NORMAL_MODE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue('DISABLE_PRINT_PROFILE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
     
     def home_motor_handler(self):
         self.homed = True
@@ -2066,3 +2090,15 @@ class Machine(QObject):
         else:
             print(f'Gripper parameters out of range: refresh_period={refresh_period}, pulse_duration={pulse_duration}')
             return False
+        
+    def calibrate_pressure_handler(self):
+        self.all_calibration_droplets_printed.emit()
+
+    def print_calibration_droplets(self,num_droplets,manual=False,pressure=None,pulse_width=None):
+        print('Machine: Printing calibration droplets')
+        # if self.balance.simulate:
+        #     if pressure is None:
+        #         pressure = self.get_current_print_pressure()
+        #     self.balance_droplets.append([num_droplets,pressure])
+        self.check_param_limits(num_droplets,1,1000)
+        self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)

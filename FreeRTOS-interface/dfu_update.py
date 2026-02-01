@@ -37,15 +37,27 @@ from PySide6 import QtCore
 import subprocess
 import re
 
+DFU_UTIL = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
+
 class DfuUpdateWorker(QtCore.QThread):
     progress = QtCore.Signal(int)          # 0..100
     stage    = QtCore.Signal(str)          # human message
     finished = QtCore.Signal(bool, str)    # ok, message
     output   = QtCore.Signal(str)          # raw stdout lines (optional)
 
-    def __init__(self, dfu_script: Path, bin_path: Path, cwd: Path | None = None,
-                 boot_chip="gpiochip0", boot_off=24, rst_chip="gpiochip0", rst_off=23,
-                 timeout_s=20.0, parent=None):
+    def __init__(self, 
+                 dfu_script: Path, 
+                 bin_path: Path, 
+                 cwd: Path | None = None,
+                 boot_chip="gpiochip0", 
+                 boot_off=24, 
+                 rst_chip="gpiochip0", 
+                 rst_off=23,
+                 manual: bool = False,
+                 dfu_vidpid: str = "0483:df11",
+                 flash_address: str = "0x08000000",
+                 timeout_s=20.0, 
+                 parent=None):
         super().__init__(parent)
         self.dfu_script = Path(dfu_script)
         self.bin_path   = Path(bin_path)
@@ -56,6 +68,11 @@ class DfuUpdateWorker(QtCore.QThread):
         self.rst_off    = int(rst_off)
         self.timeout_s  = float(timeout_s)
 
+        self.manual = bool(manual)
+        self.dfu_vidpid = str(dfu_vidpid)
+        self.flash_address = str(flash_address)
+        print("[DfuUpdateWorker] Initialized with manual =", self.manual)
+
     @staticmethod
     def _scale(pct: int, lo: int, hi: int) -> int:
         # clamp and linearly map 0..100 → lo..hi
@@ -64,6 +81,7 @@ class DfuUpdateWorker(QtCore.QThread):
         return lo + int((hi - lo) * (pct / 100.0))
 
     def run(self):
+        print("[DfuUpdateWorker] Running DFU update..., manual =", self.manual)
         if not self.dfu_script.is_file():
             self.finished.emit(False, f"DFU script not found: {self.dfu_script}")
             return
@@ -71,13 +89,29 @@ class DfuUpdateWorker(QtCore.QThread):
             self.finished.emit(False, f"Firmware .bin not found: {self.bin_path}")
             return
 
+        # cmd = [
+        #     sys.executable, "-u", str(self.dfu_script),
+        #     "--bin", str(self.bin_path),
+        #     "--boot-chip", self.boot_chip, "--boot-off", str(self.boot_off),
+        #     "--rst-chip", self.rst_chip,   "--rst-off",  str(self.rst_off),
+        #     "--timeout", str(self.timeout_s)
+        # ]
         cmd = [
             sys.executable, "-u", str(self.dfu_script),
             "--bin", str(self.bin_path),
-            "--boot-chip", self.boot_chip, "--boot-off", str(self.boot_off),
-            "--rst-chip", self.rst_chip,   "--rst-off",  str(self.rst_off),
-            "--timeout", str(self.timeout_s)
+            "--timeout", str(self.timeout_s),
+            "--vidpid", self.dfu_vidpid,             # NEW
+            "--addr", self.flash_address,            # NEW
         ]
+
+        if self.manual:
+            cmd += ["--manual"]                      # NEW
+        else:
+            cmd += [
+                "--boot-chip", self.boot_chip, "--boot-off", str(self.boot_off),
+                "--rst-chip",  self.rst_chip,  "--rst-off",  str(self.rst_off),
+            ]
+
 
         self.stage.emit("Preparing…")
         self.progress.emit(1)
@@ -379,8 +413,12 @@ class BootReset:
 
 def _wait_for_dfu(vidpid=DFU_VIDPID, timeout_s=12.0, poll_s=0.25):
     """Wait until dfu-util -l shows the expected VID:PID (e.g., 0483:df11)."""
+    print(f"[DFU] Waiting for device {vidpid} ...")
     t0 = time.time()
     last = ""
+    if not DFU_UTIL:
+        raise RuntimeError("dfu-util not found in PATH. Add C:\\msys64\\ucrt64\\bin to PATH and restart the app.")
+
     while time.time() - t0 < timeout_s:
         try:
             out = subprocess.check_output(["dfu-util", "-l"], text=True, stderr=subprocess.STDOUT)
@@ -394,15 +432,44 @@ def _wait_for_dfu(vidpid=DFU_VIDPID, timeout_s=12.0, poll_s=0.25):
 
 def _flash_with_dfu(bin_path: Path,
                     flash_addr=FLASH_ADDRESS,
-                    cwd: Path | None = None):
+                    cwd: Path | None = None,
+                    leave: bool = True,
+                    dfu_vidpid: str | None = None,
+                    usb_path: str | None = None,
+                    alt: int = 0,):
     """
     Flash a .bin at flash_addr using dfu-util, then leave DFU (dfu-util :leave).
     """
+    if not DFU_UTIL:
+        raise RuntimeError("dfu-util not found in PATH. Add C:\\msys64\\ucrt64\\bin to PATH and restart the app.")
+
+    print(f"[DFU] -- Flashing {bin_path} at {flash_addr} ...")
     if not shutil.which("dfu-util"):
         raise RuntimeError("dfu-util not found. Install with: sudo apt install dfu-util")
+    suffix = ":leave" if leave else ""
+    cmd = [DFU_UTIL]
 
-    cmd = ["dfu-util", "-a", "0", "-s", f"{flash_addr}:leave", "-D", str(bin_path)]
-    subprocess.run(cmd, check=True, cwd=(str(cwd) if cwd else None))
+    if dfu_vidpid:
+        cmd += ["-d", dfu_vidpid]          # <-- IMPORTANT
+
+    if usb_path:
+        cmd += ["--path", usb_path]        # optional disambiguation
+
+    cmd += ["-a", str(alt), "-s", f"{flash_addr}{suffix}", "-D", str(bin_path)]
+    # cmd = ["dfu-util", "-a", "0", "-s", f"{flash_addr}:leave", "-D", str(bin_path)]
+    # subprocess.run(cmd, check=True, cwd=(str(cwd) if cwd else None))
+
+        # capture output so failures show up in your UI logs
+    res = subprocess.run(
+        cmd,
+        cwd=(str(cwd) if cwd else None),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True
+    )
+    print(res.stdout, end="")              # goes to worker output stream
+    if res.returncode != 0:
+        raise RuntimeError(f"dfu-util failed (rc={res.returncode})")
 
 def _resolve_firmware_path(
     candidate: str | Path,
@@ -469,7 +536,8 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
                     exit_reset_ms: int = 200,
                     dfu_timeout_s: float = 12.0,
                     cwd_for_dfu: str | Path | None = None,
-                    verbose: bool = True):
+                    verbose: bool = True,
+                    manual: bool = False):
     """
     Full sequence:
       1) Set BOOT enabled, pulse RESET -> DFU ROM
@@ -487,6 +555,7 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
         cwd_for_dfu: optional working directory when invoking dfu-util
         verbose: print progress
     """
+    print("[DFU] Starting firmware update..., manual mode =", manual)
     module_dir = Path(__file__).resolve().parent
     bin_abs = _resolve_firmware_path(
         candidate=bin_path,
@@ -500,38 +569,71 @@ def update_firmware(bin_path: str | Path = "LabCraft_printer/firmware/freeRTOS_L
     )
     if verbose:
         print(f"[DFU] Using firmware: {bin_abs}")
-        print(f"[DFU] BOOT={boot_chip}:{boot_offset}, RESET={rst_chip}:{rst_offset}")
+        # print(f"[DFU] BOOT={boot_chip}:{boot_offset}, RESET={rst_chip}:{rst_offset}")
 
-    with BootReset(boot_chip=boot_chip,
-                   boot_offset=boot_offset,
-                   rst_chip=rst_chip,
-                   rst_offset=rst_offset,
-                   boot_active_high=BOOT_ACTIVE_HIGH,
-                   reset_active_low=RESET_ACTIVE_LOW,
-                   boot_line_name=boot_line_name,
-                   rst_line_name=rst_line_name) as br:
-        # Ensure RESET is deasserted before we start, ensure BOOT is disabled
-        br.set_boot_enabled(False)
-        time.sleep(0.02)
+    # -------- NEW: manual DFU path (NO GPIO / NO reset / NO boot control) --------
+    if manual:
+        if verbose:
+            print("[DFU] Manual mode: expecting the board is already in DFU (BOOT0=1, press RESET).")
+            print(f"[DFU] Waiting for {dfu_vidpid} ...")
 
-        # Enter DFU: BOOT enable then RESET pulse
-        br.set_boot_enabled(True)
-        time.sleep(0.02)
-        br.pulse_reset(low_ms=enter_reset_ms)
-
-        # Wait for USB DFU to enumerate
         _wait_for_dfu(vidpid=dfu_vidpid, timeout_s=dfu_timeout_s)
 
         if verbose:
             print(f"[DFU] Device {dfu_vidpid} detected. Flashing at {flash_address} ...")
 
-        # Flash
-        _flash_with_dfu(bin_abs, flash_addr=flash_address, cwd=(Path(cwd_for_dfu) if cwd_for_dfu else None))
+        # IMPORTANT: do NOT use :leave in manual mode while BOOT0 jumper is installed
+        _flash_with_dfu(
+            bin_abs,
+            flash_addr=flash_address,
+            cwd=(Path(cwd_for_dfu) if cwd_for_dfu else None),
+            leave=False,
+            dfu_vidpid=dfu_vidpid,
+            alt=0
+        )
+
+        if verbose:
+            print("[DFU] Flash complete. Remove BOOT0 jumper and press RESET to run the application.")
+        return
+
+
+
+# -------- existing Pi GPIO auto-DFU path (unchanged except leave param stays True) --------
+    if verbose:
+        print(f"[DFU] BOOT={boot_chip}:{boot_offset}, RESET={rst_chip}:{rst_offset}")
+
+    with BootReset(
+        boot_chip=boot_chip,
+        boot_offset=boot_offset,
+        rst_chip=rst_chip,
+        rst_offset=rst_offset,
+        boot_active_high=BOOT_ACTIVE_HIGH,
+        reset_active_low=RESET_ACTIVE_LOW,
+        boot_line_name=boot_line_name,
+        rst_line_name=rst_line_name
+    ) as br:
+        br.set_boot_enabled(False)
+        time.sleep(0.02)
+
+        br.set_boot_enabled(True)
+        time.sleep(0.02)
+        br.pulse_reset(low_ms=enter_reset_ms)
+
+        _wait_for_dfu(vidpid=dfu_vidpid, timeout_s=dfu_timeout_s)
+
+        if verbose:
+            print(f"[DFU] Device {dfu_vidpid} detected. Flashing at {flash_address} ...")
+
+        _flash_with_dfu(
+            bin_abs,
+            flash_addr=flash_address,
+            cwd=(Path(cwd_for_dfu) if cwd_for_dfu else None),
+            leave=True,  # keep existing behavior
+        )
 
         if verbose:
             print("[DFU] Flash complete. Exiting DFU and rebooting into application ...")
 
-        # Exit DFU: disable BOOT and reset
         br.set_boot_enabled(False)
         time.sleep(0.02)
         br.pulse_reset(low_ms=exit_reset_ms)
@@ -583,9 +685,10 @@ def reset_board(*,
 # -------------------------
 
 def _parse_args(argv=None):
-    p = argparse.ArgumentParser(description="STM32 DFU updater (Pi GPIO-24=BOOT, GPIO-23=RESET).")
+    p = argparse.ArgumentParser(description="STM32 DFU updater (Pi GPIO-24=BOOT, GPIO-23=RESET) or manual legacy DFU).")
     p.add_argument("--bin", dest="bin_path",
-                   default="LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
+                   default="firmware/freeRTOS_LabCraft.bin",
+                #    default="LabCraft_printer/firmware/freeRTOS_LabCraft.bin",
                    help="Path to firmware .bin (default: LabCraft_printer/firmware/freeRTOS_LabCraft.bin)")
     p.add_argument("--boot-chip", default=DEFAULT_BOOT_CHIP, help="Chip for BOOT line (e.g., gpiochip4)")
     p.add_argument("--boot-off", type=int, default=DEFAULT_BOOT_OFFSET, help="Line offset for BOOT (e.g., 24)")
@@ -601,24 +704,33 @@ def _parse_args(argv=None):
     p.add_argument("--cwd", dest="cwd_for_dfu", default=None,
                    help="Working directory for dfu-util (optional)")
     p.add_argument("-q", "--quiet", action="store_true", help="Less verbose output")
+    p.add_argument("--manual", action="store_true",
+                   help="Manual/legacy DFU: user puts board in DFU with BOOT0 jumper + RESET; no GPIO control.")
     return p.parse_args(argv)
 
 def main(argv=None):
     args = _parse_args(argv)
-    update_firmware(
-        bin_path=args.bin_path,
-        boot_chip=args.boot_chip,
-        boot_offset=args.boot_off,
-        rst_chip=args.rst_chip,
-        rst_offset=args.rst_off,
-        dfu_vidpid=args.dfu_vidpid,
-        flash_address=args.flash_address,
-        enter_reset_ms=args.enter_ms,
-        exit_reset_ms=args.exit_ms,
-        dfu_timeout_s=args.timeout,
-        cwd_for_dfu=args.cwd_for_dfu,
-        verbose=not args.quiet,
-    )
+    print("[DFU] -- Firmware update started, manual mode =", args.manual)
+    print(f"[DFU] -- Using firmware: {args.bin_path}")
+    try:
+        update_firmware(
+            bin_path=args.bin_path,
+            boot_chip=args.boot_chip,
+            boot_offset=args.boot_off,
+            rst_chip=args.rst_chip,
+            rst_offset=args.rst_off,
+            dfu_vidpid=args.dfu_vidpid,
+            flash_address=args.flash_address,
+            enter_reset_ms=args.enter_ms,
+            exit_reset_ms=args.exit_ms,
+            dfu_timeout_s=args.timeout,
+            cwd_for_dfu=args.cwd_for_dfu,
+            verbose=not args.quiet,
+            manual=args.manual,   # NEW
+        )
+    except Exception as e:
+        print(f"[DFU] ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
 
 if __name__ == "__main__":
     main(sys.argv[1:])

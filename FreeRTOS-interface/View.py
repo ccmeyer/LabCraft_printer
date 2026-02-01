@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import json
 import os
+import sys
 import random
 import time
 import shutil
@@ -29,7 +30,8 @@ from utilities import ShortcutManager
 import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Optional, Tuple, Set
-
+from hardware.profile import CURRENT_PROFILE, HardwareProfile
+from legacy.mass_calibration import MassCalibrationDialog
 
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
@@ -65,6 +67,13 @@ class OptionsDialog(QtWidgets.QDialog):
         super().exec()
         return self.clicked_option
 
+class RefreshingComboBox(QComboBox):
+    aboutToShowPopup = Signal()
+
+    def showPopup(self):
+        self.aboutToShowPopup.emit()
+        super().showPopup()
+
 # class ShortcutManager:
 #     """Manage application shortcuts and their descriptions."""
 #     def __init__(self, parent):
@@ -82,10 +91,11 @@ class OptionsDialog(QtWidgets.QDialog):
 #         return self.shortcuts
 
 class MainWindow(QMainWindow):
-    def __init__(self, model, controller):
+    def __init__(self, model, controller, profile: HardwareProfile = CURRENT_PROFILE):
         super().__init__()
         self.model = model
         self.controller = controller
+        self.profile = profile
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -420,6 +430,7 @@ class MainWindow(QMainWindow):
 
 class ConnectionWidget(QGroupBox):
     connect_machine_requested = QtCore.Signal(str)
+    connect_balance_requested = QtCore.Signal(str)
 
     def __init__(self, main_window, model, controller):
         super().__init__("CONNECTION")
@@ -431,8 +442,16 @@ class ConnectionWidget(QGroupBox):
         self.model = model
         self.controller = controller
 
-        # Fixed on-board port (e.g., "/dev/ttyACM0" on the Pi)
-        self.fixed_port = self.model.get_default_machine_port()  # must return a string
+        # Decide mode from profile (adjust attribute name to your actual profile)
+        prof = getattr(self.main_window, "profile", None)
+        self.legacy_mode = prof.name == "legacy" if prof else True
+
+        # Defaults
+        self.machine_default = self.model.get_default_machine_port()
+        self.balance_default = self.model.get_default_balance_port()
+
+        # # Fixed on-board port (e.g., "/dev/ttyACM0" on the Pi)
+        # self.fixed_port = self.model.get_default_machine_port()  # must return a string
 
         self.init_ui()
 
@@ -441,32 +460,86 @@ class ConnectionWidget(QGroupBox):
             self.update_machine_connect_button
         )
 
+        if self.legacy_mode:
+            self.model.machine_model.ports_updated.connect(self.on_ports_updated)
+            self.model.machine_model.balance_state_updated.connect(self.update_balance_connect_button)
+
+            # Periodic refresh only in legacy mode
+            self._port_timer = QtCore.QTimer(self)
+            self._port_timer.timeout.connect(self.controller.update_available_ports)
+            self._port_timer.start(1500)
+
+            # Initial populate
+            self.controller.update_available_ports()
+
         # Optional: if your model can change the default port at runtime,
         # hook a signal for that (only if it exists).
         if hasattr(self.model.machine_model, "default_port_changed"):
             self.model.machine_model.default_port_changed.connect(self.set_port)
 
-        # View → Controller
+        # Signals: View → Controller
         self.connect_machine_requested.connect(self.controller.connect_machine)
-
+        if self.legacy_mode:
+            self.connect_balance_requested.connect(self.controller.connect_balance)
         # Initialize current state
-        self.set_port(self.fixed_port)
         self.update_machine_connect_button(self.model.machine_model.machine_connected)
+        if self.legacy_mode:
+            self.update_balance_connect_button(self.model.machine_model.balance_connected)
+
+    # def init_ui(self):
+    #     layout = QGridLayout()
+    #     self.setLayout(layout)
+
+    #     # Header row
+    #     layout.addWidget(QLabel("Device"), 0, 0)
+    #     layout.addWidget(QLabel("Port"),   0, 1)
+    #     layout.addWidget(QLabel("Connect"),0, 2)
+
+    #     # Machine row
+    #     self.machine_label = QLabel("Machine")
+    #     self.port_label = QLabel(self.fixed_port or "Auto")
+    #     self.port_label.setToolTip("Fixed on-board serial port")
+    #     self.port_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
+    #     self.machine_connect_button = QPushButton()
+    #     self.machine_connect_button.setCheckable(True)
+    #     self.machine_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
+    #     self.machine_connect_button.clicked.connect(self.request_machine_connect_change)
+
+    #     layout.addWidget(self.machine_label,          1, 0)
+    #     layout.addWidget(self.port_label,             1, 1)
+    #     layout.addWidget(self.machine_connect_button, 1, 2)
 
     def init_ui(self):
         layout = QGridLayout()
         self.setLayout(layout)
 
-        # Header row
         layout.addWidget(QLabel("Device"), 0, 0)
         layout.addWidget(QLabel("Port"),   0, 1)
         layout.addWidget(QLabel("Connect"),0, 2)
 
-        # Machine row
+        if not self.legacy_mode:
+            # ----- CURRENT MODE (unchanged behavior) -----
+            fixed_port = self.machine_default
+            self.machine_label = QLabel("Machine")
+            self.port_label = QLabel(fixed_port or "Auto")
+            self.port_label.setToolTip("Fixed on-board serial port")
+            self.port_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+
+            self.machine_connect_button = QPushButton()
+            self.machine_connect_button.setCheckable(True)
+            self.machine_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
+            self.machine_connect_button.clicked.connect(self.request_machine_connect_change)
+
+            layout.addWidget(self.machine_label,          1, 0)
+            layout.addWidget(self.port_label,             1, 1)
+            layout.addWidget(self.machine_connect_button, 1, 2)
+            return
+        
+        # ----- LEGACY MODE (dropdowns) -----
         self.machine_label = QLabel("Machine")
-        self.port_label = QLabel(self.fixed_port or "Auto")
-        self.port_label.setToolTip("Fixed on-board serial port")
-        self.port_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.machine_port_combo = RefreshingComboBox()
+        self.machine_port_combo.aboutToShowPopup.connect(self.controller.update_available_ports)
 
         self.machine_connect_button = QPushButton()
         self.machine_connect_button.setCheckable(True)
@@ -474,8 +547,53 @@ class ConnectionWidget(QGroupBox):
         self.machine_connect_button.clicked.connect(self.request_machine_connect_change)
 
         layout.addWidget(self.machine_label,          1, 0)
-        layout.addWidget(self.port_label,             1, 1)
+        layout.addWidget(self.machine_port_combo,     1, 1)
         layout.addWidget(self.machine_connect_button, 1, 2)
+
+        self.balance_label = QLabel("Balance")
+        self.balance_port_combo = RefreshingComboBox()
+        self.balance_port_combo.aboutToShowPopup.connect(self.controller.update_available_ports)
+
+        self.balance_connect_button = QPushButton()
+        self.balance_connect_button.setCheckable(True)
+        self.balance_connect_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.balance_connect_button.clicked.connect(self.request_balance_connect_change)
+
+        layout.addWidget(self.balance_label,          2, 0)
+        layout.addWidget(self.balance_port_combo,     2, 1)
+        layout.addWidget(self.balance_connect_button, 2, 2)
+
+        # Pre-populate with defaults even before scan results
+        self._set_combo_items(self.machine_port_combo, [], self.machine_default)
+        self._set_combo_items(self.balance_port_combo, [], self.balance_default)
+
+    def _set_combo_items(self, combo, ports: list[str], preferred: str):
+        combo.blockSignals(True)
+        current = combo.currentText().strip()
+
+        combo.clear()
+        # if preferred and preferred not in ports:
+        #     combo.addItem(preferred)  # keep default visible even if not currently present
+        # for p in ports:
+        #     if p != preferred:
+        #         combo.addItem(p)
+        for p in ports:
+            combo.addItem(p)
+
+        # choose selection: current -> preferred -> first
+        target = current or preferred
+        if target:
+            idx = combo.findText(target)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    @QtCore.Slot(list)
+    def on_ports_updated(self, ports: list[str]):
+        self._set_combo_items(self.machine_port_combo, ports, self.machine_default)
+        if self.legacy_mode:
+            self._set_combo_items(self.balance_port_combo, ports, self.balance_default)
+
 
     def set_port(self, port: str):
         """Update the displayed fixed port (and internal copy)."""
@@ -489,25 +607,95 @@ class ConnectionWidget(QGroupBox):
         else:
             self.connect_machine()
 
+    # def connect_machine(self):
+    #     """Emit the fixed port to controller; no dropdown involved."""
+    #     port = self.fixed_port or self.model.get_default_machine_port()
+    #     self.connect_machine_requested.emit(port)
+
     def connect_machine(self):
-        """Emit the fixed port to controller; no dropdown involved."""
-        port = self.fixed_port or self.model.get_default_machine_port()
+        if not self.legacy_mode:
+            port = self.machine_default or self.model.get_default_machine_port()
+        else:
+            port = self.machine_port_combo.currentText().strip()
+
+        if not port:
+            self.controller.error_occurred_signal.emit("Please select a machine (MCU) port.")
+            return
+
+        # Optional: persist selection if your model supports it
+        if hasattr(self.model, "set_default_machine_port"):
+            self.model.set_default_machine_port(port)
+
         self.connect_machine_requested.emit(port)
 
+    # def update_machine_connect_button(self, machine_connected: bool):
+    #     """Set button text/color based on connection state."""
+    #     if machine_connected:
+    #         self.machine_connect_button.setText("Disconnect")
+    #         self.machine_connect_button.setChecked(True)
+    #         self.machine_connect_button.setStyleSheet(
+    #             f"background-color: {self.color_dict['dark_blue']}; color: white;"
+    #         )
+    #     else:
+    #         self.machine_connect_button.setText("Connect")
+    #         self.machine_connect_button.setChecked(False)
+    #         self.machine_connect_button.setStyleSheet(
+    #             f"background-color: {self.color_dict['light_blue']}; color: white;"
+    #         )
     def update_machine_connect_button(self, machine_connected: bool):
-        """Set button text/color based on connection state."""
         if machine_connected:
             self.machine_connect_button.setText("Disconnect")
             self.machine_connect_button.setChecked(True)
             self.machine_connect_button.setStyleSheet(
                 f"background-color: {self.color_dict['dark_blue']}; color: white;"
             )
+            if self.legacy_mode:
+                self.machine_port_combo.setEnabled(False)
         else:
             self.machine_connect_button.setText("Connect")
             self.machine_connect_button.setChecked(False)
             self.machine_connect_button.setStyleSheet(
                 f"background-color: {self.color_dict['light_blue']}; color: white;"
             )
+            if self.legacy_mode:
+                self.machine_port_combo.setEnabled(True)
+
+    # --------- Balance connect/disconnect ----------
+    def request_balance_connect_change(self):
+        if self.model.machine_model.balance_connected:
+            self.controller.disconnect_balance()
+        else:
+            self.connect_balance()
+
+    def connect_balance(self):
+        port = self.balance_port_combo.currentText().strip()
+        if not port:
+            self.controller.error_occurred_signal.emit("Please select a balance port.")
+            return
+
+        if hasattr(self.model, "set_default_balance_port"):
+            self.model.set_default_balance_port(port)
+
+        self.connect_balance_requested.emit(port)
+
+    def update_balance_connect_button(self, balance_connected: bool):
+        if not self.legacy_mode:
+            return
+
+        if balance_connected:
+            self.balance_connect_button.setText("Disconnect")
+            self.balance_connect_button.setChecked(True)
+            self.balance_connect_button.setStyleSheet(
+                f"background-color: {self.color_dict['dark_blue']}; color: white;"
+            )
+            self.balance_port_combo.setEnabled(False)
+        else:
+            self.balance_connect_button.setText("Connect")
+            self.balance_connect_button.setChecked(False)
+            self.balance_connect_button.setStyleSheet(
+                f"background-color: {self.color_dict['light_blue']}; color: white;"
+            )
+            self.balance_port_combo.setEnabled(True)
 
 class CustomSpinBox(QtWidgets.QDoubleSpinBox):
     valueChangedByStep = QtCore.Signal(int)
@@ -532,6 +720,8 @@ class MotorPositionWidget(QGroupBox):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+        prof = getattr(self.main_window, "profile", None)
+        self.legacy_mode = prof.name == "legacy" if prof else True
 
         self.init_ui()
 
@@ -571,8 +761,9 @@ class MotorPositionWidget(QGroupBox):
             'Y': {'current': QLabel('0'), 'target': QLabel('0')},
             'Z': {'current': QLabel('0'), 'target': QLabel('0')},
             'P': {'current': QLabel('0'), 'target': QLabel('0')},
-            'R': {'current': QLabel('0'), 'target': QLabel('0')},
         }
+        if not self.legacy_mode:
+            self.labels['R'] = {'current': QLabel('0'), 'target': QLabel('0')}
 
         row = 1
         for motor, positions in self.labels.items():
@@ -645,8 +836,9 @@ class MotorPositionWidget(QGroupBox):
         self.labels['Z']['target'].setText(str(self.model.machine_model.target_z))
         self.labels['P']['current'].setText(str(self.model.machine_model.current_p))
         self.labels['P']['target'].setText(str(self.model.machine_model.target_p))
-        self.labels['R']['current'].setText(str(self.model.machine_model.current_r))
-        self.labels['R']['target'].setText(str(self.model.machine_model.target_r))
+        if not self.legacy_mode:
+            self.labels['R']['current'].setText(str(self.model.machine_model.current_r))
+            self.labels['R']['target'].setText(str(self.model.machine_model.target_r))
 
     def update_step_size(self, new_step_size):
         """Update the spin box with the new step size."""
@@ -697,6 +889,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+
+        prof = getattr(self.main_window, "profile", None)
+        self.legacy_mode = prof.name == "legacy" if prof else True
+
+
         self.init_ui()
         self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
@@ -726,20 +923,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.target_print_pressure_label, 0, 2)  # Add the QLabel to the layout at position (1, 0)
         self.layout.addWidget(self.target_print_pressure_spinbox, 0, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
 
-        self.current_refuel_pressure_label = QtWidgets.QLabel("Refuel Pressure:")  # Create a new QLabel for the current pressure label
-        self.current_refuel_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
-        self.target_refuel_pressure_label = QtWidgets.QLabel("Target Refuel:")  # Create a new QLabel for the target pressure label
-        self.target_refuel_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
-        self.target_refuel_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
-        self.target_refuel_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
-        self.target_refuel_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-        self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.target_refuel_pressure_spinbox.valueChanged.connect(self.handle_target_refuel_pressure_change)  # Connect value changes to the update_pressure function
+        if not self.legacy_mode:
+            self.current_refuel_pressure_label = QtWidgets.QLabel("Refuel Pressure:")  # Create a new QLabel for the current pressure label
+            self.current_refuel_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
+            self.target_refuel_pressure_label = QtWidgets.QLabel("Target Refuel:")  # Create a new QLabel for the target pressure label
+            self.target_refuel_pressure_spinbox = QtWidgets.QDoubleSpinBox()  # Create a new QDoubleSpinBox for the target pressure value
+            self.target_refuel_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
+            self.target_refuel_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
+            self.target_refuel_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
+            self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+            self.target_refuel_pressure_spinbox.valueChanged.connect(self.handle_target_refuel_pressure_change)  # Connect value changes to the update_pressure function
 
-        self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
-        self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
-        self.layout.addWidget(self.target_refuel_pressure_label, 1, 2)  # Add the QLabel to the layout at position (1, 0)
-        self.layout.addWidget(self.target_refuel_pressure_spinbox, 1, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
+            self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
+            self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
+            self.layout.addWidget(self.target_refuel_pressure_label, 1, 2)  # Add the QLabel to the layout at position (1, 0)
+            self.layout.addWidget(self.target_refuel_pressure_spinbox, 1, 3)  # Add the QDoubleSpinBox to the layout at position (1, 1)
 
 
         self.pressure_regulation_button = QtWidgets.QPushButton("Regulate Pressure")
@@ -758,17 +956,19 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.print_series.setColor(QtCore.Qt.white)
         self.chart.addSeries(self.print_series)
 
-        self.refuel_series = QtCharts.QLineSeries()
-        self.refuel_series.setColor(QtCore.Qt.white)
-        self.chart.addSeries(self.refuel_series)
+        if not self.legacy_mode:
+            self.refuel_series = QtCharts.QLineSeries()
+            self.refuel_series.setColor(QtCore.Qt.white)
+            self.chart.addSeries(self.refuel_series)
 
         self.target_print_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
         self.target_print_pressure_series.setColor(QtCore.Qt.red)  # Set the line color to red
         self.chart.addSeries(self.target_print_pressure_series)
 
-        self.target_refuel_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-        self.target_refuel_pressure_series.setColor(QtCore.Qt.red)
-        self.chart.addSeries(self.target_refuel_pressure_series)
+        if not self.legacy_mode:
+                self.target_refuel_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
+                self.target_refuel_pressure_series.setColor(QtCore.Qt.red)
+                self.chart.addSeries(self.target_refuel_pressure_series)
 
         self.axisX = QtCharts.QValueAxis()
         self.axisX.setTickCount(3)
@@ -782,14 +982,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.print_series.attachAxis(self.axisX)
         self.print_series.attachAxis(self.axisY)
 
-        self.refuel_series.attachAxis(self.axisX)
-        self.refuel_series.attachAxis(self.axisY)
+        if not self.legacy_mode:
+            self.refuel_series.attachAxis(self.axisX)
+            self.refuel_series.attachAxis(self.axisY)
 
         self.target_print_pressure_series.attachAxis(self.axisX)
         self.target_print_pressure_series.attachAxis(self.axisY)
 
-        self.target_refuel_pressure_series.attachAxis(self.axisX)
-        self.target_refuel_pressure_series.attachAxis(self.axisY)
+        if not self.legacy_mode:
+            self.target_refuel_pressure_series.attachAxis(self.axisX)
+            self.target_refuel_pressure_series.attachAxis(self.axisY)
 
         self.chart.legend().hide()  # Hide the legend
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -800,9 +1002,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
         self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 1, 2)
 
-        self.droplet_imager_button = QtWidgets.QPushButton("Imager")
-        self.droplet_imager_button.clicked.connect(self.droplet_imager)
-        self.layout.addWidget(self.droplet_imager_button, 5, 0, 1, 2)
+
+        if not self.legacy_mode:
+            self.droplet_imager_button = QtWidgets.QPushButton("Imager")
+            self.droplet_imager_button.clicked.connect(self.droplet_imager)
+            self.layout.addWidget(self.droplet_imager_button, 5, 0, 1, 2)
 
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
@@ -814,15 +1018,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
         self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
 
-        self.refuel_pulse_width_label = QtWidgets.QLabel("Refuel Pulse Width:")
-        self.refuel_pulse_width_spinbox = QtWidgets.QSpinBox()
-        self.refuel_pulse_width_spinbox.setRange(0, 10000)
-        self.refuel_pulse_width_spinbox.setSingleStep(50)
-        self.refuel_pulse_width_spinbox.setValue(3000)
-        self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.refuel_pulse_width_spinbox.valueChanged.connect(self.handle_refuel_pulse_width_change)
-        self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
-        self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
+
+        if not self.legacy_mode:
+            self.refuel_pulse_width_label = QtWidgets.QLabel("Refuel Pulse Width:")
+            self.refuel_pulse_width_spinbox = QtWidgets.QSpinBox()
+            self.refuel_pulse_width_spinbox.setRange(0, 10000)
+            self.refuel_pulse_width_spinbox.setSingleStep(50)
+            self.refuel_pulse_width_spinbox.setValue(3000)
+            self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
+            self.refuel_pulse_width_spinbox.valueChanged.connect(self.handle_refuel_pulse_width_change)
+            self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
+            self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
 
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
@@ -851,20 +1057,25 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Update the current pressure label and plot with the new pressure values."""
         # Clear previous data
         self.print_series.clear()
-        self.refuel_series.clear()
+        if not self.legacy_mode:
+            self.refuel_series.clear()
         self.target_print_pressure_series.clear()
 
         print_log = self.model.machine_model.get_print_pressure_readings()
-        refuel_log = self.model.machine_model.get_refuel_pressure_readings()
+        if not self.legacy_mode:
+            refuel_log = self.model.machine_model.get_refuel_pressure_readings()
+        
         comp_log = list(print_log).copy()
-        comp_log.extend(refuel_log)
+        if not self.legacy_mode:
+            comp_log.extend(refuel_log)
 
         # Append new pressure data
         for i, pressure in enumerate(print_log):
             self.print_series.append(i, pressure)
 
-        for i, pressure in enumerate(refuel_log):
-            self.refuel_series.append(i, pressure)
+        if not self.legacy_mode:
+            for i, pressure in enumerate(refuel_log):
+                self.refuel_series.append(i, pressure)
 
         # Get the target pressure and append target line points
         target_print_pressure = self.model.machine_model.get_target_print_pressure()
@@ -880,15 +1091,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         # Update the pressure display labels
         self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
-        self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
+        if not self.legacy_mode:
+            self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
 
         self.target_print_pressure_spinbox.blockSignals(True)  # Block signals temporarily
         self.target_print_pressure_spinbox.setValue(target_print_pressure)
         self.target_print_pressure_spinbox.blockSignals(False)  # Unblock signals
 
-        self.target_refuel_pressure_spinbox.blockSignals(True)  # Block signals temporarily
-        self.target_refuel_pressure_spinbox.setValue(self.model.machine_model.get_target_refuel_pressure())
-        self.target_refuel_pressure_spinbox.blockSignals(False)  # Unblock signals
+        if not self.legacy_mode:
+            self.target_refuel_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+            self.target_refuel_pressure_spinbox.setValue(self.model.machine_model.get_target_refuel_pressure())
+            self.target_refuel_pressure_spinbox.blockSignals(False)  # Unblock signals
 
         self.print_pulse_width_spinbox.blockSignals(True)
         self.print_pulse_width_spinbox.setValue(self.model.machine_model.print_pulse_width)
@@ -931,12 +1144,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         #         self.controller.move_to_location('balance', manual=True, safe_y=True)
         # mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         # mass_calibration_dialog.exec()
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
-        self.model.reload_refuel_model()
+        if not self.legacy_mode:
+            importlib.reload(CalibrationClasses.View)
+            importlib.reload(CalibrationClasses)
+            self.model.reload_refuel_model()
 
-        camera_dialog = CalibrationClasses.RefuelCameraWindow(self.main_window,self.model,self.controller)
-        camera_dialog.exec()
+            camera_dialog = CalibrationClasses.RefuelCameraWindow(self.main_window,self.model,self.controller)
+            camera_dialog.exec()
+        else:
+            mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+            mass_calibration_dialog.exec()
         # droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
         # droplet_imaging_dialog.exec()
 
@@ -1323,6 +1540,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.controller = controller
         self.color_dict = color_dict
         self.setObjectName("SpeedProfilesTab")
+        self._dfu_manual_session = False 
 
         # Prevent feedback loops when we update widgets from model signals
         self._updating = False
@@ -1688,12 +1906,44 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         # Indeterminate bar while the worker spins up
         self.fw_bar.setRange(0, 0)
         self.fw_status.setText("Starting…")
+
+        manual = sys.platform.startswith("win")
+        self._dfu_manual_session = manual
+
+        if manual:
+            msg = (
+                "The legacy machine requires MANUAL DFU mode.\n\n"
+                "Before clicking Yes:\n"
+                "  1) Connect the MCU board to this computer via USB.\n"
+                "  2) Place the jumper on the BOOT0/BOOT pins (BOOT0 = 1).\n"
+                "  3) Press and release the RESET button on the MCU board.\n\n"
+                "Then click Yes to start flashing."
+            )
+            response = self.main_window.popup_yes_no("Enter DFU Mode (Manual)", msg)
+            if response != "&Yes":
+                # user cancelled -> restore UI
+                self.fw_bar.setRange(0, 100)
+                self.fw_bar.setValue(0)
+                self.fw_status.setText("Cancelled.")
+                self.firmware_update_button.setEnabled(True)
+                self.firmware_update_button.setText("Update Firmware")
+                self._dfu_manual_session = False
+                return
+            
         # Kick the controller
         if hasattr(self.controller, "start_firmware_update"):
-            self.controller.start_firmware_update()
-        elif hasattr(self.controller, "update_firmware"):
-            self.fw_status.setText("Running (UI will freeze)…")
-            self.controller.update_firmware()
+            print("[View] Starting firmware update...")
+            self.controller.start_firmware_update(manual = self._dfu_manual_session)
+        else:
+            self.fw_status.setText("Controller does not support firmware update.")
+            self.fw_bar.setRange(0, 100)
+            self.fw_bar.setValue(0)
+            self.firmware_update_button.setEnabled(True)
+            self.firmware_update_button.setText("Update Firmware")
+            self._dfu_manual_session = False
+        # elif hasattr(self.controller, "update_firmware"):
+        #     self.fw_status.setText("Running (UI will freeze)…")
+        #     self.controller.update_firmware()
 
     @QtCore.Slot()
     def _on_reset_mcu_requested(self):
@@ -1724,11 +1974,23 @@ class SpeedProfilesTab(QtWidgets.QWidget):
         self.firmware_update_button.setEnabled(True)
         self.firmware_update_button.setText("Update Firmware")
 
+        # --- manual DFU exit prompt ---
+        if ok and getattr(self, "_dfu_manual_session", False):
+            self.main_window.popup_message(
+                "Exit DFU Mode (Manual)",
+                "Firmware upload complete.\n\n"
+                "Now:\n"
+                "  1) REMOVE the BOOT0/BOOT jumper (BOOT0 = 0)\n"
+                "  2) Press and release RESET to boot the new firmware."
+            )
+        self._dfu_manual_session = False
+
     @QtCore.Slot(str)
     def _on_dfu_output(self, line):
         # Optional: surface raw dfu-util output somewhere if you want
         # print('DFU:', line)
-        pass
+        self._append_log_line(line)
+        # pass
     # ---------------- Emitters ----------------
 
     def _mk_speed_handler(self, axis_idx: int):
@@ -2963,6 +3225,9 @@ class BoardStatusBox(QGroupBox):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+        
+        prof = getattr(self.main_window, "profile", None)
+        self.legacy_mode = prof.name == "legacy" if prof else True
 
         self.init_ui()
 
@@ -2971,7 +3236,8 @@ class BoardStatusBox(QGroupBox):
         self.model.location_model.locations_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
         self.model.machine_model.home_status_signal.connect(self.update_status)
-        # self.model.calibration_model.mass_updated_signal.connect(self.update_status)
+        if self.legacy_mode:
+            self.model.calibration_model.mass_updated_signal.connect(self.update_status)
     
     def init_ui(self):
         """Initialize the user interface."""
@@ -2986,6 +3252,9 @@ class BoardStatusBox(QGroupBox):
             # 'Mass': QLabel('0'),
             # 'Stable': QLabel('False')
         }
+        if self.legacy_mode:
+            self.labels['Mass'] = QLabel('0')
+            self.labels['Stable'] = QLabel('False')
 
         row = 0
         for label, value in self.labels.items():
@@ -3005,8 +3274,10 @@ class BoardStatusBox(QGroupBox):
         self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Current Micros'].setText(str(self.model.machine_model.current_micros))
-        # self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
-        # self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
+
+        if self.legacy_mode:
+            self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))
+            self.labels['Stable'].setText(str(self.model.calibration_model.is_mass_stable()))
 
 class ShortcutTableWidget(QGroupBox):
     """
@@ -3167,6 +3438,15 @@ class ExperimentDesignDialog(QDialog):
             self.main_window, "color_dict",
             {"dark_red": "#8a0303","blue": "#1e64b4","dark_blue": "#1b3a57", "light_blue": "#3b82f6"}
         )
+                
+        prof = getattr(self.main_window, "profile", None)
+        self.legacy_mode = prof.name == "legacy" if prof else True
+
+        if self.legacy_mode:
+            self.default_droplet_volume_nL = 40.0
+        else:
+            self.default_droplet_volume_nL = 10.0
+
         self.setWindowTitle("Experiment Design (v2)")
         self.setMinimumSize(1440, 820)
 
@@ -3273,7 +3553,8 @@ class ExperimentDesignDialog(QDialog):
         self.fill_dv_spin.setDecimals(1)
         self.fill_dv_spin.setRange(0.1, 100_000.0)
         self.fill_dv_spin.setSingleStep(1.0)
-        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", 10.0)))
+            
+        self.fill_dv_spin.setValue(float(self.model.metadata.get("fill_droplet_volume_nL", self.default_droplet_volume_nL)))
         form.addRow(QLabel("Fill Droplet Vol (nL)"), self.fill_dv_spin)
 
         # Randomize well assignments + seed
@@ -3905,7 +4186,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _on_add_reagent(self):
         # Default to Additive (per your request)
-        self._add_reagent_row(group=self.GROUP_ADDITIVE)
+        self._add_reagent_row(group=self.GROUP_ADDITIVE, droplet_nL=self.default_droplet_volume_nL)
 
     def _on_optimize_and_generate(self):
         # push UI -> model
