@@ -9,6 +9,7 @@ import time
 import numpy as np
 import os
 import serial
+import math
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -110,6 +111,7 @@ class Controller(QObject):
             "led_on_wait_off":           self._seq_led_on_wait_off,
             "imager_plate_imager":       self._seq_imager_plate_imager,
             "snake_grid_droplet_print": self._seq_snake_grid_droplet_print,
+            "bridge_and_pull_y": self._seq_bridge_and_pull_y,
         }
 
     def connect_droplet_camera_signals(self):
@@ -1570,3 +1572,52 @@ class Controller(QObject):
             if r < (rows - 1):
                 if step != 0:
                     self.set_relative_X(step)
+
+    def _seq_bridge_and_pull_y(self):
+        """
+        Bridge & Pull demo in Y.
+
+        Steps:
+        1) Print payload droplets at current position.
+        2) Move +Y by separation_steps.
+        3) Print target droplets.
+        4) Print 1-droplet bridge spots from target toward payload:
+                (move -Y by bridge_spacing_steps, print 1 droplet) repeated.
+
+        Params in self._seq_params:
+        payload_droplets (int)       : droplets at payload position
+        target_droplets (int)        : droplets at target position
+        separation_steps (int)       : +Y distance between payload and target
+        bridge_spacing_steps (int)   : spacing between bridge droplets (printed from target toward payload)
+        """
+        payload = int(self._seq_params.get("payload_droplets", 5))
+        target = int(self._seq_params.get("target_droplets", 10))
+        separation = int(self._seq_params.get("separation_steps", 200))
+        bridge_spacing = int(self._seq_params.get("bridge_spacing_steps", 50))
+
+        payload = max(1, payload)
+        target = max(1, target)
+        separation = max(0, separation)
+        bridge_spacing = max(1, bridge_spacing)  # must be >=1 to avoid infinite loops
+
+        # 1) Payload at start position
+        self.print_droplets(payload)
+
+        # 2) Move to target position (+Y)
+        if separation != 0:
+            self.set_relative_Y(separation)
+
+        # 3) Target droplet
+        self.print_droplets(target)
+
+        # 4) Bridge droplets from target toward payload.
+        #    Compute how many bridge points to place so that the last bridge point is within
+        #    one bridge_spacing of the payload (or closer), without necessarily printing on top of payload.
+        if separation == 0:
+            return
+
+        n_bridge = max(0, int(math.ceil(separation / bridge_spacing)) - 1)
+
+        for _ in range(n_bridge):
+            self.set_relative_Y(-bridge_spacing)
+            self.print_droplets(1)

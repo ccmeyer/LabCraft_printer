@@ -2187,6 +2187,52 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         seq_layout.addWidget(self.grid_btn,    3, 0)
         seq_layout.addWidget(grid_params,      3, 1, 1, 2)
 
+        # --- Bridge & Pull sequence ---
+        self.bridge_pull_btn = QtWidgets.QPushButton("Bridge & Pull +Y (Target → Payload)")
+        self.bridge_pull_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        bridge_params = QtWidgets.QWidget()
+        bridge_layout = QtWidgets.QHBoxLayout(bridge_params)
+        bridge_layout.setContentsMargins(0, 0, 0, 0)
+        bridge_layout.setSpacing(8)
+
+        self.payload_droplets_spin = QtWidgets.QSpinBox()
+        self.payload_droplets_spin.setRange(1, 10000)
+        self.payload_droplets_spin.setValue(5)
+        self.payload_droplets_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.target_droplets_spin = QtWidgets.QSpinBox()
+        self.target_droplets_spin.setRange(1, 10000)
+        self.target_droplets_spin.setValue(10)
+        self.target_droplets_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.separation_steps_spin = QtWidgets.QSpinBox()
+        self.separation_steps_spin.setRange(0, 500000)
+        self.separation_steps_spin.setValue(100)
+        self.separation_steps_spin.setSingleStep(10)
+        self.separation_steps_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.bridge_spacing_steps_spin = QtWidgets.QSpinBox()
+        self.bridge_spacing_steps_spin.setRange(1, 500000)
+        self.bridge_spacing_steps_spin.setValue(10)
+        self.bridge_spacing_steps_spin.setSingleStep(5)
+        self.bridge_spacing_steps_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        bridge_layout.addWidget(QtWidgets.QLabel("Payload droplets:"))
+        bridge_layout.addWidget(self.payload_droplets_spin)
+        bridge_layout.addWidget(QtWidgets.QLabel("Target droplets:"))
+        bridge_layout.addWidget(self.target_droplets_spin)
+        bridge_layout.addWidget(QtWidgets.QLabel("Separation +Y (steps):"))
+        bridge_layout.addWidget(self.separation_steps_spin)
+        bridge_layout.addWidget(QtWidgets.QLabel("Bridge spacing (steps):"))
+        bridge_layout.addWidget(self.bridge_spacing_steps_spin)
+        bridge_layout.addStretch(1)
+
+        # pick a row index that doesn't collide with your existing ones
+        row = 4
+        seq_layout.addWidget(self.bridge_pull_btn, row, 0)
+        seq_layout.addWidget(bridge_params,       row, 1, 1, 2)
+
         outer.addWidget(seq_box)
         outer.addStretch(1)
 
@@ -2195,6 +2241,7 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.led_btn.clicked.connect(self._run_led_sequence)
         self.move_btn.clicked.connect(self._run_move_sequence)
         self.grid_btn.clicked.connect(self._run_snake_grid_sequence)
+        self.bridge_pull_btn.clicked.connect(self._run_bridge_pull_sequence)
 
     def _wire_signals(self):
         self.controller.sequence_state_changed.connect(self._set_state)
@@ -2232,6 +2279,12 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.grid_cols_spin.setEnabled(enable)
         self.grid_step_spin.setEnabled(enable)
         self.grid_droplets_spin.setEnabled(enable)
+
+        self.bridge_pull_btn.setEnabled(enable)
+        self.payload_droplets_spin.setEnabled(enable)
+        self.target_droplets_spin.setEnabled(enable)
+        self.separation_steps_spin.setEnabled(enable)
+        self.bridge_spacing_steps_spin.setEnabled(enable)
 
         # cancel only during countdown
         self.cancel_btn.setEnabled(getattr(self.controller, "_seq_state", "idle") == "countdown")
@@ -2317,6 +2370,23 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
             cols=cols,
             step=step,
             droplets=droplets
+        )
+
+    def _run_bridge_pull_sequence(self):
+        delay = float(self.delay_spin.value())
+
+        payload = int(self.payload_droplets_spin.value())
+        target = int(self.target_droplets_spin.value())
+        separation = int(self.separation_steps_spin.value())
+        bridge_spacing = int(self.bridge_spacing_steps_spin.value())
+
+        self.controller.start_preprogrammed_sequence(
+            "bridge_and_pull_y",
+            delay_s=delay,
+            payload_droplets=payload,
+            target_droplets=target,
+            separation_steps=separation,
+            bridge_spacing_steps=bridge_spacing,
         )
 
 class BaseCalibrationDialog(QDialog):
