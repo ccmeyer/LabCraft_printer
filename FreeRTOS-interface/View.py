@@ -245,6 +245,10 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
         self.shortcut_manager.add_shortcut('c','Print only 5', lambda: self.controller.print_only(5))
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
+        
+        self.shortcut_manager.add_shortcut('w','Print 1 droplet', lambda: self.controller.print_droplets(1))
+        self.shortcut_manager.add_shortcut('e','Print 5 droplets', lambda: self.controller.print_droplets(5))
+        self.shortcut_manager.add_shortcut('r','Print 10 droplets', lambda: self.controller.print_droplets(10))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
         # self.shortcut_manager.add_shortcut('Shift+s','Reset Print Syringe', lambda: self.controller.reset_print_syringe())
         self.shortcut_manager.add_shortcut('Shift+i','See calibrations', lambda: self.show_calibrations())
