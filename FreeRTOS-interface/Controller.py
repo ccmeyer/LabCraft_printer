@@ -111,6 +111,7 @@ class Controller(QObject):
             "led_on_wait_off":           self._seq_led_on_wait_off,
             "imager_plate_imager":       self._seq_imager_plate_imager,
             "snake_grid_droplet_print": self._seq_snake_grid_droplet_print,
+            "droplet_walk_y": self._seq_droplet_walk_y,
             "bridge_and_pull_y": self._seq_bridge_and_pull_y,
         }
 
@@ -1572,6 +1573,44 @@ class Controller(QObject):
             if r < (rows - 1):
                 if step != 0:
                     self.set_relative_X(step)
+
+    def _seq_droplet_walk_y(self):
+        """
+        Demo sequence: Print increasing droplet counts while stepping +Y.
+
+        Default behavior:
+        spot 1: 1 droplet
+        move +Y (step)
+        spot 2: 2 droplets
+        move +Y (step)
+        spot 3: 3 droplets
+        ...
+
+        Params in self._seq_params:
+        n_spots (int)        : number of spots along the line (>=1)
+        step_y (int)         : relative Y move between spots, in steps (>=0)
+        start_droplets (int) : droplets at first spot (>=1), default 1
+        inc_droplets (int)   : increment each spot (>=0), default 1
+        """
+        n_spots = int(self._seq_params.get("n_spots", 5))
+        step_y = int(self._seq_params.get("step_y", 50))
+        start = int(self._seq_params.get("start_droplets", 1))
+        inc = int(self._seq_params.get("inc_droplets", 1))
+
+        n_spots = max(1, n_spots)
+        step_y = max(0, step_y)
+        start = max(1, start)
+        inc = max(0, inc)
+
+        droplets = start
+
+        for i in range(n_spots):
+            self.print_droplets(droplets)
+
+            if i < (n_spots - 1) and step_y != 0:
+                self.set_relative_Y(step_y)
+
+            droplets += inc
 
     def _seq_bridge_and_pull_y(self):
         """

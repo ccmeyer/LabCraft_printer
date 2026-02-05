@@ -2187,6 +2187,49 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         seq_layout.addWidget(self.grid_btn,    3, 0)
         seq_layout.addWidget(grid_params,      3, 1, 1, 2)
 
+        # 5) Droplet walk +Y (1,2,3,...)
+        self.walk_btn = QtWidgets.QPushButton("Droplet Walk +Y (1,2,3,...)")
+        self.walk_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        walk_params = QtWidgets.QWidget()
+        walk_layout = QtWidgets.QHBoxLayout(walk_params)
+        walk_layout.setContentsMargins(0, 0, 0, 0)
+        walk_layout.setSpacing(8)
+
+        self.walk_nspots_spin = QtWidgets.QSpinBox()
+        self.walk_nspots_spin.setRange(1, 500)
+        self.walk_nspots_spin.setValue(8)
+        self.walk_nspots_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.walk_stepy_spin = QtWidgets.QSpinBox()
+        self.walk_stepy_spin.setRange(0, 500000)
+        self.walk_stepy_spin.setValue(50)
+        self.walk_stepy_spin.setSingleStep(5)
+        self.walk_stepy_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.walk_start_spin = QtWidgets.QSpinBox()
+        self.walk_start_spin.setRange(1, 10000)
+        self.walk_start_spin.setValue(1)
+        self.walk_start_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.walk_inc_spin = QtWidgets.QSpinBox()
+        self.walk_inc_spin.setRange(0, 10000)
+        self.walk_inc_spin.setValue(1)
+        self.walk_inc_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        walk_layout.addWidget(QtWidgets.QLabel("Spots:"))
+        walk_layout.addWidget(self.walk_nspots_spin)
+        walk_layout.addWidget(QtWidgets.QLabel("ΔY (steps):"))
+        walk_layout.addWidget(self.walk_stepy_spin)
+        walk_layout.addWidget(QtWidgets.QLabel("Start droplets:"))
+        walk_layout.addWidget(self.walk_start_spin)
+        walk_layout.addWidget(QtWidgets.QLabel("+ per spot:"))
+        walk_layout.addWidget(self.walk_inc_spin)
+        walk_layout.addStretch(1)
+
+        seq_layout.addWidget(self.walk_btn, 4, 0)
+        seq_layout.addWidget(walk_params, 4, 1, 1, 2)
+
         # --- Bridge & Pull sequence ---
         self.bridge_pull_btn = QtWidgets.QPushButton("Bridge & Pull +Y (Target → Payload)")
         self.bridge_pull_btn.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -2229,7 +2272,7 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         bridge_layout.addStretch(1)
 
         # pick a row index that doesn't collide with your existing ones
-        row = 4
+        row = 5
         seq_layout.addWidget(self.bridge_pull_btn, row, 0)
         seq_layout.addWidget(bridge_params,       row, 1, 1, 2)
 
@@ -2242,6 +2285,8 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.move_btn.clicked.connect(self._run_move_sequence)
         self.grid_btn.clicked.connect(self._run_snake_grid_sequence)
         self.bridge_pull_btn.clicked.connect(self._run_bridge_pull_sequence)
+        self.walk_btn.clicked.connect(self._run_walk_sequence)
+
 
     def _wire_signals(self):
         self.controller.sequence_state_changed.connect(self._set_state)
@@ -2279,6 +2324,12 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.grid_cols_spin.setEnabled(enable)
         self.grid_step_spin.setEnabled(enable)
         self.grid_droplets_spin.setEnabled(enable)
+
+        self.walk_btn.setEnabled(enable)
+        self.walk_nspots_spin.setEnabled(enable)
+        self.walk_stepy_spin.setEnabled(enable)
+        self.walk_start_spin.setEnabled(enable)
+        self.walk_inc_spin.setEnabled(enable)
 
         self.bridge_pull_btn.setEnabled(enable)
         self.payload_droplets_spin.setEnabled(enable)
@@ -2371,7 +2422,23 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
             step=step,
             droplets=droplets
         )
+        
+    def _run_walk_sequence(self):
+        delay = float(self.delay_spin.value())
+        n_spots = int(self.walk_nspots_spin.value())
+        step_y = int(self.walk_stepy_spin.value())
+        start = int(self.walk_start_spin.value())
+        inc = int(self.walk_inc_spin.value())
 
+        self.controller.start_preprogrammed_sequence(
+            "droplet_walk_y",
+            delay_s=delay,
+            n_spots=n_spots,
+            step_y=step_y,
+            start_droplets=start,
+            inc_droplets=inc,
+        )
+        
     def _run_bridge_pull_sequence(self):
         delay = float(self.delay_spin.value())
 
