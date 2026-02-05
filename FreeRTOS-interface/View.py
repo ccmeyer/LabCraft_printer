@@ -2138,6 +2138,51 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.move_btn.setFocusPolicy(QtCore.Qt.NoFocus)
         seq_layout.addWidget(self.move_btn,          2, 0, 1, 3)
 
+        # 4) Snake grid droplet print
+        self.grid_btn = QtWidgets.QPushButton("Snake Grid: Print Droplets")
+        self.grid_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        # params widget so we don't fight the grid columns
+        grid_params = QtWidgets.QWidget()
+        grid_params_layout = QtWidgets.QHBoxLayout(grid_params)
+        grid_params_layout.setContentsMargins(0, 0, 0, 0)
+        grid_params_layout.setSpacing(8)
+
+        self.grid_rows_spin = QtWidgets.QSpinBox()
+        self.grid_rows_spin.setRange(1, 200)
+        self.grid_rows_spin.setValue(5)
+        self.grid_rows_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.grid_cols_spin = QtWidgets.QSpinBox()
+        self.grid_cols_spin.setRange(1, 200)
+        self.grid_cols_spin.setValue(5)
+        self.grid_cols_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.grid_step_spin = QtWidgets.QSpinBox()
+        self.grid_step_spin.setRange(0, 500000)
+        self.grid_step_spin.setValue(50)
+        self.grid_step_spin.setSingleStep(10)
+        self.grid_step_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        self.grid_droplets_spin = QtWidgets.QSpinBox()
+        self.grid_droplets_spin.setRange(1, 10000)
+        self.grid_droplets_spin.setValue(1)
+        self.grid_droplets_spin.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        grid_params_layout.addWidget(QtWidgets.QLabel("Rows:"))
+        grid_params_layout.addWidget(self.grid_rows_spin)
+        grid_params_layout.addWidget(QtWidgets.QLabel("Cols:"))
+        grid_params_layout.addWidget(self.grid_cols_spin)
+        grid_params_layout.addWidget(QtWidgets.QLabel("Step (steps):"))
+        grid_params_layout.addWidget(self.grid_step_spin)
+        grid_params_layout.addWidget(QtWidgets.QLabel("Droplets/spot:"))
+        grid_params_layout.addWidget(self.grid_droplets_spin)
+        grid_params_layout.addStretch(1)
+
+        # Add to the sequences grid layout
+        seq_layout.addWidget(self.grid_btn,    3, 0)
+        seq_layout.addWidget(grid_params,      3, 1, 1, 2)
+
         outer.addWidget(seq_box)
         outer.addStretch(1)
 
@@ -2145,6 +2190,7 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.pickup_btn.clicked.connect(self._run_pickup_sequence)
         self.led_btn.clicked.connect(self._run_led_sequence)
         self.move_btn.clicked.connect(self._run_move_sequence)
+        self.grid_btn.clicked.connect(self._run_snake_grid_sequence)
 
     def _wire_signals(self):
         self.controller.sequence_state_changed.connect(self._set_state)
@@ -2176,6 +2222,12 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.led_wait_spin.setEnabled(enable)
         self.move_btn.setEnabled(enable)
         self.delay_spin.setEnabled(enable)
+
+        self.grid_btn.setEnabled(enable)
+        self.grid_rows_spin.setEnabled(enable)
+        self.grid_cols_spin.setEnabled(enable)
+        self.grid_step_spin.setEnabled(enable)
+        self.grid_droplets_spin.setEnabled(enable)
 
         # cancel only during countdown
         self.cancel_btn.setEnabled(getattr(self.controller, "_seq_state", "idle") == "countdown")
@@ -2245,6 +2297,22 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         self.controller.start_preprogrammed_sequence(
             "imager_plate_imager",
             delay_s=delay
+        )
+
+    def _run_snake_grid_sequence(self):
+        delay = float(self.delay_spin.value())
+        rows = int(self.grid_rows_spin.value())
+        cols = int(self.grid_cols_spin.value())
+        step = int(self.grid_step_spin.value())
+        droplets = int(self.grid_droplets_spin.value())
+
+        self.controller.start_preprogrammed_sequence(
+            "snake_grid_droplet_print",
+            delay_s=delay,
+            rows=rows,
+            cols=cols,
+            step=step,
+            droplets=droplets
         )
 
 class BaseCalibrationDialog(QDialog):

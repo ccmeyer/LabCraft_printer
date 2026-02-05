@@ -109,6 +109,7 @@ class Controller(QObject):
             "pickup_slot_imager_return": self._seq_pickup_slot_imager_return,
             "led_on_wait_off":           self._seq_led_on_wait_off,
             "imager_plate_imager":       self._seq_imager_plate_imager,
+            "snake_grid_droplet_print": self._seq_snake_grid_droplet_print,
         }
 
     def connect_droplet_camera_signals(self):
@@ -1523,3 +1524,49 @@ class Controller(QObject):
         self.move_to_location("camera")   # imager
         self.move_to_location("plate")    # plate
         self.move_to_location("camera")   # back
+
+    def _seq_snake_grid_droplet_print(self):
+        """
+        Prints a snake-pattern grid of droplets starting at the current position.
+
+        Pattern:
+        - For each row:
+            - print droplets at current position
+            - move in Y between columns (direction alternates each row)
+            - at end of row, move +X to next row (no Y reset; snake continues)
+
+        Params expected in self._seq_params:
+        rows (int)      : number of rows (X direction)
+        cols (int)      : number of columns (Y direction)
+        step (int)      : relative move in "steps" between spots (applied to both X and Y)
+        droplets (int)  : number of droplets to print at each spot
+        """
+        rows = int(self._seq_params.get("rows", 1))
+        cols = int(self._seq_params.get("cols", 1))
+        step = int(self._seq_params.get("step", 0))
+        droplets = int(self._seq_params.get("droplets", 1))
+
+        # basic sanitation
+        rows = max(1, rows)
+        cols = max(1, cols)
+        droplets = max(1, droplets)
+        # allow step = 0 (prints all on same spot), but clamp negatives
+        step = max(0, step)
+
+        for r in range(rows):
+            direction = +1 if (r % 2 == 0) else -1  # snake direction along Y
+
+            for c in range(cols):
+                # Print droplets at this grid point
+                self.print_droplets(droplets)
+
+                # Move to next column (Y) unless we're at end of the row
+                if c < (cols - 1):
+                    dy = direction * step
+                    if dy != 0:
+                        self.set_relative_Y(dy)
+
+            # Move to next row (X) unless we're at last row
+            if r < (rows - 1):
+                if step != 0:
+                    self.set_relative_X(step)
