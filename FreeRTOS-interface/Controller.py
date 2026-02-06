@@ -113,6 +113,7 @@ class Controller(QObject):
             "snake_grid_droplet_print": self._seq_snake_grid_droplet_print,
             "droplet_walk_y": self._seq_droplet_walk_y,
             "bridge_and_pull_y": self._seq_bridge_and_pull_y,
+            "bridge_pull_y_3step": self._seq_bridge_pull_y_3step,
         }
 
     def connect_droplet_camera_signals(self):
@@ -1660,3 +1661,87 @@ class Controller(QObject):
         for _ in range(n_bridge):
             self.set_relative_Y(-bridge_spacing)
             self.print_droplets(1)
+
+    def _seq_bridge_pull_y_3step(self):
+        """
+        3-step Bridge & Pull demo in +Y.
+
+        Workflow:
+        - Print initial payload once at the current position.
+        - For i in {1..3}:
+            - Move +Y by separation_i
+            - Print target_i droplets
+            - Print bridge droplets from target toward payload (move -Y in steps of bridge_spacing_i, print 1 droplet each)
+            - Return to the target position (so the next step starts from "where the droplet likely moved")
+
+        Params in self._seq_params:
+        payload_droplets (int)
+
+        step1_target_droplets (int)
+        step1_separation_steps (int)
+        step1_bridge_spacing_steps (int)
+
+        step2_target_droplets (int)
+        step2_separation_steps (int)
+        step2_bridge_spacing_steps (int)
+
+        step3_target_droplets (int)
+        step3_separation_steps (int)
+        step3_bridge_spacing_steps (int)
+        """
+
+        def _bridge_pull_one_step(separation: int, target_droplets: int, bridge_spacing: int):
+            """
+            Executes one bridge & pull step starting from the current payload position.
+            After this returns, the head is positioned back at the target location (payload advanced).
+            """
+            separation = max(0, int(separation))
+            target_droplets = max(1, int(target_droplets))
+            bridge_spacing = max(1, int(bridge_spacing))  # avoid infinite loop
+
+            # Move to target position (+Y)
+            if separation != 0:
+                self.set_relative_Y(separation)
+
+            # Print target droplet cluster
+            self.print_droplets(target_droplets)
+
+            # If no separation, nothing to bridge
+            if separation == 0:
+                return
+
+            # Number of bridge points so the last bridge is within <= bridge_spacing of payload
+            n_bridge = max(0, int(math.ceil(separation / bridge_spacing)) - 1)
+
+            # Print bridging droplets from target back toward payload
+            for _ in range(n_bridge):
+                self.set_relative_Y(-bridge_spacing)
+                self.print_droplets(1)
+
+            # Return to target position (so next step starts from expected "moved" droplet location)
+            if n_bridge > 0:
+                self.set_relative_Y(n_bridge * bridge_spacing)
+
+        payload = max(1, int(self._seq_params.get("payload_droplets", 5)))
+        self.print_droplets(payload)
+
+        # Step 1
+        _bridge_pull_one_step(
+            separation=self._seq_params.get("step1_separation_steps", 200),
+            target_droplets=self._seq_params.get("step1_target_droplets", 10),
+            bridge_spacing=self._seq_params.get("step1_bridge_spacing_steps", 50),
+        )
+
+        # Step 2
+        _bridge_pull_one_step(
+            separation=self._seq_params.get("step2_separation_steps", 200),
+            target_droplets=self._seq_params.get("step2_target_droplets", 10),
+            bridge_spacing=self._seq_params.get("step2_bridge_spacing_steps", 50),
+        )
+
+        # Step 3
+        _bridge_pull_one_step(
+            separation=self._seq_params.get("step3_separation_steps", 200),
+            target_droplets=self._seq_params.get("step3_target_droplets", 10),
+            bridge_spacing=self._seq_params.get("step3_bridge_spacing_steps", 50),
+        )
