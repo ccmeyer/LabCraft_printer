@@ -11,18 +11,20 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../third_party/cpputest
 add_executable(fw_tests
     main.cpp
     tests/test_smoke.cpp
+    tests/test_comm_codec.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp
     # ../Src/utils/RingBuffer.c
+    ../Core/Src/CommCodec.cpp
 )
 
 target_include_directories(fw_tests PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/stubs
 
     # Include firmware headers as needed:
-    ${CMAKE_CURRENT_LIST_DIR}/../Inc
-    ${CMAKE_CURRENT_LIST_DIR}/../Src
+    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
+    ${CMAKE_CURRENT_LIST_DIR}/../Core/Src
 )
 
 target_compile_definitions(fw_tests PRIVATE

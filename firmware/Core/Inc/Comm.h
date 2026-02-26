@@ -10,6 +10,7 @@
 
 #include "BoardConfig.h"
 #include "stm32f4xx_hal.h"
+#include "CommCodec.h"
 #include <cstdint>
 #include <cstddef>
 #include "FreeRTOS.h"
@@ -104,11 +105,7 @@ public:
 
 
 
-    enum RxState { WAIT_START, WAIT_LEN, WAIT_DATA };
-    RxState _rxState = WAIT_START;
-    uint8_t _rxLen    = 0;
-    uint8_t _rxBuf[64];
-    uint8_t _rxIdx    = 0;
+    CommCodec::RxParser _rxParser{};
 
     volatile bool _txBusy = false;
     uint8_t _txBuf[160];   // >= max frame size (header + payload + CRC)

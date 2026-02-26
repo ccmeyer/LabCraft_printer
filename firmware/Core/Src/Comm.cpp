@@ -18,6 +18,7 @@
 #include "Gantry.h"
 #include "Gripper.h"
 #include "Logger.h"
+#include "CommCodec.h"
 
 #if (LC_HAS_IMAGING == 1)
 #include "Flash.hpp"
@@ -44,15 +45,6 @@
     p[(idx)++] = uint8_t((v)>>24 &0xFF);\
   } while(0)
 
-// framing constants
-static constexpr uint8_t START_BYTE = 0xAA;
-static constexpr int   MAX_BUF    = 64;  // enough for cmd + 3×2B + CRC
-
-static constexpr uint8_t TAG_P1 = 0x01;
-static constexpr uint8_t TAG_P2 = 0x02;
-static constexpr uint8_t TAG_P3 = 0x03;
-static constexpr uint8_t TAG_SEQ32 = 0x10;
-
 //------------------------------------------------------------------------------
 // static singleton pointer
 Comm* Comm::_instance = nullptr;
@@ -63,13 +55,7 @@ Comm::Comm(UART_HandleTypeDef* huart)
 
 // CRC16-X25
 uint16_t Comm::crc16(const uint8_t* data, uint16_t len) {
-    uint16_t crc = 0xFFFF;
-    while (len--) {
-        crc ^= *data++;
-        for (int i=0; i<8; ++i)
-            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
-    }
-    return crc;
+    return CommCodec::crc16(data, len);
 }
 
 void Comm::begin() {
@@ -133,35 +119,9 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 
 //  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
-  switch (c->_rxState) {
-	case Comm::WAIT_START:
-	  if (b == Comm::START_BYTE)
-		c->_rxState = Comm::WAIT_LEN;
-	  break;
-
-	case Comm::WAIT_LEN:
-	  c->_rxLen = b;
-	  if ((size_t)c->_rxLen + 2 <= sizeof(c->_rxBuf)) {
-		c->_rxIdx = 0;
-		c->_rxState = Comm::WAIT_DATA;
-	  } else {
-		c->_rxState = Comm::WAIT_START;
-	  }
-	  break;
-
-	case Comm::WAIT_DATA:
-//		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-	  c->_rxBuf[c->_rxIdx++] = b;
-	  if (c->_rxIdx >= c->_rxLen + 2) {
-		// got full payload + CRC
-		uint16_t recCrc = uint16_t(c->_rxBuf[c->_rxLen])
-						| (uint16_t(c->_rxBuf[c->_rxLen+1])<<8);
-		if (recCrc == Comm::crc16(c->_rxBuf, c->_rxLen)) {
-		  c->handlePacket(c->_rxBuf, c->_rxLen);
-		}
-		c->_rxState = Comm::WAIT_START;
-	  }
-	  break;
+  uint8_t payloadLen = 0;
+  if (CommCodec::feedRxByte(c->_rxParser, b, payloadLen) == CommCodec::FeedResult::FrameReady) {
+      c->handlePacket(c->_rxParser.rxBuf, payloadLen);
   }
 }
 
@@ -173,28 +133,17 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
   if (len < 2) return;
 
   Orchestrator::Command oc{};
-  oc.cmd = static_cast<Orchestrator::CmdType>(buf[0]);
-  oc.seq8 = buf[1];
-  oc.seq32 = 0;
-  oc.hasSeq32 = false;
-
-  int idx = 2;
-  while (idx + 1 < len) {
-    uint8_t tag = buf[idx++];
-    uint8_t l   = buf[idx++];
-    if (idx + l > len) break;
-
-    uint32_t v = 0;
-    for (int i=0; i<l; ++i) v |= uint32_t(buf[idx++]) << (8*i);
-
-    switch (tag) {
-      case TAG_P1: oc.p1 = v; oc.p1Len = l; break;
-      case TAG_P2: oc.p2 = v; oc.p2Len = l; break;
-      case TAG_P3: oc.p3 = v; oc.p3Len = l; break;
-      case TAG_SEQ32: oc.seq32 = v; oc.hasSeq32 = (l == 4); break;
-      default: break;
-    }
-  }
+  const auto decoded = CommCodec::decodeCommand(buf, len);
+  oc.cmd = static_cast<Orchestrator::CmdType>(decoded.cmd);
+  oc.seq8 = decoded.seq8;
+  oc.p1 = decoded.p1;
+  oc.p2 = decoded.p2;
+  oc.p3 = decoded.p3;
+  oc.p1Len = decoded.p1Len;
+  oc.p2Len = decoded.p2Len;
+  oc.p3Len = decoded.p3Len;
+  oc.seq32 = decoded.seq32;
+  oc.hasSeq32 = decoded.hasSeq32;
 
   if (auto orch = Orchestrator::instance()) {
     BaseType_t woken = pdFALSE;
@@ -204,49 +153,36 @@ void Comm::handlePacket(const uint8_t* buf, uint8_t len) {
 }
 
 void Comm::resetReceiveState() {
-    _rxState = WAIT_START;
-    _rxIdx   = 0;
-    _rxLen = 0;
+    _rxParser.state = CommCodec::RxParser::WAIT_START;
+    _rxParser.rxIdx = 0;
+    _rxParser.rxLen = 0;
 }
 
 void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
-	if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-		return; // last resort: skip; you could log here
-	}
-  uint8_t payload[2] = { cmd, seq };
-  uint8_t header[2]  = { START_BYTE, 2 };
-  uint16_t crc       = crc16(payload, 2);
-  uint8_t tail[2]    = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
-
-  // block‐send directly on UART2:
-  HAL_UART_Transmit(_huart, header, 2, HAL_MAX_DELAY);
-  HAL_UART_Transmit(_huart, payload, 2, HAL_MAX_DELAY);
-  HAL_UART_Transmit(_huart, tail, 2, HAL_MAX_DELAY);
-  xSemaphoreGive(_txMutex);
+    if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return; // last resort: skip; you could log here
+    }
+    uint8_t payload[2] = { cmd, seq };
+    uint8_t frame[2 + sizeof(payload) + 2] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    if (frameLen > 0) {
+        HAL_UART_Transmit(_huart, frame, frameLen, HAL_MAX_DELAY);
+    }
+    xSemaphoreGive(_txMutex);
 }
 
 void Comm::sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32) {
-  uint8_t payload[2 + 2 + 4]; // [ack, seq8] + [tag,len,val]
-  uint8_t idx = 0;
-  payload[idx++] = ackCmd;
-  payload[idx++] = seq8;
-
-  if (includeSeq32) {
-    payload[idx++] = TAG_SEQ32;
-    payload[idx++] = 4;
-    payload[idx++] = (uint8_t)(seq32 & 0xFF);
-    payload[idx++] = (uint8_t)((seq32 >> 8) & 0xFF);
-    payload[idx++] = (uint8_t)((seq32 >>16) & 0xFF);
-    payload[idx++] = (uint8_t)((seq32 >>24) & 0xFF);
+  uint8_t payload[2 + 2 + 4] = {0}; // [ack, seq8] + [tag,len,val]
+  const uint8_t payloadLen = CommCodec::buildAckPayload(ackCmd, seq8, seq32, includeSeq32, payload, sizeof(payload));
+  if (payloadLen == 0) {
+      return;
   }
 
-  uint8_t header[2] = { START_BYTE, idx };
-  uint16_t c = crc16(payload, idx);
-  uint8_t tail[2] = { (uint8_t)(c & 0xFF), (uint8_t)(c >> 8) };
-
-  HAL_UART_Transmit(_huart, header, 2, HAL_MAX_DELAY);
-  HAL_UART_Transmit(_huart, payload, idx, HAL_MAX_DELAY);
-  HAL_UART_Transmit(_huart, tail, 2, HAL_MAX_DELAY);
+  uint8_t frame[2 + sizeof(payload) + 2] = {0};
+  const size_t frameLen = CommCodec::encodeFrame(payload, payloadLen, frame, sizeof(frame));
+  if (frameLen > 0) {
+      HAL_UART_Transmit(_huart, frame, frameLen, HAL_MAX_DELAY);
+  }
 }
 
 
@@ -262,19 +198,19 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
                       const uint8_t* payload,
                       size_t        len)
 {
-	if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-		return; // last resort: skip; you could log here
-	}
-    uint8_t  header[2] = { 0xAA, (uint8_t)len };
-    uint16_t crc = Comm::crc16(payload, len);
-    uint8_t tail[2] = { uint8_t(crc & 0xFF), uint8_t(crc >> 8) };
+    if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return; // last resort: skip; you could log here
+    }
+    if (len > 255) {
+        xSemaphoreGive(_txMutex);
+        return;
+    }
 
-    // send header
-    HAL_UART_Transmit(huart, header, 2, HAL_MAX_DELAY);
-    // send payload
-    HAL_UART_Transmit(huart, (uint8_t*)payload, len, HAL_MAX_DELAY);
-    // send crc
-    HAL_UART_Transmit(huart, tail, 2, HAL_MAX_DELAY);
+    uint8_t frame[2 + 255 + 2] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(len), frame, sizeof(frame));
+    if (frameLen > 0) {
+        HAL_UART_Transmit(huart, frame, frameLen, HAL_MAX_DELAY);
+    }
     xSemaphoreGive(_txMutex);
 }
 
@@ -482,4 +418,3 @@ void Comm::statusTask() {
 
     }
 }
-

@@ -103,6 +103,7 @@ Artifacts in `firmware/artifacts/` are only committed if the repo policy explici
 ## Definition of done (firmware task)
 - Host unit tests pass (CppUTest)
 - Headless build passes and produces `.bin`
+- Update firmware/docs/repo_map.md if the change affects module ownership, entrypoints, or protocol handling.
 - Summary includes:
   - what changed and why
   - what modules were touched
