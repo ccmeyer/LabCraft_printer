@@ -1,151 +1,186 @@
 # Droplet Printer Repo — Agent Instructions (Root)
 
 ## Mission
-This repository controls real hardware (droplet printer). Changes must be safe, minimal, and verifiable.
-Primary current goal: **add automated tests** so future changes are safer and regressions are caught early.
+This repository controls real hardware (droplet printer). Changes must be safe, minimal, reviewable, and verifiable.
+Primary goal: **maintain high confidence via automated tests** for both:
+- the Python MVC application (`FreeRTOS-interface/`)
+- the STM32 firmware (`firmware/`)
 
-## Repo layout
+## Repo layout (high level)
 - `FreeRTOS-interface/`
-  - `App.py` — application entry / orchestration (likely creates MVC objects and starts UI/event loop)
-  - `Controller.py` — mediates View ↔ Model ↔ machine comms
-  - `Model.py` — state, configuration, experiment definitions, business logic
-  - `View.py` — UI layer (likely PySide6/Qt or similar)
+  - `App.py` — application entry/orchestration
+  - `Controller.py` — mediates View ↔ Model ↔ comms
+  - `Model.py` — state, configuration, experiment logic
+  - `View.py` — UI layer (Qt/PySide-style)
+  - `Machine_FreeRTOS` — Object responsible for communicating with the actual machine
 - `firmware/`
-  - `Inc/` — headers
-  - `Src/` — source
-- `Documentation/` — manuals/parts docs
+  - STM32CubeIDE project (contains `.project/.cproject/.ioc` etc.)
+  - `tests_host/` — host unit tests (CppUTest + CMake)
+  - `third_party/cpputest/` — CppUTest framework (submodule/vendor)
+  - `scripts/` — build and test scripts
+  - `artifacts/` — copied firmware binaries (e.g., `LabCraft_firmware.bin`)
+- `Documentation/` — manuals and parts docs
 - `requirements.txt`
 - `README.md`
+- `AGENTS.md`
+
+---
 
 ## Safety / guardrails (non-negotiable)
-- **Never perform destructive actions** on the user’s machine. Do not propose anything that could risk hardware damage.
-- **Do not change the device protocol** (message formats, opcodes, parsing) unless explicitly requested.
-- Avoid large refactors. Prefer small, reviewable diffs.
-- Any change that crosses MVC layers must begin with a short plan and a list of files to touch.
-- If a change might affect motion/pressure control, include explicit verification steps and “how to revert”.
+- **Never propose destructive actions** that could risk hardware damage.
+- **Do not change the device protocol** (message formats/opcodes/parsing) unless explicitly requested.
+- Avoid large refactors. Prefer small, incremental diffs.
+- Any change crossing MVC layers must begin with:
+  - the call path (UI → Controller → Model → comms → firmware handler)
+  - a plan (≤8 steps)
+  - a list of files to touch (before editing)
+- If a change affects motion/pressure control or timing-sensitive behavior:
+  - include explicit verification steps
+  - include a rollback plan (how to revert)
+
+---
 
 ## Working style (required)
 For each task:
-1) **Locate call path first** (UI action → Controller → Model → comms → firmware handler).
-2) Propose a plan (≤8 steps) and list files to touch **before editing**.
-3) Implement the smallest viable slice.
-4) Run tests (and/or provide a short manual checklist).
-5) Summarize: what changed, why, how to validate, and any risks.
+1) Locate call path first (UI → Controller → Model → comms → firmware handler)
+2) Propose plan (≤8 steps) + list files to touch **before editing**
+3) Implement the smallest viable slice (minimal diff)
+4) Verify: run automated tests + provide short manual checklist if needed
+5) Summarize:
+   - what changed and why
+   - how to validate
+   - risks/edge cases
+   - rollback steps
 
-## Environment setup (Python)
-Assume Windows + VS Code unless stated otherwise.
+---
 
-### Create venv (if needed)
-- Windows PowerShell:
-  - `py -m venv .venv`
-  - `.\.venv\Scripts\Activate.ps1`
-  - `python -m pip install -U pip`
-  - `pip install -r requirements.txt`
+## Environment assumptions
+Primary development environment: **Windows + VS Code**.
+Prefer using the project interpreter/tools and repo scripts.
 
-### Run the app (fill in once confirmed)
-Preferred: run using the selected VS Code interpreter (`.\.venv\Scripts\python.exe`).
-- `<fill this in>` Example candidates:
+---
+
+## Python (FreeRTOS-interface) commands
+### Virtual environment (if needed)
+- Create venv: `py -m venv .venv`
+- Activate: `.\.venv\Scripts\Activate.ps1`
+- Install deps: `python -m pip install -U pip` then `pip install -r requirements.txt`
+
+### Run the app
+- Use VS Code selected interpreter (`.\.venv\Scripts\python.exe`) then run:
   - `python FreeRTOS-interface/App.py`
-  - `python -m FreeRTOS-interface.App` (only if it’s a package)
-If uncertain, consult `README.md` and report what you found.
+  - (If README specifies a different entrypoint, follow README)
 
-## Testing strategy (high priority)
+### Run Python tests
+- Use the repo’s chosen test command (prefer `pytest` if configured):
+  - `python -m pytest -q`
+  - If `pytest` is not configured, use the repo’s documented command.
 
-### Guiding principles
-- Start with **fast, deterministic tests** that run without hardware.
-- Put the hardware boundary behind interfaces and use fakes/mocks.
-- Favor tests of **Model + Controller logic** first; View/UI tests are optional later.
-- Add regression tests for each bugfix (test fails before fix, passes after).
+---
 
-### Phase 1: Python unit tests (no hardware)
-Goal: runnable test suite on every machine without needing the printer connected.
+## Firmware commands (STM32)
+Firmware must be validated in two ways:
 
-**Preferred framework:** `pytest` (recommended) or built-in `unittest` if adding deps is not allowed.
-- If `pytest` is not in `requirements.txt`, propose adding:
-  - `pytest`
-  - optionally `pytest-mock` (helpful)
-  - optionally `pytest-qt` if UI tests are later desired (do not add initially unless asked)
+### A) Host unit tests (fast, no hardware)
+- Run host tests:
+  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_unit_tests.ps1`
 
-**Test folder convention**
-- Add `tests/` at repo root OR `FreeRTOS-interface/tests/` (choose one and be consistent).
-- Keep tests focused and name them `test_<thing>.py`.
+### B) Headless CubeIDE build (compiles/links real firmware and produces `.bin`)
+- Run headless build:
+  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/build_firmware_headless.ps1`
 
-**Hardware boundary**
-- Identify the comms layer used to talk to the MCU (serial/USB/etc).
-- Create a small interface/adapter (if not present) so Controller uses a `Comm` object with predictable methods.
-- Provide a `FakeComm` for tests:
-  - captures outgoing commands
-  - can return canned status messages
-  - can simulate timeouts/errors
+### Recommended combined check
+- Prefer one command after firmware edits (if present):
+  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1`
+  - (If not present, run A then B)
 
-**Core test targets (initial)**
-- Model invariants:
-  - configuration parsing/validation (JSON/settings files if any)
-  - experiment state transitions
-  - droplet calibration computations (pure functions)
-- Controller logic:
-  - correct commands enqueued for user actions
-  - correct handling of status updates / error states
-  - correct sequencing logic (queue ordering, retries, abort paths)
-- Serialization/parsing (very important):
-  - test encode/decode for each message type
-  - golden test vectors stored in fixtures
+### Firmware prerequisites
+- CMake installed and on PATH (`cmake --version`)
+- Visual Studio Build Tools present for host builds (MSVC)
+- STM32CubeIDE installed for headless build
+- CppUTest submodule/vendor present:
+  - `git submodule update --init --recursive` (if using submodules)
 
-### Phase 2: Integration tests (still no hardware)
-- Run `App` in a “headless/simulated mode” if possible (no actual serial).
-- Verify key workflows end-to-end using FakeComm:
-  - connect → home → move → print sequence (simulated) → disconnect
-- Validate that a status update from MCU correctly updates Model/UI state (as far as possible without rendering UI).
+---
 
-### Phase 3: Firmware tests (optional, later)
-Firmware unit testing is valuable but usually heavier to bootstrap.
-Do not start this unless requested; if requested, propose one of:
-- Unity/Ceedling
-- CppUTest
-- PlatformIO native tests (if using PlatformIO)
+## Firmware editing rules
+- Treat the repo as the source of truth for the CubeIDE project.
+- **Do not edit auto-generated CubeMX/CubeIDE code** outside `/* USER CODE BEGIN */ ... /* USER CODE END */` blocks.
+- Prefer changes in:
+  - application logic modules (protocol parsing, state machines, utilities)
+  - not peripheral init code
+- When adding new firmware logic, prefer isolating it into host-testable modules:
+  - avoid hard dependencies on HAL/FreeRTOS headers in core logic
+  - keep HAL/RTOS at the edges and call into pure functions
 
-Minimum firmware test targets:
-- message parsing / command dispatch
-- safety interlocks (limit switch logic, bounds checks)
-- math-only utilities (timing, conversion, PID helpers)
+---
 
-## Command list for agents (keep updated)
-If these aren’t available yet, agents should propose adding them.
+## Testing strategy (what to test first)
+### Python (already in place)
+- Keep tests deterministic and hardware-free where possible.
+- Use fakes/mocks for comms.
+- Add regression tests for each bugfix.
 
-### Tests
-- `python -m pytest -q`  (if using pytest)
-- OR `python -m unittest` (if using unittest)
+### Firmware (host-testable first)
+Host unit tests (CppUTest) should cover:
+- protocol encode/decode (golden vectors)
+- framing/parsing and buffer edge cases
+- state machines (homing/printing sequences) where possible
+- math utilities and bounds checks
 
-### Lint/format (optional but recommended later)
-Only propose once tests exist:
-- `ruff` (lint + formatting) OR `black` + `flake8`
-- Keep tooling minimal; avoid bikeshedding.
+Headless build should be run after any firmware edits to catch:
+- syntax errors, missing includes
+- linker issues
+- build configuration regressions
+
+---
+
+## What NOT to do
+- Do not attempt to run hardware-in-the-loop tests unless explicitly requested and the workflow is clearly defined.
+- Do not add heavy tooling (linting/formatting/build systems) unless requested.
+- Do not restructure the repo or rename major components without discussion.
+
+---
 
 ## Documentation expectations
-- When adding a new test harness, update `README.md` with:
-  - how to run tests
-  - any environment requirements
-- If you discover undocumented run steps, add them to `README.md`.
+When adding or changing test/build tooling:
+- Update `README.md` (or `firmware/README.md`) with:
+  - prerequisites
+  - exact commands to run tests/build
+  - known troubleshooting steps
+
+---
 
 ## Git / commits
 - One milestone per commit.
 - Keep commits small and descriptive, e.g.:
-  - `test: add FakeComm and controller command tests`
-  - `test: add protocol encode/decode golden vectors`
+  - `test: add protocol decode golden vectors (python)`
+  - `test: add host firmware tests for parser edge cases`
+  - `build: add headless firmware build script`
 - Do not commit local artifacts:
-  - `.venv/`, `__pycache__/`, logs, build outputs, device dumps
+  - `.venv/`, `__pycache__/`, logs, workspace metadata, IDE cache directories
+- Firmware artifacts:
+  - Only commit `.bin` files in `firmware/artifacts/` if the repo explicitly intends to version them.
+  - Otherwise treat them as build outputs.
 
-## What to do when uncertain
-- If repo behavior is unclear (entrypoint, protocol formats, threading model), **stop and ask** by producing:
-  - what you inspected
-  - 2–3 plausible interpretations
-  - what information would disambiguate
+---
 
-## Default “definition of done” for any PR
-- Tests run locally and pass (or explain why hardware prevents it and propose a simulation test)
-- No protocol changes unless explicitly requested
+## If uncertain
+Stop and ask by producing:
+- what was inspected
+- 2–3 plausible interpretations
+- what info would disambiguate
+
+---
+
+## Definition of done (per task/PR)
+- Automated tests pass for the affected area:
+  - Python: `python -m pytest -q` (or repo equivalent)
+  - Firmware: host tests + headless build as applicable
+- Any protocol/schema changes documented (if explicitly requested)
 - Summary includes:
   - files changed
   - risk assessment
   - validation steps
-  - rollback steps (how to revert)
+  - rollback steps
+  - recommended next steps
