@@ -37,3 +37,22 @@ Makefile
 **/.metadata/
 **/*.user
 **/*.userprefs
+
+# --- STM32CubeIDE / Eclipse build outputs ---
+firmware/Debug/
+firmware/Release/
+firmware/Debug_Legacy/
+firmware/Release_Legacy/
+
+# Eclipse workspace metadata (should not be tracked)
+firmware/.metadata/
+
+# Object/dependency/analysis outputs (common GCC/ARM toolchains)
+**/*.o
+**/*.d
+**/*.su
+**/*.cyclo
+**/*.lst
+**/*.map
+**/*.elf
+**/*.axf

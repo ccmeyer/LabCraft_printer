@@ -1,5 +1,0 @@
-../Core/Src/nvm.c:16:17:crc32_update	40	static
-../Core/Src/nvm.c:27:17:crc32_block	16	static
-../Core/Src/nvm.c:31:6:nvm_load	32	static
-../Core/Src/nvm.c:43:6:nvm_defaults	16	static
-../Core/Src/nvm.c:53:6:nvm_save	120	static
