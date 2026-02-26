@@ -103,15 +103,23 @@
 
 ## Milestone M5: Motion Semantics Documentation + Legacy Routing Coverage
 - Closes IDs: `AUD-2026-020`
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Focus:
   - Explicit Z-axis convention guardrails in movement logic.
   - Legacy-profile safe-height routing coverage.
 - Primary test deliverables:
   - Legacy safe-height route ordering test (`safe_z=5000`).
-  - Convention assertion test(s)/documentation checks.
+  - Convention assertion tests for inverted-Z semantics.
 - Verification gate:
   - Current and legacy routing semantics are both asserted in tests.
   - Convention ambiguity removed for future maintainers.
+- Completed files:
+  - `tests/test_controller_move_to_location.py`
+- Notes:
+  - Added profile-parameterized safe-height coverage for `current` and `legacy`.
+  - Added explicit inverted-Z convention assertions ensuring no unnecessary safe lift when both positions are already physically high.
+  - No production controller logic changes were required.
 
 ## Milestone M6: App Startup and Disconnect Timing Resilience
 - Closes IDs: `AUD-2026-011`, `AUD-2026-014`

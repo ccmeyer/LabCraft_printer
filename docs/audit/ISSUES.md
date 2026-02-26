@@ -7,14 +7,11 @@
 - Covered Areas: `App.py`, `Controller.py`, `Model.py`, `Machine_FreeRTOS.py`, `View.py`
 
 ## Triage Summary (Open Only)
-- Open issue count: 3
+- Open issue count: 2
 - Highest open severity: `Medium`
 - Deduping performed:
   - Removed resolved/covered items from active queue.
   - Merged protocol-test drift concerns under `AUD-2026-015` + `AUD-2026-019`.
-  - Kept `AUD-2026-020` as documentation/maintainability (distinct from behavior bug fixed in `AUD-2026-001`).
-
-## High Priority
 
 ## Medium Priority
 
@@ -36,16 +33,15 @@
 - Verification Note: Boot with missing/invalid settings file and assert deterministic fallback behavior.
 - Test Coverage Note: Missing (startup settings fallback test).
 
-## Low Priority / Cleanup
+## Recently Resolved (Milestone M5)
 
 ## AUD-2026-020
-- Severity: Low
-- Category: Maintainability
-- Location: `FreeRTOS-interface/Controller.py`, `Controller.move_to_location`
-- Description: Inverted Z-axis convention is implicit.
-- Impact: Future edits may reintroduce unsafe routing assumptions.
-- Verification Note: Add explicit convention assertions/docs tied to movement logic.
-- Test Coverage Note: Partial (current-profile safe-Z covered; legacy/convention tests still missing).
+- Status: Resolved
+- Resolution Reference:
+  - Tests:
+    - `tests/test_controller_move_to_location.py::test_move_to_location_legacy_profile_uses_legacy_safe_height_before_balance_route`
+    - `tests/test_controller_move_to_location.py::test_move_to_location_enforces_safe_z_when_below_threshold`
+    - `tests/test_controller_move_to_location.py::test_move_to_location_inverted_z_convention_skips_safe_z_when_already_high`
 
 ## Recently Resolved (Milestone M4 Coverage Debt)
 - Status: Covered by new tests (no direct issue ID closed)
