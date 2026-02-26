@@ -3,6 +3,7 @@ import sys
 import types
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +32,16 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture
+def test_profile():
+    return SimpleNamespace(
+        name="current",
+        has_refuel_camera=False,
+        has_droplet_camera=False,
+        has_log_channel=False,
+    )
 
 
 @pytest.fixture

@@ -778,6 +778,9 @@ class SerialReader(QThread):
         """
         TAG_SEQ32 = 0x10
 
+        if not payload:
+            return {"ack_cmd": None, "seq8": None, "seq32": None}
+
         ack_cmd = payload[0]
         seq8 = payload[1] if len(payload) >= 2 else 0
         seq32 = None
@@ -802,6 +805,8 @@ class SerialReader(QThread):
                 length = hdr[1]
                 payload = self.ser.read(length)
                 if len(payload) != length: continue
+                if length == 0:
+                    continue
                 tail = self.ser.read(2)
                 if len(tail) != 2: continue
                 rec_crc = tail[0] | (tail[1]<<8)
@@ -815,10 +820,12 @@ class SerialReader(QThread):
                     # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
                     # print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
                     ack = self._parse_ack(payload)
+                    if ack.get("ack_cmd") is None:
+                        continue
                     print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
                     self.ackReceived.emit(ack)
 
-            except (serial.SerialException, OSError, TypeError, ValueError):
+            except (serial.SerialException, OSError, TypeError, ValueError, IndexError):
                 break
 
     def stop(self):
@@ -1380,10 +1387,12 @@ class Machine(QObject):
         # Retry to connect
         if self._connection_attempts < 3:
             self._connection_attempts += 1
+            self._teardown_transport_for_retry()
             print(f"Retrying connection ({self._connection_attempts}/3)…")
             self.connect_board(self.port)
         elif self._connection_attempts < 6:
             self._connection_attempts += 1
+            self._teardown_transport_for_retry()
             self.reset_mcu_board()
             print(f"Resetting board and retrying connection ({self._connection_attempts}/6)…")
             self.connect_board(self.port)
@@ -1396,6 +1405,19 @@ class Machine(QObject):
             print(msg)
             self.error_occurred.emit(msg)
             self.machine_connected_signal.emit(False)
+
+    def _teardown_transport_for_retry(self):
+        """Close current transport before recursive reconnect attempts."""
+        try:
+            self.stop_reader_thread()
+        except Exception:
+            pass
+        try:
+            if self.ser is not None and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
 
     def reset_board(self):
         print('Resetting board')
@@ -1624,18 +1646,24 @@ class Machine(QObject):
         return len(self.command_queue.queue)
     
     def _write_frame(self, frame: bytes):
+        if self.ser is None or not getattr(self.ser, "is_open", False):
+            raise IOError("Serial port is not open")
         with QMutexLocker(self._tx_mutex):
             self.ser.write(frame)
             self.ser.flush()
 
     def send_command_to_board(self, command):
         """Send a command to the board."""
-        # self.ser.write(command.frame)
-        # self.ser.flush()
-        self._write_frame(command.frame)
-        self.command_sent.emit({"command": command.get_command()})
-        print(f"Sent command: {command.get_command()}")
-        return True
+        try:
+            self._write_frame(command.frame)
+            self.command_sent.emit({"command": command.get_command()})
+            print(f"Sent command: {command.get_command()}")
+            return True
+        except Exception as e:
+            msg = f"Failed to send command: {e}"
+            print(msg)
+            self.error_occurred.emit(msg)
+            return False
 
     def send_next_command(self):
         """
@@ -1730,7 +1758,6 @@ class Machine(QObject):
 
         # Clear Python side queue & notify UI
         self.command_queue.clear_queue()
-        self._tx_paused = False
 
         self._wait_for_clear_status_deadline = time.time() + 0.5  # 500 ms fallback
         self._waiting_for_post_clear_status = True

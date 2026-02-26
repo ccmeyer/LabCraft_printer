@@ -770,7 +770,7 @@ class Controller(QObject):
 
         target = original_target.copy()
 
-        if current_z < safe_z or (target['Z'] < safe_z):
+        if current_z < safe_z and target['Z'] < safe_z:
             print("Already above safe height")
             ignore_safe_height = True
         print(f'Moving to location: {name} from {current_location}')
