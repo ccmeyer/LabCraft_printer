@@ -7,31 +7,34 @@
 - Covered Areas: `App.py`, `Controller.py`, `Model.py`, `Machine_FreeRTOS.py`, `View.py`
 
 ## Triage Summary (Open Only)
-- Open issue count: 2
-- Highest open severity: `Medium`
+- Open issue count: 0
+- Highest open severity: n/a
 - Deduping performed:
   - Removed resolved/covered items from active queue.
   - Merged protocol-test drift concerns under `AUD-2026-015` + `AUD-2026-019`.
 
 ## Medium Priority
 
+No open Medium issues.
+
+## Recently Resolved (Milestone M6)
+
 ## AUD-2026-014
-- Severity: Medium
-- Category: Timing
-- Location: `FreeRTOS-interface/Machine_FreeRTOS.py`, `Machine._on_goodbye_done` (around line 1482)
-- Description: Blocking `time.sleep(0.05)` in Qt-controlled path.
-- Impact: Event-loop stalls and timing nondeterminism.
-- Verification Note: Measure disconnect latency/responsiveness under active UI loop.
-- Test Coverage Note: Missing (disconnect responsiveness timing test).
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Machine_FreeRTOS.py`, `_on_goodbye_done` (removed blocking sleep; immediate cleanup path)
+  - Tests:
+    - `tests/test_machine_disconnect_timing.py::test_on_goodbye_done_does_not_block_with_sleep`
+    - `tests/test_machine_disconnect_timing.py::test_on_goodbye_done_still_disconnects_when_buffer_reset_fails`
 
 ## AUD-2026-011
-- Severity: Medium
-- Category: Configuration
-- Location: `FreeRTOS-interface/App.py`, `load_settings` (around lines 44-46)
-- Description: Startup settings load lacks robust error/fallback handling.
-- Impact: Corrupt/missing settings can hard-fail startup.
-- Verification Note: Boot with missing/invalid settings file and assert deterministic fallback behavior.
-- Test Coverage Note: Missing (startup settings fallback test).
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/App.py`, `load_settings` (deterministic fallback for missing/invalid settings payloads)
+  - Tests:
+    - `tests/test_app_settings_fallback.py::test_load_settings_returns_defaults_when_file_missing`
+    - `tests/test_app_settings_fallback.py::test_load_settings_returns_defaults_when_json_invalid`
+    - `tests/test_app_settings_fallback.py::test_load_settings_reads_valid_json`
 
 ## Recently Resolved (Milestone M5)
 

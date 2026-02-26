@@ -1516,8 +1516,8 @@ class Machine(QObject):
 
     def _on_goodbye_done(self):
         try:
-            time.sleep(0.05)
-            self.ser.reset_input_buffer()
+            if self.ser is not None:
+                self.ser.reset_input_buffer()
             print('Goodbye acknowledged, machine disconnected.')
         except Exception:
             print('Error during goodbye acknowledgment.')

@@ -123,6 +123,8 @@
 
 ## Milestone M6: App Startup and Disconnect Timing Resilience
 - Closes IDs: `AUD-2026-011`, `AUD-2026-014`
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Focus:
   - Robust startup settings fallback behavior.
   - Non-blocking disconnect path timing behavior.
@@ -132,6 +134,14 @@
 - Verification gate:
   - Startup does not hard-fail on malformed settings.
   - Disconnect path remains responsive under event loop constraints.
+- Completed files:
+  - `FreeRTOS-interface/App.py`
+  - `FreeRTOS-interface/Machine_FreeRTOS.py`
+  - `tests/test_app_settings_fallback.py`
+  - `tests/test_machine_disconnect_timing.py`
+- Notes:
+  - Hardened `load_settings` with deterministic defaults for missing/invalid/non-dict settings payloads.
+  - Removed blocking sleep from GOODBYE completion path while preserving buffer reset + disconnect cleanup.
 
 ## Exit Criteria (Roadmap v2 Complete)
 - All open IDs in `docs/audit/ISSUES.md` marked resolved with code + test references.

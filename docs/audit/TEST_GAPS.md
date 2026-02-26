@@ -6,10 +6,11 @@
 - Intent: Open test gaps only (resolved/covered gaps removed for triage clarity).
 
 ## Gap Triage (Open Only)
-- Total open gaps: 3
+- Total open gaps: 1
 - Dedupe notes:
   - Removed covered View designer reopen/lock items from active queue (Milestone M4 complete).
   - Removed legacy routing coverage gap after Milestone M5 completion.
+  - Removed startup fallback and disconnect timing gaps after Milestone M6 completion.
 
 ## Model
 
@@ -27,21 +28,21 @@
 
 | Gap ID | Related Issue ID | Area | Risk | Verification | Missing Test |
 |---|---|---|---|---|---|
-| GAP-X-004 | AUD-2026-014 | `Machine._on_goodbye_done` | Medium | Measure close/disconnect responsiveness under event loop | Disconnect timing responsiveness test |
+| (none open) | - | - | - | - | - |
 
 ## View
 
 | Gap ID | Related Issue ID | Area | Risk | Verification | Missing Test |
 |---|---|---|---|---|---|
-| GAP-V-003 | AUD-2026-011 | startup/view boot resilience | Low | Validate startup behavior when settings payload is missing/corrupt and UI still initializes safely | App/View startup fallback smoke test |
+| (none open) | - | - | - | - | - |
 
 ## Priority Backlog (Hardware-Free First)
 - [x] Model atomic-write and exclusion-reset resilience (`GAP-M-001`, `GAP-M-002`)
 - [x] Protocol boundary hardening (`GAP-X-001`, `GAP-X-002`, `GAP-X-003`)
 - [x] View designer lock/reopen regressions (`GAP-V-001`, `GAP-V-002`)
 - [x] Legacy safe-height routing coverage (`GAP-C-005`)
+- [x] Startup fallback smoke (`GAP-V-003`) and disconnect timing responsiveness (`GAP-X-004`)
 - [ ] Controller print-array branch coverage (`GAP-C-003`)
-- [ ] Disconnect timing responsiveness (`GAP-X-004`) and startup fallback smoke (`GAP-V-003`)
 
 ## Deferred (Needs Hardware / HIL)
 - [ ] Validate real UART timing jitter assumptions during CLEAR/GOODBYE handling.

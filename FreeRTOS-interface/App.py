@@ -42,8 +42,13 @@ def set_dark_theme(app):
     """)
 
 def load_settings(file_path):
-    with open(file_path, 'r') as file:
-        return json.load(file)
+    defaults = {"HARDWARE_PROFILE": "current"}
+    try:
+        with open(file_path, 'r', encoding="utf-8") as file:
+            loaded = json.load(file)
+        return loaded if isinstance(loaded, dict) else defaults.copy()
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        return defaults.copy()
 
 def main():
     app = QApplication(sys.argv)
