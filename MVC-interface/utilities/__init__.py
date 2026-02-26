@@ -1,1 +1,0 @@
-from .shortcuts import ShortcutManager
