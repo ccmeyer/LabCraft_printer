@@ -70,12 +70,12 @@
   - Missing test: ACK handling matrix asserting pending-ACK cleanup for seq32-present, seq32-absent, and mismatched seq8 cases.
 
 ## View
-- `MainWindow.closeEvent` (`View.py`:388-405)
-  - Gap: indefinite wait path if disconnect signal never arrives.
-  - Missing test: Qt close-event timeout behavior with non-signaling machine mock.
-- `popup_yes_no` decision handling (`View.py`:301-303 + callers)
-  - Gap: logic tied to localized button text not covered.
-  - Missing test: role-based button assertions independent of UI text.
+- ~~`MainWindow.closeEvent` (`View.py`:388-405)~~
+  - Covered by: `tests/test_mainwindow_closeevent.py::test_mainwindow_closeevent_has_timeout_if_disconnect_signal_missing`
+  - Covered by: `tests/test_mainwindow_closeevent.py::test_mainwindow_closeevent_returns_quickly_when_disconnect_signal_arrives`
+- ~~`popup_yes_no` decision handling (`View.py`:301-303 + callers)~~
+  - Covered by: `tests/test_view_popup_yes_no_roles.py::test_popup_yes_no_callers_do_not_depend_on_button_text_literals`
+  - Covered by: `tests/test_view_popup_yes_no_roles.py::test_popup_yes_no_no_response_preserves_negative_paths`
 - `ExperimentDesignDialog` lock/refresh interactions (`View.py`:4544-4988)
   - Gap: combined lock precedence and external subscriber interactions are only partially covered.
   - Missing test: multiple lock-mode transitions (uploaded/manual/gripper) with explicit enable-state matrix assertions.
@@ -87,7 +87,7 @@
 - [x] Add comms failure-mode tests for HELLO/CLEAR/ACK malformed frames.
 - [x] Add safe-height routing tests for `move_to_location` edge cases.
 - [ ] Add file-corruption resilience tests in `ExperimentModel` (invalid-progress fallback now covered; atomic-write fault injection still missing).
-- [ ] Add Qt close-event timeout and dialog lock-precedence regression tests.
+- [ ] Add remaining dialog lock-precedence regression tests (close-event timeout portion now covered).
 
 ## Deferred (Needs Hardware / HIL)
 - [ ] Validate real UART timing jitter against CLEAR/GOODBYE timeout assumptions.

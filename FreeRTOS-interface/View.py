@@ -91,6 +91,8 @@ class RefreshingComboBox(QComboBox):
 #         return self.shortcuts
 
 class MainWindow(QMainWindow):
+    CLOSE_DISCONNECT_TIMEOUT_MS = 5000
+
     def __init__(self, model, controller, profile: HardwareProfile = CURRENT_PROFILE):
         super().__init__()
         self.model = model
@@ -298,8 +300,50 @@ class MainWindow(QMainWindow):
         msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
-        msg.exec()
-        return msg.clickedButton().text()
+        result = msg.exec()
+        return QtWidgets.QMessageBox.StandardButton(result)
+
+    @staticmethod
+    def _is_yes_response(response) -> bool:
+        if isinstance(response, QtWidgets.QMessageBox.StandardButton):
+            return response == QtWidgets.QMessageBox.Yes
+        if isinstance(response, int):
+            return response == int(QtWidgets.QMessageBox.Yes)
+        if isinstance(response, str):
+            normalized = response.replace("&", "").strip().lower()
+            return normalized in {"yes", "y"}
+        return False
+
+    @staticmethod
+    def _is_no_response(response) -> bool:
+        if isinstance(response, QtWidgets.QMessageBox.StandardButton):
+            return response == QtWidgets.QMessageBox.No
+        if isinstance(response, int):
+            return response == int(QtWidgets.QMessageBox.No)
+        if isinstance(response, str):
+            normalized = response.replace("&", "").strip().lower()
+            return normalized in {"no", "n"}
+        return False
+
+    def _wait_for_disconnect(self, timeout_ms=None):
+        if timeout_ms is None:
+            timeout_ms = getattr(self, "close_disconnect_timeout_ms", self.CLOSE_DISCONNECT_TIMEOUT_MS)
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+
+        signal = self.controller.machine.disconnect_complete_signal
+        signal.connect(loop.quit)
+        timer.start(timeout_ms)
+        loop.exec()
+        timer.stop()
+
+        try:
+            signal.disconnect(loop.quit)
+        except Exception:
+            pass
     
     def popup_input(self,title, message):
         text, ok = QtWidgets.QInputDialog.getText(self, title, message)
@@ -322,20 +366,20 @@ class MainWindow(QMainWindow):
             return
         else:
             response = self.popup_yes_no('Reset Array','Are you sure you want to reset the current array?')
-            if response == '&Yes':
+            if self._is_yes_response(response):
                 self.controller.reset_single_array()
 
     def reset_all_arrays(self):
         """Reset all arrays."""
         response = self.popup_yes_no('Reset All Arrays','Are you sure you want to reset all arrays?')
-        if response == '&Yes':
+        if self._is_yes_response(response):
             self.controller.reset_all_arrays()
     
     def pause_machine(self):
         """Pause the machine."""
         self.controller.pause_commands()
         response = self.popup_yes_no('Pause','Execution paused. Do you want to resume?')
-        if response == '&Yes':
+        if self._is_yes_response(response):
             print('Resuming execution')
             self.controller.resume_commands()
             return
@@ -350,7 +394,7 @@ class MainWindow(QMainWindow):
         if name is not None:
             self.controller.add_new_location(name)
         ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if ansewer == "&Yes":
+        if self._is_yes_response(ansewer):
             self.controller.save_locations()
 
     def modify_location(self):
@@ -359,7 +403,7 @@ class MainWindow(QMainWindow):
         if name is not None:
             self.controller.modify_location(name)
         ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if ansewer == "&Yes":
+        if self._is_yes_response(ansewer):
             self.controller.save_locations()
 
     def move_to_location(self,location=False,direct=True,safe_y=False,manual=False):
@@ -389,19 +433,13 @@ class MainWindow(QMainWindow):
         """Handle the window close event."""
         if self.model.machine_model.is_connected():
             response = self.popup_yes_no('Close Application','Disconnect from the machine and close the application?')
-            if response == '&No':
+            if self._is_no_response(response):
                 event.ignore()
                 return
             else:
+                self.disconnected = False
                 self.controller.disconnect_machine()
-                # Create an event loop to wait for the disconnection to complete
-                loop = QEventLoop()
-
-                # Temporarily connect the disconnect_complete_signal to the loop.quit() to unblock the close event
-                self.controller.machine.disconnect_complete_signal.connect(loop.quit)
-
-                # Run the event loop (non-blocking) until the disconnect is complete
-                loop.exec()
+                self._wait_for_disconnect()
                 if self.disconnected:
                     print('Disconnected machine')
                 else:
@@ -1264,7 +1302,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if not self.controller.check_if_all_completed():
             return
         response = self.main_window.popup_yes_no("Start Print Array","Are you sure you want to start the print array?")
-        if response == "&Yes":
+        if self.main_window._is_yes_response(response):
             self.controller.print_array()
         else:
             return
@@ -1357,7 +1395,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             return
         if not self.model.reaction_collection.is_empty():
             response = self.main_window.popup_yes_no("Plate Selection", "Changing the plate format will clear the current experiment. Are you sure you want to continue?")
-            if response == "&No":
+            if self.main_window._is_no_response(response):
                 self.plate_selection.blockSignals(True)  # Block signals temporarily
                 self.plate_selection.setCurrentIndex(self.plate_selection.findText(previous_plate_format))
                 self.plate_selection.blockSignals(False)  # Unblock signals
@@ -1398,7 +1436,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         else:
             print("Gripper is empty")
             response = self.main_window.popup_yes_no("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack. Proceed anyway?")
-            if response == "&No":
+            if self.main_window._is_no_response(response):
                 return
         self.controller.move_to_location('plate',z_offset=500)
         plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
@@ -1924,7 +1962,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
                 "Then click Yes to start flashing."
             )
             response = self.main_window.popup_yes_no("Enter DFU Mode (Manual)", msg)
-            if response != "&Yes":
+            if not self.main_window._is_yes_response(response):
                 # user cancelled -> restore UI
                 self.fw_bar.setRange(0, 100)
                 self.fw_bar.setValue(0)
@@ -1953,7 +1991,7 @@ class SpeedProfilesTab(QtWidgets.QWidget):
     def _on_reset_mcu_requested(self):
         # Confirm with the user
         response = self.main_window.popup_yes_no("Reset MCU","Are you sure you want to reset the microcontroller unit (MCU)? This will interrupt any ongoing operations.")
-        if response == "&Yes":
+        if self.main_window._is_yes_response(response):
             if hasattr(self.controller, "reset_mcu_board"):
                 self.controller.reset_mcu_board()
             else:

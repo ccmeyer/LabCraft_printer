@@ -2,11 +2,8 @@ from types import SimpleNamespace
 
 from Machine_FreeRTOS import Machine
 
-from tests.fakes.fake_serial import FakeSerialFactory
-
-
-def test_connect_board_retry_does_not_leak_reader_or_serial(qapp, test_profile):
-    factory = FakeSerialFactory()
+def test_connect_board_retry_does_not_leak_reader_or_serial(qapp, test_profile, fake_serial_factory):
+    factory = fake_serial_factory
     machine = Machine(SimpleNamespace(), profile=test_profile, serial_factory=factory)
     machine.begin_reader_thread = lambda: None
     machine._start_ack_wait = lambda *a, **k: None

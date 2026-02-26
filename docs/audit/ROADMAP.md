@@ -173,11 +173,32 @@
   - Added malformed/missing progress JSON fallback tests and minimal model-side guards in `FreeRTOS-interface/Model.py`.
 
 ### M4: View shutdown/dialog robustness
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Deliver tests: #9, #10
-- Optional refactor: close-event timeout injection seam
+- Completed test files:
+  - `tests/test_mainwindow_closeevent.py`
+  - `tests/test_view_popup_yes_no_roles.py`
+- Notes:
+  - Added bounded close-event disconnect wait with timeout seam in `FreeRTOS-interface/View.py`.
+  - Normalized yes/no handling to role-based checks; removed dependence on literal `"&Yes"` / `"&No"` text in key call paths.
 
 ### M5: Stabilization
-- Consolidate fixtures/fakes in `tests/fakes/` and enforce deterministic runtime (`pytest -q` clean pass)
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
+- Completed files:
+  - `tests/fakes/__init__.py`
+  - `tests/fakes/fake_qt.py`
+  - `tests/conftest.py`
+  - `tests/test_mainwindow_closeevent.py`
+  - `tests/test_machine_connection_retries.py`
+  - `tests/test_machine_clear_queue_contract.py`
+  - `tests/test_machine_send_path_guards.py`
+  - `tests/test_serial_reader_failures.py`
+- Notes:
+  - Consolidated shared test doubles into `tests/fakes/` and common fixtures in `tests/conftest.py`.
+  - Migrated comms/View boundary tests to shared fixtures.
+  - Verified deterministic, hardware-free suite run: `pytest -q` (63 passed).
 
 ## Acceptance Criteria
 - `pytest -q` passes with no hardware connected.

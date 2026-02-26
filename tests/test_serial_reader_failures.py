@@ -2,15 +2,12 @@ import struct
 
 import Machine_FreeRTOS as mfr
 
-from tests.fakes.fake_serial import FakeSerialMain
-
-
 def _frame(payload: bytes) -> bytes:
     crc = mfr.crc16_x25(payload)
     return bytes([mfr.START_BYTE, len(payload)]) + payload + struct.pack("<H", crc)
 
 
-def test_serial_reader_ignores_malformed_ack_and_continues(qapp):
+def test_serial_reader_ignores_malformed_ack_and_continues(qapp, fake_serial_main):
     malformed_ack = b""
     good_status = bytes(
         [
@@ -30,8 +27,9 @@ def test_serial_reader_ignores_malformed_ack_and_continues(qapp):
         ]
     )
     stream = _frame(malformed_ack) + _frame(good_status)
+    fake_serial_main.append_inbound(stream)
 
-    reader = mfr.SerialReader(FakeSerialMain(stream))
+    reader = mfr.SerialReader(fake_serial_main)
     statuses = []
     acks = []
     reader.status_received.connect(statuses.append)

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.fakes import FakeSerialFactory, FakeSerialMain, FakeSignal
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -42,6 +43,21 @@ def test_profile():
         has_droplet_camera=False,
         has_log_channel=False,
     )
+
+
+@pytest.fixture
+def fake_signal():
+    return FakeSignal()
+
+
+@pytest.fixture
+def fake_serial_main():
+    return FakeSerialMain()
+
+
+@pytest.fixture
+def fake_serial_factory():
+    return FakeSerialFactory()
 
 
 @pytest.fixture

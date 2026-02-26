@@ -66,6 +66,12 @@
 - Issue: `QEventLoop.exec()` waits indefinitely for disconnect signal (no timeout).
 - Why it matters: App shutdown can hang forever.
 - What test would catch it: Qt close-event test with mock machine that never emits disconnect; assert bounded return.
+- Status: Resolved (Milestone 4)
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/View.py`, `MainWindow._wait_for_disconnect` + timeout use in `MainWindow.closeEvent`
+  - Tests:
+    - `tests/test_mainwindow_closeevent.py::test_mainwindow_closeevent_has_timeout_if_disconnect_signal_missing`
+    - `tests/test_mainwindow_closeevent.py::test_mainwindow_closeevent_returns_quickly_when_disconnect_signal_arrives`
 
 ## High Priority
 
@@ -195,6 +201,12 @@
 - Issue: Branching compares literal button text (`"&Yes"`, `"&No"`).
 - Why it matters: Locale/theme text changes can break logic.
 - What test would catch it: Qt test asserting decision logic by button role, not display text.
+- Status: Resolved (Milestone 4)
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/View.py`, role-based `popup_yes_no` return and `_is_yes_response`/`_is_no_response` caller checks
+  - Tests:
+    - `tests/test_view_popup_yes_no_roles.py::test_popup_yes_no_callers_do_not_depend_on_button_text_literals`
+    - `tests/test_view_popup_yes_no_roles.py::test_popup_yes_no_no_response_preserves_negative_paths`
 
 ### AUD-2026-018
 - Severity: Low

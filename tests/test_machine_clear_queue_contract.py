@@ -2,12 +2,9 @@ from types import SimpleNamespace
 
 from Machine_FreeRTOS import Machine
 
-from tests.fakes.fake_serial import FakeSerialMain
-
-
-def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_profile):
+def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_profile, fake_serial_main):
     machine = Machine(SimpleNamespace(), profile=test_profile)
-    machine.ser = FakeSerialMain()
+    machine.ser = fake_serial_main
     machine.command_queue.add_command("WAIT", 1, 0, 0)
 
     machine.clear_command_queue()
