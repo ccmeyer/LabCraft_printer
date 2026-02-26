@@ -2342,6 +2342,30 @@ class ExperimentModel(QObject):
             return obj.tolist()          # ndarray -> list
         raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
+    def _default_fill_droplet_volume_nl(self) -> float:
+        return 40.0 if self.legacy_mode else 10.0
+
+    def _atomic_json_dump(self, path: str, payload: Dict):
+        import json
+        import os
+        import tempfile
+
+        directory = os.path.dirname(path) or "."
+        fd, tmp_path = tempfile.mkstemp(prefix="._tmp_", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, default=self.convert_to_serializable)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+            raise
+
     # -----------------------------
     # Path setup / initialization
     # -----------------------------
@@ -2401,10 +2425,8 @@ class ExperimentModel(QObject):
     # -----------------------------
     def save_experiment(self):
         """Persist metadata + factors (inputs). Derived plans are recomputed on load."""
-        import json
         data = self.to_dict()  # you already have to_dict() for v2
-        with open(self.experiment_file_path, "w") as f:
-            json.dump(data, f, indent=4, default=self.convert_to_serializable)  # `default=` lets us serialize numpy etc.
+        self._atomic_json_dump(self.experiment_file_path, data)
         self.unsaved_changes = False
 
     def load_experiment(self, filename: str, experiment_dir: str):
@@ -2443,14 +2465,12 @@ class ExperimentModel(QObject):
     # -----------------------------
     def create_progress_file(self, file_name: Optional[str] = None):
         """Write a `progress.json` snapshot from current well assignments."""
-        import json
         if file_name is not None:
             self.progress_file_path = file_name
 
         if self._runtime_well_plate is None:
             # No wells assigned yet – write empty structure
-            with open(self.progress_file_path, "w") as f:
-                json.dump({}, f, indent=4)
+            self._atomic_json_dump(self.progress_file_path, {})
             self.progress_data = {}
             return
 
@@ -2472,8 +2492,7 @@ class ExperimentModel(QObject):
             }
 
         self.progress_data = progress
-        with open(self.progress_file_path, "w") as f:
-            json.dump(progress, f, indent=4)
+        self._atomic_json_dump(self.progress_file_path, progress)
 
     def progress_to_key(self) -> "pd.DataFrame":
         """
@@ -3090,7 +3109,7 @@ class ExperimentModel(QObject):
             "target_reaction_volume_nL": 500.0,
             "final_reaction_volume_nL": 500.0,
             "fill_reagent_name": "Water",
-            "fill_droplet_volume_nL": 10.0,
+            "fill_droplet_volume_nL": self._default_fill_droplet_volume_nl(),
             "randomize_assignments": False,
             "random_seed": None,
             "start_row": 0,
@@ -3796,7 +3815,7 @@ class WellPlate(QObject):
     def clear_all_wells(self):
         """Clear all wells and reset their status."""
         self.wells = {}
-        self.exclude_wells = set()
+        self.excluded_wells = set()
         self.wells = self.create_wells()
         self.clear_all_wells_signal.emit()
 
@@ -5483,7 +5502,9 @@ class Model(QObject):
             print("No reactions in the experiment model.")
             return
 
+        preserved_exclusions = set(getattr(self.well_plate, "excluded_wells", set()))
         self.clear_experiment()
+        self.well_plate.excluded_wells = preserved_exclusions
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
 
