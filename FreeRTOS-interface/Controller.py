@@ -34,12 +34,21 @@ class Controller(QObject):
     sequence_completed     = QtCore.Signal(str)         # seq_id
     sequence_error         = QtCore.Signal(str)         # message
 
-    def __init__(self, machine, model, profile: HardwareProfile = CURRENT_PROFILE):
+    def __init__(
+        self,
+        machine,
+        model,
+        profile: HardwareProfile = CURRENT_PROFILE,
+        monotonic_fn=None,
+        timer_factory=None,
+    ):
         super().__init__()
 
         self.machine = machine
         self.model = model
         self.profile = profile
+        self._monotonic_fn = monotonic_fn or time.monotonic
+        self._timer_factory = timer_factory or (lambda parent: QtCore.QTimer(parent))
         self.balance = None  # to be set for legacy if needed
         self._port_info = {}  # device -> ListPortInfo
 
@@ -98,7 +107,7 @@ class Controller(QObject):
         self._seq_params  = {}
         self._seq_deadline_monotonic = 0.0
 
-        self._seq_timer = QtCore.QTimer(self)
+        self._seq_timer = self._timer_factory(self)
         self._seq_timer.setInterval(100)  # 10 Hz countdown updates
         self._seq_timer.timeout.connect(self._on_seq_tick)
 
@@ -1399,7 +1408,7 @@ class Controller(QObject):
             self._begin_sequence()
             return
 
-        self._seq_deadline_monotonic = time.monotonic() + delay_s
+        self._seq_deadline_monotonic = self._monotonic_fn() + delay_s
         self._seq_state = "countdown"
         self.sequence_state_changed.emit(self._seq_state)
         self.sequence_countdown_s.emit(delay_s)
@@ -1418,7 +1427,7 @@ class Controller(QObject):
         self.machine.set_sequence_pause(False)
 
     def _on_seq_tick(self):
-        remaining = self._seq_deadline_monotonic - time.monotonic()
+        remaining = self._seq_deadline_monotonic - self._monotonic_fn()
         if remaining <= 0:
             self._seq_timer.stop()
             self.sequence_countdown_s.emit(0.0)

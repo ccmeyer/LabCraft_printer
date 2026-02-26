@@ -837,9 +837,9 @@ class LogReader(QThread):
     messageReceived = Signal(str)
     
 
-    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360):
+    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360, serial_factory=serial.Serial):
         super().__init__(parent)
-        self.ser = serial.Serial(log_port, baud, timeout=1)
+        self.ser = serial_factory(log_port, baud, timeout=1)
         self._running = True
         self._in_stats = False
         self._stats_block = []
@@ -1189,10 +1189,11 @@ class Machine(QObject):
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
     log_message_received = Signal(str)  # Signal to emit when a log message is received
 
-    def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE):
+    def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE, serial_factory=serial.Serial):
         super().__init__()
         self.model = model
         self.profile = profile
+        self._serial_factory = serial_factory
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -1346,7 +1347,7 @@ class Machine(QObject):
     def connect_board(self, port):
         try:
             self.port = port
-            self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
+            self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
             
@@ -1525,7 +1526,7 @@ class Machine(QObject):
             return
 
         try:
-            self.log_reader = LogReader(self.baud)
+            self.log_reader = LogReader(self.baud, serial_factory=self._serial_factory)
             self.log_reader.lineReceived.connect(self.on_log_line_received)
             self.log_reader.statsUpdated.connect(self.on_stats_updated)
             self.log_reader.messageReceived.connect(self.on_log_message_received)

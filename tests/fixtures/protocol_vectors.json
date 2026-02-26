@@ -1,0 +1,24 @@
+{
+  "crc_cases": [
+    {
+      "payload_hex": "f301100401000000",
+      "crc_hex_le": "ed36"
+    },
+    {
+      "payload_hex": "f22a10042a000000",
+      "crc_hex_le": "be1c"
+    }
+  ],
+  "frame_cases": [
+    {
+      "cmd": 243,
+      "seq32": 1,
+      "frame_hex": "aa08f301100401000000ed36"
+    },
+    {
+      "cmd": 242,
+      "seq32": 42,
+      "frame_hex": "aa08f22a10042a000000be1c"
+    }
+  ]
+}
