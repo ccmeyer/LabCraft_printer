@@ -74,3 +74,29 @@ def test_load_progress_applies_added_droplets(experiment_model_factory):
     em.load_progress()
     runtime_reagent = well.get_assigned_reaction().get_reagent_by_id(sid)
     assert runtime_reagent.added_droplets == 1
+
+
+def test_load_progress_skips_unknown_reagent_ids_gracefully(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    well, sid, _reagent = _first_assigned_reagent(model.well_plate)
+    progress_path = Path(em.progress_file_path)
+    data = json.loads(progress_path.read_text(encoding="utf-8"))
+    data[well.well_id]["reagents"][sid]["added_droplets"] = 2
+    data[well.well_id]["reagents"]["Unknown_1.00_mM"] = {
+        "name": "Unknown",
+        "concentration": 1.0,
+        "units": "mM",
+        "target_droplets": 1,
+        "added_droplets": 99,
+    }
+    progress_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    em.load_progress()
+    runtime_reagent = well.get_assigned_reaction().get_reagent_by_id(sid)
+    assert runtime_reagent.added_droplets == 2

@@ -96,6 +96,13 @@
 - Issue: Missing reagent IDs and malformed JSON are not handled robustly.
 - Why it matters: Reload flow can crash on stale/corrupt progress files.
 - What test would catch it: Unit tests for invalid JSON and unknown stock IDs; expect graceful skip/fallback.
+- Status: Resolved (Milestone 3)
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Model.py`, `read_progress_file`, `return_progress_data`, `load_progress`
+  - Tests:
+    - `tests/test_experiment_progress_io_resilience.py::test_read_progress_file_handles_invalid_json_with_safe_fallback`
+    - `tests/test_experiment_progress_io_resilience.py::test_return_progress_data_handles_missing_file_with_safe_fallback`
+    - `tests/test_experiment_update_well_plate.py::test_load_progress_skips_unknown_reagent_ids_gracefully`
 
 ### AUD-2026-008
 - Severity: High
@@ -104,6 +111,10 @@
 - Issue: Uses global `random.seed()`/`random.shuffle()`.
 - Why it matters: Mutates global RNG state and leaks nondeterminism into unrelated flows/tests.
 - What test would catch it: Unit test asserting external RNG sequence unchanged before/after assignment randomization.
+- Status: Resolved (Milestone 3)
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Model.py`, `load_experiment_from_model` now uses local RNG instance for shuffle
+  - Test: `tests/test_experiment_assignment_auto.py::test_load_experiment_randomization_does_not_mutate_global_rng`
 
 ### AUD-2026-009
 - Severity: High

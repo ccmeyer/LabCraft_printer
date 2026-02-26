@@ -160,8 +160,17 @@
   - Applied minimal controller-only fix in `FreeRTOS-interface/Controller.py` to enforce safe-Z pre-move under inverted Z-axis convention (higher Z = farther down).
 
 ### M3: Model persistence/integrity
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Deliver tests: #6, #7, #8
-- Optional refactors: only if required for graceful fallback paths
+- Completed test files:
+  - `tests/test_experiment_assignment_auto.py`
+  - `tests/test_experiment_update_well_plate.py`
+  - `tests/test_experiment_progress_io_resilience.py`
+- Notes:
+  - Added RNG-isolation coverage for `load_experiment_from_model` randomization.
+  - Added safe handling tests for unknown reagent IDs in `load_progress`.
+  - Added malformed/missing progress JSON fallback tests and minimal model-side guards in `FreeRTOS-interface/Model.py`.
 
 ### M4: View shutdown/dialog robustness
 - Deliver tests: #9, #10

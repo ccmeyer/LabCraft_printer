@@ -1,4 +1,5 @@
 import pytest
+import random
 
 from Model import Model
 
@@ -97,3 +98,28 @@ def test_auto_assignment_fails_when_reactions_exceed_available_wells(experiment_
 
     with pytest.raises(ValueError, match="Not enough available wells"):
         Model.load_experiment_from_model(model, load_progress=False)
+
+
+def test_load_experiment_randomization_does_not_mutate_global_rng(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    em.factors = []
+    em.add_additive("AddA", [0.1, 0.2, 0.3], "mM", 10.0, starting_conc=0.0)
+    em.add_choice_group("Choice")
+    em.add_choice_option("Choice", "Opt1", [0.0, 0.5], "mM", 10.0, starting_conc=0.0)
+    em.add_choice_option("Choice", "Opt2", [0.0, 0.5], "mM", 10.0, starting_conc=0.0)
+    em.set_metadata(randomize_assignments=True, random_seed=1234, start_row=0, start_col=0, replicates=1)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+    random.seed(2026)
+    expected_rng = random.Random(2026)
+    pre_actual = [random.random() for _ in range(3)]
+    pre_expected = [expected_rng.random() for _ in range(3)]
+    assert pre_actual == pytest.approx(pre_expected, abs=1e-12)
+
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    post_actual = [random.random() for _ in range(3)]
+    post_expected = [expected_rng.random() for _ in range(3)]
+    assert post_actual == pytest.approx(post_expected, abs=1e-12)

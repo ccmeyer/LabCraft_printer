@@ -2984,15 +2984,21 @@ class ExperimentModel(QObject):
     def read_progress_file(self, progress_file: str):
         import json
         self.progress_file_path = progress_file
-        with open(progress_file, "r") as f:
-            self.progress_data = json.load(f)
+        try:
+            with open(progress_file, "r") as f:
+                self.progress_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            self.progress_data = {}
 
     def return_progress_data(self) -> Dict:
         import json
         if not self.progress_file_path:
             return {}
-        with open(self.progress_file_path, "r") as f:
-            return json.load(f)
+        try:
+            with open(self.progress_file_path, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
 
     def load_progress(self):
         """Apply progress.json into live ReactionComposition objects (requires runtime context)."""
@@ -3012,7 +3018,10 @@ class ExperimentModel(QObject):
             if rxn is None or rxn.unique_id != entry.get("reaction_id"):
                 continue
             for stock_id, rd in entry.get("reagents", {}).items():
-                reagent = rxn.get_reagent_by_id(stock_id)
+                try:
+                    reagent = rxn.get_reagent_by_id(stock_id)
+                except KeyError:
+                    continue
                 reagent.added_droplets = rd.get("added_droplets", 0)
                 reagent.completed = reagent.is_complete()
             if entry.get("completed"):
@@ -5522,8 +5531,7 @@ class Model(QObject):
             random_seed = self.experiment_model.get_random_seed()
             if random_seed is not None:
                 import random
-                random.seed(random_seed)
-                random.shuffle(all_reactions)
+                random.Random(random_seed).shuffle(all_reactions)
 
         # ---- 3) Assign reactions to wells ----
         start_row = self.experiment_model.get_start_row()

@@ -8,18 +8,16 @@
 ## Missing Tests By Subsystem
 
 ## Model
-- `Model.load_experiment_from_model` (`Model.py`:5522-5526)
-  - Gap: randomization mutates global RNG.
-  - Missing test: unit test asserting global `random` stream unchanged when design randomization runs.
+- ~~`Model.load_experiment_from_model` (`Model.py`:5522-5526)~~
+  - Covered by: `tests/test_experiment_assignment_auto.py::test_load_experiment_randomization_does_not_mutate_global_rng`
 - `ExperimentModel.create_progress_file`/`save_experiment` (`Model.py`:2406-2407, 2452-2476)
   - Gap: no atomic write protection.
   - Missing test: fault-injection write interruption test (expect non-corrupt file state).
-- `ExperimentModel.read_progress_file`/`return_progress_data` (`Model.py`:2984-2995)
-  - Gap: malformed/missing progress file behavior untested.
-  - Missing test: invalid JSON/missing-file load path should degrade safely.
-- `ExperimentModel.load_progress` (`Model.py`:3014-3017)
-  - Gap: unknown stock IDs in progress can crash.
-  - Missing test: stale stock IDs are skipped without exception.
+- ~~`ExperimentModel.read_progress_file`/`return_progress_data` (`Model.py`:2984-2995)~~
+  - Covered by: `tests/test_experiment_progress_io_resilience.py::test_read_progress_file_handles_invalid_json_with_safe_fallback`
+  - Covered by: `tests/test_experiment_progress_io_resilience.py::test_return_progress_data_handles_missing_file_with_safe_fallback`
+- ~~`ExperimentModel.load_progress` (`Model.py`:3014-3017)~~
+  - Covered by: `tests/test_experiment_update_well_plate.py::test_load_progress_skips_unknown_reagent_ids_gracefully`
 - `WellPlate.clear_all_wells` (`Model.py`:3787-3791)
   - Gap: excluded well state reset typo not covered.
   - Missing test: exclude wells -> clear -> verify exclusion set truly reset.
@@ -88,7 +86,7 @@
 ## Priority Backlog (Hardware-Free First)
 - [x] Add comms failure-mode tests for HELLO/CLEAR/ACK malformed frames.
 - [x] Add safe-height routing tests for `move_to_location` edge cases.
-- [ ] Add file-corruption/invalid-progress resilience tests in `ExperimentModel`.
+- [ ] Add file-corruption resilience tests in `ExperimentModel` (invalid-progress fallback now covered; atomic-write fault injection still missing).
 - [ ] Add Qt close-event timeout and dialog lock-precedence regression tests.
 
 ## Deferred (Needs Hardware / HIL)
