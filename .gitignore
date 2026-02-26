@@ -23,3 +23,17 @@ FreeRTOS-interface/*.ipynb
 FreeRTOS-interface/Images/*
 FreeRTOS-interface/Logs/*
 FreeRTOS-interface/Experiments
+
+# Firmware host test build outputs
+firmware/tests_host/build/
+
+# CMake cache/artifacts (in case someone builds in-tree)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Typical IDE temp
+**/.metadata/
+**/*.user
+**/*.userprefs
