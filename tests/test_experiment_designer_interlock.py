@@ -1,0 +1,133 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from PySide6.QtGui import QCloseEvent
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QTableWidget,
+)
+
+from View import ExperimentDesignDialog
+
+
+def _build_dialog_stub(gripper_loaded: bool):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._uploaded_design_active = False
+    dialog._editing_locked_by_gripper = False
+    dialog.status_lbl = QLabel("")
+
+    dialog.add_reagent_btn = QPushButton()
+    dialog.upload_design_btn = QPushButton()
+    dialog.reset_upload_btn = QPushButton()
+    dialog.run_btn = QPushButton()
+    dialog.new_btn = QPushButton()
+    dialog.save_btn = QPushButton()
+    dialog.load_btn = QPushButton()
+    dialog.finish_btn = QPushButton()
+    dialog.rep_spin = QSpinBox()
+    dialog.v_spin = QDoubleSpinBox()
+    dialog.final_v_spin = QDoubleSpinBox()
+    dialog.fill_name_edit = QLineEdit()
+    dialog.fill_dv_spin = QDoubleSpinBox()
+    dialog.randomize_chk = QCheckBox()
+    dialog.random_seed_spin = QSpinBox()
+    dialog.subset_chk = QCheckBox()
+    dialog.reduction_spin = QSpinBox()
+    dialog.start_col_spin = QSpinBox()
+    dialog.start_row_spin = QSpinBox()
+
+    dialog.reagent_table = QTableWidget(1, 8)
+    dialog.reagent_table.setCellWidget(0, 0, QLineEdit())
+    dialog.reagent_table.setCellWidget(0, 1, QComboBox())
+    dialog.reagent_table.setCellWidget(0, 2, QDoubleSpinBox())
+    dialog.reagent_table.setCellWidget(0, 3, QLineEdit())
+    dialog.reagent_table.setCellWidget(0, 4, QLineEdit())
+    dialog.reagent_table.setCellWidget(0, 5, QLineEdit())
+    dialog.reagent_table.setCellWidget(0, 6, QDoubleSpinBox())
+    dialog.reagent_table.setCellWidget(0, 7, QPushButton())
+
+    rack_model = SimpleNamespace(get_gripper_printer_head=lambda: object() if gripper_loaded else None)
+    dialog.main_window = SimpleNamespace(
+        complete_experiment_design=Mock(),
+        model=SimpleNamespace(rack_model=rack_model),
+    )
+    dialog.model = SimpleNamespace(
+        has_explicit_well_assignments=lambda: False,
+        save_experiment=Mock(),
+    )
+    return dialog
+
+
+def test_experiment_designer_close_without_finish_does_not_apply(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    QDialog.__init__(dialog)
+    complete_mock = Mock()
+    dialog.main_window = SimpleNamespace(
+        complete_experiment_design=complete_mock,
+        model=SimpleNamespace(rack_model=SimpleNamespace(gripper_updated=SimpleNamespace(disconnect=Mock()))),
+    )
+    dialog._auto_timer = SimpleNamespace(stop=Mock())
+    dialog._gripper_lock_connection = None
+
+    ExperimentDesignDialog.closeEvent(dialog, QCloseEvent())
+
+    complete_mock.assert_not_called()
+
+
+def test_experiment_designer_finish_calls_apply_once():
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._editing_locked_by_gripper = False
+    dialog._apply_requested = False
+    dialog._on_optimize_and_generate = Mock()
+    dialog._ensure_experiment_dir = Mock()
+    dialog._set_status = Mock()
+    dialog.accept = Mock()
+    complete_mock = Mock()
+    save_mock = Mock()
+    dialog.main_window = SimpleNamespace(complete_experiment_design=complete_mock)
+    dialog.model = SimpleNamespace(save_experiment=save_mock)
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    complete_mock.assert_called_once_with()
+    save_mock.assert_called_once_with()
+    assert dialog._apply_requested is True
+
+
+def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):
+    dialog = _build_dialog_stub(gripper_loaded=True)
+    dialog._on_optimize_and_generate = Mock()
+    dialog._ensure_experiment_dir = Mock()
+    dialog.accept = Mock()
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+    ExperimentDesignDialog._on_finish(dialog)
+
+    assert dialog._editing_locked_by_gripper is True
+    assert dialog.finish_btn.isEnabled() is False
+    assert "view-only" in dialog.status_lbl.text()
+    dialog.main_window.complete_experiment_design.assert_not_called()
+
+
+def test_experiment_designer_unlocks_when_gripper_unloaded(qapp):
+    gripper_loaded = {"value": True}
+    dialog = _build_dialog_stub(gripper_loaded=True)
+    dialog.main_window.model.rack_model = SimpleNamespace(
+        get_gripper_printer_head=lambda: object() if gripper_loaded["value"] else None
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+    assert dialog.finish_btn.isEnabled() is False
+
+    gripper_loaded["value"] = False
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog._editing_locked_by_gripper is False
+    assert dialog.finish_btn.isEnabled() is True

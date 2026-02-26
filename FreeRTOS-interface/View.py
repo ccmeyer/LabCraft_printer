@@ -3791,6 +3791,9 @@ class ExperimentDesignDialog(QDialog):
         # Uploaded design UI state
         self._uploaded_design_active: bool = bool(self.model.has_uploaded_design())
         self._uploaded_design_path: str | None = getattr(self.model, "_uploaded_design_source", None)
+        self._apply_requested: bool = False
+        self._editing_locked_by_gripper: bool = False
+        self._gripper_lock_connection = None
 
 
         # Debounced auto-update timer (4)
@@ -4005,9 +4008,10 @@ class ExperimentDesignDialog(QDialog):
         self._load_factors_into_table()
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
-        self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
-        # Also enforce manual-assignment locking if applicable
-        self._apply_manual_assignment_lock_state()
+        self._refresh_all_lock_states()
+        self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
+            self._refresh_all_lock_states
+        )
 
 
     # -----------------------------
@@ -4281,7 +4285,7 @@ class ExperimentDesignDialog(QDialog):
                         w.setReadOnly(False)
                     else:
                         w.setEnabled(True)
-        self._apply_manual_assignment_lock_state()
+        
 
     def _on_upload_design(self):
         """
@@ -4344,7 +4348,7 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_stock_table()
         self._update_summary_labels()
         self._apply_target_color_state()
-        self._apply_uploaded_design_mode_to_ui(active=True)
+        self._refresh_all_lock_states()
 
     def _on_reset_uploaded_design(self):
         if not self._uploaded_design_active and not self.model.has_uploaded_design():
@@ -4384,7 +4388,7 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_stock_table()
         self._update_summary_labels()
         self._apply_target_color_state()
-        self._apply_uploaded_design_mode_to_ui(active=False)
+        self._refresh_all_lock_states()
 
     def _manual_assignments_active(self) -> bool:
         """
@@ -4439,6 +4443,109 @@ class ExperimentDesignDialog(QDialog):
             self.start_col_spin.setEnabled(not active)
         if hasattr(self, "start_row_spin") and self.start_row_spin is not None:
             self.start_row_spin.setEnabled(not active)
+
+    def _is_gripper_loaded(self) -> bool:
+        try:
+            return self.main_window.model.rack_model.get_gripper_printer_head() is not None
+        except Exception:
+            return False
+
+    def _apply_gripper_edit_lock_state(self):
+        self._editing_locked_by_gripper = self._is_gripper_loaded()
+        locked = self._editing_locked_by_gripper
+
+        mutating_controls = [
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "run_btn",
+            "new_btn",
+            "save_btn",
+            "load_btn",
+            "finish_btn",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "fill_name_edit",
+            "fill_dv_spin",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+        ]
+        for attr_name in mutating_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None and locked:
+                widget.setEnabled(False)
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for row in range(self.reagent_table.rowCount()):
+                for col in range(self.reagent_table.columnCount()):
+                    w = self.reagent_table.cellWidget(row, col)
+                    if w is None:
+                        continue
+                    if isinstance(w, QLineEdit):
+                        if locked:
+                            w.setReadOnly(True)
+                    elif locked:
+                        w.setEnabled(False)
+
+        if locked:
+            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+        elif hasattr(self, "status_lbl") and self.status_lbl is not None:
+            if self.status_lbl.text() == "Design is view-only while a printer head is loaded in the gripper.":
+                self._set_status("")
+
+    def _apply_default_edit_state(self):
+        baseline_controls = [
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "run_btn",
+            "new_btn",
+            "save_btn",
+            "load_btn",
+            "finish_btn",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "fill_name_edit",
+            "fill_dv_spin",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+        ]
+        for attr_name in baseline_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(True)
+
+        if hasattr(self, "random_seed_spin") and hasattr(self, "randomize_chk"):
+            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
+        if hasattr(self, "reduction_spin") and hasattr(self, "subset_chk"):
+            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for row in range(self.reagent_table.rowCount()):
+                for col in range(self.reagent_table.columnCount()):
+                    w = self.reagent_table.cellWidget(row, col)
+                    if w is None:
+                        continue
+                    if isinstance(w, QLineEdit):
+                        w.setReadOnly(False)
+                    else:
+                        w.setEnabled(True)
+
+    def _refresh_all_lock_states(self):
+        self._apply_default_edit_state()
+        self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
+        self._apply_manual_assignment_lock_state()
+        self._apply_gripper_edit_lock_state()
 
     # -----------------------------
     # Model rebuild & metadata
@@ -4805,7 +4912,7 @@ class ExperimentDesignDialog(QDialog):
         # After loading, refresh uploaded-design UI state
         self._uploaded_design_active = self.model.has_uploaded_design()
         self._uploaded_design_path = getattr(self.model, "_uploaded_design_source", None)
-        self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
+        self._refresh_all_lock_states()
 
         # Repaint UI from model
         self.choice_groups = set(
@@ -4821,9 +4928,12 @@ class ExperimentDesignDialog(QDialog):
     def _on_finish(self):
         """
         Optimize & generate, save the design (creating/renaming the folder if needed),
-        then close the dialog. Your existing closeEvent handoff will populate the rest
-        of the app (load_experiment_from_model).
+        then close the dialog. Applying to the main app is explicit in this path only.
         """
+        if self._editing_locked_by_gripper:
+            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+            return
+
         # Reuse the same logic as Optimize & Generate
         self._on_optimize_and_generate()
 
@@ -4831,18 +4941,17 @@ class ExperimentDesignDialog(QDialog):
         self._ensure_experiment_dir()
         self.model.save_experiment()
 
-        self._set_status("Design finalized and saved. Closing…")
+        self._set_status("Design finalized and saved. Closing...")
 
-        # Propogate the experiment to the main window
+        # Propagate the experiment to the main window
         try:
-            print("[ExperimentDesignDialog] attempting closeEvent handoff to parent")
             if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
-                print("[ExperimentDesignDialog] handing off to main_window")
                 self.main_window.complete_experiment_design()
+                self._apply_requested = True
         except Exception as e:
-            print(f"[ExperimentDesignDialog] closeEvent handoff error: {e}")
+            print(f"[ExperimentDesignDialog] finish handoff error: {e}")
 
-        # Close; your closeEvent wiring can then call model.load_experiment_from_model()
+        # Close dialog after explicit apply.
         self.accept()
 
     def _set_status(self, msg: str):
@@ -4862,23 +4971,18 @@ class ExperimentDesignDialog(QDialog):
         
     def closeEvent(self, event):
         """
-        When the dialog closes, make sure the model is up-to-date and hand off to the main window.
+        Close-time cleanup only. Applying the design is explicit via Finish.
         """
-        print("[ExperimentDesignDialog] closeEvent triggered")
-        # Ensure latest edits are reflected in the model and a design exists
         try:
-            # Debounced path might be pending; force a final recompute
-            self._recompute_silent()
+            self._auto_timer.stop()
         except Exception:
             pass
 
-        # Call parent window's handler if available
         try:
-            print("[ExperimentDesignDialog] attempting closeEvent handoff to parent")
-            if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
-                print("[ExperimentDesignDialog] handing off to main_window")
-                self.main_window.complete_experiment_design()
-        except Exception as e:
-            print(f"[ExperimentDesignDialog] closeEvent handoff error: {e}")
+            if self._gripper_lock_connection is not None:
+                self.main_window.model.rack_model.gripper_updated.disconnect(self._refresh_all_lock_states)
+                self._gripper_lock_connection = None
+        except Exception:
+            pass
 
         super().closeEvent(event)

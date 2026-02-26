@@ -31,3 +31,50 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture
+def experiment_model_factory(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    from hardware.profile import CURRENT_PROFILE
+    from Model import (
+        Model,
+        ExperimentModel,
+        StockSolutionManager,
+        ReactionCollection,
+        WellPlate,
+    )
+
+    plates_src = REPO_ROOT / "FreeRTOS-interface" / "Presets" / "Plates.json"
+    plates_data = json.loads(plates_src.read_text(encoding="utf-8"))
+
+    def _make(*, plate_data_override=None):
+        m = Model.__new__(Model)
+        m.experiment_model = ExperimentModel(prof=CURRENT_PROFILE)
+
+        plate_data = plate_data_override if plate_data_override is not None else plates_data
+        plates_tmp = tmp_path / "Plates.json"
+        plates_tmp.write_text(json.dumps(plate_data), encoding="utf-8")
+        m.well_plate = WellPlate(plate_data, str(plates_tmp))
+
+        m.stock_solutions = StockSolutionManager()
+        m.reaction_collection = ReactionCollection()
+        m.experiment_loaded = SimpleNamespace(emit=lambda *a, **k: None)
+
+        m.clear_experiment = lambda: (
+            m.stock_solutions.clear_all_stock_solutions(),
+            m.reaction_collection.clear_all_reactions(),
+            m.well_plate.clear_all_wells(),
+        )
+        m.assign_printer_heads = lambda: None
+
+        exp_dir = tmp_path / f"exp_{id(m)}"
+        exp_dir.mkdir(exist_ok=True)
+        m.experiment_model.experiment_dir_path = str(exp_dir)
+        m.experiment_model.update_all_paths()
+
+        return m
+
+    return _make
