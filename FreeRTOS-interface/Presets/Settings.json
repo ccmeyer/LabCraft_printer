@@ -1,6 +1,8 @@
 {
     "BASE_PATH":"./",
+    "HARDWARE_PROFILE":"legacy",
     "MACHINE_PORT":"/dev/ttyAMA0",
+    "BALANCE_PORT":"",
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",
     "DEFAULT_REAGENT":"water",
