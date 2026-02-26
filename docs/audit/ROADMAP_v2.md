@@ -33,6 +33,8 @@
 
 ## Milestone M2: Protocol Parsing and ACK Contract Hardening
 - Closes IDs: `AUD-2026-015`, `AUD-2026-019`
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Focus:
   - Explicit malformed TLV diagnostics and envelope size guard behavior.
   - Deterministic ACK seq32/seq8 fallback cleanup matrix.
@@ -43,6 +45,15 @@
 - Verification gate:
   - No silent protocol parse drops for known malformed cases.
   - Pending ACK map transitions are deterministic across ACK variants.
+- Completed files:
+  - `FreeRTOS-interface/Machine_FreeRTOS.py`
+  - `tests/test_protocol_tlv_parser.py`
+  - `tests/test_machine_ack_matching.py`
+  - `tests/test_protocol_frame.py`
+- Notes:
+  - Added warning-level diagnostics for malformed/unknown/mismatched TLVs in parser path.
+  - Added explicit payload envelope guards (`len(payload) <= 255`) in both `build_frame` and `Command.__init__`.
+  - Added ACK matching matrix coverage for seq32/seq8 and duplicate ACK behaviors.
 
 ## Milestone M3: Controller Robustness and Static Guardrails
 - Closes IDs: `AUD-2026-012`, `AUD-2026-013`, `AUD-2026-016`

@@ -7,7 +7,7 @@
 - Covered Areas: `App.py`, `Controller.py`, `Model.py`, `Machine_FreeRTOS.py`, `View.py`
 
 ## Triage Summary (Open Only)
-- Open issue count: 8
+- Open issue count: 6
 - Highest open severity: `High`
 - Deduping performed:
   - Removed resolved/covered items from active queue.
@@ -17,24 +17,6 @@
 ## High Priority
 
 ## Medium Priority
-
-## AUD-2026-015
-- Severity: Medium
-- Category: Protocol
-- Location: `FreeRTOS-interface/Machine_FreeRTOS.py`, `parse_tlv_payload` + `Command.__init__` (around lines 744-758, 1051)
-- Description: Weak malformed-TLV diagnostics and missing explicit payload envelope guard (`len <= 255` contract).
-- Impact: Protocol drift can fail silently or generate invalid frames.
-- Verification Note: Run malformed TLV + oversize payload vectors and assert explicit rejection/diagnostics.
-- Test Coverage Note: Missing (TLV malformed + frame-size contract tests).
-
-## AUD-2026-019
-- Severity: Medium
-- Category: Protocol
-- Location: `FreeRTOS-interface/Machine_FreeRTOS.py`, `Machine._on_any_ack`
-- Description: ACK seq32/seq8 fallback matching lacks explicit regression matrix.
-- Impact: Pending-ACK cleanup can regress when ACK payload shape changes.
-- Verification Note: Validate cleanup behavior for seq32 present, seq32 absent, seq8 mismatch, duplicate ACK.
-- Test Coverage Note: Missing (parameterized ACK-matching matrix).
 
 ## AUD-2026-012
 - Severity: Medium
@@ -116,3 +98,25 @@
   - Tests:
     - `tests/test_experiment_model_reset_defaults.py::test_reset_experiment_model_uses_current_profile_fill_default`
     - `tests/test_experiment_model_reset_defaults.py::test_reset_experiment_model_uses_legacy_profile_fill_default`
+
+## Recently Resolved (Milestone M2)
+
+## AUD-2026-015
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Machine_FreeRTOS.py`, `parse_tlv_payload` diagnostics + explicit payload-size guards in `build_frame` and `Command.__init__`
+  - Tests:
+    - `tests/test_protocol_tlv_parser.py::test_parse_tlv_payload_logs_unknown_and_malformed_entries`
+    - `tests/test_protocol_tlv_parser.py::test_parse_tlv_payload_logs_length_mismatch`
+    - `tests/test_protocol_frame.py::test_build_frame_rejects_payload_length_over_255`
+    - `tests/test_protocol_frame.py::test_command_rejects_payload_length_over_255`
+
+## AUD-2026-019
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Machine_FreeRTOS.py`, `_on_any_ack` deterministic seq32/seq8 handling contract
+  - Tests:
+    - `tests/test_machine_ack_matching.py::test_on_any_ack_matches_seq32_key_when_present`
+    - `tests/test_machine_ack_matching.py::test_on_any_ack_falls_back_to_seq8_when_seq32_absent`
+    - `tests/test_machine_ack_matching.py::test_on_any_ack_does_not_fallback_to_seq8_when_seq32_present_but_mismatched`
+    - `tests/test_machine_ack_matching.py::test_on_any_ack_duplicate_ack_only_consumes_once`

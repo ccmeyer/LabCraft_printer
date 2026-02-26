@@ -1,6 +1,7 @@
 import json
 import struct
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -51,3 +52,15 @@ def test_command_builds_expected_tlvs_and_crc():
 
     expected_crc = mfr.crc16_x25(payload)
     assert int.from_bytes(crc_tail, byteorder="little") == expected_crc
+
+
+def test_build_frame_rejects_payload_length_over_255():
+    with patch.object(mfr.struct, "pack", return_value=b"\x00" * 300):
+        with pytest.raises(ValueError, match="Payload length exceeds 255 bytes"):
+            mfr.build_frame(mfr.HELLO, 1)
+
+
+def test_command_rejects_payload_length_over_255():
+    with patch.object(mfr.struct, "pack", return_value=b"\x00" * 300):
+        with pytest.raises(ValueError, match="Payload length exceeds 255 bytes"):
+            mfr.Command(1, "DISPENSE", 1, 2, 3)

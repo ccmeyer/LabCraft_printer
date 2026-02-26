@@ -12,6 +12,7 @@ from collections import deque
 import serial
 import re
 import json
+import logging
 import cv2
 import numpy as np
 import pandas as pd
@@ -23,6 +24,8 @@ import glob
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+
+logger = logging.getLogger(__name__)
 
 try:
     from picamera2 import Picamera2
@@ -729,6 +732,8 @@ def build_frame(cmd, seq32):
     payload = bytearray([cmd & 0xFF, seq8])
     # SEQ32 TLV
     payload += bytes([TAG_SEQ32, 4]) + struct.pack("<I", seq32 & 0xFFFFFFFF)
+    if len(payload) > 255:
+        raise ValueError("Payload length exceeds 255 bytes")
     header  = bytes([START_BYTE, len(payload)])
     c       = crc16_x25(payload)
     tail    = struct.pack("<H", c)
@@ -745,16 +750,24 @@ def parse_tlv_payload(payload: bytes) -> dict:
         tag    = payload[idx];    idx += 1
         length = payload[idx];    idx += 1
         if idx + length > len(payload):
+            logger.warning("Malformed TLV payload: tag=0x%02X len=%d exceeds payload", tag, length)
             break  # malformed/truncated
         raw = payload[idx:idx+length]
         idx += length
 
         entry = TAG_MAP.get(tag)
         if not entry:
+            logger.warning("Unknown TLV tag: 0x%02X", tag)
             continue  # unknown tag
         name, expected_len, signed = entry
         if expected_len != length:
             # length mismatch; skip or handle as error
+            logger.warning(
+                "TLV length mismatch for %s: expected=%d got=%d",
+                name,
+                expected_len,
+                length,
+            )
             continue
 
         value = int.from_bytes(raw, byteorder="little", signed=signed)
@@ -1053,6 +1066,8 @@ class Command:
             p.extend(struct.pack("<I", val & 0xFFFFFFFF))
 
         self.payload = bytes(p)
+        if len(self.payload) > 255:
+            raise ValueError("Payload length exceeds 255 bytes")
 
         # 2) wrap in header/CRC/footer
         self.header = bytes([START_BYTE, len(self.payload)])
