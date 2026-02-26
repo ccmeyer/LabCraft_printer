@@ -1,0 +1,12 @@
+../Core/Src/Logger.cpp:20:1:Logger::Logger()	1
+../Core/Src/Logger.cpp:22:9:static Logger* Logger::instance()	1
+../Core/Src/Logger.cpp:26:6:void Logger::begin(UART_HandleTypeDef*, DMA_HandleTypeDef*)	1
+../Core/Src/Logger.cpp:32:6:)	3
+../Core/Src/Logger.cpp:52:6:void Logger::_flush()	5
+../Core/Src/Logger.cpp:82:6:void Logger::on_tx_cplt()	1
+../Core/Src/Logger.cpp:84:6:void Logger::_dmaComplete()	1
+../Core/Src/Logger.cpp:100:17:void MX_LOGGER_Init(UART_HandleTypeDef*, DMA_HandleTypeDef*)	3
+../Core/Src/Logger.cpp:106:13:void EXTI8_DiagDump()	1
+../Core/Src/Logger.cpp:126:6:void Logger::startRunTimeStatsTask(uint32_t)	1
+../Core/Src/Logger.cpp:138:6:static void Logger::statsTaskEntry(void*)	1
+../Core/Src/Logger.cpp:145:6:void Logger::statsTask(uint32_t)	1

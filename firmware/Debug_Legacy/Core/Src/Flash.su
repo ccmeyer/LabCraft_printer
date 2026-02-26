@@ -1,0 +1,2 @@
+../Core/Src/Flash.cpp:175:17:void MX_FLASH_Init(uint16_t)	16	static
+../Core/Src/Flash.cpp:176:17:void MX_FLASH_ONCE()	4	static

@@ -1,0 +1,34 @@
+../Core/Inc/Comm.h:76:18:static Comm* Comm::instance()	1
+../Core/Inc/PressureSensor.h:36:14:uint16_t PressureSensor::getPrintPressure() const	1
+../Core/Inc/Printer.h:85:12:uint32_t Printer::getPrintPulse() const	1
+../Core/Inc/Printer.h:87:12:uint32_t Printer::getDispenseHz() const	1
+../Core/Inc/Stepper.h:37:19:static Stepper* Stepper::stepperX()	1
+../Core/Inc/Stepper.h:38:19:static Stepper* Stepper::stepperY()	1
+../Core/Inc/Stepper.h:39:19:static Stepper* Stepper::stepperZ()	1
+../Core/Inc/Stepper.h:40:19:static Stepper* Stepper::stepperP()	1
+../Core/Inc/Stepper.h:109:11:int32_t Stepper::getPosition() const	1
+../Core/Inc/Stepper.h:110:11:int32_t Stepper::getTargetPosition() const	1
+../Core/Inc/Stepper.h:151:9:float Stepper::accelStepsPerSec2() const	1
+../Core/Inc/Stepper.h:155:12:uint32_t Stepper::maxSpeedHz() const	1
+../Core/Inc/PressureRegulator.h:50:12:uint32_t PressureRegulator::getTarget() const	1
+../Core/Inc/PressureRegulator.h:52:8:bool PressureRegulator::isActive() const	1
+../Core/Inc/PressureRegulator.h:64:29:static PressureRegulator& PressureRegulator::regP()	1
+../Core/Inc/PressureRegulator.h:147:28:static PressureRegulator* PressureRegulator::get(int)	5
+../Core/Inc/Orchestrator.h:163:22:static UBaseType_t Orchestrator::getCommandDepth()	1
+../Core/Inc/Orchestrator.h:167:19:static uint32_t Orchestrator::getLastCmdNum()	1
+../Core/Inc/Orchestrator.h:171:19:static uint32_t Orchestrator::getCurrentCmdNum()	1
+../Core/Src/Comm.cpp:60:1:Comm::Comm(UART_HandleTypeDef*)	1
+../Core/Src/Comm.cpp:65:10:static uint16_t Comm::crc16(const uint8_t*, uint16_t)	3
+../Core/Src/Comm.cpp:75:6:void Comm::begin()	1
+../Core/Src/Comm.cpp:94:17:void MX_COMM_Init(UART_HandleTypeDef*)	3
+../Core/Src/Comm.cpp:99:17:void HAL_UART_ErrorCallback(UART_HandleTypeDef*)	4
+../Core/Src/Comm.cpp:123:17:void HAL_UART_RxCpltCallback(UART_HandleTypeDef*)	12
+../Core/Src/Comm.cpp:168:6:void Comm::setStatusPaused(bool)	1
+../Core/Src/Comm.cpp:172:6:void Comm::handlePacket(const uint8_t*, uint8_t)	11
+../Core/Src/Comm.cpp:206:6:void Comm::resetReceiveState()	1
+../Core/Src/Comm.cpp:212:6:void Comm::sendCommandByte(uint8_t, uint8_t)	2
+../Core/Src/Comm.cpp:228:6:void Comm::sendAckWithSeq32(uint8_t, uint8_t, uint32_t, bool)	2
+../Core/Src/Comm.cpp:255:6:static void Comm::statusTaskEntry(void*)	1
+../Core/Src/Comm.cpp:261:6:void Comm::sendFrame(UART_HandleTypeDef*, const uint8_t*, size_t)	2
+../Core/Src/Comm.cpp:281:6:void uart_diag(UART_HandleTypeDef*)	6
+../Core/Src/Comm.cpp:313:6:void Comm::statusTask()	7

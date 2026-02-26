@@ -1,0 +1,32 @@
+../Core/Inc/Orchestrator.h:159:29:static EventGroupDef_t* Orchestrator::getDoneEvents()	1
+../Core/Src/Gripper.cpp:16:13:void EXTI8_SoftwareTrigger()	1
+../Core/Src/Gripper.cpp:23:10:static Gripper& Gripper::instance()	3
+../Core/Src/Gripper.cpp:30:1:Gripper::Gripper()	1
+../Core/Src/Gripper.cpp:38:6:void Gripper::begin(GPIO_TypeDef*, uint16_t, GPIO_TypeDef*, uint16_t, TickType_t, TickType_t)	3
+../Core/Src/Gripper.cpp:94:6:bool Gripper::lockVacuumGate(TickType_t)	3
+../Core/Src/Gripper.cpp:104:6:void Gripper::unlockVacuumGate()	2
+../Core/Src/Gripper.cpp:110:6:void Gripper::open()	4
+../Core/Src/Gripper.cpp:137:6:void Gripper::close()	4
+../Core/Src/Gripper.cpp:163:6:void Gripper::stopPump()	1
+../Core/Src/Gripper.cpp:167:6:void Gripper::stopRefresh()	2
+../Core/Src/Gripper.cpp:176:6:void Gripper::setRefreshPeriodTicks(TickType_t)	3
+../Core/Src/Gripper.cpp:187:6:void Gripper::setPulseDurationTicks(TickType_t)	3
+../Core/Src/Gripper.cpp:198:6:void Gripper::setRefreshPeriodMs(uint32_t)	1
+../Core/Src/Gripper.cpp:202:6:void Gripper::setPulseDurationMs(uint32_t)	1
+../Core/Src/Gripper.cpp:206:10:uint32_t Gripper::getRefreshPeriodMs() const	1
+../Core/Src/Gripper.cpp:210:10:uint32_t Gripper::getPulseDurationMs() const	1
+../Core/Src/Gripper.cpp:223:6:static void Gripper::refreshTimerCallback(TimerHandle_t)	3
+../Core/Src/Gripper.cpp:232:6:static void Gripper::refreshTaskEntry(void*)	3
+../Core/Src/Gripper.cpp:256:6:static void Gripper::pumpOffTimerCallback(TimerHandle_t)	4
+../Core/Src/Gripper.cpp:277:6:void Gripper::pulsePump()	1
+../Core/Src/Gripper.cpp:285:6:void MX_GRIPPER_Init()	1
+../Core/Src/Gripper.cpp:295:6:void MX_GRIPPER_Open()	1
+../Core/Src/Gripper.cpp:296:6:void MX_GRIPPER_Close()	1
+../Core/Src/Gripper.cpp:297:6:void MX_GRIPPER_StopRefresh()	1
+../Core/Src/Gripper.cpp:298:6:void MX_GRIPPER_StopPump()	1
+../Core/Src/Gripper.cpp:301:10:void MX_GRIPPER_SetRefreshPeriodMs(uint32_t)	1
+../Core/Src/Gripper.cpp:302:10:void MX_GRIPPER_SetPulseDurationMs(uint32_t)	1
+../Core/Src/Gripper.cpp:303:10:uint32_t MX_GRIPPER_GetRefreshPeriodMs()	1
+../Core/Src/Gripper.cpp:304:10:uint32_t MX_GRIPPER_GetPulseDurationMs()	1
+../Core/Src/Gripper.cpp:306:12:BaseType_t MX_VACUUM_Lock(TickType_t)	2
+../Core/Src/Gripper.cpp:309:6:void MX_VACUUM_Unlock()	1

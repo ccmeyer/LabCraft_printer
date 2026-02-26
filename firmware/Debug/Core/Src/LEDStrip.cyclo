@@ -1,0 +1,11 @@
+../Core/Inc/LEDStrip.h:32:15:void LEDStrip::off()	1
+../Core/Src/LEDStrip.cpp:14:11:static LEDStrip& LEDStrip::instance()	1
+../Core/Src/LEDStrip.cpp:19:6:void LEDStrip::begin(TIM_HandleTypeDef*)	4
+../Core/Src/LEDStrip.cpp:41:6:void LEDStrip::setBrightness(uint8_t)	6
+../Core/Src/LEDStrip.cpp:49:6:void LEDStrip::fadeTo(uint8_t, uint32_t)	3
+../Core/Src/LEDStrip.cpp:61:6:static void LEDStrip::fadeTaskEntry(void*)	1
+../Core/Src/LEDStrip.cpp:65:6:void LEDStrip::fadeTask()	8
+../Core/Src/LEDStrip.cpp:96:17:void MX_LEDSTRIP_Init(TIM_HandleTypeDef*)	1
+../Core/Src/LEDStrip.cpp:99:17:void MX_LEDSTRIP_SetBrightness(uint8_t)	1
+../Core/Src/LEDStrip.cpp:102:17:void MX_LEDSTRIP_FadeTo(uint8_t, uint32_t)	1
+../Core/Src/LEDStrip.cpp:105:17:void MX_LEDSTRIP_Off()	1

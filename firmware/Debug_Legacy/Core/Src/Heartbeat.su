@@ -1,0 +1,2 @@
+../Core/Src/Heartbeat.c:12:13:HeartbeatTask	16	static
+../Core/Src/Heartbeat.c:22:6:MX_HEARTBEAT_Start	48	static

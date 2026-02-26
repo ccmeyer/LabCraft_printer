@@ -1,0 +1,38 @@
+../Core/Src/TMC2208Driver.cpp:17:6:void TMC2208Driver::I_scale_analog(bool)	1
+../Core/Src/TMC2208Driver.cpp:18:6:void TMC2208Driver::internal_Rsense(bool)	1
+../Core/Src/TMC2208Driver.cpp:19:6:void TMC2208Driver::en_spreadCycle(bool)	1
+../Core/Src/TMC2208Driver.cpp:20:6:void TMC2208Driver::shaft(bool)	1
+../Core/Src/TMC2208Driver.cpp:21:6:void TMC2208Driver::index_otpw(bool)	1
+../Core/Src/TMC2208Driver.cpp:22:6:void TMC2208Driver::index_step(bool)	1
+../Core/Src/TMC2208Driver.cpp:23:6:void TMC2208Driver::pdn_disable(bool)	1
+../Core/Src/TMC2208Driver.cpp:24:6:void TMC2208Driver::mstep_reg_select(bool)	1
+../Core/Src/TMC2208Driver.cpp:25:6:void TMC2208Driver::multistep_filt(bool)	1
+../Core/Src/TMC2208Driver.cpp:30:6:void TMC2208Driver::toff(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:31:6:void TMC2208Driver::hstrt(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:32:6:void TMC2208Driver::hend(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:33:6:void TMC2208Driver::tbl(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:34:6:void TMC2208Driver::vsense(bool)	1
+../Core/Src/TMC2208Driver.cpp:35:6:void TMC2208Driver::mres(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:36:6:void TMC2208Driver::intpol(bool)	1
+../Core/Src/TMC2208Driver.cpp:37:6:void TMC2208Driver::dedge(bool)	1
+../Core/Src/TMC2208Driver.cpp:38:6:void TMC2208Driver::diss2g(bool)	1
+../Core/Src/TMC2208Driver.cpp:39:6:void TMC2208Driver::diss2vs(bool)	1
+../Core/Src/TMC2208Driver.cpp:43:6:void TMC2208Driver::pwm_ofs(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:44:6:void TMC2208Driver::pwm_grad(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:45:6:void TMC2208Driver::pwm_freq(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:46:6:void TMC2208Driver::pwm_autoscale(bool)	1
+../Core/Src/TMC2208Driver.cpp:47:6:void TMC2208Driver::pwm_autograd(bool)	1
+../Core/Src/TMC2208Driver.cpp:48:6:void TMC2208Driver::freewheel(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:49:6:void TMC2208Driver::pwm_reg(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:50:6:void TMC2208Driver::pwm_lim(uint8_t)	1
+../Core/Src/TMC2208Driver.cpp:53:6:void TMC2208Driver::tpwmthrs(uint16_t)	1
+../Core/Src/TMC2208Driver.cpp:58:1:TMC2208Driver::TMC2208Driver(UART_HandleTypeDef*)	1
+../Core/Src/TMC2208Driver.cpp:73:16:static TMC2208Driver* TMC2208Driver::instance()	1
+../Core/Src/TMC2208Driver.cpp:77:9:uint8_t TMC2208Driver::calcCRC(uint8_t*, uint8_t)	4
+../Core/Src/TMC2208Driver.cpp:94:6:void TMC2208Driver::write(uint8_t, uint32_t)	1
+../Core/Src/TMC2208Driver.cpp:110:6:void TMC2208Driver::writeGCONF()	1
+../Core/Src/TMC2208Driver.cpp:114:6:void TMC2208Driver::writeCHOPCONF()	1
+../Core/Src/TMC2208Driver.cpp:118:6:void TMC2208Driver::writePWMCONF()	1
+../Core/Src/TMC2208Driver.cpp:122:6:void TMC2208Driver::writeTPWMTHRS()	1
+../Core/Src/TMC2208Driver.cpp:126:6:void TMC2208Driver::push()	1
+../Core/Src/TMC2208Driver.cpp:135:6:void MX_TMC2208_Init(UART_HandleTypeDef*)	3

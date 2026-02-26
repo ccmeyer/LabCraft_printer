@@ -1,0 +1,5 @@
+../Core/Inc/Logger.h:25:23:UART_HandleTypeDef* Logger::handle() const	1
+../Core/Inc/Comm.h:76:18:static Comm* Comm::instance()	1
+../Core/Inc/Comm.h:116:25:UART_HandleTypeDef* Comm::handle() const	1
+../Core/Inc/Comm.h:117:10:void Comm::on_tx_cplt()	1
+../Core/Src/callbacks.cpp:11:17:void HAL_UART_TxCpltCallback(UART_HandleTypeDef*)	7
