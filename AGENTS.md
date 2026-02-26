@@ -73,72 +73,17 @@ Prefer using the project interpreter/tools and repo scripts.
 
 ### Run Python tests
 - Use the repo’s chosen test command (prefer `pytest` if configured):
-  - `python -m pytest -q`
-  - If `pytest` is not configured, use the repo’s documented command.
+  - `python -m pytest -q` (primary)
+  - `python -m pytest` (for full output)
 
 ---
 
-## Firmware commands (STM32)
-Firmware must be validated in two ways:
-
-### A) Host unit tests (fast, no hardware)
-- Run host tests:
-  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_unit_tests.ps1`
-
-### B) Headless CubeIDE build (compiles/links real firmware and produces `.bin`)
-- Run headless build:
-  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/build_firmware_headless.ps1`
-
-### Recommended combined check
-- Prefer one command after firmware edits (if present):
-  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1`
-  - (If not present, run A then B)
-
-### Firmware prerequisites
-- CMake installed and on PATH (`cmake --version`)
-- Visual Studio Build Tools present for host builds (MSVC)
-- STM32CubeIDE installed for headless build
-- CppUTest submodule/vendor present:
-  - `git submodule update --init --recursive` (if using submodules)
-
----
-
-## Firmware editing rules
-- Treat the repo as the source of truth for the CubeIDE project.
-- **Do not edit auto-generated CubeMX/CubeIDE code** outside `/* USER CODE BEGIN */ ... /* USER CODE END */` blocks.
-- Prefer changes in:
-  - application logic modules (protocol parsing, state machines, utilities)
-  - not peripheral init code
-- When adding new firmware logic, prefer isolating it into host-testable modules:
-  - avoid hard dependencies on HAL/FreeRTOS headers in core logic
-  - keep HAL/RTOS at the edges and call into pure functions
-
----
-
-## Testing strategy (what to test first)
-### Python (already in place)
-- Keep tests deterministic and hardware-free where possible.
-- Use fakes/mocks for comms.
-- Add regression tests for each bugfix.
-
-### Firmware (host-testable first)
-Host unit tests (CppUTest) should cover:
-- protocol encode/decode (golden vectors)
-- framing/parsing and buffer edge cases
-- state machines (homing/printing sequences) where possible
-- math utilities and bounds checks
-
-Headless build should be run after any firmware edits to catch:
-- syntax errors, missing includes
-- linker issues
-- build configuration regressions
-
----
-
-## What NOT to do
-- Do not attempt to run hardware-in-the-loop tests unless explicitly requested and the workflow is clearly defined.
-- Do not add heavy tooling (linting/formatting/build systems) unless requested.
-- Do not restructure the repo or rename major components without discussion.
+## Firmware note
+If you modify anything under `firmware/`, follow `firmware/AGENTS.md`.
+Firmware changes must pass:
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
+(or run unit tests + headless build separately if needed).
+Before editing anything under firmware/, read firmware/AGENTS.md and restate the validation commands you will run.
 
 ---
 
@@ -175,7 +120,7 @@ Stop and ask by producing:
 
 ## Definition of done (per task/PR)
 - Automated tests pass for the affected area:
-  - Python: `python -m pytest -q` (or repo equivalent)
+  - Python: `python -m pytest -q`
   - Firmware: host tests + headless build as applicable
 - Any protocol/schema changes documented (if explicitly requested)
 - Summary includes:
