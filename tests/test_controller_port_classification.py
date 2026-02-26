@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import Controller as controller_mod
 from Controller import Controller
+import pytest
 
 
 class Emitter:
@@ -54,3 +55,19 @@ def test_classify_port_refreshes_from_comports_when_not_cached(monkeypatch):
         lambda: [SimpleNamespace(device="COM9", vid=0x0483, description="stm32", manufacturer="")],
     )
     assert Controller._classify_port(c, "COM9") == "mcu"
+
+
+@pytest.mark.parametrize(
+    "desc,manuf,expected",
+    [
+        ("prolific usb-to-serial", "", "balance"),
+        ("OHAUS scale", "", "balance"),
+        ("unknown", "STMICROELECTRONICS", "mcu"),
+    ],
+)
+def test_classify_port_case_insensitive_heuristics(desc, manuf, expected):
+    c = Controller.__new__(Controller)
+    c._port_info = {
+        "COMZ": SimpleNamespace(device="COMZ", vid=None, description=desc, manufacturer=manuf)
+    }
+    assert Controller._classify_port(c, "COMZ") == expected

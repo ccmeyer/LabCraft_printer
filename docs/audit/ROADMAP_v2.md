@@ -57,6 +57,8 @@
 
 ## Milestone M3: Controller Robustness and Static Guardrails
 - Closes IDs: `AUD-2026-012`, `AUD-2026-013`, `AUD-2026-016`
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Focus:
   - Port classification correctness under descriptor/casing variants.
   - Signal disconnection scope safety.
@@ -68,6 +70,15 @@
 - Verification gate:
   - Port selection behavior stable across realistic Windows descriptors.
   - Controller disconnect does not remove non-controller listeners.
+- Completed files:
+  - `FreeRTOS-interface/Controller.py`
+  - `tests/test_controller_port_classification.py`
+  - `tests/test_controller_signal_scoping.py`
+  - `tests/test_controller_static_guards.py`
+- Notes:
+  - Fixed case-insensitive balance classification heuristic for `_classify_port`.
+  - Scoped droplet-camera signal disconnects to controller-owned callbacks only.
+  - Removed duplicate `check_if_all_completed` and added AST guard test.
 
 ## Milestone M4: View Designer Regression Coverage
 - Closes IDs: none directly (coverage debt), reduces risk linked to active runtime workflows.

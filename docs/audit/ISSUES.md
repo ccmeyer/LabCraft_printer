@@ -7,7 +7,7 @@
 - Covered Areas: `App.py`, `Controller.py`, `Model.py`, `Machine_FreeRTOS.py`, `View.py`
 
 ## Triage Summary (Open Only)
-- Open issue count: 6
+- Open issue count: 3
 - Highest open severity: `High`
 - Deduping performed:
   - Removed resolved/covered items from active queue.
@@ -17,24 +17,6 @@
 ## High Priority
 
 ## Medium Priority
-
-## AUD-2026-012
-- Severity: Medium
-- Category: Correctness
-- Location: `FreeRTOS-interface/Controller.py`, `Controller._classify_port` (around line 219)
-- Description: Lowercased description is compared against mixed-case token (`"Prolific"`).
-- Impact: Some balance ports may be misclassified.
-- Verification Note: Replay synthetic `ListPortInfo` variants with different casing and descriptors.
-- Test Coverage Note: Partial (basic coverage exists; edge-casing/heuristics still missing).
-
-## AUD-2026-013
-- Severity: Medium
-- Category: Resource Management
-- Location: `FreeRTOS-interface/Controller.py`, `disconnect_droplet_camera_signals` (around lines 141-146)
-- Description: Broad `disconnect()` may remove unrelated subscribers.
-- Impact: Other listeners can silently break.
-- Verification Note: Multi-subscriber signal wiring before/after controller disconnect call.
-- Test Coverage Note: Missing (subscriber-scoping test).
 
 ## AUD-2026-014
 - Severity: Medium
@@ -55,15 +37,6 @@
 - Test Coverage Note: Missing (startup settings fallback test).
 
 ## Low Priority / Cleanup
-
-## AUD-2026-016
-- Severity: Low
-- Category: Maintainability
-- Location: `FreeRTOS-interface/Controller.py`, duplicate `check_if_all_completed` (around lines 751-753, 1006-1008)
-- Description: Duplicate class method definition.
-- Impact: Confusing override behavior and refactor risk.
-- Verification Note: Static parse to detect duplicate method names in critical classes.
-- Test Coverage Note: Missing (AST static guard test).
 
 ## AUD-2026-020
 - Severity: Low
@@ -120,3 +93,26 @@
     - `tests/test_machine_ack_matching.py::test_on_any_ack_falls_back_to_seq8_when_seq32_absent`
     - `tests/test_machine_ack_matching.py::test_on_any_ack_does_not_fallback_to_seq8_when_seq32_present_but_mismatched`
     - `tests/test_machine_ack_matching.py::test_on_any_ack_duplicate_ack_only_consumes_once`
+
+## Recently Resolved (Milestone M3)
+
+## AUD-2026-012
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Controller.py`, `_classify_port` balance heuristics now consistently lowercase-matched
+  - Tests:
+    - `tests/test_controller_port_classification.py::test_classify_port_case_insensitive_heuristics`
+
+## AUD-2026-013
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Controller.py`, `disconnect_droplet_camera_signals` now disconnects controller-owned handlers explicitly
+  - Tests:
+    - `tests/test_controller_signal_scoping.py::test_disconnect_droplet_camera_signals_only_removes_controller_handlers`
+
+## AUD-2026-016
+- Status: Resolved
+- Resolution Reference:
+  - Code: `FreeRTOS-interface/Controller.py`, duplicate `check_if_all_completed` definition removed
+  - Tests:
+    - `tests/test_controller_static_guards.py::test_controller_has_no_duplicate_method_definitions`

@@ -6,7 +6,7 @@
 - Intent: Open test gaps only (resolved/covered gaps removed for triage clarity).
 
 ## Gap Triage (Open Only)
-- Total open gaps: 9
+- Total open gaps: 6
 - Dedupe notes:
   - Collapsed covered items from Milestones 1-4 plus protocol hardening from Milestone 2.
   - Kept View close-event/popup gaps closed; remaining View focus is designer lock/reopen flows.
@@ -21,10 +21,7 @@
 
 | Gap ID | Related Issue ID | Area | Risk | Verification | Missing Test |
 |---|---|---|---|---|---|
-| GAP-C-001 | AUD-2026-012 | `Controller._classify_port` | Medium | Feed synthetic `ListPortInfo` variants (case/descriptor/VID-only) | Parameterized classification edge-case test |
-| GAP-C-002 | AUD-2026-013 | `Controller.disconnect_droplet_camera_signals` | Medium | Verify only controller callbacks are removed in multi-subscriber setup | Signal disconnection scoping test |
 | GAP-C-003 | n/a (coverage debt) | `Controller.print_array` | Medium | Simulate queue-nonempty/profile/refill/last-well branches and assert orchestration | Integration-lite print-array branch matrix |
-| GAP-C-004 | AUD-2026-016 | `Controller` class structure | Low | Static parse of critical classes for duplicate method names | AST duplicate-method guard test |
 | GAP-C-005 | AUD-2026-020 | `Controller.move_to_location` legacy path | Low | Assert `safe_z=5000` behavior/order in legacy profile | Legacy safe-height routing test |
 
 ## Comms Boundary
@@ -44,7 +41,7 @@
 - [x] Model atomic-write and exclusion-reset resilience (`GAP-M-001`, `GAP-M-002`)
 - [x] Protocol boundary hardening (`GAP-X-001`, `GAP-X-002`, `GAP-X-003`)
 - [ ] View designer lock/reopen regressions (`GAP-V-001`, `GAP-V-002`)
-- [ ] Controller branch/scoping/static guard coverage (`GAP-C-001`..`GAP-C-004`)
+- [ ] Controller branch coverage (`GAP-C-003`) and legacy routing (`GAP-C-005`)
 
 ## Deferred (Needs Hardware / HIL)
 - [ ] Validate real UART timing jitter assumptions during CLEAR/GOODBYE handling.

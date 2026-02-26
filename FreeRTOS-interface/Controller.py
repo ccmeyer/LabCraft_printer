@@ -138,12 +138,18 @@ class Controller(QObject):
             print("Droplet camera not initialized or image_captured_signal not available.")
     
     def disconnect_droplet_camera_signals(self):
-        self.model.calibration_manager.captureImageRequested.disconnect()
-        self.model.calibration_manager.moveRequested.disconnect()
-        self.model.calibration_manager.moveAbsoluteRequested.disconnect()
-        self.model.calibration_manager.changeSettingsRequested.disconnect()
-        self.machine.droplet_camera.image_captured_signal.disconnect()
-        self.machine.droplet_camera.capture_failed_signal.disconnect()
+        try:
+            self.model.calibration_manager.captureImageRequested.disconnect(self.handle_capture_request)
+            self.model.calibration_manager.moveRequested.disconnect(self.handle_move_request)
+            self.model.calibration_manager.moveAbsoluteRequested.disconnect(self.handle_absolute_move_request)
+            self.model.calibration_manager.changeSettingsRequested.disconnect(self.handle_settings_change_request)
+        except Exception:
+            pass
+        try:
+            self.machine.droplet_camera.image_captured_signal.disconnect(self._on_image_captured)
+            self.machine.droplet_camera.capture_failed_signal.disconnect(self._on_capture_failed)
+        except Exception:
+            pass
 
     def handle_status_update(self, status_dict):
         """Handle the status update and update the machine model."""
@@ -216,7 +222,7 @@ class Controller(QObject):
                 return "mcu"
 
             # Balance heuristics (best-effort)
-            if any(k in desc for k in ("Prolific","balance", "scale", "ohaus", "sartorius", "mettler", "toledo")):
+            if any(k in desc for k in ("prolific", "balance", "scale", "ohaus", "sartorius", "mettler", "toledo")):
                 return "balance"
 
             return None
@@ -1003,10 +1009,6 @@ class Controller(QObject):
         self.model.experiment_model.create_progress_file()
         self.update_slots_signal.emit()
 
-    def check_if_all_completed(self):
-        """Check if all commands have been completed."""
-        return self.machine.check_if_all_completed()
-    
     def enter_print_mode(self):
         """Enter print mode."""
         self.machine.enter_print_mode()
