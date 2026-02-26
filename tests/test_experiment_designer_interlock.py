@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 from View import ExperimentDesignDialog
 
 
-def _build_dialog_stub(gripper_loaded: bool):
+def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
     dialog._editing_locked_by_gripper = False
@@ -59,10 +60,29 @@ def _build_dialog_stub(gripper_loaded: bool):
         model=SimpleNamespace(rack_model=rack_model),
     )
     dialog.model = SimpleNamespace(
-        has_explicit_well_assignments=lambda: False,
+        has_explicit_well_assignments=lambda: manual_assignments,
         save_experiment=Mock(),
     )
     return dialog
+
+
+def _assert_mutating_controls_disabled(dialog):
+    controls = [
+        dialog.finish_btn,
+        dialog.run_btn,
+        dialog.add_reagent_btn,
+        dialog.upload_design_btn,
+        dialog.reset_upload_btn,
+        dialog.rep_spin,
+        dialog.randomize_chk,
+        dialog.random_seed_spin,
+        dialog.start_col_spin,
+        dialog.start_row_spin,
+        dialog.subset_chk,
+        dialog.reduction_spin,
+    ]
+    for control in controls:
+        assert control.isEnabled() is False
 
 
 def test_experiment_designer_close_without_finish_does_not_apply(qapp):
@@ -131,3 +151,66 @@ def test_experiment_designer_unlocks_when_gripper_unloaded(qapp):
 
     assert dialog._editing_locked_by_gripper is False
     assert dialog.finish_btn.isEnabled() is True
+
+
+@pytest.mark.parametrize(
+    "uploaded_active,manual_assignments,gripper_loaded",
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (False, False, True),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_experiment_designer_lock_precedence_matrix(
+    qapp,
+    uploaded_active,
+    manual_assignments,
+    gripper_loaded,
+):
+    dialog = _build_dialog_stub(gripper_loaded=gripper_loaded, manual_assignments=manual_assignments)
+    dialog._uploaded_design_active = uploaded_active
+    dialog.randomize_chk.setChecked(True)
+    dialog.subset_chk.setChecked(True)
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    if gripper_loaded:
+        _assert_mutating_controls_disabled(dialog)
+        assert "view-only" in dialog.status_lbl.text()
+        return
+
+    assert dialog._editing_locked_by_gripper is False
+
+    # Uploaded mode lock behavior
+    assert dialog.add_reagent_btn.isEnabled() is (not uploaded_active)
+    assert dialog.subset_chk.isEnabled() is (not uploaded_active)
+    assert dialog.reduction_spin.isEnabled() is (not uploaded_active)
+
+    # Manual assignment lock behavior
+    assert dialog.rep_spin.isEnabled() is (not manual_assignments)
+    assert dialog.randomize_chk.isEnabled() is (not manual_assignments)
+    assert dialog.start_col_spin.isEnabled() is (not manual_assignments)
+    assert dialog.start_row_spin.isEnabled() is (not manual_assignments)
+    assert dialog.random_seed_spin.isEnabled() is (not manual_assignments)
+
+    # Unaffected mutating controls remain enabled without gripper lock
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.run_btn.isEnabled() is True
+
+
+def test_experiment_designer_gripper_lock_dominates_uploaded_manual_modes(qapp):
+    dialog = _build_dialog_stub(gripper_loaded=True, manual_assignments=True)
+    dialog._uploaded_design_active = True
+    dialog.randomize_chk.setChecked(True)
+    dialog.subset_chk.setChecked(True)
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog._editing_locked_by_gripper is True
+    _assert_mutating_controls_disabled(dialog)
+    assert "view-only" in dialog.status_lbl.text()

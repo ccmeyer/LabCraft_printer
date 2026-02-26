@@ -8,7 +8,7 @@
 
 ## Triage Summary (Open Only)
 - Open issue count: 3
-- Highest open severity: `High`
+- Highest open severity: `Medium`
 - Deduping performed:
   - Removed resolved/covered items from active queue.
   - Merged protocol-test drift concerns under `AUD-2026-015` + `AUD-2026-019`.
@@ -46,6 +46,16 @@
 - Impact: Future edits may reintroduce unsafe routing assumptions.
 - Verification Note: Add explicit convention assertions/docs tied to movement logic.
 - Test Coverage Note: Partial (current-profile safe-Z covered; legacy/convention tests still missing).
+
+## Recently Resolved (Milestone M4 Coverage Debt)
+- Status: Covered by new tests (no direct issue ID closed)
+- Coverage Reference:
+  - Tests:
+    - `tests/test_experiment_designer_interlock.py::test_experiment_designer_lock_precedence_matrix`
+    - `tests/test_experiment_designer_interlock.py::test_experiment_designer_gripper_lock_dominates_uploaded_manual_modes`
+    - `tests/test_experiment_designer_reopen.py::test_open_close_designer_does_not_apply_when_not_finished`
+    - `tests/test_experiment_designer_reopen.py::test_open_close_repeated_cycles_do_not_mutate_runtime_state`
+    - `tests/test_experiment_designer_reopen.py::test_finish_path_still_applies_once_on_reopen_session`
 
 ## Recently Resolved (Milestone M1)
 

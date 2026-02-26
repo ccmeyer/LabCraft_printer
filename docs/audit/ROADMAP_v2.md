@@ -82,6 +82,8 @@
 
 ## Milestone M4: View Designer Regression Coverage
 - Closes IDs: none directly (coverage debt), reduces risk linked to active runtime workflows.
+- Status: Done
+- Commit: `<commit-hash-placeholder>`
 - Focus:
   - Designer lock precedence matrix (uploaded/manual/gripper).
   - Reopen/close cycle under active runtime state with no implicit apply/reset.
@@ -91,6 +93,13 @@
 - Verification gate:
   - Reopen/close is view-safe during active print context.
   - Control enablement follows deterministic precedence rules.
+- Completed files:
+  - `tests/test_experiment_designer_interlock.py`
+  - `tests/test_experiment_designer_reopen.py`
+- Notes:
+  - Added full uploaded/manual/gripper lock precedence matrix assertions.
+  - Added reopen-cycle regressions proving no implicit apply on close and explicit finish-only apply semantics.
+  - No production `View.py` changes were required.
 
 ## Milestone M5: Motion Semantics Documentation + Legacy Routing Coverage
 - Closes IDs: `AUD-2026-020`
