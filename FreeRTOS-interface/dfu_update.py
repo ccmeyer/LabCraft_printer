@@ -33,7 +33,10 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6 import QtCore
+try:
+    from PySide6 import QtCore
+except ImportError:
+    QtCore = None
 import subprocess
 import re
 
