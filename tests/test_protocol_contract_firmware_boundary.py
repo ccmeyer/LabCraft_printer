@@ -5,7 +5,7 @@ import Machine_FreeRTOS as mfr
 
 
 def _firmware_cmd_map():
-    text = Path("firmware/Inc/Orchestrator.h").read_text(encoding="utf-8")
+    text = Path("firmware/Core/Inc/Orchestrator.h").read_text(encoding="utf-8")
     pairs = re.findall(r"\b(CMD_[A-Z0-9_]+)\s*=\s*0[xX]([0-9A-Fa-f]+)", text)
     return {name: int(hexv, 16) for name, hexv in pairs}
 
