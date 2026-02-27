@@ -14,7 +14,9 @@
 #include "Logger.h"
 #include "Gantry.h"
 #include "Comm.h"
+#include "CommCodec.h"
 #include "cmsis_os.h"         // for portMAX_DELAY, pdTRUE, etc.
+#include <cstdio>
 
 #if LC_HAS_IMAGING > 0
   #include "Flash.h"
@@ -96,18 +98,22 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		case CMD_RESUME:
 		  _resumeRequested = true;
 		  return pdFALSE;
-      case CMD_CLEAR: {
+	      case CMD_CLEAR: {
 //    	  xQueueReset(_cmdQueue);
-		  _inFlight = cmd;                 // capture seq/cmd for ACK
-    	  _clearRequested = true;
-    	  _acknowledgeRequested = true;
-        // inject these at head so they fire immediately
-        return pdFALSE;
-      }
-      default: {
-    	  return xQueueSendFromISR(_cmdQueue, &cmd, pxHigherPriorityTaskWoken);
-      }
-    }
+			  _inFlight = cmd;                 // capture seq/cmd for ACK
+	    	  _clearRequested = true;
+	    	  _acknowledgeRequested = true;
+	        // inject these at head so they fire immediately
+	        return pdFALSE;
+	      }
+	      case CMD_SELFTEST_ABORT: {
+	        _selfTestAbortRequested = true;
+	        return pdFALSE;
+	      }
+	      default: {
+	    	  return xQueueSendFromISR(_cmdQueue, &cmd, pxHigherPriorityTaskWoken);
+	      }
+	    }
 }
 
 
@@ -751,16 +757,178 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			#endif
 			  MX_GRIPPER_SetRefreshPeriodMs(120000);
 			  break;
-		} case CMD_SET_GRIPPER_PARAMS: {
-			  // p1 = Refresh, p2 = Pulse duration
-			  uint32_t refreshPeriod   = cmd.p1;
-			  uint32_t pulseDuration   = cmd.p2;
-			  MX_GRIPPER_SetRefreshPeriodMs(refreshPeriod);
-			  MX_GRIPPER_SetPulseDurationMs(pulseDuration);
-			  break;
-		} case CMD_WAIT: {
-			  // p1 = wait time (ms)
-			  uint32_t ms = cmd.p1u();
+			} case CMD_SET_GRIPPER_PARAMS: {
+				  // p1 = Refresh, p2 = Pulse duration
+				  uint32_t refreshPeriod   = cmd.p1;
+				  uint32_t pulseDuration   = cmd.p2;
+				  MX_GRIPPER_SetRefreshPeriodMs(refreshPeriod);
+				  MX_GRIPPER_SetPulseDurationMs(pulseDuration);
+				  break;
+			} case CMD_SELFTEST_START: {
+				  Comm* comm = Comm::instance();
+				  if (!comm || !comm->handle()) {
+				    break;
+				  }
+
+				  _selfTestAbortRequested = false;
+				  const uint32_t runId = cmd.hasSeq32 ? cmd.seq32 : _currentCmdNum;
+				  const uint8_t outSeq8 = cmd.seq8;
+				  uint16_t total = 0;
+				  uint16_t passed = 0;
+				  uint16_t failed = 0;
+				  bool aborted = false;
+
+				  auto sendResult = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
+				    uint8_t payload[192] = {0};
+				    size_t idx = 0;
+				    payload[idx++] = CMD_SELFTEST_RESULT;
+				    payload[idx++] = outSeq8;
+
+				    payload[idx++] = 0x30; payload[idx++] = 2;
+				    payload[idx++] = static_cast<uint8_t>(testId & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((testId >> 8) & 0xFFu);
+
+				    const size_t nameLenRaw = strlen(name);
+				    const uint8_t nameLen = static_cast<uint8_t>((nameLenRaw > 32u) ? 32u : nameLenRaw);
+				    payload[idx++] = 0x31; payload[idx++] = nameLen;
+				    memcpy(&payload[idx], name, nameLen); idx += nameLen;
+
+				    payload[idx++] = 0x32; payload[idx++] = 1;
+				    payload[idx++] = pass ? 1u : 0u;
+
+				    const size_t metricsLenRaw = strlen(metrics);
+				    const uint8_t metricsLen = static_cast<uint8_t>((metricsLenRaw > 96u) ? 96u : metricsLenRaw);
+				    payload[idx++] = 0x33; payload[idx++] = metricsLen;
+				    memcpy(&payload[idx], metrics, metricsLen); idx += metricsLen;
+
+				    const uint32_t ts = HAL_GetTick();
+				    payload[idx++] = 0x34; payload[idx++] = 4;
+				    payload[idx++] = static_cast<uint8_t>(ts & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((ts >> 8) & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((ts >> 16) & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((ts >> 24) & 0xFFu);
+
+				    payload[idx++] = 0x21; payload[idx++] = 4;
+				    payload[idx++] = static_cast<uint8_t>(runId & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((runId >> 8) & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((runId >> 16) & 0xFFu);
+				    payload[idx++] = static_cast<uint8_t>((runId >> 24) & 0xFFu);
+
+				    comm->sendFrame(comm->handle(), payload, idx);
+				  };
+
+				  auto runOne = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
+				    if (_selfTestAbortRequested) {
+				      aborted = true;
+				      return false;
+				    }
+				    total++;
+				    if (pass) passed++; else failed++;
+				    sendResult(testId, name, pass, metrics);
+				    if (_selfTestAbortRequested) {
+				      aborted = true;
+				      return false;
+				    }
+				    return true;
+				  };
+
+				  {
+				    static const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
+				    const uint16_t crc = CommCodec::crc16(known, sizeof(known));
+				    char metrics[48];
+				    snprintf(metrics, sizeof(metrics), "crc=%u", static_cast<unsigned>(crc));
+				    if (!runOne(1001, "comm_crc_known_vector", (crc == 0x4B37u), metrics)) goto selftest_done;
+				  }
+
+				  {
+				    uint8_t ackPayload[8] = {0};
+				    const uint8_t ackLen = CommCodec::buildAckPayload(0xF4, 0x22, runId, true, ackPayload, sizeof(ackPayload));
+				    uint8_t frame[16] = {0};
+				    const size_t frameLen = CommCodec::encodeFrame(ackPayload, ackLen, frame, sizeof(frame));
+				    CommCodec::RxParser parser{};
+				    uint8_t parsedLen = 0;
+				    int readyCount = 0;
+				    for (size_t i = 0; i < frameLen; ++i) {
+				      if (CommCodec::feedRxByte(parser, frame[i], parsedLen) == CommCodec::FeedResult::FrameReady) {
+				        readyCount++;
+				      }
+				    }
+				    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+				    const bool pass = (ackLen == 8u) && (frameLen == 12u) && (readyCount == 1) &&
+				                      (decoded.cmd == 0xF4u) && (decoded.seq8 == 0x22u) && decoded.hasSeq32;
+				    char metrics[48];
+				    snprintf(metrics, sizeof(metrics), "frame_len=%u", static_cast<unsigned>(frameLen));
+				    if (!runOne(1002, "comm_frame_roundtrip", pass, metrics)) goto selftest_done;
+				  }
+
+				  {
+				    const bool pass = (comm->handle() != nullptr);
+				    if (!runOne(1003, "status_frame_shape", pass, "status=ok")) goto selftest_done;
+				  }
+
+				  {
+				    const uint32_t t0 = HAL_GetTick();
+				    vTaskDelay(pdMS_TO_TICKS(10));
+				    const uint32_t dt = HAL_GetTick() - t0;
+				    char metrics[48];
+				    snprintf(metrics, sizeof(metrics), "delta_ms=%lu", static_cast<unsigned long>(dt));
+				    if (!runOne(1004, "uptime_counter_read", dt >= 1u, metrics)) goto selftest_done;
+				  }
+
+				  {
+				    const uint32_t flashDelay = Orchestrator::getFlashDelay();
+				    char metrics[64];
+				    snprintf(metrics, sizeof(metrics), "flash_delay_us=%lu", static_cast<unsigned long>(flashDelay));
+				    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
+				  }
+
+				  {
+				    static const char kBuildInfo[] = __DATE__ " " __TIME__;
+				    char metrics[48];
+				    snprintf(metrics, sizeof(metrics), "version_len=%u", static_cast<unsigned>(strlen(kBuildInfo)));
+				    if (!runOne(1006, "fw_build_info", strlen(kBuildInfo) > 0u, metrics)) goto selftest_done;
+				  }
+
+				  selftest_done:
+				  uint8_t donePayload[64] = {0};
+				  size_t d = 0;
+				  donePayload[d++] = CMD_SELFTEST_DONE;
+				  donePayload[d++] = outSeq8;
+
+				  donePayload[d++] = 0x21; donePayload[d++] = 4;
+				  donePayload[d++] = static_cast<uint8_t>(runId & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((runId >> 8) & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((runId >> 16) & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((runId >> 24) & 0xFFu);
+
+				  donePayload[d++] = 0x35; donePayload[d++] = 2;
+				  donePayload[d++] = static_cast<uint8_t>(total & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((total >> 8) & 0xFFu);
+
+				  donePayload[d++] = 0x36; donePayload[d++] = 2;
+				  donePayload[d++] = static_cast<uint8_t>(passed & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((passed >> 8) & 0xFFu);
+
+				  donePayload[d++] = 0x37; donePayload[d++] = 2;
+				  donePayload[d++] = static_cast<uint8_t>(failed & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((failed >> 8) & 0xFFu);
+
+				  donePayload[d++] = 0x38; donePayload[d++] = 1;
+				  donePayload[d++] = aborted ? 1u : 0u;
+
+				  const uint32_t ts = HAL_GetTick();
+				  donePayload[d++] = 0x34; donePayload[d++] = 4;
+				  donePayload[d++] = static_cast<uint8_t>(ts & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((ts >> 8) & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((ts >> 16) & 0xFFu);
+				  donePayload[d++] = static_cast<uint8_t>((ts >> 24) & 0xFFu);
+
+				  comm->sendFrame(comm->handle(), donePayload, d);
+				  _selfTestAbortRequested = false;
+				  break;
+			} case CMD_WAIT: {
+				  // p1 = wait time (ms)
+				  uint32_t ms = cmd.p1u();
 			  if (ms == 0) {
 			    break; // immediate completion
 			  }

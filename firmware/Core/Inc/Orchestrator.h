@@ -115,14 +115,19 @@ public:
 
 	CMD_PAUSE = 0xF0,
     CMD_RESUME = 0xF1,
-	CMD_CLEAR = 0xF2,
-	CMD_HELLO       = 0xF3,
-	CMD_HELLO_ACK   = 0xF4,
-	CMD_GOODBYE     = 0xF5,
-	CMD_BYE_ACK     = 0xF6,
-	CMD_CLEAR_ACK	= 0xF7,
-	CMD_BYE_DONE	= 0xF8
-  };
+		CMD_CLEAR = 0xF2,
+		CMD_HELLO       = 0xF3,
+		CMD_HELLO_ACK   = 0xF4,
+		CMD_GOODBYE     = 0xF5,
+		CMD_BYE_ACK     = 0xF6,
+		CMD_CLEAR_ACK	= 0xF7,
+		CMD_BYE_DONE	= 0xF8,
+
+		CMD_SELFTEST_START  = 0xFA,
+		CMD_SELFTEST_RESULT = 0xFB,
+		CMD_SELFTEST_DONE   = 0xFC,
+		CMD_SELFTEST_ABORT  = 0xFD
+	  };
 
   // complete packet, decoded from Comm
   struct Command {
@@ -189,8 +194,9 @@ public:
   volatile bool _pauseRequested  = false;
   volatile bool _resumeRequested = false;
   volatile bool _clearRequested  = false;
-  volatile bool _acknowledgeRequested = false;
-  volatile bool _shutdownRequested = false;
+	  volatile bool _acknowledgeRequested = false;
+	  volatile bool _shutdownRequested = false;
+	  volatile bool _selfTestAbortRequested = false;
 
 
 

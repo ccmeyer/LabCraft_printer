@@ -28,7 +28,7 @@ set -euo pipefail
 # -------------------------
 PROFILE="SAFE"  # SAFE or FULL (your future selftest profiles)
 BIN_PATH=""     # default resolved below
-PORT=""         # auto-detect if not provided
+PORT="/dev/ttyAMA0"  # default Pi UART; override with --port
 DFU_SCRIPT=""   # auto-detect if not provided
 REPORT_PATH=""  # default resolved below
 LOG_DIR=""      # default resolved below
@@ -180,9 +180,8 @@ run_selftest() {
     return "${PIPESTATUS[0]}"
   fi
 
-  # If no selftest runner exists yet, treat as "flash-only" success.
-  echo "NOTE: tools/run_selftest.py not found; skipping self-test (flash-only run)." | tee -a "$log"
-  return 0
+  echo "ERROR: tools/run_selftest.py not found; cannot run required self-test." | tee -a "$log"
+  return 5
 }
 
 usage() {
@@ -192,7 +191,7 @@ Usage: $(basename "$0") [options]
 Options:
   --bin PATH            Firmware .bin to flash (default: firmware/artifacts/LabCraft_firmware.bin)
   --dfu-script PATH     Path to dfu_update.py (default: auto-detect in repo)
-  --port PATH           Serial device to use after flashing (default: auto-detect)
+  --port PATH           Serial device to use after flashing (default: /dev/ttyAMA0)
   --profile NAME        Self-test profile (SAFE or FULL). Default: SAFE
   --report PATH         JSON report output path (default: hil_reports/selftest_<ts>.json)
   --log-dir PATH        Log directory (default: hil_reports/)
