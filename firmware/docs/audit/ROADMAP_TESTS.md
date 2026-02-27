@@ -113,6 +113,8 @@ Status: Completed (`commit 2dd4ff1`)
 
 ## Milestone 5: FULL Profile Bring-Up (Fixture-Gated)
 
+Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution remains deferred.
+
 ### Test IDs completed
 - Host-test IDs:
   - `TST-COMM-006` and `TST-COMM-007` as compatibility guards for any profile/control TLV changes (no protocol format changes expected).
@@ -122,8 +124,9 @@ Status: Completed (`commit 2dd4ff1`)
   - `2003` `pressure_regulator_step_response_full`
 
 ### Acceptance criteria
-- FULL profile can run under fixture controls with safe gating and deterministic metrics.
-- Motion and pressure tests meet agreed tolerances and do not violate safety constraints.
+- SAFE profile emits stable IDs `2001`..`2003` with explicit gating metrics and no motion/pressure execution.
+- FULL profile can run under fixture controls with safe gating and deterministic metrics once fixture work is enabled.
+- Motion and pressure tests meet agreed tolerances and do not violate safety constraints when FULL execution is enabled.
 - SAFE profile remains unchanged and passing.
 
 ### Verification commands
@@ -150,3 +153,4 @@ Status: Completed (`commit 2dd4ff1`)
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+

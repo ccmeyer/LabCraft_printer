@@ -309,20 +309,41 @@ Verification command for every HIL item:
   - `crc_mismatch_count` (uint16)
   - `length_reject_count` (uint16)
 
-#### `TST-HIL-ST-101` (P2) `2001 motion_home_cycle_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-101` (P2) `2001 motion_home_cycle_full` (SAFE gate implemented, FULL deferred fixture)
 - Required firmware-side metrics:
+  - Current SAFE gate metrics:
+    - `profile`
+    - `executed`
+    - `fixture_required`
+    - `motion`
+    - `gate`
+  - Future FULL fixture metrics:
   - `home_time_ms`
   - `home_success_axes`
   - `limit_hits`
 
-#### `TST-HIL-ST-102` (P2) `2002 motion_absolute_move_bounds_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-102` (P2) `2002 motion_absolute_move_bounds_full` (SAFE gate implemented, FULL deferred fixture)
 - Required firmware-side metrics:
+  - Current SAFE gate metrics:
+    - `profile`
+    - `executed`
+    - `fixture_required`
+    - `motion`
+    - `gate`
+  - Future FULL fixture metrics:
   - `target_x`, `target_y`, `target_z`
   - `final_error_steps`
   - `bound_violation` (bool)
 
-#### `TST-HIL-ST-103` (P2) `2003 pressure_regulator_step_response_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-103` (P2) `2003 pressure_regulator_step_response_full` (SAFE gate implemented, FULL deferred fixture)
 - Required firmware-side metrics:
+  - Current SAFE gate metrics:
+    - `profile`
+    - `executed`
+    - `fixture_required`
+    - `pressure`
+    - `gate`
+  - Future FULL fixture metrics:
   - `target_pressure`
   - `settle_time_ms`
   - `overshoot`
@@ -374,3 +395,7 @@ Items requiring extraction or fixture before implementation:
 - Milestone 4 complete (`commit 2dd4ff1`):
   - Host-test IDs: `TST-ORCH-001`, `TST-NVM-001`, `TST-PR-001`, `TST-STEP-001`
   - HIL self-test IDs: SAFE regression gate rerun only (`1001`-`1006`, `1010`-`1013`, `1020`, `1021`, `1030`)
+- Milestone 5 SAFE gating slice complete (`commit 762f6bc`):
+  - Host-test IDs: `TST-COMM-007` (extended self-test result framing guard)
+  - HIL self-test IDs: `2001`, `2002`, `2003` emitted in SAFE with `executed=0` gating metrics
+
