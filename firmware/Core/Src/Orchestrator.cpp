@@ -832,7 +832,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    return true;
 				  };
 
-				  auto runAckRoundtrip = [&](uint16_t testId, const char* name, uint8_t ackCmd, bool includeSeq32, bool doneLabel) {
+				  auto runAckRoundtrip = [&](uint16_t testId, const char* name, uint8_t ackCmd, bool includeSeq32, bool doneLabel, const char* extraMetrics = nullptr, bool extraPass = true) {
 				    uint8_t ackPayload[8] = {0};
 				    const uint8_t ackLen = CommCodec::buildAckPayload(ackCmd, outSeq8, runId, includeSeq32, ackPayload, sizeof(ackPayload));
 				    uint8_t frame[16] = {0};
@@ -850,27 +850,54 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
 				    const bool seq8Match = (decoded.seq8 == outSeq8);
 				    const bool seq32Match = includeSeq32 ? (decoded.hasSeq32 && decoded.seq32 == runId) : !decoded.hasSeq32;
-				    const bool pass = (ackLen == (includeSeq32 ? 8u : 2u)) &&
+				    const bool pass = extraPass &&
+				                      (ackLen == (includeSeq32 ? 8u : 2u)) &&
 				                      (frameLen == static_cast<size_t>(ackLen + 4u)) &&
 				                      (readyCount == 1) &&
 				                      (decoded.cmd == ackCmd) &&
 				                      seq8Match &&
 				                      seq32Match;
 
-				    char metrics[96];
+				    char metrics[128];
+				    int written = 0;
 				    if (doneLabel) {
-				      snprintf(metrics, sizeof(metrics), "done_cmd=%u;seq8_match=%u;seq32_match=%u",
-				               static_cast<unsigned>(ackCmd),
-				               static_cast<unsigned>(seq8Match ? 1u : 0u),
-				               static_cast<unsigned>(seq32Match ? 1u : 0u));
+				      written = snprintf(metrics, sizeof(metrics), "done_cmd=%u;seq8_match=%u;seq32_match=%u",
+				                         static_cast<unsigned>(ackCmd),
+				                         static_cast<unsigned>(seq8Match ? 1u : 0u),
+				                         static_cast<unsigned>(seq32Match ? 1u : 0u));
 				    } else {
-				      snprintf(metrics, sizeof(metrics), "ack_cmd=%u;seq8_match=%u;seq32_match=%u",
-				               static_cast<unsigned>(ackCmd),
-				               static_cast<unsigned>(seq8Match ? 1u : 0u),
-				               static_cast<unsigned>(seq32Match ? 1u : 0u));
+				      written = snprintf(metrics, sizeof(metrics), "ack_cmd=%u;seq8_match=%u;seq32_match=%u",
+				                         static_cast<unsigned>(ackCmd),
+				                         static_cast<unsigned>(seq8Match ? 1u : 0u),
+				                         static_cast<unsigned>(seq32Match ? 1u : 0u));
+				    }
+				    if (extraMetrics && extraMetrics[0] != '\0' && written > 0 && static_cast<size_t>(written) < sizeof(metrics) - 1u) {
+				      snprintf(metrics + written, sizeof(metrics) - static_cast<size_t>(written), ";%s", extraMetrics);
 				    }
 				    return runOne(testId, name, pass, metrics);
 				  };
+
+				  auto sampleStatusWindow = [&](uint32_t sampleMs,
+				                                uint32_t& chunk0Seen,
+				                                uint32_t& chunk1Seen,
+				                                uint32_t& alternationErrors,
+				                                uint32_t& periodMsAvg,
+				                                uint32_t& periodMsMaxJitter) {
+				    Comm::resetStatusMetrics();
+				    comm->setStatusPaused(false);
+				    vTaskDelay(pdMS_TO_TICKS(sampleMs));
+				    chunk0Seen = Comm::getStatusChunk0Count();
+				    chunk1Seen = Comm::getStatusChunk1Count();
+				    alternationErrors = Comm::getStatusAlternationErrors();
+				    periodMsAvg = Comm::getStatusPeriodAvgMs();
+				    periodMsMaxJitter = Comm::getStatusPeriodMaxJitterMs();
+				  };
+
+				  uint32_t statusChunk0Seen = 0;
+				  uint32_t statusChunk1Seen = 0;
+				  uint32_t statusAlternationErrors = 0;
+				  uint32_t statusPeriodMsAvg = 0;
+				  uint32_t statusPeriodMsMaxJitter = 0;
 
 				  {
 				    static const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
@@ -905,9 +932,49 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  if (!runAckRoundtrip(1011, "session_goodbye_ack", CMD_BYE_ACK, true, false)) goto selftest_done;
 				  if (!runAckRoundtrip(1012, "session_goodbye_done", CMD_BYE_DONE, true, true)) goto selftest_done;
 
+				  sampleStatusWindow(260u,
+				                    statusChunk0Seen,
+				                    statusChunk1Seen,
+				                    statusAlternationErrors,
+				                    statusPeriodMsAvg,
+				                    statusPeriodMsMaxJitter);
+
 				  {
-				    const bool pass = (comm->handle() != nullptr);
-				    if (!runOne(1003, "status_frame_shape", pass, "status=ok")) goto selftest_done;
+				    static constexpr unsigned kStatusTagCount = 18u;
+				    const bool pass = (statusChunk0Seen > 0u) && (statusChunk1Seen > 0u);
+				    char metrics[96];
+				    snprintf(metrics, sizeof(metrics), "tag_count=%u;has_seq32=0;chunk0_seen=%lu;chunk1_seen=%lu",
+				             kStatusTagCount,
+				             static_cast<unsigned long>(statusChunk0Seen),
+				             static_cast<unsigned long>(statusChunk1Seen));
+				    if (!runOne(1003, "status_frame_shape", pass, metrics)) goto selftest_done;
+				  }
+
+				  {
+				    xQueueReset(_cmdQueue);
+				    const UBaseType_t queueDepthAfterClear = uxQueueMessagesWaiting(_cmdQueue);
+				    char extra[48];
+				    snprintf(extra, sizeof(extra), "queue_depth_after_clear=%u", static_cast<unsigned>(queueDepthAfterClear));
+				    if (!runAckRoundtrip(1013, "clear_queue_ack", CMD_CLEAR_ACK, true, false, extra, (queueDepthAfterClear == 0u))) goto selftest_done;
+				  }
+
+				  {
+				    const bool pass = (statusChunk0Seen >= 2u) && (statusChunk1Seen >= 2u) && (statusAlternationErrors == 0u);
+				    char metrics[96];
+				    snprintf(metrics, sizeof(metrics), "chunk0_seen=%lu;chunk1_seen=%lu;alternation_errors=%lu",
+				             static_cast<unsigned long>(statusChunk0Seen),
+				             static_cast<unsigned long>(statusChunk1Seen),
+				             static_cast<unsigned long>(statusAlternationErrors));
+				    if (!runOne(1020, "status_chunk_alternation_safe", pass, metrics)) goto selftest_done;
+				  }
+
+				  {
+				    const bool pass = (statusPeriodMsAvg >= 35u) && (statusPeriodMsAvg <= 90u) && (statusPeriodMsMaxJitter <= 40u);
+				    char metrics[96];
+				    snprintf(metrics, sizeof(metrics), "period_ms_avg=%lu;period_ms_max_jitter=%lu",
+				             static_cast<unsigned long>(statusPeriodMsAvg),
+				             static_cast<unsigned long>(statusPeriodMsMaxJitter));
+				    if (!runOne(1021, "status_cadence_safe", pass, metrics)) goto selftest_done;
 				  }
 
 				  {

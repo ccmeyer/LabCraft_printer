@@ -245,6 +245,75 @@ enum Chunk : int {
 
 // Make your variable that type:
 static Chunk chunk = CHUNK_0;
+static volatile uint32_t s_statusChunk0Count = 0;
+static volatile uint32_t s_statusChunk1Count = 0;
+static volatile uint32_t s_statusAlternationErrors = 0;
+static volatile uint32_t s_statusLastTickMs = 0;
+static volatile uint32_t s_statusPeriodSumMs = 0;
+static volatile uint32_t s_statusPeriodSamples = 0;
+static volatile uint32_t s_statusPeriodMaxJitterMs = 0;
+static volatile int s_statusLastChunk = -1;
+
+void Comm::resetStatusMetrics() {
+    taskENTER_CRITICAL();
+    s_statusChunk0Count = 0;
+    s_statusChunk1Count = 0;
+    s_statusAlternationErrors = 0;
+    s_statusLastTickMs = 0;
+    s_statusPeriodSumMs = 0;
+    s_statusPeriodSamples = 0;
+    s_statusPeriodMaxJitterMs = 0;
+    s_statusLastChunk = -1;
+    taskEXIT_CRITICAL();
+}
+
+uint32_t Comm::getStatusChunk0Count() {
+    return s_statusChunk0Count;
+}
+
+uint32_t Comm::getStatusChunk1Count() {
+    return s_statusChunk1Count;
+}
+
+uint32_t Comm::getStatusAlternationErrors() {
+    return s_statusAlternationErrors;
+}
+
+uint32_t Comm::getStatusPeriodAvgMs() {
+    const uint32_t samples = s_statusPeriodSamples;
+    return (samples == 0u) ? 0u : (s_statusPeriodSumMs / samples);
+}
+
+uint32_t Comm::getStatusPeriodMaxJitterMs() {
+    return s_statusPeriodMaxJitterMs;
+}
+
+static void recordStatusSend(Chunk sentChunk) {
+    const uint32_t now = HAL_GetTick();
+    taskENTER_CRITICAL();
+    if (sentChunk == CHUNK_0) {
+        s_statusChunk0Count++;
+    } else if (sentChunk == CHUNK_1) {
+        s_statusChunk1Count++;
+    }
+
+    if (s_statusLastChunk >= 0 && s_statusLastChunk == static_cast<int>(sentChunk)) {
+        s_statusAlternationErrors++;
+    }
+    s_statusLastChunk = static_cast<int>(sentChunk);
+
+    if (s_statusLastTickMs != 0u) {
+        const uint32_t period = now - s_statusLastTickMs;
+        s_statusPeriodSumMs += period;
+        s_statusPeriodSamples++;
+        const uint32_t jitter = (period > 50u) ? (period - 50u) : (50u - period);
+        if (jitter > s_statusPeriodMaxJitterMs) {
+            s_statusPeriodMaxJitterMs = jitter;
+        }
+    }
+    s_statusLastTickMs = now;
+    taskEXIT_CRITICAL();
+}
 
 void Comm::statusTask() {
     for (;;) {
@@ -325,12 +394,13 @@ void Comm::statusTask() {
 
 				APPEND_S32(payload, idx, TAG_CMD_DEPTH,   depth);
 				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
-				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+					APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
 
-				sendFrame(_huart, payload, idx);
-				chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
+					sendFrame(_huart, payload, idx);
+					recordStatusSend(CHUNK_0);
+					chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
 
-				break;
+					break;
         	}
 			case CHUNK_1: {
 				uint8_t payload[1 + 19*(1+1+4)] = {};
@@ -406,10 +476,11 @@ void Comm::statusTask() {
 				APPEND_S32(payload, idx, TAG_GRIP_REFRESH,   gripperRefreshPeriod);
 
 				APPEND_S32(payload, idx, TAG_CURR_CMD,    currentCmd);
-				APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
+					APPEND_S32(payload, idx, TAG_LAST_CMD,    lastCmd);
 
-		        sendFrame(_huart, payload, idx);
-				chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
+			        sendFrame(_huart, payload, idx);
+			        recordStatusSend(CHUNK_1);
+					chunk = static_cast<Chunk>((chunk + 1) % CHUNK_COUNT);
 
 				break;
 			}

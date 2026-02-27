@@ -252,6 +252,10 @@ TEST(CommCodec, ByeDoneWithSeq32Roundtrips) {
     assertAckRoundtrip(0xF8, 0x10, 0x12345678u);
 }
 
+TEST(CommCodec, ClearAckWithSeq32Roundtrips) {
+    assertAckRoundtrip(0xF7, 0x10, 0x12345678u);
+}
+
 TEST(CommCodec, SelftestStartWithProfileRunIdTimeoutParsesCoreFields) {
     static const uint8_t payload[] = {
         0xFA, 0x10,

@@ -96,6 +96,13 @@ public:
 
     void resetReceiveState();
 
+    static void resetStatusMetrics();
+    static uint32_t getStatusChunk0Count();
+    static uint32_t getStatusChunk1Count();
+    static uint32_t getStatusAlternationErrors();
+    static uint32_t getStatusPeriodAvgMs();
+    static uint32_t getStatusPeriodMaxJitterMs();
+
     // RX byte feeder (called from UART ISR or from USB receive callback)
     void onRxByte(uint8_t b);
     void onRxBytes(const uint8_t* data, uint32_t len);
