@@ -174,7 +174,7 @@ Includes controlled motion/pressure/actuation checks with fixture and explicit s
 - Stubs required:
   - none
 
-#### `TST-ORCH-001` (P1) Orchestrator Opcode-to-Intent Decode Table (after extraction)
+#### `TST-ORCH-001` (P1) Orchestrator Opcode-to-Intent Decode Table
 - Target module + file(s):
   - extraction target: `firmware/Core/Src/Orchestrator.cpp`
   - proposed helper: `firmware/Core/Src/OrchestratorDecode.cpp`
@@ -189,7 +189,7 @@ Includes controlled motion/pressure/actuation checks with fixture and explicit s
 - Stubs required:
   - none (pure helper)
 
-#### `TST-NVM-001` (P1) NVM Record Validation/Encoding (after extraction)
+#### `TST-NVM-001` (P1) NVM Record Validation/Encoding
 - Target module + file(s):
   - extraction target: `firmware/Core/Src/nvm.c`
   - proposed helper: `firmware/Core/Src/nvm_codec.c`
@@ -205,7 +205,7 @@ Includes controlled motion/pressure/actuation checks with fixture and explicit s
 - Stubs required:
   - none (pure helper)
 
-#### `TST-PR-001` (P2) Pressure Regulator Math Core (after extraction)
+#### `TST-PR-001` (P2) Pressure Regulator Math Core
 - Target module + file(s):
   - extraction target: `firmware/Core/Src/PressureRegulator.cpp`
 - Function/API under test:
@@ -219,7 +219,7 @@ Includes controlled motion/pressure/actuation checks with fixture and explicit s
 - Stubs required:
   - none (pure helper)
 
-#### `TST-STEP-001` (P2) Stepper Profile Math Core (after extraction)
+#### `TST-STEP-001` (P2) Stepper Profile Math Core
 - Target module + file(s):
   - extraction target: `firmware/Core/Src/Stepper.cpp`
 - Function/API under test:
@@ -357,7 +357,7 @@ Verification command for every HIL item:
 - `TST-HIL-ST-001` .. `TST-HIL-ST-013` (SAFE profile)
 
 Items requiring extraction or fixture before implementation:
-- Host extraction dependent: `TST-COMM-005`, `TST-ORCH-001`, `TST-NVM-001`, `TST-PR-001`, `TST-STEP-001`
+- Host extraction dependent: `TST-COMM-005`
 - FULL-profile HIL fixture dependent: `TST-HIL-ST-101` .. `TST-HIL-ST-106`
 
 ## Completion Notes
@@ -371,3 +371,6 @@ Items requiring extraction or fixture before implementation:
 - Milestone 3 complete (`commit 819cac8`):
   - Host-test IDs: `TST-COMM-002`, `TST-COMM-003` (retained parser guardrails)
   - HIL self-test IDs: `1004`, `1005`, `1006`, `1030`
+- Milestone 4 complete (`commit 2dd4ff1`):
+  - Host-test IDs: `TST-ORCH-001`, `TST-NVM-001`, `TST-PR-001`, `TST-STEP-001`
+  - HIL self-test IDs: SAFE regression gate rerun only (`1001`-`1006`, `1010`-`1013`, `1020`, `1021`, `1030`)

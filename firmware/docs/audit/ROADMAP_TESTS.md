@@ -89,6 +89,8 @@ Status: Completed (`commit 819cac8`)
 
 ## Milestone 4: Extraction Prerequisites for Deeper Coverage
 
+Status: Completed (`commit 2dd4ff1`)
+
 ### Test IDs completed
 - Host-test IDs:
   - `TST-ORCH-001`
