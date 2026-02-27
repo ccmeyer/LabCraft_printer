@@ -2,7 +2,8 @@ from PySide6.QtCore import QObject, Signal
 from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
-from dfu_update import DfuUpdateWorker, reset_board
+from dfu_update import reset_board
+from dfu_update_worker import DfuUpdateWorker
 from pathlib import Path
 
 import time
@@ -1756,3 +1757,5 @@ class Controller(QObject):
             target_droplets=self._seq_params.get("step3_target_droplets", 10),
             bridge_spacing=self._seq_params.get("step3_bridge_spacing_steps", 50),
         )
+
+

@@ -5,7 +5,8 @@ from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtWidgets import QApplication
 
-from dfu_update import DfuUpdateWorker, reset_board, update_firmware
+from dfu_update import reset_board, update_firmware
+from dfu_update_worker import DfuUpdateWorker
 
 from collections import deque
 
@@ -2145,3 +2146,5 @@ class Machine(QObject):
         #     self.balance_droplets.append([num_droplets,pressure])
         self.check_param_limits(num_droplets,1,1000)
         self.print_droplets(num_droplets,handler=self.calibrate_pressure_handler,manual=manual)
+
+
