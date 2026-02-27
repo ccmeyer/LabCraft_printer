@@ -256,11 +256,12 @@ TEST(CommCodec, ClearAckWithSeq32Roundtrips) {
     assertAckRoundtrip(0xF7, 0x10, 0x12345678u);
 }
 
-TEST(CommCodec, SelftestStartWithProfileRunIdTimeoutParsesCoreFields) {
+TEST(CommCodec, SelftestStartWithFullProfileMirroredIntoP1ParsesProfileField) {
     static const uint8_t payload[] = {
         0xFA, 0x10,
         CommCodec::TAG_SEQ32, 0x04, 0x78, 0x56, 0x34, 0x12,
-        0x20, 0x01, 0x00,             // TAG_PROFILE
+        CommCodec::TAG_P1, 0x01, 0x01,       // mirrored FULL profile for firmware decode
+        0x20, 0x01, 0x01,                    // TAG_PROFILE
         0x21, 0x04, 0x78, 0x56, 0x34, 0x12, // TAG_RUN_ID
         0x22, 0x04, 0x30, 0x75, 0x00, 0x00  // TAG_TIMEOUT_MS = 30000
     };
@@ -275,6 +276,8 @@ TEST(CommCodec, SelftestStartWithProfileRunIdTimeoutParsesCoreFields) {
     const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
     UNSIGNED_LONGS_EQUAL(0xFAu, decoded.cmd);
     UNSIGNED_LONGS_EQUAL(0x10u, decoded.seq8);
+    UNSIGNED_LONGS_EQUAL(0x01u, decoded.p1);
+    UNSIGNED_LONGS_EQUAL(1u, decoded.p1Len);
     CHECK_TRUE(decoded.hasSeq32);
     UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
 }

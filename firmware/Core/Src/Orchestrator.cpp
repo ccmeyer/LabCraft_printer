@@ -12,6 +12,7 @@
 #include "Gripper.h"
 #include "Printer.h"
 #include "PressureRegulator.h"
+#include "PressureSensor.h"
 #include "Logger.h"
 #include "Gantry.h"
 #include "Comm.h"
@@ -901,10 +902,70 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  };
 
 				  uint32_t statusChunk0Seen = 0;
-				  uint32_t statusChunk1Seen = 0;
-				  uint32_t statusAlternationErrors = 0;
-				  uint32_t statusPeriodMsAvg = 0;
-				  uint32_t statusPeriodMsMaxJitter = 0;
+					  uint32_t statusChunk1Seen = 0;
+					  uint32_t statusAlternationErrors = 0;
+					  uint32_t statusPeriodMsAvg = 0;
+					  uint32_t statusPeriodMsMaxJitter = 0;
+					  const bool fullProfile = (cmd.p1Len > 0u) && (cmd.p1u() == 1u);
+					  bool fullHomePass = false;
+
+					  auto absDiff32 = [](int32_t a, int32_t b) -> uint32_t {
+					    const int64_t diff = static_cast<int64_t>(a) - static_cast<int64_t>(b);
+					    return static_cast<uint32_t>((diff < 0) ? -diff : diff);
+					  };
+
+					  auto isHomedPosition = [](int32_t pos) -> bool {
+					    return (pos >= 80) && (pos <= 140);
+					  };
+
+					  auto waitPressureReady = [&](PressureRegulator& reg,
+					                               uint8_t sensorPort,
+					                               int32_t targetPressure,
+					                               bool stepUp,
+					                               uint32_t timeoutMs,
+					                               uint32_t& settleTimeMs,
+					                               uint32_t& overshoot,
+					                               uint32_t& steadyStateError) {
+					    PressureSensor* sensor = PressureSensor::instance();
+					    if (!sensor) {
+					      settleTimeMs = timeoutMs;
+					      overshoot = 0u;
+					      steadyStateError = 0u;
+					      return false;
+					    }
+
+					    const uint32_t startMs = HAL_GetTick();
+					    int32_t peakPressure = sensor->getPressure(sensorPort);
+					    int32_t troughPressure = peakPressure;
+
+					    while ((HAL_GetTick() - startMs) < timeoutMs) {
+					      const int32_t pressure = sensor->getPressure(sensorPort);
+					      if (pressure > peakPressure) peakPressure = pressure;
+					      if (pressure < troughPressure) troughPressure = pressure;
+					      if (reg.isPressureOk()) {
+					        break;
+					      }
+					      if (_selfTestAbortRequested) {
+					        break;
+					      }
+					      vTaskDelay(pdMS_TO_TICKS(20));
+					    }
+
+					    const uint32_t elapsedMs = HAL_GetTick() - startMs;
+					    settleTimeMs = elapsedMs;
+					    const int32_t finalPressure = sensor->getPressure(sensorPort);
+					    steadyStateError = absDiff32(finalPressure, targetPressure);
+					    if (stepUp) {
+					      overshoot = (peakPressure > targetPressure)
+					                  ? static_cast<uint32_t>(peakPressure - targetPressure)
+					                  : 0u;
+					    } else {
+					      overshoot = (troughPressure < targetPressure)
+					                  ? static_cast<uint32_t>(targetPressure - troughPressure)
+					                  : 0u;
+					    }
+					    return reg.isPressureOk();
+					  };
 
 				  {
 				    static const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
@@ -1054,32 +1115,203 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
 						  }
 
-					  {
-					    if (!runOne(2001,
-					                "motion_home_cycle_full",
-					                true,
-					                "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
-					      goto selftest_done;
-					    }
-					  }
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2001,
+						                  "motion_home_cycle_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      static constexpr uint32_t kHomeFastHz = 30000u;
+						      static constexpr uint32_t kHomeSlowHz = 3000u;
+						      static constexpr uint32_t kHomeBackoffSteps = 400u;
+						      uint32_t homeSuccessAxes = 0u;
+						      const uint32_t expectedAxes = 2u + static_cast<uint32_t>(LC_PRESSURE_PORTS);
+						      const uint32_t homeStartMs = HAL_GetTick();
 
-					  {
-					    if (!runOne(2002,
-					                "motion_absolute_move_bounds_full",
-					                true,
-					                "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
-					      goto selftest_done;
-					    }
-					  }
+						      Stepper::stepperX()->enableMotor();
+						      Stepper::stepperY()->enableMotor();
+						      Stepper::stepperP()->enableMotor();
+						#if (LC_PRESSURE_PORTS > 1)
+						      Stepper::stepperR()->enableMotor();
+						#endif
 
-					  {
-					    if (!runOne(2003,
-					                "pressure_regulator_step_response_full",
-					                true,
-					                "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
-					      goto selftest_done;
-					    }
-					  }
+						      MX_STEPPERX_Home(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						      MX_STEPPERY_Home(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						      PressureRegulator::regP().homeWithValve(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						#if (LC_PRESSURE_PORTS > 1)
+						      PressureRegulator::regR().homeWithValve(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						#endif
+
+						      if (isHomedPosition(Stepper::stepperX()->getPosition())) homeSuccessAxes++;
+						      if (isHomedPosition(Stepper::stepperY()->getPosition())) homeSuccessAxes++;
+						      if (isHomedPosition(Stepper::stepperP()->getPosition())) homeSuccessAxes++;
+						#if (LC_PRESSURE_PORTS > 1)
+						      if (isHomedPosition(Stepper::stepperR()->getPosition())) homeSuccessAxes++;
+						#endif
+
+						      const uint32_t homeTimeMs = HAL_GetTick() - homeStartMs;
+						      const uint32_t limitHits = homeSuccessAxes;
+						      const bool homePass = (homeSuccessAxes == expectedAxes);
+						      fullHomePass = homePass;
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "home_time_ms=%lu;home_success_axes=%lu;limit_hits=%lu",
+						               static_cast<unsigned long>(homeTimeMs),
+						               static_cast<unsigned long>(homeSuccessAxes),
+						               static_cast<unsigned long>(limitHits));
+						      if (!runOne(2001, "motion_home_cycle_full", homePass, metrics)) goto selftest_done;
+						    }
+						  }
+
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2002,
+						                  "motion_absolute_move_bounds_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else if (!fullHomePass) {
+						      if (!runOne(2002,
+						                  "motion_absolute_move_bounds_full",
+						                  false,
+						                  "target_x=400;target_y=400;target_z=0;final_error_steps=0;bound_violation=1")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      static constexpr int32_t kTargetX = 400;
+						      static constexpr int32_t kTargetY = 400;
+						      static constexpr int32_t kTargetZ = 0;
+						      static constexpr uint32_t kMoveFeedHz = 4000u;
+						      const int32_t homeX = Stepper::stepperX()->getPosition();
+						      const int32_t homeY = Stepper::stepperY()->getPosition();
+						      bool boundViolation = false;
+						      uint32_t finalErrorSteps = 0u;
+
+						      xEventGroupClearBits(_doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+						      Gantry::instance()->moveTo(kTargetX, kTargetY, kMoveFeedHz);
+						      const bool reachedTarget = waitForBit(BIT_STEPPER1_DONE) && waitForBit(BIT_STEPPER2_DONE);
+						      const GantryPosition targetPos = Gantry::instance()->getPosition();
+						      const uint32_t targetErrorX = absDiff32(targetPos.x, kTargetX);
+						      const uint32_t targetErrorY = absDiff32(targetPos.y, kTargetY);
+						      finalErrorSteps = (targetErrorX > targetErrorY) ? targetErrorX : targetErrorY;
+						      boundViolation = (targetPos.x < 0) || (targetPos.y < 0) ||
+						                       (targetPos.x > (kTargetX + 50)) || (targetPos.y > (kTargetY + 50));
+
+						      xEventGroupClearBits(_doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+						      Gantry::instance()->moveTo(homeX, homeY, kMoveFeedHz);
+						      const bool returnedHome = waitForBit(BIT_STEPPER1_DONE) && waitForBit(BIT_STEPPER2_DONE);
+						      const GantryPosition returnPos = Gantry::instance()->getPosition();
+						      const uint32_t returnErrorX = absDiff32(returnPos.x, homeX);
+						      const uint32_t returnErrorY = absDiff32(returnPos.y, homeY);
+						      const uint32_t returnError = (returnErrorX > returnErrorY) ? returnErrorX : returnErrorY;
+						      if (returnError > finalErrorSteps) finalErrorSteps = returnError;
+						      boundViolation = boundViolation ||
+						                       (returnPos.x < 0) || (returnPos.y < 0) ||
+						                       (returnPos.x > (kTargetX + 50)) || (returnPos.y > (kTargetY + 50));
+
+						      const bool movePass = reachedTarget && returnedHome && !boundViolation && (finalErrorSteps <= 4u);
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "target_x=%ld;target_y=%ld;target_z=%ld;final_error_steps=%lu;bound_violation=%u",
+						               static_cast<long>(kTargetX),
+						               static_cast<long>(kTargetY),
+						               static_cast<long>(kTargetZ),
+						               static_cast<unsigned long>(finalErrorSteps),
+						               static_cast<unsigned>(boundViolation ? 1u : 0u));
+						      if (!runOne(2002, "motion_absolute_move_bounds_full", movePass, metrics)) goto selftest_done;
+						    }
+						  }
+
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2003,
+						                  "pressure_regulator_step_response_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else if (!fullHomePass) {
+						      if (!runOne(2003,
+						                  "pressure_regulator_step_response_full",
+						                  false,
+						                  "target_pressure=0;settle_time_ms=0;overshoot=0;steady_state_error=0")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      static constexpr uint32_t kBaselineTimeoutMs = 3000u;
+						      static constexpr uint32_t kSettleTimeoutMs = 4000u;
+						      static constexpr int32_t kPressureDelta = 200;
+						      PressureSensor* sensor = PressureSensor::instance();
+						      PressureRegulator& reg = PressureRegulator::regP();
+						      const int32_t baselineTarget = static_cast<int32_t>(reg.getTarget());
+						      int32_t targetPressure = baselineTarget + kPressureDelta;
+						      bool stepUp = true;
+						      if (targetPressure > 5600) {
+						        targetPressure = baselineTarget - kPressureDelta;
+						        stepUp = false;
+						      }
+						      uint32_t settleTimeMs = kSettleTimeoutMs;
+						      uint32_t overshoot = 0u;
+						      uint32_t steadyStateError = 0u;
+						      bool pressurePass = false;
+
+						      if (sensor && targetPressure != baselineTarget) {
+						        reg.start();
+						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+						        uint32_t baselineSettleMs = 0u;
+						        uint32_t baselineOvershoot = 0u;
+						        uint32_t baselineError = 0u;
+						        const bool baselineReady = waitPressureReady(reg,
+						                                                0u,
+						                                                baselineTarget,
+						                                                true,
+						                                                kBaselineTimeoutMs,
+						                                                baselineSettleMs,
+						                                                baselineOvershoot,
+						                                                baselineError);
+						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+						        reg.setTargetSafe(targetPressure);
+						        targetPressure = static_cast<int32_t>(reg.getTarget());
+						        pressurePass = baselineReady &&
+						                       waitPressureReady(reg,
+						                                         0u,
+						                                         targetPressure,
+						                                         stepUp,
+						                                         kSettleTimeoutMs,
+						                                         settleTimeMs,
+						                                         overshoot,
+						                                         steadyStateError);
+						        xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
+						        reg.setTargetSafe(baselineTarget);
+						        uint32_t restoreSettleMs = 0u;
+						        uint32_t restoreOvershoot = 0u;
+						        uint32_t restoreError = 0u;
+						        (void)waitPressureReady(reg,
+						                                0u,
+						                                baselineTarget,
+						                                !stepUp,
+						                                kSettleTimeoutMs,
+						                                restoreSettleMs,
+						                                restoreOvershoot,
+						                                restoreError);
+						        reg.pause();
+						      }
+
+						      pressurePass = pressurePass && (steadyStateError <= 120u) && (overshoot <= 300u);
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "target_pressure=%ld;settle_time_ms=%lu;overshoot=%lu;steady_state_error=%lu",
+						               static_cast<long>(targetPressure),
+						               static_cast<unsigned long>(settleTimeMs),
+						               static_cast<unsigned long>(overshoot),
+						               static_cast<unsigned long>(steadyStateError));
+						      if (!runOne(2003, "pressure_regulator_step_response_full", pressurePass, metrics)) goto selftest_done;
+						    }
+						  }
 		
 						  selftest_done:
 						  uint8_t donePayload[64] = {0};

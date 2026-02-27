@@ -14,6 +14,7 @@ except ImportError:
 
 START_BYTE = 0xAA
 
+TAG_P1 = 0x01
 CMD_HELLO = 0xF3
 CMD_HELLO_ACK = 0xF4
 CMD_GOODBYE = 0xF5
@@ -170,8 +171,9 @@ def run(args: argparse.Namespace) -> int:
         return 3
 
     profile = args.profile.upper()
-    if profile != "SAFE":
-        print(f"Unsupported profile '{profile}'. Only SAFE is currently supported.")
+    profile_map = {"SAFE": 0, "FULL": 1}
+    if profile not in profile_map:
+        print(f"Unsupported profile '{profile}'. Supported profiles: SAFE, FULL.")
         return 3
 
     run_id = int(time.time() * 1000) & 0xFFFFFFFF
@@ -203,8 +205,12 @@ def run(args: argparse.Namespace) -> int:
         if not got_hello_ack:
             print("No HELLO_ACK before self-test start.")
 
-        profile_val = 0
-        tlvs = bytes([TAG_PROFILE, 1, profile_val]) + bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
+        profile_val = profile_map[profile]
+        # Mirror profile into TAG_P1 so current firmware decode can branch without
+        # changing CommCodec TLV parsing rules. TAG_PROFILE remains authoritative.
+        tlvs = bytes([TAG_P1, 1, profile_val])
+        tlvs += bytes([TAG_PROFILE, 1, profile_val])
+        tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
         tlvs += bytes([TAG_TIMEOUT_MS, 4]) + int(args.timeout_ms).to_bytes(4, "little")
         ser.write(build_control(CMD_SELFTEST_START, 2, run_id, tlvs))
 
@@ -374,7 +380,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Run LabCraft SAFE firmware self-test and write JSON report.")
+    p = argparse.ArgumentParser(description="Run LabCraft firmware self-test and write JSON report.")
     p.add_argument("--port", default="/dev/ttyAMA0")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--profile", default="SAFE")
