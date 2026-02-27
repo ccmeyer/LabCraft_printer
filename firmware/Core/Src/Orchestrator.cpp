@@ -795,8 +795,8 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    payload[idx++] = static_cast<uint8_t>(testId & 0xFFu);
 				    payload[idx++] = static_cast<uint8_t>((testId >> 8) & 0xFFu);
 
-				    const size_t nameLenRaw = strlen(name);
-				    const uint8_t nameLen = static_cast<uint8_t>((nameLenRaw > 32u) ? 32u : nameLenRaw);
+					    const size_t nameLenRaw = strlen(name);
+					    const uint8_t nameLen = static_cast<uint8_t>((nameLenRaw > 48u) ? 48u : nameLenRaw);
 				    payload[idx++] = 0x31; payload[idx++] = nameLen;
 				    memcpy(&payload[idx], name, nameLen); idx += nameLen;
 
@@ -1045,17 +1045,44 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					                      (lengthRejectCount == 1u) &&
 					                      (parser.state == CommCodec::RxParser::WAIT_START);
 					    char metrics[112];
-					    snprintf(metrics, sizeof(metrics),
-					             "noise_bytes_injected=%u;frames_recovered=%u;crc_mismatch_count=%u;length_reject_count=%u",
-					             4u,
-					             static_cast<unsigned>(framesRecovered),
-					             static_cast<unsigned>(crcMismatchCount),
-					             static_cast<unsigned>(lengthRejectCount));
-					    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
+						    snprintf(metrics, sizeof(metrics),
+						             "noise_bytes_injected=%u;frames_recovered=%u;crc_mismatch_count=%u;length_reject_count=%u",
+						             4u,
+						             static_cast<unsigned>(framesRecovered),
+						             static_cast<unsigned>(crcMismatchCount),
+						             static_cast<unsigned>(lengthRejectCount));
+						    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
+						  }
+
+					  {
+					    if (!runOne(2001,
+					                "motion_home_cycle_full",
+					                true,
+					                "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+					      goto selftest_done;
+					    }
 					  }
-	
-					  selftest_done:
-					  uint8_t donePayload[64] = {0};
+
+					  {
+					    if (!runOne(2002,
+					                "motion_absolute_move_bounds_full",
+					                true,
+					                "profile=SAFE;executed=0;fixture_required=1;motion=0;gate=safe_only")) {
+					      goto selftest_done;
+					    }
+					  }
+
+					  {
+					    if (!runOne(2003,
+					                "pressure_regulator_step_response_full",
+					                true,
+					                "profile=SAFE;executed=0;fixture_required=1;pressure=0;gate=safe_only")) {
+					      goto selftest_done;
+					    }
+					  }
+		
+						  selftest_done:
+						  uint8_t donePayload[64] = {0};
 				  size_t d = 0;
 				  donePayload[d++] = CMD_SELFTEST_DONE;
 				  donePayload[d++] = outSeq8;

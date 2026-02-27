@@ -303,6 +303,50 @@ TEST(CommCodec, SelftestDoneSummaryTlvsDoNotBreakDecoding) {
     UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
 }
 
+TEST(CommCodec, SelftestResultWithMilestone5SafeGateMetricsRoundtrips) {
+    static const char name[] = "m5_gate";
+    static const char metrics[] = "profile=SAFE";
+    uint8_t payload[96] = {0};
+    size_t idx = 0;
+    payload[idx++] = 0xFB;
+    payload[idx++] = 0x10;
+    payload[idx++] = CommCodec::TAG_SEQ32;
+    payload[idx++] = 0x04;
+    payload[idx++] = 0x78;
+    payload[idx++] = 0x56;
+    payload[idx++] = 0x34;
+    payload[idx++] = 0x12;
+    payload[idx++] = 0x30;
+    payload[idx++] = 0x02;
+    payload[idx++] = 0xD1;
+    payload[idx++] = 0x07;
+    payload[idx++] = 0x31;
+    payload[idx++] = static_cast<uint8_t>(strlen(name));
+    memcpy(&payload[idx], name, strlen(name));
+    idx += strlen(name);
+    payload[idx++] = 0x32;
+    payload[idx++] = 0x01;
+    payload[idx++] = 0x01;
+    payload[idx++] = 0x33;
+    payload[idx++] = static_cast<uint8_t>(strlen(metrics));
+    memcpy(&payload[idx], metrics, strlen(metrics));
+    idx += strlen(metrics);
+
+    uint8_t frame[96] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, idx, frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0xFBu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x10u, decoded.seq8);
+    CHECK_TRUE(decoded.hasSeq32);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
+}
+
 TEST_GROUP(CommCodecRecovery)
 {
 };
