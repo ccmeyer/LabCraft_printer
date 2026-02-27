@@ -468,7 +468,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         bridge_v.addWidget(self.bridge_reagent_label)
         bridge_v.addWidget(self.bridge_design_dv_label)
         bridge_v.addWidget(self.bridge_design_targets_label)
-        bridge_v.addWidget(self.bridge_design_stock_label)
+        # bridge_v.addWidget(self.bridge_design_stock_label)
         bridge_v.addLayout(preview_h)
         bridge_v.addWidget(self.bridge_table)
         bridge_v.addWidget(self.bridge_apply_btn)
@@ -478,7 +478,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.log_label = QtWidgets.QLabel("Calibration Log")
         self.log_label.setStyleSheet("font-weight: bold;")
-        self.analysis_layout.addWidget(self.log_label)
+        # self.analysis_layout.addWidget(self.log_label)
 
         self.stage_table = QtWidgets.QTableWidget()
         self.stage_table.setColumnCount(2)
@@ -491,7 +491,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stage_table.horizontalHeader().setStretchLastSection(True)
         self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
         self.stage_table.setMinimumHeight(100)
-        self.analysis_layout.addWidget(self.stage_table)
+        # self.analysis_layout.addWidget(self.stage_table)
 
         # Add RIGHT to main layout; give it stretch to expand
         right_container = QtWidgets.QWidget()
