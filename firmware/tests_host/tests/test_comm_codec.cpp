@@ -394,6 +394,57 @@ TEST(CommCodec, SelftestResultWithMilestone6MetricsRoundtrips) {
     UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
 }
 
+TEST(CommCodec, SelftestResultWithRtosMemoryHeadroomMetricsEncodesLongHostFrame) {
+    static const char name[] = "rtos_mem";
+    static const char metrics[] = "heap_now=8192;heap_min=6144;stk_min=96;stk_task=Status;task_n=9;core_miss=0;preg_n=2;trunc=0";
+    uint8_t payload[160] = {0};
+    size_t idx = 0;
+    payload[idx++] = 0xFB;
+    payload[idx++] = 0x10;
+    payload[idx++] = CommCodec::TAG_SEQ32;
+    payload[idx++] = 0x04;
+    payload[idx++] = 0x78;
+    payload[idx++] = 0x56;
+    payload[idx++] = 0x34;
+    payload[idx++] = 0x12;
+    payload[idx++] = 0x30;
+    payload[idx++] = 0x02;
+    payload[idx++] = 0x10;
+    payload[idx++] = 0x04;
+    payload[idx++] = 0x31;
+    payload[idx++] = static_cast<uint8_t>(strlen(name));
+    memcpy(&payload[idx], name, strlen(name));
+    idx += strlen(name);
+    payload[idx++] = 0x32;
+    payload[idx++] = 0x01;
+    payload[idx++] = 0x01;
+    payload[idx++] = 0x33;
+    payload[idx++] = static_cast<uint8_t>(strlen(metrics));
+    memcpy(&payload[idx], metrics, strlen(metrics));
+    idx += strlen(metrics);
+    payload[idx++] = 0x34;
+    payload[idx++] = 0x04;
+    payload[idx++] = 0x78;
+    payload[idx++] = 0x56;
+    payload[idx++] = 0x34;
+    payload[idx++] = 0x12;
+
+    uint8_t frame[192] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(idx), frame, sizeof(frame));
+    UNSIGNED_LONGS_EQUAL(idx + 4u, frameLen);
+    BYTES_EQUAL(0xAA, frame[0]);
+    BYTES_EQUAL(static_cast<uint8_t>(idx), frame[1]);
+    const uint16_t crc = CommCodec::crc16(payload, static_cast<uint16_t>(idx));
+    BYTES_EQUAL(static_cast<uint8_t>(crc & 0xFFu), frame[2u + idx]);
+    BYTES_EQUAL(static_cast<uint8_t>((crc >> 8) & 0xFFu), frame[3u + idx]);
+
+    const auto decoded = CommCodec::decodeCommand(payload, static_cast<uint8_t>(idx));
+    UNSIGNED_LONGS_EQUAL(0xFBu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x10u, decoded.seq8);
+    CHECK_TRUE(decoded.hasSeq32);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
+}
+
 TEST_GROUP(CommCodecRecovery)
 {
 };

@@ -18,7 +18,9 @@
 #include "Comm.h"
 #include "CommCodec.h"
 #include "cmsis_os.h"         // for portMAX_DELAY, pdTRUE, etc.
+#include "task.h"
 #include <cstdio>
+#include <cstring>
 
 #if LC_HAS_IMAGING > 0
   #include "Flash.h"
@@ -56,7 +58,7 @@ void Orchestrator::begin() {
 
   xTaskCreate(
     _taskEntry, "Orch",
-    512,    this,
+    768,    this,
     tskIDLE_PRIORITY + 2,
     &_taskHandle
   );
@@ -804,8 +806,8 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    payload[idx++] = 0x32; payload[idx++] = 1;
 				    payload[idx++] = pass ? 1u : 0u;
 
-				    const size_t metricsLenRaw = strlen(metrics);
-				    const uint8_t metricsLen = static_cast<uint8_t>((metricsLenRaw > 96u) ? 96u : metricsLenRaw);
+					    const size_t metricsLenRaw = strlen(metrics);
+					    const uint8_t metricsLen = static_cast<uint8_t>((metricsLenRaw > 96u) ? 96u : metricsLenRaw);
 				    payload[idx++] = 0x33; payload[idx++] = metricsLen;
 				    memcpy(&payload[idx], metrics, metricsLen); idx += metricsLen;
 
@@ -1134,8 +1136,8 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					    if (!runOne(1006, "fw_build_info", strlen(kBuildInfo) > 0u, metrics)) goto selftest_done;
 					  }
 
-					  {
-					    static const uint8_t recoveryStream[] = {
+						  {
+						    static const uint8_t recoveryStream[] = {
 					      0x00, 0x7E, 0x55, 0xAB,
 					      0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80,
 					      0xAA, 0x3F,
@@ -1168,7 +1170,82 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						             static_cast<unsigned>(framesRecovered),
 						             static_cast<unsigned>(crcMismatchCount),
 						             static_cast<unsigned>(lengthRejectCount));
-						    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
+							    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
+							  }
+
+						  {
+						    static constexpr size_t kSelfTestTaskSnapshotCap = 16u;
+						    static constexpr uint32_t kSelfTestHeapNowMinBytes = 4096u;
+						    static constexpr uint32_t kSelfTestHeapMinMinBytes = 3072u;
+						    static constexpr uint16_t kSelfTestStackMinWords = 32u;
+						    static TaskStatus_t taskStats[kSelfTestTaskSnapshotCap];
+						    const UBaseType_t taskCount = uxTaskGetNumberOfTasks();
+						    const UBaseType_t captured = uxTaskGetSystemState(taskStats, kSelfTestTaskSnapshotCap, nullptr);
+						    const bool trunc = (taskCount > kSelfTestTaskSnapshotCap) || ((captured == 0u) && (taskCount > 0u));
+						    bool hasOrch = false;
+						    bool hasStatus = false;
+						    bool hasPrinter = false;
+						    bool hasPressure = false;
+						    bool hasLogStats = false;
+						    uint32_t pregCount = 0u;
+						    uint16_t stackMinWords = 0xFFFFu;
+						    char stackMinTask[12] = "none";
+						    for (UBaseType_t i = 0; i < captured; ++i) {
+						      const char* taskName = taskStats[i].pcTaskName;
+						      if (taskName == nullptr) {
+						        continue;
+						      }
+						      bool trackForMin = false;
+						      if (strcmp(taskName, "Orch") == 0) {
+						        hasOrch = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "Status") == 0) {
+						        hasStatus = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "PRNT") == 0) {
+						        hasPrinter = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "Pressure") == 0) {
+						        hasPressure = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "LogStats") == 0) {
+						        hasLogStats = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "PReg") == 0) {
+						        pregCount++;
+						        trackForMin = true;
+						      }
+						      if (trackForMin && (taskStats[i].usStackHighWaterMark < stackMinWords)) {
+						        stackMinWords = taskStats[i].usStackHighWaterMark;
+						        snprintf(stackMinTask, sizeof(stackMinTask), "%s", taskName);
+						      }
+						    }
+						    const uint32_t heapNow = xPortGetFreeHeapSize();
+						    const uint32_t heapMin = xPortGetMinimumEverFreeHeapSize();
+						    const uint32_t coreMissing = (hasOrch ? 0u : 1u) +
+						                                 (hasStatus ? 0u : 1u) +
+						                                 (hasPrinter ? 0u : 1u) +
+						                                 (hasPressure ? 0u : 1u) +
+						                                 (hasLogStats ? 0u : 1u);
+						    const bool pass = (heapNow >= kSelfTestHeapNowMinBytes) &&
+						                      (heapMin >= kSelfTestHeapMinMinBytes) &&
+						                      (stackMinWords >= kSelfTestStackMinWords) &&
+						                      (coreMissing == 0u) &&
+						                      !trunc &&
+						                      (pregCount == static_cast<uint32_t>(LC_PRESSURE_PORTS));
+						    char metrics[160];
+						    snprintf(metrics,
+						             sizeof(metrics),
+						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u",
+						             static_cast<unsigned long>(heapNow),
+						             static_cast<unsigned long>(heapMin),
+						             static_cast<unsigned>(stackMinWords),
+						             stackMinTask,
+						             static_cast<unsigned>(captured),
+						             static_cast<unsigned long>(coreMissing),
+						             static_cast<unsigned long>(pregCount),
+						             trunc ? 1u : 0u);
+						    if (!runOne(1040, "rtos_memory_headroom_safe", pass, metrics)) goto selftest_done;
 						  }
 
 						  {
