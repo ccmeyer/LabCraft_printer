@@ -177,6 +177,9 @@ def run(args: argparse.Namespace) -> int:
         return 3
 
     run_id = int(time.time() * 1000) & 0xFFFFFFFF
+    effective_timeout_ms = int(args.timeout_ms)
+    if profile == "FULL" and effective_timeout_ms < 90000:
+        effective_timeout_ms = 90000
     started_at = now_iso()
     results = []
     host_checks = []
@@ -211,10 +214,10 @@ def run(args: argparse.Namespace) -> int:
         tlvs = bytes([TAG_P1, 1, profile_val])
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
         tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
-        tlvs += bytes([TAG_TIMEOUT_MS, 4]) + int(args.timeout_ms).to_bytes(4, "little")
+        tlvs += bytes([TAG_TIMEOUT_MS, 4]) + effective_timeout_ms.to_bytes(4, "little")
         ser.write(build_control(CMD_SELFTEST_START, 2, run_id, tlvs))
 
-        deadline = time.monotonic() + (args.timeout_ms / 1000.0)
+        deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
         done_seen = False
         while time.monotonic() < deadline:
             chunk = ser.read(256)

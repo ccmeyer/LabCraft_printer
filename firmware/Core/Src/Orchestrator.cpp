@@ -964,7 +964,63 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					                  ? static_cast<uint32_t>(targetPressure - troughPressure)
 					                  : 0u;
 					    }
-					    return reg.isPressureOk();
+						    return reg.isPressureOk();
+						  };
+
+						  auto waitBitsWithTimeout = [&](EventBits_t bits, uint32_t timeoutMs) {
+						    const TickType_t chunkTicks = pdMS_TO_TICKS(50);
+						    const TickType_t timeoutTicks = pdMS_TO_TICKS(timeoutMs);
+						    TickType_t waitedTicks = 0;
+						    while (waitedTicks < timeoutTicks) {
+						      if (_selfTestAbortRequested) {
+						        return false;
+						      }
+						      const TickType_t waitTicks = ((timeoutTicks - waitedTicks) > chunkTicks) ? chunkTicks : (timeoutTicks - waitedTicks);
+						      const EventBits_t result = xEventGroupWaitBits(
+						          _doneEvents,
+						          bits,
+						          pdFALSE,
+						          pdTRUE,
+						          waitTicks);
+						      if ((result & bits) == bits) {
+						        return true;
+						      }
+						      waitedTicks += waitTicks;
+						    }
+						    return false;
+						  };
+
+					  auto areMotorsDisabled = [&]() -> bool {
+					    const bool xDisabled = HAL_GPIO_ReadPin(Stepper::stepperX()->enPort(), Stepper::stepperX()->enPin()) == GPIO_PIN_SET;
+					    const bool yDisabled = HAL_GPIO_ReadPin(Stepper::stepperY()->enPort(), Stepper::stepperY()->enPin()) == GPIO_PIN_SET;
+					    const bool zDisabled = HAL_GPIO_ReadPin(Stepper::stepperZ()->enPort(), Stepper::stepperZ()->enPin()) == GPIO_PIN_SET;
+					    const bool pDisabled = HAL_GPIO_ReadPin(Stepper::stepperP()->enPort(), Stepper::stepperP()->enPin()) == GPIO_PIN_SET;
+					#if (LC_PRESSURE_PORTS > 1)
+					    const bool rDisabled = HAL_GPIO_ReadPin(Stepper::stepperR()->enPort(), Stepper::stepperR()->enPin()) == GPIO_PIN_SET;
+					    return xDisabled && yDisabled && zDisabled && pDisabled && rDisabled;
+					#else
+					    return xDisabled && yDisabled && zDisabled && pDisabled;
+					#endif
+					  };
+
+					  auto areRegulatorsStopped = [&]() -> bool {
+					    const bool pStopped = !PressureRegulator::regP().isActive();
+					#if (LC_PRESSURE_PORTS > 1)
+					    const bool rStopped = !PressureRegulator::regR().isActive();
+					    return pStopped && rStopped;
+					#else
+					    return pStopped;
+					#endif
+					  };
+
+					  auto areValvesClosed = [&]() -> bool {
+					    const bool pClosed = !PressureRegulator::regP().isValveOpen();
+					#if (LC_PRESSURE_PORTS > 1)
+					    const bool rClosed = !PressureRegulator::regR().isValveOpen();
+					    return pClosed && rClosed;
+					#else
+					    return pClosed;
+					#endif
 					  };
 
 				  {
@@ -1127,23 +1183,28 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						      static constexpr uint32_t kHomeFastHz = 30000u;
 						      static constexpr uint32_t kHomeSlowHz = 3000u;
 						      static constexpr uint32_t kHomeBackoffSteps = 400u;
+						      static constexpr uint32_t kHomeTimeoutMs = 20000u;
 						      uint32_t homeSuccessAxes = 0u;
 						      const uint32_t expectedAxes = 2u + static_cast<uint32_t>(LC_PRESSURE_PORTS);
 						      const uint32_t homeStartMs = HAL_GetTick();
+						      EventBits_t homeBits = BIT_HOME_X_DONE | BIT_HOME_Y_DONE | BIT_HOME_P_DONE;
 
 						      Stepper::stepperX()->enableMotor();
 						      Stepper::stepperY()->enableMotor();
 						      Stepper::stepperP()->enableMotor();
 						#if (LC_PRESSURE_PORTS > 1)
 						      Stepper::stepperR()->enableMotor();
+						      homeBits |= BIT_HOME_R_DONE;
 						#endif
 
-						      MX_STEPPERX_Home(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
-						      MX_STEPPERY_Home(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
-						      PressureRegulator::regP().homeWithValve(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						      xEventGroupClearBits(_doneEvents, homeBits);
+						      startHomeAsync(Stepper::stepperX(), kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps, BIT_HOME_X_DONE);
+						      startHomeAsync(Stepper::stepperY(), kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps, BIT_HOME_Y_DONE);
+						      startRegHomeAsync(&PressureRegulator::regP(), kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps, BIT_HOME_P_DONE);
 						#if (LC_PRESSURE_PORTS > 1)
-						      PressureRegulator::regR().homeWithValve(kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps);
+						      startRegHomeAsync(&PressureRegulator::regR(), kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps, BIT_HOME_R_DONE);
 						#endif
+						      const bool homeCompleted = waitBitsWithTimeout(homeBits, kHomeTimeoutMs);
 
 						      if (isHomedPosition(Stepper::stepperX()->getPosition())) homeSuccessAxes++;
 						      if (isHomedPosition(Stepper::stepperY()->getPosition())) homeSuccessAxes++;
@@ -1154,7 +1215,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 
 						      const uint32_t homeTimeMs = HAL_GetTick() - homeStartMs;
 						      const uint32_t limitHits = homeSuccessAxes;
-						      const bool homePass = (homeSuccessAxes == expectedAxes);
+						      const bool homePass = homeCompleted && (homeSuccessAxes == expectedAxes);
 						      fullHomePass = homePass;
 						      char metrics[96];
 						      snprintf(metrics, sizeof(metrics),
@@ -1163,6 +1224,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						               static_cast<unsigned long>(homeSuccessAxes),
 						               static_cast<unsigned long>(limitHits));
 						      if (!runOne(2001, "motion_home_cycle_full", homePass, metrics)) goto selftest_done;
+						      if (!homePass) goto selftest_done;
 						    }
 						  }
 
@@ -1312,8 +1374,153 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						      if (!runOne(2003, "pressure_regulator_step_response_full", pressurePass, metrics)) goto selftest_done;
 						    }
 						  }
-		
-						  selftest_done:
+
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2004,
+						                  "valve_actuation_sequence_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;valves=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else if (!fullHomePass) {
+						      if (!runOne(2004,
+						                  "valve_actuation_sequence_full",
+						                  false,
+						                  "valve_open_count=0;valve_close_count=0;sequence_order_ok=0")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      uint32_t openCount = 0u;
+						      uint32_t closeCount = 0u;
+						      bool sequenceOrderOk = true;
+
+						      PressureRegulator::regP().openValve();
+						      openCount++;
+						      sequenceOrderOk = sequenceOrderOk && PressureRegulator::regP().isValveOpen();
+						      vTaskDelay(pdMS_TO_TICKS(10));
+						      PressureRegulator::regP().closeValve();
+						      closeCount++;
+						      sequenceOrderOk = sequenceOrderOk && !PressureRegulator::regP().isValveOpen();
+
+						#if (LC_PRESSURE_PORTS > 1)
+						      PressureRegulator::regR().openValve();
+						      openCount++;
+						      sequenceOrderOk = sequenceOrderOk && PressureRegulator::regR().isValveOpen();
+						      vTaskDelay(pdMS_TO_TICKS(10));
+						      PressureRegulator::regR().closeValve();
+						      closeCount++;
+						      sequenceOrderOk = sequenceOrderOk && !PressureRegulator::regR().isValveOpen();
+						#endif
+
+						      const bool valvePass = sequenceOrderOk && (openCount == closeCount);
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "valve_open_count=%lu;valve_close_count=%lu;sequence_order_ok=%u",
+						               static_cast<unsigned long>(openCount),
+						               static_cast<unsigned long>(closeCount),
+						               static_cast<unsigned>(sequenceOrderOk ? 1u : 0u));
+						      if (!runOne(2004, "valve_actuation_sequence_full", valvePass, metrics)) goto selftest_done;
+						    }
+						  }
+
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2005,
+						                  "print_refuel_pulse_integrity_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;pulses=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else if (!fullHomePass) {
+						      if (!runOne(2005,
+						                  "print_refuel_pulse_integrity_full",
+						                  false,
+						                  "pulse_count=0;pulse_width_min_ns=0;pulse_width_max_ns=0")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      Printer* printer = Printer::instance();
+						      uint32_t pulseCount = 0u;
+						      uint32_t pulseWidthMinNs = 0u;
+						      uint32_t pulseWidthMaxNs = 0u;
+						      bool pulsePass = false;
+
+						      if (printer != nullptr) {
+						        const uint32_t printPulseNs = printer->getPrintPulse() * 1000u;
+						#if (LC_PRESSURE_PORTS > 1)
+						        const uint32_t refuelPulseNs = printer->getRefuelPulse() * 1000u;
+						#else
+						        const uint32_t refuelPulseNs = printPulseNs;
+						#endif
+						        pulseWidthMinNs = (printPulseNs < refuelPulseNs) ? printPulseNs : refuelPulseNs;
+						        pulseWidthMaxNs = (printPulseNs > refuelPulseNs) ? printPulseNs : refuelPulseNs;
+
+						        printer->pulsePrint();
+						        pulseCount++;
+						        vTaskDelay(pdMS_TO_TICKS(5));
+						#if (LC_PRESSURE_PORTS > 1)
+						        printer->pulseRefuel();
+						        pulseCount++;
+						        vTaskDelay(pdMS_TO_TICKS(5));
+						#endif
+						        pulsePass = (pulseCount >= 1u) && (pulseWidthMinNs > 0u) && (pulseWidthMaxNs >= pulseWidthMinNs);
+						      }
+
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "pulse_count=%lu;pulse_width_min_ns=%lu;pulse_width_max_ns=%lu",
+						               static_cast<unsigned long>(pulseCount),
+						               static_cast<unsigned long>(pulseWidthMinNs),
+						               static_cast<unsigned long>(pulseWidthMaxNs));
+						      if (!runOne(2005, "print_refuel_pulse_integrity_full", pulsePass, metrics)) goto selftest_done;
+						    }
+						  }
+
+						  {
+						    if (!fullProfile) {
+						      if (!runOne(2006,
+						                  "emergency_abort_and_safe_stop_full",
+						                  true,
+						                  "profile=SAFE;executed=0;fixture_required=1;abort=0;gate=safe_only")) {
+						        goto selftest_done;
+						      }
+						    } else if (!fullHomePass) {
+						      if (!runOne(2006,
+						                  "emergency_abort_and_safe_stop_full",
+						                  false,
+						                  "abort_latency_ms=0;motors_disabled=0;regulators_stopped=0;valves_safe_state=0")) {
+						        goto selftest_done;
+						      }
+						    } else {
+						      static constexpr uint32_t kAbortMoveSteps = 200u;
+						      static constexpr uint32_t kAbortMoveHz = 4000u;
+						      static constexpr uint32_t kAbortLatencyLimitMs = 1000u;
+						      PressureRegulator::regP().start();
+						      Stepper::stepperX()->enableMotor();
+						      Stepper::stepperX()->move(true, kAbortMoveSteps, kAbortMoveHz, 0u);
+						      const uint32_t abortStartMs = HAL_GetTick();
+						      performShutdown(outSeq8, runId, true);
+						      const uint32_t abortLatencyMs = HAL_GetTick() - abortStartMs;
+						      const bool motorsDisabled = areMotorsDisabled();
+						      const bool regulatorsStopped = areRegulatorsStopped();
+						      const bool valvesSafeState = areValvesClosed();
+						      const bool abortPass = (abortLatencyMs <= kAbortLatencyLimitMs) &&
+						                             motorsDisabled &&
+						                             regulatorsStopped &&
+						                             valvesSafeState;
+						      char metrics[96];
+						      snprintf(metrics, sizeof(metrics),
+						               "abort_latency_ms=%lu;motors_disabled=%u;regulators_stopped=%u;valves_safe_state=%u",
+						               static_cast<unsigned long>(abortLatencyMs),
+						               static_cast<unsigned>(motorsDisabled ? 1u : 0u),
+						               static_cast<unsigned>(regulatorsStopped ? 1u : 0u),
+						               static_cast<unsigned>(valvesSafeState ? 1u : 0u));
+						      if (!runOne(2006, "emergency_abort_and_safe_stop_full", abortPass, metrics)) goto selftest_done;
+						    }
+						  }
+			
+							  selftest_done:
 						  uint8_t donePayload[64] = {0};
 				  size_t d = 0;
 				  donePayload[d++] = CMD_SELFTEST_DONE;

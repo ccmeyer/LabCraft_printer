@@ -17,6 +17,13 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+if ($PiHost -match '^(?<User>[^@]+)@(?<Host>.+)$') {
+  if ([string]::IsNullOrWhiteSpace($PiUser) -or $PiUser -eq "labcraft") {
+    $PiUser = $Matches.User
+  }
+  $PiHost = $Matches.Host
+}
+
 function Require-Cmd([string]$name) {
   if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
     throw "Missing command '$name'. Install/enable OpenSSH client (ssh/scp) on Windows."

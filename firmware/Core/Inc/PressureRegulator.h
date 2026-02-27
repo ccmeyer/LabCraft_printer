@@ -59,6 +59,11 @@ public:
 
   void openValve();
   void closeValve();
+  bool isValveOpen() const {
+    return (_valvePort != nullptr) &&
+           (_valvePin != 0u) &&
+           (HAL_GPIO_ReadPin(_valvePort, _valvePin) == GPIO_PIN_SET);
+  }
 
   // after both have been begun you can call these:
   static PressureRegulator& regP() { return *get(0); }
