@@ -365,3 +365,6 @@ Items requiring extraction or fixture before implementation:
 - Milestone 1 complete (`commit bce03eb`):
   - Host-test IDs: `TST-COMM-003`, `TST-COMM-004`, `TST-COMM-006`, `TST-COMM-007`
   - HIL self-test IDs: `1001`, `1002`, `1010`, `1011`, `1012`
+- Milestone 2 complete (`commit b8bdc2d`):
+  - Host-test IDs: `TST-COMM-006` (extended with `CMD_CLEAR_ACK` framing coverage)
+  - HIL self-test IDs: `1003`, `1013`, `1020`, `1021`

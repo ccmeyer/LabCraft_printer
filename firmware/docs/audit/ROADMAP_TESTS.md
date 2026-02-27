@@ -40,9 +40,11 @@ Status: Completed (`commit bce03eb`)
 
 ## Milestone 2: SAFE Status and Queue Semantics
 
+Status: Completed (`commit b8bdc2d`)
+
 ### Test IDs completed
 - Host-test IDs:
-  - `TST-COMM-005` (if helper extraction is completed in this milestone)
+  - `TST-COMM-006` (extended with `CMD_CLEAR_ACK` framing coverage)
 - HIL self-test IDs:
   - `1003` `status_frame_shape`
   - `1013` `clear_queue_ack`
