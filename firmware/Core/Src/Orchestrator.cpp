@@ -6,6 +6,7 @@
  */
 #include "BoardConfig.h"
 #include "Orchestrator.h"
+#include "OrchestratorDecode.h"
 #include "LEDController.h"    // your LED queue + done-event
 #include "Stepper.h"          // MX_STEPPERx_Move(), MX_STEPPERx_Stop(), MX_STEPPERx_IsBusy()
 #include "Gripper.h"
@@ -428,22 +429,28 @@ void Orchestrator::executeCommand(const Command &cmd) {
       	  waitForBit(BIT_STEPPER3_DONE);
           break;
         }
-        case CMD_SET_AXIS_MAXSPEED: {
-          auto ax = (Stepper::Axis)cmd.p1;
-          if (auto s = Stepper::getAxis(ax)) s->setMaxSpeedHz((uint32_t)cmd.p2);
-          break;
-        }
-        case CMD_SET_AXIS_ACCEL: {
-          auto ax = (Stepper::Axis)cmd.p1;
-          if (auto s = Stepper::getAxis(ax)) s->setAccelStepsPerSec2((float)cmd.p2);
-          break;
-        }
-        case CMD_SET_AXIS_PROFILE: {
-          auto ax = (Stepper::Axis)cmd.p1;
-          auto pf = (Stepper::AccelProfile)cmd.p2;
-          if (auto s = Stepper::getAxis(ax)) s->setAccelProfile(pf);
-          break;
-        }
+	        case CMD_SET_AXIS_MAXSPEED: {
+	          const auto intent = OrchestratorDecode::decodeIntent(
+	              {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
+	          auto ax = static_cast<Stepper::Axis>(intent.axis);
+	          if (auto s = Stepper::getAxis(ax)) s->setMaxSpeedHz(intent.value);
+	          break;
+	        }
+	        case CMD_SET_AXIS_ACCEL: {
+	          const auto intent = OrchestratorDecode::decodeIntent(
+	              {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
+	          auto ax = static_cast<Stepper::Axis>(intent.axis);
+	          if (auto s = Stepper::getAxis(ax)) s->setAccelStepsPerSec2((float)intent.value);
+	          break;
+	        }
+	        case CMD_SET_AXIS_PROFILE: {
+	          const auto intent = OrchestratorDecode::decodeIntent(
+	              {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
+	          auto ax = static_cast<Stepper::Axis>(intent.axis);
+	          auto pf = static_cast<Stepper::AccelProfile>(intent.value);
+	          if (auto s = Stepper::getAxis(ax)) s->setAccelProfile(pf);
+	          break;
+	        }
         case CMD_HOME_X: {
           MX_STEPPERX_Home(cmd.p1, cmd.p2,cmd.p3);
 		  break;
@@ -1084,12 +1091,14 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  comm->sendFrame(comm->handle(), donePayload, d);
 				  _selfTestAbortRequested = false;
 				  break;
-			} case CMD_WAIT: {
-				  // p1 = wait time (ms)
-				  uint32_t ms = cmd.p1u();
-			  if (ms == 0) {
-			    break; // immediate completion
-			  }
+				} case CMD_WAIT: {
+					  // p1 = wait time (ms)
+					  const auto intent = OrchestratorDecode::decodeIntent(
+					      {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
+					  uint32_t ms = intent.waitMs;
+				  if (ms == 0) {
+				    break; // immediate completion
+				  }
 
 			  _waitRemainingTicks = msToAtLeast1Tick(ms);
 

@@ -6,6 +6,7 @@
  */
 
 #include "PressureRegulator.h"
+#include "PressureRegulatorMath.h"
 #include "Orchestrator.h"
 #include "Logger.h"
 #include "Printer.h"
@@ -171,30 +172,31 @@ void PressureRegulator::pause() {
 void PressureRegulator::setPrintProfile(bool enabled) {
   taskENTER_CRITICAL();  // avoid races with controlLoop on _integral/_KIc
 
-  // Save current I contribution so we can preserve it across the gain change.
-  int64_t prev_I_contrib = (int64_t)_KIc * _integral;
+  PressureRegulatorMath::ProfileState state{};
+  state.kpCurrent = _KPc;
+  state.kiCurrent = _KIc;
+  state.kdCurrent = _KDc;
+  state.kpPrint = _KP_print;
+  state.kiPrint = _KI_print;
+  state.kdPrint = _KD_print;
+  state.kpTrack = _KP_track;
+  state.kiTrack = _KI_track;
+  state.kdTrack = _KD_track;
+  state.integral = _integral;
+  state.iContrib = _I_contrib;
+  state.iCap = I_CAP;
+  state.maxHzDeltaPerLoop = _maxHzDeltaPerLoop;
+  state.maxHzDeltaPrint = _maxHzDeltaPerLoop_print;
+  state.maxHzDeltaTrack = MAX_HZ_DELTA_PER_LOOP;
 
-  // Switch gains
-  _KPc = enabled ? _KP_print : _KP_track;
-  _KIc = enabled ? _KI_print : _KI_track;
-  _KDc = enabled ? _KD_print : _KD_track;
-  _maxHzDeltaPerLoop = enabled ? _maxHzDeltaPerLoop_print : 2000;
+  state = PressureRegulatorMath::applyPrintProfile(state, enabled);
 
-  if (_KIc == 0) {
-    // Printing → KI=0: freeze I (controlLoop already blocks integrating),
-    // remember the last I contribution to restore later.
-    _I_contrib = prev_I_contrib;
-  } else {
-    // Tracking → KI>0: restore I so that _KIc * _integral ~= previous I contribution
-    int64_t desired = (prev_I_contrib != 0) ? prev_I_contrib : _I_contrib;
-    int64_t newI = desired / (int64_t)_KIc;
-
-    if (newI >  I_CAP) newI =  I_CAP;
-    if (newI < -I_CAP) newI = -I_CAP;
-
-    _integral  = newI;
-    _I_contrib = (int64_t)_KIc * _integral;   // keep the cache consistent
-  }
+  _KPc = state.kpCurrent;
+  _KIc = state.kiCurrent;
+  _KDc = state.kdCurrent;
+  _integral = state.integral;
+  _I_contrib = state.iContrib;
+  _maxHzDeltaPerLoop = state.maxHzDeltaPerLoop;
 
   taskEXIT_CRITICAL();
 }
@@ -232,27 +234,25 @@ static inline float clampf(float v, float lo, float hi) {
 
 // Use these from Orchestrator (see above)
 void PressureRegulator::setTargetSafe(int32_t requested) {
-	  // clamp and rate-limit
-	  int32_t clamped = requested;
-	  if (clamped < _minTarget) clamped = _minTarget;
-	  if (clamped > _maxTarget) clamped = _maxTarget;
-
-	  int32_t delta = clamped - _target;
-	  if (delta >  _maxCmdStep) clamped = _target + _maxCmdStep;
-	  if (delta < -_maxCmdStep) clamped = _target - _maxCmdStep;
-
-	  _target = clamped;
-	  _pressureOk = false;
-	}
+		  PressureRegulatorMath::TargetLimits limits{};
+		  limits.currentTarget = _target;
+		  limits.minTarget = _minTarget;
+		  limits.maxTarget = _maxTarget;
+		  limits.maxCmdStep = _maxCmdStep;
+		  limits.maxRelStep = _maxRelStep;
+		  _target = PressureRegulatorMath::clampTarget(limits, requested);
+		  _pressureOk = false;
+		}
 
 void PressureRegulator::setRelativeTargetSafe(bool sign, int32_t delta) {
-	  if (delta < 0) delta = -delta;                 // magnitude only
-	  if (delta > _maxRelStep) delta = _maxRelStep;  // clamp
-	  int32_t newT = _target + (sign ? +delta : -delta);
-	  if (newT < _minTarget) newT = _minTarget;
-	  if (newT > _maxTarget) newT = _maxTarget;
-	  _target = newT;
-	  _pressureOk = false;
+		  PressureRegulatorMath::TargetLimits limits{};
+		  limits.currentTarget = _target;
+		  limits.minTarget = _minTarget;
+		  limits.maxTarget = _maxTarget;
+		  limits.maxCmdStep = _maxCmdStep;
+		  limits.maxRelStep = _maxRelStep;
+		  _target = PressureRegulatorMath::clampRelativeTarget(limits, sign, delta);
+		  _pressureOk = false;
 }
 
 void PressureRegulator::openValve() {

@@ -12,11 +12,19 @@ add_executable(fw_tests
     main.cpp
     tests/test_smoke.cpp
     tests/test_comm_codec.cpp
+    tests/test_orchestrator_decode.cpp
+    tests/test_nvm_codec.cpp
+    tests/test_pressure_regulator_math.cpp
+    tests/test_stepper_profile_math.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp
     # ../Src/utils/RingBuffer.c
     ../Core/Src/CommCodec.cpp
+    ../Core/Src/OrchestratorDecode.cpp
+    ../Core/Src/nvm_codec.c
+    ../Core/Src/PressureRegulatorMath.cpp
+    ../Core/Src/StepperProfileMath.cpp
 )
 
 target_include_directories(fw_tests PRIVATE

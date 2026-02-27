@@ -6,6 +6,7 @@
  */
 
 #include "Stepper.h"
+#include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
 #include "Logger.h"
 #include "FreeRTOS.h"
@@ -15,9 +16,6 @@
 #include <stdint.h>
 #include <cstdlib>
 #include <cmath>          // for cosf()
-#ifndef M_PI_F
-	#define M_PI_F 3.14159265f
-#endif
 
 // --- Timer helpers ----------------------------------------------------------
 static inline bool is_apb2_timer(TIM_TypeDef* inst) {
@@ -42,12 +40,7 @@ static inline uint32_t timer_max_arr(TIM_HandleTypeDef* htim) {
 }
 // Compute ARR from desired square-wave frequency
 static inline uint32_t arr_for_freq(uint32_t tclk_eff, uint32_t freq_hz) {
-  if (freq_hz < 1u) freq_hz = 1u;
-  // Update interrupt toggles STEP each time ⇒ period between toggles = (ARR+1)/tclk_eff
-  // A full step (hi+lo) uses 2 toggles ⇒ we already account for *2 in denominator.
-  uint64_t arrp1 = (uint64_t)tclk_eff / (uint64_t)(freq_hz * 2u);
-  if (arrp1 < 2u) arrp1 = 2u; // ensure ARR >= 1
-  return (uint32_t)(arrp1 - 1u);
+  return StepperProfileMath::arrForFreq(tclk_eff, freq_hz);
 }
 
 static inline uint8_t port_code(GPIO_TypeDef* p) {
@@ -149,11 +142,18 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _direction      = direction;
   _lastDirection  = direction;
 
-  // ---------- Use stored max speed by default; honor an override if provided ----------
-  uint32_t v_req = (freqHz == 0u) ? _max_speed_hz : freqHz;
-  if (v_req > _max_speed_hz) v_req = _max_speed_hz;
-  if (v_req < 1u) v_req = 1u;
+  const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
+  const uint32_t maxARR  = timer_max_arr(_htim);
+  StepperProfileMath::MovePlanInput planInput{};
+  planInput.steps = steps;
+  planInput.requestedHz = freqHz;
+  planInput.maxSpeedHz = _max_speed_hz;
+  planInput.accelStepsPerSec2 = _accel_sps2;
+  planInput.timerClockHz = tclkEff;
+  planInput.timerMaxArr = maxARR;
+  const StepperProfileMath::MovePlan plan = StepperProfileMath::planMove(planInput);
 
+  const uint32_t v_req = plan.cruiseHz;
   _lastFreqHz = v_req;    // for pause/resume
   _lastAccel  = 0u;       // legacy field; not used anymore
 
@@ -164,28 +164,8 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _togglesRemaining = _totalToggles;
   _togglesDone      = 0u;
 
-  // ---------- Accel from saved steps/s^2 ----------
-  const float a_sps2_f = (_accel_sps2 > 1.f) ? _accel_sps2 : 1.f;
-
-  // steps to accel from 0 to v_req at accel 'a' : s = v^2/(2a)
-  uint32_t s_accel_steps = (uint32_t)std::ceil((double)v_req * (double)v_req / (2.0 * (double)a_sps2_f));
-  if (s_accel_steps < 1u) s_accel_steps = 1u;
-
-  // Triangular fallback if the move is too short to ever reach v_req
-  if (2u * s_accel_steps > steps) {
-    // v_peak = sqrt(steps * a)
-    double v_peak_d = std::sqrt((double)steps * (double)a_sps2_f);
-    uint32_t v_peak = (uint32_t)std::floor(v_peak_d);
-    if (v_peak < 1u) v_peak = 1u;
-    v_req = v_peak;
-    _lastFreqHz = v_req;
-
-    s_accel_steps = steps / 2u;
-    if (s_accel_steps < 1u) s_accel_steps = 1u;
-  }
-
-  _accelToggles = s_accel_steps * 2u;
-  _decelToggles = _accelToggles;
+  _accelToggles = plan.accelToggles;
+  _decelToggles = plan.decelToggles;
 
   // ---------- GPIO DIR/EN ----------
   HAL_GPIO_WritePin(_dirPort,  _dirPin,  hwDir ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -194,29 +174,8 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   HAL_GPIO_WritePin(_enPort,   _enPin,   GPIO_PIN_RESET);
   if (_dualDriver) HAL_GPIO_WritePin(_enPort2, _enPin2, GPIO_PIN_RESET);
 
-  // ---------- Timer / ARR bounds ----------
-  const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
-  const uint32_t maxARR  = timer_max_arr(_htim);
-
-  // Respect min pulse width (~2 µs)
-  const uint32_t kMinPulseNs = 2000u;
-  uint32_t minTicks = (uint32_t)(((uint64_t)kMinPulseNs * tclkEff + 999999999ULL) / 1000000000ULL);
-  if (minTicks < 2u) minTicks = 2u;
-  const uint32_t minARR = minTicks - 1u;
-
-  // Target period from v_req
-  uint32_t targetARR = arr_for_freq(tclkEff, v_req);
-  if (targetARR < minARR) targetARR = minARR;
-  if (targetARR > maxARR) targetARR = maxARR;
-  _targetARR = targetARR;
-
-  // Softer launch
-  const uint32_t startMult = 5u;
-  uint64_t start64 = (uint64_t)_targetARR * (uint64_t)startMult;
-  if (start64 > (uint64_t)maxARR) start64 = (uint64_t)maxARR;
-  uint32_t startARR = (uint32_t)start64;
-  if (startARR < minARR) startARR = minARR;
-  _startARR = startARR;
+  _targetARR = plan.targetArr;
+  _startARR = plan.startArr;
 
   // Linear fallback slope (kept for completeness; S-curve below uses _start/_target)
   const uint32_t Aeff = (_accelToggles ? _accelToggles : 1u);
@@ -459,21 +418,8 @@ void Stepper::_stepTick() {
   }
 
   auto ease01 = [&](float t)->float {
-    if (t <= 0.f) return 0.f;
-    if (t >= 1.f) return 1.f;
-    switch (_profile) {
-      case PROFILE_TRAPEZOIDAL_LINEAR:
-        return t; // linear (classic trapezoid; infinite jerk at corners)
-      case PROFILE_SCURVE_MINJERK: {
-        // 10*t^3 - 15*t^4 + 6*t^5
-        float t2 = t*t, t3 = t2*t, t4 = t3*t, t5 = t4*t;
-        return (10.f*t3 - 15.f*t4 + 6.f*t5);
-      }
-      case PROFILE_SCURVE_COSINE:
-      default:
-        return 0.5f * (1.f - cosf(t * M_PI_F));
-    }
-  };
+	    return StepperProfileMath::ease01(static_cast<StepperProfileMath::Profile>(_profile), t);
+	  };
 
   // choose period
   int32_t arr;

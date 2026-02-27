@@ -16,7 +16,15 @@
 #define NVM_MAGIC       0x4C434647u  // "LCFG"
 #define NVM_VERSION     1
 
-typedef struct __attribute__((packed)) {
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
+
+typedef struct
+#if defined(__GNUC__)
+__attribute__((packed))
+#endif
+{
     uint32_t magic;      // "LCFG"
     uint32_t version;    // structure version
     // ---- your settings go here ----
@@ -26,6 +34,10 @@ typedef struct __attribute__((packed)) {
     // --------------------------------
     uint32_t crc;        // CRC32 over [magic..flags]
 } nvm_config_t;
+
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
 bool nvm_load(nvm_config_t *out);          // returns true if valid
 void nvm_defaults(nvm_config_t *cfg);      // fill defaults
