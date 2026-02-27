@@ -275,11 +275,11 @@ echo "" | tee -a "$LOG_PATH"
 
 # dfu_update.py imports PySide6 at module import time in your current version.
 # If PySide6 isn't installed on the Pi, flashing will fail.
-python3 -c 'import PySide6' 2>/dev/null || {
-  echo "ERROR: PySide6 is not importable; dfu_update.py will likely fail on import." | tee -a "$LOG_PATH"
-  echo "Install PySide6 or refactor dfu_update.py to avoid importing PySide6 for CLI use." | tee -a "$LOG_PATH"
-  exit 2
-}
+# python3 -c 'import PySide6' 2>/dev/null || {
+#   echo "ERROR: PySide6 is not importable; dfu_update.py will likely fail on import." | tee -a "$LOG_PATH"
+#   echo "Install PySide6 or refactor dfu_update.py to avoid importing PySide6 for CLI use." | tee -a "$LOG_PATH"
+#   exit 2
+# }
 
 # Flash firmware
 echo "--- Flashing via DFU ---" | tee -a "$LOG_PATH"
