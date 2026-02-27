@@ -129,3 +129,117 @@ TEST(CommCodec, TruncatedTlvStopsParsingSafely) {
     UNSIGNED_LONGS_EQUAL(0u, decoded.p3Len);
     CHECK_FALSE(decoded.hasSeq32);
 }
+
+TEST_GROUP(CommCodecRecovery)
+{
+};
+
+TEST(CommCodecRecovery, NoiseBeforeStartIgnored) {
+    static const uint8_t stream[] = {0x00, 0x7E, 0x55, 0xAB, 0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80};
+    CommCodec::RxParser parser{};
+    uint8_t payloadLen = 0;
+    int frameReadyCount = 0;
+
+    for (size_t i = 0; i < sizeof(stream); ++i) {
+        const auto result = CommCodec::feedRxByte(parser, stream[i], payloadLen);
+        if (i < 9) {
+            LONGS_EQUAL((int)CommCodec::FeedResult::None, (int)result);
+        }
+        if (result == CommCodec::FeedResult::FrameReady) {
+            frameReadyCount++;
+        }
+    }
+
+    LONGS_EQUAL(1, frameReadyCount);
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, payloadLen);
+    UNSIGNED_LONGS_EQUAL(0xF3u, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x01u, decoded.seq8);
+}
+
+TEST(CommCodecRecovery, TwoValidFramesBackToBackBothRecognized) {
+    static const uint8_t stream[] = {
+        0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80,
+        0xAA, 0x02, 0xF5, 0x02, 0xC7, 0x21
+    };
+    CommCodec::RxParser parser{};
+    uint8_t payloadLen = 0;
+    int frameReadyCount = 0;
+    int crcMismatchCount = 0;
+    int lengthRejectedCount = 0;
+    CommCodec::DecodedCommand decodedFrames[2]{};
+
+    for (size_t i = 0; i < sizeof(stream); ++i) {
+        const auto result = CommCodec::feedRxByte(parser, stream[i], payloadLen);
+        if (result == CommCodec::FeedResult::FrameReady) {
+            if (frameReadyCount < 2) {
+                decodedFrames[frameReadyCount] = CommCodec::decodeCommand(parser.rxBuf, payloadLen);
+            }
+            frameReadyCount++;
+        } else if (result == CommCodec::FeedResult::CrcMismatch) {
+            crcMismatchCount++;
+        } else if (result == CommCodec::FeedResult::LengthRejected) {
+            lengthRejectedCount++;
+        }
+    }
+
+    LONGS_EQUAL(2, frameReadyCount);
+    LONGS_EQUAL(0, crcMismatchCount);
+    LONGS_EQUAL(0, lengthRejectedCount);
+    UNSIGNED_LONGS_EQUAL(0xF3u, decodedFrames[0].cmd);
+    UNSIGNED_LONGS_EQUAL(0x01u, decodedFrames[0].seq8);
+    UNSIGNED_LONGS_EQUAL(0xF5u, decodedFrames[1].cmd);
+    UNSIGNED_LONGS_EQUAL(0x02u, decodedFrames[1].seq8);
+}
+
+TEST(CommCodecRecovery, TruncatedThenCorruptFrameFollowedByValidFrameRecovers) {
+    static const uint8_t stream[] = {
+        0xAA, 0x03, 0x10, 0x20, 0x30, 0x40, 0x50,
+        0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80
+    };
+    CommCodec::RxParser parser{};
+    uint8_t payloadLen = 0;
+    int frameReadyCount = 0;
+    int crcMismatchCount = 0;
+    CommCodec::DecodedCommand recovered{};
+
+    for (size_t i = 0; i < sizeof(stream); ++i) {
+        const auto result = CommCodec::feedRxByte(parser, stream[i], payloadLen);
+        if (result == CommCodec::FeedResult::CrcMismatch) {
+            crcMismatchCount++;
+            LONGS_EQUAL((int)CommCodec::RxParser::WAIT_START, (int)parser.state);
+        } else if (result == CommCodec::FeedResult::FrameReady) {
+            frameReadyCount++;
+            recovered = CommCodec::decodeCommand(parser.rxBuf, payloadLen);
+        }
+    }
+
+    LONGS_EQUAL(1, crcMismatchCount);
+    LONGS_EQUAL(1, frameReadyCount);
+    UNSIGNED_LONGS_EQUAL(0xF3u, recovered.cmd);
+    UNSIGNED_LONGS_EQUAL(0x01u, recovered.seq8);
+}
+
+TEST(CommCodecRecovery, OversizeLenRejectedAndReturnsToWaitStart) {
+    static const uint8_t stream[] = {0xAA, 0x3F, 0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80};
+    CommCodec::RxParser parser{};
+    uint8_t payloadLen = 0;
+    int lengthRejectedCount = 0;
+    int frameReadyCount = 0;
+    CommCodec::DecodedCommand recovered{};
+
+    for (size_t i = 0; i < sizeof(stream); ++i) {
+        const auto result = CommCodec::feedRxByte(parser, stream[i], payloadLen);
+        if (result == CommCodec::FeedResult::LengthRejected) {
+            lengthRejectedCount++;
+            LONGS_EQUAL((int)CommCodec::RxParser::WAIT_START, (int)parser.state);
+        } else if (result == CommCodec::FeedResult::FrameReady) {
+            frameReadyCount++;
+            recovered = CommCodec::decodeCommand(parser.rxBuf, payloadLen);
+        }
+    }
+
+    LONGS_EQUAL(1, lengthRejectedCount);
+    LONGS_EQUAL(1, frameReadyCount);
+    UNSIGNED_LONGS_EQUAL(0xF3u, recovered.cmd);
+    UNSIGNED_LONGS_EQUAL(0x01u, recovered.seq8);
+}
