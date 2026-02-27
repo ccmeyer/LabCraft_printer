@@ -52,6 +52,7 @@ RESET_ACTIVE_LOW  = False
 # DFU details
 DFU_VIDPID    = "0483:df11"
 FLASH_ADDRESS = "0x08000000"  # STM32F4 internal flash base
+DFU_UTIL = shutil.which("dfu-util") or shutil.which("dfu-util.exe")
 
 # -------------------------
 # gpiod helpers (v1 & v2)
