@@ -113,7 +113,7 @@ Status: Completed (`commit 2dd4ff1`)
 
 ## Milestone 5: FULL Profile Bring-Up (Fixture-Gated)
 
-Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution remains deferred.
+Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution completed (`commit 3902394`).
 
 ### Test IDs completed
 - Host-test IDs:
@@ -125,7 +125,7 @@ Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution r
 
 ### Acceptance criteria
 - SAFE profile emits stable IDs `2001`..`2003` with explicit gating metrics and no motion/pressure execution.
-- FULL profile can run under fixture controls with safe gating and deterministic metrics once fixture work is enabled.
+- FULL profile runs fixture-gated homing, bounded gantry motion, and pressure step response with deterministic metrics.
 - Motion and pressure tests meet agreed tolerances and do not violate safety constraints when FULL execution is enabled.
 - SAFE profile remains unchanged and passing.
 

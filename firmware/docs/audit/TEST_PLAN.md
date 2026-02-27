@@ -309,7 +309,7 @@ Verification command for every HIL item:
   - `crc_mismatch_count` (uint16)
   - `length_reject_count` (uint16)
 
-#### `TST-HIL-ST-101` (P2) `2001 motion_home_cycle_full` (SAFE gate implemented, FULL deferred fixture)
+#### `TST-HIL-ST-101` (P2) `2001 motion_home_cycle_full` (SAFE gate + FULL fixture implemented)
 - Required firmware-side metrics:
   - Current SAFE gate metrics:
     - `profile`
@@ -317,12 +317,12 @@ Verification command for every HIL item:
     - `fixture_required`
     - `motion`
     - `gate`
-  - Future FULL fixture metrics:
+  - FULL fixture metrics:
   - `home_time_ms`
   - `home_success_axes`
   - `limit_hits`
 
-#### `TST-HIL-ST-102` (P2) `2002 motion_absolute_move_bounds_full` (SAFE gate implemented, FULL deferred fixture)
+#### `TST-HIL-ST-102` (P2) `2002 motion_absolute_move_bounds_full` (SAFE gate + FULL fixture implemented)
 - Required firmware-side metrics:
   - Current SAFE gate metrics:
     - `profile`
@@ -330,12 +330,12 @@ Verification command for every HIL item:
     - `fixture_required`
     - `motion`
     - `gate`
-  - Future FULL fixture metrics:
+  - FULL fixture metrics:
   - `target_x`, `target_y`, `target_z`
   - `final_error_steps`
   - `bound_violation` (bool)
 
-#### `TST-HIL-ST-103` (P2) `2003 pressure_regulator_step_response_full` (SAFE gate implemented, FULL deferred fixture)
+#### `TST-HIL-ST-103` (P2) `2003 pressure_regulator_step_response_full` (SAFE gate + FULL fixture implemented)
 - Required firmware-side metrics:
   - Current SAFE gate metrics:
     - `profile`
@@ -343,7 +343,7 @@ Verification command for every HIL item:
     - `fixture_required`
     - `pressure`
     - `gate`
-  - Future FULL fixture metrics:
+  - FULL fixture metrics:
   - `target_pressure`
   - `settle_time_ms`
   - `overshoot`
@@ -376,6 +376,7 @@ Verification command for every HIL item:
 - `TST-COMM-006`
 - `TST-COMM-007`
 - `TST-HIL-ST-001` .. `TST-HIL-ST-013` (SAFE profile)
+- `TST-HIL-ST-101` .. `TST-HIL-ST-103` (FULL profile with fixture)
 
 Items requiring extraction or fixture before implementation:
 - Host extraction dependent: `TST-COMM-005`
@@ -398,4 +399,7 @@ Items requiring extraction or fixture before implementation:
 - Milestone 5 SAFE gating slice complete (`commit 762f6bc`):
   - Host-test IDs: `TST-COMM-007` (extended self-test result framing guard)
   - HIL self-test IDs: `2001`, `2002`, `2003` emitted in SAFE with `executed=0` gating metrics
+- Milestone 5 FULL fixture execution complete (`commit 3902394`):
+  - Host-test IDs: `TST-COMM-007` (self-test start profile mirror guard)
+  - HIL self-test IDs: `2001`, `2002`, `2003` executed on fixture with FULL metrics
 
