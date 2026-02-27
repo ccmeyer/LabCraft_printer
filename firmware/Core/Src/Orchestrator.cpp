@@ -977,31 +977,78 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    if (!runOne(1021, "status_cadence_safe", pass, metrics)) goto selftest_done;
 				  }
 
-				  {
-				    const uint32_t t0 = HAL_GetTick();
-				    vTaskDelay(pdMS_TO_TICKS(10));
-				    const uint32_t dt = HAL_GetTick() - t0;
-				    char metrics[48];
-				    snprintf(metrics, sizeof(metrics), "delta_ms=%lu", static_cast<unsigned long>(dt));
-				    if (!runOne(1004, "uptime_counter_read", dt >= 1u, metrics)) goto selftest_done;
-				  }
+					  {
+					    const uint32_t t0 = HAL_GetTick();
+					    vTaskDelay(pdMS_TO_TICKS(10));
+					    const uint32_t dt = HAL_GetTick() - t0;
+					    char metrics[48];
+					    snprintf(metrics, sizeof(metrics), "delta_ms=%lu", static_cast<unsigned long>(dt));
+					    if (!runOne(1004, "uptime_counter_read", dt >= 1u, metrics)) goto selftest_done;
+					  }
+	
+					  {
+					    const uint32_t flashDelay = Orchestrator::getFlashDelay();
+					    uint32_t flashWidthNs = 0;
+	#if LC_HAS_IMAGING == 1
+					    if (auto* flash = Flash::instance()) {
+					      flashWidthNs = flash->getPulseDuration();
+					    }
+	#endif
+					    char metrics[96];
+					    snprintf(metrics, sizeof(metrics), "flash_delay_us=%lu;flash_width_ns=%lu",
+					             static_cast<unsigned long>(flashDelay),
+					             static_cast<unsigned long>(flashWidthNs));
+					    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
+					  }
+	
+					  {
+					    static const char kBuildInfo[] = __DATE__ " " __TIME__;
+					    char metrics[96];
+					    snprintf(metrics, sizeof(metrics), "version_len=%u;build_epoch=%s",
+					             static_cast<unsigned>(strlen(kBuildInfo)),
+					             kBuildInfo);
+					    if (!runOne(1006, "fw_build_info", strlen(kBuildInfo) > 0u, metrics)) goto selftest_done;
+					  }
 
-				  {
-				    const uint32_t flashDelay = Orchestrator::getFlashDelay();
-				    char metrics[64];
-				    snprintf(metrics, sizeof(metrics), "flash_delay_us=%lu", static_cast<unsigned long>(flashDelay));
-				    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
-				  }
-
-				  {
-				    static const char kBuildInfo[] = __DATE__ " " __TIME__;
-				    char metrics[48];
-				    snprintf(metrics, sizeof(metrics), "version_len=%u", static_cast<unsigned>(strlen(kBuildInfo)));
-				    if (!runOne(1006, "fw_build_info", strlen(kBuildInfo) > 0u, metrics)) goto selftest_done;
-				  }
-
-				  selftest_done:
-				  uint8_t donePayload[64] = {0};
+					  {
+					    static const uint8_t recoveryStream[] = {
+					      0x00, 0x7E, 0x55, 0xAB,
+					      0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80,
+					      0xAA, 0x3F,
+					      0xAA, 0x03, 0x10, 0x20, 0x30, 0x40, 0x50,
+					      0xAA, 0x02, 0xF3, 0x01, 0x84, 0x80
+					    };
+					    CommCodec::RxParser parser{};
+					    uint8_t parsedLen = 0;
+					    uint16_t framesRecovered = 0;
+					    uint16_t crcMismatchCount = 0;
+					    uint16_t lengthRejectCount = 0;
+					    for (size_t i = 0; i < sizeof(recoveryStream); ++i) {
+					      const auto result = CommCodec::feedRxByte(parser, recoveryStream[i], parsedLen);
+					      if (result == CommCodec::FeedResult::FrameReady) {
+					        framesRecovered++;
+					      } else if (result == CommCodec::FeedResult::CrcMismatch) {
+					        crcMismatchCount++;
+					      } else if (result == CommCodec::FeedResult::LengthRejected) {
+					        lengthRejectCount++;
+					      }
+					    }
+					    const bool pass = (framesRecovered == 2u) &&
+					                      (crcMismatchCount == 1u) &&
+					                      (lengthRejectCount == 1u) &&
+					                      (parser.state == CommCodec::RxParser::WAIT_START);
+					    char metrics[112];
+					    snprintf(metrics, sizeof(metrics),
+					             "noise_bytes_injected=%u;frames_recovered=%u;crc_mismatch_count=%u;length_reject_count=%u",
+					             4u,
+					             static_cast<unsigned>(framesRecovered),
+					             static_cast<unsigned>(crcMismatchCount),
+					             static_cast<unsigned>(lengthRejectCount));
+					    if (!runOne(1030, "uart_recovery_after_noise_safe", pass, metrics)) goto selftest_done;
+					  }
+	
+					  selftest_done:
+					  uint8_t donePayload[64] = {0};
 				  size_t d = 0;
 				  donePayload[d++] = CMD_SELFTEST_DONE;
 				  donePayload[d++] = outSeq8;
