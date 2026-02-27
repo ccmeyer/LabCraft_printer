@@ -52,6 +52,20 @@ To get started with the LabCraft Printer project, follow these steps:
     pip install -r requirements.txt
     ```
 
+## Run Python Tests
+
+Use the project virtual environment, then run:
+
+```bash
+py -m pytest -q
+```
+
+If your repo venv is in `env` on Windows:
+
+```bash
+.\env\Scripts\python.exe -m pytest -q
+```
+
 ## Getting Started - PlatformIO
 
 To get started with PlatformIO, follow these steps:

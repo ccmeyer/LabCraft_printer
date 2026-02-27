@@ -16,6 +16,9 @@ START_BYTE = 0xAA
 
 CMD_HELLO = 0xF3
 CMD_HELLO_ACK = 0xF4
+CMD_GOODBYE = 0xF5
+CMD_BYE_ACK = 0xF6
+CMD_BYE_DONE = 0xF8
 CMD_SELFTEST_START = 0xFA
 CMD_SELFTEST_RESULT = 0xFB
 CMD_SELFTEST_DONE = 0xFC
@@ -174,6 +177,7 @@ def run(args: argparse.Namespace) -> int:
     run_id = int(time.time() * 1000) & 0xFFFFFFFF
     started_at = now_iso()
     results = []
+    host_checks = []
     summary = {"total": 0, "passed": 0, "failed": 0}
     aborted = False
 
@@ -260,6 +264,100 @@ def run(args: argparse.Namespace) -> int:
         else:
             rc = 0
 
+        if done_seen:
+            goodbye_seq8 = 3
+            ser.write(build_control(CMD_GOODBYE, goodbye_seq8, run_id))
+
+            # Wait for BYE_ACK first.
+            bye_ack_timeout_ms = 2000
+            ack_deadline = time.monotonic() + (bye_ack_timeout_ms / 1000.0)
+            got_bye_ack = False
+            ack_details = {
+                "seq8": goodbye_seq8,
+                "run_id": run_id,
+                "timeout_ms": bye_ack_timeout_ms,
+            }
+            while time.monotonic() < ack_deadline and not got_bye_ack:
+                chunk = ser.read(128)
+                for v in chunk:
+                    frame = reader.feed(v)
+                    if not frame or len(frame) < 2:
+                        continue
+                    cmd = frame[0]
+                    seq8 = frame[1]
+                    if cmd == CMD_BYE_ACK and seq8 == goodbye_seq8:
+                        got_bye_ack = True
+                        break
+                    ack_details["observed_cmd"] = cmd
+                    ack_details["observed_seq8"] = seq8
+
+            if got_bye_ack:
+                print("GOODBYE ACK received.")
+            else:
+                print("Timed out waiting for GOODBYE ACK.")
+            host_checks.append(
+                {
+                    "name": "goodbye_ack",
+                    "pass": got_bye_ack,
+                    "details": ack_details,
+                    "timestamp": now_iso(),
+                }
+            )
+
+            # Wait for BYE_DONE only after BYE_ACK succeeds.
+            bye_done_timeout_ms = 3000
+            got_bye_done = False
+            done_details = {
+                "seq8": goodbye_seq8,
+                "run_id": run_id,
+                "timeout_ms": bye_done_timeout_ms,
+            }
+            if got_bye_ack:
+                done_deadline = time.monotonic() + (bye_done_timeout_ms / 1000.0)
+                while time.monotonic() < done_deadline and not got_bye_done:
+                    chunk = ser.read(128)
+                    for v in chunk:
+                        frame = reader.feed(v)
+                        if not frame or len(frame) < 2:
+                            continue
+                        cmd = frame[0]
+                        seq8 = frame[1]
+                        if cmd != CMD_BYE_DONE:
+                            done_details["observed_cmd"] = cmd
+                            done_details["observed_seq8"] = seq8
+                            continue
+                        if seq8 != goodbye_seq8:
+                            done_details["observed_cmd"] = cmd
+                            done_details["observed_seq8"] = seq8
+                            continue
+                        tlv = parse_tlvs(frame[2:])
+                        seq32 = None
+                        if TAG_SEQ32 in tlv and len(tlv[TAG_SEQ32]) == 4:
+                            seq32 = int.from_bytes(tlv[TAG_SEQ32], "little")
+                            done_details["observed_seq32"] = seq32
+                            if seq32 != run_id:
+                                continue
+                        got_bye_done = True
+                        break
+            else:
+                done_details["skipped"] = "BYE_ACK not received"
+
+            if got_bye_done:
+                print("GOODBYE DONE received.")
+            else:
+                print("Timed out waiting for GOODBYE DONE.")
+            host_checks.append(
+                {
+                    "name": "goodbye_done",
+                    "pass": got_bye_done,
+                    "details": done_details,
+                    "timestamp": now_iso(),
+                }
+            )
+
+            if not (got_bye_ack and got_bye_done):
+                rc = 3
+
         report = {
             "run_id": run_id,
             "profile": profile,
@@ -268,6 +366,7 @@ def run(args: argparse.Namespace) -> int:
             "aborted": aborted,
             "summary": summary,
             "results": results,
+            "host_checks": host_checks,
         }
         write_json_atomic(args.out, report)
         print(f"Wrote self-test report: {args.out}")
