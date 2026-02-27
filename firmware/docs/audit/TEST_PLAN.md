@@ -45,7 +45,7 @@ No motion/pressure actuation; read-only and protocol/session checks.
 - `1021 status_cadence_safe`
 - `1030 uart_recovery_after_noise_safe`
 
-### FULL Profile (planned / HIL fixture required)
+### FULL Profile (implemented / HIL fixture required)
 Includes controlled motion/pressure/actuation checks with fixture and explicit safety gating.
 
 - `2001 motion_home_cycle_full`
@@ -236,7 +236,7 @@ Includes controlled motion/pressure/actuation checks with fixture and explicit s
 ### HIL SelfTest Backlog (concrete)
 
 Verification command for every HIL item:
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 #### `TST-HIL-ST-001` (P0) `1001 comm_crc_known_vector` (SAFE)
 - Required firmware-side metrics:
@@ -349,19 +349,19 @@ Verification command for every HIL item:
   - `overshoot`
   - `steady_state_error`
 
-#### `TST-HIL-ST-104` (P2) `2004 valve_actuation_sequence_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-104` (P2) `2004 valve_actuation_sequence_full` (FULL fixture implemented)
 - Required firmware-side metrics:
   - `valve_open_count`
   - `valve_close_count`
   - `sequence_order_ok` (bool)
 
-#### `TST-HIL-ST-105` (P2) `2005 print_refuel_pulse_integrity_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-105` (P2) `2005 print_refuel_pulse_integrity_full` (FULL fixture implemented)
 - Required firmware-side metrics:
   - `pulse_count`
   - `pulse_width_min_ns`
   - `pulse_width_max_ns`
 
-#### `TST-HIL-ST-106` (P0) `2006 emergency_abort_and_safe_stop_full` (FULL, deferred fixture)
+#### `TST-HIL-ST-106` (P0) `2006 emergency_abort_and_safe_stop_full` (FULL fixture implemented)
 - Required firmware-side metrics:
   - `abort_latency_ms`
   - `motors_disabled` (bool)
@@ -376,11 +376,11 @@ Verification command for every HIL item:
 - `TST-COMM-006`
 - `TST-COMM-007`
 - `TST-HIL-ST-001` .. `TST-HIL-ST-013` (SAFE profile)
-- `TST-HIL-ST-101` .. `TST-HIL-ST-103` (FULL profile with fixture)
+- `TST-HIL-ST-101` .. `TST-HIL-ST-106` (FULL profile with fixture)
 
 Items requiring extraction or fixture before implementation:
 - Host extraction dependent: `TST-COMM-005`
-- FULL-profile HIL fixture dependent: `TST-HIL-ST-101` .. `TST-HIL-ST-106`
+- No remaining fixture-dependent backlog items in the current Milestone 1-6 plan; FULL-profile HIL items `TST-HIL-ST-101` .. `TST-HIL-ST-106` are implemented and validated on fixture.
 
 ## Completion Notes
 
@@ -402,4 +402,7 @@ Items requiring extraction or fixture before implementation:
 - Milestone 5 FULL fixture execution complete (`commit 3902394`):
   - Host-test IDs: `TST-COMM-007` (self-test start profile mirror guard)
   - HIL self-test IDs: `2001`, `2002`, `2003` executed on fixture with FULL metrics
+- Milestone 6 FULL safety completion (`commit 941e592`):
+  - Host-test IDs: `TST-COMM-006` (session/self-test framing guard retained)
+  - HIL self-test IDs: `2004`, `2005`, `2006` executed on fixture with FULL metrics
 

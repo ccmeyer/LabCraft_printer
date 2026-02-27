@@ -50,7 +50,7 @@ If you are unsure whether a file is generated:
 
 ### Required before commit: full HIL gate (preferred)
 Run the complete local→Pi→flash→selftest loop from Windows:
-`powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+`powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 This command should:
 1) run host unit tests + headless build (via `run_fw_checks.ps1`)
@@ -153,7 +153,7 @@ Artifacts in `firmware/artifacts/` are only committed if the repo policy explici
 - Local checks pass:
   - `run_fw_checks.ps1 -Config Debug`
 - HIL gate passes (preferred):
-  - `run_fw_hil_windows.ps1 -PiHost labcraft.local`
+  - `run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 - Update `firmware/docs/repo_map.md` if the change affects module ownership, entrypoints, or protocol handling.
 - Summary includes:
   - what changed and why

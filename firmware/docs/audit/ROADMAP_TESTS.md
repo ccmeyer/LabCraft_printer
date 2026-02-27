@@ -6,7 +6,7 @@ Purpose: sequence the updated backlog into vertical-slice milestones that combin
 - Local:
   - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
 - HIL:
-  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+  - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
@@ -34,7 +34,7 @@ Status: Completed (`commit bce03eb`)
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
@@ -58,7 +58,7 @@ Status: Completed (`commit b8bdc2d`)
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
@@ -83,7 +83,7 @@ Status: Completed (`commit 819cac8`)
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
@@ -107,7 +107,7 @@ Status: Completed (`commit 2dd4ff1`)
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
@@ -131,11 +131,13 @@ Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution c
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
 ---
 
 ## Milestone 6: FULL Profile Safety Completion
+
+Status: Completed (`commit 941e592`)
 
 ### Test IDs completed
 - Host-test IDs:
@@ -152,5 +154,5 @@ Status: SAFE gating slice completed (`commit 762f6bc`); FULL fixture execution c
 
 ### Verification commands
 - `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
-- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost labcraft.local`
+- `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29`
 
