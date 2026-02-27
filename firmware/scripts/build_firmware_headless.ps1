@@ -19,7 +19,7 @@ $bin = Get-ChildItem -Path $ProjectDir -Recurse -Filter "*.bin" |
 
 if (-not $bin) { throw "No .bin produced under $ProjectDir" }
 
-$artifactDir = Join-Path (Split-Path $ProjectDir -Parent) "artifacts"
+$artifactDir = Join-Path (Split-Path $ProjectDir -Parent) "firmware/artifacts"
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
 Copy-Item $bin.FullName (Join-Path $artifactDir "$ProjName.bin") -Force
