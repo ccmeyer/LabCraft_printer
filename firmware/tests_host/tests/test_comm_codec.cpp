@@ -10,6 +10,26 @@ static CommCodec::FeedResult feedAll(CommCodec::RxParser& parser, const uint8_t*
     return last;
 }
 
+static void assertAckRoundtrip(uint8_t ackCmd, uint8_t seq8, uint32_t seq32) {
+    uint8_t payload[8] = {0};
+    const uint8_t payloadLen = CommCodec::buildAckPayload(ackCmd, seq8, seq32, true, payload, sizeof(payload));
+    UNSIGNED_LONGS_EQUAL(8u, payloadLen);
+
+    uint8_t frame[16] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, payloadLen, frame, sizeof(frame));
+    UNSIGNED_LONGS_EQUAL(12u, frameLen);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    const auto result = feedAll(parser, frame, frameLen, parsedLen);
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)result);
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(ackCmd, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(seq8, decoded.seq8);
+    CHECK_TRUE(decoded.hasSeq32);
+    UNSIGNED_LONGS_EQUAL(seq32, decoded.seq32);
+}
+
 TEST_GROUP(CommCodec)
 {
 };
@@ -112,6 +132,38 @@ TEST(CommCodec, OversizeLenIsRejected) {
     LONGS_EQUAL((int)CommCodec::FeedResult::LengthRejected, (int)result);
 }
 
+TEST(CommCodec, EncodeFrameZeroLenPayloadMatchesGolden) {
+    static const uint8_t dummyPayload[] = {0x00};
+    uint8_t frame[8] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(dummyPayload, 0, frame, sizeof(frame));
+    UNSIGNED_LONGS_EQUAL(4u, frameLen);
+    static const uint8_t expected[] = {0xAA, 0x00, 0xFF, 0xFF};
+    MEMCMP_EQUAL(expected, frame, sizeof(expected));
+}
+
+TEST(CommCodec, EncodeFrameReturnsZeroWhenOutCapTooSmall) {
+    static const uint8_t payload[] = {0xF3, 0x01};
+    uint8_t frame[5] = {0}; // needs 6 bytes
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    UNSIGNED_LONGS_EQUAL(0u, frameLen);
+}
+
+TEST(CommCodec, MaxPayloadLen62AcceptedByParser) {
+    uint8_t payload[62] = {0};
+    for (size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = static_cast<uint8_t>(i);
+    }
+    uint8_t frame[80] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    const auto result = feedAll(parser, frame, frameLen, parsedLen);
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)result);
+    UNSIGNED_LONGS_EQUAL(62u, parsedLen);
+}
+
 TEST(CommCodec, TruncatedTlvStopsParsingSafely) {
     static const uint8_t payload[] = {0x02, 0x09, CommCodec::TAG_P1, 0x04, 0xAA, 0xBB};
     uint8_t frame[32] = {0};
@@ -128,6 +180,123 @@ TEST(CommCodec, TruncatedTlvStopsParsingSafely) {
     UNSIGNED_LONGS_EQUAL(0u, decoded.p2Len);
     UNSIGNED_LONGS_EQUAL(0u, decoded.p3Len);
     CHECK_FALSE(decoded.hasSeq32);
+}
+
+TEST(CommCodec, DecodeDuplicateP1UsesLastWriteWins) {
+    static const uint8_t payload[] = {
+        0xFA, 0x10,
+        CommCodec::TAG_P1, 0x01, 0x11,
+        CommCodec::TAG_P1, 0x01, 0x22
+    };
+    uint8_t frame[24] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0x22u, decoded.p1);
+    UNSIGNED_LONGS_EQUAL(1u, decoded.p1Len);
+}
+
+TEST(CommCodec, DecodeUnknownTagIgnoredAndKnownTagsPreserved) {
+    static const uint8_t payload[] = {
+        0xFA, 0x10,
+        CommCodec::TAG_P1, 0x01, 0x11,
+        0x99, 0x02, 0xAA, 0xBB,
+        CommCodec::TAG_P2, 0x02, 0x34, 0x12
+    };
+    uint8_t frame[32] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0x11u, decoded.p1);
+    UNSIGNED_LONGS_EQUAL(1u, decoded.p1Len);
+    UNSIGNED_LONGS_EQUAL(0x1234u, decoded.p2);
+    UNSIGNED_LONGS_EQUAL(2u, decoded.p2Len);
+}
+
+TEST(CommCodec, DecodeSeq32WrongLenDoesNotSetHasSeq32) {
+    static const uint8_t payload[] = {
+        0xFA, 0x10,
+        CommCodec::TAG_SEQ32, 0x02, 0xAA, 0xBB
+    };
+    uint8_t frame[24] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    CHECK_FALSE(decoded.hasSeq32);
+}
+
+TEST(CommCodec, HelloAckWithSeq32Roundtrips) {
+    assertAckRoundtrip(0xF4, 0x10, 0x12345678u);
+}
+
+TEST(CommCodec, ByeAckWithSeq32Roundtrips) {
+    assertAckRoundtrip(0xF6, 0x10, 0x12345678u);
+}
+
+TEST(CommCodec, ByeDoneWithSeq32Roundtrips) {
+    assertAckRoundtrip(0xF8, 0x10, 0x12345678u);
+}
+
+TEST(CommCodec, SelftestStartWithProfileRunIdTimeoutParsesCoreFields) {
+    static const uint8_t payload[] = {
+        0xFA, 0x10,
+        CommCodec::TAG_SEQ32, 0x04, 0x78, 0x56, 0x34, 0x12,
+        0x20, 0x01, 0x00,             // TAG_PROFILE
+        0x21, 0x04, 0x78, 0x56, 0x34, 0x12, // TAG_RUN_ID
+        0x22, 0x04, 0x30, 0x75, 0x00, 0x00  // TAG_TIMEOUT_MS = 30000
+    };
+    uint8_t frame[48] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0xFAu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x10u, decoded.seq8);
+    CHECK_TRUE(decoded.hasSeq32);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
+}
+
+TEST(CommCodec, SelftestDoneSummaryTlvsDoNotBreakDecoding) {
+    static const uint8_t payload[] = {
+        0xFC, 0x10,
+        CommCodec::TAG_SEQ32, 0x04, 0x78, 0x56, 0x34, 0x12,
+        0x35, 0x02, 0x09, 0x00, // TAG_TOTAL
+        0x36, 0x02, 0x09, 0x00, // TAG_PASSED
+        0x37, 0x02, 0x00, 0x00, // TAG_FAILED
+        0x38, 0x01, 0x00        // TAG_ABORTED
+    };
+    uint8_t frame[48] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
+    CHECK_TRUE(frameLen > 0);
+
+    CommCodec::RxParser parser{};
+    uint8_t parsedLen = 0;
+    LONGS_EQUAL((int)CommCodec::FeedResult::FrameReady, (int)feedAll(parser, frame, frameLen, parsedLen));
+
+    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+    UNSIGNED_LONGS_EQUAL(0xFCu, decoded.cmd);
+    UNSIGNED_LONGS_EQUAL(0x10u, decoded.seq8);
+    CHECK_TRUE(decoded.hasSeq32);
+    UNSIGNED_LONGS_EQUAL(0x12345678u, decoded.seq32);
 }
 
 TEST_GROUP(CommCodecRecovery)

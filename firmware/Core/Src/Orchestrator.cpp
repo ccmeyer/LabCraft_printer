@@ -832,6 +832,46 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    return true;
 				  };
 
+				  auto runAckRoundtrip = [&](uint16_t testId, const char* name, uint8_t ackCmd, bool includeSeq32, bool doneLabel) {
+				    uint8_t ackPayload[8] = {0};
+				    const uint8_t ackLen = CommCodec::buildAckPayload(ackCmd, outSeq8, runId, includeSeq32, ackPayload, sizeof(ackPayload));
+				    uint8_t frame[16] = {0};
+				    const size_t frameLen = CommCodec::encodeFrame(ackPayload, ackLen, frame, sizeof(frame));
+
+				    CommCodec::RxParser parser{};
+				    uint8_t parsedLen = 0;
+				    int readyCount = 0;
+				    for (size_t i = 0; i < frameLen; ++i) {
+				      if (CommCodec::feedRxByte(parser, frame[i], parsedLen) == CommCodec::FeedResult::FrameReady) {
+				        readyCount++;
+				      }
+				    }
+
+				    const auto decoded = CommCodec::decodeCommand(parser.rxBuf, parsedLen);
+				    const bool seq8Match = (decoded.seq8 == outSeq8);
+				    const bool seq32Match = includeSeq32 ? (decoded.hasSeq32 && decoded.seq32 == runId) : !decoded.hasSeq32;
+				    const bool pass = (ackLen == (includeSeq32 ? 8u : 2u)) &&
+				                      (frameLen == static_cast<size_t>(ackLen + 4u)) &&
+				                      (readyCount == 1) &&
+				                      (decoded.cmd == ackCmd) &&
+				                      seq8Match &&
+				                      seq32Match;
+
+				    char metrics[96];
+				    if (doneLabel) {
+				      snprintf(metrics, sizeof(metrics), "done_cmd=%u;seq8_match=%u;seq32_match=%u",
+				               static_cast<unsigned>(ackCmd),
+				               static_cast<unsigned>(seq8Match ? 1u : 0u),
+				               static_cast<unsigned>(seq32Match ? 1u : 0u));
+				    } else {
+				      snprintf(metrics, sizeof(metrics), "ack_cmd=%u;seq8_match=%u;seq32_match=%u",
+				               static_cast<unsigned>(ackCmd),
+				               static_cast<unsigned>(seq8Match ? 1u : 0u),
+				               static_cast<unsigned>(seq32Match ? 1u : 0u));
+				    }
+				    return runOne(testId, name, pass, metrics);
+				  };
+
 				  {
 				    static const uint8_t known[] = {'1','2','3','4','5','6','7','8','9'};
 				    const uint16_t crc = CommCodec::crc16(known, sizeof(known));
@@ -860,6 +900,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    snprintf(metrics, sizeof(metrics), "frame_len=%u", static_cast<unsigned>(frameLen));
 				    if (!runOne(1002, "comm_frame_roundtrip", pass, metrics)) goto selftest_done;
 				  }
+
+				  if (!runAckRoundtrip(1010, "session_hello_ack", CMD_HELLO_ACK, true, false)) goto selftest_done;
+				  if (!runAckRoundtrip(1011, "session_goodbye_ack", CMD_BYE_ACK, true, false)) goto selftest_done;
+				  if (!runAckRoundtrip(1012, "session_goodbye_done", CMD_BYE_DONE, true, true)) goto selftest_done;
 
 				  {
 				    const bool pass = (comm->handle() != nullptr);
