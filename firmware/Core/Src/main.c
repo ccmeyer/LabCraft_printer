@@ -24,6 +24,8 @@
 /* USER CODE BEGIN Includes */
 #include "nvm.h"
 #include "BoardConfig.h"
+#include "CrashLog.h"
+#include "WatchdogSupervisor.h"
 
 extern void MX_LED_Init(void);
 
@@ -311,6 +313,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HAL_INIT);
 
   /* USER CODE END Init */
 
@@ -318,6 +321,8 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
+  CrashLog_EarlyBootInit();
+  CrashLog_SetBootStage(CRASH_BOOT_STAGE_CRASHLOG_READY);
 
   nvm_config_t cfg;
   if (!nvm_load(&cfg)) {
@@ -346,7 +351,11 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM12_Init();
   /* USER CODE BEGIN 2 */
-  // initialize our C++‐backed LED task
+  Watchdog_EarlyInit();
+  if (Watchdog_ShouldRunRecoveryReset() != 0u) {
+    NVIC_SystemReset();
+  }
+  // initialize our C++-backed LED task
   MX_LED_Init();
 
   MX_GRIPPER_Init();
@@ -357,7 +366,9 @@ int main(void)
 //  Force_PE8_EXTI_Rising_WithPulldown();
 
   MX_ORCH_Init();
+  CrashLog_SetBootStage(CRASH_BOOT_STAGE_ORCH_READY);
   MX_LOGGER_Init(&huart1, &hdma_usart1_tx);
+  CrashLog_SetBootStage(CRASH_BOOT_STAGE_LOGGER_READY);
 //  MX_COMM_Init(&huart2);     // start the Comm task on UART2
 
 //  Configure_All_TMC2208s();
@@ -385,7 +396,7 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of MotorInit */
-  osThreadDef(MotorInit, StartDefaultTask, osPriorityNormal, 0, 128);
+  osThreadDef(MotorInit, StartDefaultTask, osPriorityNormal, 0, 256);
   MotorInitHandle = osThreadCreate(osThread(MotorInit), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -1385,6 +1396,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+  (void)argument;
   MX_HEARTBEAT_Start();
   MX_PS_Init(&hi2c1, 0x70, 40);      // tca addr=0x70, sensor=40
 
@@ -1399,10 +1411,14 @@ void StartDefaultTask(void const * argument)
 #endif
 
   MX_COMM_Init(&huart2);     // start the Comm task on UART2
+  Watchdog_StartTask();
+  Watchdog_EnableTask(CRASH_TASK_BOOT);
+  Watchdog_CheckIn(CRASH_TASK_BOOT);
 
   /* Infinite loop */
   for(;;)
   {
+    Watchdog_CheckIn(CRASH_TASK_BOOT);
 	osDelay(1);
   }
   /* USER CODE END 5 */
@@ -1444,11 +1460,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_ERROR, CRASH_TASK_NONE);
+#else
   __disable_irq();
   while (1)
   {
   }
+#endif
   /* USER CODE END Error_Handler_Debug */
 }
 

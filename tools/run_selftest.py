@@ -189,13 +189,25 @@ def run(args: argparse.Namespace) -> int:
     with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
         reader = FrameReader()
 
-        # HELLO handshake (best-effort compatibility with current flow).
+        # HELLO handshake. Retry until the target is actually up so startup
+        # latency after DFU does not cause us to lose both HELLO and START.
         hello_seq8 = 1
-        ser.write(build_control(CMD_HELLO, hello_seq8, run_id))
-        hello_deadline = time.monotonic() + 2.0
+        hello_timeout_ms = int(args.hello_timeout_ms)
+        hello_retry_ms = int(args.hello_retry_ms)
+        hello_window_s = hello_timeout_ms / 1000.0
+        hello_deadline = time.monotonic() + hello_window_s
+        next_hello_send = 0.0
         got_hello_ack = False
+        hello_retries_sent = 0
+        observed_uart_bytes = 0
         while time.monotonic() < hello_deadline:
+            now = time.monotonic()
+            if now >= next_hello_send:
+                ser.write(build_control(CMD_HELLO, hello_seq8, run_id))
+                hello_retries_sent += 1
+                next_hello_send = now + (hello_retry_ms / 1000.0)
             chunk = ser.read(128)
+            observed_uart_bytes += len(chunk)
             for v in chunk:
                 frame = reader.feed(v)
                 if not frame or len(frame) < 2:
@@ -205,8 +217,39 @@ def run(args: argparse.Namespace) -> int:
                     break
             if got_hello_ack:
                 break
+        host_checks.append(
+            {
+                "name": "hello_ack",
+                "pass": got_hello_ack,
+                "details": {
+                    "seq8": hello_seq8,
+                    "run_id": run_id,
+                    "timeout_ms": hello_timeout_ms,
+                    "retry_ms": hello_retry_ms,
+                    "retries_sent": hello_retries_sent,
+                    "observed_uart_bytes": observed_uart_bytes,
+                    "fast_fail_on_missing_hello": bool(args.fast_fail_on_missing_hello),
+                },
+                "timestamp": now_iso(),
+            }
+        )
         if not got_hello_ack:
             print("No HELLO_ACK before self-test start.")
+            if args.fast_fail_on_missing_hello:
+                aborted = True
+                report = {
+                    "run_id": run_id,
+                    "profile": profile,
+                    "started_at": started_at,
+                    "finished_at": now_iso(),
+                    "aborted": aborted,
+                    "summary": summary,
+                    "results": results,
+                    "host_checks": host_checks,
+                }
+                write_json_atomic(args.out, report)
+                print(f"Wrote self-test report: {args.out}")
+                return 3
 
         profile_val = profile_map[profile]
         # Mirror profile into TAG_P1 so current firmware decode can branch without
@@ -388,6 +431,9 @@ def main() -> int:
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--profile", default="SAFE")
     p.add_argument("--timeout-ms", type=int, default=30000)
+    p.add_argument("--hello-timeout-ms", type=int, default=8000)
+    p.add_argument("--hello-retry-ms", type=int, default=250)
+    p.add_argument("--fast-fail-on-missing-hello", action="store_true")
     p.add_argument("--out", required=True)
     args = p.parse_args()
     try:

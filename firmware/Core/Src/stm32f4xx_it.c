@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "CrashLog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -86,9 +87,13 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+  CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_NMI, CRASH_TASK_NONE);
+#else
    while (1)
   {
   }
+#endif
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
@@ -103,6 +108,9 @@ void HardFault_Handler(void)
   while (1)
   {
     /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_HARD, CRASH_TASK_NONE);
+#endif
     /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }
@@ -118,6 +126,9 @@ void MemManage_Handler(void)
   while (1)
   {
     /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_MEM, CRASH_TASK_NONE);
+#endif
     /* USER CODE END W1_MemoryManagement_IRQn 0 */
   }
 }
@@ -133,6 +144,9 @@ void BusFault_Handler(void)
   while (1)
   {
     /* USER CODE BEGIN W1_BusFault_IRQn 0 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_BUS, CRASH_TASK_NONE);
+#endif
     /* USER CODE END W1_BusFault_IRQn 0 */
   }
 }
@@ -148,6 +162,9 @@ void UsageFault_Handler(void)
   while (1)
   {
     /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+    CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_USAGE, CRASH_TASK_NONE);
+#endif
     /* USER CODE END W1_UsageFault_IRQn 0 */
   }
 }

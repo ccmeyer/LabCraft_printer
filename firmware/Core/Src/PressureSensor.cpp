@@ -10,6 +10,7 @@
 #include "Logger.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "WatchdogSupervisor.h"
 
 #include <cstring>
 
@@ -120,6 +121,7 @@ void PressureSensor::taskEntry(void* pv) {
 
 void PressureSensor::taskLoop() {
     uint8_t port = 0;
+    Watchdog_EnableTask(CRASH_TASK_PRESSURE);
 
     // run bus-recovery once up front:
     I2C1_BusRecovery();     // drain off any stuck bus low
@@ -129,6 +131,7 @@ void PressureSensor::taskLoop() {
     for (int i = 0; i < 10; ++i) { vTaskDelay(_readInterval); }
 
     for (;;) {
+        Watchdog_CheckIn(CRASH_TASK_PRESSURE);
 //    	Logger::instance()->log("TEST %u\r\n", port);
         // 1) switch the I²C multiplexer
     	HAL_StatusTypeDef st;

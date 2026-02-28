@@ -103,6 +103,13 @@ extern "C" void MX_LOGGER_Init(UART_HandleTypeDef* huart1, DMA_HandleTypeDef* hd
   logger.startRunTimeStatsTask(3000 /* ms */);
 }
 
+extern "C" void MX_LOGGER_Log_entry(const char* fmt) {
+  if (fmt == nullptr) {
+    return;
+  }
+  Logger::instance()->log("%s", fmt);
+}
+
 static void EXTI8_DiagDump(void)
 {
     uint32_t moder = (GPIOE->MODER  >> (8*2)) & 0x3u; // 0=input, 1=out, 2=AF, 3=analog

@@ -321,12 +321,16 @@ private:
   // X & Y home tasks
   StaticTask_t  _tcbHomeX{};
   StaticTask_t  _tcbHomeY{};
+  StaticTask_t  _tcbHomeZ{};
   StackType_t   _stackHomeX[HOME_STACK_WORDS];
   StackType_t   _stackHomeY[HOME_STACK_WORDS];
+  StackType_t   _stackHomeZ[HOME_STACK_WORDS];
   TaskHandle_t  _taskHomeX = nullptr;
   TaskHandle_t  _taskHomeY = nullptr;
+  TaskHandle_t  _taskHomeZ = nullptr;
   HomeTaskArgs  _argsHomeX{};
   HomeTaskArgs  _argsHomeY{};
+  HomeTaskArgs  _argsHomeZ{};
 
   // P regulator home task
   StaticTask_t     _tcbHomeP{};

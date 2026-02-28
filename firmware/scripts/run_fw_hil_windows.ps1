@@ -5,12 +5,15 @@ param(
   [string]$PiUser = "labcraft",     # change if needed
   [string]$RemoteRepo = "/home/labcraft/LabCraft_printer",  # repo path on Pi
   [string]$Profile = "FULL",
+  [ValidateSet("Full", "Bisect")]
+  [string]$Mode = "Full",
   [string]$Port = "/dev/ttyAMA0",
   [string]$Config = "Debug",
 
   # Local paths (defaults assume you run from repo root)
   [string]$LocalBin = "firmware\artifacts\LabCraft_firmware.bin",
   [string]$LocalSelfTest = "tools\run_selftest.py",
+  [string]$LocalFlashAndTest = "firmware\hil\flash_and_test.sh",
   [string]$RemoteVenv = ""          # default: "$RemoteRepo/.venv"
 )
 
@@ -42,6 +45,7 @@ $sshTarget = "${PiUser}@${PiHost}"
 try {
   $LocalBinAbs = Resolve-Path $LocalBin
   if (-not (Test-Path $LocalSelfTest)) { Fail "Missing $LocalSelfTest. Did you add tools/run_selftest.py?" }
+  if (-not (Test-Path $LocalFlashAndTest)) { Fail "Missing $LocalFlashAndTest." }
 
   # 1) Local checks: host tests + headless build
   Write-Host "=== Local firmware checks ==="
@@ -51,26 +55,45 @@ try {
   # 2) Copy artifacts to Pi
   $remoteBinDir = "$RemoteRepo/firmware/artifacts"
   $remoteToolsDir = "$RemoteRepo/tools"
+  $remoteHilDir = "$RemoteRepo/firmware/hil"
   $ts = Get-Date -Format "yyyyMMdd_HHmmss"
   $remoteReport = "$RemoteRepo/hil_reports/selftest_$ts.json"
 
   Write-Host "=== Upload to Pi ==="
-  ssh "$sshTarget" "mkdir -p '$remoteBinDir' '$remoteToolsDir' '$RemoteRepo/hil_reports'"
+  ssh "$sshTarget" "mkdir -p '$remoteBinDir' '$remoteToolsDir' '$remoteHilDir' '$RemoteRepo/hil_reports'"
   $remoteBinFile  = "$remoteBinDir/LabCraft_firmware.bin"
   $remoteSelfTest = "$remoteToolsDir/run_selftest.py"
+  $remoteFlashAndTest = "$remoteHilDir/flash_and_test.sh"
 
   # scp expects: user@host:/path
   $scpBinTarget      = "${sshTarget}:$remoteBinFile"
   $scpSelfTestTarget = "${sshTarget}:$remoteSelfTest"
+  $scpFlashAndTestTarget = "${sshTarget}:$remoteFlashAndTest"
   $scpReportSource   = "${sshTarget}:$remoteReport"
 
 scp "$($LocalBinAbs.Path)" $scpBinTarget
   scp "$LocalSelfTest" $scpSelfTestTarget
+  scp "$LocalFlashAndTest" $scpFlashAndTestTarget
 
   # 3) Run flash + selftest on Pi
   if ([string]::IsNullOrWhiteSpace($RemoteVenv)) {
     $RemoteVenv = "$RemoteRepo/.venv"
   }
+
+  $remoteMode = $Mode.ToLowerInvariant()
+  $remoteProfile = $Profile
+  if ($Mode -eq "Bisect") {
+    $remoteProfile = "SAFE"
+  }
+
+  $flashArgs = @(
+    "./firmware/hil/flash_and_test.sh"
+    "--bin", "firmware/artifacts/LabCraft_firmware.bin"
+    "--port", $Port
+    "--profile", $remoteProfile
+    "--mode", $remoteMode
+    "--report", $remoteReport
+  )
 
   $cmd = @"
 set -e
@@ -78,8 +101,13 @@ cd '$RemoteRepo'
 if [ -f '$RemoteVenv/bin/activate' ]; then
   . '$RemoteVenv/bin/activate'
 fi
+python3 - <<'PY'
+from pathlib import Path
+path = Path('$remoteFlashAndTest')
+path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
+PY
 chmod +x firmware/hil/flash_and_test.sh
-./firmware/hil/flash_and_test.sh --bin firmware/artifacts/LabCraft_firmware.bin --port '$Port' --profile '$Profile' --report '$remoteReport'
+$(($flashArgs | ForEach-Object { "'$_'" }) -join " ")
 "@
 $cmd = $cmd -replace "`r", ""
 

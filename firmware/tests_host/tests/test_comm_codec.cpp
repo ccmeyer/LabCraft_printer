@@ -1,6 +1,8 @@
 #include "CppUTest/TestHarness.h"
 #include "CommCodec.h"
 
+#include <cstring>
+
 static CommCodec::FeedResult feedAll(CommCodec::RxParser& parser, const uint8_t* data, size_t len, uint8_t& outPayloadLen) {
     CommCodec::FeedResult last = CommCodec::FeedResult::None;
     outPayloadLen = 0;
@@ -256,6 +258,48 @@ TEST(CommCodec, ClearAckWithSeq32Roundtrips) {
     assertAckRoundtrip(0xF7, 0x10, 0x12345678u);
 }
 
+TEST(CommCodec, SelftestResultCrashRecordMetricsFrameEncodesWithoutTruncation) {
+    static const char name[] = "crash_record";
+    static const char metrics[] = "pending=1;fault=hard;task=status;reset=iwdg;boot=42;fault_ct=3;wdg_ct=2;boot_stage=hello_ack";
+    uint8_t payload[256] = {0};
+    size_t idx = 0;
+    payload[idx++] = 0xFB;
+    payload[idx++] = 0x33;
+    payload[idx++] = 0x30; payload[idx++] = 2; payload[idx++] = 0x11; payload[idx++] = 0x04;
+    payload[idx++] = 0x31; payload[idx++] = sizeof(name) - 1; memcpy(&payload[idx], name, sizeof(name) - 1); idx += sizeof(name) - 1;
+    payload[idx++] = 0x32; payload[idx++] = 1; payload[idx++] = 1;
+    payload[idx++] = 0x33; payload[idx++] = sizeof(metrics) - 1; memcpy(&payload[idx], metrics, sizeof(metrics) - 1); idx += sizeof(metrics) - 1;
+    payload[idx++] = 0x34; payload[idx++] = 4; payload[idx++] = 1; payload[idx++] = 0; payload[idx++] = 0; payload[idx++] = 0;
+    payload[idx++] = 0x21; payload[idx++] = 4; payload[idx++] = 1; payload[idx++] = 0; payload[idx++] = 0; payload[idx++] = 0;
+
+    uint8_t frame[320] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(idx), frame, sizeof(frame));
+    CHECK_TRUE(frameLen == idx + 4u);
+    UNSIGNED_LONGS_EQUAL(0xAAu, frame[0]);
+    UNSIGNED_LONGS_EQUAL(idx, frame[1]);
+}
+
+TEST(CommCodec, SelftestResultWatchdogMetricsFrameEncodesWithoutTruncation) {
+    static const char name[] = "watchdog";
+    static const char metrics[] = "enabled=1;timeout_ms=4000;req_n=5;live_n=5;late_task=none";
+    uint8_t payload[256] = {0};
+    size_t idx = 0;
+    payload[idx++] = 0xFB;
+    payload[idx++] = 0x33;
+    payload[idx++] = 0x30; payload[idx++] = 2; payload[idx++] = 0x12; payload[idx++] = 0x04;
+    payload[idx++] = 0x31; payload[idx++] = sizeof(name) - 1; memcpy(&payload[idx], name, sizeof(name) - 1); idx += sizeof(name) - 1;
+    payload[idx++] = 0x32; payload[idx++] = 1; payload[idx++] = 1;
+    payload[idx++] = 0x33; payload[idx++] = sizeof(metrics) - 1; memcpy(&payload[idx], metrics, sizeof(metrics) - 1); idx += sizeof(metrics) - 1;
+    payload[idx++] = 0x34; payload[idx++] = 4; payload[idx++] = 2; payload[idx++] = 0; payload[idx++] = 0; payload[idx++] = 0;
+    payload[idx++] = 0x21; payload[idx++] = 4; payload[idx++] = 1; payload[idx++] = 0; payload[idx++] = 0; payload[idx++] = 0;
+
+    uint8_t frame[320] = {0};
+    const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(idx), frame, sizeof(frame));
+    CHECK_TRUE(frameLen == idx + 4u);
+    UNSIGNED_LONGS_EQUAL(0xAAu, frame[0]);
+    UNSIGNED_LONGS_EQUAL(idx, frame[1]);
+}
+
 TEST(CommCodec, SelftestStartWithFullProfileMirroredIntoP1ParsesProfileField) {
     static const uint8_t payload[] = {
         0xFA, 0x10,
@@ -396,7 +440,7 @@ TEST(CommCodec, SelftestResultWithMilestone6MetricsRoundtrips) {
 
 TEST(CommCodec, SelftestResultWithRtosMemoryHeadroomMetricsEncodesLongHostFrame) {
     static const char name[] = "rtos_mem";
-    static const char metrics[] = "heap_now=8192;heap_min=6144;stk_min=96;stk_task=Status;task_n=9;core_miss=0;preg_n=2;trunc=0";
+    static const char metrics[] = "heap_now=8192;heap_min=6144;stk_min=96;stk_task=Status;task_n=9;core_miss=0;preg_n=2;trunc=0;stk_ovf=0";
     uint8_t payload[160] = {0};
     size_t idx = 0;
     payload[idx++] = 0xFB;

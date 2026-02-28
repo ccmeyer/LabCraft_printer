@@ -14,6 +14,7 @@
 #include "FreeRTOS.h"
 #include "event_groups.h"
 #include "stm32f4xx_hal.h"
+#include "WatchdogSupervisor.h"
 #include <cmath>
 
 static inline uint8_t pr_port_code(GPIO_TypeDef* p) {
@@ -113,6 +114,7 @@ void PressureRegulator::begin(
   if (_taskHandle) {
     vTaskSuspend(_taskHandle);
   }
+  Watchdog_DisableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
   _stepper->stop();
 }
 
@@ -150,6 +152,7 @@ void PressureRegulator::start() {
   _stepping   = false;
 
   if (_taskHandle) vTaskResume(_taskHandle);
+  Watchdog_EnableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
   Logger::instance()->log("[PReg] START port=%u handle=%p\r\n",
                           (unsigned)_sensorPort, _taskHandle);
   //  if (_taskHandle) xTaskNotifyGive(_taskHandle);
@@ -158,6 +161,7 @@ void PressureRegulator::start() {
 void PressureRegulator::pause() {
   _active = false;
   if (_taskHandle) vTaskSuspend(_taskHandle);
+  Watchdog_DisableTask((_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R);
   if (_stepping) { _stepper->stop(); _stepping = false; }
   _integral = 0;
 }
@@ -266,12 +270,16 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     // Prevent control loop from issuing new moves
     _homing = true;
     Printer::instance()->pauseDispense();
+    const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
 //    if (_taskHandle) vTaskSuspend(_taskHandle);
     // If called from our own control task, don't suspend ourselves.
     TaskHandle_t me = xTaskGetCurrentTaskHandle();
     const bool calledFromOwnTask = (_taskHandle && me == _taskHandle);
 
-    if (!calledFromOwnTask && _taskHandle) vTaskSuspend(_taskHandle);
+    if (!calledFromOwnTask && _taskHandle) {
+      vTaskSuspend(_taskHandle);
+      Watchdog_DisableTask(watchdogTaskId);
+    }
 
 
     // Open valve
@@ -298,6 +306,7 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
 //    }
     if (!calledFromOwnTask && _active && _taskHandle) {
       vTaskResume(_taskHandle);
+      Watchdog_EnableTask(watchdogTaskId);
     }
     Printer::instance()->resumeDispense();
     Logger::instance()->log("homing-complete\r\n");
@@ -357,8 +366,11 @@ void PressureRegulator::homeWithValveFast(){
 
 void PressureRegulator::controlLoop() {
   const TickType_t period = pdMS_TO_TICKS(5);  // 200 Hz tick
+  const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
+  Watchdog_EnableTask(watchdogTaskId);
   Logger::instance()->log("CONTROL LOOP\r\n");
   for (;;) {
+    Watchdog_CheckIn(watchdogTaskId);
 
 	  // ---- Quiet window handling ----
 	  if (_quietActive) {

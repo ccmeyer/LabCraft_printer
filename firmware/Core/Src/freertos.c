@@ -24,6 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "CrashLog.h"
+#include "CrashLogCodec.h"
 
 /* USER CODE END Includes */
 
@@ -44,11 +46,14 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+static volatile uint32_t g_stackOverflowHookFired = 0;
 
 /* USER CODE END Variables */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+uint32_t RTOS_StackOverflowHookFired(void);
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -103,5 +108,27 @@ void vApplicationGetTimerTaskMemory( StaticTask_t **ppxTimerTaskTCBBuffer, Stack
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+uint32_t RTOS_StackOverflowHookFired(void)
+{
+  return g_stackOverflowHookFired;
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE == 0)
+  (void)xTask;
+  (void)pcTaskName;
+  g_stackOverflowHookFired = 1u;
+  taskDISABLE_INTERRUPTS();
+  for (;;)
+  {
+  }
+#else
+  (void)xTask;
+  g_stackOverflowHookFired = 1u;
+  CrashTaskId taskId = CrashLog_TaskIdFromTaskName(pcTaskName);
+  CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_STACK_OVF, taskId);
+#endif
+}
 
 /* USER CODE END Application */

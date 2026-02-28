@@ -17,6 +17,9 @@
 #include "Gantry.h"
 #include "Comm.h"
 #include "CommCodec.h"
+#include "CrashLog.h"
+#include "CrashLogCodec.h"
+#include "WatchdogSupervisor.h"
 #include "cmsis_os.h"         // for portMAX_DELAY, pdTRUE, etc.
 #include "task.h"
 #include <cstdio>
@@ -30,6 +33,8 @@
 #if LC_HAS_LED_STRIP > 0
   #include "LEDStrip.h"
 #endif
+
+extern "C" uint32_t RTOS_StackOverflowHookFired(void);
 
 Orchestrator* Orchestrator::_instance = nullptr;
 
@@ -73,10 +78,11 @@ extern "C" void MX_ORCH_Init()
 BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigherPriorityTaskWoken) {
 	// special commands — handle immediately
 
-    switch (cmd.cmd) {
-		case CMD_HELLO: {
-		  // Reset any stale state and request HELLO_ACK
-		  _paused = false; _pauseRequested = false;
+	    switch (cmd.cmd) {
+			case CMD_HELLO: {
+			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_RX);
+			  // Reset any stale state and request HELLO_ACK
+			  _paused = false; _pauseRequested = false;
 		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
 		  _inFlight = cmd;                 // capture seq/cmd for ACK
@@ -161,6 +167,7 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
   const TickType_t quantum = msToAtLeast1Tick(WAIT_QUANTUM_MS);
 
   while (remainingTicks > 0) {
+    Watchdog_CheckIn(CRASH_TASK_ORCH);
     // Interrupt conditions (match your waitForBit() intent)
     if (_paused || _pauseRequested || _clearRequested || _shutdownRequested) {
       return false;
@@ -180,6 +187,7 @@ bool Orchestrator::pauseAwareDelayTicks(TickType_t& remainingTicks)
 bool Orchestrator::waitForBit(EventBits_t bit) {
   const TickType_t ticks = pdMS_TO_TICKS(50);
   while (true) {
+    Watchdog_CheckIn(CRASH_TASK_ORCH);
     // If a PAUSE came in, stop waiting immediately.
 //    if (_paused) {
 //      return false;
@@ -204,9 +212,10 @@ bool Orchestrator::waitForBits(EventBits_t bits)
 {
   const TickType_t ticks = pdMS_TO_TICKS(50);
   while (true) {
-	// If a PAUSE came in, stop waiting immediately.
-	if (_paused) {
-	  return false;
+    Watchdog_CheckIn(CRASH_TASK_ORCH);
+		// If a PAUSE came in, stop waiting immediately.
+		if (_paused) {
+		  return false;
 	}
 	// Wait in small chunks
 	EventBits_t result = xEventGroupWaitBits(
@@ -228,19 +237,24 @@ bool Orchestrator::waitForBits(EventBits_t bits)
 }
 
 void Orchestrator::_run() {
+  Watchdog_EnableTask(CRASH_TASK_ORCH);
   for (;;) {
-	  if (_acknowledgeRequested) {
+	  Watchdog_CheckIn(CRASH_TASK_ORCH);
+		  if (_acknowledgeRequested) {
 		  const uint8_t seq8  = _inFlight.seq8;
 		  const uint32_t seq32 = _inFlight.hasSeq32 ? _inFlight.seq32 : _currentCmdNum;
 		  const bool have32 = _inFlight.hasSeq32;
 //          // Reply with appropriate ACK using the same sequence number
 //          uint8_t seq = _inFlight.seq;
-          switch (_inFlight.cmd) {
-            case CMD_HELLO:{
+	          switch (_inFlight.cmd) {
+	            case CMD_HELLO:{
 //            	Comm::instance()->sendCommandByte(CMD_HELLO_ACK, seq);
-            	Comm::instance()->sendAckWithSeq32(CMD_HELLO_ACK, seq8, seq32, have32);
-                // Then resume status & cosmetic stuff
-                Comm::instance()->setStatusPaused(false);
+	            	Comm::instance()->sendAckWithSeq32(CMD_HELLO_ACK, seq8, seq32, have32);
+	            	CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
+	            	Watchdog_Arm();
+	            	CrashLog_LogBootSummary();
+	                // Then resume status & cosmetic stuff
+	                Comm::instance()->setStatusPaused(false);
 				#if LC_HAS_LED_STRIP == 1
 				  MX_LEDSTRIP_FadeTo(100,500);
 				#endif
@@ -455,17 +469,23 @@ void Orchestrator::executeCommand(const Command &cmd) {
 	          break;
 	        }
         case CMD_HOME_X: {
-          MX_STEPPERX_Home(cmd.p1, cmd.p2,cmd.p3);
-		  break;
-		}
+          xEventGroupClearBits(_doneEvents, BIT_HOME_X_DONE);
+          startHomeAsync(Stepper::stepperX(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_X_DONE);
+          waitForBit(BIT_HOME_X_DONE);
+          break;
+        }
         case CMD_HOME_Y: {
-          MX_STEPPERY_Home(cmd.p1, cmd.p2,cmd.p3);
-		  break;
-		}
+          xEventGroupClearBits(_doneEvents, BIT_HOME_Y_DONE);
+          startHomeAsync(Stepper::stepperY(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_Y_DONE);
+          waitForBit(BIT_HOME_Y_DONE);
+          break;
+        }
         case CMD_HOME_Z: {
-          MX_STEPPERZ_Home(cmd.p1, cmd.p2,cmd.p3);
-		  break;
-		}
+          xEventGroupClearBits(_doneEvents, BIT_HOME_Z_DONE);
+          startHomeAsync(Stepper::stepperZ(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_Z_DONE);
+          waitForBit(BIT_HOME_Z_DONE);
+          break;
+        }
         case CMD_ENABLE_MOTORS: {
           Stepper::stepperX()->enableMotor();
           Stepper::stepperY()->enableMotor();
@@ -634,12 +654,16 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			break;
 		}
         case CMD_HOME_PRINT: {
-        	PressureRegulator::regP().homeWithValve(cmd.p1, cmd.p2, cmd.p3);
-			break;
-		}
+          xEventGroupClearBits(_doneEvents, BIT_HOME_P_DONE);
+          startRegHomeAsync(&PressureRegulator::regP(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_P_DONE);
+          waitForBit(BIT_HOME_P_DONE);
+          break;
+        }
         case CMD_HOME_REFUEL: {
 		#if (LC_PRESSURE_PORTS > 1)
-		  PressureRegulator::regR().homeWithValve(cmd.p1, cmd.p2, cmd.p3);
+		  xEventGroupClearBits(_doneEvents, BIT_HOME_R_DONE);
+		  startRegHomeAsync(&PressureRegulator::regR(), cmd.p1, cmd.p2, cmd.p3, BIT_HOME_R_DONE);
+		  waitForBit(BIT_HOME_R_DONE);
 		#else
 		  Logger::instance()->log("Legacy has no refuel channel");
 		#endif
@@ -788,10 +812,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				  uint16_t failed = 0;
 				  bool aborted = false;
 
-				  auto sendResult = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
-				    uint8_t payload[192] = {0};
-				    size_t idx = 0;
-				    payload[idx++] = CMD_SELFTEST_RESULT;
+					  auto sendResult = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
+					    uint8_t payload[256] = {0};
+					    size_t idx = 0;
+					    payload[idx++] = CMD_SELFTEST_RESULT;
 				    payload[idx++] = outSeq8;
 
 				    payload[idx++] = 0x30; payload[idx++] = 2;
@@ -806,10 +830,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    payload[idx++] = 0x32; payload[idx++] = 1;
 				    payload[idx++] = pass ? 1u : 0u;
 
-					    const size_t metricsLenRaw = strlen(metrics);
-					    const uint8_t metricsLen = static_cast<uint8_t>((metricsLenRaw > 96u) ? 96u : metricsLenRaw);
-				    payload[idx++] = 0x33; payload[idx++] = metricsLen;
-				    memcpy(&payload[idx], metrics, metricsLen); idx += metricsLen;
+						    const size_t metricsLenRaw = strlen(metrics);
+						    const uint8_t metricsLen = static_cast<uint8_t>((metricsLenRaw > 160u) ? 160u : metricsLenRaw);
+					    payload[idx++] = 0x33; payload[idx++] = metricsLen;
+					    memcpy(&payload[idx], metrics, metricsLen); idx += metricsLen;
 
 				    const uint32_t ts = HAL_GetTick();
 				    payload[idx++] = 0x34; payload[idx++] = 4;
@@ -887,16 +911,17 @@ void Orchestrator::executeCommand(const Command &cmd) {
 				    return runOne(testId, name, pass, metrics);
 				  };
 
-				  auto sampleStatusWindow = [&](uint32_t sampleMs,
-				                                uint32_t& chunk0Seen,
-				                                uint32_t& chunk1Seen,
-				                                uint32_t& alternationErrors,
-				                                uint32_t& periodMsAvg,
-				                                uint32_t& periodMsMaxJitter) {
-				    Comm::resetStatusMetrics();
-				    comm->setStatusPaused(false);
-				    vTaskDelay(pdMS_TO_TICKS(sampleMs));
-				    chunk0Seen = Comm::getStatusChunk0Count();
+					  auto sampleStatusWindow = [&](uint32_t sampleMs,
+					                                uint32_t& chunk0Seen,
+					                                uint32_t& chunk1Seen,
+					                                uint32_t& alternationErrors,
+					                                uint32_t& periodMsAvg,
+					                                uint32_t& periodMsMaxJitter) {
+					    Comm::resetStatusMetrics();
+					    comm->setStatusPaused(false);
+					    Watchdog_CheckIn(CRASH_TASK_ORCH);
+					    vTaskDelay(pdMS_TO_TICKS(sampleMs));
+					    chunk0Seen = Comm::getStatusChunk0Count();
 				    chunk1Seen = Comm::getStatusChunk1Count();
 				    alternationErrors = Comm::getStatusAlternationErrors();
 				    periodMsAvg = Comm::getStatusPeriodAvgMs();
@@ -940,9 +965,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					    int32_t peakPressure = sensor->getPressure(sensorPort);
 					    int32_t troughPressure = peakPressure;
 
-					    while ((HAL_GetTick() - startMs) < timeoutMs) {
-					      const int32_t pressure = sensor->getPressure(sensorPort);
-					      if (pressure > peakPressure) peakPressure = pressure;
+						    while ((HAL_GetTick() - startMs) < timeoutMs) {
+						      Watchdog_CheckIn(CRASH_TASK_ORCH);
+						      const int32_t pressure = sensor->getPressure(sensorPort);
+						      if (pressure > peakPressure) peakPressure = pressure;
 					      if (pressure < troughPressure) troughPressure = pressure;
 					      if (reg.isPressureOk()) {
 					        break;
@@ -973,10 +999,11 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						    const TickType_t chunkTicks = pdMS_TO_TICKS(50);
 						    const TickType_t timeoutTicks = pdMS_TO_TICKS(timeoutMs);
 						    TickType_t waitedTicks = 0;
-						    while (waitedTicks < timeoutTicks) {
-						      if (_selfTestAbortRequested) {
-						        return false;
-						      }
+							    while (waitedTicks < timeoutTicks) {
+							      Watchdog_CheckIn(CRASH_TASK_ORCH);
+							      if (_selfTestAbortRequested) {
+							        return false;
+							      }
 						      const TickType_t waitTicks = ((timeoutTicks - waitedTicks) > chunkTicks) ? chunkTicks : (timeoutTicks - waitedTicks);
 						      const EventBits_t result = xEventGroupWaitBits(
 						          _doneEvents,
@@ -1222,6 +1249,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						    }
 						    const uint32_t heapNow = xPortGetFreeHeapSize();
 						    const uint32_t heapMin = xPortGetMinimumEverFreeHeapSize();
+						    const uint32_t stackOverflowFired = RTOS_StackOverflowHookFired();
 						    const uint32_t coreMissing = (hasOrch ? 0u : 1u) +
 						                                 (hasStatus ? 0u : 1u) +
 						                                 (hasPrinter ? 0u : 1u) +
@@ -1232,11 +1260,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						                      (stackMinWords >= kSelfTestStackMinWords) &&
 						                      (coreMissing == 0u) &&
 						                      !trunc &&
-						                      (pregCount == static_cast<uint32_t>(LC_PRESSURE_PORTS));
-						    char metrics[160];
+						                      (pregCount == static_cast<uint32_t>(LC_PRESSURE_PORTS)) &&
+						                      (stackOverflowFired == 0u);
+						    char metrics[176];
 						    snprintf(metrics,
 						             sizeof(metrics),
-						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u",
+						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u;stk_ovf=%lu",
 						             static_cast<unsigned long>(heapNow),
 						             static_cast<unsigned long>(heapMin),
 						             static_cast<unsigned>(stackMinWords),
@@ -1244,9 +1273,78 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						             static_cast<unsigned>(captured),
 						             static_cast<unsigned long>(coreMissing),
 						             static_cast<unsigned long>(pregCount),
-						             trunc ? 1u : 0u);
+						             trunc ? 1u : 0u,
+						             static_cast<unsigned long>(stackOverflowFired));
 						    if (!runOne(1040, "rtos_memory_headroom_safe", pass, metrics)) goto selftest_done;
 						  }
+
+						#if (LC_CRASHLOG_SELFTEST_ENABLE != 0)
+						  {
+						    CrashLogSnapshot snap{};
+						    CrashLog_GetSnapshot(&snap);
+						    const bool pending = (snap.flags & CRASHLOG_FLAG_PENDING) != 0u;
+						    const bool sticky = (snap.flags & CRASHLOG_FLAG_WDT_ARM_STICKY) != 0u;
+						    const bool staleWatchdogHistory =
+						        pending &&
+						        sticky &&
+						        (snap.lastFault == CRASH_FAULT_WDT_STARVE) &&
+						        (snap.resetCause != CRASH_RESET_IWDG);
+						    const bool pass = (!pending && (snap.lastFault == CRASH_FAULT_NONE)) || staleWatchdogHistory;
+						    char metrics[192];
+						    snprintf(metrics,
+						             sizeof(metrics),
+						             "pending=%u;sticky=%u;fault=%s;task=%s;reset=%s;boot=%lu;fault_ct=%lu;wdg_ct=%lu;sticky_ct=%lu;raw_sr=%lu;boot_stage=%s",
+						             pending ? 1u : 0u,
+						             sticky ? 1u : 0u,
+						             CrashLog_FaultKindName(snap.lastFault),
+						             CrashLog_TaskIdName(snap.lastTask),
+						             CrashLog_ResetCauseName(snap.resetCause),
+						             static_cast<unsigned long>(snap.bootCount),
+						             static_cast<unsigned long>(snap.faultCountTotal),
+						             static_cast<unsigned long>(snap.watchdogResetCount),
+						             static_cast<unsigned long>(snap.watchdogStickyCount),
+						             static_cast<unsigned long>(snap.watchdogRawStatus),
+						             CrashLog_BootStageName(snap.bootStage));
+						    if (!runOne(1041, "crash_record_retained_safe", pass, metrics)) goto selftest_done;
+						  }
+						#endif
+
+						#if (LC_WATCHDOG_SELFTEST_ENABLE != 0)
+						  {
+						    const WatchdogArmResult armResult = Watchdog_GetArmResult();
+						    const uint32_t enabled = Watchdog_IsEnabled();
+						    const uint32_t reqN = Watchdog_GetRequiredTaskCount();
+						    const uint32_t liveN = Watchdog_GetLiveTaskCount();
+						    const CrashTaskId lateTask = Watchdog_GetLateTask();
+						    const uint32_t recoveryBoot = CrashLog_IsWatchdogRecoveryBoot();
+						    const bool passArmed = (armResult == WATCHDOG_ARM_RESULT_ARMED) &&
+						        (enabled == 1u) &&
+						        (lateTask == CRASH_TASK_NONE) &&
+						        (reqN > 0u) &&
+						        (liveN == reqN);
+						    const bool passStickySkip = (armResult == WATCHDOG_ARM_RESULT_SKIPPED_STICKY_STATUS) &&
+						        (enabled == 0u) &&
+						        (lateTask == CRASH_TASK_NONE) &&
+						        (reqN == 0u) &&
+						        (liveN == 0u);
+						    const bool pass = passArmed || passStickySkip;
+						    char metrics[192];
+						    snprintf(metrics,
+						             sizeof(metrics),
+						             "enabled=%lu;arm_result=%s;timeout_ms=%lu;init_timeout_ms=%lu;req_n=%lu;live_n=%lu;late_task=%s;raw_sr=%lu;sticky_ct=%lu;recovery_boot=%lu",
+						             static_cast<unsigned long>(enabled),
+						             Watchdog_ArmResultName(armResult),
+						             static_cast<unsigned long>(Watchdog_GetTimeoutMs()),
+						             static_cast<unsigned long>(Watchdog_GetInitTimeoutMs()),
+						             static_cast<unsigned long>(reqN),
+						             static_cast<unsigned long>(liveN),
+						             CrashLog_TaskIdName(lateTask),
+						             static_cast<unsigned long>(Watchdog_GetRawStatus()),
+						             static_cast<unsigned long>(Watchdog_GetStickyStatusCount()),
+						             static_cast<unsigned long>(recoveryBoot));
+						    if (!runOne(1042, "watchdog_supervisor_safe", pass, metrics)) goto selftest_done;
+						  }
+						#endif
 
 						  {
 						    if (!fullProfile) {
@@ -1669,6 +1767,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
 void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have32)
 {
 //  Logger::instance()->log("Shutdown start\r\n");
+  Watchdog_CheckIn(CRASH_TASK_ORCH);
 
   _clearing = true;
 
@@ -1720,7 +1819,9 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
 #endif
 
   // small settle delay for hardware
+  Watchdog_CheckIn(CRASH_TASK_ORCH);
   vTaskDelay(pdMS_TO_TICKS(500));
+  Watchdog_CheckIn(CRASH_TASK_ORCH);
 
   PressureRegulator::regP().closeValve();
 #if (LC_PRESSURE_PORTS > 1)
@@ -1734,6 +1835,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
 
 //   8) Tell host we’re safe. Status is paused, but command bytes still go out.
 //  Comm::instance()->sendCommandByte(CMD_BYE_DONE, byeSeq);
+  Watchdog_CheckIn(CRASH_TASK_ORCH);
   Comm::instance()->sendAckWithSeq32(CMD_BYE_DONE, byeSeq8, byeSeq32, have32);
 }
 
@@ -1747,6 +1849,7 @@ void Orchestrator::_homeTaskEntry(void* ctx)
   // Clear the handle for this bank so a new home can be started later
   if (a->stepper == Stepper::stepperX()) instance()->_taskHomeX = nullptr;
   else if (a->stepper == Stepper::stepperY()) instance()->_taskHomeY = nullptr;
+  else if (a->stepper == Stepper::stepperZ()) instance()->_taskHomeZ = nullptr;
 
   vTaskDelete(nullptr);
 }
@@ -1768,6 +1871,8 @@ void Orchestrator::startHomeAsync(Stepper* s,
     tcb = &_tcbHomeX; stack = _stackHomeX; handle = &_taskHomeX; args = &_argsHomeX; name = "HomeX";
   } else if (s == Stepper::stepperY()) {
     tcb = &_tcbHomeY; stack = _stackHomeY; handle = &_taskHomeY; args = &_argsHomeY; name = "HomeY";
+  } else if (s == Stepper::stepperZ()) {
+    tcb = &_tcbHomeZ; stack = _stackHomeZ; handle = &_taskHomeZ; args = &_argsHomeZ; name = "HomeZ";
   } else {
     // Fallback for any other axis (Z, P, R) if you ever call this path:
     Logger::instance()->log("[Home] No static bank for this axis; running blocking fallback\r\n");

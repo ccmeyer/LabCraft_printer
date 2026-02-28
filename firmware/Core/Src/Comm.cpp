@@ -19,6 +19,8 @@
 #include "Gripper.h"
 #include "Logger.h"
 #include "CommCodec.h"
+#include "CrashLog.h"
+#include "WatchdogSupervisor.h"
 
 #if (LC_HAS_IMAGING == 1)
 #include "Flash.hpp"
@@ -64,12 +66,18 @@ void Comm::begin() {
     // Create TX mutex
     _txMutex = xSemaphoreCreateMutex();
 
+    CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_INIT);
+
     // arm the HAL RX interrupt for 1 byte
-    HAL_UART_Receive_IT(_huart, &_rxByte, 1);
+    if (HAL_UART_Receive_IT(_huart, &_rxByte, 1) == HAL_OK) {
+        CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_RX_ARMED);
+    } else {
+        _needRxRearm = true;
+    }
 
     // spawn status‐sender task @50 ms intervals
     xTaskCreate(
-      statusTaskEntry, "Status", 256,
+      statusTaskEntry, "Status", 384,
       this,                // pvParameters
       tskIDLE_PRIORITY+1,  // priority
       nullptr
@@ -102,6 +110,8 @@ extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef* huart) {
     // Try to re-arm RX; if busy, set a flag to retry from task context
     if (HAL_UART_Receive_IT(huart, &c->_rxByte, 1) != HAL_OK) {
         c->_needRxRearm = true;   // new volatile flag on Comm
+    } else {
+        CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_RX_REARMED);
     }
 }
 
@@ -115,6 +125,8 @@ extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef* huart) {
 
   if (HAL_UART_Receive_IT(huart, &c->_rxByte, 1) != HAL_OK) {
     c->_needRxRearm = true;
+  } else {
+    CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_RX_REARMED);
   }
 
 //  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
@@ -316,12 +328,15 @@ static void recordStatusSend(Chunk sentChunk) {
 }
 
 void Comm::statusTask() {
+    Watchdog_EnableTask(CRASH_TASK_STATUS);
     for (;;) {
+        Watchdog_CheckIn(CRASH_TASK_STATUS);
         vTaskDelay(pdMS_TO_TICKS(50));
 
         if (_needRxRearm) {
           if (HAL_UART_Receive_IT(_huart, &_rxByte, 1) == HAL_OK) {
             _needRxRearm = false;
+            CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_RX_REARMED);
           }
         }
         if (_statusPaused) continue;

@@ -27,6 +27,7 @@ set -euo pipefail
 # Defaults (override with args)
 # -------------------------
 PROFILE="SAFE"  # SAFE or FULL (your future selftest profiles)
+MODE="full"     # full or bisect
 BIN_PATH=""     # default resolved below
 PORT="/dev/ttyAMA0"  # default Pi UART; override with --port
 DFU_SCRIPT=""   # auto-detect if not provided
@@ -35,6 +36,10 @@ LOG_DIR=""      # default resolved below
 SELFTEST_CMD="" # optional explicit command
 WAIT_PORT_S=20
 BAUD=115200
+HELLO_TIMEOUT_MS=""
+SELFTEST_TIMEOUT_MS=""
+HELLO_RETRY_MS=250
+SKIP_SELFTEST_AFTER_MISSING_HELLO=0
 
 # -------------------------
 # Helpers
@@ -172,11 +177,26 @@ run_selftest() {
   # Default: use tools/run_selftest.py if present (you will add this later)
   if [[ -f "$repo/tools/run_selftest.py" ]]; then
     echo "Running tools/run_selftest.py (profile=$PROFILE, port=$port)" | tee -a "$log"
-    python3 -u "$repo/tools/run_selftest.py" \
+    local cmd=(
+      python3 -u "$repo/tools/run_selftest.py"
       --port "$port" \
       --baud "$BAUD" \
       --profile "$PROFILE" \
-      --out "$report" 2>&1 | tee -a "$log"
+      --out "$report"
+    )
+    if [[ -n "$SELFTEST_TIMEOUT_MS" ]]; then
+      cmd+=(--timeout-ms "$SELFTEST_TIMEOUT_MS")
+    fi
+    if [[ -n "$HELLO_TIMEOUT_MS" ]]; then
+      cmd+=(--hello-timeout-ms "$HELLO_TIMEOUT_MS")
+    fi
+    if [[ -n "$HELLO_RETRY_MS" ]]; then
+      cmd+=(--hello-retry-ms "$HELLO_RETRY_MS")
+    fi
+    if [[ "$SKIP_SELFTEST_AFTER_MISSING_HELLO" -ne 0 ]]; then
+      cmd+=(--fast-fail-on-missing-hello)
+    fi
+    "${cmd[@]}" 2>&1 | tee -a "$log"
     return "${PIPESTATUS[0]}"
   fi
 
@@ -193,11 +213,16 @@ Options:
   --dfu-script PATH     Path to dfu_update.py (default: auto-detect in repo)
   --port PATH           Serial device to use after flashing (default: /dev/ttyAMA0)
   --profile NAME        Self-test profile (SAFE or FULL). Default: SAFE
+  --mode NAME           Runner mode (full or bisect). Default: full
   --report PATH         JSON report output path (default: hil_reports/selftest_<ts>.json)
   --log-dir PATH        Log directory (default: hil_reports/)
   --selftest-cmd CMD    Explicit self-test command to run (overrides tools/run_selftest.py)
   --wait-port SEC       How long to wait for serial port after flashing (default: 20)
   --baud BAUD           Baud rate for self-test runner (default: 115200)
+  --hello-timeout-ms N  HELLO_ACK timeout for tools/run_selftest.py
+  --selftest-timeout-ms N  Overall self-test timeout for tools/run_selftest.py
+  --hello-retry-ms N    HELLO retry interval for tools/run_selftest.py
+  --skip-selftest-after-missing-hello  Fail immediately when HELLO_ACK never arrives
   -h, --help            Show help
 
 Example:
@@ -214,15 +239,37 @@ while [[ $# -gt 0 ]]; do
     --dfu-script) DFU_SCRIPT="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
     --report) REPORT_PATH="$2"; shift 2 ;;
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --selftest-cmd) SELFTEST_CMD="$2"; shift 2 ;;
     --wait-port) WAIT_PORT_S="$2"; shift 2 ;;
     --baud) BAUD="$2"; shift 2 ;;
+    --hello-timeout-ms) HELLO_TIMEOUT_MS="$2"; shift 2 ;;
+    --selftest-timeout-ms) SELFTEST_TIMEOUT_MS="$2"; shift 2 ;;
+    --hello-retry-ms) HELLO_RETRY_MS="$2"; shift 2 ;;
+    --skip-selftest-after-missing-hello) SKIP_SELFTEST_AFTER_MISSING_HELLO=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+case "$MODE" in
+  full)
+    ;;
+  bisect)
+    PROFILE="SAFE"
+    if [[ -z "$HELLO_TIMEOUT_MS" ]]; then HELLO_TIMEOUT_MS=8000; fi
+    if [[ -z "$SELFTEST_TIMEOUT_MS" ]]; then SELFTEST_TIMEOUT_MS=12000; fi
+    if [[ -z "$HELLO_RETRY_MS" ]]; then HELLO_RETRY_MS=250; fi
+    SKIP_SELFTEST_AFTER_MISSING_HELLO=1
+    ;;
+  *)
+    echo "Unknown mode: $MODE" >&2
+    usage
+    exit 2
+    ;;
+esac
 
 # -------------------------
 # Main
@@ -267,10 +314,14 @@ echo "=== LabCraft HIL flash_and_test ===" | tee "$LOG_PATH"
 echo "Repo root     : $REPO_ROOT" | tee -a "$LOG_PATH"
 echo "DFU script    : $DFU_SCRIPT" | tee -a "$LOG_PATH"
 echo "BIN           : $BIN_PATH" | tee -a "$LOG_PATH"
+echo "Mode          : $MODE" | tee -a "$LOG_PATH"
 echo "Profile       : $PROFILE" | tee -a "$LOG_PATH"
 echo "Report path   : $REPORT_PATH" | tee -a "$LOG_PATH"
 echo "Wait port (s) : $WAIT_PORT_S" | tee -a "$LOG_PATH"
 echo "Baud          : $BAUD" | tee -a "$LOG_PATH"
+echo "HELLO t/o ms  : ${HELLO_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+echo "Selftest t/o  : ${SELFTEST_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+echo "HELLO retry   : ${HELLO_RETRY_MS:-default}" | tee -a "$LOG_PATH"
 echo "" | tee -a "$LOG_PATH"
 
 # dfu_update.py imports PySide6 at module import time in your current version.

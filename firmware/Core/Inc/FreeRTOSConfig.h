@@ -45,6 +45,11 @@
 
 /* USER CODE BEGIN Includes */
 /* Section where include file can be added */
+#include "CrashLog.h"
+
+#ifndef LC_STACK_OVERFLOW_CHECK_ENABLE
+#define LC_STACK_OVERFLOW_CHECK_ENABLE 1
+#endif
 /* USER CODE END Includes */
 
 /* Ensure definitions are only used by the compiler, and not by the assembler. */
@@ -137,7 +142,11 @@ See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html. */
 /* Normal assert() semantics without relying on the provision of an assert.h
 header file. */
 /* USER CODE BEGIN 1 */
+#if (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
+#define configASSERT( x ) do { if ((x) == 0) { CrashLog_RecordAndHaltFromHandler(CRASH_FAULT_ASSERT, CRASH_TASK_NONE); } } while (0)
+#else
 #define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
+#endif
 /* USER CODE END 1 */
 
 /* Definitions that map the FreeRTOS port interrupt handlers to their CMSIS
@@ -158,6 +167,11 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+#if (LC_STACK_OVERFLOW_CHECK_ENABLE != 0)
+#define configCHECK_FOR_STACK_OVERFLOW          2
+#else
+#define configCHECK_FOR_STACK_OVERFLOW          0
+#endif
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

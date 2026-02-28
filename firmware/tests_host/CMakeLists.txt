@@ -16,6 +16,7 @@ add_executable(fw_tests
     tests/test_nvm_codec.cpp
     tests/test_pressure_regulator_math.cpp
     tests/test_stepper_profile_math.cpp
+    tests/test_crash_log_codec.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp
@@ -25,6 +26,7 @@ add_executable(fw_tests
     ../Core/Src/nvm_codec.c
     ../Core/Src/PressureRegulatorMath.cpp
     ../Core/Src/StepperProfileMath.cpp
+    ../Core/Src/CrashLogCodec.c
 )
 
 target_include_directories(fw_tests PRIVATE

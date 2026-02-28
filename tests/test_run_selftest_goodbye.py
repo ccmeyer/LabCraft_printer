@@ -16,9 +16,10 @@ def _load_run_selftest():
 
 
 class FakeSerial:
-    def __init__(self, inbound: bytes):
+    def __init__(self, inbound: bytes, empty_reads_before_data: int = 0):
         self._buf = bytearray(inbound)
         self.writes = []
+        self._empty_reads_before_data = empty_reads_before_data
 
     def __enter__(self):
         return self
@@ -27,6 +28,9 @@ class FakeSerial:
         return False
 
     def read(self, n: int) -> bytes:
+        if self._empty_reads_before_data > 0:
+            self._empty_reads_before_data -= 1
+            return b""
         if not self._buf:
             return b""
         # Emulate streaming UART bytes so handshake loops don't consume
@@ -83,18 +87,31 @@ def _bye_done(mod, seq8: int, seq32: int | None = None) -> bytes:
     return _frame_payload(mod, bytes(payload))
 
 
-def _run_with_stream(monkeypatch, tmp_path, inbound: bytes, timeout_ms: int = 5000):
+def _run_with_stream(
+    monkeypatch,
+    tmp_path,
+    inbound: bytes,
+    timeout_ms: int = 5000,
+    empty_reads_before_data: int = 0,
+    profile: str = "SAFE",
+    hello_timeout_ms: int = 8000,
+    hello_retry_ms: int = 250,
+    fast_fail_on_missing_hello: bool = False,
+):
     mod = _load_run_selftest()
     clock = FakeClock()
-    ser = FakeSerial(inbound)
+    ser = FakeSerial(inbound, empty_reads_before_data=empty_reads_before_data)
     monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
     monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: ser))
     out_path = tmp_path / "report.json"
     args = SimpleNamespace(
         port="/dev/ttyAMA0",
         baud=115200,
-        profile="SAFE",
+        profile=profile,
         timeout_ms=timeout_ms,
+        hello_timeout_ms=hello_timeout_ms,
+        hello_retry_ms=hello_retry_ms,
+        fast_fail_on_missing_hello=fast_fail_on_missing_hello,
         out=str(out_path),
     )
     rc = mod.run(args)
@@ -126,6 +143,84 @@ def test_goodbye_ack_and_done_success(monkeypatch, tmp_path):
             got_cmd = frame[0]
             break
     assert got_cmd == mod.CMD_GOODBYE
+
+
+def test_hello_retries_until_target_is_ready(monkeypatch, tmp_path):
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    inbound = b"".join(
+        [
+            _hello_ack(_load_run_selftest()),
+            _selftest_done(_load_run_selftest(), run_id, failed=0),
+            _bye_ack(_load_run_selftest(), 3),
+            _bye_done(_load_run_selftest(), 3, seq32=run_id),
+        ]
+    )
+    mod, rc, report, ser = _run_with_stream(
+        monkeypatch,
+        tmp_path,
+        inbound,
+        empty_reads_before_data=30,
+    )
+    assert rc == 0
+    assert len(ser.writes) >= 4
+    hello_frames = 0
+    for data in ser.writes:
+        reader = mod.FrameReader()
+        for b in data:
+            frame = reader.feed(b)
+            if frame:
+                if frame[0] == mod.CMD_HELLO:
+                    hello_frames += 1
+                break
+    assert hello_frames >= 2
+    assert report["summary"]["failed"] == 0
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["hello_ack"]["pass"] is True
+    assert checks["hello_ack"]["details"]["retries_sent"] >= 2
+
+
+def test_fast_fail_on_missing_hello_writes_report_and_skips_selftest(monkeypatch, tmp_path):
+    mod, rc, report, ser = _run_with_stream(
+        monkeypatch,
+        tmp_path,
+        inbound=b"",
+        timeout_ms=12000,
+        hello_timeout_ms=800,
+        hello_retry_ms=100,
+        fast_fail_on_missing_hello=True,
+    )
+    assert rc == 3
+    assert report["aborted"] is True
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["hello_ack"]["pass"] is False
+    assert checks["hello_ack"]["details"]["timeout_ms"] == 800
+    assert checks["hello_ack"]["details"]["retry_ms"] == 100
+    assert checks["hello_ack"]["details"]["retries_sent"] >= 1
+    assert len(ser.writes) >= 1
+    for data in ser.writes:
+        reader = mod.FrameReader()
+        for b in data:
+            frame = reader.feed(b)
+            if frame:
+                assert frame[0] != mod.CMD_SELFTEST_START
+                break
+
+
+def test_full_profile_preserves_long_timeout_floor(monkeypatch, tmp_path):
+    _, rc, report, _ = _run_with_stream(
+        monkeypatch,
+        tmp_path,
+        inbound=b"",
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=500,
+        hello_retry_ms=100,
+        fast_fail_on_missing_hello=True,
+    )
+    assert rc == 3
+    assert report["profile"] == "FULL"
+    checks = {c["name"]: c for c in report["host_checks"]}
+    assert checks["hello_ack"]["details"]["timeout_ms"] == 500
 
 
 def test_goodbye_ack_missing_sets_rc3(monkeypatch, tmp_path):
