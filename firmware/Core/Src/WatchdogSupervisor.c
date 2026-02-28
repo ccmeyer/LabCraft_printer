@@ -188,7 +188,7 @@ static void Watchdog_Task(void* argument)
     g_lateTask = late;
     g_starved = 1u;
     g_healthyStartMs = 0u;
-    CrashLog_RecordFault(CRASH_FAULT_WDT_STARVE, late);
+    CrashLog_RecordWatchdogFault(late);
   }
 }
 

@@ -610,6 +610,9 @@ TAG_RESET_WATCHDOG_RAW_SR   = 0x19
 TAG_RESET_UPTIME_MS         = 0x1A
 TAG_RESET_BOOT_STAGE        = 0x1B
 TAG_RESET_RECOVERY_BOOT     = 0x1C
+TAG_RESET_FAULT_STAGE       = 0x1D
+TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
+TAG_RESET_ACTIVE_COMMAND    = 0x1F
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -633,6 +636,7 @@ TAG_MAP = {
     TAG_DROP_REMAIN:  ("drop_remain",  4, False),
     TAG_PRINT_PW:     ("Print_width",  2, False),
     TAG_REFUEL_PW:    ("Refuel_width", 2, False),
+    TAG_DISP_FREQ:    ("Disp_freq",    2, False),
     TAG_ACTIVE_P:     ("print_active", 2, False),
     TAG_ACTIVE_R:     ("refuel_active",2, False),
 
@@ -731,6 +735,8 @@ CMD_MAP = {
     'BYE_DONE'    : 0xF8,
     'RESET_REPORT': 0xF9,
 }
+
+CMD_NAME_BY_CODE = {value: key.lower() for key, value in CMD_MAP.items()}
 
 CRASHLOG_FLAG_PENDING = 0x00000002
 CRASHLOG_FLAG_WDT_ARM_STICKY = 0x00000004
@@ -915,6 +921,9 @@ class SerialReader(QThread):
         last_fault = _u8(TAG_RESET_LAST_FAULT)
         last_task = _u8(TAG_RESET_LAST_TASK)
         boot_stage = _u8(TAG_RESET_BOOT_STAGE)
+        fault_stage = _u8(TAG_RESET_FAULT_STAGE, boot_stage)
+        watchdog_late_task = _u8(TAG_RESET_WATCHDOG_LATE_TASK)
+        active_command = _u8(TAG_RESET_ACTIVE_COMMAND)
         pending = bool(flags & CRASHLOG_FLAG_PENDING)
         sticky = bool(flags & CRASHLOG_FLAG_WDT_ARM_STICKY)
 
@@ -922,6 +931,9 @@ class SerialReader(QThread):
         last_fault_name = CRASH_FAULT_NAMES.get(last_fault, f"fault_{last_fault}")
         last_task_name = CRASH_TASK_NAMES.get(last_task, f"task_{last_task}")
         boot_stage_name = CRASH_BOOT_STAGE_NAMES.get(boot_stage, f"stage_{boot_stage}")
+        fault_stage_name = CRASH_BOOT_STAGE_NAMES.get(fault_stage, f"stage_{fault_stage}")
+        watchdog_late_task_name = CRASH_TASK_NAMES.get(watchdog_late_task, f"task_{watchdog_late_task}")
+        active_command_name = CMD_NAME_BY_CODE.get(active_command, f"cmd_0x{active_command:02x}")
 
         if reset_cause_name == "iwdg":
             summary = "Board restarted after watchdog reset."
@@ -932,8 +944,18 @@ class SerialReader(QThread):
         else:
             summary = f"Board restarted after {reset_cause_name} reset."
 
-        if last_fault_name != "none":
-            summary += f" Last fault: {last_fault_name} in {last_task_name} task at stage {boot_stage_name}."
+        if pending and last_fault_name == "wdt":
+            details = []
+            if active_command != 0:
+                details.append(f"during {active_command_name}")
+            if last_task_name != "none":
+                details.append(f"{last_task_name} active")
+            if watchdog_late_task_name != "none":
+                details.append(f"first late task {watchdog_late_task_name}")
+            details.append(f"fault stage {fault_stage_name}")
+            summary += " Watchdog starvation: " + ", ".join(details) + "."
+        elif last_fault_name != "none":
+            summary += f" Last fault: {last_fault_name} in {last_task_name} task at stage {fault_stage_name}."
         elif sticky:
             summary += f" Sticky watchdog state was recorded at stage {boot_stage_name}."
 
@@ -949,6 +971,10 @@ class SerialReader(QThread):
             "last_fault_name": last_fault_name,
             "last_task": last_task,
             "last_task_name": last_task_name,
+            "watchdog_late_task": watchdog_late_task,
+            "watchdog_late_task_name": watchdog_late_task_name,
+            "active_command": active_command,
+            "active_command_name": active_command_name,
             "boot_count": _u32(TAG_RESET_BOOT_COUNT),
             "fault_count": _u32(TAG_RESET_FAULT_COUNT),
             "watchdog_reset_count": _u32(TAG_RESET_WATCHDOG_COUNT),
@@ -957,6 +983,8 @@ class SerialReader(QThread):
             "uptime_ms": _u32(TAG_RESET_UPTIME_MS),
             "boot_stage": boot_stage,
             "boot_stage_name": boot_stage_name,
+            "fault_stage": fault_stage,
+            "fault_stage_name": fault_stage_name,
             "recovery_boot": bool(_u8(TAG_RESET_RECOVERY_BOOT)),
             "summary": summary,
         }

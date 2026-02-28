@@ -98,6 +98,9 @@ typedef struct {
   uint32_t bfar;
   uint32_t watchdogRawStatus;
   CrashBootStage bootStage;
+  CrashBootStage faultStage;
+  CrashTaskId watchdogLateTask;
+  uint8_t activeCommand;
 } CrashLogSnapshot;
 
 #define CRASHLOG_FLAG_VALID            0x00000001u
@@ -107,6 +110,7 @@ typedef struct {
 
 void CrashLog_EarlyBootInit(void);
 void CrashLog_RecordFault(CrashFaultKind kind, CrashTaskId taskIdHint);
+void CrashLog_RecordWatchdogFault(CrashTaskId lateTask);
 void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint);
 void CrashLog_RecordAndHalt(CrashFaultKind kind, CrashTaskId taskIdHint);
 void CrashLog_RecordAndHaltFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint);
@@ -119,6 +123,8 @@ void CrashLog_GetSnapshot(CrashLogSnapshot* out);
 void CrashLog_LogBootSummary(void);
 void CrashLog_SetBootStage(CrashBootStage stage);
 CrashBootStage CrashLog_GetBootStage(void);
+void CrashLog_SetActiveContext(CrashTaskId taskId, uint8_t activeCommand);
+void CrashLog_ClearActiveContext(void);
 const char* CrashLog_BootStageName(CrashBootStage stage);
 
 #ifdef __cplusplus

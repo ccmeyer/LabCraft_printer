@@ -238,6 +238,9 @@ void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   appendU32(payload, idx, TAG_RESET_UPTIME_MS, snap->uptimeMs);
   appendU8(payload, idx, TAG_RESET_BOOT_STAGE, static_cast<uint8_t>(snap->bootStage));
   appendU8(payload, idx, TAG_RESET_RECOVERY_BOOT, static_cast<uint8_t>(recoveryBoot != 0u ? 1u : 0u));
+  appendU8(payload, idx, TAG_RESET_FAULT_STAGE, static_cast<uint8_t>(snap->faultStage));
+  appendU8(payload, idx, TAG_RESET_WATCHDOG_LATE_TASK, static_cast<uint8_t>(snap->watchdogLateTask));
+  appendU8(payload, idx, TAG_RESET_ACTIVE_COMMAND, snap->activeCommand);
   sendFrame(_huart, payload, idx);
 }
 

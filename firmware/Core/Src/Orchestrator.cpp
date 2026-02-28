@@ -41,10 +41,33 @@ Orchestrator* Orchestrator::_instance = nullptr;
 namespace {
 bool s_resetReportSent = false;
 
+#ifndef LC_CRASH_TEST_GRIPPER_OPEN_WDT
+#define LC_CRASH_TEST_GRIPPER_OPEN_WDT 1
+#endif
+
+void runGripperOpenWatchdogCrashTest() {
+  for (;;) {
+    /* Intentionally starve orchestrator watchdog check-ins for crash-log validation. */
+  }
+}
+
 bool shouldSendResetReport(const CrashLogSnapshot& snap) {
   return ((snap.flags & CRASHLOG_FLAG_PENDING) != 0u) ||
          (snap.resetCause == CRASH_RESET_IWDG) ||
          (snap.resetCause == CRASH_RESET_WWDG);
+}
+
+void maybeSendResetReport(uint8_t seq8, uint32_t seq32) {
+  if (s_resetReportSent) {
+    return;
+  }
+  CrashLogSnapshot snap{};
+  CrashLog_GetSnapshot(&snap);
+  if (!shouldSendResetReport(snap)) {
+    return;
+  }
+  Comm::instance()->sendResetReport(seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
+  s_resetReportSent = true;
 }
 }
 
@@ -248,6 +271,7 @@ bool Orchestrator::waitForBits(EventBits_t bits)
 
 void Orchestrator::_run() {
   Watchdog_EnableTask(CRASH_TASK_ORCH);
+  maybeSendResetReport(0u, 0u);
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
 		  if (_acknowledgeRequested) {
@@ -263,14 +287,7 @@ void Orchestrator::_run() {
 	            	CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
 	            	Watchdog_Arm();
 	            	CrashLog_LogBootSummary();
-	            	if (!s_resetReportSent) {
-	            	  CrashLogSnapshot snap{};
-	            	  CrashLog_GetSnapshot(&snap);
-	            	  if (shouldSendResetReport(snap)) {
-	            	    Comm::instance()->sendResetReport(seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
-	            	    s_resetReportSent = true;
-	            	  }
-	            	}
+	            	maybeSendResetReport(seq8, seq32);
 	                // Then resume status & cosmetic stuff
 	                Comm::instance()->setStatusPaused(false);
 				#if LC_HAS_LED_STRIP == 1
@@ -391,7 +408,9 @@ void Orchestrator::_run() {
     if (xQueueReceive(_cmdQueue, &cmd, pdMS_TO_TICKS(50)) == pdPASS){
         // We got a real command—execute it
         _inFlight = cmd;
+        CrashLog_SetActiveContext(CRASH_TASK_ORCH, static_cast<uint8_t>(cmd.cmd));
         executeCommand(cmd);
+        CrashLog_ClearActiveContext();
     }
   }
 }
@@ -532,6 +551,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
         }
         case CMD_GRIPPER_OPEN: {
+#if (LC_CRASH_TEST_GRIPPER_OPEN_WDT != 0)
+          runGripperOpenWatchdogCrashTest();
+#endif
       	  MX_GRIPPER_Open();
       	  waitForBit(BIT_GRIPPER_DONE);
   		  break;

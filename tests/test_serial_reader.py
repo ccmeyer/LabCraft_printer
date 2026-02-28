@@ -107,13 +107,22 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
             9,
             mfr.TAG_RESET_LAST_TASK,
             1,
-            4,
+            2,
             mfr.TAG_RESET_BOOT_STAGE,
             1,
             11,
             mfr.TAG_RESET_RECOVERY_BOOT,
             1,
             1,
+            mfr.TAG_RESET_FAULT_STAGE,
+            1,
+            11,
+            mfr.TAG_RESET_WATCHDOG_LATE_TASK,
+            1,
+            4,
+            mfr.TAG_RESET_ACTIVE_COMMAND,
+            1,
+            mfr.CMD_MAP["OPEN_GRIPPER"],
         ]
     )
     serial_stream = _frame(ack_payload) + _frame(reset_payload)
@@ -132,7 +141,12 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert len(reports) == 1
     assert reports[0]["reset_cause_name"] == "iwdg"
     assert reports[0]["last_fault_name"] == "wdt"
-    assert reports[0]["last_task_name"] == "pressure"
+    assert reports[0]["last_task_name"] == "orchestrator"
+    assert reports[0]["watchdog_late_task_name"] == "pressure"
+    assert reports[0]["active_command_name"] == "open_gripper"
     assert reports[0]["boot_stage_name"] == "hello_ack"
+    assert reports[0]["fault_stage_name"] == "hello_ack"
     assert reports[0]["pending"] is True
     assert reports[0]["recovery_boot"] is True
+    assert "during open_gripper" in reports[0]["summary"]
+    assert "first late task pressure" in reports[0]["summary"]

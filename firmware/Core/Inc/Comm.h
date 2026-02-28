@@ -79,6 +79,9 @@ static constexpr uint8_t TAG_RESET_WATCHDOG_RAW_SR    = 0x19;
 static constexpr uint8_t TAG_RESET_UPTIME_MS          = 0x1A;
 static constexpr uint8_t TAG_RESET_BOOT_STAGE         = 0x1B;
 static constexpr uint8_t TAG_RESET_RECOVERY_BOOT      = 0x1C;
+static constexpr uint8_t TAG_RESET_FAULT_STAGE        = 0x1D;
+static constexpr uint8_t TAG_RESET_WATCHDOG_LATE_TASK = 0x1E;
+static constexpr uint8_t TAG_RESET_ACTIVE_COMMAND     = 0x1F;
 
 
 
