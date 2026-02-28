@@ -35,6 +35,36 @@ def test_disconnect_machine_resets_safety_state(qapp):
     assert machine_model.current_location == "Unknown"
 
 
+def test_recover_after_board_reset_preserves_banner_and_clears_transient_state(qapp):
+    machine_model = MachineModel()
+    machine_model.machine_connected = True
+    machine_model.motors_enabled = True
+    machine_model.regulating_print_pressure = True
+    machine_model.regulating_refuel_pressure = True
+    machine_model.paused = True
+    machine_model.machine_free = False
+    machine_model.current_command_num = 7
+    machine_model.last_completed_command_num = 3
+    machine_model.motors_homed = True
+    machine_model.current_location = "Home"
+    machine_model.update_last_reset_report({"summary": "watchdog reset"})
+
+    machine_model.recover_after_board_reset()
+
+    assert machine_model.machine_connected is False
+    assert machine_model.motors_enabled is False
+    assert machine_model.regulating_print_pressure is False
+    assert machine_model.regulating_refuel_pressure is False
+    assert machine_model.paused is False
+    assert machine_model.machine_free is True
+    assert machine_model.current_command_num == 0
+    assert machine_model.last_completed_command_num == 0
+    assert machine_model.motors_homed is False
+    assert machine_model.current_location == "Unknown"
+    assert machine_model.last_reset_report_active is True
+    assert machine_model.last_reset_summary == "watchdog reset"
+
+
 def test_pressure_conversion_and_rolling_buffers(qapp):
     machine_model = MachineModel()
     initial = machine_model.print_pressure_readings.copy()

@@ -284,6 +284,9 @@ class Controller(QObject):
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
+        self.model.machine_model.recover_after_board_reset()
+        self.expected_position = self.model.machine_model.get_current_position_dict()
+        self.expected_location = None
         self.model.machine_model.update_last_reset_report(report)
         self.error_occurred_signal.emit("Board Reset Detected", report.get("summary", "Board reset detected."))
 

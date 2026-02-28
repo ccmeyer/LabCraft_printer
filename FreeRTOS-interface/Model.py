@@ -4958,6 +4958,24 @@ class MachineModel(QObject):
         self.home_status_signal.emit()
         self.clear_last_reset_report()
 
+    def recover_after_board_reset(self):
+        self.machine_connected = False
+        self.machine_state_updated.emit(self.machine_connected)
+        self.motors_enabled = False
+        self.motor_state_changed.emit(self.motors_enabled)
+        self.regulating_print_pressure = False
+        self.regulating_refuel_pressure = False
+        self.regulation_state_changed.emit(self.regulating_print_pressure)
+        self.paused = False
+        self.machine_paused.emit()
+        self.machine_free = True
+        self.current_command_num = 0
+        self.last_completed_command_num = 0
+        self.command_numbers_updated.emit()
+        self.gripper_active = False
+        self.reset_home_status()
+        self.home_status_signal.emit()
+
     def update_last_reset_report(self, report):
         self.last_reset_report = dict(report)
         self.last_reset_summary = str(report.get("summary", ""))

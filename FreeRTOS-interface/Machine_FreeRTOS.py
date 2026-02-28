@@ -1430,6 +1430,8 @@ class Machine(QObject):
 
         self.execution_timer = QTimer(self)
         self.execution_timer.timeout.connect(self.send_next_command)
+        self._session_recovery_in_progress = False
+        self._waiting_for_post_clear_status = False
 
         # --- Gripper confirmation gate ---
         # Start with confirmation required so the very first open/close pops the dialog.
@@ -1562,24 +1564,30 @@ class Machine(QObject):
                 raise IOError("Port not open")
             
             self.begin_reader_thread()
-
-            # Send HELLO and wait up to 1000 ms for HELLO_ACK
-            hello_seq = self._alloc_ctl_seq32()
-            self._write_frame(build_frame(HELLO, hello_seq))
-            self._start_ack_wait(
-                HELLO_ACK, hello_seq, 1000,
-                on_ok=self._on_hello_ack,
-                on_timeout=lambda: self._hello_timeout()
-            )
+            self._send_hello()
 
         except Exception as e:
             print(f"Connection error: {e}")
             self.error_occurred.emit(str(f"Connection error: {e}"))
             self.machine_connected_signal.emit(False)
+
+    def _send_hello(self):
+        hello_seq = self._alloc_ctl_seq32()
+        self._write_frame(build_frame(HELLO, hello_seq))
+        self._start_ack_wait(
+            HELLO_ACK, hello_seq, 1000,
+            on_ok=self._on_hello_ack,
+            on_timeout=lambda: self._hello_timeout()
+        )
+
     @Slot()
     def _on_hello_ack(self):
         if self.profile.has_log_channel:
             self.begin_log_thread()
+        self._session_recovery_in_progress = False
+        self._tx_paused = False
+        self._sequence_pause = False
+        self._waiting_for_post_clear_status = False
         self.begin_execution_timer()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
@@ -1650,6 +1658,45 @@ class Machine(QObject):
         except Exception: pass
         self._gripper_ack_required = True
         # self._blocked_gripper_command = None
+
+    def _cancel_pending_acks(self):
+        for entry in list(self._pending_acks.values()):
+            try:
+                entry["timer"].stop()
+                entry["timer"].deleteLater()
+            except Exception:
+                pass
+        self._pending_acks.clear()
+
+    def _reset_session_state_for_recovery(self):
+        self.command_queue.clear_queue()
+        self.sent_command = None
+        self._cancel_pending_acks()
+        self._tx_paused = True
+        self._sequence_pause = False
+        self._waiting_for_post_clear_status = False
+        self._goodbye_seq32 = None
+        if getattr(self, 'execution_timer', None):
+            try:
+                self.execution_timer.stop()
+            except Exception:
+                pass
+        try:
+            if self.ser is not None:
+                self.ser.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            self._gripper_idle_timer.stop()
+        except Exception:
+            pass
+        self._gripper_ack_required = True
+
+    def _begin_recovery_handshake(self):
+        if self.ser is None or not getattr(self.ser, "is_open", False):
+            return
+        self._session_recovery_in_progress = True
+        self._send_hello()
 
     def reset_mcu_board(self):
         reset_board()
@@ -1730,6 +1777,8 @@ class Machine(QObject):
     @Slot(dict)
     def _on_reset_report(self, report):
         self._last_reset_report = dict(report)
+        self._reset_session_state_for_recovery()
+        self._begin_recovery_handshake()
         self.reset_report_received.emit(dict(report))
 
     def stop_reader_thread(self):
@@ -1754,6 +1803,9 @@ class Machine(QObject):
         """
         if not self.profile.has_log_channel:
             self.log_reader = None
+            return
+
+        if self.log_reader is not None:
             return
 
         try:
