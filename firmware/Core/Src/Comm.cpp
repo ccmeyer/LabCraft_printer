@@ -26,6 +26,10 @@
 #include "Flash.hpp"
 #endif
 
+namespace {
+constexpr uint32_t kCommTxTimeoutMs = 25u;
+}
+
 
 // Append an unsigned 16 bit value
 #define APPEND_U16(p, idx, tag, v)      \
@@ -178,7 +182,7 @@ void Comm::sendCommandByte(uint8_t cmd, uint8_t seq) {
     uint8_t frame[2 + sizeof(payload) + 2] = {0};
     const size_t frameLen = CommCodec::encodeFrame(payload, sizeof(payload), frame, sizeof(frame));
     if (frameLen > 0) {
-        HAL_UART_Transmit(_huart, frame, frameLen, HAL_MAX_DELAY);
+        (void)sendRawFrame(_huart, frame, frameLen, kCommTxTimeoutMs);
     }
     xSemaphoreGive(_txMutex);
 }
@@ -193,7 +197,7 @@ void Comm::sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool i
   uint8_t frame[2 + sizeof(payload) + 2] = {0};
   const size_t frameLen = CommCodec::encodeFrame(payload, payloadLen, frame, sizeof(frame));
   if (frameLen > 0) {
-      HAL_UART_Transmit(_huart, frame, frameLen, HAL_MAX_DELAY);
+      (void)sendRawFrame(_huart, frame, frameLen, kCommTxTimeoutMs);
   }
 }
 
@@ -221,9 +225,16 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
     uint8_t frame[2 + 255 + 2] = {0};
     const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(len), frame, sizeof(frame));
     if (frameLen > 0) {
-        HAL_UART_Transmit(huart, frame, frameLen, HAL_MAX_DELAY);
+        (void)sendRawFrame(huart, frame, frameLen, kCommTxTimeoutMs);
     }
     xSemaphoreGive(_txMutex);
+}
+
+bool Comm::sendRawFrame(UART_HandleTypeDef* huart, const uint8_t* frame, size_t len, uint32_t timeout_ms) {
+    if ((frame == nullptr) || (len == 0u) || (huart == nullptr)) {
+        return false;
+    }
+    return HAL_UART_Transmit(huart, const_cast<uint8_t*>(frame), static_cast<uint16_t>(len), timeout_ms) == HAL_OK;
 }
 
 void uart_diag(UART_HandleTypeDef* huart)

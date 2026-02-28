@@ -1874,9 +1874,7 @@ void Orchestrator::startHomeAsync(Stepper* s,
   } else if (s == Stepper::stepperZ()) {
     tcb = &_tcbHomeZ; stack = _stackHomeZ; handle = &_taskHomeZ; args = &_argsHomeZ; name = "HomeZ";
   } else {
-    // Fallback for any other axis (Z, P, R) if you ever call this path:
-    Logger::instance()->log("[Home] No static bank for this axis; running blocking fallback\r\n");
-    s->home(fastHz, slowHz, backoffSteps);
+    Logger::instance()->log("[Home] No static bank for this axis; refusing blocking fallback\r\n");
     xEventGroupSetBits(_doneEvents, doneBit);
     return;
   }
@@ -1905,8 +1903,6 @@ void Orchestrator::startHomeAsync(Stepper* s,
 
   if (!*handle) {
     Logger::instance()->log("[Home] xTaskCreateStatic failed for %s\r\n", name);
-    // As a last resort, run blocking so the command still completes
-    s->home(fastHz, slowHz, backoffSteps);
     xEventGroupSetBits(_doneEvents, doneBit);
   }
 }
@@ -1949,8 +1945,7 @@ void Orchestrator::startRegHomeAsync(PressureRegulator* r,
 #endif
 
   else {
-    Logger::instance()->log("[HomePR] No static bank for this regulator; blocking fallback\r\n");
-    r->homeWithValve(fastHz, slowHz, backoffSteps);
+    Logger::instance()->log("[HomePR] No static bank for this regulator; refusing blocking fallback\r\n");
     xEventGroupSetBits(_doneEvents, doneBit);
     return;
   }
@@ -1977,7 +1972,6 @@ void Orchestrator::startRegHomeAsync(PressureRegulator* r,
 
   if (!*handle) {
     Logger::instance()->log("[HomePR] xTaskCreateStatic failed for %s\r\n", name);
-    r->homeWithValve(fastHz, slowHz, backoffSteps);
     xEventGroupSetBits(_doneEvents, doneBit);
   }
 }

@@ -144,6 +144,7 @@ private:
 
     // helper to build and send framed packet in one go
     bool sendFramed(const uint8_t* payload, size_t len, uint32_t timeout_ms);
+    bool sendRawFrame(UART_HandleTypeDef* huart, const uint8_t* frame, size_t len, uint32_t timeout_ms);
 
 };
 

@@ -363,6 +363,14 @@ void PressureRegulator::homeWithValveFast(){
 	homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
 }
 
+void PressureRegulator::requestSafetyHome() {
+  if (_taskHandle == nullptr) {
+    Logger::instance()->log("[PReg] Safety home requested with no task handle\r\n");
+    return;
+  }
+  xTaskNotify(_taskHandle, NOTIF_SAFETY_HOME, eSetBits);
+}
+
 
 void PressureRegulator::controlLoop() {
   const TickType_t period = pdMS_TO_TICKS(5);  // 200 Hz tick
@@ -398,6 +406,10 @@ void PressureRegulator::controlLoop() {
 //	  homeWithValve(kHomeFastHzDefault, kHomeSlowHzDefault, kHomeBackoffDefault);
 	  homeWithValveFast();
 	  // After homing, continue loop; we will re-enter _active flow as usual.
+	}
+	if (notif & NOTIF_SAFETY_HOME) {
+	  Logger::instance()->log("[PReg] Safety home requested\r\n");
+	  homeWithValveFast();
 	}
 
     if (!_active) {

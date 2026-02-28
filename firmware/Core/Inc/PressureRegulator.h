@@ -54,6 +54,7 @@ public:
   /// Perform homing sequence with valve open/close around stepper home
   void homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps);
   void homeWithValveFast();
+  void requestSafetyHome();
 
   void resetSyringe();
 
@@ -208,6 +209,7 @@ private:
 
   // Notification bit to request homing from the task context
   static constexpr uint32_t NOTIF_INNER_LIMIT = (1u << 0);
+  static constexpr uint32_t NOTIF_SAFETY_HOME = (1u << 1);
 
   // Default homing parameters used when inner limit is hit
   static constexpr uint32_t kHomeFastHzDefault   = 30000;

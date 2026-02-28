@@ -18,6 +18,10 @@ extern "C" {
   #include "stm32f4xx_hal_i2c.h"    // <-- this declares HAL_I2C_Init(I2C_HandleTypeDef *hi2c)
 }
 
+namespace {
+constexpr uint32_t kPressureI2cTimeoutMs = 20u;
+}
+
 
 // singleton init
 PressureSensor* PressureSensor::_instance = nullptr;
@@ -161,14 +165,12 @@ void PressureSensor::taskLoop() {
               Logger::instance()->log("[PS] Over-pressure trip on port %u: avg=%ld, limit=%u\r\n",
                                       (unsigned)port, (long)_average[port], (unsigned)_safetyRawMax[port]);
 
-              // Stop affected regulator and (optionally) vent briefly to arrest rise
+              // Route the safety home onto the regulator task so the pressure task
+              // does not block long enough to starve the watchdog.
               if (port == 0) {
-//                PressureRegulator::regP().pause();           // halts control loop & motor
-                PressureRegulator::regP().homeWithValveFast();
-
+                PressureRegulator::regP().requestSafetyHome();
               } else {
-//                PressureRegulator::regR().pause();
-                PressureRegulator::regR().homeWithValveFast();
+                PressureRegulator::regR().requestSafetyHome();
               }
             }
           } else {
@@ -187,7 +189,7 @@ void PressureSensor::taskLoop() {
 HAL_StatusTypeDef PressureSensor::selectPort(uint8_t port) {
 #if LC_HAS_TCA9548A
   uint8_t b = uint8_t(1u << port);
-  return HAL_I2C_Master_Transmit(_hi2c, _tcaAddr << 1, &b, 1, HAL_MAX_DELAY);
+  return HAL_I2C_Master_Transmit(_hi2c, _tcaAddr << 1, &b, 1, kPressureI2cTimeoutMs);
 #else
   (void)port;
   return HAL_OK;
@@ -196,7 +198,7 @@ HAL_StatusTypeDef PressureSensor::selectPort(uint8_t port) {
 
 uint16_t PressureSensor::readSensorRaw(uint8_t port) {
   uint8_t buf[4];
-  HAL_StatusTypeDef st = HAL_I2C_Master_Receive(_hi2c, _sensorAddr << 1, buf, 4, HAL_MAX_DELAY);
+  HAL_StatusTypeDef st = HAL_I2C_Master_Receive(_hi2c, _sensorAddr << 1, buf, 4, kPressureI2cTimeoutMs);
   if (st != HAL_OK) {
     I2C1_BusRecovery();
     // return last committed sample, not the next write slot
