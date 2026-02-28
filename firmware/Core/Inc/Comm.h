@@ -11,6 +11,7 @@
 #include "BoardConfig.h"
 #include "stm32f4xx_hal.h"
 #include "CommCodec.h"
+#include "CrashLog.h"
 #include <cstdint>
 #include <cstddef>
 #include "FreeRTOS.h"
@@ -65,6 +66,20 @@ static constexpr uint8_t TAG_Z_ACCEL   = 0x75;
 static constexpr uint8_t TAG_GRIP_PULSE     = 0x80;
 static constexpr uint8_t TAG_GRIP_REFRESH   = 0x81;
 
+static constexpr uint8_t TAG_RESET_SEQ32               = 0x10;
+static constexpr uint8_t TAG_RESET_CAUSE              = 0x11;
+static constexpr uint8_t TAG_RESET_FLAGS              = 0x12;
+static constexpr uint8_t TAG_RESET_LAST_FAULT         = 0x13;
+static constexpr uint8_t TAG_RESET_LAST_TASK          = 0x14;
+static constexpr uint8_t TAG_RESET_BOOT_COUNT         = 0x15;
+static constexpr uint8_t TAG_RESET_FAULT_COUNT        = 0x16;
+static constexpr uint8_t TAG_RESET_WATCHDOG_COUNT     = 0x17;
+static constexpr uint8_t TAG_RESET_WATCHDOG_STICKY_CT = 0x18;
+static constexpr uint8_t TAG_RESET_WATCHDOG_RAW_SR    = 0x19;
+static constexpr uint8_t TAG_RESET_UPTIME_MS          = 0x1A;
+static constexpr uint8_t TAG_RESET_BOOT_STAGE         = 0x1B;
+static constexpr uint8_t TAG_RESET_RECOVERY_BOOT      = 0x1C;
+
 
 
 class Comm {
@@ -86,6 +101,7 @@ public:
     // Send a 2‐byte payload: <cmd, seq>, wrapped in START/len/CRC
     void sendCommandByte(uint8_t cmd, uint8_t seq = 0);
     void sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool includeSeq32);
+    void sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot);
 
     void sendFrame(UART_HandleTypeDef* huart,
                           const uint8_t* payload,

@@ -554,6 +554,7 @@ GOODBYE     = 0xF5
 BYE_ACK     = 0xF6
 CLEAR_ACK   = 0xF7
 BYE_DONE    = 0xF8
+RESET_REPORT = 0xF9
 
 # TLV tag constants; must match firmware
 TAG_LED_TOTAL     = 0x10
@@ -595,6 +596,20 @@ TAG_Y_ACCEL       = 0x74
 TAG_Z_ACCEL       = 0x75
 TAG_GRIP_PULSE    = 0x80
 TAG_GRIP_REFRESH  = 0x81
+
+TAG_RESET_SEQ32             = 0x10
+TAG_RESET_CAUSE             = 0x11
+TAG_RESET_FLAGS             = 0x12
+TAG_RESET_LAST_FAULT        = 0x13
+TAG_RESET_LAST_TASK         = 0x14
+TAG_RESET_BOOT_COUNT        = 0x15
+TAG_RESET_FAULT_COUNT       = 0x16
+TAG_RESET_WATCHDOG_COUNT    = 0x17
+TAG_RESET_WATCHDOG_STICKY_CT = 0x18
+TAG_RESET_WATCHDOG_RAW_SR   = 0x19
+TAG_RESET_UPTIME_MS         = 0x1A
+TAG_RESET_BOOT_STAGE        = 0x1B
+TAG_RESET_RECOVERY_BOOT     = 0x1C
 
 # Map tags → (field name, length_in_bytes, signed?)
 TAG_MAP = {
@@ -713,7 +728,59 @@ CMD_MAP = {
     'GOODBYE'     : 0xF5,
     'BYE_ACK'     : 0xF6,
     'CLEAR_ACK'   : 0xF7,
-    'BYE_DONE'    : 0xF8
+    'BYE_DONE'    : 0xF8,
+    'RESET_REPORT': 0xF9,
+}
+
+CRASHLOG_FLAG_PENDING = 0x00000002
+CRASHLOG_FLAG_WDT_ARM_STICKY = 0x00000004
+
+RESET_CAUSE_NAMES = {
+    0: "unknown",
+    1: "power",
+    2: "pin_reset",
+    3: "software",
+    4: "iwdg",
+    5: "wwdg",
+    6: "low_power",
+}
+
+CRASH_FAULT_NAMES = {
+    0: "none",
+    1: "hardfault",
+    2: "memmanage",
+    3: "busfault",
+    4: "usagefault",
+    5: "nmi",
+    6: "stack_overflow",
+    7: "assert",
+    8: "error_handler",
+    9: "wdt",
+}
+
+CRASH_TASK_NAMES = {
+    0: "none",
+    1: "boot",
+    2: "orchestrator",
+    3: "status",
+    4: "pressure",
+    5: "print_regulator",
+    6: "refuel_regulator",
+}
+
+CRASH_BOOT_STAGE_NAMES = {
+    0: "reset",
+    1: "hal_init",
+    2: "crashlog_ready",
+    3: "orchestrator_ready",
+    4: "logger_ready",
+    5: "comm_init",
+    6: "comm_rx_armed",
+    7: "comm_rx_rearmed",
+    8: "comm_ready",
+    9: "watchdog_task_ready",
+    10: "hello_rx",
+    11: "hello_ack",
 }
 
 def crc16_x25(data: bytes) -> int:
@@ -739,6 +806,20 @@ def build_frame(cmd, seq32):
     c       = crc16_x25(payload)
     tail    = struct.pack("<H", c)
     return header + payload + tail
+
+def parse_tlvs(payload: bytes) -> dict[int, bytes]:
+    idx = 0
+    result = {}
+    while idx + 2 <= len(payload):
+        tag = payload[idx]
+        length = payload[idx + 1]
+        idx += 2
+        if idx + length > len(payload):
+            logger.warning("Malformed TLV payload: tag=0x%02X len=%d exceeds payload", tag, length)
+            break
+        result[tag] = payload[idx:idx + length]
+        idx += length
+    return result
 
 def parse_tlv_payload(payload: bytes) -> dict:
     """
@@ -779,6 +860,7 @@ def parse_tlv_payload(payload: bytes) -> dict:
 class SerialReader(QThread):
     status_received = Signal(dict)
     ackReceived     = Signal(object)  # dict with ack_cmd, seq8, seq32
+    resetReportReceived = Signal(dict)
 
     def __init__(self, ser, parent=None):
         super().__init__(parent)
@@ -808,6 +890,77 @@ class SerialReader(QThread):
             i += ln
         return {"ack_cmd": ack_cmd, "seq8": seq8, "seq32": seq32}
 
+    @staticmethod
+    def _parse_reset_report(payload: bytes) -> dict | None:
+        if len(payload) < 2 or payload[0] != RESET_REPORT:
+            return None
+
+        seq8 = payload[1]
+        tlvs = parse_tlvs(payload[2:])
+
+        def _u8(tag, default=0):
+            raw = tlvs.get(tag)
+            if raw is None or len(raw) != 1:
+                return default
+            return raw[0]
+
+        def _u32(tag, default=0):
+            raw = tlvs.get(tag)
+            if raw is None or len(raw) != 4:
+                return default
+            return struct.unpack("<I", raw)[0]
+
+        reset_cause = _u8(TAG_RESET_CAUSE)
+        flags = _u32(TAG_RESET_FLAGS)
+        last_fault = _u8(TAG_RESET_LAST_FAULT)
+        last_task = _u8(TAG_RESET_LAST_TASK)
+        boot_stage = _u8(TAG_RESET_BOOT_STAGE)
+        pending = bool(flags & CRASHLOG_FLAG_PENDING)
+        sticky = bool(flags & CRASHLOG_FLAG_WDT_ARM_STICKY)
+
+        reset_cause_name = RESET_CAUSE_NAMES.get(reset_cause, f"reset_{reset_cause}")
+        last_fault_name = CRASH_FAULT_NAMES.get(last_fault, f"fault_{last_fault}")
+        last_task_name = CRASH_TASK_NAMES.get(last_task, f"task_{last_task}")
+        boot_stage_name = CRASH_BOOT_STAGE_NAMES.get(boot_stage, f"stage_{boot_stage}")
+
+        if reset_cause_name == "iwdg":
+            summary = "Board restarted after watchdog reset."
+        elif reset_cause_name == "wwdg":
+            summary = "Board restarted after window watchdog reset."
+        elif pending:
+            summary = "Board restarted after a retained crash event."
+        else:
+            summary = f"Board restarted after {reset_cause_name} reset."
+
+        if last_fault_name != "none":
+            summary += f" Last fault: {last_fault_name} in {last_task_name} task at stage {boot_stage_name}."
+        elif sticky:
+            summary += f" Sticky watchdog state was recorded at stage {boot_stage_name}."
+
+        return {
+            "seq8": seq8,
+            "seq32": _u32(TAG_RESET_SEQ32),
+            "reset_cause": reset_cause,
+            "reset_cause_name": reset_cause_name,
+            "flags": flags,
+            "pending": pending,
+            "sticky": sticky,
+            "last_fault": last_fault,
+            "last_fault_name": last_fault_name,
+            "last_task": last_task,
+            "last_task_name": last_task_name,
+            "boot_count": _u32(TAG_RESET_BOOT_COUNT),
+            "fault_count": _u32(TAG_RESET_FAULT_COUNT),
+            "watchdog_reset_count": _u32(TAG_RESET_WATCHDOG_COUNT),
+            "watchdog_sticky_count": _u32(TAG_RESET_WATCHDOG_STICKY_CT),
+            "watchdog_raw_status": _u32(TAG_RESET_WATCHDOG_RAW_SR),
+            "uptime_ms": _u32(TAG_RESET_UPTIME_MS),
+            "boot_stage": boot_stage,
+            "boot_stage_name": boot_stage_name,
+            "recovery_boot": bool(_u8(TAG_RESET_RECOVERY_BOOT)),
+            "summary": summary,
+        }
+
 
     def run(self):
         while not self.isInterruptionRequested():
@@ -830,6 +983,10 @@ class SerialReader(QThread):
                 if cmd == CMD_STATUS:
                     data = parse_tlv_payload(payload[1:])
                     self.status_received.emit(data)
+                elif cmd == RESET_REPORT:
+                    report = self._parse_reset_report(payload)
+                    if report is not None:
+                        self.resetReportReceived.emit(report)
                 else:
                     # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
                     # print(f"Non-status frame: cmd=0x{cmd:02X}, len={length}")
@@ -1207,6 +1364,7 @@ class Machine(QObject):
     gripper_off_signal = Signal()       # Signal to emit when the gripper is turned off
     disconnect_complete_signal = Signal()  # Signal to stop timers
     machine_connected_signal = Signal(bool)  # Signal to emit when the machine is connected
+    reset_report_received = Signal(dict)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
@@ -1231,6 +1389,7 @@ class Machine(QObject):
 
         self.execution_timer = None
         self.sent_command = None
+        self._last_reset_report = None
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
@@ -1534,10 +1693,16 @@ class Machine(QObject):
             self.reader = SerialReader(self.ser)
             self.reader.status_received.connect(self.update_status)
             self.reader.ackReceived.connect(self._on_any_ack)
+            self.reader.resetReportReceived.connect(self._on_reset_report)
             self.reader.start()
             print('Serial reader thread started')
         else:
             print('Serial reader thread already running')
+
+    @Slot(dict)
+    def _on_reset_report(self, report):
+        self._last_reset_report = dict(report)
+        self.reset_report_received.emit(dict(report))
 
     def stop_reader_thread(self):
         """

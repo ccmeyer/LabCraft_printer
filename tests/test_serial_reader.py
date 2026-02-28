@@ -79,3 +79,60 @@ def test_serial_reader_rejects_bad_crc(qapp):
 
     assert statuses == []
     assert acks == []
+
+
+def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
+    ack_payload = bytes([mfr.HELLO_ACK, 0x01, mfr.Command.TAG_SEQ32, 4, 1, 0, 0, 0])
+    reset_payload = bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            1,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            4,
+            mfr.TAG_RESET_FLAGS,
+            4,
+            mfr.CRASHLOG_FLAG_PENDING,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_LAST_FAULT,
+            1,
+            9,
+            mfr.TAG_RESET_LAST_TASK,
+            1,
+            4,
+            mfr.TAG_RESET_BOOT_STAGE,
+            1,
+            11,
+            mfr.TAG_RESET_RECOVERY_BOOT,
+            1,
+            1,
+        ]
+    )
+    serial_stream = _frame(ack_payload) + _frame(reset_payload)
+
+    fake_ser = FakeSerial(serial_stream)
+    reader = mfr.SerialReader(fake_ser)
+    acks = []
+    reports = []
+    reader.ackReceived.connect(acks.append)
+    reader.resetReportReceived.connect(reports.append)
+
+    reader.run()
+
+    assert len(acks) == 1
+    assert acks[0]["ack_cmd"] == mfr.HELLO_ACK
+    assert len(reports) == 1
+    assert reports[0]["reset_cause_name"] == "iwdg"
+    assert reports[0]["last_fault_name"] == "wdt"
+    assert reports[0]["last_task_name"] == "pressure"
+    assert reports[0]["boot_stage_name"] == "hello_ack"
+    assert reports[0]["pending"] is True
+    assert reports[0]["recovery_boot"] is True

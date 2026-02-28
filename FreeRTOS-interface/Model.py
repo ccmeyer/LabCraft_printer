@@ -4860,6 +4860,7 @@ class MachineModel(QObject):
     machine_paused = Signal()  # Signal to notify when machine is paused
     home_status_signal = Signal()
     command_numbers_updated = Signal()
+    reset_report_updated = Signal()
 
     def __init__(self):
         super().__init__()
@@ -4932,6 +4933,9 @@ class MachineModel(QObject):
 
         self.max_cycle = 0
         self.cycle_count = 0
+        self.last_reset_report = None
+        self.last_reset_summary = ""
+        self.last_reset_report_active = False
 
     def update_ports(self, ports):
         self.available_ports = ports
@@ -4952,6 +4956,21 @@ class MachineModel(QObject):
         self.regulation_state_changed.emit(self.regulating_print_pressure)
         self.reset_home_status()
         self.home_status_signal.emit()
+        self.clear_last_reset_report()
+
+    def update_last_reset_report(self, report):
+        self.last_reset_report = dict(report)
+        self.last_reset_summary = str(report.get("summary", ""))
+        self.last_reset_report_active = True
+        self.reset_report_updated.emit()
+        self.machine_state_updated.emit(self.machine_connected)
+
+    def clear_last_reset_report(self):
+        self.last_reset_report = None
+        self.last_reset_summary = ""
+        self.last_reset_report_active = False
+        self.reset_report_updated.emit()
+        self.machine_state_updated.emit(self.machine_connected)
 
     def connect_balance(self):
         self.balance_connected = True

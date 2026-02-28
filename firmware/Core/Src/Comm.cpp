@@ -28,6 +28,21 @@
 
 namespace {
 constexpr uint32_t kCommTxTimeoutMs = 25u;
+
+inline void appendU8(uint8_t* payload, size_t& idx, uint8_t tag, uint8_t value) {
+    payload[idx++] = tag;
+    payload[idx++] = 1u;
+    payload[idx++] = value;
+}
+
+inline void appendU32(uint8_t* payload, size_t& idx, uint8_t tag, uint32_t value) {
+    payload[idx++] = tag;
+    payload[idx++] = 4u;
+    payload[idx++] = static_cast<uint8_t>(value & 0xFFu);
+    payload[idx++] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+    payload[idx++] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+    payload[idx++] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
 }
 
 
@@ -199,6 +214,31 @@ void Comm::sendAckWithSeq32(uint8_t ackCmd, uint8_t seq8, uint32_t seq32, bool i
   if (frameLen > 0) {
       (void)sendRawFrame(_huart, frame, frameLen, kCommTxTimeoutMs);
   }
+}
+
+void Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot* snap, uint32_t recoveryBoot) {
+  if (snap == nullptr) {
+      return;
+  }
+
+  uint8_t payload[96] = {0};
+  size_t idx = 0;
+  payload[idx++] = Orchestrator::CMD_RESET_REPORT;
+  payload[idx++] = seq8;
+  appendU32(payload, idx, TAG_RESET_SEQ32, seq32);
+  appendU8(payload, idx, TAG_RESET_CAUSE, static_cast<uint8_t>(snap->resetCause));
+  appendU32(payload, idx, TAG_RESET_FLAGS, snap->flags);
+  appendU8(payload, idx, TAG_RESET_LAST_FAULT, static_cast<uint8_t>(snap->lastFault));
+  appendU8(payload, idx, TAG_RESET_LAST_TASK, static_cast<uint8_t>(snap->lastTask));
+  appendU32(payload, idx, TAG_RESET_BOOT_COUNT, snap->bootCount);
+  appendU32(payload, idx, TAG_RESET_FAULT_COUNT, snap->faultCountTotal);
+  appendU32(payload, idx, TAG_RESET_WATCHDOG_COUNT, snap->watchdogResetCount);
+  appendU32(payload, idx, TAG_RESET_WATCHDOG_STICKY_CT, snap->watchdogStickyCount);
+  appendU32(payload, idx, TAG_RESET_WATCHDOG_RAW_SR, snap->watchdogRawStatus);
+  appendU32(payload, idx, TAG_RESET_UPTIME_MS, snap->uptimeMs);
+  appendU8(payload, idx, TAG_RESET_BOOT_STAGE, static_cast<uint8_t>(snap->bootStage));
+  appendU8(payload, idx, TAG_RESET_RECOVERY_BOOT, static_cast<uint8_t>(recoveryBoot != 0u ? 1u : 0u));
+  sendFrame(_huart, payload, idx);
 }
 
 

@@ -48,3 +48,4 @@ def test_ack_and_control_codes_match_firmware_header():
     assert mfr.CLEAR_QUEUE == fw["CMD_CLEAR"]
     assert mfr.CLEAR_ACK == fw["CMD_CLEAR_ACK"]
     assert mfr.BYE_DONE == fw["CMD_BYE_DONE"]
+    assert mfr.RESET_REPORT == fw["CMD_RESET_REPORT"]

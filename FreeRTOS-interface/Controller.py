@@ -85,6 +85,7 @@ class Controller(QObject):
         self.machine.gripper_closed.connect(self.model.machine_model.close_gripper)
         
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
+        self.machine.reset_report_received.connect(self.handle_reset_report)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
@@ -281,6 +282,10 @@ class Controller(QObject):
         else:
             print("Controller: Failed to connect to the machine.")
             self.model.machine_model.disconnect_machine()
+
+    def handle_reset_report(self, report: dict):
+        self.model.machine_model.update_last_reset_report(report)
+        self.error_occurred_signal.emit("Board Reset Detected", report.get("summary", "Board reset detected."))
 
     def get_machine_port(self):
         """Get the currently connected machine port."""

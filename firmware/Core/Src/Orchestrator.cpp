@@ -38,6 +38,16 @@ extern "C" uint32_t RTOS_StackOverflowHookFired(void);
 
 Orchestrator* Orchestrator::_instance = nullptr;
 
+namespace {
+bool s_resetReportSent = false;
+
+bool shouldSendResetReport(const CrashLogSnapshot& snap) {
+  return ((snap.flags & CRASHLOG_FLAG_PENDING) != 0u) ||
+         (snap.resetCause == CRASH_RESET_IWDG) ||
+         (snap.resetCause == CRASH_RESET_WWDG);
+}
+}
+
 Orchestrator::Orchestrator()
   : _cmdQueue(nullptr),
     _taskHandle(nullptr),
@@ -253,6 +263,14 @@ void Orchestrator::_run() {
 	            	CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_ACK);
 	            	Watchdog_Arm();
 	            	CrashLog_LogBootSummary();
+	            	if (!s_resetReportSent) {
+	            	  CrashLogSnapshot snap{};
+	            	  CrashLog_GetSnapshot(&snap);
+	            	  if (shouldSendResetReport(snap)) {
+	            	    Comm::instance()->sendResetReport(seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
+	            	    s_resetReportSent = true;
+	            	  }
+	            	}
 	                // Then resume status & cosmetic stuff
 	                Comm::instance()->setStatusPaused(false);
 				#if LC_HAS_LED_STRIP == 1
