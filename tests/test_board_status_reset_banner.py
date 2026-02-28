@@ -19,7 +19,7 @@ class _LocationModel(QObject):
     locations_updated = Signal()
 
 
-def test_board_status_shows_and_clears_last_reset(qapp, test_profile):
+def test_board_status_does_not_render_last_reset_banner(qapp, test_profile):
     machine_model = MachineModel()
     root_model = _RootModel(machine_model)
     main_window = SimpleNamespace(color_dict={}, profile=test_profile)
@@ -27,12 +27,4 @@ def test_board_status_shows_and_clears_last_reset(qapp, test_profile):
 
     box = BoardStatusBox(main_window, root_model, controller)
 
-    assert box.labels["Last Reset"].text() == "None"
-
-    machine_model.update_last_reset_report({"summary": "Board restarted after watchdog reset."})
-    qapp.processEvents()
-    assert box.labels["Last Reset"].text() == "Board restarted after watchdog reset."
-
-    machine_model.disconnect_machine()
-    qapp.processEvents()
-    assert box.labels["Last Reset"].text() == "None"
+    assert "Last Reset" not in box.labels

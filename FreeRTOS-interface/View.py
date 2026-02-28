@@ -3607,7 +3607,6 @@ class BoardStatusBox(QGroupBox):
         self.model.location_model.locations_updated.connect(self.update_status)
         self.model.machine_model.machine_paused.connect(self.update_status)
         self.model.machine_model.home_status_signal.connect(self.update_status)
-        self.model.machine_model.reset_report_updated.connect(self.update_status)
         if self.legacy_mode:
             self.model.calibration_model.mass_updated_signal.connect(self.update_status)
     
@@ -3621,7 +3620,6 @@ class BoardStatusBox(QGroupBox):
             'Location': QLabel('Unknown'),
             'Cycle Count': QLabel('0'),
             'Current Micros': QLabel('0'),
-            'Last Reset': QLabel('None'),
             # 'Mass': QLabel('0'),
             # 'Stable': QLabel('False')
         }
@@ -3633,11 +3631,7 @@ class BoardStatusBox(QGroupBox):
         for label, value in self.labels.items():
             label_label = QLabel(label)
             label_label.setAlignment(Qt.AlignCenter)
-            if label == 'Last Reset':
-                value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                value.setWordWrap(True)
-            else:
-                value.setAlignment(Qt.AlignCenter)
+            value.setAlignment(Qt.AlignCenter)
             self.layout.addWidget(label_label, row, 0)
             self.layout.addWidget(value, row, 1)
             row += 1
@@ -3651,10 +3645,6 @@ class BoardStatusBox(QGroupBox):
         self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Current Micros'].setText(str(self.model.machine_model.current_micros))
-        if self.model.machine_model.last_reset_report_active:
-            self.labels['Last Reset'].setText(self.model.machine_model.last_reset_summary)
-        else:
-            self.labels['Last Reset'].setText('None')
 
         if self.legacy_mode:
             self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))

@@ -5,12 +5,14 @@ from Model import Model,PrinterHead,Slot
 from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
 from pathlib import Path
+from datetime import datetime, timezone
 
 import time
 import numpy as np
 import os
 import serial
 import math
+import json
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -67,6 +69,7 @@ class Controller(QObject):
 
         self._ui_dir = Path(__file__).resolve().parent              # LabCraft_Printer/FreeRTOS-interface
         self._repo_root = self._ui_dir.parent                       # LabCraft_Printer
+        self._reset_report_log_path = self._repo_root / "logs" / "board_reset_reports.jsonl"
 
         self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
         self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
@@ -287,8 +290,21 @@ class Controller(QObject):
         self.model.machine_model.recover_after_board_reset()
         self.expected_position = self.model.machine_model.get_current_position_dict()
         self.expected_location = None
-        self.model.machine_model.update_last_reset_report(report)
-        self.error_occurred_signal.emit("Board Reset Detected", report.get("summary", "Board reset detected."))
+        log_path = self._append_reset_report_log(report)
+        summary = report.get("summary", "Board reset detected.")
+        message = f"{summary}\n\nSaved to: {log_path}"
+        self.error_occurred_signal.emit("Board Reset Detected", message)
+
+    def _append_reset_report_log(self, report: dict) -> str:
+        path = Path(getattr(self, "_reset_report_log_path", Path("logs") / "board_reset_reports.jsonl"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "host_time_utc": datetime.now(timezone.utc).isoformat(),
+            "report": dict(report),
+        }
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+        return str(path)
 
     def get_machine_port(self):
         """Get the currently connected machine port."""
