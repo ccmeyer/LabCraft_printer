@@ -1465,6 +1465,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Store captured images locally.
         self.background_image = None
         self.droplet_image = None
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
 
         # ---- Safety & search tuning ----
         # flash delay search (in microseconds), added to base (initial) delay
@@ -1633,7 +1634,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._throwaway_pending = True
 
         settings = {
-            "num_droplets": 1,
+            "num_droplets": self.starting_num_droplets,
             "flash_delay": int(self._clamp_delay(self._base_delay_us)),
         }
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
@@ -1660,7 +1661,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit("Nozzle Pos - Discarding warm-up droplet frame")
             # Re-shoot with the *same* settings (one droplet, current delay/pressure)
             settings = {
-                "num_droplets": 1,
+                "num_droplets": self.starting_num_droplets,
                 "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
                 # keep current pressure (no key needed if your stack preserves it)
             }
@@ -1724,7 +1725,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         msg = f"No signal in diff → raising pressure to {new_p:.3f} psi and retesting"
         # keep current flash delay; ensure one droplet
         settings = {
-            "num_droplets": 1,
+            "num_droplets": self.starting_num_droplets,
             "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
             "print_pressure": new_p,
             "_stage_msg": msg,  # internal note for UI stage text
@@ -1867,7 +1868,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self._delay_idx += 1
             new_delay = self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])
             self.stageChanged.emit(f"No contour; trying longer flash delay: {new_delay} µs (idx={self._delay_idx})")
-            return True, {"num_droplets": 1, "flash_delay": int(new_delay)}
+            return True, {"num_droplets": self.starting_num_droplets, "flash_delay": int(new_delay)}
         # else try next pressure level (if any)
         if self._pressure_level + 1 < self.max_pressure_levels:
             self._pressure_level += 1
@@ -1877,7 +1878,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit(
                 f"No contour after delay scan; raising pressure to {new_pressure:.3f} psi and resetting delay to {new_delay} µs"
             )
-            return True, {"num_droplets": 1, "flash_delay": int(new_delay), "print_pressure": float(new_pressure)}
+            return True, {"num_droplets": self.starting_num_droplets, "flash_delay": int(new_delay), "print_pressure": float(new_pressure)}
         # out of options
         return False, None
 
@@ -2409,6 +2410,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_emergence"
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
 
         # working vars
         self.background_image = None
@@ -2517,7 +2519,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         d = int(self._clamp_delay(self.candidate_delay))
         self.candidate_delay = d
         self.stageChanged.emit(f"Setting flash delay to {d} μs  [phase={self._phase}]")
-        settings = {"flash_delay": d, "num_droplets": 1}
+        settings = {"flash_delay": d, "num_droplets": self.starting_num_droplets}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
     @Slot()
@@ -2726,6 +2728,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             raise ValueError(f"PressureBandCalibrationProcess requires: {', '.join(missing_requirements)}.")
         self.phase_name = "pressure_calibration"
 
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
         self.nozzle_position = None
         self.start_delay = None
         self.start_delay_offset =  max(self.model.machine_model.get_print_pulse_width() + 1000, 0)
@@ -2957,7 +2960,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("No start time available")
             print("No start time available")
             return
-        settings = {"flash_delay": self.start_delay, "num_droplets": 1}
+        settings = {"flash_delay": self.start_delay, "num_droplets": self.starting_num_droplets}
         print(f"Requesting settings change: {settings}")
         self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
 
@@ -2994,7 +2997,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         settings = {
             "flash_delay": new_flash_delay,
-            "num_droplets": 1,
+            "num_droplets": self.starting_num_droplets,
             "print_pressure": self.candidate_pressure,
         }
         self._rep_results = []
@@ -3423,6 +3426,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                            self.background_image is None or
                            self.emergence_time_us is None)
 
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
+
         # --- imaging delay ---
         if classification_delay_us is None:
             try:
@@ -3635,7 +3640,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         settings = {
             "print_pressure": self._current_pressure,
-            "num_droplets": 1,
+            "num_droplets": self.starting_num_droplets,
             "flash_delay": int(self.classify_delay_us)
         }
         self.stageChanged.emit(
@@ -4235,6 +4240,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         if not self._ready:
             return
 
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
         # ---- delay plan (sample well after emergence) ----
         # Base = emergence time + offset (to ensure free-flight), then 2 more later points
         self.start_delay_offset = max(self.model.machine_model.get_print_pulse_width() + 1000, 0)
@@ -4378,7 +4384,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
         current_p = self._clampP(self.model.machine_model.get_current_print_pressure())
         settings = {
             "flash_delay": self._current_delay_us,
-            "num_droplets": 1,
+            "num_droplets": self.starting_num_droplets,
             "print_pressure": current_p,
         }
         def _after():
@@ -4685,6 +4691,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                        self.background_image is not None and
                        self.emergence_time_us is not None)
 
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
+
         # --- pressures to measure ---
         if pressures is None:
             band = self.calibration_manager.get_primary_pressure_band()
@@ -4864,7 +4872,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.d_index = nxt
 
         delay = int(self.delays_us[self.d_index])
-        settings = {"print_pressure": self._current_pressure, "num_droplets": 1, "flash_delay": delay}
+        settings = {"print_pressure": self._current_pressure, "num_droplets": self.starting_num_droplets, "flash_delay": delay}
         self.stageChanged.emit(
             f"Trajectory: P={self._current_pressure:.3f} psi, delay={delay} µs "
             f"({self._completed.count(True)+1}/{len(self.delays_us)})"
@@ -5423,11 +5431,12 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                                + ", ".join(missing_requirements))
         self.phase_name = "droplet_search"
         self.manual_start = bool(manual_start)
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
 
         # Images / measurements
         self.background_image = None
         self.droplet_image = None
-        self.num_images = 100
+        self.num_images = 30
         self.image_counter = 0
         self.circularity_threshold = 1.15
         self.droplet_positions, self.droplet_focus = [], []
@@ -5439,7 +5448,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._finished = False
 
         # --- see if we should save in this run ---
-        self._save_enabled = bool(self.manual_start)  # you said you want this in manual start mode
+        # self._save_enabled = bool(self.manual_start)  # you said you want this in manual start mode
+        self._save_enabled = False
         self._save_started_here = False
         self._save_dir = None
 
@@ -5859,7 +5869,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.current_delay_us = self._clamp_delay(d_us)
         self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} μs")
         self.calibration_manager.changeSettingsRequested.emit(
-            {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+            {"flash_delay": int(self.current_delay_us), "num_droplets": self.starting_num_droplets},
             self.calibration_manager.emitSettingsChangeCompleted
         )
 
@@ -5887,6 +5897,14 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.droplet_image, self.background_image
         )
 
+        if contour is None:
+            self.stageChanged.emit("No droplet: trying next delay/position")
+            self.presentImageSignal.emit(overlay)
+            self.emitContinueSearch()
+            return
+
+        x, y, w, h = cv2.boundingRect(contour)
+        cxy = (x + w//2, y + h//2)
         if frame_idx is not None and overlay is not None:
             self._save_overlay(
                 overlay,
@@ -5903,15 +5921,6 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 "center_px": None if contour is None else tuple(map(int, (x + w//2, y + h//2))),
                 "timestamp": datetime.now().isoformat(),
             })
-
-        if contour is None:
-            self.stageChanged.emit("No droplet: trying next delay/position")
-            self.presentImageSignal.emit(overlay)
-            self.emitContinueSearch()
-            return
-
-        x, y, w, h = cv2.boundingRect(contour)
-        cxy = (x + w//2, y + h//2)
         self.presentImageSignal.emit(overlay)
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
@@ -6234,6 +6243,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             raise ValueError("Cannot start PressureSweepCharacterizationProcess; missing prerequisites: "
                                + ", ".join(missing_requirements))
         self.phase_name = "pressure_sweep_characterization"
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
 
         # ---------- prerequisites ----------
         self.num_samples           = self.calibration_manager.get_num_pressure_tests()
@@ -6698,7 +6708,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.current_delay_us = self._clamp_delay(d)
         self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} µs (search)")
         self.calibration_manager.changeSettingsRequested.emit(
-            {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+            {"flash_delay": int(self.current_delay_us), "num_droplets": self.starting_num_droplets},
             self.delayApplied.emit
         )
 
@@ -7247,6 +7257,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_timecourse"
         self._save_dir = None
+        self.starting_num_droplets = self.model.droplet_camera_model.num_droplets
 
         # ensure we stop saving on success or error
         self.calibrationCompleted.connect(self._cleanup_saving)
@@ -7409,7 +7420,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         self.current_delay_us = d
         self.stageChanged.emit(f"Setting flash_delay = {d} µs")
         # Only manipulate flash delay and ensure a single droplet per capture
-        settings = {"flash_delay": d, "num_droplets": 1}
+        settings = {"flash_delay": d, "num_droplets": self.starting_num_droplets}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.delayApplied.emit)
 
     @Slot()
