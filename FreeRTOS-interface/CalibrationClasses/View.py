@@ -1372,6 +1372,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if payload.get("is_fill"):
             try:
                 out = em.apply_fill_droplet_volume(float(payload["new_fill_nL"]), write_keys_if_assigned=True)
+                self.model.sync_printer_head_target_droplet_volume(
+                    em.get_fill_reagent_name(),
+                    1.0,
+                    "--",
+                    float(payload["new_fill_nL"]),
+                )
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
                 return
@@ -1417,8 +1423,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         try:
-            em.apply_droplet_volume_for_option(
+            summary = em.apply_droplet_volume_for_option(
                 payload["factor_name"], payload["option_name"], new_dv, write_keys_if_assigned=True
+            )
+            self.model.sync_printer_head_target_droplet_volume(
+                payload["option_name"] or payload["factor_name"],
+                float(summary["stock_concentration"]),
+                summary["units"],
+                new_dv,
             )
         except NotImplementedError as e:
             QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))

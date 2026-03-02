@@ -4550,10 +4550,72 @@ class ExperimentDesignDialog(QDialog):
         for that reagent (based on the model's preview map). Also sets a helpful tooltip.
         """
         preview = {}
+        target_preview = {}
         try:
             preview = self.model.get_unreachable_preview_map() or {}
         except Exception:
             preview = {}
+        try:
+            target_preview = self.model.get_target_preview_map() or {}
+        except Exception:
+            target_preview = {}
+
+        def _fmt_value(val: float) -> str:
+            val = float(val)
+            if abs(val) >= 0.001:
+                txt = f"{val:.3f}"
+                txt = txt.rstrip("0").rstrip(".")
+                if "." not in txt:
+                    txt += ".0"
+                return txt
+            return f"{val:.6g}"
+
+        def _fmt_signed(val: float) -> str:
+            val = float(val)
+            if abs(val) < 5e-4:
+                return "+0.0"
+            txt = f"{val:+.3f}"
+            txt = txt.rstrip("0").rstrip(".")
+            if "." not in txt:
+                txt += ".0"
+            return txt
+
+        def _reason_text(reason: str) -> str:
+            if reason == "rounds_to_zero_drops":
+                return "positive targets may not round to zero"
+            if reason == "outside_half_step":
+                return "outside half-step tolerance"
+            if reason == "invalid_delta":
+                return "invalid stock or volume"
+            return reason.replace("_", " ")
+
+        def _build_tooltip(rows: List[dict]) -> str:
+            if not rows:
+                return ""
+
+            stock_conc = rows[0].get("stock_concentration", 0.0)
+            units = rows[0].get("units", "") or ""
+            header_units = f" {units}" if units else ""
+            lines = [f"Achievable with forced stock {_fmt_value(stock_conc)}{header_units}:"]
+
+            unreachable_rows = []
+            for row in rows:
+                req = _fmt_value(row.get("requested_final", 0.0))
+                achieved = _fmt_value(row.get("achieved_final", 0.0))
+                drops = int(row.get("droplets", 0))
+                signed = _fmt_signed(row.get("signed_error", 0.0))
+                line = f"{req} -> {achieved} ({drops} drops, {signed})"
+                if row.get("reachable", False):
+                    lines.append(line)
+                else:
+                    unreachable_rows.append(f"{line}; {_reason_text(str(row.get('reason', 'unreachable')))}")
+
+            if unreachable_rows:
+                lines.append("")
+                lines.append("Unreachable:")
+                lines.extend(unreachable_rows)
+
+            return "\n".join(lines)
 
         for row in range(self.reagent_table.rowCount()):
             name_edit: QLineEdit = self.reagent_table.cellWidget(row, 0)
@@ -4572,16 +4634,15 @@ class ExperimentDesignDialog(QDialog):
 
             # Map to key used by the model
             key = (reagent_name, None) if group_name == self.GROUP_ADDITIVE else (group_name, reagent_name)
+            tooltip_rows = target_preview.get(key, [])
             unreachable = preview.get(key, [])
 
             if unreachable:
                 tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("dark_red", "#8a0303"))
-                # Pretty tooltip list
-                msg = "Unreachable with forced stock:\n" + ", ".join(str(x) for x in unreachable)
-                tgt_edit.setToolTip(msg)
+                tgt_edit.setToolTip(_build_tooltip(tooltip_rows))
             else:
                 tgt_edit.setStyleSheet("")
-                tgt_edit.setToolTip("")
+                tgt_edit.setToolTip(_build_tooltip(tooltip_rows))
 
     # -----------------------------
     # Stock table & summary updates

@@ -200,6 +200,7 @@ class SingleStockPlan:
     units: str
     droplets_per_target: Dict[float, int]    # target -> drops
     max_volume_nL: float             # worst-case (drops*drop_nL)
+    lookup_quantum: Optional[float] = None
     n_stocks: int = 1
 
 @dataclass
@@ -261,6 +262,7 @@ class ExperimentModel(QObject):
         # key for options in groups: (group_name, option_name)
         self.plans_per_option: Dict[Tuple[str, Optional[str]], Dict] = {}
         self._unreachable_preview_map: Dict[Tuple[str, Optional[str]], List[float]] = {}
+        self._target_preview_map: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
 
         # Cached stock rows for the UI stock table
         self._stock_rows_cache: List[Dict] = []
@@ -333,6 +335,72 @@ class ExperimentModel(QObject):
         self.add_choice_option(group_name, option_name, targets, units, droplet_nL, starting_conc, forced_stock_conc)
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _stable_float_key(self, x: float) -> float:
+        return float(f"{float(x):.12g}")
+
+    def _evaluate_single_forced_target(
+        self,
+        t_final: float,
+        starting_conc: float,
+        forced_stock_conc: float,
+        droplet_nL: float,
+        final_volume_nL: float,
+        *,
+        units: str = "",
+    ) -> Dict[str, Any]:
+        requested_final = float(t_final)
+        starting = float(starting_conc or 0.0)
+        requested_adjusted = max(0.0, requested_final - starting)
+        requested_adjusted = self._stable_float_key(requested_adjusted)
+
+        delta = ((float(forced_stock_conc) * float(droplet_nL)) / float(final_volume_nL)
+                 if final_volume_nL > 0 else 0.0)
+        delta = self._stable_float_key(delta) if delta > 0 else 0.0
+
+        droplets = 0
+        achieved_adjusted = 0.0
+        achieved_final = starting
+        signed_error = achieved_adjusted - requested_adjusted
+        abs_error = abs(signed_error)
+        reachable = False
+        reason = "invalid_delta"
+
+        if requested_adjusted <= 1e-12:
+            reason = "nearest_achievable"
+            reachable = True
+        elif delta > 0:
+            k_float = requested_adjusted / delta
+            droplets = max(0, int(round(k_float)))
+            achieved_adjusted = self._stable_float_key(droplets * delta)
+            achieved_final = self._stable_float_key(starting + achieved_adjusted)
+            signed_error = achieved_adjusted - requested_adjusted
+            abs_error = abs(signed_error)
+            half_step = 0.5 * delta + 1e-12
+
+            if droplets == 0:
+                reason = "rounds_to_zero_drops"
+            elif abs_error <= half_step:
+                reachable = True
+                reason = "nearest_achievable"
+            else:
+                reason = "outside_half_step"
+
+        return {
+            "requested_final": requested_final,
+            "requested_adjusted": requested_adjusted,
+            "achieved_final": self._stable_float_key(achieved_final),
+            "achieved_adjusted": self._stable_float_key(achieved_adjusted),
+            "droplets": int(droplets),
+            "delta_per_drop": float(delta),
+            "abs_error": float(abs_error),
+            "signed_error": float(signed_error),
+            "reachable": bool(reachable),
+            "reason": reason,
+            "stock_concentration": float(forced_stock_conc),
+            "starting_conc": starting,
+            "units": units,
+        }
 
     def get_random_seed(self) -> Optional[int]:
         """Only return a seed when randomization is enabled."""
@@ -549,6 +617,7 @@ class ExperimentModel(QObject):
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
+        self._target_preview_map = {}
 
         additives: List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]] = []
         choice_groups: Dict[str, List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]]] = {}
@@ -567,19 +636,24 @@ class ExperimentModel(QObject):
                     dv = float(o.droplet_nL)
                     delta = (float(forced) * dv) / V_final if V_final > 0 else 0.0
                     dp: Dict[float, int] = {}
+                    preview_rows: List[Dict[str, Any]] = []
                     unreachable_final: List[float] = []
-                    # Build mapping strictly for integer multiples of delta (on the quantum grid)
                     for t_final in o.targets:
-                        t_add = max(0.0, float(t_final) - float(getattr(o, "starting_conc", 0.0) or 0.0))
-                        t_add_q = _quantize(t_add, quantum)
-                        if delta > 0 and _is_multiple_of(delta, t_add_q, tol=1e-9):
-                            k = _int_ratio(delta, t_add_q)
-                            dp[t_add_q] = int(k)
-                        else:
-                            # zero is always reachable as 0 drops
-                            if t_add_q > 0:
-                                unreachable_final.append(float(t_final))
-                    # Record preview
+                        row = self._evaluate_single_forced_target(
+                            float(t_final),
+                            float(getattr(o, "starting_conc", 0.0) or 0.0),
+                            float(forced),
+                            dv,
+                            V_final,
+                            units=o.units,
+                        )
+                        preview_rows.append(row)
+                        if row["reachable"]:
+                            dp[self._stable_float_key(row["requested_adjusted"])] = int(row["droplets"])
+                        elif row["requested_adjusted"] > 1e-12:
+                            unreachable_final.append(float(t_final))
+
+                    self._target_preview_map[(f.name, None)] = preview_rows
                     if unreachable_final:
                         self._unreachable_preview_map[(f.name, None)] = unreachable_final
 
@@ -591,6 +665,7 @@ class ExperimentModel(QObject):
                         units=o.units,
                         droplets_per_target=dp,
                         max_volume_nL=max_vol,
+                        lookup_quantum=1e-6,
                         n_stocks=1
                     )]
                     additives.append((f.name, singles, []))  # no two-stock for forced
@@ -617,16 +692,24 @@ class ExperimentModel(QObject):
                         dv = float(opt.droplet_nL)
                         delta = (float(forced) * dv) / V_final if V_final > 0 else 0.0
                         dp: Dict[float, int] = {}
+                        preview_rows: List[Dict[str, Any]] = []
                         unreachable_final: List[float] = []
                         for t_final in opt.targets:
-                            t_add = max(0.0, float(t_final) - float(getattr(opt, "starting_conc", 0.0) or 0.0))
-                            t_add_q = _quantize(t_add, quantum)
-                            if delta > 0 and _is_multiple_of(delta, t_add_q, tol=1e-9):
-                                k = _int_ratio(delta, t_add_q)
-                                dp[t_add_q] = int(k)
-                            else:
-                                if t_add_q > 0:
-                                    unreachable_final.append(float(t_final))
+                            row = self._evaluate_single_forced_target(
+                                float(t_final),
+                                float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                                float(forced),
+                                dv,
+                                V_final,
+                                units=opt.units,
+                            )
+                            preview_rows.append(row)
+                            if row["reachable"]:
+                                dp[self._stable_float_key(row["requested_adjusted"])] = int(row["droplets"])
+                            elif row["requested_adjusted"] > 1e-12:
+                                unreachable_final.append(float(t_final))
+
+                        self._target_preview_map[(f.name, opt.name)] = preview_rows
                         if unreachable_final:
                             self._unreachable_preview_map[(f.name, opt.name)] = unreachable_final
 
@@ -638,6 +721,7 @@ class ExperimentModel(QObject):
                             units=opt.units,
                             droplets_per_target=dp,
                             max_volume_nL=max_vol,
+                            lookup_quantum=1e-6,
                             n_stocks=1
                         )]
                         bucket.append((opt.name, singles, []))
@@ -1123,7 +1207,7 @@ class ExperimentModel(QObject):
                             "droplet_volume_nL": p1.droplet_nL,
                             "units": p1.units,
                             "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
-                            "quantum": quantum,
+                            "quantum": float(p1.lookup_quantum or quantum),
                         }
                     ]
                 }
@@ -1168,7 +1252,7 @@ class ExperimentModel(QObject):
                                 "droplet_volume_nL": p1.droplet_nL,
                                 "units": p1.units,
                                 "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
-                                "quantum": quantum
+                                "quantum": float(p1.lookup_quantum or quantum)
                             },
                         ]
                     }
@@ -1382,6 +1466,7 @@ class ExperimentModel(QObject):
         # Keep factors; UI will rebuild them as usual.
         # Recompute plans/grid on next optimize/generate.
         self.plans_per_option.clear()
+        self._target_preview_map.clear()
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
@@ -2329,7 +2414,19 @@ class ExperimentModel(QObject):
         return self.calibration_file_path
 
     def get_unreachable_preview_map(self) -> Dict[Tuple[str, Optional[str]], List[float]]:
+        if self._target_preview_map:
+            return {
+                key: [float(row["requested_final"]) for row in rows if not row.get("reachable", False) and abs(float(row.get("requested_adjusted", 0.0))) > 1e-12]
+                for key, rows in self._target_preview_map.items()
+                if any(not row.get("reachable", False) and abs(float(row.get("requested_adjusted", 0.0))) > 1e-12 for row in rows)
+            }
         return dict(self._unreachable_preview_map)
+
+    def get_target_preview_map(self) -> Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]]:
+        return {
+            key: [dict(row) for row in rows]
+            for key, rows in self._target_preview_map.items()
+        }
 
     # -----------------------------
     # JSON helpers
@@ -2859,29 +2956,49 @@ class ExperimentModel(QObject):
         if rc is None:
             return False
 
-        it = self.iter_reaction_stock_droplets()
+        items_list = [list(items) for items in self.iter_reaction_stock_droplets()]
+
+        if hasattr(rc, "get_all_reactions"):
+            try:
+                n_rxns = len(rc.get_all_reactions())
+                if len(items_list) < n_rxns:
+                    items_list.extend([[] for _ in range(n_rxns - len(items_list))])
+            except Exception:
+                pass
+
+        # Keep runtime reactions in sync with the latest fill-drop plan too.
+        fill_name = self.metadata.get("fill_reagent_name", "Water")
+        fill_units = "--"
+        fill_conc = 1.0
+        if self._reactions_df is not None and not self._reactions_df.empty and "fill_drops" in self._reactions_df.columns:
+            fill_seq = [int(x) for x in self._reactions_df["fill_drops"].tolist()]
+            if len(fill_seq) < len(items_list):
+                fill_seq.extend([0 for _ in range(len(items_list) - len(fill_seq))])
+            for idx, drops in enumerate(fill_seq[:len(items_list)]):
+                if drops > 0:
+                    items_list[idx].append((fill_name, fill_conc, fill_units, drops))
 
         try:
             # Most explicit: set each reaction's items
             if hasattr(rc, "set_reaction_items_for_index"):
-                for idx, items in enumerate(it):
+                for idx, items in enumerate(items_list):
                     rc.set_reaction_items_for_index(idx, items)
                 return True
 
             # Bulk reset from an iterator
             if hasattr(rc, "reset_from_iterator"):
-                rc.reset_from_iterator(self.iter_reaction_stock_droplets())
+                rc.reset_from_iterator(iter(items_list))
                 return True
 
             # Bulk replace with a list
             if hasattr(rc, "replace_all_reaction_items"):
-                rc.replace_all_reaction_items(list(self.iter_reaction_stock_droplets()))
+                rc.replace_all_reaction_items(items_list)
                 return True
 
             # Clear + append pattern
             if hasattr(rc, "clear") and hasattr(rc, "append_reaction_items"):
                 rc.clear()
-                for items in self.iter_reaction_stock_droplets():
+                for items in items_list:
                     rc.append_reaction_items(items)
                 return True
 
@@ -2966,6 +3083,9 @@ class ExperimentModel(QObject):
         # Apply
         self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
         self.generate_experiment()
+
+        if self._has_runtime_assignments():
+            self._rebind_runtime_assignments_to_current_plans()
 
         # If wells are already assigned and you want the CSVs to reflect the new totals immediately:
         if write_keys_if_assigned and self._has_runtime_assignments():
@@ -3313,6 +3433,12 @@ class ReactionComposition(QObject):
             return False
         r.set_target_droplets(droplets, preserve_progress=preserve_progress)
         return True
+
+    def remove_reagent_by_id(self, stock_id: str) -> bool:
+        if stock_id not in self.reagents:
+            return False
+        del self.reagents[stock_id]
+        return True
     
 
 
@@ -3386,16 +3512,30 @@ class ReactionCollection(QObject):
                                      *, preserve_progress: bool = True) -> bool:
         """
         items: [(reagent_name, stock_conc, units, drops), ...] for one reaction.
-        Only updates targets for reagents that already exist in the reaction.
+        Fully reconcile the reaction with the supplied item set:
+        update existing targets, add newly needed reagents, and remove stale ones.
         """
         rxn = self._reaction_by_index(index)
         if rxn is None:
             return False
 
-        # Update provided items
+        desired: dict[str, tuple[str, float, str, int]] = {}
         for reagent_name, conc, units, drops in items:
             sid = self._stock_id_from_tuple(reagent_name, conc, units)
-            rxn.set_reagent_target_droplets(sid, int(drops), preserve_progress=preserve_progress)
+            desired[sid] = (reagent_name, float(conc), units, int(max(0, drops)))
+
+        # Remove reagents that are no longer part of the reaction.
+        for sid in list(rxn.get_all_reagents().keys()):
+            if sid not in desired:
+                rxn.remove_reagent_by_id(sid)
+
+        # Update existing reagents and add any newly required ones.
+        for sid, (reagent_name, conc, units, drops) in desired.items():
+            if sid in rxn.get_all_reagents():
+                rxn.set_reagent_target_droplets(sid, drops, preserve_progress=preserve_progress)
+                continue
+            stock = StockSolution(sid, reagent_name, conc, units)
+            rxn.add_reagent(stock, drops)
 
         # Re-validate completion flags for this reaction
         rxn.check_all_complete()
@@ -5675,6 +5815,27 @@ class Model(QObject):
                     continue
             if not self.printer_head_manager.assign_printer_head_to_slot(i):
                 break  # Stop assigning if there are no more unassigned printer heads
+
+    def sync_printer_head_target_droplet_volume(self, reagent_name: str, concentration: float, units: str,
+                                                target_droplet_volume: float) -> bool:
+        """
+        Keep the printer-head runtime bookkeeping aligned with the design-side droplet volume.
+        Returns True when a matching printer head was found.
+        """
+        stock_id = "_".join([reagent_name, f"{float(concentration):.2f}", units])
+        updated = False
+
+        printer_head = self.printer_head_manager.get_printer_head_by_id(stock_id)
+        if printer_head is not None:
+            printer_head.target_droplet_volume = float(target_droplet_volume)
+            updated = True
+
+        gripper_head = self.rack_model.get_gripper_printer_head()
+        if gripper_head is not None and gripper_head.get_stock_id() == stock_id:
+            gripper_head.target_droplet_volume = float(target_droplet_volume)
+            updated = True
+
+        return updated
 
     def record_image_metadata(self,timestamp):
         """Record metadata for the droplet images."""
