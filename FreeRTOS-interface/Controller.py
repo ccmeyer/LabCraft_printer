@@ -829,7 +829,11 @@ class Controller(QObject):
         )
 
         print(f'Moving to location: {name} from {current_location}')
-        if needs_route_safe_z and not ignore_safe_height:
+        # Only insert an intermediate safe-Z move when both endpoints are at/below
+        # the safe plane (in inverted-Z coordinates: numerically >= safe_z).
+        needs_intermediate_safe_z = current_z > safe_z and target['Z'] > safe_z
+
+        if needs_route_safe_z and not ignore_safe_height and needs_intermediate_safe_z:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
             if self.set_absolute_Z(safe_z, manual=manual, override=override) is False:
                 self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
