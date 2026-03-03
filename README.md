@@ -66,6 +66,29 @@ If your repo venv is in `env` on Windows:
 .\env\Scripts\python.exe -m pytest -q
 ```
 
+## Firmware HIL + Camera Benchmark
+
+Run full firmware checks + Pi flash + selftest + optional camera benchmark:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 `
+  -PiHost 192.168.0.29 `
+  -Profile FULL `
+  -CameraBenchmark `
+  -CameraBenchmarkCycles 100 `
+  -CameraBenchmarkExposureUs 20000 `
+  -CameraBenchmarkFlashDelayUs 5000 `
+  -CameraBenchmarkFlashWidthUs 1000 `
+  -CameraBenchmarkNumDroplets 1 `
+  -CameraBenchmarkAttemptTimeoutMs 250 `
+  -CameraBenchmarkMaxNewFrames 6
+```
+
+Outputs in `hil_reports/`:
+
+- `selftest_<timestamp>.json`
+- `selftest_<timestamp>_camera_benchmark.json` (when benchmark enabled)
+
 ## Getting Started - PlatformIO
 
 To get started with PlatformIO, follow these steps:

@@ -23,6 +23,9 @@
 #if (LC_HAS_IMAGING == 1)
 class Flash {
 public:
+  static constexpr uint16_t kMinPulseNs = 100u;
+  static constexpr uint16_t kMaxPulseNs = 5000u;
+
   /**
    * Construct the singleton.
    * @param htim         must be &htim1
@@ -32,6 +35,7 @@ public:
         uint32_t            channel);
   /// Get the singleton instance
   static Flash* instance();
+  static uint16_t clampPulseDurationNs(uint32_t pulseDurationNs);
   /**
    * Configure TIM1 (one‐pulse + PWM1), set the desired pulse width.
    * @param pulseTicks  count of TIM1 ticks for your 1 µs pulse
@@ -80,6 +84,11 @@ private:
 class Flash {
 public:
   static Flash* instance() { static Flash f; return &f; }
+  static uint16_t clampPulseDurationNs(uint32_t pulseDurationNs) {
+    if (pulseDurationNs < 100u) return 100u;
+    if (pulseDurationNs > 5000u) return 5000u;
+    return static_cast<uint16_t>(pulseDurationNs);
+  }
   void begin(uint16_t) {}
   void setDurationNs(uint16_t) {}
   void flashOnce() {}

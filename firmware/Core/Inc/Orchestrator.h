@@ -221,7 +221,15 @@ public:
 
   static uint32_t getFlashDelay()       { return instance()->_flashDelay; }
   static uint32_t getExtCount()         { return instance()->g_exti8_count; }
+  static uint32_t getFlashAckCount()    { return instance()->g_flash_ack_count; }
+  static uint32_t getFlashTaskWakeCount(){ return instance()->g_flash_task_wake_count; }
+  static uint32_t getFlashTaskDoneCount(){ return instance()->g_flash_task_done_count; }
+  static uint32_t getFlashInitCmdCount() { return instance()->g_flash_init_cmd_count; }
+  static uint32_t getFlashInitOkCount() { return instance()->g_flash_init_ok_count; }
+  static uint32_t getFlashInitTaskCreateFailCount() { return instance()->g_flash_init_task_create_fail_count; }
+  static uint32_t getFlashInitTimerCreateFailCount() { return instance()->g_flash_init_timer_create_fail_count; }
   static uint16_t getImagingDroplets()  { return instance()->_imagingDroplets; }
+  void noteFlashAckFromISR()            { g_flash_ack_count++; }
 
 #else
 
@@ -233,6 +241,13 @@ public:
 
   static uint32_t getFlashDelay()       { return 0; }
   static uint32_t getExtCount()         { return 0; }
+  static uint32_t getFlashAckCount()    { return 0; }
+  static uint32_t getFlashTaskWakeCount(){ return 0; }
+  static uint32_t getFlashTaskDoneCount(){ return 0; }
+  static uint32_t getFlashInitCmdCount() { return 0; }
+  static uint32_t getFlashInitOkCount() { return 0; }
+  static uint32_t getFlashInitTaskCreateFailCount() { return 0; }
+  static uint32_t getFlashInitTimerCreateFailCount() { return 0; }
   static uint16_t getImagingDroplets()  { return 0; }
 
 #endif
@@ -290,6 +305,13 @@ private:
   uint16_t         _flashAckPin  = GPIO_PIN_12;
   volatile bool _awaitingRelease = false;   // true after 1st EXTI until line goes LOW
   volatile uint32_t g_exti8_count = 0;
+  volatile uint32_t g_flash_ack_count = 0;
+  volatile uint32_t g_flash_task_wake_count = 0;
+  volatile uint32_t g_flash_task_done_count = 0;
+  volatile uint32_t g_flash_init_cmd_count = 0;
+  volatile uint32_t g_flash_init_ok_count = 0;
+  volatile uint32_t g_flash_init_task_create_fail_count = 0;
+  volatile uint32_t g_flash_init_timer_create_fail_count = 0;
 
 
   static void _flashAckTimerCb(TimerHandle_t);

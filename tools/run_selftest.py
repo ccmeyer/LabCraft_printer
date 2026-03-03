@@ -265,6 +265,129 @@ def _trace_artifact_path(base_out: str, test_id: int) -> str:
     return f"{base}_trace_{test_id}.json"
 
 
+def _camera_benchmark_artifact_path(base_out: str) -> str:
+    base = os.path.splitext(base_out)[0]
+    return f"{base}_camera_benchmark.json"
+
+
+def _resolve_camera_benchmark_order(mode: str, requested_order: str) -> str:
+    mode_norm = str(mode or "flash_only").strip().lower()
+    if mode_norm not in ("flash_only", "print_then_flash"):
+        mode_norm = "flash_only"
+    order_norm = str(requested_order or "auto").strip().lower()
+    if order_norm not in ("auto", "pre_selftest", "post_selftest"):
+        order_norm = "auto"
+    if order_norm == "auto":
+        return "post_selftest" if mode_norm == "print_then_flash" else "pre_selftest"
+    return order_norm
+
+
+def _run_camera_benchmark_phase(
+    args: argparse.Namespace,
+    *,
+    ser,
+    run_id: int,
+    host_checks: list,
+    build_control_fn,
+    phase: str,
+    mode: str,
+    requested_order: str,
+) -> bool:
+    bench_artifact = _camera_benchmark_artifact_path(args.out)
+    try:
+        from camera_flash_benchmark import BenchmarkConfig, run_camera_flash_benchmark
+
+        mode = str(mode or "flash_only").strip().lower()
+        if mode not in ("flash_only", "print_then_flash"):
+            mode = "flash_only"
+        effective_droplets = (
+            max(1, int(getattr(args, "camera_benchmark_num_droplets", 1)))
+            if mode == "print_then_flash"
+            else 0
+        )
+
+        bench_cfg = BenchmarkConfig(
+            cycles=max(1, int(getattr(args, "camera_benchmark_cycles", 100))),
+            exposure_us=max(1, int(getattr(args, "camera_benchmark_exposure_us", 20000))),
+            flash_delay_us=max(0, int(getattr(args, "camera_benchmark_flash_delay_us", 5000))),
+            flash_width_us=max(1, int(getattr(args, "camera_benchmark_flash_width_us", 1000))),
+            num_droplets=effective_droplets,
+            attempt_timeout_ms=max(1, int(getattr(args, "camera_benchmark_attempt_timeout_ms", 250))),
+            max_new_frames=max(1, int(getattr(args, "camera_benchmark_max_new_frames", 6))),
+            mode=mode,
+            run_order=phase,
+            preflight_pressure_timeout_ms=max(
+                50, int(getattr(args, "camera_benchmark_preflight_pressure_timeout_ms", 1000))
+            ),
+        )
+        bench_payload = run_camera_flash_benchmark(
+            ser,
+            build_control_fn,
+            run_id=run_id,
+            config=bench_cfg,
+        )
+        write_json_atomic(bench_artifact, bench_payload)
+        host_checks.append(
+            {
+                "name": "camera_flash_benchmark",
+                "pass": True,
+                "details": {
+                    "status": bench_payload.get("status", "ok"),
+                    "artifact": bench_artifact,
+                    "phase": phase,
+                    "mode": mode,
+                    "requested_order": str(requested_order),
+                    "resolved_order": str(phase),
+                    "summary": bench_payload.get("summary", {}),
+                    "preflight": bench_payload.get("preflight", {}),
+                    "init_diag": bench_payload.get("init_diag", {}),
+                    "status_snapshot_delta": bench_payload.get("status_snapshot_delta", {}),
+                },
+                "timestamp": now_iso(),
+            }
+        )
+        print(f"Wrote camera benchmark artifact: {bench_artifact}")
+        return False
+    except ImportError as e:
+        host_checks.append(
+            {
+                "name": "camera_flash_benchmark",
+                "pass": True,
+                "details": {
+                    "status": "skipped_missing_dependency",
+                    "artifact": bench_artifact,
+                    "phase": phase,
+                    "mode": str(mode),
+                    "requested_order": str(requested_order),
+                    "resolved_order": str(phase),
+                    "error": str(e),
+                },
+                "timestamp": now_iso(),
+            }
+        )
+        print(f"Skipping camera benchmark due to missing dependency: {e}")
+        return False
+    except Exception as e:
+        host_checks.append(
+            {
+                "name": "camera_flash_benchmark",
+                "pass": False,
+                "details": {
+                    "status": "error",
+                    "artifact": bench_artifact,
+                    "phase": phase,
+                    "mode": str(mode),
+                    "requested_order": str(requested_order),
+                    "resolved_order": str(phase),
+                    "error": str(e),
+                },
+                "timestamp": now_iso(),
+            }
+        )
+        print(f"Camera benchmark failed: {e}")
+        return True
+
+
 def _write_sweep_artifacts(base_out: str, run_id: int, results: list[dict]) -> tuple[str, str] | tuple[None, None]:
     combo_rows = []
     suite_summary = None
@@ -428,6 +551,7 @@ def run(args: argparse.Namespace) -> int:
     summary = {"total": 0, "passed": 0, "failed": 0}
     aborted = False
 
+    camera_benchmark_runtime_error = False
     with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
         reader = FrameReader()
 
@@ -492,6 +616,24 @@ def run(args: argparse.Namespace) -> int:
                 write_json_atomic(args.out, report)
                 print(f"Wrote self-test report: {args.out}")
                 return 3
+
+        bench_mode = str(getattr(args, "camera_benchmark_mode", "flash_only") or "flash_only").strip().lower()
+        if bench_mode not in ("flash_only", "print_then_flash"):
+            bench_mode = "flash_only"
+        requested_bench_order = str(getattr(args, "camera_benchmark_order", "auto") or "auto").strip().lower()
+        bench_order = _resolve_camera_benchmark_order(bench_mode, requested_bench_order)
+        run_benchmark = bool(getattr(args, "camera_benchmark", False))
+        if run_benchmark and bench_order == "pre_selftest":
+            camera_benchmark_runtime_error = _run_camera_benchmark_phase(
+                args,
+                ser=ser,
+                run_id=run_id,
+                host_checks=host_checks,
+                build_control_fn=build_control,
+                phase="pre_selftest",
+                mode=bench_mode,
+                requested_order=requested_bench_order,
+            )
 
         profile_val = profile_map[profile]
         # Mirror profile into TAG_P1 so current firmware decode can branch without
@@ -651,6 +793,42 @@ def run(args: argparse.Namespace) -> int:
         else:
             rc = 0
 
+        if done_seen and run_benchmark and bench_order == "post_selftest":
+            # selftest_done path leaves status paused, so re-HELLO before post-selftest benchmark.
+            hello_seq8_bench = 0x0E
+            ser.write(build_control(CMD_HELLO, hello_seq8_bench, run_id))
+            hello_resume_deadline = time.monotonic() + 1.5
+            got_resume_hello = False
+            while time.monotonic() < hello_resume_deadline:
+                chunk = ser.read(64)
+                for v in chunk:
+                    frame = reader.feed(v)
+                    if not frame or len(frame) < 2:
+                        continue
+                    if frame[0] == CMD_HELLO_ACK and frame[1] == hello_seq8_bench:
+                        got_resume_hello = True
+                        break
+                if got_resume_hello:
+                    break
+            host_checks.append(
+                {
+                    "name": "camera_flash_benchmark_hello_resume",
+                    "pass": got_resume_hello,
+                    "details": {"seq8": hello_seq8_bench, "timeout_ms": 1500},
+                    "timestamp": now_iso(),
+                }
+            )
+            camera_benchmark_runtime_error = _run_camera_benchmark_phase(
+                args,
+                ser=ser,
+                run_id=run_id,
+                host_checks=host_checks,
+                build_control_fn=build_control,
+                phase="post_selftest",
+                mode=bench_mode,
+                requested_order=requested_bench_order,
+            ) or camera_benchmark_runtime_error
+
         if done_seen:
             goodbye_seq8 = 3
             ser.write(build_control(CMD_GOODBYE, goodbye_seq8, run_id))
@@ -744,6 +922,8 @@ def run(args: argparse.Namespace) -> int:
 
             if not got_bye_ack:
                 rc = 3
+            elif not got_bye_done:
+                rc = 3
 
         host_checks.append(
             {
@@ -803,6 +983,8 @@ def run(args: argparse.Namespace) -> int:
         sweep_json, sweep_csv = _write_sweep_artifacts(args.out, run_id, results)
         if sweep_json and sweep_csv:
             print(f"Wrote sweep artifacts: {sweep_json} | {sweep_csv}")
+        if camera_benchmark_runtime_error:
+            rc = 3
         print(f"Wrote self-test report: {args.out}")
         return rc
 
@@ -819,6 +1001,17 @@ def main() -> int:
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")
+    p.add_argument("--camera-benchmark", action="store_true")
+    p.add_argument("--camera-benchmark-cycles", type=int, default=100)
+    p.add_argument("--camera-benchmark-exposure-us", type=int, default=20000)
+    p.add_argument("--camera-benchmark-flash-delay-us", type=int, default=5000)
+    p.add_argument("--camera-benchmark-flash-width-us", type=int, default=1000)
+    p.add_argument("--camera-benchmark-num-droplets", type=int, default=1)
+    p.add_argument("--camera-benchmark-order", choices=("auto", "pre_selftest", "post_selftest"), default="auto")
+    p.add_argument("--camera-benchmark-mode", choices=("flash_only", "print_then_flash"), default="flash_only")
+    p.add_argument("--camera-benchmark-preflight-pressure-timeout-ms", type=int, default=1000)
+    p.add_argument("--camera-benchmark-attempt-timeout-ms", type=int, default=250)
+    p.add_argument("--camera-benchmark-max-new-frames", type=int, default=6)
     p.add_argument("--pressure-trace", action="store_true")
     selector_group = p.add_mutually_exclusive_group()
     selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))

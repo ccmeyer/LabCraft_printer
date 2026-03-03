@@ -26,6 +26,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - CppUTest framework used by `tests_host`.
 - `firmware/scripts/`
   - `run_fw_checks.ps1`, `run_fw_unit_tests.ps1`, `build_firmware_headless.ps1`.
+  - `run_fw_hil_windows.ps1` (Windows launcher for Pi flash + selftest + report pullback).
 - `firmware/artifacts/`
   - Intended firmware binary output location.
 - Build/IDE metadata present in-tree:
@@ -185,6 +186,35 @@ Script notes:
   2. `firmware/scripts/build_firmware_headless.ps1`
 - `run_fw_unit_tests.ps1` uses CMake in `firmware/tests_host` and runs `fw_tests*.exe` from `firmware/tests_host/build`.
 - `build_firmware_headless.ps1` imports the CubeIDE project and performs `-cleanBuild "$ProjName/$Cfg"`; then copies the newest `.bin` to `firmware/artifacts/`, skipping the copy if the build output is already the artifact path.
+
+## 7) HIL Host Tooling (Pi camera benchmark)
+
+- `tools/run_selftest.py`
+  - Runs protocol selftest and writes the main JSON report.
+  - Optional camera benchmark mode:
+    - `--camera-benchmark`
+    - `--camera-benchmark-order auto|pre_selftest|post_selftest` (default `auto`)
+    - `--camera-benchmark-mode flash_only|print_then_flash` (default `flash_only`)
+    - `--camera-benchmark-preflight-pressure-timeout-ms N`
+    - emits host check `camera_flash_benchmark`
+    - writes `<out_base>_camera_benchmark.json`
+- `tools/camera_flash_benchmark.py`
+  - Pi-side camera + GPIO benchmark logic used by `run_selftest.py`.
+  - Includes:
+    - mode labels (`flash_only` vs `print_then_flash`)
+    - print-path machine-ready preflight (`enable motors`, `home XY`, `home pressure regs`, `start regulators`, bounded pressure-ready wait)
+    - init diagnostic snapshot and per-cycle GPIO probe metadata
+  - For SAFE-profile HIL stability, `print_then_flash` is typically run with `--camera-benchmark-order post_selftest` to avoid affecting selftest memory-headroom metrics.
+  - Measures stage timings:
+    - trigger -> ack
+    - ack -> arm
+    - arm -> selected frame
+    - end-to-end cycle
+- `firmware/hil/flash_and_test.sh`
+  - Passes camera-benchmark flags through to `run_selftest.py`.
+  - Still returns non-zero on flash/selftest failure.
+- `firmware/scripts/run_fw_hil_windows.ps1`
+  - Adds camera-benchmark parameters and pulls the benchmark JSON artifact when enabled.
 
 ## 6) Protocol / Message Map (Opcodes, Payloads, Direction)
 

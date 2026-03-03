@@ -13,10 +13,24 @@ param(
   [int]$ProgressTimeoutMs = 30000,
   [int]$ActivityTimeoutMs = 120000,
   [int]$StatusOnlyTimeoutMs = 10000,
+  [switch]$CameraBenchmark,
+  [int]$CameraBenchmarkCycles = 100,
+  [int]$CameraBenchmarkExposureUs = 20000,
+  [int]$CameraBenchmarkFlashDelayUs = 5000,
+  [int]$CameraBenchmarkFlashWidthUs = 1000,
+  [int]$CameraBenchmarkNumDroplets = 1,
+  [int]$CameraBenchmarkAttemptTimeoutMs = 250,
+  [int]$CameraBenchmarkMaxNewFrames = 6,
+  [ValidateSet("auto", "pre_selftest", "post_selftest")]
+  [string]$CameraBenchmarkOrder = "auto",
+  [ValidateSet("flash_only", "print_then_flash")]
+  [string]$CameraBenchmarkMode = "flash_only",
+  [int]$CameraBenchmarkPreflightPressureTimeoutMs = 1000,
 
   # Local paths (defaults assume you run from repo root)
   [string]$LocalBin = "firmware\artifacts\LabCraft_firmware.bin",
   [string]$LocalSelfTest = "tools\run_selftest.py",
+  [string]$LocalCameraBenchmark = "tools\camera_flash_benchmark.py",
   [string]$LocalFlashAndTest = "firmware\hil\flash_and_test.sh",
   [string]$RemoteVenv = ""          # default: "$RemoteRepo/.venv"
 )
@@ -49,6 +63,7 @@ $sshTarget = "${PiUser}@${PiHost}"
 try {
   $LocalBinAbs = Resolve-Path $LocalBin
   if (-not (Test-Path $LocalSelfTest)) { Fail "Missing $LocalSelfTest. Did you add tools/run_selftest.py?" }
+  if (-not (Test-Path $LocalCameraBenchmark)) { Fail "Missing $LocalCameraBenchmark. Did you add tools/camera_flash_benchmark.py?" }
   if (-not (Test-Path $LocalFlashAndTest)) { Fail "Missing $LocalFlashAndTest." }
 
   # 1) Local checks: host tests + headless build
@@ -62,21 +77,26 @@ try {
   $remoteHilDir = "$RemoteRepo/firmware/hil"
   $ts = Get-Date -Format "yyyyMMdd_HHmmss"
   $remoteReport = "$RemoteRepo/hil_reports/selftest_$ts.json"
+  $remoteBenchmarkReport = "$RemoteRepo/hil_reports/selftest_${ts}_camera_benchmark.json"
 
   Write-Host "=== Upload to Pi ==="
   ssh "$sshTarget" "mkdir -p '$remoteBinDir' '$remoteToolsDir' '$remoteHilDir' '$RemoteRepo/hil_reports'"
   $remoteBinFile  = "$remoteBinDir/LabCraft_firmware.bin"
   $remoteSelfTest = "$remoteToolsDir/run_selftest.py"
+  $remoteCameraBenchmark = "$remoteToolsDir/camera_flash_benchmark.py"
   $remoteFlashAndTest = "$remoteHilDir/flash_and_test.sh"
 
   # scp expects: user@host:/path
   $scpBinTarget      = "${sshTarget}:$remoteBinFile"
   $scpSelfTestTarget = "${sshTarget}:$remoteSelfTest"
+  $scpCameraBenchmarkTarget = "${sshTarget}:$remoteCameraBenchmark"
   $scpFlashAndTestTarget = "${sshTarget}:$remoteFlashAndTest"
   $scpReportSource   = "${sshTarget}:$remoteReport"
+  $scpBenchmarkReportSource = "${sshTarget}:$remoteBenchmarkReport"
 
 scp "$($LocalBinAbs.Path)" $scpBinTarget
   scp "$LocalSelfTest" $scpSelfTestTarget
+  scp "$LocalCameraBenchmark" $scpCameraBenchmarkTarget
   scp "$LocalFlashAndTest" $scpFlashAndTestTarget
 
   # 3) Run flash + selftest on Pi
@@ -102,6 +122,21 @@ scp "$($LocalBinAbs.Path)" $scpBinTarget
     "--activity-timeout-ms", $ActivityTimeoutMs
     "--status-only-timeout-ms", $StatusOnlyTimeoutMs
   )
+  if ($CameraBenchmark.IsPresent) {
+    $flashArgs += @(
+      "--camera-benchmark"
+      "--camera-benchmark-cycles", $CameraBenchmarkCycles
+      "--camera-benchmark-exposure-us", $CameraBenchmarkExposureUs
+      "--camera-benchmark-flash-delay-us", $CameraBenchmarkFlashDelayUs
+      "--camera-benchmark-flash-width-us", $CameraBenchmarkFlashWidthUs
+      "--camera-benchmark-num-droplets", $CameraBenchmarkNumDroplets
+      "--camera-benchmark-attempt-timeout-ms", $CameraBenchmarkAttemptTimeoutMs
+      "--camera-benchmark-max-new-frames", $CameraBenchmarkMaxNewFrames
+      "--camera-benchmark-order", $CameraBenchmarkOrder
+      "--camera-benchmark-mode", $CameraBenchmarkMode
+      "--camera-benchmark-preflight-pressure-timeout-ms", $CameraBenchmarkPreflightPressureTimeoutMs
+    )
+  }
 
   $cmd = @"
 set -e
@@ -130,6 +165,15 @@ $cmd = $cmd -replace "`r", ""
 
   Write-Host "=== Download report ==="
   scp $scpReportSource       "$localReport"
+  if ($CameraBenchmark.IsPresent) {
+    $localBenchmark = Join-Path $localReportDir ("selftest_${ts}_camera_benchmark.json")
+    scp $scpBenchmarkReportSource "$localBenchmark"
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "Benchmark report: $localBenchmark"
+    } else {
+      Write-Host "Benchmark report not found on Pi (selftest report still downloaded)."
+    }
+  }
 
   # 5) Summarize report
   $reportObj = Get-Content $localReport -Raw | ConvertFrom-Json

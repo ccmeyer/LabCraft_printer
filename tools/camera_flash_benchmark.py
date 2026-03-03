@@ -1,0 +1,966 @@
+import math
+import glob
+import os
+import statistics
+import subprocess
+import time
+from collections import Counter, deque
+from dataclasses import dataclass
+
+
+CMD_INIT_FLASH = 0xC0
+CMD_STOP_FLASH = 0xC1
+CMD_SET_FLASH_DURATION = 0xC2
+CMD_SET_FLASH_DELAY = 0xC3
+CMD_SET_IMAGING_DROPLETS = 0xC4
+CMD_STATUS = 0x02
+CMD_ENABLE_MOTORS = 0x08
+CMD_HOME_XY = 0x43
+CMD_HOME_PR_BOTH = 0x44
+CMD_P_REG_START = 0xE8
+CMD_R_REG_START = 0xEA
+CMD_P_REG_STOP = 0xE9
+CMD_R_REG_STOP = 0xEB
+
+TAG_FLASH_NUM = 0x60
+TAG_FLASH_WIDTH = 0x61
+TAG_FLASH_DELAY = 0x62
+TAG_FLASH_DROPS = 0x63
+TAG_EXT_COUNT = 0x64
+TAG_P1 = 0x01
+TAG_P2 = 0x02
+TAG_P3 = 0x03
+TAG_PRINT_P = 0x12
+TAG_REFUEL_P = 0x13
+TAG_TAR_PRINT_P = 0x14
+TAG_TAR_REFUEL_P = 0x15
+TAG_ACTIVE_P = 0x40
+TAG_ACTIVE_R = 0x41
+
+SAFE_FLASH_WIDTH_MIN_NS = 100
+SAFE_FLASH_WIDTH_MAX_NS = 5000
+MACHINE_READY_TIMEOUT_MS_MIN = 15000
+HOME_FAST_HZ = 30000
+HOME_SLOW_HZ = 3000
+HOME_BACKOFF_STEPS = 400
+
+
+@dataclass
+class BenchmarkConfig:
+    cycles: int = 100
+    exposure_us: int = 20000
+    flash_delay_us: int = 5000
+    flash_width_us: int = 1000
+    num_droplets: int = 1
+    attempt_timeout_ms: int = 250
+    max_new_frames: int = 6
+    trigger_pin_bcm: int = 17
+    flash_ack_pin_bcm: int = 22
+    k_sigma: float = 4.0
+    min_delta: float = 25.0
+    threshold_cap: float = 150.0
+    baseline_frames: int = 4
+    trigger_settle_ms: int = 2
+    post_cycle_settle_ms: int = 1
+    trigger_retries: int = 1
+    mode: str = "flash_only"
+    run_order: str = "pre_selftest"
+    preflight_pressure_timeout_ms: int = 1000
+
+
+def _safe_percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return float(values[0])
+    try:
+        q = max(0.0, min(100.0, float(pct)))
+        idx = (q / 100.0) * (len(values) - 1)
+        lo = int(math.floor(idx))
+        hi = int(math.ceil(idx))
+        if lo == hi:
+            return float(values[lo])
+        frac = idx - lo
+        return float(values[lo] * (1.0 - frac) + values[hi] * frac)
+    except Exception:
+        return None
+
+
+def summarize_cycles(cycles: list[dict], requested_cycles: int, started_ns: int, finished_ns: int) -> dict:
+    by_reason = Counter(str(c.get("reason", "unknown")) for c in cycles)
+    completed = [c for c in cycles if bool(c.get("completed", False))]
+    ack_seen = [
+        c
+        for c in completed
+        if bool(c.get("ack_seen_bool", False)) or isinstance(c.get("trigger_to_ack_ms"), (int, float))
+    ]
+    frame_selected = [
+        c
+        for c in completed
+        if bool(c.get("frame_selected_bool", False)) or isinstance(c.get("trigger_to_frame_ms"), (int, float))
+    ]
+    threshold_hits = [c for c in completed if str(c.get("reason", "")) == "threshold"]
+    fallback_hits = [c for c in completed if str(c.get("reason", "")) == "fallback"]
+    last_resort_hits = [c for c in completed if str(c.get("reason", "")) == "last_resort"]
+    ack_level_high = [c for c in completed if bool(c.get("ack_level_high_seen_bool", False))]
+
+    elapsed_s = max(0.0, (finished_ns - started_ns) / 1_000_000_000.0)
+    effective_fps = (len(completed) / elapsed_s) if elapsed_s > 0 else 0.0
+
+    def _durations(key: str) -> list[float]:
+        vals = []
+        for c in completed:
+            v = c.get(key)
+            if isinstance(v, (int, float)):
+                vals.append(float(v))
+        vals.sort()
+        return vals
+
+    summary = {
+        "requested_cycles": int(requested_cycles),
+        "completed_cycles": len(completed),
+        "success_cycles": len(frame_selected),
+        "success_rate": (len(frame_selected) / len(completed)) if completed else 0.0,
+        "ack_seen_cycles": len(ack_seen),
+        "frame_selected_cycles": len(frame_selected),
+        "threshold_cycles": len(threshold_hits),
+        "fallback_cycles": len(fallback_hits),
+        "last_resort_cycles": len(last_resort_hits),
+        "ack_level_high_seen_cycles": len(ack_level_high),
+        "elapsed_s": elapsed_s,
+        "effective_fps": effective_fps,
+        "reason_distribution": dict(by_reason),
+        "timeout_count": int(by_reason.get("edge_timeout", 0)),
+        "error_count": int(by_reason.get("error", 0)),
+        "durations_ms": {},
+    }
+
+    for key in (
+        "trigger_to_ack_ms",
+        "ack_to_arm_ms",
+        "arm_to_frame_ms",
+        "trigger_to_frame_ms",
+        "cycle_total_ms",
+    ):
+        vals = _durations(key)
+        if not vals:
+            summary["durations_ms"][key] = {"count": 0, "p50": None, "p90": None, "p99": None, "mean": None}
+            continue
+        summary["durations_ms"][key] = {
+            "count": len(vals),
+            "p50": _safe_percentile(vals, 50),
+            "p90": _safe_percentile(vals, 90),
+            "p99": _safe_percentile(vals, 99),
+            "mean": float(statistics.mean(vals)),
+        }
+    return summary
+
+
+def _gpiofind(name: str) -> tuple[str, int]:
+    out = subprocess.check_output(["gpiofind", name], text=True).strip()
+    chip, off = out.split()
+    return chip, int(off)
+
+
+def _open_chip(chip_name: str):
+    import gpiod
+
+    tried = []
+    for name in (chip_name, f"/dev/{chip_name}" if not chip_name.startswith("/dev/") else None):
+        if not name:
+            continue
+        tried.append(name)
+        try:
+            return gpiod.Chip(name)
+        except FileNotFoundError:
+            continue
+    available = " ".join(sorted(glob.glob("/dev/gpiochip*"))) or "<none>"
+    raise FileNotFoundError(f"Could not open GPIO chip {chip_name!r}. Tried {tried}. Available chips: {available}")
+
+
+def _make_output_line(chip_name: str, offset: int, initial: int = 0):
+    import gpiod
+
+    is_v2 = hasattr(gpiod, "line")
+
+    if is_v2:
+        chip = _open_chip(chip_name)
+        ls = gpiod.LineSettings()
+        Direction = gpiod.line.Direction
+        Value = gpiod.line.Value
+        ls.direction = Direction.OUTPUT
+        ls.output_value = Value.ACTIVE if initial else Value.INACTIVE
+        req = chip.request_lines(consumer="camera_bench_out", config={offset: ls})
+
+        class OutV2:
+            def set_value(self, val: int):
+                req.set_values({offset: Value.ACTIVE if int(val) else Value.INACTIVE})
+
+            def read_value(self):
+                try:
+                    vals = req.get_values([offset])
+                    if isinstance(vals, dict):
+                        v = vals.get(offset, 0)
+                    elif isinstance(vals, (list, tuple)):
+                        v = vals[0] if vals else 0
+                    else:
+                        v = vals
+                    if hasattr(v, "value"):
+                        return int(v.value)
+                    return int(v)
+                except Exception:
+                    return None
+
+            def release(self):
+                req.release()
+                try:
+                    chip.close()
+                except Exception:
+                    pass
+
+        return OutV2()
+
+    chip = _open_chip(chip_name)
+    line = chip.get_line(offset)
+    line.request(consumer="camera_bench_out", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[initial])
+
+    class OutV1:
+        def set_value(self, val: int):
+            line.set_value(int(val))
+
+        def read_value(self):
+            try:
+                return int(line.get_value())
+            except Exception:
+                return None
+
+        def release(self):
+            line.release()
+            chip.close()
+
+    return OutV1()
+
+
+def _make_rising_edge_input(chip_name: str, offset: int):
+    import gpiod
+    is_v2 = hasattr(gpiod, "line")
+
+    if is_v2:
+        chip = _open_chip(chip_name)
+        ls = gpiod.LineSettings()
+        Direction = gpiod.line.Direction
+        Edge = gpiod.line.Edge
+        Bias = getattr(gpiod.line, "Bias", None)
+        ls.direction = Direction.INPUT
+        ls.edge_detection = Edge.RISING
+        if Bias is not None:
+            try:
+                ls.bias = Bias.PULL_DOWN
+            except Exception:
+                pass
+        req = chip.request_lines(consumer="camera_bench_in", config={offset: ls})
+
+        class InV2:
+            def event_wait(self, timeout_s: float) -> bool:
+                return req.wait_edge_events(float(timeout_s))
+
+            def event_consume(self):
+                _ = req.read_edge_events()
+
+            def read_value(self):
+                try:
+                    vals = req.get_values([offset])
+                    if isinstance(vals, dict):
+                        v = vals.get(offset, 0)
+                    elif isinstance(vals, (list, tuple)):
+                        v = vals[0] if vals else 0
+                    else:
+                        v = vals
+                    if hasattr(v, "value"):
+                        return int(v.value)
+                    return int(v)
+                except Exception:
+                    try:
+                        v = req.get_value(offset)
+                        if hasattr(v, "value"):
+                            return int(v.value)
+                        return int(v)
+                    except Exception:
+                        return None
+
+            def release(self):
+                req.release()
+                chip.close()
+
+        return InV2()
+
+    chip = _open_chip(chip_name)
+    line = chip.get_line(offset)
+    flags = 0
+    if hasattr(gpiod, "LINE_REQ_FLAG_BIAS_PULL_DOWN"):
+        flags |= gpiod.LINE_REQ_FLAG_BIAS_PULL_DOWN
+    line.request(consumer="camera_bench_in", type=gpiod.LINE_REQ_EV_RISING_EDGE, flags=flags)
+
+    class InV1:
+        def event_wait(self, timeout_s: float) -> bool:
+            secs = int(max(0.0, float(timeout_s)))
+            nsecs = int(max(0.0, float(timeout_s) - secs) * 1_000_000_000)
+            return line.event_wait(secs, nsecs)
+
+        def event_consume(self):
+            _ = line.event_read()
+
+        def read_value(self):
+            try:
+                return int(line.get_value())
+            except Exception:
+                return None
+
+        def release(self):
+            line.release()
+            chip.close()
+
+    return InV1()
+
+
+def _baseline_before_ns(buf: deque, cutoff_ns: int, n: int) -> tuple[float, float]:
+    import numpy as np
+
+    vals = []
+    for _arr, _md, t_done_ns, mean in reversed(buf):
+        if t_done_ns < cutoff_ns:
+            vals.append(float(mean))
+            if len(vals) >= n:
+                break
+    if len(vals) < 2:
+        tail = [float(item[3]) for item in list(buf)[-n:]]
+        vals = tail if tail else [0.0, 0.0]
+    arr = np.array(vals, dtype=float)
+    return float(np.mean(arr)), float(np.std(arr))
+
+
+def _crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc >> 1) ^ 0xA001) if (crc & 1) else (crc >> 1)
+            crc &= 0xFFFF
+    return crc
+
+
+def _parse_tlvs(payload: bytes) -> dict[int, bytes]:
+    out: dict[int, bytes] = {}
+    i = 0
+    while i + 1 < len(payload):
+        tag = payload[i]
+        ln = payload[i + 1]
+        i += 2
+        if i + ln > len(payload):
+            break
+        out[tag] = payload[i : i + ln]
+        i += ln
+    return out
+
+
+def _status_snapshot_from_serial(ser, *, sample_ms: int = 250) -> dict:
+    deadline = time.monotonic() + (max(1, int(sample_ms)) / 1000.0)
+    state = 0
+    expected_len = 0
+    buf = bytearray()
+    latest = {
+        "flash_num": None,
+        "flash_width_ns": None,
+        "flash_delay_us": None,
+        "imaging_droplets": None,
+        "ext_count": None,
+        "print_pressure": None,
+        "refuel_pressure": None,
+        "print_target": None,
+        "refuel_target": None,
+        "print_active": None,
+        "refuel_active": None,
+        "status_frames_seen": 0,
+    }
+    while time.monotonic() < deadline:
+        chunk = ser.read(256)
+        if not chunk:
+            continue
+        for b in chunk:
+            if state == 0:
+                if b == 0xAA:
+                    state = 1
+                continue
+            if state == 1:
+                expected_len = int(b)
+                buf.clear()
+                state = 2
+                continue
+
+            buf.append(b)
+            if len(buf) < expected_len + 2:
+                continue
+            payload = bytes(buf[:expected_len])
+            rec_crc = int(buf[expected_len]) | (int(buf[expected_len + 1]) << 8)
+            state = 0
+            buf.clear()
+            if _crc16(payload) != rec_crc or len(payload) < 2:
+                continue
+            if payload[0] != CMD_STATUS:
+                continue
+            latest["status_frames_seen"] += 1
+            # Status frames are `CMD_STATUS` followed directly by TLVs (no seq byte).
+            tlv = _parse_tlvs(payload[1:])
+            if TAG_FLASH_NUM in tlv and len(tlv[TAG_FLASH_NUM]) == 4:
+                latest["flash_num"] = int.from_bytes(tlv[TAG_FLASH_NUM], "little")
+            if TAG_EXT_COUNT in tlv and len(tlv[TAG_EXT_COUNT]) == 4:
+                latest["ext_count"] = int.from_bytes(tlv[TAG_EXT_COUNT], "little")
+            if TAG_FLASH_WIDTH in tlv and len(tlv[TAG_FLASH_WIDTH]) == 4:
+                latest["flash_width_ns"] = int.from_bytes(tlv[TAG_FLASH_WIDTH], "little")
+            if TAG_FLASH_DELAY in tlv and len(tlv[TAG_FLASH_DELAY]) == 4:
+                latest["flash_delay_us"] = int.from_bytes(tlv[TAG_FLASH_DELAY], "little")
+            if TAG_FLASH_DROPS in tlv and len(tlv[TAG_FLASH_DROPS]) in (2, 4):
+                latest["imaging_droplets"] = int.from_bytes(tlv[TAG_FLASH_DROPS], "little")
+            if TAG_PRINT_P in tlv and len(tlv[TAG_PRINT_P]) == 2:
+                latest["print_pressure"] = int.from_bytes(tlv[TAG_PRINT_P], "little")
+            if TAG_REFUEL_P in tlv and len(tlv[TAG_REFUEL_P]) == 2:
+                latest["refuel_pressure"] = int.from_bytes(tlv[TAG_REFUEL_P], "little")
+            if TAG_TAR_PRINT_P in tlv and len(tlv[TAG_TAR_PRINT_P]) == 2:
+                latest["print_target"] = int.from_bytes(tlv[TAG_TAR_PRINT_P], "little")
+            if TAG_TAR_REFUEL_P in tlv and len(tlv[TAG_TAR_REFUEL_P]) == 2:
+                latest["refuel_target"] = int.from_bytes(tlv[TAG_TAR_REFUEL_P], "little")
+            if TAG_ACTIVE_P in tlv and len(tlv[TAG_ACTIVE_P]) == 2:
+                latest["print_active"] = int.from_bytes(tlv[TAG_ACTIVE_P], "little")
+            if TAG_ACTIVE_R in tlv and len(tlv[TAG_ACTIVE_R]) == 2:
+                latest["refuel_active"] = int.from_bytes(tlv[TAG_ACTIVE_R], "little")
+    return latest
+
+
+def _is_pressure_ready(status: dict) -> bool:
+    p_active = status.get("print_active")
+    p = status.get("print_pressure")
+    p_t = status.get("print_target")
+    if not isinstance(p_active, int) or not isinstance(p, int) or not isinstance(p_t, int):
+        return False
+    if p_active == 0:
+        return False
+    if abs(int(p) - int(p_t)) > 50:
+        return False
+    r_active = status.get("refuel_active")
+    r = status.get("refuel_pressure")
+    r_t = status.get("refuel_target")
+    if isinstance(r_active, int) and r_active != 0:
+        if not isinstance(r, int) or not isinstance(r_t, int):
+            return False
+        if abs(int(r) - int(r_t)) > 50:
+            return False
+    return True
+
+
+def _pressure_preflight(ser, timeout_ms: int) -> tuple[bool, dict]:
+    deadline = time.monotonic() + (max(1, int(timeout_ms)) / 1000.0)
+    latest = {}
+    while time.monotonic() < deadline:
+        latest = _status_snapshot_from_serial(ser, sample_ms=120)
+        if int(latest.get("status_frames_seen", 0)) <= 0:
+            continue
+        if _is_pressure_ready(latest):
+            return True, latest
+    return False, latest
+
+
+def _send_control(
+    ser,
+    build_control_fn,
+    *,
+    cmd: int,
+    seq8: int,
+    run_id: int,
+    p1: int | None = None,
+    p2: int | None = None,
+    p3: int | None = None,
+) -> int:
+    tlv = b""
+    if p1 is not None:
+        tlv = bytes([TAG_P1, 4]) + int(p1).to_bytes(4, "little", signed=False)
+    if p2 is not None:
+        tlv += bytes([TAG_P2, 4]) + int(p2).to_bytes(4, "little", signed=False)
+    if p3 is not None:
+        tlv += bytes([TAG_P3, 4]) + int(p3).to_bytes(4, "little", signed=False)
+    ser.write(build_control_fn(cmd, seq8, run_id, tlv))
+    return (seq8 + 1) & 0xFF
+
+
+def _machine_ready_preflight(ser, build_control_fn, *, run_id: int, seq8: int, timeout_ms: int) -> tuple[int, dict]:
+    started_ns = time.monotonic_ns()
+    timeout_ms = max(MACHINE_READY_TIMEOUT_MS_MIN, int(timeout_ms))
+    status_before = _status_snapshot_from_serial(ser, sample_ms=250)
+    phases = []
+
+    def _mark_phase(
+        name: str,
+        cmd: int,
+        *,
+        p1: int | None = None,
+        p2: int | None = None,
+        p3: int | None = None,
+    ):
+        nonlocal seq8
+        t0 = time.monotonic_ns()
+        seq8 = _send_control(
+            ser,
+            build_control_fn,
+            cmd=cmd,
+            seq8=seq8,
+            run_id=run_id,
+            p1=p1,
+            p2=p2,
+            p3=p3,
+        )
+        t1 = time.monotonic_ns()
+        phases.append(
+            {
+                "name": name,
+                "cmd": int(cmd),
+                "sent_ns": int(t1),
+                "duration_ms": (t1 - t0) / 1_000_000.0,
+            }
+        )
+
+    _mark_phase("enable_motors", CMD_ENABLE_MOTORS)
+    _mark_phase(
+        "home_xy",
+        CMD_HOME_XY,
+        p1=HOME_FAST_HZ,
+        p2=HOME_SLOW_HZ,
+        p3=HOME_BACKOFF_STEPS,
+    )
+    _mark_phase(
+        "home_pressure_regs",
+        CMD_HOME_PR_BOTH,
+        p1=HOME_FAST_HZ,
+        p2=HOME_SLOW_HZ,
+        p3=HOME_BACKOFF_STEPS,
+    )
+    _mark_phase("start_print_reg", CMD_P_REG_START)
+    _mark_phase("start_refuel_reg", CMD_R_REG_START)
+
+    ok, status_ready = _pressure_preflight(ser, timeout_ms)
+    finished_ns = time.monotonic_ns()
+    reason = None if ok else "pressure_not_ready_timeout"
+    return (
+        seq8,
+        {
+            "required": True,
+            "pass": bool(ok),
+            "reason": reason,
+            "timeout_ms": int(timeout_ms),
+            "started_ns": int(started_ns),
+            "finished_ns": int(finished_ns),
+            "total_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "status_before": status_before,
+            "status_after": status_ready,
+            "phases": phases,
+        },
+    )
+
+
+def _wait_for_ack_with_level_probe(ack, timeout_s: float) -> tuple[bool, bool]:
+    deadline = time.monotonic() + max(0.001, float(timeout_s))
+    level_high_seen = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if ack.event_wait(min(0.002, max(0.0001, remaining))):
+            ack.event_consume()
+            return True, level_high_seen
+        v = ack.read_value() if hasattr(ack, "read_value") else None
+        if isinstance(v, int) and v != 0:
+            level_high_seen = True
+    return False, level_high_seen
+
+
+def run_camera_flash_benchmark(
+    ser,
+    build_control_fn,
+    *,
+    run_id: int,
+    config: BenchmarkConfig,
+) -> dict:
+    import numpy as np
+    from picamera2 import Picamera2
+
+    trigger_chip, trigger_offset = _gpiofind(f"GPIO{config.trigger_pin_bcm}")
+    ack_chip, ack_offset = _gpiofind(f"GPIO{config.flash_ack_pin_bcm}")
+    trig = _make_output_line(trigger_chip, trigger_offset, initial=0)
+    ack = _make_rising_edge_input(ack_chip, ack_offset)
+    camera = None
+    mode = str(getattr(config, "mode", "flash_only") or "flash_only").strip().lower()
+    run_order = str(getattr(config, "run_order", "pre_selftest") or "pre_selftest").strip().lower()
+    if mode not in ("flash_only", "print_then_flash"):
+        mode = "flash_only"
+    if run_order not in ("pre_selftest", "post_selftest"):
+        run_order = "pre_selftest"
+    did_start_pressure_regs = False
+    try:
+        safe_flash_width = max(SAFE_FLASH_WIDTH_MIN_NS, min(SAFE_FLASH_WIDTH_MAX_NS, int(config.flash_width_us)))
+        effective_droplets = 0 if mode == "flash_only" else max(1, int(config.num_droplets))
+        seq8 = 32
+        preflight = {"required": mode == "print_then_flash", "pass": True, "timeout_ms": 0, "status": {}}
+        if mode == "print_then_flash":
+            timeout_ms = max(
+                MACHINE_READY_TIMEOUT_MS_MIN, int(getattr(config, "preflight_pressure_timeout_ms", 1000))
+            )
+            seq8, preflight = _machine_ready_preflight(
+                ser,
+                build_control_fn,
+                run_id=run_id,
+                seq8=seq8,
+                timeout_ms=timeout_ms,
+            )
+            did_start_pressure_regs = True
+            if not bool(preflight.get("pass", False)):
+                started_ns = time.monotonic_ns()
+                finished_ns = started_ns
+                cycles = []
+                summary = summarize_cycles(cycles, config.cycles, started_ns, finished_ns)
+                summary["reason_distribution"] = {"skipped_not_pressure_ready": int(max(1, int(config.cycles)))}
+                summary["completed_cycles"] = 0
+                summary["success_cycles"] = 0
+                summary["success_rate"] = 0.0
+                return {
+                    "status": "skipped_not_pressure_ready",
+                    "mode": mode,
+                    "run_order": run_order,
+                    "started_ns": started_ns,
+                    "finished_ns": finished_ns,
+                    "elapsed_ms": (finished_ns - started_ns) / 1_000_000.0,
+                    "config": {
+                        "cycles": int(config.cycles),
+                        "exposure_us": int(config.exposure_us),
+                        "flash_delay_us": int(config.flash_delay_us),
+                        "flash_width_us": int(config.flash_width_us),
+                        "safe_flash_width_ns_applied": int(safe_flash_width),
+                        "num_droplets": int(config.num_droplets),
+                        "effective_num_droplets": int(effective_droplets),
+                        "attempt_timeout_ms": int(config.attempt_timeout_ms),
+                        "max_new_frames": int(config.max_new_frames),
+                        "trigger_pin_bcm": int(config.trigger_pin_bcm),
+                        "flash_ack_pin_bcm": int(config.flash_ack_pin_bcm),
+                        "trigger_settle_ms": int(config.trigger_settle_ms),
+                        "post_cycle_settle_ms": int(config.post_cycle_settle_ms),
+                        "trigger_retries": int(config.trigger_retries),
+                        "mode": mode,
+                        "run_order": run_order,
+                        "preflight_pressure_timeout_ms": timeout_ms,
+                    },
+                    "preflight": preflight,
+                    "init_diag": {},
+                    "status_snapshot_pre": {},
+                    "status_snapshot_post": {},
+                    "status_snapshot_delta": {"ext_count_delta": None, "flash_num_delta": None},
+                    "summary": summary,
+                    "cycles": cycles,
+                }
+
+        # Apply fixed imaging settings once (fixed-settings benchmark path).
+        ser.write(build_control_fn(CMD_INIT_FLASH, seq8, run_id))
+        seq8 = (seq8 + 1) & 0xFF
+        ser.write(
+            build_control_fn(
+                CMD_SET_FLASH_DURATION,
+                seq8,
+                run_id,
+                bytes([TAG_P1, 4]) + int(safe_flash_width).to_bytes(4, "little"),
+            )
+        )
+        seq8 = (seq8 + 1) & 0xFF
+        ser.write(
+            build_control_fn(
+                CMD_SET_FLASH_DELAY,
+                seq8,
+                run_id,
+                bytes([TAG_P1, 4]) + int(config.flash_delay_us).to_bytes(4, "little"),
+            )
+        )
+        seq8 = (seq8 + 1) & 0xFF
+        ser.write(
+            build_control_fn(
+                CMD_SET_IMAGING_DROPLETS,
+                seq8,
+                run_id,
+                bytes([TAG_P1, 4]) + int(effective_droplets).to_bytes(4, "little"),
+            )
+        )
+
+        init_status = _status_snapshot_from_serial(ser, sample_ms=250)
+        init_diag = {
+            "status_frames_seen": int(init_status.get("status_frames_seen", 0)),
+            "observed_flash_delay_us": init_status.get("flash_delay_us"),
+            "observed_flash_width_ns": init_status.get("flash_width_ns"),
+            "observed_imaging_droplets": init_status.get("imaging_droplets"),
+            "config_match": (
+                init_status.get("flash_delay_us") == int(config.flash_delay_us)
+                and init_status.get("flash_width_ns") == int(safe_flash_width)
+                and init_status.get("imaging_droplets") == int(effective_droplets)
+            )
+            if int(init_status.get("status_frames_seen", 0)) > 0
+            else False,
+        }
+
+        camera = Picamera2(1)
+        vid_cfg = camera.create_video_configuration(
+            main={"size": camera.sensor_resolution, "format": "RGB888"},
+            buffer_count=3,
+        )
+        camera.configure(vid_cfg)
+        camera.set_controls(
+            {
+                "FrameDurationLimits": (int(config.exposure_us), int(config.exposure_us)),
+                "ExposureTime": int(config.exposure_us),
+                "AeEnable": False,
+                "AwbEnable": False,
+                "AnalogueGain": 1.0,
+            }
+        )
+        camera.start()
+
+        buf = deque(maxlen=16)  # (arr, md, t_done_ns, mean)
+        results = []
+        status_pre = _status_snapshot_from_serial(ser, sample_ms=250)
+        started_ns = time.monotonic_ns()
+        timeout_s = max(0.001, float(config.attempt_timeout_ms) / 1000.0)
+        max_new_frames = max(1, int(config.max_new_frames))
+
+        for cycle_idx in range(max(1, int(config.cycles))):
+            row = {"cycle_index": int(cycle_idx), "attempt_index": 1, "completed": False}
+            t_cycle_start = time.monotonic_ns()
+            row["t_cycle_start"] = t_cycle_start
+
+            retries = max(1, int(config.trigger_retries))
+            t_trigger_high = None
+            t_ack_edge = None
+            ack_level_high_seen = False
+            for attempt_idx in range(1, retries + 1):
+                row["attempt_index"] = attempt_idx
+
+                # Ensure clean LOW level before a fresh trigger edge.
+                trig.set_value(0)
+                row["t_trigger_set_low"] = time.monotonic_ns()
+                row["trigger_level_after_set_low"] = trig.read_value() if hasattr(trig, "read_value") else None
+                settle_ms = max(0, int(config.trigger_settle_ms))
+                if settle_ms > 0:
+                    time.sleep(settle_ms / 1000.0)
+
+                # Drain stale ack edges.
+                while ack.event_wait(0.0):
+                    ack.event_consume()
+                row["ack_level_before_wait"] = ack.read_value() if hasattr(ack, "read_value") else None
+
+                trig.set_value(1)
+                row["t_trigger_set_high"] = time.monotonic_ns()
+                row["trigger_level_after_set_high"] = trig.read_value() if hasattr(trig, "read_value") else None
+                t_trigger_high = time.monotonic_ns()
+                row["t_trigger_high"] = t_trigger_high
+
+                t_wait_start = time.monotonic_ns()
+                edge_seen, level_seen = _wait_for_ack_with_level_probe(ack, timeout_s)
+                t_wait_end = time.monotonic_ns()
+                row["edge_wait_ms"] = (t_wait_end - t_wait_start) / 1_000_000.0
+                row["ack_level_after_wait"] = ack.read_value() if hasattr(ack, "read_value") else None
+                ack_level_high_seen = ack_level_high_seen or bool(level_seen)
+                if edge_seen:
+                    t_ack_edge = time.monotonic_ns()
+                    row["t_ack_edge"] = t_ack_edge
+                    break
+
+            if t_ack_edge is None or t_trigger_high is None:
+                trig.set_value(0)
+                row["t_trigger_set_low_final"] = time.monotonic_ns()
+                row["trigger_level_after_set_low_final"] = trig.read_value() if hasattr(trig, "read_value") else None
+                t_cycle_end = time.monotonic_ns()
+                timeout_subreason = "no_edge_no_level"
+                if bool(ack_level_high_seen):
+                    timeout_subreason = "level_seen_no_edge"
+                elif isinstance(row.get("ack_level_after_wait"), int) and int(row.get("ack_level_after_wait")) != 0:
+                    timeout_subreason = "line_high_no_edge"
+                row.update(
+                    {
+                        "reason": "edge_timeout",
+                        "edge_timeout_subreason": timeout_subreason,
+                        "success_bool": False,
+                        "ack_seen_bool": False,
+                        "ack_level_high_seen_bool": bool(ack_level_high_seen),
+                        "frame_selected_bool": False,
+                        "completed": True,
+                        "t_cycle_end": t_cycle_end,
+                        "cycle_total_ms": (t_cycle_end - t_cycle_start) / 1_000_000.0,
+                    }
+                )
+                results.append(row)
+                post_ms = max(0, int(config.post_cycle_settle_ms))
+                if post_ms > 0:
+                    time.sleep(post_ms / 1000.0)
+                continue
+
+            trig.set_value(0)
+            row["t_trigger_set_low_after_ack"] = time.monotonic_ns()
+            row["trigger_level_after_set_low_after_ack"] = trig.read_value() if hasattr(trig, "read_value") else None
+            t_arm_gate = time.monotonic_ns()
+            row["t_arm_gate"] = t_arm_gate
+
+            base_mean, base_std = _baseline_before_ns(buf, t_arm_gate, config.baseline_frames)
+            threshold = base_mean + config.k_sigma * max(base_std, 1.0) + config.min_delta
+            threshold = min(threshold, config.threshold_cap)
+
+            cap_deadline = time.monotonic() + timeout_s
+            cap_seen = 0
+            chosen = None
+            brightest = None
+            reason = "last_resort"
+
+            while True:
+                req = camera.capture_request()
+                if req is None:
+                    continue
+                t_done_ns = time.monotonic_ns()
+                try:
+                    md = req.get_metadata()
+                    arr = req.make_array("main")
+                finally:
+                    req.release()
+
+                mean = float(np.mean(arr))
+                buf.append((arr, md, t_done_ns, mean))
+
+                if t_done_ns <= t_arm_gate:
+                    if time.monotonic() > cap_deadline:
+                        chosen = (arr, md, t_done_ns, mean)
+                        reason = "last_resort"
+                        break
+                    continue
+
+                cap_seen += 1
+                if brightest is None or mean > brightest[3]:
+                    brightest = (arr, md, t_done_ns, mean)
+                if mean >= threshold:
+                    chosen = (arr, md, t_done_ns, mean)
+                    reason = "threshold"
+                    break
+                if cap_seen >= max_new_frames or time.monotonic() > cap_deadline:
+                    if brightest is not None:
+                        chosen = brightest
+                        reason = "fallback"
+                    else:
+                        chosen = (arr, md, t_done_ns, mean)
+                        reason = "last_resort"
+                    break
+
+            t_cycle_end = time.monotonic_ns()
+            t_selected = int(chosen[2]) if chosen is not None else t_cycle_end
+            selected_mean = float(chosen[3]) if chosen is not None else None
+
+            row.update(
+                {
+                    "completed": True,
+                    "reason": reason,
+                    "threshold": float(threshold),
+                    "selected_mean": selected_mean,
+                    "post_arm_frames_seen": int(cap_seen),
+                    "success_bool": True,
+                    "ack_seen_bool": True,
+                    "ack_level_high_seen_bool": bool(ack_level_high_seen),
+                    "frame_selected_bool": bool(chosen is not None),
+                    "t_selected_frame_done": t_selected,
+                    "t_cycle_end": t_cycle_end,
+                    "trigger_to_ack_ms": (t_ack_edge - t_trigger_high) / 1_000_000.0,
+                    "ack_to_arm_ms": (t_arm_gate - t_ack_edge) / 1_000_000.0,
+                    "arm_to_frame_ms": (t_selected - t_arm_gate) / 1_000_000.0,
+                    "trigger_to_frame_ms": (t_selected - t_trigger_high) / 1_000_000.0,
+                    "cycle_total_ms": (t_cycle_end - t_cycle_start) / 1_000_000.0,
+                }
+            )
+            results.append(row)
+            post_ms = max(0, int(config.post_cycle_settle_ms))
+            if post_ms > 0:
+                time.sleep(post_ms / 1000.0)
+
+        finished_ns = time.monotonic_ns()
+        status_post = _status_snapshot_from_serial(ser, sample_ms=250)
+        summary = summarize_cycles(results, config.cycles, started_ns, finished_ns)
+        ext_pre = status_pre.get("ext_count")
+        ext_post = status_post.get("ext_count")
+        flash_pre = status_pre.get("flash_num")
+        flash_post = status_post.get("flash_num")
+        status_delta = {
+            "ext_count_delta": (int(ext_post) - int(ext_pre)) if isinstance(ext_pre, int) and isinstance(ext_post, int) else None,
+            "flash_num_delta": (int(flash_post) - int(flash_pre)) if isinstance(flash_pre, int) and isinstance(flash_post, int) else None,
+        }
+        return {
+            "status": "ok",
+            "mode": mode,
+            "run_order": run_order,
+            "started_ns": started_ns,
+            "finished_ns": finished_ns,
+            "elapsed_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "config": {
+                "cycles": int(config.cycles),
+                "exposure_us": int(config.exposure_us),
+                "flash_delay_us": int(config.flash_delay_us),
+                "flash_width_us": int(config.flash_width_us),
+                "safe_flash_width_ns_applied": int(safe_flash_width),
+                "num_droplets": int(config.num_droplets),
+                "effective_num_droplets": int(effective_droplets),
+                "attempt_timeout_ms": int(config.attempt_timeout_ms),
+                "max_new_frames": int(config.max_new_frames),
+                "trigger_pin_bcm": int(config.trigger_pin_bcm),
+                "flash_ack_pin_bcm": int(config.flash_ack_pin_bcm),
+                "trigger_settle_ms": int(config.trigger_settle_ms),
+                "post_cycle_settle_ms": int(config.post_cycle_settle_ms),
+                "trigger_retries": int(config.trigger_retries),
+                "mode": mode,
+                "run_order": run_order,
+                "preflight_pressure_timeout_ms": int(getattr(config, "preflight_pressure_timeout_ms", 1000)),
+            },
+            "preflight": preflight,
+            "init_diag": init_diag,
+            "status_snapshot_pre": status_pre,
+            "status_snapshot_post": status_post,
+            "status_snapshot_delta": status_delta,
+            "summary": summary,
+            "cycles": results,
+        }
+    finally:
+        try:
+            # Prevent benchmark setup from perturbing later selftest memory headroom.
+            ser.write(build_control_fn(CMD_STOP_FLASH, 0x6F, run_id))
+        except Exception:
+            pass
+        if mode == "print_then_flash" and did_start_pressure_regs:
+            try:
+                ser.write(build_control_fn(CMD_P_REG_STOP, 0x70, run_id))
+            except Exception:
+                pass
+            try:
+                ser.write(build_control_fn(CMD_R_REG_STOP, 0x71, run_id))
+            except Exception:
+                pass
+        try:
+            trig.set_value(0)
+        except Exception:
+            pass
+        try:
+            ack.release()
+        except Exception:
+            pass
+        try:
+            trig.release()
+        except Exception:
+            pass
+        if camera is not None:
+            try:
+                camera.stop()
+                camera.close()
+            except Exception:
+                pass

@@ -207,15 +207,49 @@ class DropletCamera(QObject):
         self._cap_brightest   = None  # among post-arm frames
         self._cap_emit_rotate = True
         self._cap_arm_ns      = 0     # <<< time gate: frames with t_done_ns > arm_ns are "new"
+        self._signal_stride   = 1
+        self._signal_channel  = None  # None => full RGB mean, else BGR channel index
         
         self._cap_done = threading.Event()      # set when _complete_capture_locked runs
         self._cap_result = None                 # dict with mean/threshold/reason, and the image
         self._emit_on_complete = True           # gate emitting during retries
+        self._capture_worker_active = threading.Event()
         
         # threshold tuning
         self.k_sigma   = 4.0
         self.min_delta = 25.0
         self.max_wait_s = 1.0
+
+    def set_capture_profile(self, profile_name: str):
+        """
+        Set capture behavior profile.
+        - default: preserve historical behavior (full-frame mean, rotate output)
+        - throughput: reduce per-frame CPU work and skip rotate
+        """
+        p = str(profile_name or "default").strip().lower()
+        if p == "throughput":
+            self._signal_stride = 4
+            self._signal_channel = 1  # green channel
+            self._cap_emit_rotate = False
+            return
+        self._signal_stride = 1
+        self._signal_channel = None
+        self._cap_emit_rotate = True
+
+    def _signal_mean(self, arr) -> float:
+        if arr is None:
+            return 0.0
+        try:
+            if self._signal_channel is None:
+                if self._signal_stride <= 1:
+                    return float(np.mean(arr))
+                return float(np.mean(arr[:: self._signal_stride, :: self._signal_stride, :]))
+            chan = int(self._signal_channel)
+            if self._signal_stride <= 1:
+                return float(np.mean(arr[:, :, chan]))
+            return float(np.mean(arr[:: self._signal_stride, :: self._signal_stride, chan]))
+        except Exception:
+            return float(np.mean(arr))
 
     # --- GPIO ---
     def _trigger_high(self): 
@@ -291,7 +325,7 @@ class DropletCamera(QObject):
                 arr = req.make_array("main")
             finally:
                 req.release()
-            mean = float(np.mean(arr))
+            mean = self._signal_mean(arr)
             # print(f"{mean}")  # your debug
 
             with self._cv:
@@ -428,6 +462,7 @@ class DropletCamera(QObject):
         max_new_frames=6,
         attempt_timeout_s=1,
         small_sleep_between=0.02,
+        success_reasons=("threshold",),
     ) -> np.ndarray:
         """
         Block until we get a 'threshold' capture or exhaust attempts.
@@ -455,7 +490,7 @@ class DropletCamera(QObject):
                     f"mean={res.get('mean')} thr={res.get('threshold')}")
 
                 # success criterion: first frame that *crossed* threshold
-                if last_reason == "threshold" and self.latest_frame is not None:
+                if (last_reason in set(success_reasons)) and self.latest_frame is not None:
                     # emit once here for compatibility with existing slots
                     self.image_captured_signal.emit()
                     return self.latest_frame
@@ -476,11 +511,17 @@ class DropletCamera(QObject):
         max_new_frames=10,
         attempt_timeout_s=1.0,
         small_sleep_between=0.05,
+        success_reasons=("threshold",),
     ):
         """
         Start a capture with internal retries. On success, emits image_captured_signal once.
         On failure, emits capture_failed_signal(str). Returns immediately.
         """
+        if self._capture_worker_active.is_set():
+            return False
+
+        self._capture_worker_active.set()
+
         def _runner():
             try:
                 self.capture_with_retry_sync(
@@ -488,15 +529,19 @@ class DropletCamera(QObject):
                     max_new_frames=max_new_frames,
                     attempt_timeout_s=attempt_timeout_s,
                     small_sleep_between=small_sleep_between,
+                    success_reasons=success_reasons,
                 )
                 # success path already emitted image_captured_signal inside sync wrapper
             except Exception as e:
                 # already emitted capture_failed_signal inside sync wrapper,
                 # but in case of other errors, emit here too
                 self.capture_failed_signal.emit(str(e))
+            finally:
+                self._capture_worker_active.clear()
 
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
+        return True
 
 class RefuelCamera(QObject):
     def __init__(self):
@@ -1416,6 +1461,7 @@ class Machine(QObject):
         self.psi_max = 15
 
         self.execution_timer = None
+        self.execution_interval_ms = 90
         self.sent_command = None
         self._last_reset_report = None
 
@@ -1843,7 +1889,12 @@ class Machine(QObject):
             self.execution_timer = QTimer(self)
             self.execution_timer.timeout.connect(self.send_next_command)
         if not self.execution_timer.isActive():
-            self.execution_timer.start(90)
+            self.execution_timer.start(max(1, int(self.execution_interval_ms)))
+
+    def set_execution_interval_ms(self, interval_ms: int):
+        self.execution_interval_ms = max(1, int(interval_ms))
+        if self.execution_timer is not None and self.execution_timer.isActive():
+            self.execution_timer.start(self.execution_interval_ms)
 
     def stop_execution_timer(self):
         print('Stopping execution timer')
@@ -2327,9 +2378,20 @@ class Machine(QObject):
         self.droplet_camera.start_camera()
         return
     
-    def capture_droplet_image(self):
-        # return self.droplet_camera.capture_non_blocking()
-        return self.droplet_camera.capture_with_retry_async(attempts=5, attempt_timeout_s=1)
+    def capture_droplet_image(self, *, throughput_mode=False):
+        # Throughput mode is intended for repeated live imaging; keep strict mode for calibration.
+        success_reasons = ("threshold", "fallback") if throughput_mode else ("threshold",)
+        attempts = 2 if throughput_mode else 5
+        attempt_timeout_s = 0.2 if throughput_mode else 1.0
+        small_sleep_between = 0.01 if throughput_mode else 0.05
+        max_new_frames = 4 if throughput_mode else 10
+        return self.droplet_camera.capture_with_retry_async(
+            attempts=attempts,
+            max_new_frames=max_new_frames,
+            attempt_timeout_s=attempt_timeout_s,
+            small_sleep_between=small_sleep_between,
+            success_reasons=success_reasons,
+        )
     
     def stop_droplet_camera(self):
         self.droplet_camera.stop_camera()
@@ -2343,13 +2405,18 @@ class Machine(QObject):
 
     def set_exposure_time(self, exposure_time, handler=None):
         return self.droplet_camera.change_exposure_time(exposure_time,handler=handler)
+
+    def set_droplet_capture_profile(self, profile_name: str):
+        if hasattr(self.droplet_camera, "set_capture_profile"):
+            self.droplet_camera.set_capture_profile(profile_name)
     
     def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False):
-        duration = int(duration) # Only allow durations in increments of 100 nsec
-        if duration >= 1:
-            return self.add_command_to_queue('SET_WIDTH_F',duration,0,0,handler=handler,kwargs=kwargs,manual=manual)
-        else:
-            print('Duration too low')
+        duration = int(duration)
+        # Hardware safety limit to protect LED; firmware also enforces this clamp.
+        safe_duration = max(100, min(5000, duration))
+        if safe_duration != duration:
+            print(f"Clamped flash duration from {duration} ns to {safe_duration} ns for LED safety.")
+        return self.add_command_to_queue('SET_WIDTH_F', safe_duration, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
 
     def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False):
         delay = round(delay,0)

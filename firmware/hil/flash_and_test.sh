@@ -43,6 +43,17 @@ ACTIVITY_TIMEOUT_MS=""
 STATUS_ONLY_TIMEOUT_MS=""
 HELLO_RETRY_MS=250
 SKIP_SELFTEST_AFTER_MISSING_HELLO=0
+CAMERA_BENCHMARK=0
+CAMERA_BENCHMARK_CYCLES=""
+CAMERA_BENCHMARK_EXPOSURE_US=""
+CAMERA_BENCHMARK_FLASH_DELAY_US=""
+CAMERA_BENCHMARK_FLASH_WIDTH_US=""
+CAMERA_BENCHMARK_NUM_DROPLETS=""
+CAMERA_BENCHMARK_ATTEMPT_TIMEOUT_MS=""
+CAMERA_BENCHMARK_MAX_NEW_FRAMES=""
+CAMERA_BENCHMARK_ORDER=""
+CAMERA_BENCHMARK_MODE=""
+CAMERA_BENCHMARK_PREFLIGHT_PRESSURE_TIMEOUT_MS=""
 
 # -------------------------
 # Helpers
@@ -208,6 +219,39 @@ run_selftest() {
     if [[ "$SKIP_SELFTEST_AFTER_MISSING_HELLO" -ne 0 ]]; then
       cmd+=(--fast-fail-on-missing-hello)
     fi
+    if [[ "$CAMERA_BENCHMARK" -ne 0 ]]; then
+      cmd+=(--camera-benchmark)
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_CYCLES" ]]; then
+      cmd+=(--camera-benchmark-cycles "$CAMERA_BENCHMARK_CYCLES")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_EXPOSURE_US" ]]; then
+      cmd+=(--camera-benchmark-exposure-us "$CAMERA_BENCHMARK_EXPOSURE_US")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_FLASH_DELAY_US" ]]; then
+      cmd+=(--camera-benchmark-flash-delay-us "$CAMERA_BENCHMARK_FLASH_DELAY_US")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_FLASH_WIDTH_US" ]]; then
+      cmd+=(--camera-benchmark-flash-width-us "$CAMERA_BENCHMARK_FLASH_WIDTH_US")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_NUM_DROPLETS" ]]; then
+      cmd+=(--camera-benchmark-num-droplets "$CAMERA_BENCHMARK_NUM_DROPLETS")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_ATTEMPT_TIMEOUT_MS" ]]; then
+      cmd+=(--camera-benchmark-attempt-timeout-ms "$CAMERA_BENCHMARK_ATTEMPT_TIMEOUT_MS")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_MAX_NEW_FRAMES" ]]; then
+      cmd+=(--camera-benchmark-max-new-frames "$CAMERA_BENCHMARK_MAX_NEW_FRAMES")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_ORDER" ]]; then
+      cmd+=(--camera-benchmark-order "$CAMERA_BENCHMARK_ORDER")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_MODE" ]]; then
+      cmd+=(--camera-benchmark-mode "$CAMERA_BENCHMARK_MODE")
+    fi
+    if [[ -n "$CAMERA_BENCHMARK_PREFLIGHT_PRESSURE_TIMEOUT_MS" ]]; then
+      cmd+=(--camera-benchmark-preflight-pressure-timeout-ms "$CAMERA_BENCHMARK_PREFLIGHT_PRESSURE_TIMEOUT_MS")
+    fi
     "${cmd[@]}" 2>&1 | tee -a "$log"
     return "${PIPESTATUS[0]}"
   fi
@@ -238,6 +282,17 @@ Options:
   --status-only-timeout-ms N  Fail fast if only CMD_STATUS traffic remains after selftest frames
   --hello-retry-ms N    HELLO retry interval for tools/run_selftest.py
   --skip-selftest-after-missing-hello  Fail immediately when HELLO_ACK never arrives
+  --camera-benchmark     Run camera/flash timing benchmark and attach artifact
+  --camera-benchmark-cycles N
+  --camera-benchmark-exposure-us N
+  --camera-benchmark-flash-delay-us N
+  --camera-benchmark-flash-width-us N
+  --camera-benchmark-num-droplets N
+  --camera-benchmark-attempt-timeout-ms N
+  --camera-benchmark-max-new-frames N
+  --camera-benchmark-order auto|pre_selftest|post_selftest
+  --camera-benchmark-mode flash_only|print_then_flash
+  --camera-benchmark-preflight-pressure-timeout-ms N
   -h, --help            Show help
 
 Example:
@@ -267,6 +322,17 @@ while [[ $# -gt 0 ]]; do
     --status-only-timeout-ms) STATUS_ONLY_TIMEOUT_MS="$2"; shift 2 ;;
     --hello-retry-ms) HELLO_RETRY_MS="$2"; shift 2 ;;
     --skip-selftest-after-missing-hello) SKIP_SELFTEST_AFTER_MISSING_HELLO=1; shift 1 ;;
+    --camera-benchmark) CAMERA_BENCHMARK=1; shift 1 ;;
+    --camera-benchmark-cycles) CAMERA_BENCHMARK_CYCLES="$2"; shift 2 ;;
+    --camera-benchmark-exposure-us) CAMERA_BENCHMARK_EXPOSURE_US="$2"; shift 2 ;;
+    --camera-benchmark-flash-delay-us) CAMERA_BENCHMARK_FLASH_DELAY_US="$2"; shift 2 ;;
+    --camera-benchmark-flash-width-us) CAMERA_BENCHMARK_FLASH_WIDTH_US="$2"; shift 2 ;;
+    --camera-benchmark-num-droplets) CAMERA_BENCHMARK_NUM_DROPLETS="$2"; shift 2 ;;
+    --camera-benchmark-attempt-timeout-ms) CAMERA_BENCHMARK_ATTEMPT_TIMEOUT_MS="$2"; shift 2 ;;
+    --camera-benchmark-max-new-frames) CAMERA_BENCHMARK_MAX_NEW_FRAMES="$2"; shift 2 ;;
+    --camera-benchmark-order) CAMERA_BENCHMARK_ORDER="$2"; shift 2 ;;
+    --camera-benchmark-mode) CAMERA_BENCHMARK_MODE="$2"; shift 2 ;;
+    --camera-benchmark-preflight-pressure-timeout-ms) CAMERA_BENCHMARK_PREFLIGHT_PRESSURE_TIMEOUT_MS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -343,6 +409,16 @@ echo "Progress t/o  : ${PROGRESS_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
 echo "Activity t/o  : ${ACTIVITY_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
 echo "Status-only t/o: ${STATUS_ONLY_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
 echo "HELLO retry   : ${HELLO_RETRY_MS:-default}" | tee -a "$LOG_PATH"
+echo "Camera bench  : $CAMERA_BENCHMARK" | tee -a "$LOG_PATH"
+if [[ "$CAMERA_BENCHMARK" -ne 0 ]]; then
+  echo "  cycles      : ${CAMERA_BENCHMARK_CYCLES:-default}" | tee -a "$LOG_PATH"
+  echo "  exposure us : ${CAMERA_BENCHMARK_EXPOSURE_US:-default}" | tee -a "$LOG_PATH"
+  echo "  delay us    : ${CAMERA_BENCHMARK_FLASH_DELAY_US:-default}" | tee -a "$LOG_PATH"
+  echo "  width us    : ${CAMERA_BENCHMARK_FLASH_WIDTH_US:-default}" | tee -a "$LOG_PATH"
+  echo "  droplets    : ${CAMERA_BENCHMARK_NUM_DROPLETS:-default}" | tee -a "$LOG_PATH"
+  echo "  timeout ms  : ${CAMERA_BENCHMARK_ATTEMPT_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+  echo "  max frames  : ${CAMERA_BENCHMARK_MAX_NEW_FRAMES:-default}" | tee -a "$LOG_PATH"
+fi
 echo "" | tee -a "$LOG_PATH"
 
 # dfu_update.py imports PySide6 at module import time in your current version.

@@ -202,7 +202,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         manual_grid.addWidget(self.print_pulse_width_spinbox,row, 1); row += 1
 
         # Exposure time
-        self.exposure_time_label = QtWidgets.QLabel("Exposure Time (ms):")
+        self.exposure_time_label = QtWidgets.QLabel("Exposure Time (µs):")
         self.exposure_time_spinbox = QtWidgets.QSpinBox()
         self.exposure_time_spinbox.setRange(0, 1_000_000)
         self.exposure_time_spinbox.setSingleStep(2000)
@@ -214,6 +214,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_button = QtWidgets.QPushButton("Trigger Flash")
         self.flash_button.clicked.connect(self.toggle_flash)
         manual_grid.addWidget(self.flash_button, row, 0, 1, 2); row += 1
+
+        self.benchmark_profile_button = QtWidgets.QPushButton("Apply Benchmark Capture Profile")
+        self.benchmark_profile_button.clicked.connect(self.apply_benchmark_capture_profile)
+        manual_grid.addWidget(self.benchmark_profile_button, row, 0, 1, 2); row += 1
 
         # --- Group 2: Calibration (with Starting Pressure) ---
         calib_group = QtWidgets.QGroupBox("Calibration")
@@ -615,7 +619,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.repeat_capture_button.setText("Start Repeated Capture")
         else:
             self.enter_repeat_capture_mode()
-            self.camera_timer.start(1000)  # Capture every 100 milliseconds
+            self.camera_timer.start(100)  # Capture every 100 milliseconds
             self.repeat_capture_button.setText("Stop Repeated Capture")
         self.capturing = not self.capturing
 
@@ -623,8 +627,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Enters the repeat capture mode.
         """
-        self.set_exposure_time(200000)
+        self.set_exposure_time(20000)
         self.num_droplets_spinbox.setValue(0)
+
+    def apply_benchmark_capture_profile(self):
+        """
+        Apply a fixed, fast capture profile for throughput benchmarking.
+        """
+        self.controller.set_droplet_capture_profile("throughput")
+        self.controller.set_command_dispatch_interval(20)
+        self.flash_delay_spinbox.setValue(5000)
+        self.flash_duration_spinbox.setValue(1000)
+        self.exposure_time_spinbox.setValue(20000)
+        self.num_droplets_spinbox.setValue(1)
 
     def toggle_flash(self):
         """
@@ -733,7 +748,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.start_droplet_camera()
 
     def capture_image(self):
-        self.controller.capture_droplet_image()
+        self.controller.capture_droplet_image(throughput_mode=bool(self.capturing))
 
     def stop_droplet_camera(self):
         self.controller.stop_droplet_camera()
@@ -1717,6 +1732,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         self.camera_timer.stop()
+        try:
+            self.controller.set_droplet_capture_profile("default")
+            self.controller.set_command_dispatch_interval(90)
+        except Exception:
+            pass
         self.stop_droplet_camera()
         self.controller.stop_read_camera()
         self.controller.disable_print_profile()

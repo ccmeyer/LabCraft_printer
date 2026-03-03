@@ -69,6 +69,16 @@ Flash* Flash::instance() {
 	return _instance;
 }
 
+uint16_t Flash::clampPulseDurationNs(uint32_t pulseDurationNs) {
+  if (pulseDurationNs < static_cast<uint32_t>(kMinPulseNs)) {
+    return kMinPulseNs;
+  }
+  if (pulseDurationNs > static_cast<uint32_t>(kMaxPulseNs)) {
+    return kMaxPulseNs;
+  }
+  return static_cast<uint16_t>(pulseDurationNs);
+}
+
 //void Flash::begin(uint16_t pulseDurationNs) {
 //    // 1) compute initial tick count (at least 1)
 //    _pulseTicks = ns_to_ticks(pulseDurationNs);
@@ -79,9 +89,9 @@ Flash* Flash::instance() {
 //}
 
 void Flash::begin(uint16_t pulseDurationNs) {
-  _pulseDurationNs = pulseDurationNs;
+  _pulseDurationNs = clampPulseDurationNs(pulseDurationNs);
   _timerHz = tim1_input_hz(_htim);
-  _pulseTicks = ns_to_ticks(_timerHz, pulseDurationNs);
+  _pulseTicks = ns_to_ticks(_timerHz, _pulseDurationNs);
   // TIM1 is 16-bit; keep ARR in range: ARR = 2*ticks - 1 <= 0xFFFF
   if (_pulseTicks > 32768u) _pulseTicks = 32768u;
   configureTimer();
@@ -120,9 +130,9 @@ void Flash::configureTimer() {
 //}
 
 void Flash::setDurationNs(uint16_t pulseDurationNs) {
-  _pulseDurationNs = pulseDurationNs;           // FIX
+  _pulseDurationNs = clampPulseDurationNs(pulseDurationNs);
   if (_timerHz == 0) _timerHz = tim1_input_hz(_htim);
-  _pulseTicks = ns_to_ticks(_timerHz, pulseDurationNs);
+  _pulseTicks = ns_to_ticks(_timerHz, _pulseDurationNs);
   if (_pulseTicks > 32768u) _pulseTicks = 32768u;
   configureTimer();
 }

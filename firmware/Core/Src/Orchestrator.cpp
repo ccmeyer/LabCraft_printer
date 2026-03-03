@@ -597,8 +597,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_INIT_FLASH: {
           // Starts the flash trigger monitoring task
 		#if LC_HAS_IMAGING == 1
+            g_flash_init_cmd_count++;
         	if (!_flashTaskHandle) {
-        		xTaskCreate(
+        		const BaseType_t taskRc = xTaskCreate(
 					_flashTaskEntry,
 					"FlashMon",
 					256,
@@ -606,12 +607,21 @@ void Orchestrator::executeCommand(const Command &cmd) {
 					tskIDLE_PRIORITY+3,     // even higher than Orchestrator
 					&_flashTaskHandle
         		);
+                if (taskRc != pdPASS || !_flashTaskHandle) {
+                    g_flash_init_task_create_fail_count++;
+                }
         	}
 			if (!_flashAckTmr) {
 			_flashAckTmr = xTimerCreate(
 				"FlashAck", pdMS_TO_TICKS(kFlashAckMs), pdFALSE, this, _flashAckTimerCb);
+                if (!_flashAckTmr) {
+                    g_flash_init_timer_create_fail_count++;
+                }
 			}
 			HAL_GPIO_WritePin(_flashAckPort, _flashAckPin, GPIO_PIN_RESET);
+            if (_flashTaskHandle && _flashAckTmr) {
+                g_flash_init_ok_count++;
+            }
 		#endif
           break;
         }
@@ -627,7 +637,8 @@ void Orchestrator::executeCommand(const Command &cmd) {
         }
         case CMD_SET_FLASH_DURATION: {
 		#if LC_HAS_IMAGING == 1
-          Flash::instance()->setDurationNs(cmd.p1);
+          const uint16_t safePulseNs = Flash::clampPulseDurationNs(cmd.p1);
+          Flash::instance()->setDurationNs(safePulseNs);
 		#endif
           break;
         }
@@ -1775,18 +1786,99 @@ void Orchestrator::executeCommand(const Command &cmd) {
 	
 					  {
 					    const uint32_t flashDelay = Orchestrator::getFlashDelay();
+                        const uint32_t extCount = Orchestrator::getExtCount();
+                        const uint32_t flashAckCount = Orchestrator::getFlashAckCount();
+                        const uint32_t flashTaskWakeCount = Orchestrator::getFlashTaskWakeCount();
+                        const uint32_t flashTaskDoneCount = Orchestrator::getFlashTaskDoneCount();
+                        const uint32_t flashInitCmdCount = Orchestrator::getFlashInitCmdCount();
+                        const uint32_t flashInitOkCount = Orchestrator::getFlashInitOkCount();
+                        const uint32_t flashInitTaskCreateFailCount = Orchestrator::getFlashInitTaskCreateFailCount();
+                        const uint32_t flashInitTimerCreateFailCount = Orchestrator::getFlashInitTimerCreateFailCount();
 					    uint32_t flashWidthNs = 0;
+                        uint32_t flashWidthMinNs = 0;
+                        uint32_t flashWidthMaxNs = 0;
 	#if LC_HAS_IMAGING == 1
 					    if (auto* flash = Flash::instance()) {
 					      flashWidthNs = flash->getPulseDuration();
 					    }
+                        flashWidthMinNs = static_cast<uint32_t>(Flash::kMinPulseNs);
+                        flashWidthMaxNs = static_cast<uint32_t>(Flash::kMaxPulseNs);
 	#endif
-					    char metrics[96];
-					    snprintf(metrics, sizeof(metrics), "flash_delay_us=%lu;flash_width_ns=%lu",
+					    char metrics[320];
+					    snprintf(metrics, sizeof(metrics),
+                                 "flash_delay_us=%lu;flash_width_ns=%lu;flash_width_min_ns=%lu;flash_width_max_ns=%lu;"
+                                 "ext_count=%lu;flash_ack_count=%lu;flash_task_wake_count=%lu;flash_task_done_count=%lu;"
+                                 "flash_init_cmd_count=%lu;flash_init_ok_count=%lu;flash_init_task_create_fail_count=%lu;flash_init_timer_create_fail_count=%lu",
 					             static_cast<unsigned long>(flashDelay),
-					             static_cast<unsigned long>(flashWidthNs));
+					             static_cast<unsigned long>(flashWidthNs),
+                                 static_cast<unsigned long>(flashWidthMinNs),
+                                 static_cast<unsigned long>(flashWidthMaxNs),
+                                 static_cast<unsigned long>(extCount),
+                                 static_cast<unsigned long>(flashAckCount),
+                                 static_cast<unsigned long>(flashTaskWakeCount),
+                                 static_cast<unsigned long>(flashTaskDoneCount),
+                                 static_cast<unsigned long>(flashInitCmdCount),
+                                 static_cast<unsigned long>(flashInitOkCount),
+                                 static_cast<unsigned long>(flashInitTaskCreateFailCount),
+                                 static_cast<unsigned long>(flashInitTimerCreateFailCount));
 					    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
 					  }
+
+                      {
+                        const uint16_t priorDrops = _imagingDroplets;
+                        setImagingDroplets(0);
+                        const uint32_t extPre = Orchestrator::getExtCount();
+                        const uint32_t ackPre = Orchestrator::getFlashAckCount();
+                        const uint32_t wakePre = Orchestrator::getFlashTaskWakeCount();
+                        const uint32_t donePre = Orchestrator::getFlashTaskDoneCount();
+                        static constexpr uint32_t kBurstCycles = 5u;
+                        uint32_t started = 0u;
+                        uint32_t timedOut = 0u;
+                        for (uint32_t i = 0; i < kBurstCycles; ++i) {
+                            if (_flashTaskHandle == nullptr) {
+                                break;
+                            }
+                            xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
+                            const BaseType_t noteRc = xTaskNotify(_flashTaskHandle, 0x1u, eSetBits);
+                            if (noteRc != pdPASS) {
+                                continue;
+                            }
+                            started++;
+                            if (!waitBitsWithTimeout(BIT_FLASH_DONE, 250u)) {
+                                timedOut++;
+                            }
+                            vTaskDelay(msToAtLeast1Tick(3u));
+                        }
+                        const uint32_t extPost = Orchestrator::getExtCount();
+                        const uint32_t ackPost = Orchestrator::getFlashAckCount();
+                        const uint32_t wakePost = Orchestrator::getFlashTaskWakeCount();
+                        const uint32_t donePost = Orchestrator::getFlashTaskDoneCount();
+                        setImagingDroplets(priorDrops);
+
+                        const uint32_t dExt = extPost - extPre;
+                        const uint32_t dAck = ackPost - ackPre;
+                        const uint32_t dWake = wakePost - wakePre;
+                        const uint32_t dDone = donePost - donePre;
+                        const bool taskPresent = (_flashTaskHandle != nullptr);
+                        const bool pass = (!taskPresent) ||
+                                          (started > 0u) &&
+                                          (timedOut == 0u) &&
+                                          (dWake >= started) &&
+                                          (dDone >= started) &&
+                                          (dAck >= started);
+                        char metrics[224];
+                        snprintf(metrics, sizeof(metrics),
+                                 "skipped_no_flash_task=%lu;cycles_req=%lu;cycles_started=%lu;cycles_timeout=%lu;ext_delta=%lu;flash_ack_delta=%lu;flash_task_wake_delta=%lu;flash_task_done_delta=%lu",
+                                 static_cast<unsigned long>(taskPresent ? 0u : 1u),
+                                 static_cast<unsigned long>(kBurstCycles),
+                                 static_cast<unsigned long>(started),
+                                 static_cast<unsigned long>(timedOut),
+                                 static_cast<unsigned long>(dExt),
+                                 static_cast<unsigned long>(dAck),
+                                 static_cast<unsigned long>(dWake),
+                                 static_cast<unsigned long>(dDone));
+                        if (!runOne(1007, "flash_imaging_burst_diag_safe", pass, metrics)) goto selftest_done;
+                      }
 	
 					  {
 					    static const char kBuildInfo[] = __DATE__ " " __TIME__;
@@ -3206,6 +3298,7 @@ void Orchestrator::_flashTaskLoop() {
 	// Wait for a (coalesced) notification
 	uint32_t note = 0;
 	xTaskNotifyWait(/*ulBitsToClearOnEntry*/0, /*ulBitsToClearOnExit*/0xFFFFFFFFu, &note, portMAX_DELAY);
+    g_flash_task_wake_count++;
 
 
     _flashInProgress = true;
@@ -3240,6 +3333,7 @@ void Orchestrator::_flashTaskLoop() {
     }
 
     _flashInProgress = false;
+    g_flash_task_done_count++;
     xEventGroupSetBits(_doneEvents, BIT_FLASH_DONE);
     Logger::instance()->log("-FLASH DONE-\r\n");
   }
@@ -3266,11 +3360,13 @@ extern "C" void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin) {
 extern "C" void MX_FLASH_Acknowledge() {
 //	HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
     // Immediately raise the "flash fired" GPIO so the Pi can edge-trigger
-    Orchestrator::instance()->_flashAckHigh();
+    auto* orch = Orchestrator::instance();
+    orch->_flashAckHigh();
+    orch->noteFlashAckFromISR();
 
     // Drop it low in ~2 ms via a FreeRTOS software timer
     BaseType_t hpw = pdFALSE;
-    xTimerStartFromISR(Orchestrator::instance()->_flashAckTmr, &hpw);
+    xTimerStartFromISR(orch->_flashAckTmr, &hpw);
     portYIELD_FROM_ISR(hpw);
 }
 #else

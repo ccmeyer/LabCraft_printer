@@ -1134,13 +1134,13 @@ class Controller(QObject):
     def start_droplet_camera(self):
         self.machine.start_droplet_camera()
 
-    def capture_droplet_image(self, callback=None):
+    def capture_droplet_image(self, callback=None, *, throughput_mode=False):
         """
         Initiates a non-blocking image capture. If a callback is provided,
         it will be invoked with the captured frame once the capture completes.
         """
         # self.pending_capture_callback = callback
-        self.machine.capture_droplet_image()
+        self.machine.capture_droplet_image(throughput_mode=throughput_mode)
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()
@@ -1163,6 +1163,12 @@ class Controller(QObject):
     def set_exposure_time(self, exposure_time,callback=None):
         self.machine.set_exposure_time(exposure_time,handler=callback)
         self.model.droplet_camera_model.update_exposure_time(exposure_time)
+
+    def set_droplet_capture_profile(self, profile_name: str):
+        self.machine.set_droplet_capture_profile(profile_name)
+
+    def set_command_dispatch_interval(self, interval_ms: int):
+        self.machine.set_execution_interval_ms(interval_ms)
 
     def set_save_directory(self, directory):
         self.model.droplet_camera_model.set_save_directory(directory)      
