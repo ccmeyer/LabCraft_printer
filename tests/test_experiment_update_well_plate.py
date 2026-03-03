@@ -68,6 +68,7 @@ def test_load_progress_applies_added_droplets(experiment_model_factory):
     well, sid, _reagent = _first_assigned_reagent(model.well_plate)
     progress_path = Path(em.progress_file_path)
     data = json.loads(progress_path.read_text(encoding="utf-8"))
+    data.pop("__plate__", None)
     data[well.well_id]["reagents"][sid]["added_droplets"] = 1
     progress_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -87,6 +88,7 @@ def test_load_progress_skips_unknown_reagent_ids_gracefully(experiment_model_fac
     well, sid, _reagent = _first_assigned_reagent(model.well_plate)
     progress_path = Path(em.progress_file_path)
     data = json.loads(progress_path.read_text(encoding="utf-8"))
+    data.pop("__plate__", None)
     data[well.well_id]["reagents"][sid]["added_droplets"] = 2
     data[well.well_id]["reagents"]["Unknown_1.00_mM"] = {
         "name": "Unknown",

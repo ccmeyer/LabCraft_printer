@@ -43,6 +43,8 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     dialog.reduction_spin = QSpinBox()
     dialog.start_col_spin = QSpinBox()
     dialog.start_row_spin = QSpinBox()
+    dialog.plate_format_combo = QComboBox()
+    dialog.plate_format_combo.addItem("shallow-384_well_plate")
 
     dialog.reagent_table = QTableWidget(1, 8)
     dialog.reagent_table.setCellWidget(0, 0, QLineEdit())
@@ -80,6 +82,7 @@ def _assert_mutating_controls_disabled(dialog):
         dialog.start_row_spin,
         dialog.subset_chk,
         dialog.reduction_spin,
+        dialog.plate_format_combo,
     ]
     for control in controls:
         assert control.isEnabled() is False
@@ -119,6 +122,28 @@ def test_experiment_designer_finish_calls_apply_once():
     complete_mock.assert_called_once_with()
     save_mock.assert_called_once_with()
     assert dialog._apply_requested is True
+
+
+def test_experiment_designer_finish_stops_when_capacity_check_fails():
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._editing_locked_by_gripper = False
+    dialog._apply_requested = False
+    dialog._on_optimize_and_generate = Mock(return_value=False)
+    dialog._ensure_experiment_dir = Mock()
+    dialog._set_status = Mock()
+    dialog.accept = Mock()
+    complete_mock = Mock()
+    save_mock = Mock()
+    dialog.main_window = SimpleNamespace(complete_experiment_design=complete_mock)
+    dialog.model = SimpleNamespace(save_experiment=save_mock)
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    complete_mock.assert_not_called()
+    save_mock.assert_not_called()
+    dialog.accept.assert_not_called()
+    dialog._ensure_experiment_dir.assert_not_called()
+    assert dialog._apply_requested is False
 
 
 def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):

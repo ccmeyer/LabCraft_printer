@@ -51,6 +51,7 @@ def test_progress_json_matches_runtime_assigned_reactions(experiment_model_facto
 
     progress_path = Path(em.progress_file_path)
     data = json.loads(progress_path.read_text(encoding="utf-8"))
+    data.pop("__plate__", None)
 
     runtime_wells = [w for w in model.well_plate.get_all_wells() if w.get_assigned_reaction() is not None]
     assert set(data.keys()) == {w.well_id for w in runtime_wells}
@@ -71,6 +72,7 @@ def test_key_csv_rows_and_counts_match_progress_data(experiment_model_factory):
     Model.load_experiment_from_model(model, load_progress=False)
 
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    progress.pop("__plate__", None)
     key_df = pd.read_csv(em.key_file_path).set_index("Well ID")
     sid_lookup = _stock_lookup_by_sid(em)
 
@@ -98,6 +100,7 @@ def test_concentration_key_matches_starting_plus_added_contributions(experiment_
     Model.load_experiment_from_model(model, load_progress=False)
 
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    progress.pop("__plate__", None)
     conc_df = pd.read_csv(em.concentration_key_file_path).set_index("Well ID").fillna(0.0)
     sid_lookup = _stock_lookup_by_sid(em)
     v_final = float(em.metadata["final_reaction_volume_nL"])
@@ -151,6 +154,7 @@ def test_write_keys_now_rebuilds_progress_before_writing_csvs(experiment_model_f
     em.write_keys_now()
 
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    progress.pop("__plate__", None)
     assert progress[well.well_id]["reagents"][sid]["target_droplets"] == new_target
 
     key_df = pd.read_csv(em.key_file_path).set_index("Well ID")

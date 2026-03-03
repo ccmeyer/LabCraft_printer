@@ -30,6 +30,7 @@ import glob
 import shutil
 import csv
 import math
+import re
 import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
@@ -2492,7 +2493,15 @@ class ExperimentModel(QObject):
             }
 
         self.progress_data = progress
-        self._atomic_json_dump(self.progress_file_path, progress)
+        plate_meta = {
+            "name": self._runtime_well_plate.get_current_plate_name(),
+            "rows": self._runtime_well_plate.get_num_rows(),
+            "columns": self._runtime_well_plate.get_num_cols(),
+            "schema_version": 1,
+        }
+        payload = dict(progress)
+        payload["__plate__"] = plate_meta
+        self._atomic_json_dump(self.progress_file_path, payload)
 
     def progress_to_key(self) -> "pd.DataFrame":
         """
@@ -3005,7 +3014,14 @@ class ExperimentModel(QObject):
         self.progress_file_path = progress_file
         try:
             with open(progress_file, "r") as f:
-                self.progress_data = json.load(f)
+                payload = json.load(f)
+                if isinstance(payload, dict):
+                    # strip metadata envelope key if present
+                    payload.pop("__plate__", None)
+                    # Backward-compatible legacy progress structure
+                    self.progress_data = payload
+                else:
+                    self.progress_data = {}
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             self.progress_data = {}
 
@@ -3015,7 +3031,11 @@ class ExperimentModel(QObject):
             return {}
         try:
             with open(self.progress_file_path, "r") as f:
-                return json.load(f)
+                payload = json.load(f)
+                if isinstance(payload, dict):
+                    payload.pop("__plate__", None)
+                    return payload
+                return {}
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
@@ -3023,6 +3043,27 @@ class ExperimentModel(QObject):
         """Apply progress.json into live ReactionComposition objects (requires runtime context)."""
         if self._runtime_well_plate is None:
             return
+        # Plate compatibility check (for new structured progress payloads)
+        try:
+            with open(self.progress_file_path, "r") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and "__plate__" in payload and isinstance(payload["__plate__"], dict):
+                plate = payload["__plate__"]
+                expected_name = self._runtime_well_plate.get_current_plate_name()
+                expected_rows = self._runtime_well_plate.get_num_rows()
+                expected_cols = self._runtime_well_plate.get_num_cols()
+                if (
+                    plate.get("name") != expected_name
+                    or int(plate.get("rows", -1)) != int(expected_rows)
+                    or int(plate.get("columns", -1)) != int(expected_cols)
+                ):
+                    raise ValueError(
+                        "progress.json plate metadata does not match current well plate "
+                        f"({plate.get('name')} {plate.get('rows')}x{plate.get('columns')} vs "
+                        f"{expected_name} {expected_rows}x{expected_cols})."
+                    )
+        except FileNotFoundError:
+            pass
         data = self.return_progress_data()
         if not data:
             self.create_progress_file()
@@ -3449,12 +3490,46 @@ class Well(QObject):
     Each well can only be assigned a single reaction composition.
     '''
     state_changed = Signal(str)  # Signal to notify when the state of the well changes, sending the well ID
+    @staticmethod
+    def row_label_to_index(row_label: str) -> int:
+        """Convert Excel-style row label (A..Z, AA..) to zero-based index."""
+        s = str(row_label or "").strip().upper()
+        if not s or not s.isalpha():
+            raise ValueError(f"Invalid row label '{row_label}'.")
+        value = 0
+        for ch in s:
+            value = value * 26 + (ord(ch) - ord('A') + 1)
+        return value - 1
+
+    @staticmethod
+    def index_to_row_label(row_index: int) -> str:
+        """Convert zero-based row index to Excel-style row label."""
+        if int(row_index) < 0:
+            raise ValueError(f"Row index must be >= 0, got {row_index}.")
+        n = int(row_index) + 1
+        out = []
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            out.append(chr(ord('A') + rem))
+        return ''.join(reversed(out))
+
+    @staticmethod
+    def parse_well_id(well_id: str) -> tuple[str, int]:
+        s = str(well_id or "").strip().upper()
+        m = re.fullmatch(r"([A-Z]+)(\d+)", s)
+        if not m:
+            raise ValueError(f"Invalid well ID '{well_id}'.")
+        row_label, col_s = m.groups()
+        col = int(col_s)
+        if col <= 0:
+            raise ValueError(f"Invalid column index in well ID '{well_id}'.")
+        return row_label, col
+
     def __init__(self, well_id):
         super().__init__()
-        self.well_id = well_id  # Unique identifier for the well (e.g., "A1", "B2")
-        self.row = well_id[0]  # Row of the well (e.g., "A", "B")
-        self.row_num = ord(self.row) - 65  # Row number (0-indexed, A=0, B=1)
-        self.col = int(well_id[1:])  # Column of the well (e.g., 1, 2)
+        self.well_id = str(well_id).strip().upper()  # Unique identifier for the well (e.g., "A1", "AA2")
+        self.row, self.col = self.parse_well_id(self.well_id)
+        self.row_num = self.row_label_to_index(self.row)  # Row number (0-indexed)
         self.assigned_reaction = None  # The reaction assigned to this well
         self.coordinates = None  # The x, y, and z coordinates of the well on the plate
 
@@ -3496,6 +3571,7 @@ class WellPlate(QObject):
     well_state_changed_signal = Signal(str)  # Signal to notify when the state of a well changes, sending the well ID
     clear_all_wells_signal = Signal()  # Signal to notify when all wells are cleared
     plate_format_changed_signal = Signal()  # Signal to notify when the well plate is updated
+    plate_summary_changed_signal = Signal(str, int, int)  # name, rows, cols
 
     def __init__(self, all_plate_data,plates_path):
         super().__init__()
@@ -3513,11 +3589,57 @@ class WellPlate(QObject):
     
         self.apply_calibration_data()
 
+    @staticmethod
+    def _normalize_well_id(well_id):
+        row, col = Well.parse_well_id(str(well_id).strip().upper())
+        return f"{row}{col}"
+
+    @staticmethod
+    def _well_id_from_row_col(row: int, col: int) -> str:
+        return f"{Well.index_to_row_label(int(row))}{int(col) + 1}"
+
+    def normalize_excluded_wells(self):
+        """Canonicalize exclusions to a set[str] of existing well IDs."""
+        normalized = set()
+        for item in set(getattr(self, "excluded_wells", set())):
+            if isinstance(item, Well):
+                wid = item.well_id
+            else:
+                try:
+                    wid = self._normalize_well_id(item)
+                except ValueError:
+                    continue
+            if wid in self.wells:
+                normalized.add(wid)
+        self.excluded_wells = normalized
+        return normalized
+
+    def validate_start_position(self, start_row=0, start_col=0):
+        if int(start_row) < 0 or int(start_row) >= self.rows:
+            raise ValueError(
+                f"start_row {start_row} out of bounds for plate with {self.rows} rows."
+            )
+        if int(start_col) < 0 or int(start_col) >= self.cols:
+            raise ValueError(
+                f"start_col {start_col} out of bounds for plate with {self.cols} columns."
+            )
+
     def check_calibration_applied(self):
         return self.calibration_applied
     
     def get_current_plate_name(self):
         return self.current_plate_data['name']
+
+    def iter_well_ids(self):
+        """Yield well IDs in deterministic row-major order."""
+        for row in range(self.rows):
+            for col in range(self.cols):
+                yield self._well_id_from_row_col(row, col)
+
+    def iter_rows(self):
+        """Yield row labels in plate order (A..Z, AA..)."""
+        for row in range(self.rows):
+            yield Well.index_to_row_label(row)
     
     def get_all_current_plate_calibrations(self):
         return self.calibrations
@@ -3601,11 +3723,10 @@ class WellPlate(QObject):
         wells = {}
         for row in range(self.rows):
             for col in range(self.cols):
-                well_id = f"{chr(row + 65)}{col + 1}"
+                well_id = self._well_id_from_row_col(row, col)
                 well = Well(well_id)
                 well.state_changed.connect(self.well_state_changed)
                 wells[well_id] = well
-        self.plate_format_changed_signal.emit()
         return wells
     
     def set_plate_format(self, plate_name):
@@ -3618,8 +3739,10 @@ class WellPlate(QObject):
                 self.wells = self.create_wells()
                 self.calibrations = plate_data['calibrations']
                 self.calibration_applied = False
+                self.normalize_excluded_wells()
                 self.apply_calibration_data()
                 self.plate_format_changed_signal.emit()
+                self.plate_summary_changed_signal.emit(self.get_current_plate_name(), self.rows, self.cols)
                 return
         raise ValueError(f"Plate format '{plate_name}' not found.")
     
@@ -3754,18 +3877,23 @@ class WellPlate(QObject):
 
     def exclude_well(self, well_id):
         """Exclude a well from being used."""
-        if well_id in self.wells:
-            self.excluded_wells.add(well_id)
+        wid = self._normalize_well_id(well_id)
+        if wid in self.wells:
+            self.excluded_wells.add(wid)
         else:
-            raise ValueError(f"Well '{well_id}' does not exist in the plate.")
+            raise ValueError(f"Well '{wid}' does not exist in the plate.")
 
     def include_well(self, well_id):
         """Include an excluded well back into use."""
-        self.excluded_wells.discard(well_id)
+        self.excluded_wells.discard(self._normalize_well_id(well_id))
 
     def get_well(self, well_id):
         """Retrieve a specific well by its ID."""
-        return self.wells.get(well_id, None)
+        try:
+            wid = self._normalize_well_id(well_id)
+        except ValueError:
+            return None
+        return self.wells.get(wid, None)
 
     def zigzag_order(self,wells, fill_by="columns"):
         """
@@ -3780,7 +3908,7 @@ class WellPlate(QObject):
         """
         def row_to_num(row):
             """Convert the row letter to a number (e.g., 'A' -> 0, 'B' -> 1)."""
-            return ord(row) - ord('A')
+            return Well.row_label_to_index(row)
 
         if fill_by == "rows":
             # Sort by row first (converted to number), and by column within each row, alternating the column order
@@ -3803,8 +3931,10 @@ class WellPlate(QObject):
         """
         if fill_by not in ["rows", "columns"]:
             raise ValueError("fill_by must be 'rows' or 'columns'.")
+        self.validate_start_position(start_row=start_row, start_col=start_col)
+        self.normalize_excluded_wells()
 
-        available_wells = [well for well in self.wells.values() if well not in self.excluded_wells and well.assigned_reaction is None]
+        available_wells = [well for well in self.wells.values() if well.well_id not in self.excluded_wells and well.assigned_reaction is None]
         available_wells = [well for well in available_wells if well.row_num >= start_row and well.col >= start_col+1]
         return self.zigzag_order(available_wells, fill_by=fill_by)
     
@@ -5331,7 +5461,35 @@ class Model(QObject):
         
     def load_all_plate_data(self,file_path):
         with open(file_path, 'r') as file:
-            return json.load(file)
+            data = json.load(file)
+        if not isinstance(data, list) or not data:
+            raise ValueError("Plates.json must be a non-empty list of plate definitions.")
+
+        required = {"name", "rows", "columns", "spacing", "default", "calibrations"}
+        names = set()
+        default_count = 0
+        for i, plate in enumerate(data):
+            if not isinstance(plate, dict):
+                raise ValueError(f"Plate entry at index {i} must be an object.")
+            missing = required - set(plate.keys())
+            if missing:
+                raise ValueError(f"Plate entry '{plate}' missing required keys: {sorted(missing)}")
+            name = str(plate["name"])
+            if name in names:
+                raise ValueError(f"Duplicate plate name '{name}' in Plates.json.")
+            names.add(name)
+            if int(plate["rows"]) <= 0 or int(plate["columns"]) <= 0:
+                raise ValueError(f"Plate '{name}' must have positive rows/columns.")
+            if float(plate["spacing"]) <= 0:
+                raise ValueError(f"Plate '{name}' must have positive spacing.")
+            if bool(plate["default"]):
+                default_count += 1
+            if not isinstance(plate.get("calibrations", {}), dict):
+                raise ValueError(f"Plate '{name}' calibrations must be an object.")
+
+        if default_count != 1:
+            raise ValueError(f"Plates.json must define exactly one default plate; found {default_count}.")
+        return data
         
     def load_all_location_data(self,file_path):
         with open(file_path, 'r') as file:
@@ -5544,6 +5702,9 @@ class Model(QObject):
         self.well_plate.excluded_wells = preserved_exclusions
         if plate_name is not None:
             self.well_plate.set_plate_format(plate_name)
+            self.experiment_model.metadata["plate_name"] = self.well_plate.get_current_plate_name()
+            self.experiment_model.metadata["plate_rows"] = self.well_plate.get_num_rows()
+            self.experiment_model.metadata["plate_columns"] = self.well_plate.get_num_cols()
 
         stock_solutions, reaction_collection = self.load_reactions_from_model()
         if stock_solutions is None or reaction_collection is None:
@@ -5553,6 +5714,9 @@ class Model(QObject):
 
         self.stock_solutions = stock_solutions
         self.reaction_collection = reaction_collection
+        self.experiment_model.metadata["plate_name"] = self.well_plate.get_current_plate_name()
+        self.experiment_model.metadata["plate_rows"] = self.well_plate.get_num_rows()
+        self.experiment_model.metadata["plate_columns"] = self.well_plate.get_num_cols()
 
         # Randomization (handled earlier via seed in ExperimentModel->load_reactions_from_model)
         all_reactions = self.reaction_collection.get_all_reactions()
@@ -5634,6 +5798,40 @@ class Model(QObject):
         self.experiment_model.create_concentration_key_file()
 
         self.experiment_loaded.emit()
+
+    def get_well_stock_final_concentration(self, well_id: str, stock_id: str):
+        """
+        Return estimated final concentration contribution for a specific stock in a well.
+        Uses target droplets and stock concentration against final reaction volume metadata.
+        """
+        well = self.well_plate.get_well(well_id)
+        if well is None or well.get_assigned_reaction() is None:
+            return None
+        rxn = well.get_assigned_reaction()
+        reagent = rxn.get_all_reagents().get(stock_id)
+        if reagent is None:
+            return 0.0
+        try:
+            drops = float(reagent.get_target_droplets())
+            c_stock = float(reagent.stock_solution.get_stock_concentration())
+            v_final = float(self.experiment_model.metadata.get(
+                "final_reaction_volume_nL",
+                self.experiment_model.metadata.get("target_reaction_volume_nL", 500.0),
+            ))
+            dv = float(self.experiment_model.metadata.get("fill_droplet_volume_nL", 10.0))
+            # Prefer design stock table droplet volume if available
+            for row in self.experiment_model.get_stock_table_rows(include_fill=True):
+                name = row.get("option_name") or row.get("factor_name") or ""
+                units = row.get("units", "")
+                sid = f"{name}_{float(row.get('stock_concentration', 0.0)):.2f}_{units}"
+                if sid == stock_id:
+                    dv = float(row.get("droplet_volume_nL", dv))
+                    break
+            if v_final <= 0:
+                return 0.0
+            return c_stock * (drops * dv) / v_final
+        except Exception:
+            return None
 
 
     # ----------------- helper: manual well assignments -----------------

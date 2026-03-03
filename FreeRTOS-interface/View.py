@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # Import your model & dataclasses
-from Model import ( FactorSpec, OptionSpec, ExperimentModel)
+from Model import ( FactorSpec, OptionSpec, ExperimentModel, Well)
 
 from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
@@ -427,7 +427,8 @@ class MainWindow(QMainWindow):
     def complete_experiment_design(self):
         """Handle completion of experiment design."""
         print("[MainWindow] Experiment design completed.")
-        self.model.load_experiment_from_model()
+        plate_name = self.model.experiment_model.metadata.get("plate_name")
+        self.model.load_experiment_from_model(plate_name=plate_name)
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -1236,6 +1237,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
         self.model.well_plate.clear_all_wells_signal.connect(self.update_well_colors)
         self.model.well_plate.plate_format_changed_signal.connect(self.update_grid)
+        self.model.well_plate.plate_summary_changed_signal.connect(self._update_plate_summary)
         self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
         self.init_ui()
 
@@ -1246,15 +1248,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.plate_selection_label.setStyleSheet("color: white;")
         self.plate_selection_label.setAlignment(Qt.AlignRight)
         self.top_layout.addWidget(self.plate_selection_label)
-        self.plate_selection = QComboBox()
-        all_plate_names = self.model.well_plate.get_all_plate_names()
-        self.plate_selection.addItems(all_plate_names)
-
-        # Set the current index to match the model's plate format
-        current_plate_name = self.model.well_plate.get_current_plate_name()
-        self.plate_selection.setCurrentIndex(self.plate_selection.findText(current_plate_name))
-        self.plate_selection.currentIndexChanged.connect(self.on_plate_selection_changed)
-        self.top_layout.addWidget(self.plate_selection)
+        self.plate_format_value_label = QLabel("")
+        self.plate_format_value_label.setStyleSheet("color: white;")
+        self.top_layout.addWidget(self.plate_format_value_label)
+        self._update_plate_summary(
+            self.model.well_plate.get_current_plate_name(),
+            self.model.well_plate.get_num_rows(),
+            self.model.well_plate.get_num_cols(),
+        )
         
         # Create a calibration button
         self.calibration_button = QPushButton("Calibrate Plate", self)
@@ -1315,13 +1316,32 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         rows, cols = self.model.well_plate.get_plate_dimensions()
         self.well_labels = [[QLabel() for _ in range(cols)] for _ in range(rows)]
 
+        # Column headers
+        for col in range(cols):
+            hdr = QLabel(str(col + 1))
+            hdr.setStyleSheet("color: white;")
+            hdr.setAlignment(Qt.AlignCenter)
+            self.grid_layout.addWidget(hdr, 0, col + 1)
+
+        # Row headers + wells
+        row_labels = list(self.model.well_plate.iter_rows())
+        for row in range(rows):
+            row_hdr = QLabel(row_labels[row])
+            row_hdr.setStyleSheet("color: white;")
+            row_hdr.setAlignment(Qt.AlignCenter)
+            self.grid_layout.addWidget(row_hdr, row + 1, 0)
+
         for row in range(rows):
             for col in range(cols):
                 label = QLabel()
                 label.setStyleSheet("border: 0.5px solid black; border-radius: 4px;")
                 label.setAlignment(Qt.AlignCenter)
-                self.grid_layout.addWidget(label, row, col)
+                self.grid_layout.addWidget(label, row + 1, col + 1)
                 self.well_labels[row][col] = label
+
+    def _update_plate_summary(self, name: str, rows: int, cols: int):
+        if hasattr(self, "plate_format_value_label"):
+            self.plate_format_value_label.setText(f"{name} ({rows}x{cols})")
 
     def gripper_update_handler(self):
         """Handle when the gripper picks up a new printer head."""
@@ -1333,6 +1353,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     
     def update_well_colors(self):
         """Update the colors of the wells based on the selected reagent's concentration."""
+        stock_id = None
         if not self.model.reaction_collection.is_empty():
             # Get the current reagent selection
             stock_index = self.reagent_selection.currentIndex()
@@ -1355,6 +1376,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         for well in self.model.well_plate.get_all_wells():
             if well.assigned_reaction:
                 concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
+                final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
                 state = well.assigned_reaction.check_stock_complete(stock_id)
                 if state:
                     outline = 'white'
@@ -1371,8 +1393,20 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: {rgba_color}; border: 1px solid {outline};")
                 else:
                     self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: grey; border: 1px solid {outline};")
+                if final_conc is None:
+                    conc_text = "n/a"
+                else:
+                    try:
+                        units = self.model.stock_solutions.get_stock_by_id(stock_id).units
+                    except Exception:
+                        units = ""
+                    conc_text = f"{final_conc:.4f} {units}".strip()
+                self.well_labels[well.row_num][well.col-1].setToolTip(
+                    f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
+                )
             else:
                 self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: none; border: 1px solid black;")
+                self.well_labels[well.row_num][well.col-1].setToolTip(f"Well {well.well_id}\nNo reaction assigned")
 
 
     def clear_grid(self):
@@ -1384,28 +1418,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 widget.deleteLater()
 
     def on_plate_selection_changed(self):
-        """Handle plate selection changes."""
-        previous_plate_format = self.model.well_plate.get_current_plate_name()
-        plate_format = self.plate_selection.currentText()
-        if self.model.rack_model.gripper_printer_head is not None:
-            self.main_window.popup_message("Printer Head Loaded", "Please place the printer head back in the rack before changing out plates.")
-            self.plate_selection.blockSignals(True)  # Block signals temporarily
-            self.plate_selection.setCurrentIndex(self.plate_selection.findText(previous_plate_format))
-            self.plate_selection.blockSignals(False)  # Unblock signals
-            return
-        if not self.model.reaction_collection.is_empty():
-            response = self.main_window.popup_yes_no("Plate Selection", "Changing the plate format will clear the current experiment. Are you sure you want to continue?")
-            if self.main_window._is_no_response(response):
-                self.plate_selection.blockSignals(True)  # Block signals temporarily
-                self.plate_selection.setCurrentIndex(self.plate_selection.findText(previous_plate_format))
-                self.plate_selection.blockSignals(False)  # Unblock signals
-                return
-            else:
-                # self.model.clear_experiment()
-                # self.model.reload_experiment(plate_name=plate_format)
-                self.model.load_experiment_from_model(plate_name=plate_format)
-        else:
-            self.model.well_plate.set_plate_format(plate_format)
+        """Deprecated: plate format is configured in Experiment Design dialog."""
+        return
     
     def on_experiment_loaded(self):
         """Handle the experiment loaded signal."""
@@ -3967,6 +3981,22 @@ class ExperimentDesignDialog(QDialog):
         self.start_row_spin.setValue(int(self.model.metadata.get("start_row", 0)))
         form.addRow(QLabel("Start row (0-based)"), self.start_row_spin)
 
+        # Plate format (designer-owned source of truth)
+        self.plate_format_combo = QComboBox()
+        try:
+            plate_names = list(self.main_window.model.well_plate.get_all_plate_names())
+        except Exception:
+            plate_names = []
+        self.plate_format_combo.addItems(plate_names)
+        selected_plate = self.model.metadata.get("plate_name")
+        if not selected_plate and hasattr(self.main_window.model, "well_plate"):
+            selected_plate = self.main_window.model.well_plate.get_current_plate_name()
+        if selected_plate:
+            idx = self.plate_format_combo.findText(str(selected_plate))
+            if idx >= 0:
+                self.plate_format_combo.setCurrentIndex(idx)
+        form.addRow(QLabel("Plate format"), self.plate_format_combo)
+
         # Add the form to the left-hand column
         controls_col.addLayout(form)
 
@@ -4024,7 +4054,7 @@ class ExperimentDesignDialog(QDialog):
 
         # ---- Auto-update bindings ----
         def _auto_update():
-            self._on_optimize_and_generate()
+            self._schedule_auto_update()
         self.randomize_chk.stateChanged.connect(_auto_update)
         self.random_seed_spin.valueChanged.connect(_auto_update)
         self.subset_chk.stateChanged.connect(_auto_update)
@@ -4038,6 +4068,7 @@ class ExperimentDesignDialog(QDialog):
         self.final_v_spin.valueChanged.connect(self._schedule_auto_update)
         self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
         self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
+        self.plate_format_combo.currentIndexChanged.connect(self._schedule_auto_update)
 
         # ---- Model hooks & initial render ----
         self.model.stock_updated.connect(self._refresh_stock_table)
@@ -4213,6 +4244,7 @@ class ExperimentDesignDialog(QDialog):
             return
 
         self.model.generate_experiment()
+        self._validate_plate_capacity(show_dialog=False)
         self._refresh_stock_table()
         self._update_summary_labels()
         self._apply_target_color_state()
@@ -4481,6 +4513,8 @@ class ExperimentDesignDialog(QDialog):
             self.start_col_spin.setEnabled(not active)
         if hasattr(self, "start_row_spin") and self.start_row_spin is not None:
             self.start_row_spin.setEnabled(not active)
+        if hasattr(self, "plate_format_combo") and self.plate_format_combo is not None:
+            self.plate_format_combo.setEnabled(not active)
 
     def _is_gripper_loaded(self) -> bool:
         try:
@@ -4512,6 +4546,7 @@ class ExperimentDesignDialog(QDialog):
             "reduction_spin",
             "start_col_spin",
             "start_row_spin",
+            "plate_format_combo",
         ]
         for attr_name in mutating_controls:
             widget = getattr(self, attr_name, None)
@@ -4641,6 +4676,20 @@ class ExperimentDesignDialog(QDialog):
         # If randomize is checked and no seed yet, create a fresh one
         randomize = self.randomize_chk.isChecked()
         seed = int(self.random_seed_spin.value())
+        selected_plate_name = self.plate_format_combo.currentText().strip() or None
+        plate_rows = None
+        plate_columns = None
+
+        # Keep plate metadata coherent at save-time, before finish handoff mutates runtime state.
+        try:
+            wp = getattr(getattr(self.main_window, "model", None), "well_plate", None)
+            if wp is not None and selected_plate_name:
+                plate_data = wp.get_plate_data_by_name(selected_plate_name)
+                plate_rows = int(plate_data.get("rows"))
+                plate_columns = int(plate_data.get("columns"))
+        except Exception:
+            plate_rows = None
+            plate_columns = None
 
         self.model.set_metadata(
             name=self.exp_name_edit.text().strip() or "Untitled",
@@ -4655,6 +4704,9 @@ class ExperimentDesignDialog(QDialog):
             reduction_factor=int(self.reduction_spin.value()) if self.subset_chk.isChecked() else 1,
             start_col=int(self.start_col_spin.value()),
             start_row=int(self.start_row_spin.value()),
+            plate_name=selected_plate_name,
+            plate_rows=plate_rows,
+            plate_columns=plate_columns,
         )
         print(f"[ExperimentDesignDialog] metadata updated: {self.model.metadata}")
 
@@ -4666,7 +4718,7 @@ class ExperimentDesignDialog(QDialog):
         # Default to Additive (per your request)
         self._add_reagent_row(group=self.GROUP_ADDITIVE, droplet_nL=self.default_droplet_volume_nL)
 
-    def _on_optimize_and_generate(self):
+    def _on_optimize_and_generate(self, show_capacity_dialog: bool = False):
         # push UI -> model
         self._rebuild_model_from_table()
         self._update_metadata_from_controls()
@@ -4680,14 +4732,73 @@ class ExperimentDesignDialog(QDialog):
         )
         if not res.get("best"):
             QMessageBox.warning(self, "Optimization failed", res.get("reason", "Unknown error"))
-            return
+            return False
 
         # Generate reactions, totals, and fill usage
         self.model.generate_experiment()
+        if not self._validate_plate_capacity(show_dialog=show_capacity_dialog):
+            return False
         # UI updates come from signals; but we also force a local refresh
         self._refresh_stock_table()
         self._update_summary_labels()
         self._apply_target_color_state()
+        return True
+
+    def _available_wells_for_selected_plate(self) -> tuple[int, str]:
+        """
+        Compute assignable wells for the selected plate using the same gating inputs
+        as runtime assignment (plate dims, start row/col, exclusions).
+        """
+        selected_plate = self.plate_format_combo.currentText().strip()
+        wp = getattr(getattr(self.main_window, "model", None), "well_plate", None)
+        if wp is None:
+            return 0, selected_plate or "unknown"
+
+        plate_name = selected_plate or wp.get_current_plate_name()
+        plate = wp.get_plate_data_by_name(plate_name)
+        rows = int(plate.get("rows", 0))
+        cols = int(plate.get("columns", 0))
+        start_row = int(self.start_row_spin.value())
+        start_col = int(self.start_col_spin.value())
+
+        if start_row < 0 or start_col < 0:
+            return 0, plate_name
+        if start_row >= rows or start_col >= cols:
+            return 0, plate_name
+
+        region_capacity = (rows - start_row) * (cols - start_col)
+        excluded_count = 0
+        for item in set(getattr(wp, "excluded_wells", set()) or set()):
+            if isinstance(item, Well):
+                well_id = item.well_id
+            else:
+                well_id = str(item).strip().upper()
+            try:
+                row_label, col_1 = Well.parse_well_id(well_id)
+                row_idx = Well.row_label_to_index(row_label)
+                col_idx = int(col_1) - 1
+            except Exception:
+                continue
+            if 0 <= row_idx < rows and 0 <= col_idx < cols and row_idx >= start_row and col_idx >= start_col:
+                excluded_count += 1
+        return max(0, region_capacity - excluded_count), plate_name
+
+    def _validate_plate_capacity(self, show_dialog: bool = True) -> bool:
+        required = int(self.model.get_number_of_reactions() or 0)
+        available, plate_name = self._available_wells_for_selected_plate()
+        if required <= available:
+            return True
+
+        message = (
+            "Not enough available wells for this experiment design.\n\n"
+            f"Required reactions: {required}\n"
+            f"Available wells on '{plate_name}': {available}\n\n"
+            "Choose a larger plate, reduce the design size, adjust start row/column, "
+            "or include more wells."
+        )
+        if show_dialog:
+            QMessageBox.warning(self, "Insufficient Well Capacity", message)
+        return False
 
     def _apply_target_color_state(self):
         """
@@ -4753,6 +4864,7 @@ class ExperimentDesignDialog(QDialog):
     def _on_experiment_generated(self, total_reactions: int, worst_nonfill_nL: float):
         # Update summary when model emits
         self._update_summary_labels(total_reactions=total_reactions, worst_nonfill_nL=worst_nonfill_nL)
+        self._validate_plate_capacity(show_dialog=False)
 
     def _update_summary_labels(self, initial: bool = False, total_reactions: int | None = None, worst_nonfill_nL: float | None = None):
         if total_reactions is None:
@@ -4760,9 +4872,21 @@ class ExperimentDesignDialog(QDialog):
             total_reactions = len(df)
         if worst_nonfill_nL is None:
             worst_nonfill_nL = self.model.get_worst_nonfill_volume_nL() or 0.0
+        available_wells = None
+        try:
+            available_wells, _ = self._available_wells_for_selected_plate()
+        except Exception:
+            available_wells = None
 
+        required_html = str(total_reactions)
+        if available_wells is not None and int(total_reactions) > int(available_wells):
+            required_html = f"<span style='color:#8a0303; font-weight:600;'>{int(total_reactions)}</span>"
+
+        available_text = str(available_wells) if available_wells is not None else "n/a"
         self.summary_lbl.setText(
-            f"Summary: Total reactions = {total_reactions}  |  "
+            "Summary: "
+            f"Total reactions = {required_html}  |  "
+            f"Available wells = {available_text}  |  "
             f"Worst non-fill volume = {self._fmt_num(worst_nonfill_nL)} nL"
         )
     
@@ -4781,6 +4905,7 @@ class ExperimentDesignDialog(QDialog):
         blk(self.randomize_chk); blk(self.random_seed_spin)
         blk(self.subset_chk); blk(self.reduction_spin)
         blk(self.start_col_spin); blk(self.start_row_spin)
+        blk(getattr(self, "plate_format_combo", None))
 
         self.exp_name_edit.setText(md.get("name", "Untitled"))
         self.rep_spin.setValue(int(md.get("replicates", 1)))
@@ -4809,6 +4934,15 @@ class ExperimentDesignDialog(QDialog):
             self.start_col_spin.setValue(int(md.get("start_col", 0)))
         if hasattr(self, "start_row_spin"):
             self.start_row_spin.setValue(int(md.get("start_row", 0)))
+
+        if hasattr(self, "plate_format_combo"):
+            selected_plate = md.get("plate_name")
+            if not selected_plate and hasattr(self.main_window.model, "well_plate"):
+                selected_plate = self.main_window.model.well_plate.get_current_plate_name()
+            if selected_plate:
+                idx = self.plate_format_combo.findText(str(selected_plate))
+                if idx >= 0:
+                    self.plate_format_combo.setCurrentIndex(idx)
 
         self._recompute_silent()
         self._apply_manual_assignment_lock_state()
@@ -4973,7 +5107,8 @@ class ExperimentDesignDialog(QDialog):
             return
 
         # Reuse the same logic as Optimize & Generate
-        self._on_optimize_and_generate()
+        if not self._on_optimize_and_generate(show_capacity_dialog=True):
+            return
 
         # Ensure the folder exists and save the design itself
         self._ensure_experiment_dir()
