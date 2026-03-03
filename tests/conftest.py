@@ -21,8 +21,115 @@ def _ensure_optional_module(name: str) -> None:
         sys.modules[name] = types.ModuleType(name)
 
 
-for _mod in ("cv2", "joblib", "pandas"):
+for _mod in ("cv2", "joblib", "pandas", "numpy"):
     _ensure_optional_module(_mod)
+
+
+def _ensure_pyside6_stub() -> None:
+    if importlib.util.find_spec("PySide6") is not None or "PySide6" in sys.modules:
+        return
+
+    pyside6 = types.ModuleType("PySide6")
+    qtcore = types.ModuleType("PySide6.QtCore")
+    qtwidgets = types.ModuleType("PySide6.QtWidgets")
+
+    class _Signal:
+        def __init__(self, *args, **kwargs):
+            self._subs = []
+
+        def connect(self, fn):
+            self._subs.append(fn)
+
+        def disconnect(self, fn):
+            if fn in self._subs:
+                self._subs.remove(fn)
+
+        def emit(self, *args, **kwargs):
+            for fn in list(self._subs):
+                fn(*args, **kwargs)
+
+    class _QObject:
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+    class _QThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    class _QTimer:
+        def __init__(self, parent=None):
+            self._interval = 0
+            self.timeout = _Signal()
+
+        def setInterval(self, ms):
+            self._interval = ms
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class _QApplication:
+        _instance = None
+
+        def __init__(self, *args, **kwargs):
+            _QApplication._instance = self
+
+        @staticmethod
+        def instance():
+            return _QApplication._instance
+
+    qtcore.Signal = _Signal
+    qtcore.QObject = _QObject
+    qtcore.QThread = _QThread
+    qtcore.QTimer = _QTimer
+    qtcore.Slot = lambda *a, **k: (lambda fn: fn)
+    qtwidgets.QApplication = _QApplication
+
+    pyside6.QtCore = qtcore
+    pyside6.QtWidgets = qtwidgets
+
+    sys.modules["PySide6"] = pyside6
+    sys.modules["PySide6.QtCore"] = qtcore
+    sys.modules["PySide6.QtWidgets"] = qtwidgets
+
+
+_ensure_pyside6_stub()
+
+
+def _ensure_serial_stub() -> None:
+    if importlib.util.find_spec("serial") is not None or "serial" in sys.modules:
+        return
+
+    serial_mod = types.ModuleType("serial")
+    tools_mod = types.ModuleType("serial.tools")
+    list_ports_mod = types.ModuleType("serial.tools.list_ports")
+
+    class SerialException(Exception):
+        pass
+
+    list_ports_mod.comports = lambda: []
+    tools_mod.list_ports = list_ports_mod
+    serial_mod.tools = tools_mod
+    serial_mod.SerialException = SerialException
+
+    sys.modules["serial"] = serial_mod
+    sys.modules["serial.tools"] = tools_mod
+    sys.modules["serial.tools.list_ports"] = list_ports_mod
+
+
+_ensure_serial_stub()
+
+if "numpy" in sys.modules:
+    _np = sys.modules["numpy"]
+    if not hasattr(_np, "array"):
+        _np.array = lambda x, *a, **k: x
+    if not hasattr(_np, "zeros"):
+        _np.zeros = lambda n, *a, **k: [0 for _ in range(n if isinstance(n, int) else 0)]
 
 
 @pytest.fixture(scope="session")
