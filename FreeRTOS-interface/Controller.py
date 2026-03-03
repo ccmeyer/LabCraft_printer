@@ -1227,20 +1227,60 @@ class Controller(QObject):
         # self.capture_droplet_image(callback=callback)
         self.machine.capture_droplet_image()
 
+    def _emit_active_calibration_error(self, message: str):
+        """
+        Route runtime errors through the active calibration process when available.
+        This ensures CalibrationManager receives the error via its normal process wiring.
+        """
+        msg = str(message)
+        try:
+            active = getattr(self.model.calibration_manager, "activeCalibration", None)
+            if active is not None and hasattr(active, "calibrationError"):
+                active.calibrationError.emit(msg)
+                return
+        except Exception:
+            pass
+        try:
+            self.model.calibration_manager.calibrationError.emit(msg)
+        except Exception:
+            pass
+
     def handle_move_request(self, move_vector, callback):
         # Perform the move command then call the callback.
-        dX, dY, dZ = move_vector
-        self.set_relative_coordinates(dX, dY, dZ, manual=False,handler=callback)
-        print('Controller: Move request handled')
+        try:
+            dX, dY, dZ = move_vector
+            ok = self.set_relative_coordinates(dX, dY, dZ, manual=False, handler=callback)
+            if ok is False:
+                self._emit_active_calibration_error(
+                    f"Relative move rejected by safety guard: ({dX}, {dY}, {dZ})"
+                )
+                return
+            print('Controller: Move request handled')
+        except Exception as e:
+            self._emit_active_calibration_error(f"Relative move failed: {e}")
 
     def handle_absolute_move_request(self, target_position, callback):
         # Perform the move command then call the callback.
-        if type(target_position) == tuple or type(target_position) == list:
-            target = {'X': target_position[0], 'Y': target_position[1], 'Z': target_position[2]}
-        else:
-            target = target_position.copy()
-        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=False,handler=callback)
-        print('Controller: Move request handled')
+        try:
+            if type(target_position) == tuple or type(target_position) == list:
+                target = {'X': target_position[0], 'Y': target_position[1], 'Z': target_position[2]}
+            else:
+                target = target_position.copy()
+            ok = self.set_absolute_coordinates(
+                target['X'],
+                target['Y'],
+                target['Z'],
+                manual=False,
+                handler=callback
+            )
+            if ok is False:
+                self._emit_active_calibration_error(
+                    f"Absolute move rejected by safety guard: ({target['X']}, {target['Y']}, {target['Z']})"
+                )
+                return
+            print('Controller: Move request handled')
+        except Exception as e:
+            self._emit_active_calibration_error(f"Absolute move failed: {e}")
 
     # def handle_droplet_change_request(self, num_droplets,callback):
     #     self.set_imaging_droplets(num_droplets,callback=callback)

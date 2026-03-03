@@ -88,6 +88,8 @@ class CalibrationManager(QObject):
         "nozzle_focus": "nozzle_focus",
         "droplet_emergence": "droplet_emergence",
         "trajectory": "trajectory",
+        "trajectory_calibration": "trajectory",
+        "droplet_trajectory": "trajectory",
         "droplet_search": "droplet_search",
     }
 
@@ -651,7 +653,20 @@ class CalibrationManager(QObject):
             return []
         phase_key = self._resolve_phase_key(phase_name)
         steps = self.data["runs"][self._run_idx]["steps"]
-        return steps.get(phase_key, [])
+        canonical = steps.get(phase_key, [])
+        if canonical:
+            return canonical
+
+        # Backward compatibility: older runs may have stored the legacy alias
+        # key directly (e.g. "trajectory_calibration"). Fall back to those keys
+        # when the canonical list is empty or missing.
+        for alias_key, canonical_key in self.PHASE_ALIASES.items():
+            if canonical_key != phase_key or alias_key == phase_key:
+                continue
+            legacy_rows = steps.get(alias_key, [])
+            if legacy_rows:
+                return legacy_rows
+        return canonical
 
     def get_centered_nozzle_position(self):
         recs = self._latest_step_list("nozzle_position")
@@ -975,7 +990,7 @@ class CalibrationManager(QObject):
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
         missing = self._process_missing(proc_cls)
-        phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls(self, self.model), "phase_name", "unknown")
+        phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
 
         if missing:
             msg = f"{phase_name.replace('_',' ').title()} prerequisites missing: {', '.join(missing)}"
@@ -1278,6 +1293,96 @@ class BaseCalibrationProcess(QObject):
         finally:
             self._active_timers.discard(timer)
 
+    def _request_move_relative_with_timeout(
+        self,
+        move_vector,
+        *,
+        on_done=None,
+        timeout_ms: int = 15_000,
+        err_msg: str | None = None,
+    ):
+        """
+        Request a relative stage move and fail deterministically if move completion
+        callback is never observed.
+        """
+        done = {"fired": False}
+        t_ref = {"t": None}
+        fail_msg = err_msg or f"Move timeout after {int(timeout_ms)} ms (relative {move_vector})"
+
+        def _finish(ok: bool, why: str | None = None):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            if not ok:
+                self.calibrationError.emit(why or fail_msg)
+                return
+            if callable(on_done):
+                try:
+                    on_done()
+                except Exception as e:
+                    self.calibrationError.emit(f"Move completion handler failed: {e}")
+            else:
+                self.calibration_manager.emitMoveCompleted()
+
+        t_ref["t"] = self._start_timeout(
+            int(timeout_ms),
+            on_timeout=lambda: _finish(False, fail_msg),
+        )
+        try:
+            self.calibration_manager.moveRequested.emit(
+                move_vector,
+                lambda *args, **kwargs: _finish(True, "callback"),
+            )
+        except Exception as e:
+            _finish(False, f"Move request failed: {e}")
+
+    def _request_move_absolute_with_timeout(
+        self,
+        target_position,
+        *,
+        on_done=None,
+        timeout_ms: int = 15_000,
+        err_msg: str | None = None,
+    ):
+        """
+        Request an absolute stage move and fail deterministically if move completion
+        callback is never observed.
+        """
+        done = {"fired": False}
+        t_ref = {"t": None}
+        fail_msg = err_msg or f"Move timeout after {int(timeout_ms)} ms (absolute {target_position})"
+
+        def _finish(ok: bool, why: str | None = None):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            if not ok:
+                self.calibrationError.emit(why or fail_msg)
+                return
+            if callable(on_done):
+                try:
+                    on_done()
+                except Exception as e:
+                    self.calibrationError.emit(f"Move completion handler failed: {e}")
+            else:
+                self.calibration_manager.emitMoveCompleted()
+
+        t_ref["t"] = self._start_timeout(
+            int(timeout_ms),
+            on_timeout=lambda: _finish(False, fail_msg),
+        )
+        try:
+            self.calibration_manager.moveAbsoluteRequested.emit(
+                target_position,
+                lambda *args, **kwargs: _finish(True, "callback"),
+            )
+        except Exception as e:
+            _finish(False, f"Move request failed: {e}")
+
 class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
     """
     Purpose: give a newly loaded printer head a forceful first ejection so it begins behaving normally.
@@ -1487,6 +1592,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
         # movement clamp (motor steps). Adjust to your mechanics.
         self.max_xy_steps_per_correction = 1000
+        self.move_timeout_ms = 15_000
+        self._default_axis_spans = {"X": 20_000, "Y": 10_000, "Z": 20_000}
 
         # top-center target: x center, y near top
         self.top_margin_frac = 0.12           # ~12% down from top
@@ -1595,9 +1702,17 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Nozzle Pos - Moving to initial position")
         # Get the location of the camera in the location model
         initial_position = self.model.location_model.get_location_dict('camera')
-        move_vector = (initial_position['X'], initial_position['Y'], initial_position['Z'])
+        move_vector = self._clamp_abs_target(
+            initial_position['X'],
+            initial_position['Y'],
+            initial_position['Z'],
+        )
         print(f"Moving to initial position: {move_vector}")
-        self.calibration_manager.moveAbsoluteRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        self._request_move_absolute_with_timeout(
+            move_vector,
+            timeout_ms=self.move_timeout_ms,
+            err_msg="Nozzle Pos - Initial move timed out."
+        )
 
 
     @Slot()
@@ -1825,14 +1940,39 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self.nozzleCentered.emit()
             return
 
-        # compute move vector from pixel→motor; clamp to avoid huge jumps
+        if self._recenter_iters >= self.max_recenter_iterations:
+            self.calibrationError.emit("Too many recenter attempts-aborting to avoid oscillation.")
+            return
+
+        # compute move vector from pixel-to-motor; clamp per-step + absolute target
         move_vector = self.model.droplet_camera_model.calculate_move_to_target(nozzle_px, target)
         move_vector = self._clamp_move(move_vector)
-        self.stageChanged.emit(f"Nozzle offset detected; moving by {move_vector}")
-        self.calibration_manager.moveRequested.emit(move_vector, self.calibration_manager.emitMoveCompleted)
+        cur = self.model.machine_model.get_current_position_dict()
+        tgt = self._clamp_abs_target(
+            int(cur['X']) + int(move_vector[0]),
+            int(cur['Y']) + int(move_vector[1]),
+            int(cur['Z']) + int(move_vector[2]),
+        )
+        clamped_move = (
+            int(tgt[0] - int(cur['X'])),
+            int(tgt[1] - int(cur['Y'])),
+            int(tgt[2] - int(cur['Z'])),
+        )
+        if clamped_move != tuple(map(int, move_vector)):
+            self.stageChanged.emit(
+                f"Nozzle offset move clamped: requested {move_vector}, applied {clamped_move}"
+            )
+        if clamped_move == (0, 0, 0):
+            self.calibrationError.emit("Nozzle Pos - Recenter move collapsed to zero at bounds.")
+            return
+
+        self.stageChanged.emit(f"Nozzle offset detected; moving by {clamped_move}")
         self._recenter_iters += 1
-        if self._recenter_iters > self.max_recenter_iterations:
-            self.calibrationError.emit("Too many recenter attempts—aborting to avoid oscillation.")
+        self._request_move_absolute_with_timeout(
+            tgt,
+            timeout_ms=self.move_timeout_ms,
+            err_msg="Nozzle Pos - Recenter move timed out."
+        )
 
     def _is_top_centered(self, pt, img_size, target):
         x, y = pt
@@ -1853,7 +1993,34 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         cap = float(self.max_xy_steps_per_correction)
         dx = max(-cap, min(cap, float(dx)))
         dy = max(-cap, min(cap, float(dy)))
-        return (dx, dy, dz)
+        return (int(round(dx)), int(round(dy)), int(round(dz)))
+
+    def _axis_bounds(self, axis: str):
+        axis = str(axis).upper()
+        try:
+            lo, hi = self.model.machine_model.get_axis_bounds(axis)
+            return int(lo), int(hi)
+        except Exception:
+            pass
+        try:
+            bounds = self.model.location_model.get_boundaries()
+            if isinstance(bounds, dict) and "min" in bounds and "max" in bounds:
+                return int(bounds["min"][axis]), int(bounds["max"][axis])
+        except Exception:
+            pass
+        cur = self.model.machine_model.get_current_position_dict()
+        base = int(cur.get(axis, 0))
+        span = int(self._default_axis_spans.get(axis, 10_000))
+        return base - span, base + span
+
+    def _clamp_abs_target(self, X: int, Y: int, Z: int):
+        x_lo, x_hi = self._axis_bounds("X")
+        y_lo, y_hi = self._axis_bounds("Y")
+        z_lo, z_hi = self._axis_bounds("Z")
+        Xc = max(x_lo, min(x_hi, int(X)))
+        Yc = max(y_lo, min(y_hi, int(Y)))
+        Zc = max(z_lo, min(z_hi, int(Z)))
+        return (Xc, Yc, Zc)
 
     # ----------------- Helpers: scan plan & bounds -----------------
 
@@ -2259,7 +2426,12 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         dY = self.best_pos["Y"] - cur["Y"]
         if dY == 0:
             self.nozzleFocused.emit(); return
-        self.calibration_manager.moveRequested.emit((0, dY, 0), self.nozzleFocused.emit)
+        self._request_move_relative_with_timeout(
+            (0, dY, 0),
+            on_done=self.nozzleFocused.emit,
+            timeout_ms=15_000,
+            err_msg="Nozzle focus move-to-best timed out."
+        )
 
     def _move_to_Y_clamped(self, target_y: int):
         cur = self.model.machine_model.get_current_position_dict()
@@ -2277,7 +2449,11 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 alt = int(max(self._loY, min(self._hiY, alt)))
                 if alt != cur["Y"] and (len(self._targets) < 2 or alt != self._targets[-2]):
                     self._targets.append(alt)
-                    self.calibration_manager.moveRequested.emit((0, alt - cur["Y"], 0), self.calibration_manager.emitMoveCompleted)
+                    self._request_move_relative_with_timeout(
+                        (0, alt - cur["Y"], 0),
+                        timeout_ms=15_000,
+                        err_msg="Nozzle focus nudge move timed out."
+                    )
                     return
                 # nothing else to try → snap to best
                 self._move_to_best_then_finish()
@@ -2286,7 +2462,11 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self.calibration_manager.captureImageRequested.emit(self.handleDropletCaptured)
             return
 
-        self.calibration_manager.moveRequested.emit((0, dY, 0), self.calibration_manager.emitMoveCompleted)
+        self._request_move_relative_with_timeout(
+            (0, dY, 0),
+            timeout_ms=15_000,
+            err_msg="Nozzle focus step move timed out."
+        )
 
     # ---- oscillation avoidance helpers ----
     def _avoid_revisit(self, candidate: int, current_y: int, a: int, b: int) -> int:
@@ -2348,7 +2528,6 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
                 key=lambda ca: (-contour_bottom_y(ca[0]), -ca[1])
             )
             chosen, chosen_area = keep_sorted[0]
-            chosen, _ = keep[0]
             x, y, w, h = cv2.boundingRect(chosen)
             pad_x = max(6, int(round(0.25 * w)))
             pad_y = max(6, int(round(0.25 * h)))
@@ -2929,7 +3108,11 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Nozzle center not found")
             return
         print(f"Requesting move to initial position: {nozzle_vector}")
-        self.calibration_manager.moveAbsoluteRequested.emit(nozzle_vector, self.calibration_manager.emitMoveCompleted)
+        self._request_move_absolute_with_timeout(
+            nozzle_vector,
+            timeout_ms=15_000,
+            err_msg="Pressure calibration initial move timed out."
+        )
 
     @Slot()
     def onPrepareBackground(self):
@@ -3465,8 +3648,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.safety_clearance_px       = int(safety_clearance_px)
         self.near_nozzle_px            = int(self.safety_clearance_px * 1.6)
         self.far_nozzle_px             = int(self.safety_clearance_px * 3.0)
-        # self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
-        self.auto_stop_on_nozzle_wet   = False
+        self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
 
         # --- replicate policy ---
         self.min_reps           = int(min_reps)
@@ -4227,7 +4409,7 @@ class TrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
-        self.phase_name = "trajectory_calibration"
+        self.phase_name = "trajectory"
 
         # ---- prerequisites from earlier calibrations ----
         self._ready = True
@@ -5433,6 +5615,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_positions, self.droplet_focus = [], []
         self.circularity_values, self.droplet_volumes = [], []
         self.measurements = []
+        self.early_stop_min_reps = 12
+        self.early_stop_window = 6
+        self.early_stop_mean_drift_pct = 1.5
+        self.early_stop_cv_drift_pct = 1.0
 
         # --- lifecycle/guards ---
         self._aborted = False
@@ -5490,6 +5676,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
         self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
         self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+        self._x_track_offset_steps = 0
+        self._z_track_offset_steps = 0
+        self._xz_offset_ema_alpha = 0.35
 
         # Target position (only used if we actually move there)
         self.predicted_target = self._predict_stage_target(self.target_delay_us)
@@ -5746,8 +5935,11 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if (X == int(cur['X'])) and (Y == int(cur['Y'])) and (Z == int(cur['Z'])):
             self.calibration_manager.emitMoveCompleted()
             return
-        self.calibration_manager.moveAbsoluteRequested.emit((X, Y, Z),
-                                                            self.calibration_manager.emitMoveCompleted)
+        self._request_move_absolute_with_timeout(
+            (X, Y, Z),
+            timeout_ms=15_000,
+            err_msg="Droplet search move timed out."
+        )
 
     def _safe_move_relative(self, dXYZ_tuple):
         if self._is_dead():
@@ -5886,6 +6078,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
             self.droplet_image, self.background_image
         )
+        center_px = None
+        if contour is not None:
+            x, y, w, h = cv2.boundingRect(contour)
+            center_px = (int(x + w // 2), int(y + h // 2))
 
         if frame_idx is not None and overlay is not None:
             self._save_overlay(
@@ -5900,7 +6096,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 "frame_index": int(frame_idx),
                 "flash_delay_us": int(self.current_delay_us),
                 "found": bool(contour is not None),
-                "center_px": None if contour is None else tuple(map(int, (x + w//2, y + h//2))),
+                "center_px": center_px,
                 "timestamp": datetime.now().isoformat(),
             })
 
@@ -5910,8 +6106,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitContinueSearch()
             return
 
-        x, y, w, h = cv2.boundingRect(contour)
-        cxy = (x + w//2, y + h//2)
+        cxy = center_px
         self.presentImageSignal.emit(overlay)
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
@@ -6051,6 +6246,13 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
 
+        if self._should_early_stop_characterization():
+            self.stageChanged.emit(
+                f"Characterization converged early at {self.image_counter} replicates."
+            )
+            self.emitInitiateAnalyzeCharacterization()
+            return
+
         if self.image_counter < self.num_images:
             self.emitContinueCharacterization()
         else:
@@ -6148,6 +6350,27 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.calibrationCompleted.emit()
 
     # helpers
+    def _should_early_stop_characterization(self) -> bool:
+        vals = [float(v) for v in self.droplet_volumes if v is not None]
+        min_needed = int(self.early_stop_min_reps)
+        w = int(self.early_stop_window)
+        if len(vals) < min_needed or len(vals) < (2 * w):
+            return False
+        prev = np.array(vals[-2*w:-w], dtype=float)
+        last = np.array(vals[-w:], dtype=float)
+        if prev.size == 0 or last.size == 0:
+            return False
+        prev_mean = float(np.mean(prev))
+        last_mean = float(np.mean(last))
+        mean_drift_pct = abs(last_mean - prev_mean) / max(abs(prev_mean), 1e-9) * 100.0
+        prev_cv = float(np.std(prev) / max(abs(prev_mean), 1e-9) * 100.0)
+        last_cv = float(np.std(last) / max(abs(last_mean), 1e-9) * 100.0)
+        cv_drift = abs(last_cv - prev_cv)
+        return (
+            mean_drift_pct <= float(self.early_stop_mean_drift_pct)
+            and cv_drift <= float(self.early_stop_cv_drift_pct)
+        )
+
     def _annotate_final(self, mean_center, mean_vol, cv_vol):
         img = self.droplet_image.copy()
         for p in self.droplet_positions:
@@ -6165,7 +6388,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         try:
             # prefer the searched-and-found delay for accuracy
             used_delay = int(self.current_delay_us) if self.current_delay_us is not None else int(self.target_delay_us)
-            predX, predY, predZ = self._predict_target_xyz(self.vec_steps_per_s, used_delay)
+            predX, predY, predZ = self._predict_stage_target(used_delay)
             cur = self.model.machine_model.get_current_position_dict()
             ex = int(cur['X']) - int(predX)
             ez = int(cur['Z']) - int(predZ)
@@ -6307,6 +6530,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.edge_guard_px     = int(edge_guard_px)
         self.repl_target       = int(replicates_per_pressure)
         self.focus_ok_threshold = float(focus_ok_threshold)
+        self.early_stop_min_reps = 12
+        self.early_stop_window = 6
+        self.early_stop_mean_drift_pct = 1.5
+        self.early_stop_cv_drift_pct = 1.0
 
         self.max_search_cycles   = int(max_search_cycles)
         self.max_recenter_moves  = int(max_recenter_moves)
@@ -6464,7 +6691,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if (int(cur['X']) == X) and (int(cur['Y']) == Y) and (int(cur['Z']) == Z):
             self.moveDone.emit()
             return
-        self.calibration_manager.moveAbsoluteRequested.emit((X, Y, Z), self.moveDone.emit)
+        self._request_move_absolute_with_timeout(
+            (X, Y, Z),
+            on_done=self.moveDone.emit,
+            timeout_ms=15_000,
+            err_msg="Pressure sweep move timed out."
+        )
 
     def _make_pressure_set_by_count(self, p_lo: float, p_hi: float, n: int, min_sep: float=0.005) -> list[float]:
         lo, hi = (float(min(p_lo, p_hi)), float(max(p_lo, p_hi)))
@@ -6928,6 +7160,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             # After the move completes, state_char → (moveDone) → state_capture → fresh frame.
             return
 
+        if self._should_early_stop_batch():
+            self.stageChanged.emit(
+                f"Pressure {self.cur_pressure:.3f} characterization converged early at {self.image_counter} replicates."
+            )
+            self.analyzeBatch.emit()
+            return
+
         if self.image_counter < self.num_images:
             self.continueCap.emit()
         else:
@@ -6976,6 +7215,27 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.i += 1
         self._reset_char_buffers()
         self.nextPressure.emit()
+
+    def _should_early_stop_batch(self) -> bool:
+        vals = [float(v) for v in self.droplet_volumes if v is not None]
+        min_needed = int(self.early_stop_min_reps)
+        w = int(self.early_stop_window)
+        if len(vals) < min_needed or len(vals) < (2 * w):
+            return False
+        prev = np.array(vals[-2*w:-w], dtype=float)
+        last = np.array(vals[-w:], dtype=float)
+        if prev.size == 0 or last.size == 0:
+            return False
+        prev_mean = float(np.mean(prev))
+        last_mean = float(np.mean(last))
+        mean_drift_pct = abs(last_mean - prev_mean) / max(abs(prev_mean), 1e-9) * 100.0
+        prev_cv = float(np.std(prev) / max(abs(prev_mean), 1e-9) * 100.0)
+        last_cv = float(np.std(last) / max(abs(last_mean), 1e-9) * 100.0)
+        cv_drift = abs(last_cv - prev_cv)
+        return (
+            mean_drift_pct <= float(self.early_stop_mean_drift_pct)
+            and cv_drift <= float(self.early_stop_cv_drift_pct)
+        )
 
     def _record_pressure_result(self, valid: bool, reason: str | None = None):
         rec = {
@@ -7307,7 +7567,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         root = self.model.droplet_camera_model.get_save_root_directory()
         if not root:
             try:
-                cal_path = self.manager.calibration_file_path
+                cal_path = self.calibration_manager.calibration_file_path
                 if not cal_path:
                     cal_path = self.model.experiment_model.get_calibration_file_path()
                 base_dir = os.path.dirname(os.path.abspath(cal_path))
@@ -7491,6 +7751,7 @@ class DropletCameraModel(QObject):
 
         self._k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         self._roi_cache = None  # (h, w, nzy, margin_up, band_half, roi_top, mask)
+        self._last_droplet_center_px = None
 
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.image_dir = os.path.join(self.script_dir, 'Images')
@@ -7799,9 +8060,6 @@ class DropletCameraModel(QObject):
             root = os.path.join(self.image_dir, directory)
 
         self._save_root_dir = os.path.abspath(root)
-
-    def get_save_root_directory(self) -> str | None:
-        return self._save_root_dir
 
     def get_save_root_directory(self) -> str | None:
         return self._save_root_dir
@@ -8208,56 +8466,47 @@ class DropletCameraModel(QObject):
         image_gray, diff = self.calc_diff_image(image, background)
         if diff is None:
             return None, None, image
-        
-        # Apply a threshold to the difference image
-        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
 
-        # Find contours
+        blur = cv2.GaussianBlur(diff, (5, 5), 0)
+        mu, sd = float(np.mean(blur)), float(np.std(blur))
+        t_hard = max(20, int(mu + 2.5 * sd))
+        _, thresh = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+        if cv2.countNonZero(thresh) < 80:
+            _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, self._k3, iterations=1)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, self._k3, iterations=1)
+
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Check if there are any contours
-        if len(contours) == 0:
+        if not contours:
             print('No contours detected')
-            # Add text in the middle of the screen saying no contours detected
             cv2.putText(image, 'No contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
             return None, None, image
 
-        # Determine if there are mutliple large contours
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000]
-        if len(large_contours) > 1:
-            print('Multiple large contours detected')
-            cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
-            # Add text in the middle of the screen saying multiple large contours detected
-            cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            return None, None, image
+        large_contours = [c for c in contours if cv2.contourArea(c) > 800]
+        if not large_contours:
+            large_contours = contours
 
-        # Find the largest contour and identify the center
-        largest_contour = max(contours, key=cv2.contourArea)
+        # Keep deterministic selection in multi-contour scenes: prefer lower contour then larger area.
+        def _rank(c):
+            x, y, w, h = cv2.boundingRect(c)
+            return (-(y + h), -cv2.contourArea(c))
 
-        # Detect if the contour is in contact with the edge of the image
-
-        x, y, w, h = cv2.boundingRect(largest_contour)
+        chosen = sorted(large_contours, key=_rank)[0]
+        x, y, w, h = cv2.boundingRect(chosen)
         center = (x + w//2, y + h//2)
-        if x == 0 or y == 0 or x+w == image.shape[1] or y+h == image.shape[0]:
-            print('Contour is in contact with the edge of the image')
-
         focus = self.compute_tenengrad_variance(image_gray)
 
-        # Draw the contour
-        cv2.drawContours(image, [largest_contour], -1, (0, 255, 0), 2)
+        annotated = image.copy()
+        cv2.drawContours(annotated, [chosen], -1, (0, 255, 0), 2)
+        cv2.rectangle(annotated, (x, y), (x+w, y+h), (255, 0, 0), 2)
+        cv2.circle(annotated, center, 10, (0, 0, 255), -1)
+        cv2.putText(annotated, f'Center: {center}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(annotated, f'Focus: {focus:.2f}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        if len(large_contours) > 1:
+            cv2.putText(annotated, f'Candidates: {len(large_contours)}', (10, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
-        # Draw the bounding box
-        cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
-
-        # Draw the center
-        cv2.circle(image, center, 10, (0, 0, 255), -1)
-
-        # Add the center coordinates and focus value to the bottom right of the nozzle
-        cv2.putText(image, f'Center: {center}', (x+w, y+h), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.putText(image, f'Focus: {focus:.2f}', (x+w, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        return center, focus, image
+        return center, focus, annotated
     
     def calc_bounding_rect_area(self, background, image):
         """
@@ -8503,42 +8752,88 @@ class DropletCameraModel(QObject):
             print('Difference image is None')
             return None, None
 
-        # Apply a threshold to the difference image
-        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+        def _threshold_region(region):
+            blur = cv2.GaussianBlur(region, (5, 5), 0)
+            mu, sd = float(np.mean(blur)), float(np.std(blur))
+            t_hard = max(20, int(mu + 2.5 * sd))
+            _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+            if cv2.countNonZero(th) < 80:
+                _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            th = cv2.morphologyEx(th, cv2.MORPH_OPEN, self._k3, iterations=1)
+            th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, self._k3, iterations=1)
+            return th
 
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Check if there are any contours
-        if len(contours) == 0:
-            print('No contours detected')
-            return None, image
-        
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 100000]
-        
-        # Remove contours that have a very high width to height ratio
-        
-        large_contours = [contour for contour in large_contours if cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3] < 3]
-
-
-        if len(large_contours) == 0:
-            print('No large contours detected')
-            # Draw all contours and write their areas on the image
-            annotated_image = image.copy()
-            cv2.drawContours(annotated_image, contours, -1, (0, 255, 0), 2)
-            for i, contour in enumerate(contours):
+        def _filter(contours):
+            out = []
+            for contour in contours:
                 area = cv2.contourArea(contour)
+                if area < 800 or area > 120000:
+                    continue
                 x, y, w, h = cv2.boundingRect(contour)
-                cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            return None, annotated_image
+                if h <= 0:
+                    continue
+                if (w / float(h)) >= 3.2:
+                    continue
+                out.append(contour)
+            return out
 
-        # Find the largest contour
-        # largest_contour = max(large_contours, key=cv2.contourArea)
-        largest_contour = max(large_contours, key=cv2.contourArea)
+        # Fast path: ROI around last center, fallback to full frame if no valid contour.
+        roi_used = False
+        x0 = y0 = 0
+        x1, y1 = diff.shape[1], diff.shape[0]
+        last = self._last_droplet_center_px
+        if last is not None:
+            cx, cy = int(last[0]), int(last[1])
+            half = 240
+            x0 = max(0, cx - half)
+            y0 = max(0, cy - half)
+            x1 = min(diff.shape[1], cx + half)
+            y1 = min(diff.shape[0], cy + half)
+            if (x1 - x0) >= 80 and (y1 - y0) >= 80:
+                roi = diff[y0:y1, x0:x1]
+                th_roi = _threshold_region(roi)
+                contours_roi, _ = cv2.findContours(th_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                filtered_roi = _filter(contours_roi)
+                if filtered_roi:
+                    roi_used = True
+                    # map ROI contour -> full image coords
+                    filtered = [c + np.array([[[x0, y0]]], dtype=c.dtype) for c in filtered_roi]
+                else:
+                    filtered = []
+            else:
+                filtered = []
+        else:
+            filtered = []
 
-        # Draw the contour
+        if not filtered:
+            th = _threshold_region(diff)
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(contours) == 0:
+                print('No contours detected')
+                return None, image
+            filtered = _filter(contours)
+            if len(filtered) == 0:
+                print('No large contours detected')
+                annotated_image = image.copy()
+                cv2.drawContours(annotated_image, contours, -1, (0, 255, 0), 2)
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    x, y, w, h = cv2.boundingRect(contour)
+                    cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                return None, annotated_image
+
+        # Deterministic contour selection in ambiguous scenes.
+        largest_contour = sorted(
+            filtered,
+            key=lambda c: (-cv2.contourArea(c), -cv2.boundingRect(c)[1])
+        )[0]
+
         annotated_image = image.copy()
         cv2.drawContours(annotated_image, [largest_contour], -1, (0, 255, 0), 2)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        self._last_droplet_center_px = (int(x + w // 2), int(y + h // 2))
+        if roi_used:
+            cv2.rectangle(annotated_image, (x0, y0), (x1, y1), (128, 128, 255), 1)
 
         return largest_contour, annotated_image
 
@@ -8557,8 +8852,14 @@ class DropletCameraModel(QObject):
             print('Difference image is None')
             return None, None
 
-        # Apply a threshold to the difference image
-        _, thresh = cv2.threshold(diff, 60, 255, cv2.THRESH_BINARY)
+        blur = cv2.GaussianBlur(diff, (5, 5), 0)
+        mu, sd = float(np.mean(blur)), float(np.std(blur))
+        t_hard = max(20, int(mu + 2.5 * sd))
+        _, thresh = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+        if cv2.countNonZero(thresh) < 80:
+            _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, self._k3, iterations=1)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, self._k3, iterations=1)
 
         # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -8573,13 +8874,6 @@ class DropletCameraModel(QObject):
         large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 100000]
         large_contours = [contour for contour in large_contours if cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3] < 3]
 
-        if len(large_contours) > 1:
-            print('Multiple large contours detected')
-            cv2.drawContours(image, large_contours, -1, (0, 255, 0), 2)
-            # Add text in the middle of the screen saying multiple large contours detected
-            cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            return "Multiple", image
-        
         if len(large_contours) == 0:
             print('No large contours detected')
             # Draw all contours and write their areas on the image
@@ -8591,8 +8885,18 @@ class DropletCameraModel(QObject):
                 cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             return None, annotated_image
 
-        # Find the largest contour
-        largest_contour = max(large_contours, key=cv2.contourArea)
+        # Deterministic ranking for multi-candidate frames.
+        ranked = sorted(large_contours, key=lambda c: (-cv2.contourArea(c), -cv2.boundingRect(c)[1]))
+        if len(ranked) > 1:
+            a0 = cv2.contourArea(ranked[0]) + 1e-9
+            a1 = cv2.contourArea(ranked[1])
+            if (a1 / a0) >= 0.65:
+                print('Multiple large contours detected')
+                cv2.drawContours(image, ranked[:2], -1, (0, 255, 0), 2)
+                cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                return "Multiple", image
+
+        largest_contour = ranked[0]
 
         # Compute the circularity of the droplet
         area = cv2.contourArea(largest_contour)
@@ -8633,6 +8937,7 @@ class DropletCameraModel(QObject):
             "volume": ellipse_volume_nL,
             "focus": focus
         }
+        self._last_droplet_center_px = center_ellipse
 
         return results, annotated
     
@@ -9014,3 +9319,4 @@ class RefuelCameraModel(QObject):
     def get_current_level(self):
         return self.current_level
         
+

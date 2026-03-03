@@ -1209,46 +1209,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_table.resizeColumnsToContents()
         self.bridge_table.resizeRowsToContents()
 
-    def _apply_previewed_droplet_volume(self):
-        try:
-            dv = float(getattr(self, "_dv_preview_value_nL", None) or 0.0)
-            key = getattr(self, "_dv_preview_key", None)
-            if not key or dv <= 0.0:
-                QtWidgets.QMessageBox.warning(self, "Nothing to apply",
-                    "No previewed droplet volume has been computed yet.")
-                return
-
-            factor_name, option_name = key  # option_name may be None for additives
-
-            # Apply and force key/CSV refresh if wells are already assigned
-            summary = self.model.experiment_model.apply_droplet_volume_for_option(
-                factor_name, option_name, dv, write_keys_if_assigned=True
-            )
-
-            # Update any UI that mirrors stock table or concentration key preview
-            if hasattr(self.main_window, "refresh_stock_table"):
-                try:
-                    self.main_window.refresh_stock_table()
-                except Exception:
-                    pass
-
-            QtWidgets.QMessageBox.information(
-                self,
-                "Droplet Volume Applied",
-                (
-                    f"Applied {dv:.3f} nL to {factor_name}"
-                    + (f"/{option_name}" if option_name else "")
-                    + f"\nΔ per drop = {summary['delta_per_drop']:.6f} {summary['units']}\n"
-                    "Droplet counts & fill were recomputed. "
-                    "If wells were assigned, keys were rewritten."
-                ),
-            )
-        except NotImplementedError as nie:
-            QtWidgets.QMessageBox.critical(self, "Unsupported",
-                f"{nie}\n\n(For Step 2 we only support single-stock reagents.)")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Apply failed", str(e))
-
     def _bridge_clear_preview(self):
         self._bridge_preview_payload = None
         self.bridge_apply_btn.setEnabled(False)
@@ -2022,4 +1982,5 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.stop_camera()
         # self.controller.exit_print_mode()
         super().closeEvent(event)
+
 
