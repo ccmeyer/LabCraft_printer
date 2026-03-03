@@ -56,8 +56,14 @@ public:
     uint32_t           refuelPulseUs
   );
 
-  /// Enqueue a dispense operation (non-blocking)
+  /// Enqueue a dispense operation (blocking until queued)
   void enqueue(uint16_t count, uint16_t rateHz, PulseMode mode);
+
+  /// Enqueue with explicit timeout (used by self-test to avoid deadlock).
+  bool enqueueWithTimeout(uint16_t count, uint16_t rateHz, PulseMode mode, TickType_t timeoutTicks);
+
+  /// Diagnostic-only guard to bound pressure-ready waits inside taskLoop().
+  void setDiagnosticReadyTimeout(bool enabled, uint32_t timeoutMs);
 
   /// Pause the dispensing task (won't start any new pulses)
   void pauseDispense();
@@ -125,6 +131,8 @@ private:
   volatile uint32_t _totalDispensed = 0;
   volatile int32_t _remaining = 0;
   volatile bool     _cancelRequested = false;
+  bool _diagReadyTimeoutEnabled = false;
+  TickType_t _diagReadyTimeoutTicks = 0;
 
   bool  _flashOnLast     = false;
 

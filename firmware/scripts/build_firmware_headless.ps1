@@ -22,7 +22,12 @@ if (-not $bin) { throw "No .bin produced under $ProjectDir" }
 $artifactDir = Join-Path (Split-Path $ProjectDir -Parent) "firmware/artifacts"
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
-Copy-Item $bin.FullName (Join-Path $artifactDir "$ProjName.bin") -Force
-Write-Host "Copied: $($bin.FullName) -> $artifactDir\$ProjName.bin"
+$artifactPath = Join-Path $artifactDir "$ProjName.bin"
+if (([System.IO.Path]::GetFullPath($bin.FullName)) -ne ([System.IO.Path]::GetFullPath($artifactPath))) {
+    Copy-Item $bin.FullName $artifactPath -Force
+    Write-Host "Copied: $($bin.FullName) -> $artifactPath"
+} else {
+    Write-Host "Artifact already up to date at $artifactPath"
+}
 
 exit $exit

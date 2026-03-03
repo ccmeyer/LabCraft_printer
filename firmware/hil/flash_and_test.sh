@@ -38,6 +38,9 @@ WAIT_PORT_S=20
 BAUD=115200
 HELLO_TIMEOUT_MS=""
 SELFTEST_TIMEOUT_MS=""
+PROGRESS_TIMEOUT_MS=""
+ACTIVITY_TIMEOUT_MS=""
+STATUS_ONLY_TIMEOUT_MS=""
 HELLO_RETRY_MS=250
 SKIP_SELFTEST_AFTER_MISSING_HELLO=0
 
@@ -187,6 +190,15 @@ run_selftest() {
     if [[ -n "$SELFTEST_TIMEOUT_MS" ]]; then
       cmd+=(--timeout-ms "$SELFTEST_TIMEOUT_MS")
     fi
+    if [[ -n "$PROGRESS_TIMEOUT_MS" ]]; then
+      cmd+=(--progress-timeout-ms "$PROGRESS_TIMEOUT_MS")
+    fi
+    if [[ -n "$ACTIVITY_TIMEOUT_MS" ]]; then
+      cmd+=(--activity-timeout-ms "$ACTIVITY_TIMEOUT_MS")
+    fi
+    if [[ -n "$STATUS_ONLY_TIMEOUT_MS" ]]; then
+      cmd+=(--status-only-timeout-ms "$STATUS_ONLY_TIMEOUT_MS")
+    fi
     if [[ -n "$HELLO_TIMEOUT_MS" ]]; then
       cmd+=(--hello-timeout-ms "$HELLO_TIMEOUT_MS")
     fi
@@ -221,6 +233,9 @@ Options:
   --baud BAUD           Baud rate for self-test runner (default: 115200)
   --hello-timeout-ms N  HELLO_ACK timeout for tools/run_selftest.py
   --selftest-timeout-ms N  Overall self-test timeout for tools/run_selftest.py
+  --progress-timeout-ms N  Progress watchdog timeout for tools/run_selftest.py
+  --activity-timeout-ms N  Serial-activity watchdog timeout for tools/run_selftest.py
+  --status-only-timeout-ms N  Fail fast if only CMD_STATUS traffic remains after selftest frames
   --hello-retry-ms N    HELLO retry interval for tools/run_selftest.py
   --skip-selftest-after-missing-hello  Fail immediately when HELLO_ACK never arrives
   -h, --help            Show help
@@ -247,6 +262,9 @@ while [[ $# -gt 0 ]]; do
     --baud) BAUD="$2"; shift 2 ;;
     --hello-timeout-ms) HELLO_TIMEOUT_MS="$2"; shift 2 ;;
     --selftest-timeout-ms) SELFTEST_TIMEOUT_MS="$2"; shift 2 ;;
+    --progress-timeout-ms) PROGRESS_TIMEOUT_MS="$2"; shift 2 ;;
+    --activity-timeout-ms) ACTIVITY_TIMEOUT_MS="$2"; shift 2 ;;
+    --status-only-timeout-ms) STATUS_ONLY_TIMEOUT_MS="$2"; shift 2 ;;
     --hello-retry-ms) HELLO_RETRY_MS="$2"; shift 2 ;;
     --skip-selftest-after-missing-hello) SKIP_SELFTEST_AFTER_MISSING_HELLO=1; shift 1 ;;
     -h|--help) usage; exit 0 ;;
@@ -321,6 +339,9 @@ echo "Wait port (s) : $WAIT_PORT_S" | tee -a "$LOG_PATH"
 echo "Baud          : $BAUD" | tee -a "$LOG_PATH"
 echo "HELLO t/o ms  : ${HELLO_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
 echo "Selftest t/o  : ${SELFTEST_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+echo "Progress t/o  : ${PROGRESS_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+echo "Activity t/o  : ${ACTIVITY_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
+echo "Status-only t/o: ${STATUS_ONLY_TIMEOUT_MS:-default}" | tee -a "$LOG_PATH"
 echo "HELLO retry   : ${HELLO_RETRY_MS:-default}" | tee -a "$LOG_PATH"
 echo "" | tee -a "$LOG_PATH"
 

@@ -77,8 +77,42 @@ void PressureRegulator::begin(
   _stepping  = false;
   _homing    = false;
   _resetting = false;
-  _printTol = 3;
+  _printTol = _readyCfg.readyTolRaw;
   _doneBit = doneBit;
+
+  if (_sensorPort == 0u) {
+    _recoveryCfg = RecoveryConfig{};
+    _recoveryCfg.activeTicks = 2;
+    _recoveryCfg.baseBoostHz = 300;
+    _recoveryCfg.pulseCoeffHzPerUs = 1;
+    _recoveryCfg.pressureCoeffHzPerRaw = 0;
+    _recoveryCfg.maxBoostHz = 1500;
+    _recoveryCfg.recoveryFloorHz = 0;
+    _recoveryCfg.recoveryExitErrorRaw = 3;
+    _recoveryCfg.maxExtendTicks = 0;
+    _recoveryCfg.allowExtendWhileUndershoot = false;
+    _recoveryCfg.boostOnlyWhenUndershoot = true;
+    _recoveryCfg.linearDecay = true;
+  } else {
+    _recoveryCfg.activeTicks = 8;
+    _recoveryCfg.baseBoostHz = 2000;
+    _recoveryCfg.pulseCoeffHzPerUs = 2;
+    _recoveryCfg.pressureCoeffHzPerRaw = 1;
+    _recoveryCfg.maxBoostHz = 10000;
+    _recoveryCfg.recoveryFloorHz = 1200;
+    _recoveryCfg.recoveryExitErrorRaw = 4;
+    _recoveryCfg.maxExtendTicks = 4;
+    _recoveryCfg.allowExtendWhileUndershoot = true;
+    _recoveryCfg.boostOnlyWhenUndershoot = true;
+    _recoveryCfg.linearDecay = true;
+  }
+  _slewCfgTrack = SlewConfig{MAX_HZ_DELTA_PER_LOOP, MAX_HZ_DELTA_PER_LOOP, 0};
+  if (_sensorPort == 0u) {
+    _slewCfgPrint = SlewConfig{600, 1200, 0};
+  } else {
+    _slewCfgPrint = SlewConfig{1200, 450, 3};
+  }
+  _slewCfg = _slewCfgTrack;
 
   _active = false;
   _quietActive = false;
@@ -87,6 +121,15 @@ void PressureRegulator::begin(
   _freezeI = false;
   _I_contrib     = 0;
   _integral      = 0;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryTicksInitial = 0;
+  _recoveryInitialBoostHz = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryTicksExtended = 0;
+  _recoveryBypassRemaining = 0;
+  _readyConsecutiveCount = 0;
+  _traceLastPressureOk = false;
 
   enable_gpio_clock(_valvePort);
   // ensure valve closed at start
@@ -129,14 +172,22 @@ void PressureRegulator::start() {
 //  _pausedByQuiet = false;
   _freezeI       = false;
   _I_contrib     = 0;
+  _recoveryActive = false;
+  _recoveryTicksRemaining = 0;
+  _recoveryCurrentBoostHz = 0;
+  _recoveryTicksExtended = 0;
+  _recoveryBypassRemaining = 0;
+  _readyConsecutiveCount = 0;
 
   if (_innerPort != nullptr && _innerPin != 0) {
     __HAL_GPIO_EXTI_CLEAR_FLAG(_innerPin);
   }
   if (_stepper) _stepper->enableMotor();  // <-- ensure enabled
 
-
-  int32_t measured = PressureSensor::instance()->getPressure(_sensorPort);
+  int32_t measured = _target;
+  if (PressureSensor::instance()) {
+    measured = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
+  }
   _lastError = measured - _target;
   _integral  = 0;
 
@@ -189,9 +240,9 @@ void PressureRegulator::setPrintProfile(bool enabled) {
   state.integral = _integral;
   state.iContrib = _I_contrib;
   state.iCap = I_CAP;
-  state.maxHzDeltaPerLoop = _maxHzDeltaPerLoop;
-  state.maxHzDeltaPrint = _maxHzDeltaPerLoop_print;
-  state.maxHzDeltaTrack = MAX_HZ_DELTA_PER_LOOP;
+  state.maxHzDeltaPerLoop = _slewCfg.maxHzDeltaUpPerLoop;
+  state.maxHzDeltaPrint = _slewCfgPrint.maxHzDeltaUpPerLoop;
+  state.maxHzDeltaTrack = _slewCfgTrack.maxHzDeltaUpPerLoop;
 
   state = PressureRegulatorMath::applyPrintProfile(state, enabled);
 
@@ -200,7 +251,7 @@ void PressureRegulator::setPrintProfile(bool enabled) {
   _KDc = state.kdCurrent;
   _integral = state.integral;
   _I_contrib = state.iContrib;
-  _maxHzDeltaPerLoop = state.maxHzDeltaPerLoop;
+  _slewCfg = enabled ? _slewCfgPrint : _slewCfgTrack;
 
   taskEXIT_CRITICAL();
 }
@@ -209,6 +260,7 @@ void PressureRegulator::beginDispenseQuiet(uint32_t /*pre_ms*/) {
   _quietActive  = true;
   _quietPreHold = true;      // stay quiet until endDispenseQuiet() is called
   _freezeI      = true;
+  recordTraceEvent(PressureTraceEventType::QuietStart);
 //  if (_stepping) { _stepper->pauseMove(); _pausedByQuiet = true; }
   // Stop any in-flight “infinite” move so we won’t resume with stale sign/speed.
   if (_stepping) {
@@ -217,13 +269,59 @@ void PressureRegulator::beginDispenseQuiet(uint32_t /*pre_ms*/) {
   }
 
   // Reset derivative baseline to avoid a D-kick when we resume
-  int32_t p = PressureSensor::instance()->getPressure(_sensorPort);
+  int32_t p = _target;
+  if (PressureSensor::instance()) {
+    p = static_cast<int32_t>(PressureSensor::instance()->getLatestRaw(_sensorPort));
+  }
   _lastError = p - _target;
 }
 
 void PressureRegulator::endDispenseQuiet(uint32_t post_ms) {
   _quietPreHold     = false;                                   // allow release by time
   _quietReleaseTick = xTaskGetTickCount() + pdMS_TO_TICKS(post_ms);
+  recordTraceEvent(PressureTraceEventType::QuietEnd, static_cast<uint16_t>(post_ms));
+}
+
+void PressureRegulator::notifyPulseStart(const DisturbanceEvent& ev) {
+  _recoveryPressureAtTrigger = ev.pressureAtTrigger;
+  _recoveryPulseWidthUs = ev.pulseWidthUs;
+  _recoveryTriggerTickMs = ev.tickMs;
+  recordTraceEvent(PressureTraceEventType::PulseStart, ev.pulseWidthUs, ev.pressureAtTrigger);
+}
+
+void PressureRegulator::notifyPulseEnd(const DisturbanceEvent& ev) {
+  _recoveryPressureAtTrigger = ev.pressureAtTrigger;
+  _recoveryPulseWidthUs = ev.pulseWidthUs;
+  _recoveryTriggerTickMs = ev.tickMs;
+  _recoveryInitialBoostHz = PressureRegulatorMath::computeRecoveryBoostHz(
+      ev.pressureAtTrigger,
+      ev.pulseWidthUs,
+      PressureRegulatorMath::RecoveryConfig{
+          _recoveryCfg.activeTicks,
+          _recoveryCfg.baseBoostHz,
+          _recoveryCfg.pulseCoeffHzPerUs,
+          _recoveryCfg.pressureCoeffHzPerRaw,
+          _recoveryCfg.maxBoostHz,
+          _recoveryCfg.recoveryFloorHz,
+          _recoveryCfg.recoveryExitErrorRaw,
+          _recoveryCfg.maxExtendTicks,
+          _recoveryCfg.allowExtendWhileUndershoot,
+          _recoveryCfg.boostOnlyWhenUndershoot,
+          _recoveryCfg.linearDecay},
+      static_cast<uint16_t>(_minTarget));
+  _recoveryTicksInitial = _recoveryCfg.activeTicks;
+  _recoveryTicksRemaining = _recoveryCfg.activeTicks;
+  _recoveryTicksExtended = 0u;
+  _recoveryBypassRemaining = _slewCfg.recoveryBypassSlewTicks;
+  _recoveryCurrentBoostHz = _recoveryInitialBoostHz;
+  _recoveryActive = (_recoveryCurrentBoostHz > 0u) && (_recoveryTicksRemaining > 0u);
+  recordTraceEvent(PressureTraceEventType::PulseEnd, ev.pulseWidthUs, ev.pressureAtTrigger);
+  if (_recoveryActive) {
+    recordTraceEvent(
+        PressureTraceEventType::RecoveryStart,
+        static_cast<uint16_t>((_recoveryCurrentBoostHz > 0xFFFFu) ? 0xFFFFu : _recoveryCurrentBoostHz),
+        _recoveryTicksRemaining);
+  }
 }
 
 void PressureRegulator::setRelativeTarget(bool sign, int32_t p) {
@@ -427,8 +525,14 @@ void PressureRegulator::controlLoop() {
       continue;
     }
 
-    // 1) sample pressure (INT)
-    int32_t pressure = PressureSensor::instance()->getPressure(_sensorPort);
+    // 1) sample pressure from the latest validated control sample
+    PressureSensor* sensor = PressureSensor::instance();
+    if (sensor == nullptr) {
+      vTaskDelay(period);
+      continue;
+    }
+    const auto controlSample = sensor->getControlSample(_sensorPort);
+    int32_t pressure = static_cast<int32_t>(controlSample.raw);
 
     // sanity bounds on target
     if (_target < _minTarget || _target > _maxTarget) {
@@ -442,8 +546,20 @@ void PressureRegulator::controlLoop() {
 
     int32_t error = pressure - _target;
 
-    // READY flag / print gating
-    _pressureOk = ( llabs((long long)error) <= _printTol );
+    const bool inReadyBand = ( llabs((long long)error) <= _printTol );
+    if (inReadyBand) {
+      if (_readyConsecutiveCount < _readyCfg.consecutiveSamples) {
+        _readyConsecutiveCount++;
+      }
+    } else {
+      _readyConsecutiveCount = 0;
+    }
+    _pressureOk = (_readyConsecutiveCount >= _readyCfg.consecutiveSamples);
+    if (_pressureOk != _traceLastPressureOk) {
+      recordTraceEvent(_pressureOk ? PressureTraceEventType::ReadyEnter : PressureTraceEventType::ReadyExit,
+                       static_cast<uint16_t>((pressure > 0xFFFFL) ? 0xFFFFu : pressure));
+      _traceLastPressureOk = _pressureOk;
+    }
     if (_pressureOk && _doneBit != 0) {
       xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     }
@@ -476,23 +592,56 @@ void PressureRegulator::controlLoop() {
 //      + (int64_t)KI_S * (int64_t)_integral
 //      + (int64_t)KD_S * (int64_t)dErr;
 
-    uint32_t rawHz = (uint32_t)( llabs(uS) / GAIN );
-    if (rawHz < _minHz) rawHz = _minHz;
-    if (rawHz > _maxHz) rawHz = _maxHz;
-    if (rawHz == 0) rawHz = (_minHz ? _minHz : 1);  // never 0 Hz
-
-
-    // optional rate limiting instead of EMA (keeps it integer)
-    if (_stepping) {
-      uint32_t desired = rawHz;
-      if (desired > _lastRateHz) {
-        uint32_t inc = desired - _lastRateHz;
-        if (inc > _maxHzDeltaPerLoop) desired = _lastRateHz + _maxHzDeltaPerLoop;
-      } else {
-        uint32_t dec = _lastRateHz - desired;
-        if (dec > _maxHzDeltaPerLoop) desired = _lastRateHz - _maxHzDeltaPerLoop;
+    const uint32_t pidRequestedHz = (uint32_t)( llabs(uS) / GAIN );
+    if (_recoveryActive) {
+      _recoveryCurrentBoostHz = computeRecoveryBoostHz();
+      bool extendRecovery = PressureRegulatorMath::shouldExtendRecovery(
+          error,
+          static_cast<int32_t>(_readyCfg.readyTolRaw),
+          _recoveryTicksExtended,
+          _recoveryCfg.maxExtendTicks,
+          _recoveryCfg.allowExtendWhileUndershoot,
+          _recoveryCfg.recoveryExitErrorRaw);
+      if (_recoveryTicksRemaining > 0u) {
+        _recoveryTicksRemaining--;
       }
-      rawHz = desired;
+      if ((_recoveryTicksRemaining == 0u) && extendRecovery) {
+        _recoveryTicksRemaining = 1u;
+        _recoveryTicksExtended++;
+      } else if (_recoveryTicksRemaining == 0u) {
+        _recoveryActive = false;
+        _recoveryCurrentBoostHz = 0u;
+        recordTraceEvent(PressureTraceEventType::RecoveryEnd);
+      }
+    } else {
+      _recoveryCurrentBoostHz = 0u;
+    }
+    uint32_t requestedHz = PressureRegulatorMath::computeRecoveryRequestedHz(
+        PressureRegulatorMath::RecoveryState{
+            pidRequestedHz,
+            _recoveryCurrentBoostHz,
+            _recoveryActive,
+            error,
+            static_cast<int32_t>(_readyCfg.readyTolRaw),
+            _recoveryCfg.boostOnlyWhenUndershoot,
+            _maxHz,
+            _minHz,
+            _recoveryCfg.recoveryFloorHz});
+    if (requestedHz == 0u) requestedHz = (_minHz ? _minHz : 1u);
+
+
+    // Asymmetric slew limiting: faster up, slower down to reduce overshoot risk.
+    if (_stepping) {
+      if (_recoveryBypassRemaining > 0u) {
+        _recoveryBypassRemaining--;
+      } else {
+        requestedHz = PressureRegulatorMath::applyAsymmetricSlew(
+            requestedHz,
+            _lastRateHz,
+            PressureRegulatorMath::SlewConfig{
+                _slewCfg.maxHzDeltaUpPerLoop,
+                _slewCfg.maxHzDeltaDownPerLoop});
+      }
     }
 
     bool dir = (error < 0);
@@ -517,14 +666,14 @@ void PressureRegulator::controlLoop() {
     // 3) command stepper
     if (!_stepping) {
       _stepper->enableMotor();
-      _stepper->move(dir, MAX_STEPS, rawHz, /*accel*/1);
+      _stepper->move(dir, MAX_STEPS, requestedHz, /*accel*/1);
       _stepping  = true;
-      _lastRateHz= rawHz;
+      _lastRateHz= requestedHz;
       _lastDir   = dir;
     } else {
-      if (rawHz != _lastRateHz) {
-        _stepper->setSpeedHz(rawHz);
-        _lastRateHz = rawHz;
+      if (requestedHz != _lastRateHz) {
+        _stepper->setSpeedHz(requestedHz);
+        _lastRateHz = requestedHz;
       }
       if (dir != _lastDir) {
         HAL_GPIO_WritePin(_stepper->dirPort(), _stepper->dirPin(),
@@ -540,8 +689,65 @@ void PressureRegulator::controlLoop() {
       _integral = 0;
     }
 
+    recordTraceSample(controlSample, error, dErr, requestedHz, _lastRateHz, dir);
+
     vTaskDelay(period);
   }
+}
+
+uint32_t PressureRegulator::computeRecoveryBoostHz() const {
+  return PressureRegulatorMath::decayRecoveryBoostHz(
+      _recoveryInitialBoostHz,
+      _recoveryTicksRemaining,
+      _recoveryTicksInitial,
+      _recoveryCfg.linearDecay);
+}
+
+void PressureRegulator::recordTraceSample(const PressureSensor::ControlSample& sample,
+                                          int32_t error,
+                                          int32_t dErr,
+                                          uint32_t requestedHz,
+                                          uint32_t appliedHz,
+                                          bool dir) {
+  auto& recorder = PressureTraceRecorder::instance();
+  if (!recorder.isCapturing()) {
+    return;
+  }
+  PressureTraceSample trace{};
+  const uint32_t now = HAL_GetTick();
+  const uint32_t dt = now - recorder.startTickMs();
+  trace.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+  trace.rawPressure = sample.raw;
+  trace.controlPressure = sample.raw;
+  trace.avgPressure = sample.avg;
+  trace.target = static_cast<uint16_t>(_target);
+  trace.error = static_cast<int16_t>(error);
+  trace.dError = static_cast<int16_t>(dErr);
+  trace.requestedHz = static_cast<uint16_t>((requestedHz > 0xFFFFu) ? 0xFFFFu : requestedHz);
+  trace.appliedHz = static_cast<uint16_t>((appliedHz > 0xFFFFu) ? 0xFFFFu : appliedHz);
+  if (_pressureOk) trace.flags |= 0x01u;
+  if (_stepping) trace.flags |= 0x02u;
+  if (dir) trace.flags |= 0x04u;
+  if (_quietActive) trace.flags |= 0x08u;
+  if (_recoveryActive) trace.flags |= 0x10u;
+  if (sample.lastReadRejected) trace.flags |= 0x20u;
+  trace.ffBoostHzDiv16 = static_cast<uint8_t>((_recoveryCurrentBoostHz / 16u) > 0xFFu ? 0xFFu : (_recoveryCurrentBoostHz / 16u));
+  recorder.recordSample(traceChannel(), trace);
+}
+
+void PressureRegulator::recordTraceEvent(PressureTraceEventType type, uint16_t value0, uint16_t value1) {
+  auto& recorder = PressureTraceRecorder::instance();
+  if (!recorder.isCapturing()) {
+    return;
+  }
+  PressureTraceEvent event{};
+  const uint32_t now = HAL_GetTick();
+  const uint32_t dt = now - recorder.startTickMs();
+  event.dtMs = static_cast<uint16_t>((dt > 0xFFFFu) ? 0xFFFFu : dt);
+  event.type = static_cast<uint8_t>(type);
+  event.value0 = value0;
+  event.value1 = value1;
+  recorder.recordEvent(traceChannel(), event);
 }
 
 void PressureRegulator::attachInnerLimitSwitch(GPIO_TypeDef* port,

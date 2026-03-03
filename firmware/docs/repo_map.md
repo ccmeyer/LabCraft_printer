@@ -98,10 +98,16 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - Sensors:
   - `firmware/Core/Inc/PressureSensor.h`, `firmware/Core/Src/PressureSensor.cpp`
-  - Functions: `PressureSensor::start`, `PressureSensor::taskLoop`
+  - Functions: `PressureSensor::start`, `PressureSensor::taskLoop`, `getControlSample`, `getLatestRaw`, `getAverageRaw`
 - Regulation:
   - `firmware/Core/Inc/PressureRegulator.h`, `firmware/Core/Src/PressureRegulator.cpp`
-  - Functions: `PressureRegulator::start`, `PressureRegulator::controlLoop`, `homeWithValve`, `openValve`, `closeValve`, `handleInnerLimitFromIsr`
+  - Functions: `PressureRegulator::start`, `PressureRegulator::controlLoop`, `notifyPulseStart`, `notifyPulseEnd`, `homeWithValve`, `openValve`, `closeValve`, `handleInnerLimitFromIsr`
+- Shared math/helpers:
+  - `firmware/Core/Inc/PressureRegulatorMath.h`, `firmware/Core/Src/PressureRegulatorMath.cpp`
+  - Includes pressure sample validation, recovery/feedforward math, and deadline-slip helpers used by both runtime code and host tests.
+- Pressure trace capture:
+  - `firmware/Core/Inc/PressureTraceRecorder.h`, `firmware/Core/Src/PressureTraceRecorder.cpp`
+  - Records bounded pressure/control samples and events during pressure-focused FULL self-tests.
 
 ### Vacuum/gripper/valves
 
@@ -178,7 +184,7 @@ Script notes:
   1. `firmware/scripts/run_fw_unit_tests.ps1`
   2. `firmware/scripts/build_firmware_headless.ps1`
 - `run_fw_unit_tests.ps1` uses CMake in `firmware/tests_host` and runs `fw_tests*.exe` from `firmware/tests_host/build`.
-- `build_firmware_headless.ps1` imports the CubeIDE project and performs `-cleanBuild "$ProjName/$Cfg"`; then copies the newest `.bin` to an `artifacts` folder resolved from script variables.
+- `build_firmware_headless.ps1` imports the CubeIDE project and performs `-cleanBuild "$ProjName/$Cfg"`; then copies the newest `.bin` to `firmware/artifacts/`, skipping the copy if the build output is already the artifact path.
 
 ## 6) Protocol / Message Map (Opcodes, Payloads, Direction)
 
@@ -356,6 +362,10 @@ Pure host-side encode/decode vectors that do not require HAL peripherals:
    - `CMD_HELLO` triggers ACK intent and state reset behavior.
    - `CMD_GOODBYE` triggers ACK then BYE_DONE path.
    - `CMD_CLEAR` triggers queue reset intent and CLEAR_ACK path.
+
+6. **Pressure self-test/trace vectors:**
+   - `tools/run_selftest.py` decodes pressure trace sample/event chunks from `CMD_SELFTEST_RESULT` frames.
+   - FULL diagnostic runs can enable raw pressure-trace export with `--pressure-trace`, which writes separate `*_trace_<test_id>.json` artifacts next to the main self-test report.
 
 Notes:
 

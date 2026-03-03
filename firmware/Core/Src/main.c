@@ -1403,11 +1403,11 @@ void StartDefaultTask(void const * argument)
 
   MX_GANTRY_Init();
   MX_STEPPERP_Init();
-  MX_PRESSURE_REGP_Init(1638, 2000,40000,2);
+  MX_PRESSURE_REGP_Init(1638, 2000,40000,3);
 //
 #if (LC_PRESSURE_PORTS > 1)
   MX_STEPPERR_Init();
-  MX_PRESSURE_REGR_Init(1638, 2000,40000,2);
+  MX_PRESSURE_REGR_Init(1638, 2000,40000,3);
 #endif
 
   MX_COMM_Init(&huart2);     // start the Comm task on UART2

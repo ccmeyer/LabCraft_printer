@@ -131,7 +131,7 @@ static void EXTI8_DiagDump(void)
 
 
 void Logger::startRunTimeStatsTask(uint32_t periodMs) {
-    // spawn at idle+1, 512 words stack
+    // Keep this diagnostic task lightweight; move large scratch buffers out of task stack.
     xTaskCreate(
       statsTaskEntry,
       "LogStats",
@@ -150,8 +150,8 @@ void Logger::statsTaskEntry(void* arg) {
 static const size_t STATS_BUF_SZ = 512;
 
 void Logger::statsTask(uint32_t periodMs) {
-    // one buffer to hold the table
-    char buf[STATS_BUF_SZ];
+    // Use static storage so runtime-stats formatting does not consume task stack headroom.
+    static char buf[STATS_BUF_SZ];
     TickType_t ticks = pdMS_TO_TICKS(periodMs);
     EXTI8_DiagDump();
 

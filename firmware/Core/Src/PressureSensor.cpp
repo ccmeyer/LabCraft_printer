@@ -7,6 +7,7 @@
 
 #include "PressureSensor.h"
 #include "PressureRegulator.h"
+#include "PressureRegulatorMath.h"
 #include "Logger.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -46,6 +47,16 @@ PressureSensor::PressureSensor(I2C_HandleTypeDef* hi2c,
   _safetyRawMax[0] = _safetyRawMax[1] = 0;
   _overCtr[0] = _overCtr[1] = 0;
   _faultLatched[0] = _faultLatched[1] = false;
+  for (uint8_t i = 0; i < MAX_PORTS; ++i) {
+    _controlSample[i].raw = 0;
+    _controlSample[i].avg = 0;
+    _controlSample[i].previousRaw = 0;
+    _controlSample[i].tickMs = 0;
+    _controlSample[i].valid = false;
+    _controlSample[i].lastReadRejected = false;
+    _controlSample[i].rejectReason = RejectReason::None;
+    _validationCfg[i] = ValidationConfig{};
+  }
 }
 
 PressureSensor* PressureSensor::instance() {
@@ -146,15 +157,61 @@ void PressureSensor::taskLoop() {
     	  continue;
     	}
 
-        // 2) grab a raw reading
+        // 2) grab a raw reading and validate it for control use
         uint16_t raw = readSensorRaw(port);
+        PressureRegulatorMath::ValidationConfig cfg{};
+        cfg.minRaw = _validationCfg[port].minRaw;
+        cfg.maxRaw = _validationCfg[port].maxRaw;
+        cfg.maxStepPerSample = _validationCfg[port].maxStepPerSample;
+        cfg.maxConsecutiveRejects = _validationCfg[port].maxConsecutiveRejects;
+        const auto validation = PressureRegulatorMath::validatePressureSample(
+            _controlSample[port].raw,
+            raw,
+            _rejectStreak[port],
+            cfg);
 
-        // 3) smooth it in our circular buffer
+        uint16_t committedRaw = _controlSample[port].raw;
+        if (validation.accept) {
+          committedRaw = validation.committedRaw;
+          _rejectStreak[port] = 0;
+        } else {
+          _rejectStreak[port]++;
+          _controlSample[port].rejectCount++;
+          if (validation.reason == PressureRegulatorMath::PressureRejectReason::RailLow ||
+              validation.reason == PressureRegulatorMath::PressureRejectReason::RailHigh) {
+            _controlSample[port].railRejectCount++;
+          } else if (validation.reason == PressureRegulatorMath::PressureRejectReason::Spike) {
+            _controlSample[port].spikeRejectCount++;
+          }
+        }
+
+        _controlSample[port].previousRaw = _controlSample[port].raw;
+        _controlSample[port].raw = committedRaw;
+        _controlSample[port].valid = true;
+        _controlSample[port].lastReadRejected = !validation.accept;
+        _controlSample[port].tickMs = HAL_GetTick();
+        switch (validation.reason) {
+          case PressureRegulatorMath::PressureRejectReason::RailLow:
+            _controlSample[port].rejectReason = RejectReason::RailLow;
+            break;
+          case PressureRegulatorMath::PressureRejectReason::RailHigh:
+            _controlSample[port].rejectReason = RejectReason::RailHigh;
+            break;
+          case PressureRegulatorMath::PressureRejectReason::Spike:
+            _controlSample[port].rejectReason = RejectReason::Spike;
+            break;
+          default:
+            _controlSample[port].rejectReason = RejectReason::None;
+            break;
+        }
+
+        // 3) smooth the committed value in the circular buffer for status/UI
         _total[port] -= _readings[port][_readIndex[port]];
-        _readings[port][_readIndex[port]] = (int32_t)raw;
-        _total[port] += (int32_t)raw;
+        _readings[port][_readIndex[port]] = (int32_t)committedRaw;
+        _total[port] += (int32_t)committedRaw;
         _readIndex[port] = (_readIndex[port] + 1) % NUM_READINGS;
         _average[port] = _total[port] / NUM_READINGS;
+        _controlSample[port].avg = static_cast<uint16_t>(_average[port]);
 
         if (_safetyEnabled && _safetyRawMax[port] != 0 && !_faultLatched[port]) {
           if (_average[port] > (int32_t)_safetyRawMax[port]) {
@@ -201,9 +258,7 @@ uint16_t PressureSensor::readSensorRaw(uint8_t port) {
   HAL_StatusTypeDef st = HAL_I2C_Master_Receive(_hi2c, _sensorAddr << 1, buf, 4, kPressureI2cTimeoutMs);
   if (st != HAL_OK) {
     I2C1_BusRecovery();
-    // return last committed sample, not the next write slot
-    size_t last = (_readIndex[port] + NUM_READINGS - 1) % NUM_READINGS;
-    return (uint16_t)_readings[port][last];
+    return _controlSample[port].raw;
   }
   uint8_t p1 = buf[0], p2 = buf[1];
   uint16_t raw = (uint16_t(p1 & 0x3F) << 8) | p2;
@@ -231,6 +286,18 @@ void PressureSensor::clearSafetyFault(uint8_t port) {
   _faultLatched[port] = false;
   _overCtr[port] = 0;
   taskEXIT_CRITICAL();
+}
+
+void PressureSensor::setValidationConfig(uint8_t port, const ValidationConfig& cfg) {
+  if (port >= MAX_PORTS) return;
+  taskENTER_CRITICAL();
+  _validationCfg[port] = cfg;
+  taskEXIT_CRITICAL();
+}
+
+PressureSensor::ValidationConfig PressureSensor::getValidationConfig(uint8_t port) const {
+  if (port >= MAX_PORTS) port = MAX_PORTS - 1;
+  return _validationCfg[port];
 }
 
 extern "C" {

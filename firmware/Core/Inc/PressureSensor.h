@@ -17,6 +17,33 @@
 
 class PressureSensor {
 public:
+    enum class RejectReason : uint8_t {
+      None = 0,
+      RailLow,
+      RailHigh,
+      Spike
+    };
+
+    struct ValidationConfig {
+      uint16_t minRaw = 1200;
+      uint16_t maxRaw = 7000;
+      uint16_t maxStepPerSample = 250;
+      uint8_t maxConsecutiveRejects = 3;
+    };
+
+    struct ControlSample {
+      uint16_t raw = 0;
+      uint16_t avg = 0;
+      uint16_t previousRaw = 0;
+      uint32_t tickMs = 0;
+      bool valid = false;
+      bool lastReadRejected = false;
+      RejectReason rejectReason = RejectReason::None;
+      uint32_t rejectCount = 0;
+      uint32_t railRejectCount = 0;
+      uint32_t spikeRejectCount = 0;
+    };
+
     /// Singleton accessor
     static PressureSensor* instance();
 
@@ -44,6 +71,24 @@ public:
       if (port >= _numPorts) return _average[_numPorts - 1]; // or 0
       return _average[port];
     }
+
+    ControlSample getControlSample(uint8_t port) const {
+      if (port >= _numPorts) port = _numPorts - 1;
+      return _controlSample[port];
+    }
+
+    uint16_t getLatestRaw(uint8_t port) const {
+      if (port >= _numPorts) port = _numPorts - 1;
+      return _controlSample[port].raw;
+    }
+
+    uint16_t getAverageRaw(uint8_t port) const {
+      if (port >= _numPorts) port = _numPorts - 1;
+      return static_cast<uint16_t>(_average[port]);
+    }
+
+    void setValidationConfig(uint8_t port, const ValidationConfig& cfg);
+    ValidationConfig getValidationConfig(uint8_t port) const;
 
     uint8_t numPorts() const { return _numPorts; }
 
@@ -92,6 +137,9 @@ private:
     uint16_t _safetyRawMax[MAX_PORTS];      // 0 => disabled for that port
     uint8_t  _overCtr[MAX_PORTS];
     bool     _faultLatched[MAX_PORTS];
+    ControlSample _controlSample[MAX_PORTS];
+    ValidationConfig _validationCfg[MAX_PORTS];
+    uint8_t _rejectStreak[MAX_PORTS] = {0, 0};
 };
 #ifdef __cplusplus
 extern "C" {

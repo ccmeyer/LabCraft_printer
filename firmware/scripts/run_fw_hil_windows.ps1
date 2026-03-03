@@ -9,6 +9,10 @@ param(
   [string]$Mode = "Full",
   [string]$Port = "/dev/ttyAMA0",
   [string]$Config = "Debug",
+  [int]$SelfTestTimeoutMs = 120000,
+  [int]$ProgressTimeoutMs = 30000,
+  [int]$ActivityTimeoutMs = 120000,
+  [int]$StatusOnlyTimeoutMs = 10000,
 
   # Local paths (defaults assume you run from repo root)
   [string]$LocalBin = "firmware\artifacts\LabCraft_firmware.bin",
@@ -93,6 +97,10 @@ scp "$($LocalBinAbs.Path)" $scpBinTarget
     "--profile", $remoteProfile
     "--mode", $remoteMode
     "--report", $remoteReport
+    "--selftest-timeout-ms", $SelfTestTimeoutMs
+    "--progress-timeout-ms", $ProgressTimeoutMs
+    "--activity-timeout-ms", $ActivityTimeoutMs
+    "--status-only-timeout-ms", $StatusOnlyTimeoutMs
   )
 
   $cmd = @"

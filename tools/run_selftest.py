@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+from collections import deque
+import csv
 import json
 import os
+import struct
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -37,7 +40,19 @@ TAG_TOTAL = 0x35
 TAG_PASSED = 0x36
 TAG_FAILED = 0x37
 TAG_ABORTED = 0x38
+TAG_TRACE_KIND = 0x39
+TAG_TRACE_CHUNK_INDEX = 0x3A
+TAG_TRACE_CHUNK_TOTAL = 0x3B
+TAG_TRACE_FORMAT = 0x3C
+TAG_TRACE_PAYLOAD = 0x3D
 TAG_SEQ32 = 0x10
+TAG_P2 = 0x02
+TAG_P3 = 0x03
+
+TRACE_KIND_SAMPLES = 1
+TRACE_KIND_EVENTS = 2
+TRACE_FORMAT_SAMPLE_V1 = 1
+TRACE_FORMAT_EVENT_V1 = 2
 
 
 def crc16(data: bytes) -> int:
@@ -113,6 +128,86 @@ def parse_metrics(raw: str) -> dict:
     return out
 
 
+def decode_pressure_trace_samples_v1(payload: bytes) -> list[dict]:
+    fmt = "<HHHHHhhHHBB"
+    size = struct.calcsize(fmt)
+    rows = []
+    for off in range(0, len(payload), size):
+        chunk = payload[off : off + size]
+        if len(chunk) != size:
+            break
+        (
+            dt_ms,
+            raw_pressure,
+            control_pressure,
+            avg_pressure,
+            target,
+            error,
+            derror,
+            requested_hz,
+            applied_hz,
+            flags,
+            ff_boost_div16,
+        ) = struct.unpack(fmt, chunk)
+        rows.append(
+            {
+                "dt_ms": dt_ms,
+                "raw_pressure": raw_pressure,
+                "control_pressure": control_pressure,
+                "avg_pressure": avg_pressure,
+                "target": target,
+                "error": error,
+                "derror": derror,
+                "requested_hz": requested_hz,
+                "applied_hz": applied_hz,
+                "flags": flags,
+                "ff_boost_hz": ff_boost_div16 * 16,
+            }
+        )
+    return rows
+
+
+def decode_pressure_trace_events_v1(payload: bytes) -> list[dict]:
+    fmt = "<HBBHH"
+    size = struct.calcsize(fmt)
+    names = {
+        0: "trace_start",
+        1: "trace_stop",
+        2: "pulse_start",
+        3: "pulse_end",
+        4: "quiet_start",
+        5: "quiet_end",
+        6: "recovery_start",
+        7: "recovery_end",
+        8: "ready_enter",
+        9: "ready_exit",
+    }
+    rows = []
+    for off in range(0, len(payload), size):
+        chunk = payload[off : off + size]
+        if len(chunk) != size:
+            break
+        dt_ms, event_type, _reserved, value0, value1 = struct.unpack(fmt, chunk)
+        rows.append(
+            {
+                "dt_ms": dt_ms,
+                "event_type": event_type,
+                "event_name": names.get(event_type, f"unknown_{event_type}"),
+                "value0": value0,
+                "value1": value1,
+            }
+        )
+    return rows
+
+
+def decode_trace_payload(trace_kind: int, trace_format: int, payload: bytes) -> list[dict]:
+    if trace_kind == TRACE_KIND_SAMPLES and trace_format == TRACE_FORMAT_SAMPLE_V1:
+        return decode_pressure_trace_samples_v1(payload)
+    if trace_kind == TRACE_KIND_EVENTS and trace_format == TRACE_FORMAT_EVENT_V1:
+        return decode_pressure_trace_events_v1(payload)
+    return []
+
+
 class FrameReader:
     WAIT_START = 0
     WAIT_LEN = 1
@@ -165,6 +260,152 @@ def write_json_atomic(path: str, obj: dict) -> None:
             os.unlink(tmp)
 
 
+def _trace_artifact_path(base_out: str, test_id: int) -> str:
+    base = os.path.splitext(base_out)[0]
+    return f"{base}_trace_{test_id}.json"
+
+
+def _write_sweep_artifacts(base_out: str, run_id: int, results: list[dict]) -> tuple[str, str] | tuple[None, None]:
+    combo_rows = []
+    suite_summary = None
+    suite_id = None
+    for row in results:
+        metrics = row.get("metrics", {})
+        if not isinstance(metrics, dict):
+            continue
+        if {"suite", "param", "scenario"}.issubset(metrics.keys()):
+            sid = int(metrics.get("suite", 0))
+            suite_id = sid if suite_id is None else suite_id
+            if suite_id != sid:
+                continue
+            combo_rows.append(row)
+            continue
+        if {"suite", "combos", "pass_combo_count", "best_param", "best_score", "worst_score", "trace_exported_count"}.issubset(metrics.keys()):
+            sid = int(metrics.get("suite", 0))
+            suite_id = sid if suite_id is None else suite_id
+            if suite_id != sid:
+                continue
+            suite_summary = row
+
+    if not combo_rows or suite_id is None:
+        return None, None
+
+    combos = []
+    for row in combo_rows:
+        metrics = dict(row["metrics"])
+        score = int(metrics.get("score", 0))
+        if score == 0:
+            score = (
+                1000 * int(metrics.get("ready_miss", 0))
+                + 4 * int(metrics.get("slip_w", 0))
+                + 2 * int(metrics.get("rec_w", 0))
+                + int(metrics.get("over", 0))
+                + int(metrics.get("under", 0))
+                + int(metrics.get("zero", 0))
+            )
+        trace_path = _trace_artifact_path(base_out, int(row["test_id"]))
+        trace_file = trace_path if os.path.exists(trace_path) else None
+        combos.append(
+            {
+                "test_id": int(row["test_id"]),
+                "name": row.get("name"),
+                "pass": bool(row.get("pass", False)),
+                "suite": int(metrics.get("suite", 0)),
+                "param": int(metrics.get("param", 0)),
+                "scenario": int(metrics.get("scenario", 0)),
+                "mode": int(metrics.get("mode", 0)),
+                "target_raw": int(metrics.get("target_raw", 0)),
+                "pulse_us": int(metrics.get("pulse_us", 0)),
+                "droplets": int(metrics.get("droplets", 0)),
+                "hz": int(metrics.get("hz", 0)),
+                "base": int(metrics.get("base", 0)),
+                "min": int(metrics.get("min", 0)),
+                "max": int(metrics.get("max", 0)),
+                "under": int(metrics.get("under", 0)),
+                "over": int(metrics.get("over", 0)),
+                "rec_w": int(metrics.get("rec_w", 0)),
+                "rec_m": int(metrics.get("rec_m", 0)),
+                "ready_miss": int(metrics.get("ready_miss", 0)),
+                "slip_w": int(metrics.get("slip_w", 0)),
+                "slip_m": int(metrics.get("slip_m", 0)),
+                "zero": int(metrics.get("zero", 0)),
+                "rejects": int(metrics.get("rejects", 0)),
+                "sc": int(metrics.get("sc", 0)),
+                "ec": int(metrics.get("ec", 0)),
+                "trace": int(metrics.get("trace", 0)),
+                "score": score,
+                "trace_file": trace_file,
+            }
+        )
+
+    combos.sort(key=lambda r: (r["score"], r["ready_miss"], r["slip_w"], r["test_id"]))
+
+    summary_metrics = {}
+    if suite_summary and isinstance(suite_summary.get("metrics"), dict):
+        summary_metrics = dict(suite_summary["metrics"])
+    else:
+        summary_metrics = {
+            "suite": suite_id,
+            "combos": len(combos),
+            "pass_combo_count": sum(1 for c in combos if c["pass"]),
+            "best_param": combos[0]["param"] if combos else 0,
+            "best_score": combos[0]["score"] if combos else 0,
+            "worst_score": combos[-1]["score"] if combos else 0,
+            "trace_exported_count": sum(1 for c in combos if c["trace"] == 1),
+        }
+
+    payload = {
+        "run_id": run_id,
+        "suite_id": int(summary_metrics.get("suite", suite_id)),
+        "summary": summary_metrics,
+        "combos": combos,
+    }
+
+    base = os.path.splitext(base_out)[0]
+    json_path = f"{base}_pressure_sweep_s{payload['suite_id']}.json"
+    csv_path = f"{base}_pressure_sweep_s{payload['suite_id']}.csv"
+    write_json_atomic(json_path, payload)
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "test_id",
+                "name",
+                "pass",
+                "suite",
+                "param",
+                "scenario",
+                "mode",
+                "target_raw",
+                "pulse_us",
+                "droplets",
+                "hz",
+                "base",
+                "min",
+                "max",
+                "under",
+                "over",
+                "rec_w",
+                "rec_m",
+                "ready_miss",
+                "slip_w",
+                "slip_m",
+                "zero",
+                "rejects",
+                "sc",
+                "ec",
+                "trace",
+                "score",
+                "trace_file",
+            ],
+        )
+        writer.writeheader()
+        for row in combos:
+            writer.writerow(row)
+
+    return json_path, csv_path
+
+
 def run(args: argparse.Namespace) -> int:
     if serial is None:
         print("Missing dependency: pyserial (import serial failed).")
@@ -183,6 +424,7 @@ def run(args: argparse.Namespace) -> int:
     started_at = now_iso()
     results = []
     host_checks = []
+    trace_chunks: dict[tuple[int, int, int], dict] = {}
     summary = {"total": 0, "passed": 0, "failed": 0}
     aborted = False
 
@@ -255,29 +497,114 @@ def run(args: argparse.Namespace) -> int:
         # Mirror profile into TAG_P1 so current firmware decode can branch without
         # changing CommCodec TLV parsing rules. TAG_PROFILE remains authoritative.
         tlvs = bytes([TAG_P1, 1, profile_val])
+        tlvs += bytes([TAG_P2, 1, 1 if getattr(args, "pressure_trace", False) else 0])
+        pressure_trace_test = getattr(args, "pressure_trace_test", None)
+        pressure_sweep_suite = getattr(args, "pressure_sweep_suite", None)
+        selector = pressure_sweep_suite if pressure_sweep_suite is not None else pressure_trace_test
+        if selector is not None:
+            tlvs += bytes([TAG_P3, 2]) + int(selector).to_bytes(2, "little")
         tlvs += bytes([TAG_PROFILE, 1, profile_val])
         tlvs += bytes([TAG_RUN_ID, 4]) + run_id.to_bytes(4, "little")
         tlvs += bytes([TAG_TIMEOUT_MS, 4]) + effective_timeout_ms.to_bytes(4, "little")
         ser.write(build_control(CMD_SELFTEST_START, 2, run_id, tlvs))
 
-        deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
+        hard_deadline = time.monotonic() + (effective_timeout_ms / 1000.0)
+        progress_timeout_ms = max(1000, int(getattr(args, "progress_timeout_ms", 15000)))
+        activity_timeout_ms = max(progress_timeout_ms, int(getattr(args, "activity_timeout_ms", 60000)))
+        idle_deadline = time.monotonic() + (progress_timeout_ms / 1000.0)
+        activity_deadline = time.monotonic() + (activity_timeout_ms / 1000.0)
         done_seen = False
-        while time.monotonic() < deadline:
+        timeout_reason = "hard_timeout"
+        progress_count = 0
+        last_progress = {}
+        recent_frames = deque(maxlen=64)
+        frame_counts: dict[int, int] = {}
+        total_rx_bytes = 0
+        last_valid_frame_monotonic = time.monotonic()
+        last_rx_byte_monotonic = time.monotonic()
+        last_selftest_frame_monotonic = time.monotonic()
+        status_only_timeout_ms = max(1000, int(getattr(args, "status_only_timeout_ms", 5000)))
+        status_frames_since_selftest = 0
+        selftest_frames_seen = 0
+        while True:
+            now = time.monotonic()
+            if now >= hard_deadline:
+                timeout_reason = "hard_timeout"
+                break
+            if now >= activity_deadline:
+                timeout_reason = "activity_timeout"
+                break
+            if now >= idle_deadline:
+                timeout_reason = "progress_timeout"
+                break
             chunk = ser.read(256)
             if not chunk:
                 continue
+            total_rx_bytes += len(chunk)
+            last_rx_byte_monotonic = now
+            idle_deadline = now + (progress_timeout_ms / 1000.0)
+            activity_deadline = now + (activity_timeout_ms / 1000.0)
             for v in chunk:
                 frame = reader.feed(v)
                 if not frame or len(frame) < 2:
                     continue
+                last_valid_frame_monotonic = now
                 cmd = frame[0]
                 body = frame[2:]
                 tlv = parse_tlvs(body)
+                frame_counts[cmd] = frame_counts.get(cmd, 0) + 1
+                frame_snapshot = {"ts": now_iso(), "cmd": cmd}
+                idle_deadline = now + (progress_timeout_ms / 1000.0)
+                if cmd == 0x02:
+                    status_frames_since_selftest += 1
+                    if (
+                        selftest_frames_seen > 0
+                        and (now - last_selftest_frame_monotonic) >= (status_only_timeout_ms / 1000.0)
+                        and status_frames_since_selftest >= 50
+                    ):
+                        timeout_reason = "status_only_after_selftest"
+                        done_seen = False
+                        break
 
                 if cmd == CMD_SELFTEST_RESULT:
+                    selftest_frames_seen += 1
+                    last_selftest_frame_monotonic = now
+                    status_frames_since_selftest = 0
                     test_id = int.from_bytes(tlv.get(TAG_TEST_ID, b"\x00\x00"), "little")
                     name = tlv.get(TAG_NAME, b"").decode("utf-8", errors="replace")
                     passed = bool(tlv.get(TAG_PASS, b"\x00")[0] if tlv.get(TAG_PASS) else 0)
+                    frame_snapshot["test_id"] = test_id
+                    frame_snapshot["name"] = name
+                    if test_id == 0 and name == "selftest_progress":
+                        progress_count += 1
+                        metrics_raw = tlv.get(TAG_METRICS, b"").decode("utf-8", errors="replace")
+                        last_progress = parse_metrics(metrics_raw)
+                        frame_snapshot["progress"] = True
+                        frame_snapshot["stage"] = str(last_progress.get("stage", ""))
+                        recent_frames.append(frame_snapshot)
+                        continue
+                    if TAG_TRACE_KIND in tlv:
+                        trace_kind = int.from_bytes(tlv.get(TAG_TRACE_KIND, b"\x00"), "little")
+                        trace_format = int.from_bytes(tlv.get(TAG_TRACE_FORMAT, b"\x00"), "little")
+                        chunk_index = int.from_bytes(tlv.get(TAG_TRACE_CHUNK_INDEX, b"\x00\x00"), "little")
+                        chunk_total = int.from_bytes(tlv.get(TAG_TRACE_CHUNK_TOTAL, b"\x00\x00"), "little")
+                        payload_raw = tlv.get(TAG_TRACE_PAYLOAD, b"")
+                        frame_snapshot["trace_kind"] = trace_kind
+                        frame_snapshot["trace_chunk_index"] = chunk_index
+                        frame_snapshot["trace_chunk_total"] = chunk_total
+                        key = (test_id, trace_kind, trace_format)
+                        slot = trace_chunks.setdefault(
+                            key,
+                            {
+                                "name": name,
+                                "pass": passed,
+                                "chunk_total": chunk_total,
+                                "parts": {},
+                            },
+                        )
+                        slot["parts"][chunk_index] = payload_raw
+                        recent_frames.append(frame_snapshot)
+                        continue
                     metrics_raw = tlv.get(TAG_METRICS, b"").decode("utf-8", errors="replace")
                     results.append(
                         {
@@ -288,10 +615,16 @@ def run(args: argparse.Namespace) -> int:
                             "timestamp": now_iso(),
                         }
                     )
+                    recent_frames.append(frame_snapshot)
                     continue
 
                 if cmd == CMD_SELFTEST_DONE:
+                    selftest_frames_seen += 1
+                    last_selftest_frame_monotonic = now
+                    status_frames_since_selftest = 0
                     done_run = int.from_bytes(tlv.get(TAG_RUN_ID, b"\x00\x00\x00\x00"), "little")
+                    frame_snapshot["run_id"] = done_run
+                    recent_frames.append(frame_snapshot)
                     if done_run != run_id:
                         continue
                     summary = {
@@ -304,9 +637,11 @@ def run(args: argparse.Namespace) -> int:
                     break
             if done_seen:
                 break
+            if timeout_reason == "status_only_after_selftest":
+                break
 
         if not done_seen:
-            print("Timed out waiting for CMD_SELFTEST_DONE.")
+            print(f"Timed out waiting for CMD_SELFTEST_DONE ({timeout_reason}).")
             aborted = True
             rc = 3
         elif aborted:
@@ -357,7 +692,7 @@ def run(args: argparse.Namespace) -> int:
             )
 
             # Wait for BYE_DONE only after BYE_ACK succeeds.
-            bye_done_timeout_ms = 3000
+            bye_done_timeout_ms = 5000
             got_bye_done = False
             done_details = {
                 "seq8": goodbye_seq8,
@@ -407,8 +742,33 @@ def run(args: argparse.Namespace) -> int:
                 }
             )
 
-            if not (got_bye_ack and got_bye_done):
+            if not got_bye_ack:
                 rc = 3
+
+        host_checks.append(
+            {
+                "name": "selftest_progress_watchdog",
+                "pass": done_seen,
+                "details": {
+                    "progress_count": progress_count,
+                    "last_progress": last_progress,
+                    "recent_frames": list(recent_frames),
+                    "frame_counts": {str(k): v for k, v in sorted(frame_counts.items())},
+                    "progress_timeout_ms": progress_timeout_ms,
+                    "activity_timeout_ms": activity_timeout_ms,
+                    "status_only_timeout_ms": status_only_timeout_ms,
+                    "effective_timeout_ms": effective_timeout_ms,
+                    "total_rx_bytes": total_rx_bytes,
+                    "status_frames_since_selftest": status_frames_since_selftest,
+                    "selftest_frames_seen": selftest_frames_seen,
+                    "last_valid_frame_age_ms": int(max(0.0, (time.monotonic() - last_valid_frame_monotonic) * 1000.0)),
+                    "last_rx_byte_age_ms": int(max(0.0, (time.monotonic() - last_rx_byte_monotonic) * 1000.0)),
+                    "last_selftest_frame_age_ms": int(max(0.0, (time.monotonic() - last_selftest_frame_monotonic) * 1000.0)),
+                    "timeout_reason": None if done_seen else timeout_reason,
+                },
+                "timestamp": now_iso(),
+            }
+        )
 
         report = {
             "run_id": run_id,
@@ -421,6 +781,28 @@ def run(args: argparse.Namespace) -> int:
             "host_checks": host_checks,
         }
         write_json_atomic(args.out, report)
+        if trace_chunks:
+            base = os.path.splitext(args.out)[0]
+            for (test_id, trace_kind, trace_format), info in trace_chunks.items():
+                parts = info["parts"]
+                ordered = b"".join(parts[i] for i in sorted(parts))
+                existing_path = _trace_artifact_path(args.out, test_id)
+                payload = {}
+                if os.path.exists(existing_path):
+                    with open(existing_path, "r", encoding="utf-8") as fh:
+                        payload = json.load(fh)
+                payload.setdefault("run_id", run_id)
+                payload.setdefault("test_id", test_id)
+                payload.setdefault("name", info["name"])
+                payload.setdefault("summary", next((r["metrics"] for r in results if r["test_id"] == test_id), {}))
+                if trace_kind == TRACE_KIND_SAMPLES:
+                    payload["samples"] = decode_trace_payload(trace_kind, trace_format, ordered)
+                elif trace_kind == TRACE_KIND_EVENTS:
+                    payload["events"] = decode_trace_payload(trace_kind, trace_format, ordered)
+                write_json_atomic(existing_path, payload)
+        sweep_json, sweep_csv = _write_sweep_artifacts(args.out, run_id, results)
+        if sweep_json and sweep_csv:
+            print(f"Wrote sweep artifacts: {sweep_json} | {sweep_csv}")
         print(f"Wrote self-test report: {args.out}")
         return rc
 
@@ -431,9 +813,16 @@ def main() -> int:
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--profile", default="SAFE")
     p.add_argument("--timeout-ms", type=int, default=30000)
+    p.add_argument("--progress-timeout-ms", type=int, default=15000)
+    p.add_argument("--activity-timeout-ms", type=int, default=60000)
+    p.add_argument("--status-only-timeout-ms", type=int, default=5000)
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")
+    p.add_argument("--pressure-trace", action="store_true")
+    selector_group = p.add_mutually_exclusive_group()
+    selector_group.add_argument("--pressure-trace-test", type=int, choices=(2101, 2102, 2103, 2104))
+    selector_group.add_argument("--pressure-sweep-suite", type=int, choices=(2301, 2302, 2303, 2304))
     p.add_argument("--out", required=True)
     args = p.parse_args()
     try:

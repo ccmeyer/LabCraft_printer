@@ -107,8 +107,36 @@ void Printer::configureTimerRefuel() {
 }
 
 void Printer::enqueue(uint16_t count, uint16_t rateHz, PulseMode mode) {
+  (void)enqueueWithTimeout(count, rateHz, mode, portMAX_DELAY);
+}
+
+bool Printer::enqueueWithTimeout(uint16_t count, uint16_t rateHz, PulseMode mode, TickType_t timeoutTicks) {
+  if (_queue == nullptr) {
+    return false;
+  }
   DispenseCommand cmd{count, rateHz, mode};
-  xQueueSend(_queue, &cmd, portMAX_DELAY);
+  if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
+    return true;
+  }
+  if (timeoutTicks == 0) {
+    return false;
+  }
+  const TickType_t start = xTaskGetTickCount();
+  while ((xTaskGetTickCount() - start) < timeoutTicks) {
+    vTaskDelay(1);
+    if (xQueueSend(_queue, &cmd, 0) == pdTRUE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void Printer::setDiagnosticReadyTimeout(bool enabled, uint32_t timeoutMs) {
+  _diagReadyTimeoutEnabled = enabled;
+  _diagReadyTimeoutTicks = enabled ? pdMS_TO_TICKS(timeoutMs) : 0;
+  if (_diagReadyTimeoutEnabled && _diagReadyTimeoutTicks == 0) {
+    _diagReadyTimeoutTicks = 1;
+  }
 }
 
 bool Printer::isBusy() const {
@@ -146,18 +174,53 @@ void Printer::taskLoop() {
       bool printingHoldsGate = Gripper::instance().lockVacuumGate(portMAX_DELAY);
       (void)printingHoldsGate; // for safety; expect true
 
-      uint32_t periodMs = 1000u / _dispenseHz;
-      uint32_t halfDelay = periodMs / 2;
+      const uint32_t rateHz = (_dispenseHz == 0u) ? 1u : _dispenseHz;
+      TickType_t periodTicks = pdMS_TO_TICKS(1000u / rateHz);
+      if (periodTicks == 0) periodTicks = 1;
+      TickType_t halfPeriodTicks = periodTicks / 2;
+      if (halfPeriodTicks == 0) halfPeriodTicks = 1;
+      TickType_t nextPhaseTick = xTaskGetTickCount();
+      const TickType_t readyPollTicks = pdMS_TO_TICKS(2);
+
+      auto delayUntil = [&](TickType_t targetTick) {
+        TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(targetTick - now) > 0) {
+          vTaskDelay(targetTick - now);
+        }
+      };
+      auto advancePhase = [&](TickType_t stepTicks, bool rebaseOnAnyLate) {
+        nextPhaseTick += stepTicks;
+        TickType_t now = xTaskGetTickCount();
+        const int32_t lateTicks = static_cast<int32_t>(now - nextPhaseTick);
+        const int32_t threshold = rebaseOnAnyLate ? 0 : static_cast<int32_t>(stepTicks);
+        if (lateTicks > threshold) {
+          // Rebase late schedules to avoid burst catch-up.
+          nextPhaseTick = now + stepTicks;
+        }
+      };
+
       while (_remaining > 0 && !_cancelRequested) {
+        delayUntil(nextPhaseTick);
 
     	// ---------- PRINT PULSE ----------
         if (cmd.mode != PulseMode::REFUEL_ONLY) {
+            const TickType_t readyWaitStart = xTaskGetTickCount();
 		    while (!PressureRegulator::regP().isPressureOk() && !_cancelRequested) {
-			  vTaskDelay(pdMS_TO_TICKS(2));   // cheap wake‐up every 2 ms
+              if (_diagReadyTimeoutEnabled &&
+                  ((xTaskGetTickCount() - readyWaitStart) >= _diagReadyTimeoutTicks)) {
+                _cancelRequested = true;
+                break;
+              }
+			  vTaskDelay(readyPollTicks);   // cheap wake-up while waiting for pressure ready
 		    }
 		    if (_cancelRequested) break;
+            PressureRegulator::DisturbanceEvent disturbance{};
+            disturbance.type = PressureRegulator::PulseType::Print;
+            disturbance.pulseWidthUs = static_cast<uint16_t>(_printPulseUs);
+            disturbance.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(0u);
+            disturbance.tickMs = HAL_GetTick();
+            PressureRegulator::regP().notifyPulseStart(disturbance);
         	PressureRegulator::regP().beginDispenseQuiet(0);
-        	vTaskDelay(pdMS_TO_TICKS(2));
         	pulsePrint();
 
 			#if LC_HAS_IMAGING == 1
@@ -173,8 +236,14 @@ void Printer::taskLoop() {
 			  }
 			#endif
             PressureRegulator::regP().endDispenseQuiet(2);
+            disturbance.tickMs = HAL_GetTick();
+            disturbance.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(0u);
+            PressureRegulator::regP().notifyPulseEnd(disturbance);
         }
-        vTaskDelay(pdMS_TO_TICKS(halfDelay));
+        if (cmd.mode == PulseMode::BOTH) {
+          advancePhase(halfPeriodTicks, false);
+          delayUntil(nextPhaseTick);
+        }
 
         // if someone hit “cancel” during the delay…
 		if (_cancelRequested) {
@@ -185,21 +254,41 @@ void Printer::taskLoop() {
 		if (cmd.mode != PulseMode::PRINT_ONLY) {
 		#if (LC_PRESSURE_PORTS > 1)
           // On dual-channel machines, wait for refuel pressure + pulse refuel
+          const TickType_t readyWaitStart = xTaskGetTickCount();
           while (!PressureRegulator::regR().isPressureOk() && !_cancelRequested) {
-            vTaskDelay(pdMS_TO_TICKS(2));
+            if (_diagReadyTimeoutEnabled &&
+                ((xTaskGetTickCount() - readyWaitStart) >= _diagReadyTimeoutTicks)) {
+              _cancelRequested = true;
+              break;
+            }
+            vTaskDelay(readyPollTicks);
           }
           if (_cancelRequested) break;
 
+          PressureRegulator::DisturbanceEvent disturbance{};
+          disturbance.type = PressureRegulator::PulseType::Refuel;
+          disturbance.pulseWidthUs = static_cast<uint16_t>(_refuelPulseUs);
+          disturbance.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(1u);
+          disturbance.tickMs = HAL_GetTick();
+          PressureRegulator::regR().notifyPulseStart(disturbance);
           PressureRegulator::regR().beginDispenseQuiet(0);
           vTaskDelay(pdMS_TO_TICKS(2));
           pulseRefuel();
           PressureRegulator::regR().endDispenseQuiet(2);
+          disturbance.tickMs = HAL_GetTick();
+          disturbance.pressureAtTrigger = PressureSensor::instance()->getLatestRaw(1u);
+          PressureRegulator::regR().notifyPulseEnd(disturbance);
 		#else
           // Legacy: no refuel channel exists. Treat as no-op so host never hangs.
           (void)0;
 		#endif
-		}
-        vTaskDelay(pdMS_TO_TICKS(halfDelay));
+        }
+        if (cmd.mode == PulseMode::BOTH) {
+          advancePhase(halfPeriodTicks, false);
+        }
+        if (cmd.mode != PulseMode::BOTH) {
+          advancePhase(periodTicks, true);
+        }
 
         if (_cancelRequested) break;
 

@@ -9,6 +9,7 @@
 #define INC_PRESSUREREGULATOR_H_
 #include "Stepper.h"
 #include "PressureSensor.h"
+#include "PressureTraceRecorder.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <cmath>
@@ -16,6 +17,44 @@
 
 class PressureRegulator {
 public:
+  enum class PulseType : uint8_t {
+    Print = 0,
+    Refuel = 1
+  };
+
+  struct DisturbanceEvent {
+    PulseType type = PulseType::Print;
+    uint16_t pulseWidthUs = 0;
+    uint16_t dropletCount = 1;
+    uint16_t pressureAtTrigger = 0;
+    uint32_t tickMs = 0;
+  };
+
+  struct RecoveryConfig {
+    uint16_t activeTicks = 4;
+    uint16_t baseBoostHz = 1500;
+    uint16_t pulseCoeffHzPerUs = 1;
+    uint16_t pressureCoeffHzPerRaw = 1;
+    uint16_t maxBoostHz = 8000;
+    uint16_t recoveryFloorHz = 0;
+    uint16_t recoveryExitErrorRaw = 3;
+    uint16_t maxExtendTicks = 0;
+    bool allowExtendWhileUndershoot = false;
+    bool boostOnlyWhenUndershoot = true;
+    bool linearDecay = true;
+  };
+
+  struct SlewConfig {
+    uint32_t maxHzDeltaUpPerLoop = 2000;
+    uint32_t maxHzDeltaDownPerLoop = 2000;
+    uint8_t recoveryBypassSlewTicks = 0;
+  };
+
+  struct ReadyConfig {
+    uint16_t readyTolRaw = 4;
+    uint8_t consecutiveSamples = 1;
+  };
+
   /// Configure the regulator loop.
   /// @param stepper       Reference to the Stepper driving this chamber
   /// @param htim          The same TIM_HandleTypeDef* you gave that Stepper
@@ -77,6 +116,19 @@ public:
 #endif
 
   bool isPressureOk() const { return _pressureOk; }
+  void setRecoveryConfig(const RecoveryConfig& cfg) { _recoveryCfg = cfg; }
+  RecoveryConfig getRecoveryConfig() const { return _recoveryCfg; }
+  void setReadyConfig(const ReadyConfig& cfg) {
+    _readyCfg = cfg;
+    _printTol = cfg.readyTolRaw;
+  }
+  ReadyConfig getReadyConfig() const { return _readyCfg; }
+  void notifyPulseStart(const DisturbanceEvent& ev);
+  void notifyPulseEnd(const DisturbanceEvent& ev);
+  bool isRecoveryActive() const { return _recoveryActive; }
+  uint32_t getCurrentRecoveryBoostHz() const { return _recoveryCurrentBoostHz; }
+  void setSlewConfig(const SlewConfig& cfg) { _slewCfg = cfg; }
+  SlewConfig getSlewConfig() const { return _slewCfg; }
 
   // Call ~1–2 ms before opening the droplet valve
   void beginDispenseQuiet(uint32_t pre_ms = 2);
@@ -168,7 +220,7 @@ private:
 	static constexpr int32_t  KI_S = int32_t(1.2f*DT * GAIN + 0.5f);          // 2
 	static constexpr int32_t  KD_S = int32_t((0.015f/DT) * GAIN + 0.5f);      // 3072
 
-	int32_t  _lastError = 0;
+  int32_t  _lastError = 0;
 //	int64_t  _integral  = 0;   // scaled by 1 (since KI_S already has DT)
 
 
@@ -180,12 +232,27 @@ private:
 
 	  int64_t  _integral  = 0;     // scaled by 1
 	  int64_t  _I_contrib = 0;     // tracks _KIc * _integral across gain changes
+  RecoveryConfig _recoveryCfg{};
+  ReadyConfig _readyCfg{};
+  bool _recoveryActive = false;
+  uint16_t _recoveryTicksRemaining = 0;
+  uint16_t _recoveryTicksInitial = 0;
+  uint32_t _recoveryInitialBoostHz = 0;
+  uint32_t _recoveryCurrentBoostHz = 0;
+  uint16_t _recoveryPressureAtTrigger = 0;
+  uint16_t _recoveryPulseWidthUs = 0;
+  uint32_t _recoveryTriggerTickMs = 0;
+  uint16_t _recoveryTicksExtended = 0;
+  uint8_t _recoveryBypassRemaining = 0;
+  uint8_t _readyConsecutiveCount = 0;
+  bool _traceLastPressureOk = false;
 
 	  static constexpr int64_t I_CAP = 20000;  // same cap used in the loop
 
-	static constexpr uint32_t MAX_HZ_DELTA_PER_LOOP = 2000;
-	uint32_t _maxHzDeltaPerLoop = 2000;   // gentler during printing
-	uint32_t _maxHzDeltaPerLoop_print = 500;   // gentler during printing
+  static constexpr uint32_t MAX_HZ_DELTA_PER_LOOP = 2000;
+  SlewConfig _slewCfg{};
+  SlewConfig _slewCfgTrack{MAX_HZ_DELTA_PER_LOOP, MAX_HZ_DELTA_PER_LOOP, 0};
+  SlewConfig _slewCfgPrint{500, 300, 2};
 
 	//	  static constexpr uint32_t MAX_STEPS = 10000000;
 
@@ -194,6 +261,17 @@ private:
     static_cast<PressureRegulator*>(pv)->controlLoop();
   }
   void controlLoop();
+  PressureTraceChannel traceChannel() const {
+    return (_sensorPort == 0u) ? PressureTraceChannel::Print : PressureTraceChannel::Refuel;
+  }
+  void recordTraceSample(const PressureSensor::ControlSample& sample,
+                         int32_t error,
+                         int32_t dErr,
+                         uint32_t requestedHz,
+                         uint32_t appliedHz,
+                         bool dir);
+  void recordTraceEvent(PressureTraceEventType type, uint16_t value0 = 0, uint16_t value1 = 0);
+  uint32_t computeRecoveryBoostHz() const;
 
 
   // ---------- Inner-limit (syringe end) support ----------
