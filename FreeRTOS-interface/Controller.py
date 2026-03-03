@@ -459,43 +459,33 @@ class Controller(QObject):
         """
         Check if a straight-line path from current_pos to target_pos intersects any 3D obstacles
         or goes out of bounds.
-        
-        Parameters:
-        - current_pos: tuple of floats (x, y, z) representing the current position.
-        - target_pos: tuple of floats (x, y, z) representing the target position.
-        - obstacles: list of obstacles, where each obstacle is defined by two tuples representing
-                    the opposite corners of a 3D rectangular prism: [(corner1, corner2), ...]
-        - boundaries: tuple of two corners defining the machine workspace boundaries.
 
-        Returns:
-        - True if a collision or out-of-bounds is detected, False otherwise.
+        Returns True on malformed safety config as a fail-safe (block motion).
         """
         boundaries = self.model.location_model.get_boundaries()
         obstacles = self.model.location_model.get_obstacles()
 
-        # Boundary check
-        for axis in ['X', 'Y', 'Z']:
-            if not (boundaries['min'][axis] <= min(current_pos[axis], target_pos[axis]) and 
-                    max(current_pos[axis], target_pos[axis]) <= boundaries['max'][axis]):
-                #print(f"Path goes out of bounds on axis {axis}.")
-                return True
-
-        # Obstacle check
-        for obstacle in obstacles:
-            min_corner = {axis: min(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
-            max_corner = {axis: max(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
-            
+        try:
             for axis in ['X', 'Y', 'Z']:
-                min_proj = min(current_pos[axis], target_pos[axis])
-                max_proj = max(current_pos[axis], target_pos[axis])
-                
-                if max_proj < min_corner[axis] or min_proj > max_corner[axis]:
-                    break
-            else:
-                #print(f"Collision with {obstacle['name']} detected.")
-                #print(f'Current position: {current_pos}')
-                #print(f'Target position: {target_pos}')
-                return True
+                if not (boundaries['min'][axis] <= min(current_pos[axis], target_pos[axis]) and
+                        max(current_pos[axis], target_pos[axis]) <= boundaries['max'][axis]):
+                    return True
+
+            for obstacle in obstacles:
+                min_corner = {axis: min(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
+                max_corner = {axis: max(obstacle['corner1'][axis], obstacle['corner2'][axis]) for axis in ['X', 'Y', 'Z']}
+
+                for axis in ['X', 'Y', 'Z']:
+                    min_proj = min(current_pos[axis], target_pos[axis])
+                    max_proj = max(current_pos[axis], target_pos[axis])
+
+                    if max_proj < min_corner[axis] or min_proj > max_corner[axis]:
+                        break
+                else:
+                    return True
+        except (TypeError, KeyError):
+            print('Collision check misconfigured: invalid boundaries/obstacles payload')
+            return True
 
         return False
     
@@ -789,9 +779,9 @@ class Controller(QObject):
             safe_z = 35000
         else:
             safe_z = 5000
-        # current_location = self.model.machine_model.get_current_location()
         current_location = str(getattr(self, "expected_location", None) or "")
-        # current_z = self.model.machine_model.get_current_position_dict()['Z']
+        current_location_norm = current_location.strip().lower()
+        target_name_norm = str(name or "").strip().lower()
         current_z = self.expected_position['Z']
 
         if coords is not None:
@@ -799,35 +789,84 @@ class Controller(QObject):
         else:
             original_target = self.model.location_model.get_location_dict(name)
 
-        target = original_target.copy()
+        if original_target is None:
+            self.error_occurred_signal.emit("Move Error", f"Location '{name}' not found")
+            print(f"Move aborted: location '{name}' not found")
+            return False
 
-        if current_z < safe_z and target['Z'] < safe_z:
+        if not isinstance(original_target, dict) or not all(axis in original_target for axis in ("X", "Y", "Z")):
+            self.error_occurred_signal.emit("Move Error", f"Location '{name}' has invalid coordinates")
+            print(f"Move aborted: location '{name}' has invalid coordinates: {original_target}")
+            return False
+
+        target = original_target.copy()
+        try:
+            target['X'] = int(target['X'])
+            target['Y'] = int(target['Y'])
+            target['Z'] = int(target['Z'])
+        except (TypeError, ValueError, KeyError):
+            self.error_occurred_signal.emit("Move Error", f"Location '{name}' has non-numeric coordinates")
+            print(f"Move aborted: location '{name}' has non-numeric coordinates: {original_target}")
+            return False
+
+        current_is_camera = current_location_norm == 'camera'
+        target_is_camera = target_name_norm == 'camera'
+        current_is_balance = current_location_norm == 'balance'
+        target_is_balance = target_name_norm == 'balance'
+        current_is_slot = current_location_norm.startswith('slot-')
+        target_is_slot = target_name_norm.startswith('slot-')
+
+        # Inverted-Z convention: smaller numerical Z means physically higher.
+        # If we are already above the safe height plane, don't insert a redundant safe-Z move.
+        if current_z < safe_z:
             print("Already above safe height")
             ignore_safe_height = True
+
+        needs_route_safe_z = (
+            (current_is_camera or target_is_camera) or
+            (current_is_slot and not target_is_slot) or
+            (not current_is_slot and target_is_slot)
+        )
+
         print(f'Moving to location: {name} from {current_location}')
-        if 'camera' in [current_location, name] and not ignore_safe_height:
+        if needs_route_safe_z and not ignore_safe_height:
             print(f'Must move up to safe height before moving to {name} from {current_location}')
-            self.set_absolute_Z(safe_z, manual=manual, override=override)
-        elif 'Slot' in current_location and 'Slot' not in name and not ignore_safe_height:
+            if self.set_absolute_Z(safe_z, manual=manual, override=override) is False:
+                self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
+                return False
+
+        if current_is_balance or target_is_balance:
+            if not ignore_safe_height:
+                print(f'Must move up to safe height before moving to {name} from {current_location}')
+                if self.set_absolute_Z(safe_z, manual=manual, override=override) is False:
+                    self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Z height')
+                    return False
             print(f'Must move up to safe height before moving to {name} from {current_location}')
-            self.set_absolute_Z(safe_z, manual=manual, override=override)
-        elif 'Slot' not in current_location and 'Slot' in name and not ignore_safe_height:
-            print(f'Must move up to safe height before moving to {name} from {current_location}')
-            self.set_absolute_Z(safe_z, manual=manual, override=override)
-        if 'balance' in [current_location, name]:
-            # if not ignore_safe_height:
-            print(f'Must move up to safe height before moving to {name} from {current_location}')
-            self.set_absolute_Z(safe_z, manual=manual, override=override)
             print("Must move to safe Y before moving to or from balance")
-            self.set_absolute_Y(15000, manual=manual, override=override)
-            self.set_absolute_X(target['X'], manual=manual, override=override)
+            if self.set_absolute_Y(15000, manual=manual, override=override) is False:
+                self.error_occurred_signal.emit('Move Error', 'Failed to move to safe Y height')
+                return False
+            if self.set_absolute_X(target['X'], manual=manual, override=override) is False:
+                self.error_occurred_signal.emit('Move Error', 'Failed to move to target X for balance route')
+                return False
 
         if x_offset != 0:
             target['X'] += x_offset
         if z_offset != 0:
             target['Z'] += z_offset
-        self.set_absolute_coordinates(target['X'], target['Y'], target['Z'], manual=manual, override=override,handler=self.update_location_handler,kwargs={'name': name})
+
+        if self.set_absolute_coordinates(
+            target['X'], target['Y'], target['Z'],
+            manual=manual,
+            override=override,
+            handler=self.update_location_handler,
+            kwargs={'name': name}
+        ) is False:
+            self.error_occurred_signal.emit('Move Error', 'Failed to move to target coordinates')
+            return False
+
         self.expected_location = name
+        return True
         
     def open_gripper(self,handler=None):
         """Open the gripper."""
@@ -1787,5 +1826,4 @@ class Controller(QObject):
             target_droplets=self._seq_params.get("step3_target_droplets", 10),
             bridge_spacing=self._seq_params.get("step3_bridge_spacing_steps", 50),
         )
-
 
