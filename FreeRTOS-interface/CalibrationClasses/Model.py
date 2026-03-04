@@ -2502,10 +2502,10 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
 
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
     """
-    Identify the nozzle by diffing background vs droplet image. If not found,
-    scan a handful of longer flash delays; if still not found, raise pressure (clamped)
-    and repeat the delay scan. Use the *top of the contour* as nozzle coordinate
-    and move near the *top-center* of the frame. Verify and iterate with safety caps.
+    Identify the nozzle by diffing background vs droplet image.
+    - Missing contour/no-signal -> scan X around the start anchor (right then left).
+    - Multiple contours -> reduce flash delay until a single contour is observed.
+    - Single contour -> use contour top as nozzle coordinate and recenter near top-center.
     """
     # Define signals to trigger transitions from analyze state.
     nozzleCentered = Signal()
@@ -2520,11 +2520,13 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
 
         # ---- Safety & search tuning ----
-        # flash delay search (in microseconds), added to base (initial) delay
+        # flash delay handling (in microseconds)
         self.initial_flash_delay_us = max(self.model.machine_model.get_print_pulse_width() + 2600, 0)
         self.delay_scan_increments = [0, 400, 800, 1200, 1600]   # try a few longer delays
-        self.min_flash_delay_us = 0
+        self.min_flash_delay_us = 2000
         self.max_flash_delay_us = 12000
+        self.multi_contour_delay_step_us = 200
+        self._current_flash_delay_us = int(self.initial_flash_delay_us)
 
         # pressure search (psi)
         self.max_pressure_levels = 3          # total pressure levels: base + two bumps
@@ -2547,6 +2549,14 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.top_margin_frac = 0.12           # ~12% down from top
         self.center_tol_frac = 0.03           # within 3% of width (x) and 3% of height (y band around target)
         self.top_band_frac   = 0.03
+
+        # Missing-nozzle search around start anchor (X axis only).
+        self.nozzle_search_half_fov_fraction = 0.5
+        self.nozzle_search_min_half_fov_x_steps = 200
+        self._x_scan_anchor = None
+        self._x_scan_half_fov_x_steps = 0
+        self._x_scan_attempt_index = 0
+        self._x_scan_active = False
 
         # ---- internal scan state (reset in onPrepareDroplet) ----
         self._base_delay_us = self.initial_flash_delay_us
@@ -2670,7 +2680,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         # Request to change droplet settings (0 droplets). The callback emits a signal.
         settings = {
             "num_droplets": 0,
-            "flash_delay": int(self.initial_flash_delay_us)
+            "flash_delay": int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us))),
         }
         self._request_settings_with_recording(
             settings,
@@ -2691,18 +2701,26 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onPrepareDroplet(self):
-        self.stageChanged.emit("Nozzle Pos - Preparing droplet capture (init scan plan)")
-        self._base_delay_us = int(self.initial_flash_delay_us)
+        self.stageChanged.emit("Nozzle Pos - Preparing droplet capture")
+        self._current_flash_delay_us = int(
+            self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us))
+        )
+        self._base_delay_us = int(self._current_flash_delay_us)
         self._delay_idx = 0
         self._base_pressure = float(self.model.machine_model.get_current_print_pressure())
         self._pressure_level = 0
+
+        if not bool(getattr(self, "_x_scan_active", False)):
+            self._x_scan_anchor = self._current_position_dict()
+            self._x_scan_half_fov_x_steps = self._estimate_half_fov_x_steps()
+            self._x_scan_attempt_index = 0
 
         # First shot is a warm-up to discard
         self._throwaway_pending = True
 
         settings = {
             "num_droplets": 1,
-            "flash_delay": int(self._clamp_delay(self._base_delay_us)),
+            "flash_delay": int(self._current_flash_delay_us),
         }
         self._request_settings_with_recording(
             settings,
@@ -2733,12 +2751,16 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             # Re-shoot with the *same* settings (one droplet, current delay/pressure)
             settings = {
                 "num_droplets": 1,
-                "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
+                "flash_delay": int(self._current_flash_delay_us),
                 # keep current pressure (no key needed if your stack preserves it)
             }
             self._record_decision(
                 "discard_warmup_frame",
-                {"settings": settings, "delay_idx": int(self._delay_idx), "pressure_level": int(self._pressure_level)},
+                {
+                    "settings": settings,
+                    "flash_delay_us": int(self._current_flash_delay_us),
+                    "x_scan_attempt_index": int(self._x_scan_attempt_index),
+                },
             )
             self._request_settings_with_recording(
                 settings,
@@ -2761,9 +2783,10 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 "nozzle_px": nozzle_px,
                 "n_contours": int(n_contours),
                 "scan_state": {
-                    "base_delay_us": int(self._base_delay_us),
-                    "delay_idx": int(self._delay_idx),
-                    "pressure_level": int(self._pressure_level),
+                    "flash_delay_us": int(self._current_flash_delay_us),
+                    "x_scan_attempt_index": int(self._x_scan_attempt_index),
+                    "x_scan_half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
+                    "x_scan_anchor": dict(self._x_scan_anchor or {}),
                     "base_pressure": float(self._base_pressure) if self._base_pressure is not None else None,
                     "recenter_iterations": int(self._recenter_iters),
                 },
@@ -2773,9 +2796,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         )
 
         if status == "OK":
-            if n_contours > 1:
-                self.stageChanged.emit(f"Nozzle Pos - Multiple contours found ({n_contours}); using top-most candidate.")
+            self._x_scan_active = False
             self.presentImageSignal.emit(debug_img)
+            if n_contours > 1:
+                self._handle_multiple_contours(int(n_contours), nozzle_px)
+                return
             decision = self._recenter_or_finish(nozzle_px)
             if decision:
                 self._record_decision(
@@ -2785,42 +2810,160 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             return
 
         if status == "NO_SIGNAL":
-            # Substantial pressure bump and immediate retest
-            advanced, settings_or_err = self._escalate_pressure_on_no_signal()
-            if not advanced:
-                self._record_decision("abort_no_signal", {"reason": str(settings_or_err)})
-                self.calibrationError.emit(settings_or_err)  # error message string
-                return
-            
-            # After a pressure change, discard the next droplet frame
-            self._throwaway_pending = True
-            self.stageChanged.emit(settings_or_err.get("_stage_msg", "Raising pressure and retesting"))
-            # apply new pressure (and keep current delay)
-            new_settings = {k: v for k, v in settings_or_err.items() if not k.startswith("_")}
-            self._record_decision("pressure_bump", {"status": "NO_SIGNAL", "settings": new_settings})
-            self._request_settings_with_recording(
-                new_settings,
-                self.calibration_manager.emitSettingsChangeCompleted,
-                context="nozzle_no_signal_pressure_bump",
-            )
+            self._handle_missing_nozzle(status)
             return
 
         # status == "NONE" → keep your existing delay-scan plan, then (smaller) pressure bump
-        advanced, settings = self._advance_scan_plan()
+        self._handle_missing_nozzle(status)
+
+    def _current_position_dict(self):
+        pos = self.model.machine_model.get_current_position_dict() or {}
+        return {
+            "X": int(pos.get("X", 0)),
+            "Y": int(pos.get("Y", 0)),
+            "Z": int(pos.get("Z", 0)),
+        }
+
+    def _estimate_half_fov_x_steps(self):
+        try:
+            dX, _dY, _dZ = self.model.droplet_camera_model.compute_move_by_fraction(
+                float(self.nozzle_search_half_fov_fraction),
+                0.0,
+            )
+            mag = abs(int(round(float(dX))))
+            if mag > 0:
+                return int(mag)
+        except Exception:
+            pass
+        return int(max(1, int(self.nozzle_search_min_half_fov_x_steps)))
+
+    def _next_x_scan_target(self):
+        if self._x_scan_anchor is None:
+            self._x_scan_anchor = self._current_position_dict()
+        half_steps = int(max(1, int(self._x_scan_half_fov_x_steps or self._estimate_half_fov_x_steps())))
+        attempts = (
+            ("x_scan_right_from_anchor", -half_steps, "Nozzle Pos - No contour; scanning right from start point."),
+            ("x_scan_left_from_anchor", +half_steps, "Nozzle Pos - No contour; scanning left from start point."),
+        )
+        cur = self._current_position_dict()
+        anchor = self._x_scan_anchor
+
+        while self._x_scan_attempt_index < len(attempts):
+            decision, dx, msg = attempts[self._x_scan_attempt_index]
+            self._x_scan_attempt_index += 1
+            tgt = self._clamp_abs_target(
+                int(anchor["X"]) + int(dx),
+                int(anchor["Y"]),
+                int(anchor["Z"]),
+            )
+            if (int(tgt[0]), int(tgt[1]), int(tgt[2])) == (int(cur["X"]), int(cur["Y"]), int(cur["Z"])):
+                self._record_event(
+                    "x_scan_target_collapsed",
+                    {
+                        "decision": str(decision),
+                        "target_position": tgt,
+                        "anchor": dict(anchor),
+                        "half_fov_x_steps": int(half_steps),
+                    },
+                    level="warning",
+                )
+                continue
+            return True, decision, msg, tgt
+        return False, "", "", None
+
+    def _handle_missing_nozzle(self, status: str):
+        advanced, decision, stage_msg, tgt = self._next_x_scan_target()
         if not advanced:
-            self._record_decision("abort_delay_scan", {"status": "NONE"})
-            self.calibrationError.emit("Nozzle Pos - No droplet/nozzle detected after scanning delays and pressure levels.")
+            self._x_scan_active = False
+            msg = "Nozzle Pos - No nozzle contour detected after X-axis scan around start point. Check X/Z alignment."
+            self._record_decision(
+                "x_scan_exhausted_abort",
+                {
+                    "status": str(status),
+                    "anchor": dict(self._x_scan_anchor or {}),
+                    "half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
+                    "attempt_index": int(self._x_scan_attempt_index),
+                },
+            )
+            self.calibrationError.emit(msg)
             return
-        if "print_pressure" in settings:
-            self._throwaway_pending = True
+
+        self.stageChanged.emit(f"{stage_msg} target={tgt}")
         self._record_decision(
-            "pressure_bump" if "print_pressure" in settings else "delay_scan",
-            {"status": "NONE", "settings": settings},
+            decision,
+            {
+                "status": str(status),
+                "target_position": tgt,
+                "anchor": dict(self._x_scan_anchor or {}),
+                "half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
+                "attempt_index": int(self._x_scan_attempt_index),
+            },
+        )
+        self._x_scan_active = True
+        self._request_move_absolute_with_timeout(
+            tgt,
+            timeout_ms=self.move_timeout_ms,
+            err_msg="Nozzle Pos - X scan move timed out.",
+        )
+
+    def _handle_multiple_contours(self, n_contours: int, nozzle_px):
+        self._x_scan_active = False
+        cur_delay = int(self._clamp_delay(getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)))
+        if cur_delay <= int(self.min_flash_delay_us):
+            msg = (
+                f"Nozzle Pos - Multiple contours persist at minimum flash delay "
+                f"({int(self.min_flash_delay_us)} us); unable to isolate attached droplet."
+            )
+            self._record_decision(
+                "multi_contour_min_delay_abort",
+                {
+                    "n_contours": int(n_contours),
+                    "flash_delay_us": int(cur_delay),
+                    "nozzle_px": nozzle_px,
+                },
+            )
+            self.calibrationError.emit(msg)
+            return
+
+        new_delay = int(self._clamp_delay(cur_delay - int(self.multi_contour_delay_step_us)))
+        if new_delay >= cur_delay:
+            msg = "Nozzle Pos - Unable to reduce flash delay for multi-contour recovery."
+            self._record_decision(
+                "multi_contour_min_delay_abort",
+                {
+                    "n_contours": int(n_contours),
+                    "flash_delay_us": int(cur_delay),
+                    "requested_new_delay_us": int(new_delay),
+                    "nozzle_px": nozzle_px,
+                },
+            )
+            self.calibrationError.emit(msg)
+            return
+
+        self._current_flash_delay_us = int(new_delay)
+        settings = {
+            "num_droplets": 1,
+            "flash_delay": int(self._current_flash_delay_us),
+        }
+        self.stageChanged.emit(
+            f"Nozzle Pos - Multiple contours ({int(n_contours)}); decreasing flash delay to "
+            f"{int(self._current_flash_delay_us)} us and reassessing."
+        )
+        self._record_decision(
+            "multi_contour_delay_backoff",
+            {
+                "n_contours": int(n_contours),
+                "previous_flash_delay_us": int(cur_delay),
+                "flash_delay_us": int(self._current_flash_delay_us),
+                "step_us": int(self.multi_contour_delay_step_us),
+                "nozzle_px": nozzle_px,
+                "settings": settings,
+            },
         )
         self._request_settings_with_recording(
             settings,
             self.calibration_manager.emitSettingsChangeCompleted,
-            context="nozzle_none_scan_advance",
+            context="nozzle_multi_contour_delay_backoff",
         )
 
     # ----------------- Helpers: detection & movement -----------------
@@ -2972,6 +3115,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         img_w, img_h = self.model.droplet_camera_model.get_image_size()
         target = (img_w // 2, int(self.top_margin_frac * img_h))
         if self._is_top_centered(nozzle_px, (img_w, img_h), target):
+            self._x_scan_active = False
             self.stageChanged.emit("Nozzle near top-center; done.")
             # record final machine position
             machine_pos = self.model.machine_model.get_current_position_dict()
@@ -3026,6 +3170,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             return None
 
         self.stageChanged.emit(f"Nozzle offset detected; moving by {clamped_move}")
+        self._x_scan_active = False
         self._record_event(
             "recenter_planned",
             {
