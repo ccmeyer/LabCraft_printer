@@ -1,0 +1,377 @@
+{
+  "schema_version": 1,
+  "process_name": "NozzlePositionCalibrationProcess",
+  "phase": "nozzle_position",
+  "defaults": {
+    "background_replicates_min": 1,
+    "droplet_replicates_min": 3
+  },
+  "cases": [
+    {
+      "case_id": "NP_OK_CENTERED",
+      "label": "Centered nozzle",
+      "tooltip": "Single clear nozzle contour already near top-center.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Centered detection",
+          "tooltip": "Nozzle is visible and already in the target top-center band.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "finish"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_OK_LEFT",
+      "label": "Left offset",
+      "tooltip": "Nozzle contour is valid but left of center.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Left recenter",
+          "tooltip": "Capture a valid nozzle contour left of center so recenter is required.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_OK_RIGHT",
+      "label": "Right offset",
+      "tooltip": "Nozzle contour is valid but right of center.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Right recenter",
+          "tooltip": "Capture a valid nozzle contour right of center so recenter is required.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_OK_LOW",
+      "label": "Low in frame",
+      "tooltip": "Nozzle contour is valid but too low in the frame.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Low recenter",
+          "tooltip": "Capture a valid nozzle contour below the top target band.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_OK_NEAR_LEFT_EDGE",
+      "label": "Near left edge",
+      "tooltip": "Valid contour close to the left image boundary.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Left edge valid",
+          "tooltip": "Capture a valid nozzle contour near left image edge without clipping it entirely.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_OK_NEAR_RIGHT_EDGE",
+      "label": "Near right edge",
+      "tooltip": "Valid contour close to the right image boundary.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Right edge valid",
+          "tooltip": "Capture a valid nozzle contour near right image edge without clipping it entirely.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_MC_TWO_VALID_LOWER_WINS",
+      "label": "Two valid contours",
+      "tooltip": "Two valid contours where lower candidate should be selected.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Lower candidate wins",
+          "tooltip": "Capture two valid candidates; lower contour should be selected deterministically.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_MC_TIE_BOTTOM_LARGER_WINS",
+      "label": "Tie by bottom",
+      "tooltip": "Bottom tie between candidates; larger area should win.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Tie-break by area",
+          "tooltip": "Capture two candidates with similar bottom; larger area should be selected.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NO_SIGNAL_EMPTY",
+      "label": "No signal empty",
+      "tooltip": "No detectable foreground difference for droplet image.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Empty no-signal",
+          "tooltip": "Capture a frame pair with effectively no droplet signal.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NO_SIGNAL_WEAK",
+      "label": "No signal weak",
+      "tooltip": "Very weak foreground below no-signal threshold.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Weak no-signal",
+          "tooltip": "Capture a faint signal that remains below no-signal threshold.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NONE_SMALL_AREA",
+      "label": "None small area",
+      "tooltip": "Foreground exists but all contours are too small.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Small-area reject",
+          "tooltip": "Capture foreground specks only; no contour should pass area filter.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NONE_SHORT_HEIGHT",
+      "label": "None short height",
+      "tooltip": "Foreground contour exists but fails minimum bbox height.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Short-height reject",
+          "tooltip": "Capture a short contour that fails min-stream-height filter.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NONE_LOWER_BAND_ONLY",
+      "label": "None lower band only",
+      "tooltip": "Contour appears only below allowed top search band.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Lower-band reject",
+          "tooltip": "Capture contour only in lower frame region; should be rejected by top-band filter.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NONE_SPECKLE_NOISE",
+      "label": "None speckle noise",
+      "tooltip": "Noisy speckle foreground that should not produce valid contour.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Noise reject",
+          "tooltip": "Capture noisy diff frame with no valid nozzle stream contour.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_SEQ_WARMUP_DISCARD",
+      "label": "Warmup discard sequence",
+      "tooltip": "Sequence demonstrating warmup frame discard before valid detection.",
+      "steps": [
+        {
+          "step_id": "bg_baseline",
+          "label": "Baseline background",
+          "tooltip": "Background frame captured before warmup/measurement frames.",
+          "required": { "background": 1, "droplet": 0 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        },
+        {
+          "step_id": "dr_warmup_throwaway",
+          "label": "Warmup throwaway",
+          "tooltip": "First droplet frame intended as warmup and discarded.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        },
+        {
+          "step_id": "dr_post_warmup_ok",
+          "label": "Post-warmup valid",
+          "tooltip": "Second droplet frame after warmup, valid nozzle contour.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_SEQ_DELAY_SCAN_TO_SUCCESS",
+      "label": "Delay scan to success",
+      "tooltip": "Sequence that requires delay increments before valid detection.",
+      "steps": [
+        {
+          "step_id": "bg_baseline",
+          "label": "Baseline background",
+          "tooltip": "Background frame for this delay-scan sequence.",
+          "required": { "background": 1, "droplet": 0 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        },
+        {
+          "step_id": "dr_delay_scan_early_none",
+          "label": "Early delay none",
+          "tooltip": "Early flash delay frame should return NONE.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        },
+        {
+          "step_id": "dr_delay_scan_mid_none",
+          "label": "Mid delay none",
+          "tooltip": "Mid flash delay frame should still return NONE.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        },
+        {
+          "step_id": "dr_delay_scan_late_ok",
+          "label": "Late delay valid",
+          "tooltip": "Later flash delay frame returns valid nozzle contour.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_SEQ_PRESSURE_BUMP_TO_SUCCESS",
+      "label": "Pressure bump to success",
+      "tooltip": "Sequence requiring pressure bumps before valid detection.",
+      "steps": [
+        {
+          "step_id": "bg_baseline",
+          "label": "Baseline background",
+          "tooltip": "Background frame for pressure bump sequence.",
+          "required": { "background": 1, "droplet": 0 },
+          "expected_status": "NONE",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_base_no_signal",
+          "label": "Base pressure no-signal",
+          "tooltip": "Base pressure frame should return NO_SIGNAL.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_pressure_bump_1_no_signal",
+          "label": "Bump 1 no-signal",
+          "tooltip": "First pressure bump frame should still return NO_SIGNAL.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_pressure_bump_2_ok",
+          "label": "Bump 2 valid",
+          "tooltip": "Second pressure bump frame should return valid contour.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "OK",
+          "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_SEQ_NO_SIGNAL_TO_ABORT",
+      "label": "No-signal to abort",
+      "tooltip": "Sequence that stays no-signal until process aborts.",
+      "steps": [
+        {
+          "step_id": "bg_baseline",
+          "label": "Baseline background",
+          "tooltip": "Background frame for repeated no-signal abort sequence.",
+          "required": { "background": 1, "droplet": 0 },
+          "expected_status": "NONE",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_base_no_signal",
+          "label": "Base no-signal",
+          "tooltip": "Base pressure frame returns NO_SIGNAL.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_bump_1_no_signal",
+          "label": "Bump 1 no-signal",
+          "tooltip": "First pressure bump still no-signal.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_bump_2_no_signal",
+          "label": "Bump 2 no-signal",
+          "tooltip": "Second pressure bump still no-signal.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        },
+        {
+          "step_id": "dr_cap_no_signal_abort",
+          "label": "Cap reached abort",
+          "tooltip": "No-signal at pressure cap where process should abort.",
+          "required": { "background": 0, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "abort"
+        }
+      ]
+    }
+  ]
+}

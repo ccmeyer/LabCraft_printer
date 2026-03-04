@@ -19,6 +19,7 @@ import shutil
 from datetime import datetime
 import cv2
 from utilities import ShortcutManager
+from .Model import NozzlePositionChecklistStore
 
 class RackCalibrationFixDialog(QtWidgets.QDialog):
     def __init__(self, main_window, model, controller):
@@ -1701,6 +1702,467 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.controller.stop_read_camera()
         self.controller.disable_print_profile()
         event.accept()
+
+
+class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
+    PROCESS_NAME = "NozzlePositionCalibrationProcess"
+
+    def __init__(self, main_window, model, controller):
+        super().__init__()
+        self.main_window = main_window
+        self.color_dict = getattr(main_window, "color_dict", {})
+        self.model = model
+        self.controller = controller
+        self.droplet_camera_model = model.droplet_camera_model
+
+        self.store = NozzlePositionChecklistStore(self.model, process_name=self.PROCESS_NAME)
+        self.store.begin_session()
+
+        self._rows = self.store.get_rows()
+        self._capture_inflight = False
+
+        self._build_ui()
+        self._connect_signals()
+        self._populate_checklist()
+        self._sync_setting_controls_from_model()
+
+        self.controller.start_droplet_camera()
+        self.controller.start_read_camera()
+
+        self._set_status(f"Session created: {self.store.session_id}", color="darkgreen")
+
+    def _build_ui(self):
+        self.setWindowTitle("Nozzle Position Dataset Capture")
+        self.resize(1300, 900)
+
+        root = QtWidgets.QHBoxLayout(self)
+
+        left = QtWidgets.QWidget()
+        left_v = QtWidgets.QVBoxLayout(left)
+        left_v.setContentsMargins(6, 6, 6, 6)
+        left_v.setSpacing(8)
+
+        session_group = QtWidgets.QGroupBox("Dataset Session")
+        session_form = QtWidgets.QFormLayout(session_group)
+        self.root_path_value = QtWidgets.QLabel(self.store.base_dir)
+        self.root_path_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.manifest_path_value = QtWidgets.QLabel(self.store.manifest_path)
+        self.manifest_path_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.session_path_value = QtWidgets.QLabel(self.store.session_dir)
+        self.session_path_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        session_form.addRow("Root:", self.root_path_value)
+        session_form.addRow("Manifest:", self.manifest_path_value)
+        session_form.addRow("Session:", self.session_path_value)
+        left_v.addWidget(session_group)
+
+        checklist_group = QtWidgets.QGroupBox("Image Checklist")
+        checklist_v = QtWidgets.QVBoxLayout(checklist_group)
+        self.checklist_table = QtWidgets.QTableWidget(0, 6)
+        self.checklist_table.setHorizontalHeaderLabels(
+            ["Status", "Case", "Step", "Expected", "Required", "Captured"]
+        )
+        self.checklist_table.verticalHeader().setVisible(False)
+        self.checklist_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.checklist_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.checklist_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.checklist_table.setAlternatingRowColors(True)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
+        self.checklist_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeToContents)
+        checklist_v.addWidget(self.checklist_table)
+
+        self.selected_label_value = QtWidgets.QLabel("Selected: —")
+        self.selected_label_value.setWordWrap(True)
+        checklist_v.addWidget(self.selected_label_value)
+        left_v.addWidget(checklist_group, 1)
+
+        settings_group = QtWidgets.QGroupBox("Imaging Conditions")
+        settings_grid = QtWidgets.QGridLayout(settings_group)
+        r = 0
+        self.flash_duration_spin = QtWidgets.QSpinBox()
+        self.flash_duration_spin.setRange(0, 10000)
+        self.flash_duration_spin.setSingleStep(100)
+        settings_grid.addWidget(QtWidgets.QLabel("Flash Duration (us):"), r, 0)
+        settings_grid.addWidget(self.flash_duration_spin, r, 1)
+        r += 1
+
+        self.flash_delay_spin = QtWidgets.QSpinBox()
+        self.flash_delay_spin.setRange(0, 50000)
+        self.flash_delay_spin.setSingleStep(100)
+        settings_grid.addWidget(QtWidgets.QLabel("Flash Delay (us):"), r, 0)
+        settings_grid.addWidget(self.flash_delay_spin, r, 1)
+        r += 1
+
+        self.exposure_spin = QtWidgets.QSpinBox()
+        self.exposure_spin.setRange(0, 1_000_000)
+        self.exposure_spin.setSingleStep(1000)
+        settings_grid.addWidget(QtWidgets.QLabel("Exposure (us):"), r, 0)
+        settings_grid.addWidget(self.exposure_spin, r, 1)
+        r += 1
+
+        self.num_droplets_spin = QtWidgets.QSpinBox()
+        self.num_droplets_spin.setRange(1, 20)
+        self.num_droplets_spin.setValue(1)
+        settings_grid.addWidget(QtWidgets.QLabel("Droplets per image:"), r, 0)
+        settings_grid.addWidget(self.num_droplets_spin, r, 1)
+        r += 1
+
+        self.print_pw_spin = QtWidgets.QSpinBox()
+        self.print_pw_spin.setRange(0, 10000)
+        self.print_pw_spin.setSingleStep(50)
+        settings_grid.addWidget(QtWidgets.QLabel("Print Pulse Width (us):"), r, 0)
+        settings_grid.addWidget(self.print_pw_spin, r, 1)
+        r += 1
+
+        self.print_pressure_spin = QtWidgets.QDoubleSpinBox()
+        self.print_pressure_spin.setDecimals(3)
+        self.print_pressure_spin.setSingleStep(0.01)
+        try:
+            p_lo, p_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            p_lo, p_hi = 0.1, 5.0
+        self.print_pressure_spin.setRange(float(p_lo), float(p_hi))
+        settings_grid.addWidget(QtWidgets.QLabel("Print Pressure (psi):"), r, 0)
+        settings_grid.addWidget(self.print_pressure_spin, r, 1)
+        r += 1
+
+        left_v.addWidget(settings_group)
+
+        capture_group = QtWidgets.QGroupBox("Capture")
+        capture_v = QtWidgets.QVBoxLayout(capture_group)
+        self.capture_background_btn = QtWidgets.QPushButton("Capture Background (0 droplets)")
+        self.capture_droplet_btn = QtWidgets.QPushButton("Capture Droplet")
+        self.reject_last_btn = QtWidgets.QPushButton("Reject Last Image")
+        capture_v.addWidget(self.capture_background_btn)
+        capture_v.addWidget(self.capture_droplet_btn)
+        capture_v.addWidget(self.reject_last_btn)
+
+        self.fsm_hint_edit = QtWidgets.QLineEdit()
+        self.fsm_hint_edit.setPlaceholderText("FSM hint (optional), e.g. analyze")
+        self.operator_note_edit = QtWidgets.QLineEdit()
+        self.operator_note_edit.setPlaceholderText("Operator note (optional)")
+        capture_v.addWidget(self.fsm_hint_edit)
+        capture_v.addWidget(self.operator_note_edit)
+
+        self.status_label = QtWidgets.QLabel("Idle")
+        self.status_label.setWordWrap(True)
+        capture_v.addWidget(self.status_label)
+        left_v.addWidget(capture_group)
+
+        right = QtWidgets.QWidget()
+        right_v = QtWidgets.QVBoxLayout(right)
+        right_v.setContentsMargins(6, 6, 6, 6)
+        right_v.setSpacing(8)
+
+        self.preview_label = QtWidgets.QLabel("No image captured yet.")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumSize(640, 640)
+        self.preview_label.setStyleSheet("border: 1px solid #555;")
+        right_v.addWidget(self.preview_label, 1)
+
+        self.last_record_label = QtWidgets.QLabel("Last record: —")
+        self.last_record_label.setWordWrap(True)
+        right_v.addWidget(self.last_record_label)
+
+        root.addWidget(left, 0)
+        root.addWidget(right, 1)
+        root.setStretchFactor(left, 0)
+        root.setStretchFactor(right, 1)
+
+    def _connect_signals(self):
+        self.checklist_table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.capture_background_btn.clicked.connect(lambda: self._capture_for_role("background"))
+        self.capture_droplet_btn.clicked.connect(lambda: self._capture_for_role("droplet"))
+        self.reject_last_btn.clicked.connect(self._reject_last_image)
+
+        self.flash_duration_spin.valueChanged.connect(
+            lambda v: self.controller.set_flash_duration(int(v))
+        )
+        self.flash_delay_spin.valueChanged.connect(
+            lambda v: self.controller.set_flash_delay(int(v))
+        )
+        self.exposure_spin.valueChanged.connect(
+            lambda v: self.controller.set_exposure_time(int(v))
+        )
+        self.print_pw_spin.valueChanged.connect(
+            lambda v: self.controller.set_print_pulse_width(int(v), manual=True)
+        )
+        self.print_pressure_spin.valueChanged.connect(
+            lambda v: self.controller.set_absolute_print_pressure(float(v), manual=True)
+        )
+
+    def _sync_setting_controls_from_model(self):
+        try:
+            self.flash_duration_spin.setValue(int(self.model.droplet_camera_model.get_flash_duration()))
+        except Exception:
+            pass
+        try:
+            self.flash_delay_spin.setValue(int(self.model.droplet_camera_model.get_flash_delay()))
+        except Exception:
+            pass
+        try:
+            self.exposure_spin.setValue(int(self.model.droplet_camera_model.get_exposure_time()))
+        except Exception:
+            pass
+        try:
+            self.print_pw_spin.setValue(int(self.model.machine_model.get_print_pulse_width()))
+        except Exception:
+            pass
+        try:
+            self.print_pressure_spin.setValue(float(self.model.machine_model.get_current_print_pressure()))
+        except Exception:
+            pass
+
+    def _populate_checklist(self):
+        statuses = self.store.get_all_status()
+        rows = self.store.get_rows()
+        self.checklist_table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            st = statuses[row["row_key"]]
+            bg = int(st["accepted_background"])
+            dr = int(st["accepted_droplet"])
+            bg_req = int(st["required_background"])
+            dr_req = int(st["required_droplet"])
+            if st["complete"]:
+                status_text = "Complete"
+            elif (bg > 0) or (dr > 0):
+                status_text = "In Progress"
+            else:
+                status_text = "Missing"
+
+            expected = f"{row.get('expected_status','')}/{row.get('expected_decision','')}".strip("/")
+            required = f"bg>={bg_req}, dr>={dr_req}"
+            captured = f"bg {bg}/{bg_req}, dr {dr}/{dr_req}"
+
+            status_item = QtWidgets.QTableWidgetItem(status_text)
+            status_item.setData(Qt.UserRole, row["row_key"])
+            case_item = QtWidgets.QTableWidgetItem(row["case_id"])
+            step_item = QtWidgets.QTableWidgetItem(row["step_label"])
+            exp_item = QtWidgets.QTableWidgetItem(expected)
+            req_item = QtWidgets.QTableWidgetItem(required)
+            cap_item = QtWidgets.QTableWidgetItem(captured)
+
+            tip = row.get("tooltip", "") or row["step_label"]
+            for it in (status_item, case_item, step_item, exp_item, req_item, cap_item):
+                it.setToolTip(tip)
+
+            if st["complete"]:
+                brush = QtGui.QBrush(QtGui.QColor(110, 200, 120))
+                status_item.setForeground(brush)
+            elif status_text == "In Progress":
+                brush = QtGui.QBrush(QtGui.QColor(240, 200, 120))
+                status_item.setForeground(brush)
+            else:
+                brush = QtGui.QBrush(QtGui.QColor(220, 120, 120))
+                status_item.setForeground(brush)
+
+            self.checklist_table.setItem(i, 0, status_item)
+            self.checklist_table.setItem(i, 1, case_item)
+            self.checklist_table.setItem(i, 2, step_item)
+            self.checklist_table.setItem(i, 3, exp_item)
+            self.checklist_table.setItem(i, 4, req_item)
+            self.checklist_table.setItem(i, 5, cap_item)
+
+        if rows and self.checklist_table.currentRow() < 0:
+            self.checklist_table.selectRow(0)
+        self._update_selection_label()
+
+    def _on_selection_changed(self):
+        self._update_selection_label()
+
+    def _selected_row(self):
+        ridx = self.checklist_table.currentRow()
+        if ridx < 0:
+            return None
+        item = self.checklist_table.item(ridx, 0)
+        if item is None:
+            return None
+        row_key = item.data(Qt.UserRole)
+        if not row_key:
+            return None
+        return self.store.get_row(row_key)
+
+    def _update_selection_label(self):
+        row = self._selected_row()
+        if not row:
+            self.selected_label_value.setText("Selected: —")
+            return
+        txt = f"Selected: {row['case_id']} / {row['step_label']}\n{row.get('tooltip','')}"
+        self.selected_label_value.setText(txt)
+
+    def _set_buttons_enabled(self, enabled: bool):
+        self.capture_background_btn.setEnabled(enabled)
+        self.capture_droplet_btn.setEnabled(enabled)
+        self.reject_last_btn.setEnabled(enabled)
+
+    def _set_status(self, text: str, *, color: str = "black"):
+        self.status_label.setText(str(text))
+        self.status_label.setStyleSheet(f"color: {color};")
+
+    def _machine_state_snapshot(self):
+        mm = self.model.machine_model
+        try:
+            pos = mm.get_current_position_dict() or {}
+        except Exception:
+            pos = {}
+        out = {
+            "X": int(pos.get("X", 0)) if isinstance(pos, dict) else 0,
+            "Y": int(pos.get("Y", 0)) if isinstance(pos, dict) else 0,
+            "Z": int(pos.get("Z", 0)) if isinstance(pos, dict) else 0,
+        }
+        try:
+            out["print_pressure"] = float(mm.get_current_print_pressure())
+        except Exception:
+            out["print_pressure"] = None
+        try:
+            out["print_pulse_width_us"] = int(mm.get_print_pulse_width())
+        except Exception:
+            out["print_pulse_width_us"] = None
+        return out
+
+    def _camera_settings_snapshot(self):
+        out = {}
+        try:
+            nf, fdur, fdelay, ndrop, exp = self.model.droplet_camera_model.get_image_metadata()
+            out.update(
+                {
+                    "num_flashes": int(nf),
+                    "flash_duration_us": int(fdur),
+                    "flash_delay_us": int(fdelay),
+                    "num_droplets": int(ndrop),
+                    "exposure_time_us": int(exp),
+                }
+            )
+        except Exception:
+            pass
+        return out
+
+    def _capture_for_role(self, role: str):
+        if self._capture_inflight:
+            return
+        row = self._selected_row()
+        if row is None:
+            QtWidgets.QMessageBox.warning(self, "No selection", "Select a checklist row before capturing.")
+            return
+
+        target_droplets = 0 if role == "background" else int(max(1, self.num_droplets_spin.value()))
+        self._capture_inflight = True
+        self._set_buttons_enabled(False)
+        self._set_status(f"Capturing {role} for {row['case_id']} / {row['step_id']}...", color="darkblue")
+
+        def _on_frame(frame):
+            self._capture_inflight = False
+            self._set_buttons_enabled(True)
+
+            if frame is None:
+                self._set_status("Capture failed.", color="red")
+                QtWidgets.QMessageBox.warning(self, "Capture failed", "Camera did not return a frame.")
+                return
+
+            selected_label = f"{row['case_label']} / {row['step_label']}"
+            try:
+                rec = self.store.capture_for_row(
+                    row["row_key"],
+                    role,
+                    frame,
+                    selected_label=selected_label,
+                    machine_state=self._machine_state_snapshot(),
+                    camera_settings=self._camera_settings_snapshot(),
+                    reagent_name=self.store.resolve_reagent_name(),
+                    fsm_hint=self.fsm_hint_edit.text().strip(),
+                    operator_note=self.operator_note_edit.text().strip(),
+                )
+            except Exception as e:
+                self._set_status(f"Save failed: {e}", color="red")
+                QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
+                return
+
+            self._show_preview(frame)
+            self.last_record_label.setText(
+                f"Last record: {rec['record_id']} | {rec['capture_role']} | {rec['case_id']}:{rec['step_id']}\n"
+                f"{rec['image_relpath']}"
+            )
+            self._populate_checklist()
+
+            if self.store.is_complete():
+                self._set_status("Checklist complete (minimum required replicates met).", color="darkgreen")
+            else:
+                self._set_status("Capture stored.", color="darkgreen")
+
+        def _after_set_droplets():
+            ok = self.controller.capture_droplet_image(callback=_on_frame)
+            if ok is False:
+                self._capture_inflight = False
+                self._set_buttons_enabled(True)
+                self._set_status("Capture request was dropped (capture already pending).", color="red")
+
+        try:
+            self.controller.set_imaging_droplets(int(target_droplets), callback=_after_set_droplets)
+        except Exception as e:
+            self._capture_inflight = False
+            self._set_buttons_enabled(True)
+            self._set_status(f"Unable to set imaging droplets: {e}", color="red")
+
+    def _reject_last_image(self):
+        reason, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Reject Last Image",
+            "Reason (optional):",
+            QtWidgets.QLineEdit.Normal,
+            "",
+        )
+        if not ok:
+            return
+        evt = self.store.reject_last_capture(reason=reason)
+        if evt is None:
+            QtWidgets.QMessageBox.information(self, "Nothing to reject", "No previous capture to reject.")
+            return
+        self._populate_checklist()
+        self._set_status("Last capture marked as rejected.", color="darkorange")
+
+    def _numpy_to_qimage(self, image):
+        if image is None:
+            return QImage()
+        if image.ndim == 2:
+            h, w = image.shape
+            return QImage(image.data, w, h, w, QImage.Format_Grayscale8).copy()
+        if image.ndim == 3 and image.shape[2] == 3:
+            h, w, c = image.shape
+            return QImage(image.data, w, h, c * w, QImage.Format_RGB888).copy()
+        if image.ndim == 3 and image.shape[2] == 4:
+            h, w, c = image.shape
+            return QImage(image.data, w, h, c * w, QImage.Format_RGBA8888).copy()
+        return QImage()
+
+    def _show_preview(self, image):
+        q = self._numpy_to_qimage(image)
+        pm = QPixmap.fromImage(q)
+        pm = pm.scaled(
+            self.preview_label.width(),
+            self.preview_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.preview_label.setPixmap(pm)
+
+    def closeEvent(self, event):
+        try:
+            self.controller.stop_read_camera()
+        except Exception:
+            pass
+        try:
+            self.controller.stop_droplet_camera()
+        except Exception:
+            pass
+        try:
+            self.controller.disable_print_profile()
+        except Exception:
+            pass
+        event.accept()
+
 
 class RefuelCameraWindow(QtWidgets.QDialog):
     def __init__(self,main_window,model,controller):

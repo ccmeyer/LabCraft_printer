@@ -21,7 +21,7 @@ from skimage.metrics import structural_similarity as ssim
 import random
 import pyDOE3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import glob
 import shutil
 import csv
@@ -52,6 +52,348 @@ def numpy_encoder(obj):
     except Exception:
         pass
     return str(obj)
+
+
+class NozzlePositionChecklistStore:
+    """
+    Manifest-backed image/metadata recorder for NozzlePositionCalibrationProcess.
+    Saves captures under:
+      FreeRTOS-interface/CalibrationClasses/test_images/NozzlePositionCalibrationProcess/
+    """
+
+    PROCESS_NAME = "NozzlePositionCalibrationProcess"
+
+    def __init__(
+        self,
+        model,
+        *,
+        process_name: str | None = None,
+        base_dir: str | None = None,
+        manifest_path: str | None = None,
+    ):
+        self.model = model
+        self.process_name = process_name or self.PROCESS_NAME
+        self.base_dir = os.path.abspath(
+            base_dir
+            or os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_images", self.process_name)
+        )
+        self.manifest_path = os.path.abspath(
+            manifest_path or os.path.join(self.base_dir, "checklist_manifest.v1.json")
+        )
+
+        self.manifest = None
+        self.rows = []
+        self._row_map = {}
+
+        self.session_id = None
+        self.session_dir = None
+        self.images_dir = None
+        self.records_path = None
+        self.session_meta_path = None
+
+        self._capture_records = []
+        self._capture_by_id = {}
+        self._rejected_ids = set()
+        self._last_capture_record_id = None
+
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.load_manifest()
+
+    @staticmethod
+    def validate_manifest(manifest: dict):
+        if not isinstance(manifest, dict):
+            raise ValueError("Checklist manifest must be a JSON object.")
+        if int(manifest.get("schema_version", -1)) != 1:
+            raise ValueError("Checklist manifest schema_version must be 1.")
+        if str(manifest.get("process_name", "")).strip() == "":
+            raise ValueError("Checklist manifest missing process_name.")
+
+        cases = manifest.get("cases")
+        if not isinstance(cases, list) or not cases:
+            raise ValueError("Checklist manifest must define non-empty 'cases'.")
+
+        seen_case_ids = set()
+        for case in cases:
+            case_id = str(case.get("case_id", "")).strip()
+            if not case_id:
+                raise ValueError("Checklist case missing case_id.")
+            if case_id in seen_case_ids:
+                raise ValueError(f"Duplicate checklist case_id: {case_id}")
+            seen_case_ids.add(case_id)
+
+            steps = case.get("steps")
+            if not isinstance(steps, list) or not steps:
+                raise ValueError(f"Checklist case '{case_id}' must define non-empty steps.")
+
+            seen_step_ids = set()
+            for step in steps:
+                step_id = str(step.get("step_id", "")).strip()
+                if not step_id:
+                    raise ValueError(f"Checklist case '{case_id}' has step with missing step_id.")
+                if step_id in seen_step_ids:
+                    raise ValueError(f"Checklist case '{case_id}' has duplicate step_id '{step_id}'.")
+                seen_step_ids.add(step_id)
+
+                req = step.get("required", {})
+                if not isinstance(req, dict):
+                    raise ValueError(f"Checklist case '{case_id}' step '{step_id}' required must be an object.")
+                for role in ("background", "droplet"):
+                    v = req.get(role, None)
+                    if v is None:
+                        continue
+                    if int(v) < 0:
+                        raise ValueError(
+                            f"Checklist case '{case_id}' step '{step_id}' has invalid required count for {role}."
+                        )
+
+    def load_manifest(self):
+        if not os.path.exists(self.manifest_path):
+            raise FileNotFoundError(f"Checklist manifest not found: {self.manifest_path}")
+        with open(self.manifest_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.validate_manifest(data)
+
+        self.manifest = data
+        self.rows = self._flatten_rows(data)
+        self._row_map = {r["row_key"]: r for r in self.rows}
+        return self.manifest
+
+    def _flatten_rows(self, manifest: dict):
+        defaults = manifest.get("defaults", {}) or {}
+        bg_default = max(0, int(defaults.get("background_replicates_min", 1)))
+        dr_default = max(0, int(defaults.get("droplet_replicates_min", 3)))
+
+        rows = []
+        for case in manifest.get("cases", []):
+            case_id = str(case.get("case_id", "")).strip()
+            case_label = str(case.get("label", case_id)).strip() or case_id
+            case_tip = str(case.get("tooltip", "")).strip()
+            steps = case.get("steps", []) or []
+
+            for idx, step in enumerate(steps):
+                step_id = str(step.get("step_id", "")).strip() or f"step_{idx+1}"
+                step_label = str(step.get("label", step_id)).strip() or step_id
+                step_tip = str(step.get("tooltip", "")).strip()
+                req = step.get("required", {}) or {}
+                bg_req = max(0, int(req.get("background", bg_default)))
+                dr_req = max(0, int(req.get("droplet", dr_default)))
+                expected_status = str(step.get("expected_status", case.get("expected_status", ""))).strip()
+                expected_decision = str(step.get("expected_decision", case.get("expected_decision", ""))).strip()
+
+                row_key = f"{case_id}:{step_id}"
+                rows.append(
+                    {
+                        "row_key": row_key,
+                        "case_id": case_id,
+                        "case_label": case_label,
+                        "case_tooltip": case_tip,
+                        "step_id": step_id,
+                        "step_label": step_label,
+                        "step_tooltip": step_tip,
+                        "required_background": bg_req,
+                        "required_droplet": dr_req,
+                        "expected_status": expected_status,
+                        "expected_decision": expected_decision,
+                        "tooltip": step_tip or case_tip or step_label,
+                    }
+                )
+        return rows
+
+    def begin_session(self, *, session_id: str | None = None):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.session_id = session_id or f"session_{ts}"
+        self.session_dir = os.path.join(self.base_dir, self.session_id)
+        self.images_dir = os.path.join(self.session_dir, "images")
+        self.records_path = os.path.join(self.session_dir, "records.jsonl")
+        self.session_meta_path = os.path.join(self.session_dir, "session_meta.json")
+
+        os.makedirs(self.images_dir, exist_ok=True)
+
+        self._capture_records = []
+        self._capture_by_id = {}
+        self._rejected_ids = set()
+        self._last_capture_record_id = None
+
+        meta = {
+            "schema_version": 1,
+            "process_name": self.process_name,
+            "manifest_path": os.path.relpath(self.manifest_path, self.session_dir).replace("\\", "/"),
+            "manifest_schema_version": int((self.manifest or {}).get("schema_version", 1)),
+            "session_id": self.session_id,
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        with open(self.session_meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        return self.session_dir
+
+    def ensure_session(self):
+        if self.session_dir is None:
+            self.begin_session()
+
+    def get_rows(self):
+        return list(self.rows)
+
+    def get_row(self, row_key: str):
+        return self._row_map.get(str(row_key))
+
+    def resolve_reagent_name(self) -> str:
+        try:
+            ph = self.model.rack_model.get_gripper_printer_head()
+            if ph is None:
+                return "unknown"
+            stock = ph.get_stock_solution()
+            name = getattr(stock, "reagent_name", None)
+            if name:
+                return str(name)
+            return str(stock) if stock is not None else "unknown"
+        except Exception:
+            return "unknown"
+
+    def _append_record(self, payload: dict):
+        self.ensure_session()
+        with open(self.records_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=numpy_encoder) + "\n")
+
+    def _prepare_image_for_write(self, image):
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            # UI frames are RGB; OpenCV writer expects BGR.
+            return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        raise ValueError(f"Unsupported image shape for write: {arr.shape}")
+
+    def _accepted_count(self, row_key: str, role: str) -> int:
+        count = 0
+        for rec in self._capture_records:
+            if rec.get("row_key") != row_key:
+                continue
+            if rec.get("capture_role") != role:
+                continue
+            rid = rec.get("record_id")
+            if rid in self._rejected_ids:
+                continue
+            count += 1
+        return count
+
+    def capture_for_row(
+        self,
+        row_key: str,
+        capture_role: str,
+        image,
+        *,
+        selected_label: str,
+        machine_state: dict | None = None,
+        camera_settings: dict | None = None,
+        reagent_name: str | None = None,
+        fsm_hint: str | None = None,
+        operator_note: str | None = None,
+    ):
+        self.ensure_session()
+        role = str(capture_role).lower().strip()
+        if role not in ("background", "droplet"):
+            raise ValueError(f"Unsupported capture role: {capture_role}")
+        row = self.get_row(row_key)
+        if row is None:
+            raise KeyError(f"Unknown checklist row key: {row_key}")
+
+        idx = self._accepted_count(row_key, role) + 1
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
+        filename = f"{stamp}_{role}_{idx:03d}.jpg"
+        relpath = os.path.join("images", row["case_id"], row["step_id"], role, filename)
+        relpath = relpath.replace("\\", "/")
+        abspath = os.path.join(self.session_dir, *relpath.split("/"))
+        os.makedirs(os.path.dirname(abspath), exist_ok=True)
+
+        out = self._prepare_image_for_write(image)
+        ok = cv2.imwrite(abspath, out)
+        if not ok:
+            raise IOError(f"Failed to write capture image: {abspath}")
+
+        record_id = str(uuid.uuid4())
+        payload = {
+            "type": "capture",
+            "record_id": record_id,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "session_id": self.session_id,
+            "process_name": self.process_name,
+            "row_key": row["row_key"],
+            "case_id": row["case_id"],
+            "case_label": row["case_label"],
+            "step_id": row["step_id"],
+            "step_label": row["step_label"],
+            "selected_label": str(selected_label),
+            "capture_role": role,
+            "image_relpath": relpath,
+            "required_background": int(row["required_background"]),
+            "required_droplet": int(row["required_droplet"]),
+            "expected_status": row.get("expected_status"),
+            "expected_decision": row.get("expected_decision"),
+            "machine_state": machine_state or {},
+            "camera_settings": camera_settings or {},
+            "reagent_name": str(reagent_name or "unknown"),
+            "fsm_hint": str(fsm_hint or ""),
+            "operator_note": str(operator_note or ""),
+            "rejected": False,
+        }
+        self._append_record(payload)
+        self._capture_records.append(payload)
+        self._capture_by_id[record_id] = payload
+        self._last_capture_record_id = record_id
+        return payload
+
+    def reject_last_capture(self, *, reason: str = ""):
+        self.ensure_session()
+        rid = self._last_capture_record_id
+        if not rid:
+            return None
+        if rid in self._rejected_ids:
+            return None
+
+        self._rejected_ids.add(rid)
+        if rid in self._capture_by_id:
+            self._capture_by_id[rid]["rejected"] = True
+            self._capture_by_id[rid]["rejected_at"] = (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+
+        evt = {
+            "type": "reject",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "session_id": self.session_id,
+            "target_record_id": rid,
+            "reason": str(reason or ""),
+        }
+        self._append_record(evt)
+        return evt
+
+    def get_row_status(self, row_key: str):
+        row = self.get_row(row_key)
+        if row is None:
+            raise KeyError(f"Unknown checklist row key: {row_key}")
+        bg = self._accepted_count(row_key, "background")
+        dr = self._accepted_count(row_key, "droplet")
+        complete = (bg >= int(row["required_background"])) and (dr >= int(row["required_droplet"]))
+        return {
+            "row_key": row_key,
+            "accepted_background": bg,
+            "accepted_droplet": dr,
+            "required_background": int(row["required_background"]),
+            "required_droplet": int(row["required_droplet"]),
+            "complete": bool(complete),
+        }
+
+    def get_all_status(self):
+        out = {}
+        for row in self.rows:
+            out[row["row_key"]] = self.get_row_status(row["row_key"])
+        return out
+
+    def is_complete(self) -> bool:
+        statuses = self.get_all_status()
+        return all(s.get("complete", False) for s in statuses.values())
 
 
 class CalibrationManager(QObject):

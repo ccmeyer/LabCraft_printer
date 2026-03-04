@@ -1182,8 +1182,13 @@ class Controller(QObject):
         Initiates a non-blocking image capture. If a callback is provided,
         it will be invoked with the captured frame once the capture completes.
         """
-        # self.pending_capture_callback = callback
+        if callback is not None:
+            if self.pending_capture_callback is not None:
+                print("Capture already pending; dropping new capture callback.")
+                return False
+            self.pending_capture_callback = callback
         self.machine.capture_droplet_image(throughput_mode=throughput_mode)
+        return True
 
     def stop_droplet_camera(self):
         self.machine.stop_droplet_camera()

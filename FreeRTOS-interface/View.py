@@ -1051,6 +1051,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.droplet_imager_button.clicked.connect(self.droplet_imager)
             self.layout.addWidget(self.droplet_imager_button, 5, 0, 1, 2)
 
+            self.nozzle_dataset_button = QtWidgets.QPushButton("Nozzle Image Checklist")
+            self.nozzle_dataset_button.clicked.connect(self.nozzle_position_dataset_capture)
+            self.layout.addWidget(self.nozzle_dataset_button, 6, 0, 1, 2)
+
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
         self.print_pulse_width_spinbox.setRange(0, 10000)
@@ -1210,6 +1214,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.controller.enable_print_profile()
         droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
+
+    def nozzle_position_dataset_capture(self):
+        """Open the NozzlePosition checklist-driven dataset capture dialog."""
+        self.controller.disconnect_droplet_camera_signals()
+        importlib.reload(CalibrationClasses.View)
+        importlib.reload(CalibrationClasses)
+        self.model.reload_droplet_model()
+        self.controller.connect_droplet_camera_signals()
+        self.controller.enable_print_profile()
+        dlg = CalibrationClasses.NozzlePositionDatasetCaptureWindow(self.main_window, self.model, self.controller)
+        dlg.exec()
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)
