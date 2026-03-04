@@ -1706,6 +1706,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
 class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
     PROCESS_NAME = "NozzlePositionCalibrationProcess"
+    _ALREADY_CONNECTED_HINTS = (
+        "already connected",
+        "already started",
+        "already running",
+        "device or resource busy",
+        "resource busy",
+    )
 
     def __init__(self, main_window, model, controller):
         super().__init__()
@@ -1721,17 +1728,75 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
 
         self._rows = self.store.get_rows()
         self._capture_inflight = False
+        self._cleanup_done = False
+        self._camera_reused = False
+        self._camera_start_error = None
 
         self._build_ui()
+        self._configure_focus_behavior()
         self.setup_shortcuts()
         self._connect_signals()
         self._populate_checklist()
         self._sync_setting_controls_from_model()
+        camera_ready = self._start_camera_session()
+        if camera_ready:
+            self._set_status(self._session_ready_text(), color="darkgreen")
+        else:
+            self._set_status(
+                f"{self._session_ready_text()} (camera unavailable: {self._camera_start_error})",
+                color="red",
+            )
 
-        self.controller.start_droplet_camera()
-        self.controller.start_read_camera()
+    def _session_ready_text(self):
+        msg = f"Session created: {self.store.session_id}"
+        if self._camera_reused:
+            msg += " (reused existing camera session)"
+        return msg
 
-        self._set_status(f"Session created: {self.store.session_id}", color="darkgreen")
+    @staticmethod
+    def _is_already_connected_error(exc: Exception) -> bool:
+        msg = str(exc).strip().lower()
+        return any(hint in msg for hint in NozzlePositionDatasetCaptureWindow._ALREADY_CONNECTED_HINTS)
+
+    def _start_camera_session(self):
+        try:
+            self.controller.start_droplet_camera()
+        except Exception as exc:
+            if self._is_already_connected_error(exc):
+                self._camera_reused = True
+                print(f"[NozzleDataset] Reusing existing droplet camera session: {exc}")
+            else:
+                self._camera_start_error = str(exc)
+                return False
+
+        try:
+            self.controller.start_read_camera()
+        except Exception as exc:
+            if self._is_already_connected_error(exc):
+                self._camera_reused = True
+                print(f"[NozzleDataset] Reusing existing read-camera stream: {exc}")
+            else:
+                self._camera_start_error = str(exc)
+                return False
+        return True
+
+    def _configure_focus_behavior(self):
+        self.setFocusPolicy(Qt.StrongFocus)
+        no_focus_widgets = (
+            self.checklist_table,
+            self.flash_duration_spin,
+            self.flash_delay_spin,
+            self.exposure_spin,
+            self.num_droplets_spin,
+            self.print_pw_spin,
+            self.print_pressure_spin,
+            self.capture_preview_btn,
+            self.capture_background_btn,
+            self.capture_droplet_btn,
+            self.reject_last_btn,
+        )
+        for widget in no_focus_widgets:
+            widget.setFocusPolicy(Qt.NoFocus)
 
     def _build_ui(self):
         self.setWindowTitle("Nozzle Position Dataset Capture")
@@ -1776,7 +1841,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.checklist_table.horizontalHeader().setSectionResizeMode(5, QtWidgets.QHeaderView.ResizeToContents)
         checklist_v.addWidget(self.checklist_table)
 
-        self.selected_label_value = QtWidgets.QLabel("Selected: —")
+        self.selected_label_value = QtWidgets.QLabel("Selected: -")
         self.selected_label_value.setWordWrap(True)
         checklist_v.addWidget(self.selected_label_value)
         left_v.addWidget(checklist_group, 1)
@@ -1844,13 +1909,6 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         capture_v.addWidget(self.capture_droplet_btn)
         capture_v.addWidget(self.reject_last_btn)
 
-        self.fsm_hint_edit = QtWidgets.QLineEdit()
-        self.fsm_hint_edit.setPlaceholderText("FSM hint (optional), e.g. analyze")
-        self.operator_note_edit = QtWidgets.QLineEdit()
-        self.operator_note_edit.setPlaceholderText("Operator note (optional)")
-        capture_v.addWidget(self.fsm_hint_edit)
-        capture_v.addWidget(self.operator_note_edit)
-
         self.status_label = QtWidgets.QLabel("Idle")
         self.status_label.setWordWrap(True)
         capture_v.addWidget(self.status_label)
@@ -1867,7 +1925,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.preview_label.setStyleSheet("border: 1px solid #555;")
         right_v.addWidget(self.preview_label, 1)
 
-        self.last_record_label = QtWidgets.QLabel("Last record: —")
+        self.last_record_label = QtWidgets.QLabel("Last record: -")
         self.last_record_label.setWordWrap(True)
         right_v.addWidget(self.last_record_label)
 
@@ -1993,7 +2051,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
     def _update_selection_label(self):
         row = self._selected_row()
         if not row:
-            self.selected_label_value.setText("Selected: —")
+            self.selected_label_value.setText("Selected: -")
             return
         txt = f"Selected: {row['case_id']} / {row['step_label']}\n{row.get('tooltip','')}"
         self.selected_label_value.setText(txt)
@@ -2008,18 +2066,25 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         """
         Match movement shortcuts from the standard droplet imaging window.
         """
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.move_fraction_of_frame(-0.1, 0))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.move_fraction_of_frame(0.1, 0))
-        self.shortcut_manager.add_shortcut('Up', 'Move up', lambda: self.move_fraction_of_frame(0, -0.1))
-        self.shortcut_manager.add_shortcut('Down', 'Move down', lambda: self.move_fraction_of_frame(0, 0.1))
-        self.shortcut_manager.add_shortcut('Ctrl+Left', 'Move left', lambda: self.move_fraction_of_frame(-1, 0))
-        self.shortcut_manager.add_shortcut('Ctrl+Right', 'Move right', lambda: self.move_fraction_of_frame(1, 0))
-        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0, -1))
-        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0, 1))
-        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Y(5, manual=True))
-        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Y(-5, manual=True))
-        self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(25, manual=True))
-        self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-25, manual=True))
+        self._movement_shortcuts = []
+
+        def _add_move_shortcut(seq, description, callback):
+            shortcut = self.shortcut_manager.add_shortcut(seq, description, callback)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            self._movement_shortcuts.append(shortcut)
+
+        _add_move_shortcut('Left', 'Move left', lambda: self.move_fraction_of_frame(-0.1, 0))
+        _add_move_shortcut('Right', 'Move right', lambda: self.move_fraction_of_frame(0.1, 0))
+        _add_move_shortcut('Up', 'Move up', lambda: self.move_fraction_of_frame(0, -0.1))
+        _add_move_shortcut('Down', 'Move down', lambda: self.move_fraction_of_frame(0, 0.1))
+        _add_move_shortcut('Ctrl+Left', 'Move left', lambda: self.move_fraction_of_frame(-1, 0))
+        _add_move_shortcut('Ctrl+Right', 'Move right', lambda: self.move_fraction_of_frame(1, 0))
+        _add_move_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0, -1))
+        _add_move_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0, 1))
+        _add_move_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Y(5, manual=True))
+        _add_move_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Y(-5, manual=True))
+        _add_move_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(25, manual=True))
+        _add_move_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-25, manual=True))
 
     def move_fraction_of_frame(self, x_fraction, y_fraction):
         dX, dY, dZ = self.model.droplet_camera_model.compute_move_by_fraction(x_fraction, y_fraction)
@@ -2099,8 +2164,6 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
                     machine_state=self._machine_state_snapshot(),
                     camera_settings=self._camera_settings_snapshot(),
                     reagent_name=self.store.resolve_reagent_name(),
-                    fsm_hint=self.fsm_hint_edit.text().strip(),
-                    operator_note=self.operator_note_edit.text().strip(),
                 )
             except Exception as e:
                 self._set_status(f"Save failed: {e}", color="red")
@@ -2211,19 +2274,35 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         )
         self.preview_label.setPixmap(pm)
 
-    def closeEvent(self, event):
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _shutdown_camera_resources(self):
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
         try:
             self.controller.stop_read_camera()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[NozzleDataset] stop_read_camera failed: {exc}")
         try:
             self.controller.stop_droplet_camera()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[NozzleDataset] stop_droplet_camera failed: {exc}")
         try:
             self.controller.disable_print_profile()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[NozzleDataset] disable_print_profile failed: {exc}")
+
+    def done(self, r):
+        self._shutdown_camera_resources()
+        super().done(r)
+
+    def closeEvent(self, event):
+        self._shutdown_camera_resources()
         event.accept()
 
 

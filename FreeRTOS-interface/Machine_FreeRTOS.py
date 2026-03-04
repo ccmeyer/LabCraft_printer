@@ -316,6 +316,26 @@ class DropletCamera(QObject):
 
     # --- camera lifecycle ---
     def start_camera(self):
+        # Idempotent start: if this camera instance is already running, keep it.
+        if self.camera is not None and self._grab_running and self._grab_thread and self._grab_thread.is_alive():
+            return
+
+        # Clean stale partial state before reopening.
+        self._grab_running = False
+        if self._grab_thread:
+            self._grab_thread.join(timeout=1.0)
+            self._grab_thread = None
+        if self.camera:
+            try:
+                self.camera.stop()
+            except Exception:
+                pass
+            try:
+                self.camera.close()
+            except Exception:
+                pass
+            self.camera = None
+
         self.camera = Picamera2(1)
         vid_cfg = self.camera.create_video_configuration(
             main={"size": self.camera.sensor_resolution, "format": "RGB888"},
@@ -341,8 +361,14 @@ class DropletCamera(QObject):
             self._grab_thread.join(timeout=1.0)
             self._grab_thread = None
         if self.camera:
-            self.camera.stop()
-            self.camera.close()
+            try:
+                self.camera.stop()
+            except Exception:
+                pass
+            try:
+                self.camera.close()
+            except Exception:
+                pass
             self.camera = None
         self._trigger_low()
 
