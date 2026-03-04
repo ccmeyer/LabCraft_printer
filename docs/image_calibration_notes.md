@@ -1,4 +1,4 @@
-# Droplet Imaging Calibration Notes (Updated March 3, 2026)
+# Droplet Imaging Calibration Notes (Updated March 4, 2026)
 
 ## Scope and Baseline
 - Reviewed:
@@ -9,7 +9,7 @@
   - nozzle-related tests in `tests/`
 - Current automated baseline:
   - `.\env\Scripts\python.exe -m pytest -q`
-  - Result: `198 passed`
+  - Result: `209 passed`
 
 ## What Has Already Been Implemented and Addressed
 
@@ -218,6 +218,139 @@
 3. Revisit contour ranking policy with your domain intent (stream-first vs lowest-extent-first).
 4. Consider ROI-first detection once a stable nozzle location is seen in this run.
 
+## NozzleFocusCalibrationProcess: Goal, Flow, Prerequisites, Risks, and Improvements
+
+## Goal
+- Move along machine `Y` to maximize image sharpness (Tenengrad variance) for the nozzle/stream region.
+- Persist a focused machine-space nozzle center (`calibration_manager.set_nozzle_center(...)`).
+- Record focus trace (`focus_curve`) for debugging and later analysis.
+
+## Current call path
+1. UI: `DropletImagingDialog.toggle_start_focus_calibration(...)` in `CalibrationClasses/View.py`.
+2. Controller: `Controller.start_nozzle_focus_calibration()`.
+3. Model manager: `CalibrationManager.start_nozzle_focus_calibration()`.
+4. Process: instantiate `NozzleFocusCalibrationProcess` and start its `QStateMachine`.
+5. Capture path:
+   - process calls `_capture_with_policy(...)` -> manager `captureImageRequested` -> controller `handle_capture_request` -> machine capture -> controller `_on_image_captured` callback.
+6. Move path:
+   - process calls `_request_move_relative_with_timeout(...)` -> manager `moveRequested` -> controller `handle_move_request` -> machine relative move -> callback.
+7. Completion path:
+   - process emits `nozzleFocused` -> final state emits `calibrationDataUpdated` + `calibrationCompleted`.
+8. Manager handles completion/error, persists step data, updates queue/session.
+
+## Current process state and algorithm flow
+- FSM states:
+  - `state_capture` -> `state_analyze` -> (`moveCompleted` back to capture, or `nozzleFocused` to final).
+- Search modes inside `onAnalyze()`:
+  - `probe_dir`: sample one side first (`+step`), decide direction.
+  - `probe_dir_neg`: if first side not improving, try opposite side.
+  - `run_up`: continue in improving direction with growing step (`STEP_GROWTH`) until decline/bound.
+  - `refine`: bracket and midpoint-style refinement with oscillation guard.
+- Safety controls already present:
+  - move timeout guard (`_request_move_relative_with_timeout`, default 15 s).
+  - local sweep span around start (`SAFE_SWEEP_STEPS`, currently +/-500 Y steps).
+  - eval caps (`MAX_EVALS`, refine fallback, oscillation detection).
+
+## Effective prerequisites (current behavior)
+- Camera capture path must be active and stable.
+- Machine motion on `Y` must be available and not safety-rejected.
+- A useful background image should already exist in manager cache (`calibration_manager.get_background_image()`), usually from nozzle-position calibration.
+- Droplet imaging settings must already be in a useful state (for example `num_droplets=1` and suitable flash delay/pressure), because focus process does not explicitly set them.
+- Nozzle/stream should be within usable FOV for focus mask extraction.
+
+## Inconsistencies and edge cases that can hinder performance
+
+## High priority risks
+1. No prerequisite gate when started from UI.
+- `CalibrationManager.start_nozzle_focus_calibration()` directly instantiates the process (does not use `_try_start_process`), so `missing_requirements` cannot protect this entry point.
+
+2. Missing/poor ROI silently degrades to full-frame focus.
+- `_build_focus_mask(...)` returns `None` on many failure paths.
+- `compute_tenengrad_variance(gray, mask=None)` then scores the entire frame, which can optimize background texture/noise instead of droplet/nozzle sharpness.
+
+3. No validity gate before accepting a final focus point.
+- Process can converge and write a new nozzle center even if mask quality was repeatedly poor or droplet signal was not credible.
+
+4. Sweep bounds are local, not axis-aware.
+- Focus search clamps to `[startY-500, startY+500]` but not pre-clamped to actual axis limits.
+- Controller safety may reject moves near hard bounds, causing avoidable calibration aborts.
+
+## Medium priority risks
+5. Focus mask thresholds are absolute and resolution/contrast sensitive.
+- Area cutoff (`>=2000 px`) and morphology parameters are fixed constants.
+- Low-contrast reagents, different optics, or resolution changes can cause unstable ROI detection.
+
+6. Multi-contour ranking is deterministic but semantically brittle.
+- Lowest contour preference can still select detached droplets/reflections in some scenes.
+
+7. Background is inherited, not captured in-process.
+- Focus run recorder may not include the exact background used for masking.
+- If the cached background is stale, analysis quality drops but no explicit error is raised.
+
+8. Potential numeric robustness issue for empty mask slices.
+- `np.var(G2[mask > 0])` can produce warnings/NaN if mask has no active pixels (rare but possible in malformed masks).
+
+## Performance limitations
+1. Full-frame Sobel gradients are computed each evaluation, even when a small ROI would suffice.
+2. Up to `MAX_EVALS=60` image captures can be consumed before forced finish in difficult cases.
+3. Retry-heavy capture policy (`attempts_total=7`) can increase wall time significantly during camera instability.
+
+## Recommended reliability and performance changes (next implementation phase)
+
+## Control-path changes
+1. Add `NozzleFocusCalibrationProcess.missing_requirements(cm)` and enforce it on all start paths.
+- Change `CalibrationManager.start_nozzle_focus_calibration()` to `_try_start_process(NozzleFocusCalibrationProcess)`.
+- Requirements should include at least: camera availability, machine position read, and cached background (or explicit in-process background capture enabled).
+
+2. Add explicit setup stage before first capture.
+- Set known-safe imaging settings for focus (`num_droplets=1`, flash delay from current/nozzle baseline).
+- Optionally capture a fresh background in this process for deterministic masking and recorder completeness.
+
+3. Add validity gates.
+- Require minimum count of "valid-mask" evaluations before allowing completion.
+- Abort with clear actionable error if consecutive invalid-mask/no-signal frames exceed threshold.
+
+4. Axis-aware move clamping.
+- Clamp Y targets with machine/location bounds before issuing move requests, not only local +/- sweep span.
+
+## Analysis-path changes
+5. Promote mask quality to first-class status.
+- Return explicit mask status (`ok`, `none`, `tiny`, `low_confidence`) and record in analysis JSONL.
+- Use status to decide retry/reacquire/abort branches.
+
+6. Use ROI-scoped focus computation.
+- Compute Sobel/Tenengrad only inside padded bbox around chosen contour, with fallback expansion strategy.
+- This improves both speed and resistance to irrelevant background texture.
+
+7. Normalize contour thresholds.
+- Express area/size constraints as fractions of image area/height where practical.
+- Keep absolute lower bounds only as safety floor.
+
+8. Harden metric numerics.
+- Explicitly guard empty/invalid masks and NaN/inf focus values.
+- Treat invalid metric as analysis failure path, not a normal score.
+
+## Recommended tests for NozzleFocus (currently missing)
+1. Start-path prerequisite tests:
+- standalone focus start with missing background should fail with deterministic message.
+- UI start path should honor `missing_requirements` once routed through `_try_start_process`.
+
+2. Signal-quality gating tests:
+- repeated mask failures should trigger calibrated abort, not silent full-frame optimization.
+- low-signal frames should follow retry/reacquire branch and remain deterministic.
+
+3. Motion safety tests:
+- near-axis-bound start position should never command out-of-bounds Y targets.
+- move rejection/timeout during focus should exit cleanly with calibration error.
+
+4. Numeric robustness tests:
+- empty/degenerate mask should not produce NaN-driven control flow.
+- focus metric invalid values should be handled explicitly.
+
+5. Performance regression tests (non-blocking benchmark):
+- synthetic ROI case verifies ROI-scoped Tenengrad is faster than full-frame baseline.
+- benchmark contract should record p50/p95 timing trends for focus analysis.
+
 ## Validation Coverage Status
 
 ## Already covered by automated tests
@@ -238,6 +371,8 @@
   - `tests/test_replay_nozzle_position.py`
 - Nozzle search strategy (X scan, multi-contour backoff, downward recovery):
   - `tests/test_calibration_nozzle_position_search_strategy.py`
+- Nozzle focus contour selection regression:
+  - `tests/test_calibration_focus_mask_selection.py`
 
 ## Important nozzle tests still missing
 1. Shape mismatch (`bg.shape != droplet.shape`) returns controlled calibration error.

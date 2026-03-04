@@ -1368,8 +1368,7 @@ class CalibrationManager(QObject):
         self.start_active_calibration()
 
     def start_nozzle_focus_calibration(self):
-        self.activeCalibration = NozzleFocusCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(NozzleFocusCalibrationProcess)
 
     def start_droplet_emergence_calibration(self):
         self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
@@ -3494,6 +3493,40 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
     # Oscillation guard
     _OSC_HISTORY = 6  # keep last N targets for pattern detection
 
+    # Quality acceptance guards: background-normalized to avoid brittle absolute focus thresholds.
+    MIN_MASK_PIXELS = 1200
+    MIN_VALID_FOCUS_EVALS = 4
+    MAX_CONSEC_INVALID_MASK = 8
+    MIN_BEST_P90_BG_RATIO = 1.18
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        missing = []
+        try:
+            if cm.get_nozzle_center() is None:
+                missing.append("nozzle center (run nozzle position)")
+        except Exception:
+            missing.append("nozzle center (run nozzle position)")
+        try:
+            if cm.get_nozzle_center_image_position() is None:
+                missing.append("nozzle center image position")
+        except Exception:
+            missing.append("nozzle center image position")
+        try:
+            if cm.get_background_image() is None:
+                missing.append("background image")
+        except Exception:
+            missing.append("background image")
+        try:
+            _ = cm.model.machine_model.get_current_position_dict()
+        except Exception:
+            missing.append("machine position feedback")
+        try:
+            _ = cm.model.droplet_camera_model.get_image_size()
+        except Exception:
+            missing.append("droplet camera")
+        return missing
+
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "nozzle_focus"
@@ -3510,7 +3543,11 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         self.best_focus = None
         self.best_pos = None
+        self.best_focus_stats = None
         self.prev_focus = None
+        self.valid_focus_evals = 0
+        self.invalid_focus_evals = 0
+        self._consec_invalid_mask = 0
 
         self._start_pos = None
         self._loY = None
@@ -3596,9 +3633,21 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         mask = self._build_focus_mask(self.background_image, img) if self.background_image is not None else None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         focus = float(self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask))
+        focus_stats = self._compute_focus_stats(gray, mask)
+        bg_stats = None
+        p90_ratio = None
+        if self.background_image is not None and focus_stats.get("valid", False):
+            try:
+                bg_gray = self._to_gray(self.background_image)
+                bg_stats = self._compute_focus_stats(bg_gray, mask)
+                if bg_stats.get("valid", False):
+                    p90_ratio = float((focus_stats["p90"] + 1.0) / (bg_stats["p90"] + 1.0))
+            except Exception:
+                bg_stats = None
+                p90_ratio = None
 
         overlay = img.copy()
-        self._draw_focus_overlay(overlay, mask, focus)
+        self._draw_focus_overlay(overlay, mask, focus, p90_ratio=p90_ratio)
         self.presentImageSignal.emit(overlay)
 
         pos = self.model.machine_model.get_current_position_dict()
@@ -3606,17 +3655,48 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         if self._start_pos is None:
             self._start_pos = dict(pos)
             y0 = self._start_pos["Y"]
-            self._loY = y0 - self.SAFE_SWEEP_STEPS
-            self._hiY = y0 + self.SAFE_SWEEP_STEPS
+            self._initialize_focus_bounds(y0)
             self.stageChanged.emit(f"Focus sweep bounds on Y: [{self._loY}, {self._hiY}]")
 
         self.eval_count += 1
         self.focus_curve.append((focus, pos["X"], pos["Y"], pos["Z"], int(self.step), self.mode))
+        focus_stats_record = dict(focus_stats or {})
+        focus_stats_record["p90_ratio_to_background"] = (None if p90_ratio is None else float(p90_ratio))
+        self._record_analysis(
+            {
+                "process_name": "NozzleFocusCalibrationProcess",
+                "phase_name": str(self.phase_name or ""),
+                "mode": str(self.mode),
+                "eval_count": int(self.eval_count),
+                "position": {"X": int(pos["X"]), "Y": int(pos["Y"]), "Z": int(pos["Z"])},
+                "focus_value": float(focus),
+                "focus_stats": focus_stats_record,
+                "background_stats": dict(bg_stats or {}),
+            }
+        )
 
         # update best
-        if (self.best_focus is None) or (focus > self.best_focus):
-            self.best_focus = focus
-            self.best_pos = dict(pos)
+        if focus_stats.get("valid", False):
+            self.valid_focus_evals += 1
+            self._consec_invalid_mask = 0
+            if (self.best_focus is None) or (focus > self.best_focus):
+                self.best_focus = focus
+                self.best_pos = dict(pos)
+                self.best_focus_stats = {
+                    "mask_pixels": int(focus_stats.get("mask_pixels", 0)),
+                    "p90": float(focus_stats.get("p90", 0.0)),
+                    "mean": float(focus_stats.get("mean", 0.0)),
+                    "var": float(focus_stats.get("var", 0.0)),
+                    "p90_ratio_to_background": (None if p90_ratio is None else float(p90_ratio)),
+                }
+        else:
+            self.invalid_focus_evals += 1
+            self._consec_invalid_mask += 1
+            if self._consec_invalid_mask >= int(self.MAX_CONSEC_INVALID_MASK):
+                self._abort_with_error(
+                    "Focus ROI could not be detected consistently; verify nozzle stream visibility and rerun nozzle position."
+                )
+                return
 
         # hard eval caps
         if self.eval_count >= self.MAX_EVALS and self.mode != "refine":
@@ -3757,7 +3837,14 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.set_nozzle_center(final)
         self.calibrationDataUpdated.emit({
             "measurements": self.focus_curve,
-            "result": {"best_focus": self.best_focus, "best_position": final, "focus_axis": "Y"}
+            "result": {
+                "best_focus": self.best_focus,
+                "best_position": final,
+                "focus_axis": "Y",
+                "best_focus_stats": dict(self.best_focus_stats or {}),
+                "valid_focus_evals": int(self.valid_focus_evals),
+                "invalid_focus_evals": int(self.invalid_focus_evals),
+            }
         })
         self.calibrationCompleted.emit()
 
@@ -3815,6 +3902,10 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._move_to_Y_clamped(mid)
 
     def _move_to_best_then_finish(self):
+        ok, msg = self._assess_best_focus_quality()
+        if not ok:
+            self._abort_with_error(msg)
+            return
         if self.best_pos is None:
             self.nozzleFocused.emit(); return
         cur = self.model.machine_model.get_current_position_dict()
@@ -3888,6 +3979,86 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             return True
         return False
 
+    def _axis_y_bounds(self):
+        try:
+            bounds = self.model.machine_model.get_axis_bounds("Y")
+            if isinstance(bounds, (tuple, list)) and len(bounds) == 2:
+                lo = int(bounds[0]); hi = int(bounds[1])
+                if lo > hi:
+                    lo, hi = hi, lo
+                return (lo, hi)
+        except Exception:
+            pass
+        return None
+
+    def _initialize_focus_bounds(self, start_y: int):
+        lo = int(start_y - self.SAFE_SWEEP_STEPS)
+        hi = int(start_y + self.SAFE_SWEEP_STEPS)
+        axis_bounds = self._axis_y_bounds()
+        if axis_bounds is not None:
+            lo = max(lo, int(axis_bounds[0]))
+            hi = min(hi, int(axis_bounds[1]))
+        if lo > hi:
+            lo = hi = int(start_y)
+        self._loY = int(lo)
+        self._hiY = int(hi)
+
+    def _to_gray(self, image):
+        if image is None:
+            return None
+        if image.ndim == 2:
+            return image
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    def _compute_focus_stats(self, gray, mask):
+        if gray is None or mask is None:
+            return {"valid": False, "reason": "missing_gray_or_mask", "mask_pixels": 0}
+        try:
+            roi_selector = mask > 0
+            mask_pixels = int(np.count_nonzero(roi_selector))
+            if mask_pixels < int(self.MIN_MASK_PIXELS):
+                return {"valid": False, "reason": "mask_too_small", "mask_pixels": int(mask_pixels)}
+            gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            g2 = gx * gx + gy * gy
+            roi = g2[roi_selector]
+            if roi.size == 0:
+                return {"valid": False, "reason": "empty_roi", "mask_pixels": int(mask_pixels)}
+            var = float(np.var(roi))
+            mean = float(np.mean(roi))
+            p90 = float(np.percentile(roi, 90))
+            if not (np.isfinite(var) and np.isfinite(mean) and np.isfinite(p90)):
+                return {"valid": False, "reason": "non_finite_focus_metric", "mask_pixels": int(mask_pixels)}
+            return {
+                "valid": True,
+                "reason": "ok",
+                "mask_pixels": int(mask_pixels),
+                "var": var,
+                "mean": mean,
+                "p90": p90,
+            }
+        except Exception as e:
+            return {"valid": False, "reason": f"focus_stat_error:{e}", "mask_pixels": 0}
+
+    def _assess_best_focus_quality(self):
+        if self.best_pos is None:
+            return False, "No valid focus ROI observed; rerun nozzle position/focus calibration."
+        if int(self.valid_focus_evals) < int(self.MIN_VALID_FOCUS_EVALS):
+            return (
+                False,
+                f"Insufficient valid focus samples ({self.valid_focus_evals}/{self.MIN_VALID_FOCUS_EVALS}); check stream visibility.",
+            )
+        ratio = (self.best_focus_stats or {}).get("p90_ratio_to_background")
+        if ratio is None:
+            return False, "Focus quality could not be normalized against background; reacquire nozzle/background and retry."
+        ratio = float(ratio)
+        if ratio < float(self.MIN_BEST_P90_BG_RATIO):
+            return (
+                False,
+                f"Best focus quality too low (p90/bg={ratio:.2f} < {self.MIN_BEST_P90_BG_RATIO:.2f}).",
+            )
+        return True, ""
+
     # ---- image/ROI helpers (unchanged from your working version) ----
     def _build_focus_mask(self, bg, dr):
         # ... (same as before) ...
@@ -3939,7 +4110,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             self._last_mask = None
             return None
 
-    def _draw_focus_overlay(self, img_bgr, mask, focus_value: float):
+    def _draw_focus_overlay(self, img_bgr, mask, focus_value: float, p90_ratio: float | None = None):
         # import cv2
         if self._last_bbox is not None:
             x, y, bw, bh = self._last_bbox
@@ -3951,6 +4122,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         lines = [
             f"Focus (Tenengrad): {focus_value:.0f}",
             f"Y: {pos['Y']}  step:{self.step}  mode:{self.mode}",
+            (f"P90/bg: {p90_ratio:.2f}" if p90_ratio is not None else "P90/bg: -"),
             f"Best: {self.best_focus:.0f}" if self.best_focus is not None else "Best: -",
         ]
         for i, line in enumerate(lines):
