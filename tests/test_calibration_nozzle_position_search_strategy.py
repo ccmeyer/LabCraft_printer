@@ -10,6 +10,16 @@ ensure_calibration_import_stubs()
 from CalibrationClasses.Model import NozzlePositionCalibrationProcess
 
 
+def _bg_head_in_view_image():
+    img = np.full((200, 200, 3), 245, dtype=np.uint8)
+    img[:40, :, :] = 70
+    return img
+
+
+def _bg_head_out_of_view_image():
+    return np.full((200, 200, 3), 240, dtype=np.uint8)
+
+
 def _build_process_for_analyze():
     proc = NozzlePositionCalibrationProcess.__new__(NozzlePositionCalibrationProcess)
     proc.stageChanged = Recorder()
@@ -25,7 +35,7 @@ def _build_process_for_analyze():
 
     proc.model = SimpleNamespace(
         droplet_camera_model=SimpleNamespace(
-            compute_move_by_fraction=lambda x_frac, y_frac: (1000 * float(x_frac), 0, 0),
+            compute_move_by_fraction=lambda x_frac, y_frac: (1000 * float(x_frac), 0, 1000 * float(y_frac)),
             get_image_size=lambda: (1000, 1000),
             calculate_move_to_target=lambda nozzle_px, target_px: (0, 0, 0),
         ),
@@ -59,8 +69,8 @@ def _build_process_for_analyze():
     proc._record_decision = lambda decision, payload=None: None
     proc._record_event = lambda *args, **kwargs: None
 
-    proc.background_image = object()
-    proc.droplet_image = object()
+    proc.background_image = _bg_head_in_view_image()
+    proc.droplet_image = np.zeros((16, 16, 3), dtype=np.uint8)
     proc._throwaway_pending = False
     proc._last_capture_refs = {
         "background_image": {},
@@ -78,6 +88,14 @@ def _build_process_for_analyze():
     proc._x_scan_half_fov_x_steps = 500
     proc._x_scan_attempt_index = 0
     proc._x_scan_active = False
+    proc.downward_recovery_step_fov = 0.25
+    proc.max_downward_recovery_steps = 4
+    proc._downward_recovery_steps_taken = 0
+    proc.head_view_top_band_frac = 0.20
+    proc.head_view_mid_start_frac = 0.35
+    proc.head_view_mid_end_frac = 0.65
+    proc.head_not_in_view_ratio_min = 0.90
+    proc.head_not_in_view_delta_max = 25.0
     proc._base_pressure = 1.0
     proc._recenter_iters = 0
     proc.move_timeout_ms = 15_000
@@ -89,6 +107,18 @@ def _build_process_for_analyze():
     proc.measurements = []
 
     return proc, pos, settings_calls, move_calls, recenter_calls
+
+
+def test_background_head_view_metrics_discriminates_in_view_vs_out_of_view():
+    proc, _pos, _settings_calls, _move_calls, _recenter_calls = _build_process_for_analyze()
+
+    in_view = proc._background_head_view_metrics(_bg_head_in_view_image())
+    out_view = proc._background_head_view_metrics(_bg_head_out_of_view_image())
+
+    assert in_view["valid"] is True and in_view["head_in_view"] is True
+    assert out_view["valid"] is True and out_view["head_in_view"] is False
+    assert out_view["top_to_mid_ratio"] > in_view["top_to_mid_ratio"]
+    assert out_view["top_mid_delta"] < in_view["top_mid_delta"]
 
 
 def test_nozzle_missing_contour_scans_right_then_left_from_anchor_then_aborts():
@@ -137,6 +167,56 @@ def test_nozzle_no_signal_uses_x_scan_not_pressure_bump():
     assert move_calls == [(9500, 2000, 3000)]
     assert settings_calls == []
     assert proc.calibrationError.calls == []
+
+
+def test_nozzle_x_scan_exhausted_with_head_out_of_view_moves_down_and_retries():
+    proc, pos, settings_calls, move_calls, _ = _build_process_for_analyze()
+    proc.background_image = _bg_head_out_of_view_image()
+    proc._detect_nozzle_point = lambda bg, dr: ("NO_SIGNAL", None, 0, None)
+
+    proc.onAnalyze()
+    pos.update({"X": 9500, "Y": 2000, "Z": 3000})
+    proc.onAnalyze()
+    pos.update({"X": 10500, "Y": 2000, "Z": 3000})
+    proc.onAnalyze()
+
+    assert len(move_calls) == 3
+    # Third move is the downward recovery move after x-scan exhaustion.
+    assert move_calls[2] == (10500, 2000, 3250)
+    assert proc._downward_recovery_steps_taken == 1
+    assert proc.calibrationError.calls == []
+    assert settings_calls == []
+
+
+def test_nozzle_downward_recovery_capped_after_one_full_fov():
+    proc, pos, settings_calls, move_calls, _ = _build_process_for_analyze()
+    proc.background_image = _bg_head_out_of_view_image()
+    proc._detect_nozzle_point = lambda bg, dr: ("NO_SIGNAL", None, 0, None)
+
+    for _ in range(5):
+        # Trigger right/left/exhausted sequence in each cycle.
+        proc.onAnalyze()
+        pos.update({"X": 9500, "Y": 2000, "Z": pos["Z"]})
+        proc.onAnalyze()
+        pos.update({"X": 10500, "Y": 2000, "Z": pos["Z"]})
+        proc.onAnalyze()
+        if proc.calibrationError.calls:
+            break
+        # Simulate that the move executed and process re-entered from the new Z.
+        if move_calls:
+            last = move_calls[-1]
+            pos.update({"X": int(last[0]), "Y": int(last[1]), "Z": int(last[2])})
+        proc._x_scan_anchor = None
+        proc._x_scan_active = False
+        proc._x_scan_attempt_index = 0
+
+    # Four downward recovery steps max; then abort.
+    down_z_levels = sorted({int(m[2]) for m in move_calls if int(m[2]) > 3000})
+    assert down_z_levels == [3250, 3500, 3750, 4000]
+    assert proc._downward_recovery_steps_taken == 4
+    assert proc.calibrationError.calls
+    assert "x-axis scan" in proc.calibrationError.calls[-1][0][0].lower()
+    assert settings_calls == []
 
 
 def test_multiple_contours_decreases_flash_delay_by_200():

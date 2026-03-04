@@ -2558,6 +2558,18 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._x_scan_attempt_index = 0
         self._x_scan_active = False
 
+        # Z recovery when nozzle is likely above FOV.
+        self.downward_recovery_step_fov = 0.25
+        self.max_downward_recovery_steps = 4  # total span = 1.0 FOV
+        self._downward_recovery_steps_taken = 0
+
+        # Background-top brightness heuristic for "head in view" check.
+        self.head_view_top_band_frac = 0.20
+        self.head_view_mid_start_frac = 0.35
+        self.head_view_mid_end_frac = 0.65
+        self.head_not_in_view_ratio_min = 0.90
+        self.head_not_in_view_delta_max = 25.0
+
         # ---- internal scan state (reset in onPrepareDroplet) ----
         self._base_delay_us = self.initial_flash_delay_us
         self._delay_idx = 0
@@ -2787,6 +2799,8 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                     "x_scan_attempt_index": int(self._x_scan_attempt_index),
                     "x_scan_half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
                     "x_scan_anchor": dict(self._x_scan_anchor or {}),
+                    "downward_recovery_steps_taken": int(self._downward_recovery_steps_taken),
+                    "max_downward_recovery_steps": int(self.max_downward_recovery_steps),
                     "base_pressure": float(self._base_pressure) if self._base_pressure is not None else None,
                     "recenter_iterations": int(self._recenter_iters),
                 },
@@ -2871,10 +2885,157 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             return True, decision, msg, tgt
         return False, "", "", None
 
+    def _background_head_view_metrics(self, bg):
+        if bg is None:
+            return {
+                "valid": False,
+                "reason": "missing_background",
+            }
+        try:
+            arr = np.asarray(bg)
+            if arr.ndim == 3:
+                if arr.shape[2] == 3:
+                    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+                else:
+                    gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = arr
+
+            h, w = gray.shape[:2]
+            top_h = max(1, int(round(float(self.head_view_top_band_frac) * h)))
+            mid_y0 = max(0, int(round(float(self.head_view_mid_start_frac) * h)))
+            mid_y1 = max(mid_y0 + 1, int(round(float(self.head_view_mid_end_frac) * h)))
+            mid_y1 = min(h, mid_y1)
+            if mid_y1 <= mid_y0:
+                return {
+                    "valid": False,
+                    "reason": "invalid_mid_band",
+                    "height": int(h),
+                    "width": int(w),
+                }
+
+            top = gray[:top_h, :]
+            mid = gray[mid_y0:mid_y1, :]
+            top_mean = float(np.mean(top))
+            mid_mean = float(np.mean(mid))
+            ratio = float(top_mean / (mid_mean + 1e-9))
+            delta = float(mid_mean - top_mean)
+            head_in_view = not (
+                ratio >= float(self.head_not_in_view_ratio_min)
+                and delta <= float(self.head_not_in_view_delta_max)
+            )
+            return {
+                "valid": True,
+                "head_in_view": bool(head_in_view),
+                "top_mean": float(top_mean),
+                "mid_mean": float(mid_mean),
+                "top_to_mid_ratio": float(ratio),
+                "top_mid_delta": float(delta),
+                "thresholds": {
+                    "ratio_min": float(self.head_not_in_view_ratio_min),
+                    "delta_max": float(self.head_not_in_view_delta_max),
+                },
+                "bands": {
+                    "top_band_frac": float(self.head_view_top_band_frac),
+                    "mid_start_frac": float(self.head_view_mid_start_frac),
+                    "mid_end_frac": float(self.head_view_mid_end_frac),
+                },
+                "height": int(h),
+                "width": int(w),
+            }
+        except Exception as e:
+            return {
+                "valid": False,
+                "reason": "metric_exception",
+                "error": str(e),
+            }
+
+    def _downward_recovery_target(self):
+        try:
+            mv = self.model.droplet_camera_model.compute_move_by_fraction(
+                0.0,
+                float(self.downward_recovery_step_fov),
+            )
+        except Exception:
+            mv = (0, 0, 0)
+        try:
+            dx, dy, dz = mv
+        except Exception:
+            try:
+                dx, dy = mv
+                dz = 0
+            except Exception:
+                dx, dy, dz = 0, 0, 0
+        cur = self._current_position_dict()
+        tgt = self._clamp_abs_target(
+            int(cur["X"]) + int(round(float(dx))),
+            int(cur["Y"]) + int(round(float(dy))),
+            int(cur["Z"]) + int(round(float(dz))),
+        )
+        applied = (
+            int(tgt[0] - int(cur["X"])),
+            int(tgt[1] - int(cur["Y"])),
+            int(tgt[2] - int(cur["Z"])),
+        )
+        return tgt, applied
+
     def _handle_missing_nozzle(self, status: str):
         advanced, decision, stage_msg, tgt = self._next_x_scan_target()
         if not advanced:
             self._x_scan_active = False
+            metrics = self._background_head_view_metrics(self.background_image)
+            can_recover_down = (
+                bool(metrics.get("valid"))
+                and not bool(metrics.get("head_in_view", True))
+                and int(self._downward_recovery_steps_taken) < int(self.max_downward_recovery_steps)
+            )
+            if can_recover_down:
+                self._downward_recovery_steps_taken += 1
+                tgt_down, applied_move = self._downward_recovery_target()
+                if applied_move == (0, 0, 0):
+                    self._record_decision(
+                        "z_recovery_move_collapsed_abort",
+                        {
+                            "status": str(status),
+                            "metrics": metrics,
+                            "downward_steps_taken": int(self._downward_recovery_steps_taken),
+                            "max_downward_steps": int(self.max_downward_recovery_steps),
+                            "target_position": tgt_down,
+                            "applied_move": applied_move,
+                        },
+                    )
+                    self.calibrationError.emit(
+                        "Nozzle Pos - Unable to move down for out-of-view recovery (move collapsed at bounds)."
+                    )
+                    return
+
+                self._record_decision(
+                    "x_scan_exhausted_z_step_down",
+                    {
+                        "status": str(status),
+                        "anchor": dict(self._x_scan_anchor or {}),
+                        "half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
+                        "attempt_index": int(self._x_scan_attempt_index),
+                        "downward_steps_taken": int(self._downward_recovery_steps_taken),
+                        "max_downward_steps": int(self.max_downward_recovery_steps),
+                        "downward_step_fov": float(self.downward_recovery_step_fov),
+                        "target_position": tgt_down,
+                        "applied_move": applied_move,
+                        "head_view_metrics": metrics,
+                    },
+                )
+                self.stageChanged.emit(
+                    "Nozzle Pos - X scan exhausted and top band indicates head out of view; "
+                    f"moving down by {float(self.downward_recovery_step_fov):.2f} FOV "
+                    f"(step {int(self._downward_recovery_steps_taken)}/{int(self.max_downward_recovery_steps)})."
+                )
+                self._request_move_absolute_with_timeout(
+                    tgt_down,
+                    timeout_ms=self.move_timeout_ms,
+                    err_msg="Nozzle Pos - Downward recovery move timed out.",
+                )
+                return
+
             msg = "Nozzle Pos - No nozzle contour detected after X-axis scan around start point. Check X/Z alignment."
             self._record_decision(
                 "x_scan_exhausted_abort",
@@ -2883,6 +3044,9 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                     "anchor": dict(self._x_scan_anchor or {}),
                     "half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
                     "attempt_index": int(self._x_scan_attempt_index),
+                    "downward_steps_taken": int(self._downward_recovery_steps_taken),
+                    "max_downward_steps": int(self.max_downward_recovery_steps),
+                    "head_view_metrics": metrics,
                 },
             )
             self.calibrationError.emit(msg)

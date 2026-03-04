@@ -126,11 +126,33 @@
      - if multiple contours, decrement flash delay by 200 us (floor 2000 us) and re-capture.
      - if single contour, attempt `_recenter_or_finish(nozzle_px)`.
    - `NO_SIGNAL` and `NONE`:
-     - treat as likely out-of-FOV condition.
-     - perform anchored X scan around start point:
-       - first: move right of start (decrease X) by half FOV
-       - second: move left of start (increase X) by half FOV
-       - then: abort with deterministic error if still missing.
+      - treat as likely out-of-FOV condition.
+      - perform anchored X scan around start point:
+        - first: move right of start (decrease X) by half FOV
+        - second: move left of start (increase X) by half FOV
+        - if still missing:
+          - analyze background top-band brightness to infer whether head is above FOV
+          - if likely above FOV, move down by 0.25 FOV and retry
+          - cap downward recovery to 4 steps (1.0 FOV total)
+          - otherwise abort with deterministic alignment error.
+
+## Data-driven head-in-view heuristic (from Pi recordings)
+- Source pulled from Pi:
+  - `/home/labcraft/LabCraft_printer/FreeRTOS-interface/Experiments/Untitled-20260304_111121/calibration_recordings/NozzlePositionCalibrationProcess/`
+- Examined successful runs including:
+  - `run_20260304_111716_24e5f347`
+  - `run_20260304_111834_bd110e6d`
+  - `run_20260304_111854_2a69ca52`
+- Examined failed run:
+  - `run_20260304_112539_e1c3d3e3` (X scan exhausted)
+- Observed metric separation in background images:
+  - Successful X-scan runs: top/mid ratio about `0.24-0.44`, top-mid delta about `136-186`.
+  - Failed run (all 3 backgrounds): top/mid ratio about `0.94-0.95`, top-mid delta about `13-14`.
+- Implemented decision rule:
+  - classify `head_not_in_view` when:
+    - `top_to_mid_ratio >= 0.90` and
+    - `top_mid_delta <= 25`.
+  - else classify `head_in_view`.
 
 ## Detection algorithm used today
 - Input: absolute difference `abs(droplet - background)`.
@@ -188,7 +210,7 @@
 - Warm-up discard adds an extra droplet capture per scan start and after delay/backoff adjustments.
 - Full-frame threshold + contour pass is run for each analyze cycle.
 - Every successful recenter move returns to recapture background and restart droplet prep sequence.
-- Missing-contour path may require two additional X-scan relocations before abort.
+- Missing-contour path may require X scans plus up to four downward recovery retries before final abort.
 
 ## Suggested Next Changes (No Code Yet, for Next Iteration)
 1. Optionally restore baseline settings on completion/error (or make this behavior configurable).
@@ -214,13 +236,13 @@
   - `tests/test_calibration_process_recorder.py`
   - `tests/test_calibration_verdict_dialog.py`
   - `tests/test_replay_nozzle_position.py`
+- Nozzle search strategy (X scan, multi-contour backoff, downward recovery):
+  - `tests/test_calibration_nozzle_position_search_strategy.py`
 
 ## Important nozzle tests still missing
-1. Anchored X-scan path is deterministic for both `NONE` and `NO_SIGNAL` statuses.
-2. Multi-contour delay backoff decrements by 200 us and honors 2000 us floor.
-3. Shape mismatch (`bg.shape != droplet.shape`) returns controlled calibration error.
-4. Candidate ranking regression tests with known stream-vs-detached-droplet ground truth.
-5. Settings restore behavior at process end (if/when restore is implemented).
+1. Shape mismatch (`bg.shape != droplet.shape`) returns controlled calibration error.
+2. Candidate ranking regression tests with known stream-vs-detached-droplet ground truth.
+3. Settings restore behavior at process end (if/when restore is implemented).
 
 ## Data Collection and Replay Assets (Current State)
 - Atomic-case checklist manifest for nozzle process:
