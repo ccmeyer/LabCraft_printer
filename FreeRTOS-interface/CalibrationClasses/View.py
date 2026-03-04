@@ -1714,6 +1714,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.model = model
         self.controller = controller
         self.droplet_camera_model = model.droplet_camera_model
+        self.shortcut_manager = ShortcutManager(self)
 
         self.store = NozzlePositionChecklistStore(self.model, process_name=self.PROCESS_NAME)
         self.store.begin_session()
@@ -1722,6 +1723,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self._capture_inflight = False
 
         self._build_ui()
+        self.setup_shortcuts()
         self._connect_signals()
         self._populate_checklist()
         self._sync_setting_controls_from_model()
@@ -1804,7 +1806,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         r += 1
 
         self.num_droplets_spin = QtWidgets.QSpinBox()
-        self.num_droplets_spin.setRange(1, 20)
+        self.num_droplets_spin.setRange(0, 20)
         self.num_droplets_spin.setValue(1)
         settings_grid.addWidget(QtWidgets.QLabel("Droplets per image:"), r, 0)
         settings_grid.addWidget(self.num_droplets_spin, r, 1)
@@ -1833,9 +1835,11 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
 
         capture_group = QtWidgets.QGroupBox("Capture")
         capture_v = QtWidgets.QVBoxLayout(capture_group)
+        self.capture_preview_btn = QtWidgets.QPushButton("Capture Preview (No Save)")
         self.capture_background_btn = QtWidgets.QPushButton("Capture Background (0 droplets)")
         self.capture_droplet_btn = QtWidgets.QPushButton("Capture Droplet")
         self.reject_last_btn = QtWidgets.QPushButton("Reject Last Image")
+        capture_v.addWidget(self.capture_preview_btn)
         capture_v.addWidget(self.capture_background_btn)
         capture_v.addWidget(self.capture_droplet_btn)
         capture_v.addWidget(self.reject_last_btn)
@@ -1874,6 +1878,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
 
     def _connect_signals(self):
         self.checklist_table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.capture_preview_btn.clicked.connect(self._capture_preview_only)
         self.capture_background_btn.clicked.connect(lambda: self._capture_for_role("background"))
         self.capture_droplet_btn.clicked.connect(lambda: self._capture_for_role("droplet"))
         self.reject_last_btn.clicked.connect(self._reject_last_image)
@@ -1994,9 +1999,31 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.selected_label_value.setText(txt)
 
     def _set_buttons_enabled(self, enabled: bool):
+        self.capture_preview_btn.setEnabled(enabled)
         self.capture_background_btn.setEnabled(enabled)
         self.capture_droplet_btn.setEnabled(enabled)
         self.reject_last_btn.setEnabled(enabled)
+
+    def setup_shortcuts(self):
+        """
+        Match movement shortcuts from the standard droplet imaging window.
+        """
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.move_fraction_of_frame(-0.1, 0))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.move_fraction_of_frame(0.1, 0))
+        self.shortcut_manager.add_shortcut('Up', 'Move up', lambda: self.move_fraction_of_frame(0, -0.1))
+        self.shortcut_manager.add_shortcut('Down', 'Move down', lambda: self.move_fraction_of_frame(0, 0.1))
+        self.shortcut_manager.add_shortcut('Ctrl+Left', 'Move left', lambda: self.move_fraction_of_frame(-1, 0))
+        self.shortcut_manager.add_shortcut('Ctrl+Right', 'Move right', lambda: self.move_fraction_of_frame(1, 0))
+        self.shortcut_manager.add_shortcut('Ctrl+Up', 'Move up', lambda: self.move_fraction_of_frame(0, -1))
+        self.shortcut_manager.add_shortcut('Ctrl+Down', 'Move down', lambda: self.move_fraction_of_frame(0, 1))
+        self.shortcut_manager.add_shortcut('k', 'Move forward', lambda: self.controller.set_relative_Y(5, manual=True))
+        self.shortcut_manager.add_shortcut('j', 'Move backward', lambda: self.controller.set_relative_Y(-5, manual=True))
+        self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(25, manual=True))
+        self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-25, manual=True))
+
+    def move_fraction_of_frame(self, x_fraction, y_fraction):
+        dX, dY, dZ = self.model.droplet_camera_model.compute_move_by_fraction(x_fraction, y_fraction)
+        self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
 
     def _set_status(self, text: str, *, color: str = "black"):
         self.status_label.setText(str(text))
@@ -2105,6 +2132,42 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
             self._capture_inflight = False
             self._set_buttons_enabled(True)
             self._set_status(f"Unable to set imaging droplets: {e}", color="red")
+
+    def _capture_preview_only(self):
+        """
+        Capture an image using current conditions but do not persist it to checklist storage.
+        """
+        if self._capture_inflight:
+            return
+
+        target_droplets = int(max(0, self.num_droplets_spin.value()))
+        self._capture_inflight = True
+        self._set_buttons_enabled(False)
+        self._set_status(f"Capturing preview (droplets={target_droplets})...", color="darkblue")
+
+        def _on_frame(frame):
+            self._capture_inflight = False
+            self._set_buttons_enabled(True)
+            if frame is None:
+                self._set_status("Preview capture failed.", color="red")
+                QtWidgets.QMessageBox.warning(self, "Capture failed", "Camera did not return a frame.")
+                return
+            self._show_preview(frame)
+            self._set_status("Preview captured (not saved).", color="darkgreen")
+
+        def _after_set_droplets():
+            ok = self.controller.capture_droplet_image(callback=_on_frame)
+            if ok is False:
+                self._capture_inflight = False
+                self._set_buttons_enabled(True)
+                self._set_status("Preview capture request was dropped (capture already pending).", color="red")
+
+        try:
+            self.controller.set_imaging_droplets(int(target_droplets), callback=_after_set_droplets)
+        except Exception as e:
+            self._capture_inflight = False
+            self._set_buttons_enabled(True)
+            self._set_status(f"Unable to set imaging droplets for preview: {e}", color="red")
 
     def _reject_last_image(self):
         reason, ok = QtWidgets.QInputDialog.getText(
