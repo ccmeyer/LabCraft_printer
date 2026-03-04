@@ -140,7 +140,18 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
 
         class InV2:
             def event_wait(self, timeout):
-                return req.wait_edge_events(timeout)
+                # gpiod v2 bindings vary by platform/version:
+                # some accept float seconds, others require timedelta or integer ns.
+                try:
+                    return req.wait_edge_events(timeout)
+                except TypeError:
+                    pass
+                try:
+                    import datetime as _dt
+                    return req.wait_edge_events(_dt.timedelta(seconds=float(timeout)))
+                except TypeError:
+                    ns = int(max(0.0, float(timeout)) * 1e9)
+                    return req.wait_edge_events(ns)
             def event_consume(self):
                 _ = req.read_edge_events()
             def release(self):
@@ -410,6 +421,10 @@ class DropletCamera(QObject):
             print("Camera not started.")
             return
 
+        with self._cv:
+            self._cap_done.clear()
+            self._cap_result = None
+
         # Drain stale edges from previous runs
         while self._edge_in.event_wait(0):
             self._edge_in.event_consume()
@@ -418,7 +433,26 @@ class DropletCamera(QObject):
         self._trigger_high()
 
         # Wait for MCU "flash fired" ACK
-        if not self._edge_in.event_wait(timeout_s):
+        try:
+            fired = self._edge_in.event_wait(timeout_s)
+        except Exception as e:
+            print(f"Error while waiting for flash-fired edge: {e}")
+            self._trigger_low()
+            with self._cv:
+                self._cap_active = False
+                self._cap_result = {
+                    "arr": None,
+                    "md": None,
+                    "mean": 0.0,
+                    "reason": "edge_wait_error",
+                    "error": str(e),
+                    "threshold": 0.0,
+                    "cap_id": self._cap_id,
+                }
+                self._cap_done.set()
+            return
+
+        if not fired:
             print("Timed out waiting for flash-fired edge.")
             self._trigger_low()
             with self._cv:
@@ -2419,12 +2453,20 @@ class Machine(QObject):
         return self.add_command_to_queue('SET_WIDTH_F', safe_duration, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
 
     def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False):
-        delay = round(delay,0)
+        delay = int(round(float(delay), 0))
         if delay >= 100:
             return self.add_command_to_queue('SET_DELAY_F',delay,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
     def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
-        return self.add_command_to_queue('SET_IMAGE_DROPLETS',droplets,0,0,handler=handler,kwargs=kwargs,manual=manual)
+        return self.add_command_to_queue(
+            'SET_IMAGE_DROPLETS',
+            int(droplets),
+            0,
+            0,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual
+        )
 
     def print_only(self,droplet_count,handler=None,kwargs=None,manual=False):
         self.check_param_limits(droplet_count,1,1000)
