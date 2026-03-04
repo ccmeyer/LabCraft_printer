@@ -102,6 +102,61 @@ def _make_output_line(chip_name, offset, initial=0, consumer="gpio_out"):
                 line.release()
         return OutV1()
 
+def _wait_edge_events_compat(wait_fn, timeout):
+    """
+    Call a libgpiod wait function across API/version differences.
+    Some builds accept float seconds, others require timedelta, integers, or
+    sec/nsec pairs.
+    """
+    errs = []
+    try:
+        t = max(0.0, float(timeout))
+    except Exception:
+        t = 0.0
+
+    # 1) Common one-arg forms.
+    candidates = [timeout]
+    try:
+        import datetime as _dt
+        candidates.append(_dt.timedelta(seconds=t))
+    except Exception:
+        pass
+    # Integer fallbacks (common in some C-extension signatures)
+    candidates.extend([
+        int(round(t * 1_000_000_000)),  # ns
+        int(round(t * 1_000_000)),      # us
+        int(round(t * 1_000)),          # ms
+        int(max(0, round(t))),          # s
+    ])
+
+    for arg in candidates:
+        try:
+            return bool(wait_fn(arg))
+        except TypeError as e:
+            errs.append(str(e))
+        except Exception as e:
+            # Unexpected runtime failure should propagate.
+            raise
+
+    # 2) Two-arg / keyword sec+nsec forms used by some v1 bindings.
+    sec = int(t)
+    nsec = int(round((t - sec) * 1_000_000_000))
+    for args, kwargs in (
+        ((sec, nsec), {}),
+        ((), {"sec": sec, "nsec": nsec}),
+        ((), {"seconds": sec, "nanoseconds": nsec}),
+    ):
+        try:
+            return bool(wait_fn(*args, **kwargs))
+        except TypeError as e:
+            errs.append(str(e))
+        except Exception:
+            raise
+
+    # 3) If every signature probe failed, keep behavior explicit.
+    detail = errs[-1] if errs else "unsupported timeout signature"
+    raise TypeError(f"Unable to call edge wait with timeout={timeout!r}: {detail}")
+
 def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
     """
     Returns an object with:
@@ -140,18 +195,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
 
         class InV2:
             def event_wait(self, timeout):
-                # gpiod v2 bindings vary by platform/version:
-                # some accept float seconds, others require timedelta or integer ns.
-                try:
-                    return req.wait_edge_events(timeout)
-                except TypeError:
-                    pass
-                try:
-                    import datetime as _dt
-                    return req.wait_edge_events(_dt.timedelta(seconds=float(timeout)))
-                except TypeError:
-                    ns = int(max(0.0, float(timeout)) * 1e9)
-                    return req.wait_edge_events(ns)
+                return _wait_edge_events_compat(req.wait_edge_events, timeout)
             def event_consume(self):
                 _ = req.read_edge_events()
             def release(self):
@@ -169,7 +213,7 @@ def _make_rising_edge_input(chip_name, offset, consumer="gpio_in"):
 
         class InV1:
             def event_wait(self, timeout):
-                return line.event_wait(timeout)
+                return _wait_edge_events_compat(line.event_wait, timeout)
             def event_consume(self):
                 _ = line.event_read()
             def release(self):
