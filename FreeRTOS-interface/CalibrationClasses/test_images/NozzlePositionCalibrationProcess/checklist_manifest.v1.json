@@ -99,13 +99,13 @@
     },
     {
       "case_id": "NP_MC_TWO_VALID_LOWER_WINS",
-      "label": "Two valid contours",
-      "tooltip": "Two valid contours where lower candidate should be selected.",
+      "label": "Dual contour stream+droplet",
+      "tooltip": "Two valid contours are present; one near nozzle stream and one from detached droplet.",
       "steps": [
         {
           "step_id": "default",
           "label": "Lower candidate wins",
-          "tooltip": "Capture two valid candidates; lower contour should be selected deterministically.",
+          "tooltip": "Capture two valid candidates where deterministic lower/better ranked contour should win.",
           "required": { "background": 1, "droplet": 3 },
           "expected_status": "OK",
           "expected_decision": "recenter"
@@ -124,6 +124,51 @@
           "required": { "background": 1, "droplet": 3 },
           "expected_status": "OK",
           "expected_decision": "recenter"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NO_SIGNAL_PRESSURE_LOW",
+      "label": "No signal, pressure too low",
+      "tooltip": "No detectable nozzle/droplet signal because print pressure is too low.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Low pressure no-signal",
+          "tooltip": "Capture with pressure intentionally low enough to produce no detectable signal.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "pressure_bump"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NONE_FLASH_DELAY_TOO_SHORT",
+      "label": "Flash delay too short",
+      "tooltip": "Flash timing too early/short so valid nozzle contour is not detectable.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Early flash reject",
+          "tooltip": "Capture at too-short flash delay where contour should fail validity filters.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NONE",
+          "expected_decision": "delay_scan"
+        }
+      ]
+    },
+    {
+      "case_id": "NP_FAIL_NO_SIGNAL_GANTRY_OUT_OF_FOV",
+      "label": "Gantry out of field of view",
+      "tooltip": "Nozzle moved laterally so stream/nozzle is outside camera field of view.",
+      "steps": [
+        {
+          "step_id": "default",
+          "label": "Out-of-view no-signal",
+          "tooltip": "Capture with gantry offset to the side so no relevant signal is visible.",
+          "required": { "background": 1, "droplet": 3 },
+          "expected_status": "NO_SIGNAL",
+          "expected_decision": "delay_scan"
         }
       ]
     },
@@ -214,162 +259,6 @@
           "required": { "background": 1, "droplet": 3 },
           "expected_status": "NONE",
           "expected_decision": "delay_scan"
-        }
-      ]
-    },
-    {
-      "case_id": "NP_SEQ_WARMUP_DISCARD",
-      "label": "Warmup discard sequence",
-      "tooltip": "Sequence demonstrating warmup frame discard before valid detection.",
-      "steps": [
-        {
-          "step_id": "bg_baseline",
-          "label": "Baseline background",
-          "tooltip": "Background frame captured before warmup/measurement frames.",
-          "required": { "background": 1, "droplet": 0 },
-          "expected_status": "NONE",
-          "expected_decision": "delay_scan"
-        },
-        {
-          "step_id": "dr_warmup_throwaway",
-          "label": "Warmup throwaway",
-          "tooltip": "First droplet frame intended as warmup and discarded.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NONE",
-          "expected_decision": "delay_scan"
-        },
-        {
-          "step_id": "dr_post_warmup_ok",
-          "label": "Post-warmup valid",
-          "tooltip": "Second droplet frame after warmup, valid nozzle contour.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "OK",
-          "expected_decision": "recenter"
-        }
-      ]
-    },
-    {
-      "case_id": "NP_SEQ_DELAY_SCAN_TO_SUCCESS",
-      "label": "Delay scan to success",
-      "tooltip": "Sequence that requires delay increments before valid detection.",
-      "steps": [
-        {
-          "step_id": "bg_baseline",
-          "label": "Baseline background",
-          "tooltip": "Background frame for this delay-scan sequence.",
-          "required": { "background": 1, "droplet": 0 },
-          "expected_status": "NONE",
-          "expected_decision": "delay_scan"
-        },
-        {
-          "step_id": "dr_delay_scan_early_none",
-          "label": "Early delay none",
-          "tooltip": "Early flash delay frame should return NONE.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NONE",
-          "expected_decision": "delay_scan"
-        },
-        {
-          "step_id": "dr_delay_scan_mid_none",
-          "label": "Mid delay none",
-          "tooltip": "Mid flash delay frame should still return NONE.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NONE",
-          "expected_decision": "delay_scan"
-        },
-        {
-          "step_id": "dr_delay_scan_late_ok",
-          "label": "Late delay valid",
-          "tooltip": "Later flash delay frame returns valid nozzle contour.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "OK",
-          "expected_decision": "recenter"
-        }
-      ]
-    },
-    {
-      "case_id": "NP_SEQ_PRESSURE_BUMP_TO_SUCCESS",
-      "label": "Pressure bump to success",
-      "tooltip": "Sequence requiring pressure bumps before valid detection.",
-      "steps": [
-        {
-          "step_id": "bg_baseline",
-          "label": "Baseline background",
-          "tooltip": "Background frame for pressure bump sequence.",
-          "required": { "background": 1, "droplet": 0 },
-          "expected_status": "NONE",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_base_no_signal",
-          "label": "Base pressure no-signal",
-          "tooltip": "Base pressure frame should return NO_SIGNAL.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_pressure_bump_1_no_signal",
-          "label": "Bump 1 no-signal",
-          "tooltip": "First pressure bump frame should still return NO_SIGNAL.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_pressure_bump_2_ok",
-          "label": "Bump 2 valid",
-          "tooltip": "Second pressure bump frame should return valid contour.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "OK",
-          "expected_decision": "recenter"
-        }
-      ]
-    },
-    {
-      "case_id": "NP_SEQ_NO_SIGNAL_TO_ABORT",
-      "label": "No-signal to abort",
-      "tooltip": "Sequence that stays no-signal until process aborts.",
-      "steps": [
-        {
-          "step_id": "bg_baseline",
-          "label": "Baseline background",
-          "tooltip": "Background frame for repeated no-signal abort sequence.",
-          "required": { "background": 1, "droplet": 0 },
-          "expected_status": "NONE",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_base_no_signal",
-          "label": "Base no-signal",
-          "tooltip": "Base pressure frame returns NO_SIGNAL.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_bump_1_no_signal",
-          "label": "Bump 1 no-signal",
-          "tooltip": "First pressure bump still no-signal.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_bump_2_no_signal",
-          "label": "Bump 2 no-signal",
-          "tooltip": "Second pressure bump still no-signal.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "pressure_bump"
-        },
-        {
-          "step_id": "dr_cap_no_signal_abort",
-          "label": "Cap reached abort",
-          "tooltip": "No-signal at pressure cap where process should abort.",
-          "required": { "background": 0, "droplet": 3 },
-          "expected_status": "NO_SIGNAL",
-          "expected_decision": "abort"
         }
       ]
     }

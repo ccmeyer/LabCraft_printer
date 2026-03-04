@@ -290,6 +290,12 @@ class NozzlePositionChecklistStore:
         reagent_name: str | None = None,
         fsm_hint: str | None = None,
         operator_note: str | None = None,
+        pair_id: str | None = None,
+        pair_role: str | None = None,
+        pair_order: int | None = None,
+        pair_capture_mode: str | None = None,
+        subtract_background_record_id: str | None = None,
+        subtract_background_image_relpath: str | None = None,
     ):
         self.ensure_session()
         role = str(capture_role).lower().strip()
@@ -336,6 +342,13 @@ class NozzlePositionChecklistStore:
             "reagent_name": str(reagent_name or "unknown"),
             "fsm_hint": str(fsm_hint or ""),
             "operator_note": str(operator_note or ""),
+            # Pair metadata enables deterministic background subtraction matching during analysis.
+            "pair_id": str(pair_id or ""),
+            "pair_role": str(pair_role or ""),
+            "pair_order": int(pair_order) if pair_order is not None else None,
+            "pair_capture_mode": str(pair_capture_mode or ""),
+            "subtract_background_record_id": str(subtract_background_record_id or ""),
+            "subtract_background_image_relpath": str(subtract_background_image_relpath or ""),
             "rejected": False,
         }
         self._append_record(payload)

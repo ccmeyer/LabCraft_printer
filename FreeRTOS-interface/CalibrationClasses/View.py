@@ -16,6 +16,7 @@ import os
 import random
 import time
 import shutil
+import uuid
 from datetime import datetime
 import cv2
 from utilities import ShortcutManager
@@ -1791,8 +1792,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
             self.print_pw_spin,
             self.print_pressure_spin,
             self.capture_preview_btn,
-            self.capture_background_btn,
-            self.capture_droplet_btn,
+            self.capture_pair_btn,
             self.reject_last_btn,
         )
         for widget in no_focus_widgets:
@@ -1901,12 +1901,10 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         capture_group = QtWidgets.QGroupBox("Capture")
         capture_v = QtWidgets.QVBoxLayout(capture_group)
         self.capture_preview_btn = QtWidgets.QPushButton("Capture Preview (No Save)")
-        self.capture_background_btn = QtWidgets.QPushButton("Capture Background (0 droplets)")
-        self.capture_droplet_btn = QtWidgets.QPushButton("Capture Droplet")
+        self.capture_pair_btn = QtWidgets.QPushButton("Capture Background + Droplet")
         self.reject_last_btn = QtWidgets.QPushButton("Reject Last Image")
         capture_v.addWidget(self.capture_preview_btn)
-        capture_v.addWidget(self.capture_background_btn)
-        capture_v.addWidget(self.capture_droplet_btn)
+        capture_v.addWidget(self.capture_pair_btn)
         capture_v.addWidget(self.reject_last_btn)
 
         self.status_label = QtWidgets.QLabel("Idle")
@@ -1937,8 +1935,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
     def _connect_signals(self):
         self.checklist_table.itemSelectionChanged.connect(self._on_selection_changed)
         self.capture_preview_btn.clicked.connect(self._capture_preview_only)
-        self.capture_background_btn.clicked.connect(lambda: self._capture_for_role("background"))
-        self.capture_droplet_btn.clicked.connect(lambda: self._capture_for_role("droplet"))
+        self.capture_pair_btn.clicked.connect(self._capture_background_then_droplet)
         self.reject_last_btn.clicked.connect(self._reject_last_image)
 
         self.flash_duration_spin.valueChanged.connect(
@@ -2058,8 +2055,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
 
     def _set_buttons_enabled(self, enabled: bool):
         self.capture_preview_btn.setEnabled(enabled)
-        self.capture_background_btn.setEnabled(enabled)
-        self.capture_droplet_btn.setEnabled(enabled)
+        self.capture_pair_btn.setEnabled(enabled)
         self.reject_last_btn.setEnabled(enabled)
 
     def setup_shortcuts(self):
@@ -2132,7 +2128,43 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
             pass
         return out
 
-    def _capture_for_role(self, role: str):
+    def _store_capture_record(
+        self,
+        row,
+        role: str,
+        frame,
+        *,
+        pair_id: str | None = None,
+        pair_role: str | None = None,
+        pair_order: int | None = None,
+        pair_capture_mode: str | None = None,
+        subtract_background_record_id: str | None = None,
+        subtract_background_image_relpath: str | None = None,
+    ):
+        selected_label = f"{row['case_label']} / {row['step_label']}"
+        rec = self.store.capture_for_row(
+            row["row_key"],
+            role,
+            frame,
+            selected_label=selected_label,
+            machine_state=self._machine_state_snapshot(),
+            camera_settings=self._camera_settings_snapshot(),
+            reagent_name=self.store.resolve_reagent_name(),
+            pair_id=pair_id,
+            pair_role=pair_role,
+            pair_order=pair_order,
+            pair_capture_mode=pair_capture_mode,
+            subtract_background_record_id=subtract_background_record_id,
+            subtract_background_image_relpath=subtract_background_image_relpath,
+        )
+        self._show_preview(frame)
+        self.last_record_label.setText(
+            f"Last record: {rec['record_id']} | {rec['capture_role']} | {rec['case_id']}:{rec['step_id']}\n"
+            f"{rec['image_relpath']}"
+        )
+        return rec
+
+    def _capture_background_then_droplet(self):
         if self._capture_inflight:
             return
         row = self._selected_row()
@@ -2140,61 +2172,104 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No selection", "Select a checklist row before capturing.")
             return
 
-        target_droplets = 0 if role == "background" else int(max(1, self.num_droplets_spin.value()))
+        target_droplets = int(max(1, self.num_droplets_spin.value()))
+        pair_id = str(uuid.uuid4())
+        pair_capture_mode = "background_then_droplet"
         self._capture_inflight = True
         self._set_buttons_enabled(False)
-        self._set_status(f"Capturing {role} for {row['case_id']} / {row['step_id']}...", color="darkblue")
+        self._set_status(
+            f"Capturing background + droplet for {row['case_id']} / {row['step_id']}...",
+            color="darkblue",
+        )
 
-        def _on_frame(frame):
+        def _fail(message: str, *, critical: bool = False, dialog_message: str | None = None):
             self._capture_inflight = False
             self._set_buttons_enabled(True)
+            self._set_status(message, color="red")
+            if dialog_message:
+                if critical:
+                    QtWidgets.QMessageBox.critical(self, "Capture failed", dialog_message)
+                else:
+                    QtWidgets.QMessageBox.warning(self, "Capture failed", dialog_message)
 
-            if frame is None:
-                self._set_status("Capture failed.", color="red")
-                QtWidgets.QMessageBox.warning(self, "Capture failed", "Camera did not return a frame.")
-                return
-
-            selected_label = f"{row['case_label']} / {row['step_label']}"
-            try:
-                rec = self.store.capture_for_row(
-                    row["row_key"],
-                    role,
-                    frame,
-                    selected_label=selected_label,
-                    machine_state=self._machine_state_snapshot(),
-                    camera_settings=self._camera_settings_snapshot(),
-                    reagent_name=self.store.resolve_reagent_name(),
-                )
-            except Exception as e:
-                self._set_status(f"Save failed: {e}", color="red")
-                QtWidgets.QMessageBox.critical(self, "Save failed", str(e))
-                return
-
-            self._show_preview(frame)
-            self.last_record_label.setText(
-                f"Last record: {rec['record_id']} | {rec['capture_role']} | {rec['case_id']}:{rec['step_id']}\n"
-                f"{rec['image_relpath']}"
-            )
+        def _finish_success():
+            self._capture_inflight = False
+            self._set_buttons_enabled(True)
             self._populate_checklist()
-
             if self.store.is_complete():
                 self._set_status("Checklist complete (minimum required replicates met).", color="darkgreen")
             else:
-                self._set_status("Capture stored.", color="darkgreen")
+                self._set_status("Background + droplet capture stored.", color="darkgreen")
 
-        def _after_set_droplets():
-            ok = self.controller.capture_droplet_image(callback=_on_frame)
+        def _on_background_frame(frame):
+            if frame is None:
+                _fail("Background capture failed.", dialog_message="Camera did not return a background frame.")
+                return
+            try:
+                background_record = self._store_capture_record(
+                    row,
+                    "background",
+                    frame,
+                    pair_id=pair_id,
+                    pair_role="background",
+                    pair_order=1,
+                    pair_capture_mode=pair_capture_mode,
+                )
+            except Exception as e:
+                _fail(f"Background save failed: {e}", critical=True, dialog_message=str(e))
+                return
+
+            bg_rec_id = background_record.get("record_id")
+            bg_relpath = background_record.get("image_relpath")
+
+            def _start_paired_droplet_phase():
+                self._set_status(
+                    f"Capturing droplet for {row['case_id']} / {row['step_id']}...",
+                    color="darkblue",
+                )
+
+                def _on_droplet_frame(frame):
+                    if frame is None:
+                        _fail("Droplet capture failed.", dialog_message="Camera did not return a droplet frame.")
+                        return
+                    try:
+                        self._store_capture_record(
+                            row,
+                            "droplet",
+                            frame,
+                            pair_id=pair_id,
+                            pair_role="droplet",
+                            pair_order=2,
+                            pair_capture_mode=pair_capture_mode,
+                            subtract_background_record_id=bg_rec_id,
+                            subtract_background_image_relpath=bg_relpath,
+                        )
+                    except Exception as e:
+                        _fail(f"Droplet save failed: {e}", critical=True, dialog_message=str(e))
+                        return
+                    _finish_success()
+
+                def _after_set_droplets():
+                    ok = self.controller.capture_droplet_image(callback=_on_droplet_frame)
+                    if ok is False:
+                        _fail("Droplet capture request was dropped (capture already pending).")
+
+                try:
+                    self.controller.set_imaging_droplets(target_droplets, callback=_after_set_droplets)
+                except Exception as e:
+                    _fail(f"Unable to set imaging droplets for droplet capture: {e}")
+
+            _start_paired_droplet_phase()
+
+        def _after_set_background_droplets():
+            ok = self.controller.capture_droplet_image(callback=_on_background_frame)
             if ok is False:
-                self._capture_inflight = False
-                self._set_buttons_enabled(True)
-                self._set_status("Capture request was dropped (capture already pending).", color="red")
+                _fail("Background capture request was dropped (capture already pending).")
 
         try:
-            self.controller.set_imaging_droplets(int(target_droplets), callback=_after_set_droplets)
+            self.controller.set_imaging_droplets(0, callback=_after_set_background_droplets)
         except Exception as e:
-            self._capture_inflight = False
-            self._set_buttons_enabled(True)
-            self._set_status(f"Unable to set imaging droplets: {e}", color="red")
+            _fail(f"Unable to set imaging droplets for background capture: {e}")
 
     def _capture_preview_only(self):
         """

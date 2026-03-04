@@ -86,3 +86,55 @@ def test_store_completion_counts_respect_reject_last(tmp_path):
     st2 = store.get_row_status(row_key)
     assert st2["accepted_droplet"] == 2
     assert st2["complete"] is False
+
+
+def test_store_pair_metadata_links_droplet_to_background(tmp_path):
+    store = NozzlePositionChecklistStore(
+        _dummy_model_with_unknown_reagent(),
+        base_dir=str(tmp_path / "NozzlePositionCalibrationProcess"),
+        manifest_path=str(_manifest_path()),
+    )
+    store.begin_session(session_id="session_pairing")
+
+    row_key = "NP_OK_CENTERED:default"
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    pair_id = "pair-test-001"
+
+    bg = store.capture_for_row(
+        row_key,
+        "background",
+        frame,
+        selected_label="sel",
+        pair_id=pair_id,
+        pair_role="background",
+        pair_order=1,
+        pair_capture_mode="background_then_droplet",
+    )
+    dr = store.capture_for_row(
+        row_key,
+        "droplet",
+        frame,
+        selected_label="sel",
+        pair_id=pair_id,
+        pair_role="droplet",
+        pair_order=2,
+        pair_capture_mode="background_then_droplet",
+        subtract_background_record_id=bg["record_id"],
+        subtract_background_image_relpath=bg["image_relpath"],
+    )
+
+    lines = Path(store.records_path).read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    payload_bg = json.loads(lines[0])
+    payload_dr = json.loads(lines[1])
+
+    assert payload_bg["pair_id"] == pair_id
+    assert payload_bg["pair_role"] == "background"
+    assert payload_bg["pair_order"] == 1
+
+    assert payload_dr["pair_id"] == pair_id
+    assert payload_dr["pair_role"] == "droplet"
+    assert payload_dr["pair_order"] == 2
+    assert payload_dr["subtract_background_record_id"] == bg["record_id"]
+    assert payload_dr["subtract_background_image_relpath"] == bg["image_relpath"]
+    assert dr["subtract_background_record_id"] == bg["record_id"]
