@@ -6048,12 +6048,26 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if dy_med is not None and self._prev_dy is not None and self._prev_pressure is not None:
             moved_px = abs(dy_med - self._prev_dy)
 
-        if any(r.get("nozzle_wet") for r in self.reps) and self.auto_stop_on_nozzle_wet:
-            self._early_stop = True
-            self._stop_reason = "Nozzle wet detected during scan"
-            self._terminate_at_pressure = float(self._current_pressure)
-            self.finalize.emit()
-            return
+        wet_hits = sum(1 for r in self.reps if bool(r.get("nozzle_wet")))
+        if wet_hits > 0 and self.auto_stop_on_nozzle_wet:
+            # High-start scans can show wet/nozzle-contact at clearly-too-high pressures.
+            # If we have not discovered any single-droplet region yet and this point is
+            # still MULTIPLE, continue scanning downward instead of terminating immediately.
+            if (verdict == "multiple") and (self._min_single_pressure is None):
+                self._record_decision(
+                    "nozzle_wet_deferred_while_high_multiple",
+                    {
+                        "pressure_psi": float(self._current_pressure),
+                        "wet_replicates": int(wet_hits),
+                        "n_reps": int(len(self.reps)),
+                    },
+                )
+            else:
+                self._early_stop = True
+                self._stop_reason = "Nozzle wet detected during scan"
+                self._terminate_at_pressure = float(self._current_pressure)
+                self.finalize.emit()
+                return
 
         if verdict == "multiple":
             # Downward nudge but obey PW/Bracket caps

@@ -98,3 +98,60 @@ def test_pressure_band_completion_errors_when_no_single_band_found():
     assert "no valid single-droplet pressure band" in proc.calibrationError.calls[0][0][0].lower()
     assert proc.calibrationDataUpdated.calls == []
     assert proc.calibrationCompleted.calls == []
+
+
+def _build_choose_proc(*, verdict: str, min_single_pressure):
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._phase = "scan"
+    proc._pulse_width_us = 1500
+    proc._upper_bracket = None
+    proc._lower_bracket = None
+    proc._straddle_bracket = None
+    proc.dp_min = 0.01
+    proc.dp = 0.05
+    proc.multiple_big_step = 0.10
+    proc.none_jump_up = 0.10
+    proc.small_move_px = 8
+    proc.large_move_px = 40
+    proc.near_nozzle_px = 560
+    proc.far_nozzle_px = 1050
+    proc._prev_dy = None
+    proc._prev_pressure = None
+    proc._current_pressure = 0.90
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.auto_stop_on_nozzle_wet = True
+    proc._early_stop = False
+    proc._stop_reason = None
+    proc._terminate_at_pressure = None
+    proc._min_single_pressure = min_single_pressure
+    proc.reps = [
+        _rep(verdict, dy=120, cy=320),
+        _rep(verdict, dy=118, cy=318),
+        _rep(verdict, dy=121, cy=322),
+    ]
+    for r in proc.reps:
+        r["nozzle_wet"] = True
+    proc.finalize = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    return proc
+
+
+def test_pressure_band_nozzle_wet_is_deferred_while_high_multiple_and_no_single_seen():
+    proc = _build_choose_proc(verdict="multiple", min_single_pressure=None)
+
+    proc._choose_next_pressure("multiple")
+
+    assert proc._early_stop is False
+    assert proc.finalize.calls == []
+    assert proc._next_pressure < 0.90
+
+
+def test_pressure_band_nozzle_wet_still_stops_after_single_region_seen():
+    proc = _build_choose_proc(verdict="multiple", min_single_pressure=0.82)
+
+    proc._choose_next_pressure("multiple")
+
+    assert proc._early_stop is True
+    assert proc._stop_reason == "Nozzle wet detected during scan"
+    assert proc.finalize.calls
