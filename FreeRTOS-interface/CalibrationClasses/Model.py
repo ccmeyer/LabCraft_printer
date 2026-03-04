@@ -2980,62 +2980,77 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         return tgt, applied
 
     def _handle_missing_nozzle(self, status: str):
-        advanced, decision, stage_msg, tgt = self._next_x_scan_target()
-        if not advanced:
+        metrics = self._background_head_view_metrics(self.background_image)
+        head_not_in_view = bool(metrics.get("valid")) and (not bool(metrics.get("head_in_view", True)))
+        if head_not_in_view:
             self._x_scan_active = False
-            metrics = self._background_head_view_metrics(self.background_image)
-            can_recover_down = (
-                bool(metrics.get("valid"))
-                and not bool(metrics.get("head_in_view", True))
-                and int(self._downward_recovery_steps_taken) < int(self.max_downward_recovery_steps)
-            )
-            if can_recover_down:
-                self._downward_recovery_steps_taken += 1
-                tgt_down, applied_move = self._downward_recovery_target()
-                if applied_move == (0, 0, 0):
-                    self._record_decision(
-                        "z_recovery_move_collapsed_abort",
-                        {
-                            "status": str(status),
-                            "metrics": metrics,
-                            "downward_steps_taken": int(self._downward_recovery_steps_taken),
-                            "max_downward_steps": int(self.max_downward_recovery_steps),
-                            "target_position": tgt_down,
-                            "applied_move": applied_move,
-                        },
-                    )
-                    self.calibrationError.emit(
-                        "Nozzle Pos - Unable to move down for out-of-view recovery (move collapsed at bounds)."
-                    )
-                    return
+            # Defer X-scan until head is visible; restart X-scan plan once we regain visibility.
+            self._x_scan_anchor = None
+            self._x_scan_half_fov_x_steps = 0
+            self._x_scan_attempt_index = 0
 
+            if int(self._downward_recovery_steps_taken) >= int(self.max_downward_recovery_steps):
                 self._record_decision(
-                    "x_scan_exhausted_z_step_down",
+                    "z_scan_exhausted_abort",
                     {
                         "status": str(status),
-                        "anchor": dict(self._x_scan_anchor or {}),
-                        "half_fov_x_steps": int(self._x_scan_half_fov_x_steps),
-                        "attempt_index": int(self._x_scan_attempt_index),
                         "downward_steps_taken": int(self._downward_recovery_steps_taken),
                         "max_downward_steps": int(self.max_downward_recovery_steps),
                         "downward_step_fov": float(self.downward_recovery_step_fov),
-                        "target_position": tgt_down,
-                        "applied_move": applied_move,
                         "head_view_metrics": metrics,
                     },
                 )
-                self.stageChanged.emit(
-                    "Nozzle Pos - X scan exhausted and top band indicates head out of view; "
-                    f"moving down by {float(self.downward_recovery_step_fov):.2f} FOV "
-                    f"(step {int(self._downward_recovery_steps_taken)}/{int(self.max_downward_recovery_steps)})."
-                )
-                self._request_move_absolute_with_timeout(
-                    tgt_down,
-                    timeout_ms=self.move_timeout_ms,
-                    err_msg="Nozzle Pos - Downward recovery move timed out.",
+                self.calibrationError.emit(
+                    "Nozzle Pos - Printer head not visible after downward recovery scan (1.0 FOV total)."
                 )
                 return
 
+            self._downward_recovery_steps_taken += 1
+            tgt_down, applied_move = self._downward_recovery_target()
+            if applied_move == (0, 0, 0):
+                self._record_decision(
+                    "z_recovery_move_collapsed_abort",
+                    {
+                        "status": str(status),
+                        "metrics": metrics,
+                        "downward_steps_taken": int(self._downward_recovery_steps_taken),
+                        "max_downward_steps": int(self.max_downward_recovery_steps),
+                        "target_position": tgt_down,
+                        "applied_move": applied_move,
+                    },
+                )
+                self.calibrationError.emit(
+                    "Nozzle Pos - Unable to move down for out-of-view recovery (move collapsed at bounds)."
+                )
+                return
+
+            self._record_decision(
+                "z_scan_step_down",
+                {
+                    "status": str(status),
+                    "downward_steps_taken": int(self._downward_recovery_steps_taken),
+                    "max_downward_steps": int(self.max_downward_recovery_steps),
+                    "downward_step_fov": float(self.downward_recovery_step_fov),
+                    "target_position": tgt_down,
+                    "applied_move": applied_move,
+                    "head_view_metrics": metrics,
+                },
+            )
+            self.stageChanged.emit(
+                "Nozzle Pos - Top band indicates head out of view; "
+                f"moving down by {float(self.downward_recovery_step_fov):.2f} FOV "
+                f"(step {int(self._downward_recovery_steps_taken)}/{int(self.max_downward_recovery_steps)})."
+            )
+            self._request_move_absolute_with_timeout(
+                tgt_down,
+                timeout_ms=self.move_timeout_ms,
+                err_msg="Nozzle Pos - Downward recovery move timed out.",
+            )
+            return
+
+        advanced, decision, stage_msg, tgt = self._next_x_scan_target()
+        if not advanced:
+            self._x_scan_active = False
             msg = "Nozzle Pos - No nozzle contour detected after X-axis scan around start point. Check X/Z alignment."
             self._record_decision(
                 "x_scan_exhausted_abort",

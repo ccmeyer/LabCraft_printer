@@ -126,15 +126,15 @@
      - if multiple contours, decrement flash delay by 200 us (floor 2000 us) and re-capture.
      - if single contour, attempt `_recenter_or_finish(nozzle_px)`.
    - `NO_SIGNAL` and `NONE`:
-      - treat as likely out-of-FOV condition.
-      - perform anchored X scan around start point:
-        - first: move right of start (decrease X) by half FOV
-        - second: move left of start (increase X) by half FOV
-        - if still missing:
-          - analyze background top-band brightness to infer whether head is above FOV
-          - if likely above FOV, move down by 0.25 FOV and retry
-          - cap downward recovery to 4 steps (1.0 FOV total)
-          - otherwise abort with deterministic alignment error.
+      - analyze background top-band brightness first to infer whether head is above FOV.
+      - if head is not visible:
+        - move down by 0.25 FOV and retry
+        - cap downward recovery to 4 steps (1.0 FOV total).
+      - if head is visible:
+        - perform anchored X scan around start point:
+          - first: move right of start (decrease X) by half FOV
+          - second: move left of start (increase X) by half FOV
+          - then abort with deterministic alignment error if still missing.
 
 ## Data-driven head-in-view heuristic (from Pi recordings)
 - Source pulled from Pi:

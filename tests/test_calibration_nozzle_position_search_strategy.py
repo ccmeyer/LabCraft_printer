@@ -169,20 +169,16 @@ def test_nozzle_no_signal_uses_x_scan_not_pressure_bump():
     assert proc.calibrationError.calls == []
 
 
-def test_nozzle_x_scan_exhausted_with_head_out_of_view_moves_down_and_retries():
-    proc, pos, settings_calls, move_calls, _ = _build_process_for_analyze()
+def test_nozzle_head_out_of_view_moves_down_before_any_x_scan():
+    proc, _pos, settings_calls, move_calls, _ = _build_process_for_analyze()
     proc.background_image = _bg_head_out_of_view_image()
     proc._detect_nozzle_point = lambda bg, dr: ("NO_SIGNAL", None, 0, None)
 
     proc.onAnalyze()
-    pos.update({"X": 9500, "Y": 2000, "Z": 3000})
-    proc.onAnalyze()
-    pos.update({"X": 10500, "Y": 2000, "Z": 3000})
-    proc.onAnalyze()
 
-    assert len(move_calls) == 3
-    # Third move is the downward recovery move after x-scan exhaustion.
-    assert move_calls[2] == (10500, 2000, 3250)
+    assert len(move_calls) == 1
+    assert move_calls[0] == (10000, 2000, 3250)
+    assert proc._x_scan_attempt_index == 0
     assert proc._downward_recovery_steps_taken == 1
     assert proc.calibrationError.calls == []
     assert settings_calls == []
@@ -194,28 +190,41 @@ def test_nozzle_downward_recovery_capped_after_one_full_fov():
     proc._detect_nozzle_point = lambda bg, dr: ("NO_SIGNAL", None, 0, None)
 
     for _ in range(5):
-        # Trigger right/left/exhausted sequence in each cycle.
-        proc.onAnalyze()
-        pos.update({"X": 9500, "Y": 2000, "Z": pos["Z"]})
-        proc.onAnalyze()
-        pos.update({"X": 10500, "Y": 2000, "Z": pos["Z"]})
         proc.onAnalyze()
         if proc.calibrationError.calls:
             break
-        # Simulate that the move executed and process re-entered from the new Z.
         if move_calls:
             last = move_calls[-1]
             pos.update({"X": int(last[0]), "Y": int(last[1]), "Z": int(last[2])})
-        proc._x_scan_anchor = None
-        proc._x_scan_active = False
-        proc._x_scan_attempt_index = 0
 
     # Four downward recovery steps max; then abort.
-    down_z_levels = sorted({int(m[2]) for m in move_calls if int(m[2]) > 3000})
-    assert down_z_levels == [3250, 3500, 3750, 4000]
+    assert move_calls == [
+        (10000, 2000, 3250),
+        (10000, 2000, 3500),
+        (10000, 2000, 3750),
+        (10000, 2000, 4000),
+    ]
     assert proc._downward_recovery_steps_taken == 4
     assert proc.calibrationError.calls
-    assert "x-axis scan" in proc.calibrationError.calls[-1][0][0].lower()
+    assert "printer head not visible" in proc.calibrationError.calls[-1][0][0].lower()
+    assert settings_calls == []
+
+
+def test_nozzle_uses_x_scan_after_head_becomes_visible():
+    proc, pos, settings_calls, move_calls, _ = _build_process_for_analyze()
+    proc.background_image = _bg_head_out_of_view_image()
+    proc._detect_nozzle_point = lambda bg, dr: ("NO_SIGNAL", None, 0, None)
+
+    # First miss while head out of view -> downward move only.
+    proc.onAnalyze()
+    assert move_calls == [(10000, 2000, 3250)]
+    pos.update({"X": 10000, "Y": 2000, "Z": 3250})
+
+    # Once head is visible, X scan begins.
+    proc.background_image = _bg_head_in_view_image()
+    proc.onAnalyze()
+    assert move_calls[-1] == (9500, 2000, 3250)
+    assert proc._x_scan_attempt_index == 1
     assert settings_calls == []
 
 
