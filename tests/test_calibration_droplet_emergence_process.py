@@ -101,10 +101,11 @@ def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     proc.selected_quality = {}
     proc.candidate_delay = 3200
 
-    calls = {"machine_center": [], "image_center": []}
+    calls = {"machine_center": [], "image_center": [], "emergence_center": []}
     proc.calibration_manager = SimpleNamespace(
         set_nozzle_center=lambda p: calls["machine_center"].append(dict(p)),
         set_nozzle_center_image_position=lambda p: calls["image_center"].append(tuple(p)),
+        set_emergence_nozzle_center_image_position=lambda p: calls["emergence_center"].append(tuple(p)),
     )
     proc.model = SimpleNamespace(
         machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 10, "Y": 20, "Z": 30})
@@ -123,6 +124,7 @@ def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     assert len(calls["machine_center"]) == 1
     assert calls["machine_center"][0] == {"X": 10, "Y": 20, "Z": 30}
     assert calls["image_center"] == []
+    assert calls["emergence_center"] == [(159, 92)]
     assert proc.selected_area == 4100
     assert proc.selected_center_px == (159, 92)
     assert proc.selected_quality["contour_class"] == "attached"
@@ -150,15 +152,19 @@ def test_on_analyze_accepts_target_area_even_when_classified_detached():
     proc.phase_name = "droplet_emergence"
     proc.MIN_AREA = 3000
     proc.MAX_AREA = 8000
-    proc.model = SimpleNamespace(
-        droplet_camera_model=SimpleNamespace(
-            calc_emergence_area=lambda *args, **kwargs: (
-                4200,
-                (13, 11),
-                np.zeros((24, 24, 3), dtype=np.uint8),
-                {"contour_class": "detached"},
-            )
+    seen = {"kwargs": None}
+
+    def _calc_emergence_area(*args, **kwargs):
+        seen["kwargs"] = dict(kwargs)
+        return (
+            4200,
+            (13, 11),
+            np.zeros((24, 24, 3), dtype=np.uint8),
+            {"contour_class": "detached"},
         )
+
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(calc_emergence_area=_calc_emergence_area)
     )
     proc._required_replicates_for_phase = lambda: 1
     proc._can_accept_replicates_early = lambda: True
@@ -191,6 +197,8 @@ def test_on_analyze_accepts_target_area_even_when_classified_detached():
     assert accepted["area"] == 4200
     assert accepted["cls"] == "detached"
     assert proc.continueSearch.calls == []
+    assert seen["kwargs"] is not None
+    assert seen["kwargs"].get("nozzle_center", None) is None
 
 
 def test_set_next_delay_does_not_apply_extra_nudge():

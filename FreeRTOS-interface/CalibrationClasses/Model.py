@@ -742,6 +742,7 @@ class CalibrationManager(QObject):
         self.background_image = None
         self.nozzle_center = None
         self.nozzle_center_image_position = None
+        self.emergence_nozzle_center_image_position = None
         self.droplet_trajectory_vector = None
         self.trajectory_delay = None
         self.min_start_delay = None
@@ -957,6 +958,8 @@ class CalibrationManager(QObject):
         # if not os.path.exists(experiment_dir):
         #     os.makedirs(experiment_dir, exist_ok=True)
         self.calibration_file_path = calibration_file_path
+        # Per-run derived center used by pressure band; avoid stale cross-session carryover.
+        self.emergence_nozzle_center_image_position = None
         print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
@@ -1525,6 +1528,9 @@ class CalibrationManager(QObject):
     def set_nozzle_center_image_position(self, center): 
         self.nozzle_center_image_position = center
         self._emit_readiness()
+    def set_emergence_nozzle_center_image_position(self, center):
+        self.emergence_nozzle_center_image_position = center
+        self._emit_readiness()
     def set_trajectory_vector(self, vector): 
         self.droplet_trajectory_vector = vector
         self._emit_readiness()
@@ -1573,6 +1579,20 @@ class CalibrationManager(QObject):
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
     def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
+    def get_emergence_nozzle_center_image_position(self):
+        return self.emergence_nozzle_center_image_position
+    def get_pressure_scan_nozzle_center_image_position(self):
+        return (
+            self.emergence_nozzle_center_image_position
+            if self.emergence_nozzle_center_image_position is not None
+            else self.nozzle_center_image_position
+        )
+    def get_pressure_scan_nozzle_center_source(self):
+        if self.emergence_nozzle_center_image_position is not None:
+            return "emergence"
+        if self.nozzle_center_image_position is not None:
+            return "nozzle_position"
+        return "none"
     def get_trajectory_vector(self): return self.droplet_trajectory_vector
     def get_trajectory_delay(self): return self.trajectory_delay
     def get_min_start_delay(self): return self.min_start_delay
@@ -4382,10 +4402,11 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def onAnalyze(self):
         self.stageChanged.emit("Analyzing droplet image (emergence)")
 
+        # Do not anchor emergence analysis to prior nozzle-position center.
+        # The emergence contour center itself is used to refine nozzle center for pressure-band.
         area, center, overlay, details = self.model.droplet_camera_model.calc_emergence_area(
             self.background_image,
             self.droplet_image,
-            nozzle_center=self.nozzle_center_px,
             return_details=True,
         )
         details = details or {}
@@ -4523,6 +4544,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                     "flash_delay": int(self.candidate_delay),
                     "area": (None if self.selected_area is None else int(self.selected_area)),
                     "selected_center_px": self.selected_center_px,
+                    "pressure_band_nozzle_center_px": self.selected_center_px,
                     "selected_quality": dict(self.selected_quality or {}),
                     "phase": str(self._phase),
                     "trend_noise_events": int(self._trend_noise_events),
@@ -4624,12 +4646,19 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def _finish_success(self, agg_area: int, agg: dict):
         self.stageChanged.emit("Target area window reached")
         machine_pos = self.model.machine_model.get_current_position_dict()
-        # Keep nozzle image center from nozzle-position calibration; do not overwrite with emergence bbox center.
+        # Keep nozzle image center from nozzle-position calibration; publish emergence-refined
+        # center separately for pressure-band classification.
         self.calibration_manager.set_nozzle_center(machine_pos)
 
         self.selected_area = int(agg_area)
         self.selected_center_px = agg.get("center")
         self.selected_quality = dict(agg or {})
+        if self.selected_center_px is not None and hasattr(self.calibration_manager, "set_emergence_nozzle_center_image_position"):
+            try:
+                cx, cy = self.selected_center_px
+                self.calibration_manager.set_emergence_nozzle_center_image_position((int(cx), int(cy)))
+            except Exception:
+                pass
 
         self._record_decision(
             "emergence_target_reached",
@@ -5397,7 +5426,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # --- prerequisites ---
         self.start_pressure     = self.calibration_manager.get_start_pressure()
-        self.nozzle_center_px   = self.calibration_manager.get_nozzle_center_image_position()
+        get_ps_center = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_image_position", None)
+        if callable(get_ps_center):
+            self.nozzle_center_px = get_ps_center()
+        else:
+            self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+        get_ps_source = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_source", None)
+        self.nozzle_center_source = str(get_ps_source()) if callable(get_ps_source) else "legacy"
         self.background_image   = self.calibration_manager.get_background_image()
         self.emergence_time_us  = self.calibration_manager.get_emergence_time()
         self._ready = not (self.nozzle_center_px is None or
@@ -5578,7 +5613,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if not self._ready:
             self.calibrationError.emit("Pressure scan requires nozzle-center, background, and emergence time.")
             self.finalize.emit(); return
-        self.stageChanged.emit("Pressure scan: preparing background (num_droplets=0)")
+        self.stageChanged.emit(
+            f"Pressure scan: preparing background (num_droplets=0, nozzle_center_source={self.nozzle_center_source})"
+        )
         self.calibration_manager.changeSettingsRequested.emit(
             {"num_droplets": 0},
             self.calibration_manager.emitSettingsChangeCompleted

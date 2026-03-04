@@ -73,3 +73,23 @@ def test_pressure_scan_constructor_honors_auto_stop_on_nozzle_wet_flag(monkeypat
 
     assert p_true.auto_stop_on_nozzle_wet is True
     assert p_false.auto_stop_on_nozzle_wet is False
+
+
+def test_pressure_scan_prefers_emergence_refined_nozzle_center(monkeypatch):
+    monkeypatch.setattr(calibration_model, "QState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QFinalState", _DummyState)
+    monkeypatch.setattr(calibration_model, "QStateMachine", _DummyStateMachine)
+    monkeypatch.setattr(
+        PressureBandCalibrationProcess,
+        "missing_requirements",
+        staticmethod(lambda _cm: []),
+    )
+
+    cm, model = _build_inputs()
+    cm.get_pressure_scan_nozzle_center_image_position = lambda: (321, 123)
+    cm.get_pressure_scan_nozzle_center_source = lambda: "emergence"
+
+    proc = PressureBandCalibrationProcess(cm, model)
+
+    assert proc.nozzle_center_px == (321, 123)
+    assert proc.nozzle_center_source == "emergence"
