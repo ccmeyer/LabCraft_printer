@@ -245,3 +245,34 @@ Key outputs that downstream steps consume:
 6. Normalize phase/readiness key naming across manager/process/view.
 7. Add the safety + CV robustness tests above before broader algorithm tuning.
 
+## Recorder + Verdict + Replay Workflow
+
+### Runtime Recorder
+- `CalibrationManager` now supports per-process recorder runs under:
+  - `<experiment_dir>/calibration_recordings/<ProcessClassName>/<run_id>/`
+- Recorded artifacts:
+  - `run_meta.json` (run envelope + start/end + outcome)
+  - `events.jsonl` (state/move/settings/capture/decision/error timeline)
+  - `analysis.jsonl` (structured process analysis payloads)
+  - `captures/` (raw captured images)
+  - `verdict.json` (operator outcome + notes)
+
+### Verdict Capture
+- At process completion/error, `DropletImagingDialog` prompts for an operator verdict.
+- Verdict fields:
+  - outcome (`success` / `failed` / `unknown`)
+  - failure summary
+  - suspected cause
+  - notes
+- Verdict is written to the latest recorder run and echoed as a recorder event.
+
+### Offline Replay
+- Utility:
+  - `tools/replay_calibration_run.py`
+- Current scope:
+  - Replays `NozzlePositionCalibrationProcess` detection status from recorded background/droplet image pairs.
+- Usage:
+  - Single run: `python tools/replay_calibration_run.py --run-dir <run_dir>`
+  - Batch root: `python tools/replay_calibration_run.py --root <calibration_recordings_root>`
+- Output:
+  - JSON report with matched/mismatched/skipped counts plus per-case details.
