@@ -1386,8 +1386,7 @@ class CalibrationManager(QObject):
         self._try_start_process(NozzleFocusCalibrationProcess)
 
     def start_droplet_emergence_calibration(self):
-        self.activeCalibration = DropletEmergenceCalibrationProcess(self, self.model)
-        self.start_active_calibration()
+        self._try_start_process(DropletEmergenceCalibrationProcess)
 
     def start_pressure_calibration(self):
         self.activeCalibration = PressureCalibrationProcess(self, self.model)
@@ -4181,60 +4180,95 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     replicateContinue = Signal()
 
     # ---- tuning / safety ----
-    DELAY_MIN = 1500          # μs
-    DELAY_MAX = 8000          # μs
+    DELAY_MIN = 1500          # us
+    DELAY_MAX = 8000          # us
     COARSE_STEP = 500
     FINE_STEP   = 100
-    BIG_JUMP_US = 800         # used during "visibility escalation"
+    BIG_JUMP_US = 800         # used during visibility escalation
     MAX_EVALS   = 50
     REPLICATES  = 3
-    MONO_TOL_FRAC = 0.10      # monotonic tolerance (10% increase considered suspicious)
+    MONO_TOL_FRAC = 0.10      # monotonic tolerance
 
     # acceptable area band (target window)
     MIN_AREA = 3000
     MAX_AREA = 8000
 
-    # start-delay model vs pulse width (μs)
+    # start-delay model vs pulse width (us)
     START_DELAY_BASE_US = 5000
     START_DELAY_REF_PW  = 3000
-    START_DELAY_SLOPE   = 0.5   # +0.5 μs delay per +1 μs pulse width
+    START_DELAY_SLOPE   = 0.5   # +0.5 us delay per +1 us pulse width
+
+    SETTINGS_TIMEOUT_MS = 10_000
+    SEEK_REPLICATES = 1
+    MIN_REPLICATES = 2
+    MAX_REPLICATES = 3
+    REPLICATE_CV_OK = 0.12
+    REPLICATE_RANGE_OK = 900
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        missing = []
+        try:
+            if cm.get_nozzle_center() is None:
+                missing.append("nozzle center")
+        except Exception:
+            missing.append("nozzle center")
+        try:
+            if cm.get_nozzle_center_image_position() is None:
+                missing.append("nozzle center image position")
+        except Exception:
+            missing.append("nozzle center image position")
+        try:
+            _ = cm.model.machine_model.get_current_position_dict()
+        except Exception:
+            missing.append("machine position feedback")
+        try:
+            _ = cm.model.droplet_camera_model.get_image_size()
+        except Exception:
+            missing.append("droplet camera")
+        return missing
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_emergence"
 
-        # working vars
         self.background_image = None
         self.droplet_image = None
 
-        self.lower_delay  = 2000
-        self.upper_delay  = 5000
+        self.lower_delay = 2000
+        self.upper_delay = 5000
         self.candidate_delay = 3000
 
         self.min_area = self.MIN_AREA
         self.max_area = self.MAX_AREA
 
-        self.measurements = []    # (delay, area)
-        self._eval_count  = 0
-        self._last_delay  = None
+        self.measurements = []
+        self._eval_count = 0
+        self._last_delay = None
 
-        self._phase = "seek_visible"   # phases: seek_visible -> scan_down -> fine_adjust
-        self._prev_area = None         # last *valid* area (at higher delay)
+        self._phase = "seek_visible"   # seek_visible -> scan_down -> fine_adjust
+        self._prev_area = None
 
-        # # bracket: (delay, area) where area < min_area (low) and > max_area (high)
-        # self._lo = None   # tuple (d, area)
-        # self._hi = None   # tuple (d, area)
-
-        # replicates buffer at current delay
         self._rep_areas = []
+        self._replicate_details = []
+        self._last_agg_details = {}
+        self._trend_noise_events = 0
+
+        self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+        self.selected_area = None
+        self.selected_center_px = None
+        self.selected_quality = {}
+
+        self._orig_settings = None
+        self._restored_settings = False
 
         # states
         self.state_prepare_background = QState()
         self.state_capture_background = QState()
-        self.state_set_delay          = QState()
-        self.state_capture_droplet    = QState()
-        self.state_analyze            = QState()
-        self.state_final              = QFinalState()
+        self.state_set_delay = QState()
+        self.state_capture_droplet = QState()
+        self.state_analyze = QState()
+        self.state_final = QFinalState()
 
         self.state_prepare_background.entered.connect(self.onPrepareBackground)
         self.state_capture_background.entered.connect(self.onCaptureBackground)
@@ -4260,12 +4294,8 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
         t5 = QSignalTransition(); t5.setSenderObject(self); t5.setSignal(b"2continueSearch()"); t5.setTargetState(self.state_set_delay)
         self.state_analyze.addTransition(t5)
-        
-        # analyze -> capture_droplet for more replicates at the SAME delay
-        t5b = QSignalTransition()
-        t5b.setSenderObject(self)
-        t5b.setSignal(b"2replicateContinue()")
-        t5b.setTargetState(self.state_capture_droplet)
+
+        t5b = QSignalTransition(); t5b.setSenderObject(self); t5b.setSignal(b"2replicateContinue()"); t5b.setTargetState(self.state_capture_droplet)
         self.state_analyze.addTransition(t5b)
 
         self.state_machine.addState(self.state_prepare_background)
@@ -4283,16 +4313,35 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self.stageChanged.emit("Preparing background image")
         self._eval_count = 0
         self._rep_areas.clear()
+        self._replicate_details.clear()
         self._prev_area = None
         self._phase = "seek_visible"
+        self._trend_noise_events = 0
+        self._last_agg_details = {}
+        self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+        self.selected_area = None
+        self.selected_center_px = None
+        self.selected_quality = {}
 
-        # Start delay depends on pulse width (counterintuitively: higher PW ⇒ later emergence ⇒ larger delay)
+        try:
+            cur = self.calibration_manager.get_current_settings()
+            self._orig_settings = {
+                "num_droplets": int(cur.get("num_droplets")),
+                "flash_delay": int(cur.get("flash_delay")),
+            }
+        except Exception:
+            self._orig_settings = None
+        self._restored_settings = False
+
         self.candidate_delay = self._compute_start_delay_for_pw()
-        self.stageChanged.emit(f"Initial candidate delay (PW-adaptive): {self.candidate_delay} μs")
+        self.stageChanged.emit(f"Initial candidate delay (PW-adaptive): {self.candidate_delay} us")
 
-        # keep current nozzle/pressure; ensure no drops for background
         settings = {"num_droplets": 0}
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._request_settings_with_timeout(
+            settings,
+            context="emergence_prepare_background",
+            timeout_ms=self.SETTINGS_TIMEOUT_MS,
+        )
 
     @Slot()
     def onCaptureBackground(self):
@@ -4309,135 +4358,157 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     def onSetDelay(self):
         d = int(self._clamp_delay(self.candidate_delay))
         self.candidate_delay = d
-        self.stageChanged.emit(f"Setting flash delay to {d} μs  [phase={self._phase}]")
+        self.stageChanged.emit(f"Setting flash delay to {d} us  [phase={self._phase}]")
         settings = {"flash_delay": d, "num_droplets": 1}
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._request_settings_with_timeout(
+            settings,
+            context=f"emergence_set_delay_{self._phase}",
+            timeout_ms=self.SETTINGS_TIMEOUT_MS,
+        )
 
     @Slot()
     def onCaptureDroplet(self):
-        # median over a few replicates at the same delay
+        target_reps = int(self._required_replicates_for_phase())
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capturing droplet @ {self.candidate_delay} μs (rep {len(self._rep_areas)+1}/{self.REPLICATES})",
+            stage_text=f"Capturing droplet @ {self.candidate_delay} us (rep {len(self._rep_areas)+1}/{target_reps})",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
-            final_error_msg=f"Failed to capture droplet at {self.candidate_delay} μs."
+            final_error_msg=f"Failed to capture droplet at {self.candidate_delay} us."
         )
 
     @Slot()
     def onAnalyze(self):
         self.stageChanged.emit("Analyzing droplet image (emergence)")
 
-        # Use the updated ROI + dark-only method
-        area, center, overlay = self.model.droplet_camera_model.calc_emergence_area(
-            self.background_image, self.droplet_image
+        area, center, overlay, details = self.model.droplet_camera_model.calc_emergence_area(
+            self.background_image,
+            self.droplet_image,
+            nozzle_center=self.nozzle_center_px,
+            return_details=True,
         )
+        details = details or {}
         self.presentImageSignal.emit(overlay)
         self._eval_count += 1
 
-        if area is None:
-            area = 0
+        area_i = int(area) if area is not None else 0
+        self._rep_areas.append(area_i)
+        self._replicate_details.append({"area": area_i, "center": center, "details": details})
 
-        self._rep_areas.append(int(area))
-        self.stageChanged.emit(f"Delay {self.candidate_delay} μs replicate → area {area}")
+        self.stageChanged.emit(
+            f"Delay {self.candidate_delay} us replicate -> area {area_i} "
+            f"(class={details.get('contour_class', 'unknown')})"
+        )
 
-        # Need replicates at same delay?
-        if len(self._rep_areas) < self.REPLICATES:
+        required = int(self._required_replicates_for_phase())
+        if len(self._rep_areas) < required and (not self._can_accept_replicates_early()):
             self.replicateContinue.emit()
             return
 
-        # Aggregate replicates
-        agg_area = int(median(self._rep_areas))
+        agg_area, agg = self._aggregate_replicates()
         self._rep_areas.clear()
+        self._replicate_details.clear()
         self.measurements.append((self.candidate_delay, agg_area))
+        self._last_agg_details = dict(agg)
 
-        # Enforce monotonic trend: as we DECREASE delay, area should not INCREASE
-        # if self._prev_area is not None and agg_area > (1.0 + self.MONO_TOL_FRAC) * self._prev_area:
-        #     self.stageChanged.emit(
-        #         f"Non-monotonic increase detected (prev={self._prev_area}, now={agg_area}). Treating as noise."
-        #     )
-        #     # Push further down to bypass spurious edge/glare
-        #     next_delay = self.candidate_delay - self.FINE_STEP
-        #     self._set_next_delay(next_delay)
-        #     if self._eval_count >= self.MAX_EVALS:
-        #         self.calibrationError.emit("Emergence search did not converge (max evaluations)")
-        #         return
-        #     self.continueSearch.emit()
-        #     return
+        self._record_analysis(
+            {
+                "process_name": "DropletEmergenceCalibrationProcess",
+                "phase_name": str(self.phase_name or ""),
+                "phase": str(self._phase),
+                "eval_count": int(self._eval_count),
+                "candidate_delay_us": int(self.candidate_delay),
+                "aggregate_area": int(agg_area),
+                "aggregate": dict(agg),
+            }
+        )
 
-        # Phase logic
+        if self._phase in ("scan_down", "fine_adjust") and self._prev_area is not None:
+            if agg_area > (1.0 + self.MONO_TOL_FRAC) * float(self._prev_area):
+                self._trend_noise_events += 1
+                self._record_decision(
+                    "non_monotonic_noise",
+                    {
+                        "prev_area": int(self._prev_area),
+                        "agg_area": int(agg_area),
+                        "trend_noise_events": int(self._trend_noise_events),
+                    },
+                )
+                self.stageChanged.emit(
+                    f"Non-monotonic area rise detected ({self._prev_area} -> {agg_area}); stepping earlier"
+                )
+                self._set_next_delay(self.candidate_delay - self.FINE_STEP)
+                if self._eval_count >= self.MAX_EVALS:
+                    self._fail("Emergence search did not converge (max evaluations)")
+                    return
+                self.continueSearch.emit()
+                return
+
         if self._phase == "seek_visible":
-            if agg_area <= max(40, int(0.03 * self.MIN_AREA)):
-                # Not visible yet → bump UP in big steps (visibility escalation)
+            visible_thresh = max(40, int(0.03 * self.MIN_AREA))
+            cls = str(agg.get("contour_class", "none"))
+            if agg_area <= visible_thresh or cls == "none":
                 next_delay = self.candidate_delay + self.BIG_JUMP_US
-                self.stageChanged.emit(f"No contour; escalating delay to {next_delay} μs")
+                self._record_decision(
+                    "seek_visible_increase_delay",
+                    {
+                        "agg_area": int(agg_area),
+                        "visible_thresh": int(visible_thresh),
+                        "next_delay": int(next_delay),
+                    },
+                )
+                self.stageChanged.emit(f"No emergence contour; escalating delay to {next_delay} us")
                 if next_delay > self.DELAY_MAX:
-                    self.calibrationError.emit("No emergence detected up to maximum delay")
+                    self._fail("No emergence detected up to maximum delay")
                     return
                 self._set_next_delay(next_delay)
                 self.continueSearch.emit()
                 return
-            else:
-                # Seen! Start scanning DOWN
-                self._prev_area = agg_area
-                self._phase = "scan_down"
-                self._set_next_delay(self.candidate_delay - self.COARSE_STEP)
-                self.continueSearch.emit()
-                return
 
-        # When scanning down, accept as soon as we enter the target window
-        if self.MIN_AREA <= agg_area <= self.MAX_AREA:
-            self.stageChanged.emit("Target area window reached")
-            # self.calibrationDataUpdated.emit({
-            #     'measurements': self.measurements,
-            #     'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
-            # })
-            machine_pos = self.model.machine_model.get_current_position_dict()
-            self.calibration_manager.set_nozzle_center_image_position(center)
-            self.calibration_manager.set_nozzle_center(machine_pos)
-            self.dropletDetected.emit()
+            self._record_decision(
+                "seek_visible_found_signal",
+                {"agg_area": int(agg_area), "class": cls},
+            )
+            self._prev_area = agg_area
+            self._phase = "scan_down"
+            self._set_next_delay(self.candidate_delay - self.COARSE_STEP)
+            self.continueSearch.emit()
+            return
+
+        # Accept target window only when not clearly detached from nozzle.
+        if self.MIN_AREA <= agg_area <= self.MAX_AREA and str(agg.get("contour_class", "unknown")) != "detached":
+            self._finish_success(agg_area, agg)
             return
 
         if self._phase == "scan_down":
-            if agg_area > self.MAX_AREA:
-                # Still too late (big area) → keep moving earlier
+            cls = str(agg.get("contour_class", "unknown"))
+            if agg_area > self.MAX_AREA or cls == "detached":
                 self._prev_area = agg_area
                 self._set_next_delay(self.candidate_delay - self.COARSE_STEP)
                 if self._eval_count >= self.MAX_EVALS:
-                    self.calibrationError.emit("Emergence search did not converge (max evaluations)")
+                    self._fail("Emergence search did not converge (max evaluations)")
                     return
                 self.continueSearch.emit()
                 return
 
-            # We went too far (area < MIN) → fine adjust upward
             self._phase = "fine_adjust"
             self._set_next_delay(self.candidate_delay + self.FINE_STEP)
             self.continueSearch.emit()
             return
 
         if self._phase == "fine_adjust":
+            cls = str(agg.get("contour_class", "unknown"))
             if agg_area < self.MIN_AREA:
-                # Still too small → step later slightly
                 self._set_next_delay(self.candidate_delay + self.FINE_STEP)
-            elif agg_area > self.MAX_AREA:
-                # Overshot again → step earlier slightly
+            elif agg_area > self.MAX_AREA or cls == "detached":
                 self._set_next_delay(self.candidate_delay - self.FINE_STEP)
             else:
-                # In window
-                self.stageChanged.emit("Target area window reached (fine adjust)")
-                # self.calibrationDataUpdated.emit({
-                #     'measurements': self.measurements,
-                #     'result': {'area': agg_area, 'flash_delay': self.candidate_delay}
-                # })
-                machine_pos = self.model.machine_model.get_current_position_dict()
-                self.calibration_manager.set_nozzle_center_image_position(center)
-                self.calibration_manager.set_nozzle_center(machine_pos)
-                self.dropletDetected.emit()
+                self._finish_success(agg_area, agg)
                 return
 
             if self._eval_count >= self.MAX_EVALS:
-                self.calibrationError.emit("Emergence fine-adjust did not converge (max evaluations)")
+                self._fail("Emergence fine-adjust did not converge (max evaluations)")
                 return
             self.continueSearch.emit()
 
@@ -4445,49 +4516,169 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Droplet emergence calibration complete")
-        self.calibrationDataUpdated.emit({
-                'measurements': self.measurements,
-                'result': {'flash_delay': self.candidate_delay}
-            })
+        self._restore_original_settings_best_effort()
+        self.calibrationDataUpdated.emit(
+            {
+                "measurements": self.measurements,
+                "result": {
+                    "flash_delay": int(self.candidate_delay),
+                    "area": (None if self.selected_area is None else int(self.selected_area)),
+                    "selected_center_px": self.selected_center_px,
+                    "selected_quality": dict(self.selected_quality or {}),
+                    "phase": str(self._phase),
+                    "trend_noise_events": int(self._trend_noise_events),
+                },
+            }
+        )
         self.calibrationCompleted.emit()
 
     # ---------- helpers ----------
 
     def handleDropletCaptured(self, img):
-        # Base _capture_with_policy sets attribute; we just re-emit captureCompleted
         self.calibration_manager.emitCaptureCompleted()
 
-    def _classify(self, area:int) -> str:
-        if area < self.min_area:      return "LOW"
-        if area > self.max_area:      return "HIGH"
-        return "TARGET"
+    def _fail(self, msg: str):
+        self._restore_original_settings_best_effort()
+        self.calibrationError.emit(str(msg))
 
-    def _adaptive_step(self, cls:str, area:int) -> int:
-        """
-        Adapt step based on how far we are from the window (in 'area' units).
-        Converts that to a delay step using coarse heuristic (monotonic area↑ with delay↑).
-        """
-        # rough scaling: relative distance to window edges
-        if cls == "LOW":
-            frac = 1.0 if self.min_area <= 0 else min(2.0, max(0.2, (self.min_area - area) / max(self.min_area, 1)))
-            step = int(round(self.COARSE_STEP * frac))
-        elif cls == "HIGH":
-            frac = 1.0 if self.max_area <= 0 else min(2.0, max(0.2, (area - self.max_area) / max(self.max_area, 1)))
-            step = int(round(self.COARSE_STEP * frac))
-        else:
-            step = self.FINE_STEP
-        return max(self.FINE_STEP, min(4*self.COARSE_STEP, step))
+    def _request_settings_with_timeout(self, settings: dict, *, context: str, timeout_ms: int):
+        done = {"fired": False}
+        t_ref = {"t": None}
 
-    def _set_next_delay(self, d:int):
+        def _finish(ok: bool, why: str):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            if not ok:
+                self._fail(f"Settings apply failed during {context}: {why}")
+                return
+            self.calibration_manager.emitSettingsChangeCompleted()
+
+        t_ref["t"] = self._start_timeout(
+            int(timeout_ms),
+            on_timeout=lambda: _finish(False, "timeout"),
+        )
+        self._request_settings_with_recording(
+            settings,
+            lambda *args, **kwargs: _finish(True, "callback"),
+            context=context,
+        )
+
+    def _required_replicates_for_phase(self) -> int:
+        if self._phase == "seek_visible":
+            return int(self.SEEK_REPLICATES)
+        return int(self.MAX_REPLICATES)
+
+    def _can_accept_replicates_early(self) -> bool:
+        n = len(self._rep_areas)
+        if n < int(self.MIN_REPLICATES):
+            return False
+        if n >= int(self.MAX_REPLICATES):
+            return True
+        arr = np.asarray(self._rep_areas, dtype=float)
+        m = float(arr.mean()) if arr.size else 0.0
+        s = float(arr.std()) if arr.size else 0.0
+        cv = (s / max(abs(m), 1.0))
+        span = float(arr.max() - arr.min()) if arr.size else 0.0
+        return (cv <= float(self.REPLICATE_CV_OK)) and (span <= float(self.REPLICATE_RANGE_OK))
+
+    def _aggregate_replicates(self):
+        areas = [int(v) for v in self._rep_areas]
+        agg_area = int(median(areas)) if areas else 0
+
+        classes = [str((r.get("details") or {}).get("contour_class", "none")) for r in self._replicate_details]
+        class_counts = Counter(classes)
+        cls = class_counts.most_common(1)[0][0] if class_counts else "none"
+
+        centers = [r.get("center") for r in self._replicate_details if r.get("center") is not None]
+        center = None
+        if centers:
+            xs = [int(c[0]) for c in centers]
+            ys = [int(c[1]) for c in centers]
+            center = (int(median(xs)), int(median(ys)))
+
+        contour_areas = [float((r.get("details") or {}).get("contour_area", 0.0)) for r in self._replicate_details]
+        bbox_areas = [float((r.get("details") or {}).get("bbox_area", 0.0)) for r in self._replicate_details]
+        p95s = [float((r.get("details") or {}).get("p95", 0.0)) for r in self._replicate_details]
+
+        arr = np.asarray(areas, dtype=float) if areas else np.asarray([0.0], dtype=float)
+        m = float(arr.mean())
+        s = float(arr.std())
+        cv = float(s / max(abs(m), 1.0))
+        span = float(arr.max() - arr.min())
+
+        summary = {
+            "contour_class": cls,
+            "center": center,
+            "contour_area": float(median(contour_areas)) if contour_areas else 0.0,
+            "bbox_area": float(median(bbox_areas)) if bbox_areas else 0.0,
+            "p95": float(median(p95s)) if p95s else 0.0,
+            "replicate_count": int(len(areas)),
+            "replicate_areas": areas,
+            "replicate_cv": cv,
+            "replicate_range": span,
+        }
+        return agg_area, summary
+
+    def _finish_success(self, agg_area: int, agg: dict):
+        self.stageChanged.emit("Target area window reached")
+        machine_pos = self.model.machine_model.get_current_position_dict()
+        # Keep nozzle image center from nozzle-position calibration; do not overwrite with emergence bbox center.
+        self.calibration_manager.set_nozzle_center(machine_pos)
+
+        self.selected_area = int(agg_area)
+        self.selected_center_px = agg.get("center")
+        self.selected_quality = dict(agg or {})
+
+        self._record_decision(
+            "emergence_target_reached",
+            {
+                "flash_delay": int(self.candidate_delay),
+                "aggregate_area": int(agg_area),
+                "quality": dict(agg or {}),
+            },
+        )
+        self.dropletDetected.emit()
+
+    def _restore_original_settings_best_effort(self):
+        if self._restored_settings:
+            return
+        self._restored_settings = True
+        if not isinstance(self._orig_settings, dict):
+            return
+        restore = {}
+        if "num_droplets" in self._orig_settings:
+            try:
+                restore["num_droplets"] = int(self._orig_settings["num_droplets"])
+            except Exception:
+                pass
+        if "flash_delay" in self._orig_settings:
+            try:
+                restore["flash_delay"] = int(self._orig_settings["flash_delay"])
+            except Exception:
+                pass
+        if not restore:
+            return
+        try:
+            self._request_settings_with_recording(restore, lambda *args, **kwargs: None, context="emergence_restore_settings")
+        except Exception:
+            pass
+
+    def _set_next_delay(self, d: int):
         d = int(self._clamp_delay(d))
-        # avoid exact repeats if we can (nudge by FINE_STEP)
         if self._last_delay is not None and d == self._last_delay:
-            d = int(self._clamp_delay(d + (self.FINE_STEP if d + self.FINE_STEP <= self.DELAY_MAX else -self.FINE_STEP)))
+            d = int(
+                self._clamp_delay(
+                    d + (self.FINE_STEP if d + self.FINE_STEP <= self.DELAY_MAX else -self.FINE_STEP)
+                )
+            )
         self._last_delay = self.candidate_delay
         self.candidate_delay = d
-        self.stageChanged.emit(f"Next candidate delay: {self.candidate_delay} μs")
+        self.stageChanged.emit(f"Next candidate delay: {self.candidate_delay} us")
 
-    def _clamp_delay(self, d:int) -> int:
+    def _clamp_delay(self, d: int) -> int:
         return max(self.DELAY_MIN, min(self.DELAY_MAX, int(d)))
 
     def _compute_start_delay_for_pw(self):
@@ -4497,7 +4688,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             pw = float(self.START_DELAY_REF_PW)
         d = self.START_DELAY_BASE_US + self.START_DELAY_SLOPE * (pw - self.START_DELAY_REF_PW)
         return int(self._clamp_delay(d))
-    
+
 class PressureCalibrationProcess(BaseCalibrationProcess):
     """
     A calibration process to identify the highest pressure that yields a single droplet
@@ -10146,105 +10337,224 @@ class DropletCameraModel(QObject):
         cv2.putText(image, f'Area: {w*h}', (x+w+5, y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         return w * h, center, image
     
-    def calc_emergence_area(self, background, image,
-                            roi_top_frac=0.06, roi_bottom_frac=0.55,
-                            roi_x_center_frac=0.50, roi_x_half_frac=0.18,
-                            min_fg_pix=60, min_contour_area=40,
-                            min_peak_delta=18):
+    def calc_emergence_area(
+        self,
+        background,
+        image,
+        roi_top_frac=0.06,
+        roi_bottom_frac=0.55,
+        roi_x_center_frac=0.50,
+        roi_x_half_frac=0.18,
+        min_fg_pix=60,
+        min_contour_area=40,
+        min_peak_delta=18,
+        *,
+        nozzle_center=None,
+        roi_x_center_px=None,
+        return_details: bool = False,
+    ):
         """
-        Emergence detector tuned for droplets that appear darker than background.
-        - Uses DARK-ONLY diff (background - image) to prefer black droplets.
-        - Restricts to a TOP-CENTER ROI (configurable by fractions).
-        - Returns (bbox_area:int|None, center:(x,y)|None, overlay_bgr).
-
-        The ROI is:
-        rows  : [roi_top_frac*h, roi_bottom_frac*h]
-        cols  : [x_mid - roi_x_half_frac*w, x_mid + roi_x_half_frac*w]
+        Emergence detector tuned for dark fluid against a background.
+        - Uses dark-only diff (background - image).
+        - Uses a top ROI, anchored to calibrated nozzle center when available.
+        - Returns (bbox_area|None, center|None, overlay[, details]).
         """
+        details = {
+            "status": "init",
+            "reason": "",
+            "roi": None,
+            "candidate_count": 0,
+            "chosen_bbox": None,
+            "contour_class": "none",
+            "bbox_area": 0,
+            "contour_area": 0.0,
+            "p95": 0.0,
+        }
 
         if background is None or image is None:
+            details.update({"status": "none", "reason": "missing_image_or_background"})
+            if return_details:
+                return None, None, image, details
             return None, None, image
 
         img_gray, dark = self.calc_neg_diff_image(image, background)
         if dark is None:
+            details.update({"status": "none", "reason": "dark_diff_failed"})
+            if return_details:
+                return None, None, image, details
             return None, None, image
 
         h, w = dark.shape[:2]
-        y0 = int(max(0, min(h-1, round(roi_top_frac    * h))))
-        y1 = int(max(0, min(h,   round(roi_bottom_frac * h))))
-        x_mid = int(round(roi_x_center_frac * w))
+
+        nzx = None
+        nzy = None
+        if nozzle_center is not None and isinstance(nozzle_center, (tuple, list)) and len(nozzle_center) >= 2:
+            try:
+                nzx = int(max(0, min(w - 1, int(nozzle_center[0]))))
+                nzy = int(max(0, min(h - 1, int(nozzle_center[1]))))
+            except Exception:
+                nzx = None
+                nzy = None
+
+        if roi_x_center_px is not None:
+            x_mid = int(max(0, min(w - 1, int(roi_x_center_px))))
+        elif nzx is not None:
+            x_mid = int(nzx)
+        else:
+            x_mid = int(round(roi_x_center_frac * w))
+
         x_half = int(round(roi_x_half_frac * w))
+        if x_half < 8:
+            x_half = 8
         x0 = max(0, x_mid - x_half)
         x1 = min(w, x_mid + x_half)
+
+        if nzy is not None:
+            up = int(max(8, round(0.08 * h)))
+            down = int(max(24, round(0.42 * h)))
+            y0 = max(0, nzy - up)
+            y1 = min(h, nzy + down)
+        else:
+            y0 = int(max(0, min(h - 1, round(roi_top_frac * h))))
+            y1 = int(max(0, min(h, round(roi_bottom_frac * h))))
+
         if y1 <= y0 or x1 <= x0:
+            details.update({"status": "none", "reason": "invalid_roi", "roi": [int(x0), int(y0), int(x1), int(y1)]})
+            if return_details:
+                return None, None, image, details
             return None, None, image
 
-        roi = dark[y0:y1, x0:x1].copy()
-        # Slight denoise
-        blur = cv2.GaussianBlur(roi, (5,5), 0)
+        details["roi"] = [int(x0), int(y0), int(x1), int(y1)]
 
-        # Adaptive threshold: try mean+2.5σ first, fallback to Otsu if too strict
+        roi = dark[y0:y1, x0:x1].copy()
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+
         mu, sd = float(np.mean(blur)), float(np.std(blur))
-        t_hard = max(10, int(mu + 2.5*sd))
+        t_hard = max(10, int(mu + 2.5 * sd))
         _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
         if np.count_nonzero(th) < min_fg_pix:
             _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Clean up
         k = self._k3
-        th = cv2.morphologyEx(th, cv2.MORPH_OPEN,  k, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
 
+        overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
+        if nzx is not None and nzy is not None:
+            cv2.circle(overlay, (nzx, nzy), 4, (255, 0, 0), -1)
+
         if np.count_nonzero(th) < min_fg_pix:
-            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            # draw ROI for visual debugging
-            cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
-            cv2.putText(overlay, "No FG in ROI", (x0+5, y0+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128,128,255), 1)
+            details.update({"status": "none", "reason": "insufficient_fg"})
+            cv2.putText(overlay, "No FG in ROI", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 255), 1)
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
 
         contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
+            details.update({"status": "none", "reason": "no_contours"})
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
 
-        # Rank by bottom-most y (in full image) then by larger area – favors the droplet lip at top
-        def full_bottom_y(c):
-            yy = c[:,:,1].max()
-            return int(yy) + y0
-        keep = [(c, cv2.contourArea(c)) for c in contours if cv2.contourArea(c) >= min_contour_area]
+        keep = []
+        for c in contours:
+            c_area = float(cv2.contourArea(c))
+            if c_area < float(min_contour_area):
+                continue
+            rx, ry, rw, rh = cv2.boundingRect(c)
+            fx, fy = int(rx + x0), int(ry + y0)
+            bottom = int(fy + rh)
+            cx = float(fx + rw / 2.0)
+
+            cls = "unknown"
+            if nzy is not None:
+                if fy <= nzy <= (fy + rh + 2):
+                    cls = "attached"
+                elif fy > (nzy + 6):
+                    cls = "detached"
+                else:
+                    cls = "ambiguous"
+
+            if cls == "attached":
+                pri = 0
+            elif cls == "detached":
+                pri = 2
+            else:
+                pri = 1
+
+            anchor_x = float(nzx if nzx is not None else x_mid)
+            x_pen = abs(cx - anchor_x)
+            keep.append({
+                "contour": c,
+                "contour_area": c_area,
+                "bbox": [fx, fy, int(rw), int(rh)],
+                "bottom": bottom,
+                "x_pen": float(x_pen),
+                "class": cls,
+                "pri": pri,
+            })
+
+        details["candidate_count"] = int(len(keep))
         if not keep:
-            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
+            details.update({"status": "none", "reason": "no_contours_after_filters"})
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
 
-        keep.sort(key=lambda ca: (-full_bottom_y(ca[0]), -ca[1]))
-        chosen, _ = keep[0]
+        keep.sort(key=lambda d: (int(d["pri"]), float(d["x_pen"]), -float(d["contour_area"]), -int(d["bottom"])))
+        chosen = keep[0]
 
-        # Map ROI → full image coords
-        rx, ry, rw, rh = cv2.boundingRect(chosen)
-        x, y, ww, hh = rx + x0, ry + y0, rw, rh
-
-        # Sanity: require some “signal” within bbox
-        patch = dark[y:y+hh, x:x+ww]
+        x, y, ww, hh = [int(v) for v in chosen["bbox"]]
+        patch = dark[y:y + hh, x:x + ww]
         if patch.size == 0:
-            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            details.update({"status": "none", "reason": "empty_patch_after_bbox"})
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
+
         p95 = float(np.percentile(patch, 95))
-        if p95 < min_peak_delta:
-            overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
-            cv2.putText(overlay, f"weak p95:{int(p95)}", (x0+5, y0+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80,160,255), 1)
+        if p95 < float(min_peak_delta):
+            details.update({
+                "status": "none",
+                "reason": "weak_signal",
+                "p95": float(p95),
+                "contour_class": str(chosen.get("class", "unknown")),
+                "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
+                "bbox_area": int(ww * hh),
+                "contour_area": float(chosen.get("contour_area", 0.0)),
+            })
+            cv2.putText(overlay, f"weak p95:{int(p95)}", (x0 + 5, y0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (80, 160, 255), 1)
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
 
-        overlay = image.copy() if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)              # ROI box
-        cv2.drawContours(overlay, [chosen + np.array([[[x0, y0]]], dtype=chosen.dtype)], -1, (0, 255, 0), 2)
-        cv2.rectangle(overlay, (x, y), (x+ww, y+hh), (255, 0, 0), 2)
-        cv2.putText(overlay, f'Area:{ww*hh}', (x+ww+6, y+12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50,200,50), 2)
+        contour_full = chosen["contour"] + np.array([[[x0, y0]]], dtype=chosen["contour"].dtype)
+        color = (0, 255, 0) if str(chosen.get("class")) == "attached" else (0, 200, 255)
+        cv2.drawContours(overlay, [contour_full], -1, color, 2)
+        cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (255, 0, 0), 2)
 
-        center = (x + ww//2, y + hh//2)
-        return int(ww*hh), center, overlay
+        metric_area = int(ww * hh)
+        center = (int(x + ww // 2), int(y + hh // 2))
+
+        details.update({
+            "status": "ok",
+            "reason": "ok",
+            "contour_class": str(chosen.get("class", "unknown")),
+            "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
+            "bbox_area": int(metric_area),
+            "contour_area": float(chosen.get("contour_area", 0.0)),
+            "p95": float(p95),
+            "center": [int(center[0]), int(center[1])],
+        })
+
+        cv2.putText(overlay, f"Area:{metric_area}", (x + ww + 6, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 200, 50), 2)
+        cv2.putText(overlay, f"Class:{details['contour_class']}", (x + ww + 6, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (50, 200, 50), 1)
+
+        if return_details:
+            return metric_area, center, overlay, details
+        return metric_area, center, overlay
 
     def identify_droplets(self, image, background, nozzle_center, min_area=1000,
                           margin_up_px: int=8,satellite_band_px: int=12, min_free_offset_px: int=18):
@@ -10933,4 +11243,6 @@ class RefuelCameraModel(QObject):
     def get_current_level(self):
         return self.current_level
         
+
+
 

@@ -6,10 +6,10 @@
   - `FreeRTOS-interface/CalibrationClasses/View.py`
   - `FreeRTOS-interface/Controller.py`
   - `FreeRTOS-interface/Machine_FreeRTOS.py` (capture edge-wait compatibility fix)
-  - nozzle-related tests in `tests/`
+  - calibration-related tests in `tests/`
 - Current automated baseline:
   - `.\env\Scripts\python.exe -m pytest -q`
-  - Result: `209 passed`
+  - Result: `217 passed`
 
 ## What Has Already Been Implemented and Addressed
 
@@ -261,8 +261,8 @@
 ## Inconsistencies and edge cases that can hinder performance
 
 ## High priority risks
-1. No prerequisite gate when started from UI.
-- `CalibrationManager.start_nozzle_focus_calibration()` directly instantiates the process (does not use `_try_start_process`), so `missing_requirements` cannot protect this entry point.
+1. Background quality can still vary between runs.
+- Focus process now has prerequisite gating and quality checks, but still depends on the provided background quality and stream visibility.
 
 2. Missing/poor ROI silently degrades to full-frame focus.
 - `_build_focus_mask(...)` returns `None` on many failure paths.
@@ -351,6 +351,183 @@
 - synthetic ROI case verifies ROI-scoped Tenengrad is faster than full-frame baseline.
 - benchmark contract should record p50/p95 timing trends for focus analysis.
 
+## DropletEmergenceCalibrationProcess: Goal, Flow, Prerequisites, Risks, and Improvements
+
+## Goal
+- Estimate a robust emergence-time flash delay where the ejected fluid stream is visible but not fully detached.
+- Persist the selected delay (`result.flash_delay`) for downstream pressure/trajectory/characterization processes.
+- Present a live emergence overlay to the operator while scanning.
+
+## Current call path
+1. UI: `DropletImagingDialog.toggle_start_emergence_calibration(...)`.
+2. Controller: `Controller.start_droplet_emergence_calibration()`.
+3. Model manager: `CalibrationManager.start_droplet_emergence_calibration()`.
+4. Process: instantiate `DropletEmergenceCalibrationProcess` and start its `QStateMachine`.
+5. Capture/settings path:
+   - process emits `changeSettingsRequested` and `captureImageRequested`;
+   - controller applies settings and triggers camera capture callbacks;
+   - manager emits `settingsChangeCompleted` / `captureCompleted`.
+6. Analyze path:
+   - process calls `DropletCameraModel.calc_emergence_area(background, droplet)`;
+   - updates search phase and next delay;
+   - emits `continueSearch`, `replicateContinue`, or `dropletDetected`.
+
+## Current process state and algorithm flow
+- FSM states:
+  - `state_prepare_background`
+  - `state_capture_background`
+  - `state_set_delay`
+  - `state_capture_droplet`
+  - `state_analyze`
+  - `state_final`
+- Capture strategy:
+  - capture one background (`num_droplets=0`);
+  - at each candidate delay, capture `REPLICATES=3` droplet frames (`num_droplets=1`);
+  - aggregate by median area per delay.
+- Search phases:
+  1. `seek_visible`:
+     - if aggregate area is tiny, increase delay by `BIG_JUMP_US` (default 800 us);
+     - else switch to `scan_down`.
+  2. `scan_down`:
+     - decrease delay by `COARSE_STEP` (500 us) while area is too high;
+     - if area falls below window, switch to `fine_adjust`.
+  3. `fine_adjust`:
+     - adjust by `FINE_STEP` (100 us) until area enters `[MIN_AREA, MAX_AREA]`.
+- Success:
+  - emits completion with selected `flash_delay`;
+  - updates manager nozzle image position to detected center.
+- Failure:
+  - max delay exceeded without visibility;
+  - max evaluations exceeded in scan/fine phases.
+
+## Detection algorithm currently used (`calc_emergence_area`)
+- Uses dark-only subtraction (`background - image`) to emphasize darker fluid.
+- Restricts analysis to a fixed top-center ROI:
+  - `roi_top_frac=0.06`, `roi_bottom_frac=0.55`,
+  - `roi_x_center_frac=0.50`, `roi_x_half_frac=0.18`.
+- Thresholding:
+  - mean+2.5 sigma first, fallback to Otsu.
+- Morphology:
+  - open then close with 3x3 kernel.
+- Candidate selection:
+  - keep contours above `min_contour_area`;
+  - choose contour with largest bottom-y then largest area;
+  - output bounding-box area (`w*h`) and bbox center.
+
+## Effective prerequisites (expected vs enforced)
+- Expected by process intent:
+  - nozzle is already near top-center FOV from nozzle-position calibration;
+  - nozzle/stream is in acceptable focus from focus calibration;
+  - droplet print settings are in a plausible range (pressure/pulse width).
+- Currently enforced by code:
+  - none via `missing_requirements` (not implemented for this process).
+- Start-path behavior:
+  - `CalibrationManager.start_droplet_emergence_calibration()` currently instantiates directly (no `_try_start_process` gate).
+
+## Inconsistencies and edge cases that can hinder performance
+
+## High priority risks
+1. No explicit prerequisite gate.
+- Emergence can be started when nozzle is not centered/in focus, leading to avoidable scan failures and slow retries.
+
+2. Fixed ROI is not anchored to calibrated nozzle location.
+- Detector uses fixed top-center fractions instead of `nozzle_center_image_position`.
+- If nozzle drifts in X/Y, emergence may be missed even when physically present.
+
+3. Candidate ranking can prefer detached droplet instead of attached stream.
+- Current key uses bottom-most contour first; detached droplets lower in image can dominate.
+- This can bias delay selection toward detached states.
+
+4. Success path overwrites nozzle center image position using emergence bbox center.
+- `set_nozzle_center_image_position(center)` is called on success.
+- Emergence center is not guaranteed to be the nozzle tip; downstream processes may inherit shifted reference.
+
+5. Area metric is bounding-box area (`w*h`) with fixed absolute window.
+- Sensitive to contour orientation/reflections and camera scale.
+- Hard thresholds (`MIN_AREA=3000`, `MAX_AREA=8000`) are not normalized.
+
+## Medium priority risks
+6. No monotonic/consistency guard despite existing hook.
+- Monotonic check code is present but commented out.
+- Non-monotonic area noise can cause oscillation or wrong convergence.
+
+7. No explicit settings restore at process end/error.
+- Process modifies `num_droplets` and `flash_delay`.
+- It does not restore prior user settings automatically.
+
+8. No settings-change timeout guard.
+- Uses direct `changeSettingsRequested.emit(...)` transitions.
+- Missing callback/ack can leave FSM waiting indefinitely.
+
+9. Limited persisted diagnostics for postmortem.
+- Final result stores only `flash_delay`; per-delay confidence/quality is not persisted in calibration result.
+
+## Performance bottlenecks
+1. Mandatory 3 replicates at every candidate delay can be expensive in stable conditions.
+2. Visibility search uses large jumps then full replicate batches; misses can consume many captures before fail.
+3. Recorder capture writes (when recorder enabled) add synchronous disk cost per frame.
+
+## Recommended reliability and performance changes (next implementation phase)
+
+## Control-path changes
+1. Add `DropletEmergenceCalibrationProcess.missing_requirements(cm)` and start via `_try_start_process(...)`.
+- Require at least: nozzle-center image position, recent background/nozzle calibration context, camera readiness.
+
+2. Anchor ROI to calibrated nozzle center.
+- Use `cm.get_nozzle_center_image_position()` as ROI center and row reference.
+- Keep fallback to top-center only when calibration center unavailable.
+
+3. Add settings timeout wrapper for phase transitions.
+- Use a guarded settings helper (similar move timeout pattern) to prevent indefinite waits.
+
+4. Preserve or optionally restore original imaging settings at completion/error.
+- Restore `num_droplets` and `flash_delay` unless explicitly disabled.
+
+## Analysis-path changes
+5. Replace bbox area as primary target metric.
+- Prefer contour area and/or nozzle-anchored vertical extent near the nozzle.
+- Keep bbox metrics as secondary diagnostics.
+
+6. Add contour classification to prefer attached stream.
+- Rank by proximity/overlap to nozzle row before bottom-most extent.
+- Down-rank free detached droplets for emergence timing.
+
+7. Reinstate robust monotonic guard with tolerance band.
+- If area trend is non-physical across decreasing delays, treat as noise and branch deterministically.
+
+8. Emit confidence diagnostics with result.
+- Store selected-delay quality payload:
+  - replicate areas, contour class, signal strength (`p95`), and decision phase.
+
+## Performance changes
+9. Adaptive replicate count.
+- Use minimum replicates (e.g., 2) and stop early when area variance is below threshold.
+- Escalate to 3+ only in noisy/ambiguous frames.
+
+10. Two-stage search scheduling.
+- coarse visibility pass with single-replicate probes,
+- then replicate-confirm only near candidate window.
+
+## Recommended tests for DropletEmergence (currently missing)
+1. Start-path prerequisite tests:
+- starting emergence with missing nozzle-center context should fail fast with clear message.
+
+2. Detector classification tests:
+- attached-stream vs detached-droplet multi-contour frames should select expected contour class.
+
+3. ROI anchoring tests:
+- nozzle shifted in X/Y should still detect emergence when anchored ROI is used.
+
+4. Trend/branch determinism tests:
+- non-monotonic synthetic sequences should follow defined recovery path.
+
+5. Bounds and timeout tests:
+- delay bounds (`DELAY_MIN/DELAY_MAX`) and max-eval exits should be deterministic;
+- missing settings-completion callback should not hang FSM.
+
+6. Regression tests for center reference integrity:
+- emergence completion must not corrupt nozzle tip reference unless explicitly intended.
+
 ## Validation Coverage Status
 
 ## Already covered by automated tests
@@ -373,6 +550,10 @@
   - `tests/test_calibration_nozzle_position_search_strategy.py`
 - Nozzle focus contour selection regression:
   - `tests/test_calibration_focus_mask_selection.py`
+- Nozzle focus quality/prerequisite and manager routing:
+  - `tests/test_calibration_focus_process_quality_gate.py`
+- Recorder mode toggle/finalize behavior:
+  - `tests/test_calibration_recorder_toggle.py`
 
 ## Important nozzle tests still missing
 1. Shape mismatch (`bg.shape != droplet.shape`) returns controlled calibration error.
