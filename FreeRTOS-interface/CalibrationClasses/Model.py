@@ -5496,6 +5496,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.none_confidence_min = 0.70
         self.multiple_confidence_min = 0.40
         self.multiple_min_count = 2
+        # Guard against false "single" at high pressure when extra droplets leave FOV.
+        self.fast_single_bottom_margin_px = 220
+        self.fast_single_risk_fraction = 0.60
+        self.fast_single_risk_min_count = 3
+        self.fast_single_dy_threshold_px = int(self.far_nozzle_px)
 
         # --- outputs ---
         self.samples          = []
@@ -5740,6 +5745,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "dy_min_px": (None if dy_min is None else int(dy_min)),
             "nozzle_attached_area": int(nozzle_area or 0),
             "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
+            "frame_height_px": int(self.droplet_image.shape[0]) if getattr(self, "droplet_image", None) is not None else None,
         }
         self.reps.append(rep)
         self.replicateReady.emit()
@@ -5752,6 +5758,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return
 
         verdict, confidence, decision = self._classify_replicate_outcome(counts, total)
+        if verdict == "single":
+            risk = self._single_exit_risk_summary()
+            has_upper_multi = self._has_multiple_at_or_above_current_pressure()
+            decision["single_exit_risk"] = dict(risk)
+            decision["has_upper_multiple_evidence"] = bool(has_upper_multi)
+            if (
+                bool(has_upper_multi)
+                and int(risk.get("risky_single_count", 0)) >= int(self.fast_single_risk_min_count)
+                and float(risk.get("risky_single_fraction", 0.0)) >= float(self.fast_single_risk_fraction)
+            ):
+                verdict = "multiple"
+                confidence = max(float(confidence), float(risk.get("risky_single_fraction", 0.0)))
+                decision["reason"] = "single_exit_risk_override"
+                decision["override_from"] = "single"
+
         if verdict == "ambiguous" and total < self.escalate_to:
             self.replicates_target = self.escalate_to
             self.stageChanged.emit(
@@ -5790,6 +5811,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         bands = self._compute_single_bands()
+        if not bands:
+            msg = "Pressure scan found no valid single-droplet pressure band."
+            self._record_error(
+                msg,
+                {
+                    "pressure_count": int(len(self.samples)),
+                    "start_pressure": float(self.start_pressure),
+                    "pressure_bounds": [float(self.P_MIN), float(self.P_MAX)],
+                },
+            )
+            self.calibrationError.emit(msg)
+            return
+
         result = {
             "pulse_width_us": self._pulse_width_us,
             "delay_us": int(self.classify_delay_us),
@@ -5881,6 +5915,60 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._prev_verdict = verdict
         self._prev_pressure = self._current_pressure
         self._advance_or_finish()
+
+    def _has_multiple_at_or_above_current_pressure(self) -> bool:
+        cur = float(self._current_pressure) if self._current_pressure is not None else None
+        if cur is None:
+            return False
+        for rec in self.samples:
+            if str(rec.get("verdict", "")) != "multiple":
+                continue
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            if p >= (cur - 1e-9):
+                return True
+        return False
+
+    def _single_exit_risk_summary(self):
+        singles = [r for r in self.reps if str(r.get("cls", "")) == "single"]
+        if not singles:
+            return {
+                "single_count": 0,
+                "risky_single_count": 0,
+                "risky_single_fraction": 0.0,
+            }
+
+        risky = 0
+        for r in singles:
+            dy = r.get("dy_min_px")
+            c = r.get("center_px")
+            fh = r.get("frame_height_px")
+            by_dy = (dy is not None) and (int(dy) >= int(self.fast_single_dy_threshold_px))
+            by_bottom = False
+            if (
+                fh is not None
+                and c is not None
+                and isinstance(c, (tuple, list))
+                and len(c) >= 2
+            ):
+                try:
+                    cy = int(c[1])
+                    by_bottom = cy >= max(0, int(fh) - int(self.fast_single_bottom_margin_px))
+                except Exception:
+                    by_bottom = False
+            if by_dy or by_bottom:
+                risky += 1
+
+        n = len(singles)
+        return {
+            "single_count": int(n),
+            "risky_single_count": int(risky),
+            "risky_single_fraction": (float(risky) / float(n)) if n > 0 else 0.0,
+            "dy_threshold_px": int(self.fast_single_dy_threshold_px),
+            "bottom_margin_px": int(self.fast_single_bottom_margin_px),
+        }
 
     def _effective_step_caps(self):
         """
