@@ -107,6 +107,64 @@ class RackCalibrationFixDialog(QtWidgets.QDialog):
         # Close dialog
         self.accept()
 
+
+class CalibrationVerdictDialog(QtWidgets.QDialog):
+    """
+    Operator verdict dialog shown after each calibration process run.
+    """
+
+    def __init__(self, parent=None, *, process_name: str = "", default_outcome: str = "success", error_message: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Calibration Verdict")
+        self.resize(560, 360)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        header = QtWidgets.QLabel(f"Process: {process_name or 'unknown'}")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        form = QtWidgets.QFormLayout()
+        self.outcome_combo = QtWidgets.QComboBox()
+        self.outcome_combo.addItem("success")
+        self.outcome_combo.addItem("failed")
+        self.outcome_combo.addItem("unknown")
+        idx = self.outcome_combo.findText(str(default_outcome or "unknown"))
+        self.outcome_combo.setCurrentIndex(max(0, idx))
+
+        self.failure_summary_edit = QtWidgets.QLineEdit()
+        self.suspected_cause_edit = QtWidgets.QLineEdit()
+        self.notes_edit = QtWidgets.QTextEdit()
+        self.notes_edit.setPlaceholderText("Optional notes about behavior, observations, and next steps.")
+
+        if error_message:
+            self.failure_summary_edit.setText(str(error_message))
+
+        form.addRow("Outcome:", self.outcome_combo)
+        form.addRow("Failure Summary:", self.failure_summary_edit)
+        form.addRow("Suspected Cause:", self.suspected_cause_edit)
+        form.addRow("Notes:", self.notes_edit)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QtWidgets.QDialogButtonBox.Ok)
+        if ok_btn is not None:
+            ok_btn.setText("Save Verdict")
+        cancel_btn = buttons.button(QtWidgets.QDialogButtonBox.Cancel)
+        if cancel_btn is not None:
+            cancel_btn.setText("Skip")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_verdict_payload(self):
+        return {
+            "outcome": self.outcome_combo.currentText().strip().lower(),
+            "failure_summary": self.failure_summary_edit.text().strip(),
+            "suspected_cause": self.suspected_cause_edit.text().strip(),
+            "notes": self.notes_edit.toPlainText().strip(),
+        }
+
         
 class DropletImagingDialog(QtWidgets.QDialog):
     def __init__(self, main_window, model, controller):
@@ -761,6 +819,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.update_stage_and_log("Calibration Completed", "green")
         self.reset_calibration_buttons()
+        self._prompt_calibration_verdict(default_outcome="success")
 
     def on_calibration_queue_completed(self):
         """
@@ -780,6 +839,42 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_all_button.setText("Calibrate All")
         self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
+        self._prompt_calibration_verdict(default_outcome="failed", error_message=str(error_message))
+
+    def _prompt_calibration_verdict(self, *, default_outcome: str, error_message: str = ""):
+        mgr = self.model.calibration_manager
+        latest_dir = None
+        try:
+            latest_dir = mgr.get_latest_recording_directory()
+        except Exception:
+            latest_dir = None
+        if not latest_dir:
+            return
+
+        process_name = "unknown"
+        try:
+            process_name = os.path.basename(os.path.dirname(str(latest_dir))) or "unknown"
+        except Exception:
+            process_name = "unknown"
+
+        dlg = CalibrationVerdictDialog(
+            self,
+            process_name=process_name,
+            default_outcome=default_outcome,
+            error_message=error_message,
+        )
+        if dlg.exec():
+            verdict = dlg.get_verdict_payload()
+            try:
+                mgr.submit_latest_process_verdict(
+                    outcome=verdict.get("outcome", "unknown"),
+                    failure_summary=verdict.get("failure_summary", ""),
+                    suspected_cause=verdict.get("suspected_cause", ""),
+                    notes=verdict.get("notes", ""),
+                    submitted_by="ui",
+                )
+            except Exception as e:
+                print(f"Failed to submit calibration verdict: {e}")
 
     def reset_calibration_buttons(self):
         """
