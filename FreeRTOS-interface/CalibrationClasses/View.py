@@ -310,6 +310,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.num_pressure_tests_label, crow, 0)
         calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
+        self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
+        self.record_calibration_checkbox.setToolTip(
+            "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
+        )
+        try:
+            rec_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
+        except Exception:
+            rec_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
+        self.record_calibration_checkbox.setChecked(rec_enabled)
+        calib_grid.addWidget(self.record_calibration_checkbox, crow, 0, 1, 2); crow += 1
+
         # Calibration buttons
 
         self.prime_head_button = QtWidgets.QPushButton("Prime Printer Head")
@@ -577,6 +588,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
+        self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
         self.summary_table.itemSelectionChanged.connect(self._update_load_button_state)
         # Double-click on any cell loads that row immediately
         self.summary_table.itemDoubleClicked.connect(self._handle_summary_double_click)
@@ -782,6 +794,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Sets the number of pressure tests for characterization.
         """
         self.controller.set_num_pressure_tests(num_tests)
+
+    def set_record_mode_enabled(self, enabled: bool):
+        mgr = self.model.calibration_manager
+        try:
+            mgr.set_record_mode_enabled(bool(enabled))
+        except Exception:
+            mgr.record_mode_enabled = bool(enabled)
 
     def update_flash_info(self):
         """

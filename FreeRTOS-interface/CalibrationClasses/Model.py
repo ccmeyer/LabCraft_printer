@@ -803,16 +803,23 @@ class CalibrationManager(QObject):
             print(f"[CalibrationRecorder] Failed to start process recording: {e}")
 
     def _finalize_process_recording(self, outcome: str, *, error_message: str = ""):
-        if not getattr(self, "record_mode_enabled", False):
-            return
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
             return
+        # Finalize any active run even if record mode was toggled off mid-process.
+        active_dir = None
         try:
-            recorder.append_event(
-                "process_finished",
-                {"outcome": str(outcome), "error_message": str(error_message or "")},
-            )
+            active_dir = recorder.get_active_run_dir()
+        except Exception:
+            active_dir = None
+        if (not getattr(self, "record_mode_enabled", False)) and (not active_dir):
+            return
+        try:
+            if getattr(self, "record_mode_enabled", False):
+                recorder.append_event(
+                    "process_finished",
+                    {"outcome": str(outcome), "error_message": str(error_message or "")},
+                )
             recorder.finalize_run(str(outcome), error_message=str(error_message or ""))
             if str(outcome) == "error":
                 recorder.write_verdict(
@@ -929,6 +936,14 @@ class CalibrationManager(QObject):
             return recorder.get_last_run_dir()
         except Exception:
             return None
+
+    def set_record_mode_enabled(self, enabled: bool):
+        self.record_mode_enabled = bool(enabled)
+        state = "enabled" if self.record_mode_enabled else "disabled"
+        self.calibrationStageChanged.emit(f"Calibration recorder {state}.", "dark_blue")
+
+    def get_record_mode_enabled(self) -> bool:
+        return bool(getattr(self, "record_mode_enabled", False))
 
     # ------------- Session / File management -------------
 
@@ -3533,6 +3548,8 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         self.droplet_image = None
         self.background_image = None
+        self._bg_g2_cache = None
+        self._bg_cache_sig = None
 
         self.mode = "probe_dir"
         self.direction = +1
@@ -3624,6 +3641,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         if self.background_image is None:
             self.background_image = self.calibration_manager.get_background_image()
+        bg_g2 = self._ensure_bg_g2_cache()
 
         img = self.droplet_image
         if img is None:
@@ -3632,14 +3650,16 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
 
         mask = self._build_focus_mask(self.background_image, img) if self.background_image is not None else None
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        focus = float(self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask))
         focus_stats = self._compute_focus_stats(gray, mask)
+        if focus_stats.get("valid", False):
+            focus = float(focus_stats.get("var", 0.0))
+        else:
+            focus = float(self.model.droplet_camera_model.compute_tenengrad_variance(gray, mask=mask))
         bg_stats = None
         p90_ratio = None
-        if self.background_image is not None and focus_stats.get("valid", False):
+        if bg_g2 is not None and focus_stats.get("valid", False):
             try:
-                bg_gray = self._to_gray(self.background_image)
-                bg_stats = self._compute_focus_stats(bg_gray, mask)
+                bg_stats = self._compute_focus_stats(None, mask, g2_precomputed=bg_g2)
                 if bg_stats.get("valid", False):
                     p90_ratio = float((focus_stats["p90"] + 1.0) / (bg_stats["p90"] + 1.0))
             except Exception:
@@ -4010,17 +4030,44 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
             return image
         return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    def _compute_focus_stats(self, gray, mask):
-        if gray is None or mask is None:
+    def _ensure_bg_g2_cache(self):
+        if self.background_image is None:
+            self._bg_g2_cache = None
+            self._bg_cache_sig = None
+            return None
+        try:
+            bg_gray = self._to_gray(self.background_image)
+            if bg_gray is None:
+                return None
+            sig = (id(self.background_image), int(bg_gray.shape[0]), int(bg_gray.shape[1]))
+            if self._bg_g2_cache is not None and self._bg_cache_sig == sig:
+                return self._bg_g2_cache
+            gx = cv2.Sobel(bg_gray, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(bg_gray, cv2.CV_64F, 0, 1, ksize=3)
+            self._bg_g2_cache = gx * gx + gy * gy
+            self._bg_cache_sig = sig
+            return self._bg_g2_cache
+        except Exception:
+            self._bg_g2_cache = None
+            self._bg_cache_sig = None
+            return None
+
+    def _compute_focus_stats(self, gray, mask, *, g2_precomputed=None):
+        if mask is None:
             return {"valid": False, "reason": "missing_gray_or_mask", "mask_pixels": 0}
         try:
             roi_selector = mask > 0
             mask_pixels = int(np.count_nonzero(roi_selector))
             if mask_pixels < int(self.MIN_MASK_PIXELS):
                 return {"valid": False, "reason": "mask_too_small", "mask_pixels": int(mask_pixels)}
-            gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-            gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-            g2 = gx * gx + gy * gy
+            if g2_precomputed is not None:
+                g2 = g2_precomputed
+            else:
+                if gray is None:
+                    return {"valid": False, "reason": "missing_gray_or_mask", "mask_pixels": int(mask_pixels)}
+                gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+                g2 = gx * gx + gy * gy
             roi = g2[roi_selector]
             if roi.size == 0:
                 return {"valid": False, "reason": "empty_roi", "mask_pixels": int(mask_pixels)}
