@@ -4476,14 +4476,14 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             self.continueSearch.emit()
             return
 
-        # Accept target window only when not clearly detached from nozzle.
-        if self.MIN_AREA <= agg_area <= self.MAX_AREA and str(agg.get("contour_class", "unknown")) != "detached":
+        # Area-band is the primary convergence criterion for emergence timing.
+        # Keep contour classification as diagnostics rather than a hard reject gate.
+        if self.MIN_AREA <= agg_area <= self.MAX_AREA:
             self._finish_success(agg_area, agg)
             return
 
         if self._phase == "scan_down":
-            cls = str(agg.get("contour_class", "unknown"))
-            if agg_area > self.MAX_AREA or cls == "detached":
+            if agg_area > self.MAX_AREA:
                 self._prev_area = agg_area
                 self._set_next_delay(self.candidate_delay - self.COARSE_STEP)
                 if self._eval_count >= self.MAX_EVALS:
@@ -4498,10 +4498,9 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
             return
 
         if self._phase == "fine_adjust":
-            cls = str(agg.get("contour_class", "unknown"))
             if agg_area < self.MIN_AREA:
                 self._set_next_delay(self.candidate_delay + self.FINE_STEP)
-            elif agg_area > self.MAX_AREA or cls == "detached":
+            elif agg_area > self.MAX_AREA:
                 self._set_next_delay(self.candidate_delay - self.FINE_STEP)
             else:
                 self._finish_success(agg_area, agg)
@@ -4668,12 +4667,6 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     def _set_next_delay(self, d: int):
         d = int(self._clamp_delay(d))
-        if self._last_delay is not None and d == self._last_delay:
-            d = int(
-                self._clamp_delay(
-                    d + (self.FINE_STEP if d + self.FINE_STEP <= self.DELAY_MAX else -self.FINE_STEP)
-                )
-            )
         self._last_delay = self.candidate_delay
         self.candidate_delay = d
         self.stageChanged.emit(f"Next candidate delay: {self.candidate_delay} us")

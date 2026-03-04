@@ -127,3 +127,81 @@ def test_emergence_finish_success_does_not_overwrite_nozzle_image_position():
     assert proc.selected_center_px == (159, 92)
     assert proc.selected_quality["contour_class"] == "attached"
     assert proc.dropletDetected.calls
+
+
+def test_on_analyze_accepts_target_area_even_when_classified_detached():
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.replicateContinue = Recorder()
+    proc.background_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.droplet_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.nozzle_center_px = (12, 6)
+    proc._eval_count = 0
+    proc._phase = "fine_adjust"
+    proc._prev_area = None
+    proc._rep_areas = []
+    proc._replicate_details = []
+    proc._last_agg_details = {}
+    proc._trend_noise_events = 0
+    proc.measurements = []
+    proc.candidate_delay = 3200
+    proc.phase_name = "droplet_emergence"
+    proc.MIN_AREA = 3000
+    proc.MAX_AREA = 8000
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            calc_emergence_area=lambda *args, **kwargs: (
+                4200,
+                (13, 11),
+                np.zeros((24, 24, 3), dtype=np.uint8),
+                {"contour_class": "detached"},
+            )
+        )
+    )
+    proc._required_replicates_for_phase = lambda: 1
+    proc._can_accept_replicates_early = lambda: True
+    proc._aggregate_replicates = lambda: (
+        4200,
+        {
+            "contour_class": "detached",
+            "center": (13, 11),
+            "replicate_count": 1,
+            "replicate_cv": 0.0,
+            "replicate_range": 0.0,
+        },
+    )
+    proc._record_analysis = lambda payload: None
+    proc._set_next_delay = lambda *_args, **_kwargs: None
+    proc._fail = lambda msg: (_ for _ in ()).throw(AssertionError(f"unexpected fail: {msg}"))
+
+    accepted = {"called": False, "area": None, "cls": None}
+
+    def _finish(area, agg):
+        accepted["called"] = True
+        accepted["area"] = int(area)
+        accepted["cls"] = str(agg.get("contour_class"))
+
+    proc._finish_success = _finish
+
+    proc.onAnalyze()
+
+    assert accepted["called"] is True
+    assert accepted["area"] == 4200
+    assert accepted["cls"] == "detached"
+    assert proc.continueSearch.calls == []
+
+
+def test_set_next_delay_does_not_apply_extra_nudge():
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.DELAY_MIN = 1500
+    proc.DELAY_MAX = 8000
+    proc.FINE_STEP = 100
+    proc.candidate_delay = 3100
+    proc._last_delay = 3000
+
+    proc._set_next_delay(3000)
+
+    assert proc.candidate_delay == 3000
