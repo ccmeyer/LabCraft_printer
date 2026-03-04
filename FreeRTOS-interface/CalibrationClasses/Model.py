@@ -409,6 +409,264 @@ class NozzlePositionChecklistStore:
         return all(s.get("complete", False) for s in statuses.values())
 
 
+class CalibrationProcessRecorder:
+    """
+    Per-process recorder for calibration runs.
+    Stores raw captures, structured events, analysis payloads, and operator verdict.
+    """
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, model):
+        self.model = model
+        self._lock = threading.Lock()
+        self._active = None
+        self._last = None
+
+    @staticmethod
+    def _now_utc() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _write_json_atomic(path: str, payload: dict):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, default=numpy_encoder)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _append_jsonl(path: str, payload: dict):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=numpy_encoder) + "\n")
+
+    @staticmethod
+    def _prepare_image_for_write(image):
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
+        raise ValueError(f"Unsupported image shape for write: {arr.shape}")
+
+    def _default_root_dir(self) -> str:
+        exp = getattr(self.model, "experiment_model", None)
+        exp_dir = getattr(exp, "experiment_dir_path", None)
+        if exp_dir:
+            return os.path.abspath(os.path.join(exp_dir, "calibration_recordings"))
+        cal_path = getattr(exp, "calibration_file_path", None)
+        if cal_path:
+            return os.path.abspath(os.path.join(os.path.dirname(cal_path), "calibration_recordings"))
+        return os.path.abspath(os.path.join(os.getcwd(), "calibration_recordings"))
+
+    def _active_or_last(self):
+        return self._active or self._last
+
+    def get_active_run_dir(self) -> str | None:
+        with self._lock:
+            if not self._active:
+                return None
+            return self._active["run_dir"]
+
+    def get_last_run_dir(self) -> str | None:
+        with self._lock:
+            if not self._last:
+                return None
+            return self._last["run_dir"]
+
+    def start_run(self, process_name: str, phase_name: str, *, extra_meta: dict | None = None):
+        with self._lock:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = f"run_{ts}_{uuid.uuid4().hex[:8]}"
+            root = self._default_root_dir()
+            run_dir = os.path.join(root, str(process_name), run_id)
+            captures_dir = os.path.join(run_dir, "captures")
+            os.makedirs(captures_dir, exist_ok=True)
+
+            run = {
+                "run_id": run_id,
+                "process_name": str(process_name),
+                "phase_name": str(phase_name),
+                "run_dir": run_dir,
+                "captures_dir": captures_dir,
+                "events_path": os.path.join(run_dir, "events.jsonl"),
+                "analysis_path": os.path.join(run_dir, "analysis.jsonl"),
+                "meta_path": os.path.join(run_dir, "run_meta.json"),
+                "verdict_path": os.path.join(run_dir, "verdict.json"),
+                "capture_index": 0,
+                "event_index": 0,
+            }
+
+            meta = {
+                "schema_version": int(self.SCHEMA_VERSION),
+                "run_id": run_id,
+                "process_name": str(process_name),
+                "phase_name": str(phase_name),
+                "started_at_utc": self._now_utc(),
+                "ended_at_utc": None,
+                "outcome": "running",
+                "error_message": "",
+            }
+            if isinstance(extra_meta, dict):
+                meta.update(extra_meta)
+
+            verdict = {
+                "schema_version": int(self.SCHEMA_VERSION),
+                "run_id": run_id,
+                "process_name": str(process_name),
+                "phase_name": str(phase_name),
+                "outcome": "unknown",
+                "failure_summary": "",
+                "suspected_cause": "",
+                "notes": "",
+                "submitted_by": "system",
+                "submitted_at_utc": self._now_utc(),
+            }
+
+            self._write_json_atomic(run["meta_path"], meta)
+            self._write_json_atomic(run["verdict_path"], verdict)
+
+            self._active = run
+            self._last = dict(run)
+            return run_dir
+
+    def append_event(
+        self,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        state_name: str | None = None,
+        level: str = "info",
+    ) -> dict | None:
+        with self._lock:
+            if not self._active:
+                return None
+            self._active["event_index"] += 1
+            evt = {
+                "schema_version": int(self.SCHEMA_VERSION),
+                "event_id": str(uuid.uuid4()),
+                "event_index": int(self._active["event_index"]),
+                "ts_utc": self._now_utc(),
+                "run_id": self._active["run_id"],
+                "process_name": self._active["process_name"],
+                "phase_name": self._active["phase_name"],
+                "event_type": str(event_type),
+                "state_name": str(state_name or ""),
+                "level": str(level),
+                "payload": payload or {},
+            }
+            self._append_jsonl(self._active["events_path"], evt)
+            return evt
+
+    def append_analysis(self, record: dict) -> dict | None:
+        with self._lock:
+            if not self._active:
+                return None
+            payload = dict(record or {})
+            payload.setdefault("schema_version", int(self.SCHEMA_VERSION))
+            payload.setdefault("analysis_id", str(uuid.uuid4()))
+            payload.setdefault("ts_utc", self._now_utc())
+            payload.setdefault("run_id", self._active["run_id"])
+            payload.setdefault("process_name", self._active["process_name"])
+            payload.setdefault("phase_name", self._active["phase_name"])
+            self._append_jsonl(self._active["analysis_path"], payload)
+            return payload
+
+    def save_capture_image(
+        self,
+        image,
+        *,
+        role: str = "capture",
+        file_ext: str = "jpg",
+        metadata: dict | None = None,
+    ) -> dict | None:
+        with self._lock:
+            if not self._active:
+                return None
+            self._active["capture_index"] += 1
+            idx = int(self._active["capture_index"])
+            capture_id = f"cap_{idx:06d}"
+            ext = str(file_ext or "jpg").lstrip(".").lower()
+            filename = f"{capture_id}_{str(role)}.{ext}"
+            abspath = os.path.join(self._active["captures_dir"], filename)
+            relpath = os.path.join("captures", filename).replace("\\", "/")
+
+            out = self._prepare_image_for_write(image)
+            ok = cv2.imwrite(abspath, out)
+            if not ok:
+                raise IOError(f"Failed to write capture image: {abspath}")
+
+            h = int(out.shape[0]) if hasattr(out, "shape") and len(out.shape) >= 2 else None
+            w = int(out.shape[1]) if hasattr(out, "shape") and len(out.shape) >= 2 else None
+            info = {
+                "capture_id": capture_id,
+                "capture_index": idx,
+                "capture_role": str(role),
+                "image_relpath": relpath,
+                "width": w,
+                "height": h,
+                "captured_at_utc": self._now_utc(),
+            }
+            if isinstance(metadata, dict):
+                info.update(metadata)
+            return info
+
+    def finalize_run(self, outcome: str, *, error_message: str = ""):
+        with self._lock:
+            if not self._active:
+                return
+            run = self._active
+            meta_path = run["meta_path"]
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = {
+                    "schema_version": int(self.SCHEMA_VERSION),
+                    "run_id": run["run_id"],
+                    "process_name": run["process_name"],
+                    "phase_name": run["phase_name"],
+                    "started_at_utc": "",
+                }
+            meta["ended_at_utc"] = self._now_utc()
+            meta["outcome"] = str(outcome)
+            meta["error_message"] = str(error_message or "")
+            self._write_json_atomic(meta_path, meta)
+            self._last = dict(run)
+            self._active = None
+
+    def write_verdict(
+        self,
+        outcome: str,
+        *,
+        failure_summary: str = "",
+        suspected_cause: str = "",
+        notes: str = "",
+        submitted_by: str = "ui",
+    ):
+        with self._lock:
+            run = self._active_or_last()
+            if not run:
+                return None
+            verdict = {
+                "schema_version": int(self.SCHEMA_VERSION),
+                "run_id": run["run_id"],
+                "process_name": run["process_name"],
+                "phase_name": run["phase_name"],
+                "outcome": str(outcome or "unknown"),
+                "failure_summary": str(failure_summary or ""),
+                "suspected_cause": str(suspected_cause or ""),
+                "notes": str(notes or ""),
+                "submitted_by": str(submitted_by or "ui"),
+                "submitted_at_utc": self._now_utc(),
+            }
+            self._write_json_atomic(run["verdict_path"], verdict)
+            return verdict
+
+
 class CalibrationManager(QObject):
     calibrationStageChanged = Signal(str, str)  # (message, color_name)
     calibrationCompleted = Signal()
@@ -453,6 +711,10 @@ class CalibrationManager(QObject):
         self.activeCalibration = None
         self.model = model
 
+        # Recorder mode: captures per-process runtime telemetry for offline replay/debug.
+        self.record_mode_enabled = True
+        self._process_recorder = CalibrationProcessRecorder(model)
+
         # Persisted JSON
         self._lock = threading.Lock()
         self.data = {"schema_version": 1, "runs": []}
@@ -492,6 +754,181 @@ class CalibrationManager(QObject):
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
         self.calibrationQueueCompleted.connect(self._on_queue_completed_for_pw_sweep)
+
+    # ------------- Per-process recorder -------------
+
+    def _build_recorder_meta(self):
+        meta = {
+            "stock_solution": self._safe_get_stock_solution(),
+            "printer_head_id": self._safe_get_printer_head_id(),
+            "calibration_file_path": str(self.calibration_file_path or ""),
+        }
+        try:
+            exp_dir = getattr(self.model.experiment_model, "experiment_dir_path", None)
+            meta["experiment_dir"] = str(exp_dir or "")
+        except Exception:
+            meta["experiment_dir"] = ""
+        try:
+            meta["settings_snapshot"] = self.get_current_settings()
+        except Exception:
+            meta["settings_snapshot"] = {}
+        return meta
+
+    def _begin_process_recording(self, process_obj):
+        if not getattr(self, "record_mode_enabled", False):
+            return
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return
+        if process_obj is None:
+            return
+        try:
+            process_name = process_obj.__class__.__name__
+            phase_name = getattr(process_obj, "phase_name", None) or process_name
+            run_dir = recorder.start_run(
+                process_name,
+                phase_name,
+                extra_meta=self._build_recorder_meta(),
+            )
+            recorder.append_event(
+                "process_started",
+                {
+                    "process_name": process_name,
+                    "phase_name": phase_name,
+                    "queue_depth": int(len(self.calibration_queue)),
+                    "run_dir": run_dir,
+                },
+            )
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to start process recording: {e}")
+
+    def _finalize_process_recording(self, outcome: str, *, error_message: str = ""):
+        if not getattr(self, "record_mode_enabled", False):
+            return
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.append_event(
+                "process_finished",
+                {"outcome": str(outcome), "error_message": str(error_message or "")},
+            )
+            recorder.finalize_run(str(outcome), error_message=str(error_message or ""))
+            if str(outcome) == "error":
+                recorder.write_verdict(
+                    "failed",
+                    failure_summary=str(error_message or ""),
+                    submitted_by="system",
+                )
+            elif str(outcome) == "completed":
+                recorder.write_verdict("unknown", submitted_by="system")
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to finalize process recording: {e}")
+
+    def record_process_event(
+        self,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        state_name: str | None = None,
+        level: str = "info",
+    ):
+        if not getattr(self, "record_mode_enabled", False):
+            return None
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return None
+        try:
+            return recorder.append_event(
+                str(event_type),
+                payload or {},
+                state_name=state_name,
+                level=level,
+            )
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to append event '{event_type}': {e}")
+            return None
+
+    def record_analysis(self, record: dict):
+        if not getattr(self, "record_mode_enabled", False):
+            return None
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return None
+        try:
+            return recorder.append_analysis(record or {})
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to append analysis: {e}")
+            return None
+
+    def record_capture_frame(self, image, *, role: str = "capture", metadata: dict | None = None):
+        if not getattr(self, "record_mode_enabled", False):
+            return None
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return None
+        if image is None:
+            return None
+        try:
+            rec = recorder.save_capture_image(
+                image,
+                role=str(role),
+                metadata=metadata or {},
+            )
+            if rec is not None:
+                recorder.append_event(
+                    "capture_saved",
+                    {
+                        "capture_id": rec.get("capture_id"),
+                        "capture_role": rec.get("capture_role"),
+                        "image_relpath": rec.get("image_relpath"),
+                        "metadata": metadata or {},
+                    },
+                )
+            return rec
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to save capture image: {e}")
+            return None
+
+    def submit_latest_process_verdict(
+        self,
+        *,
+        outcome: str,
+        failure_summary: str = "",
+        suspected_cause: str = "",
+        notes: str = "",
+        submitted_by: str = "ui",
+    ):
+        if not getattr(self, "record_mode_enabled", False):
+            return None
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None:
+            return None
+        try:
+            verdict = recorder.write_verdict(
+                str(outcome or "unknown"),
+                failure_summary=str(failure_summary or ""),
+                suspected_cause=str(suspected_cause or ""),
+                notes=str(notes or ""),
+                submitted_by=str(submitted_by or "ui"),
+            )
+            recorder.append_event(
+                "verdict_submitted",
+                verdict or {},
+            )
+            return verdict
+        except Exception as e:
+            print(f"[CalibrationRecorder] Failed to write verdict: {e}")
+            return None
+
+    def get_latest_recording_directory(self):
+        try:
+            recorder = getattr(self, "_process_recorder", None)
+            if recorder is None:
+                return None
+            return recorder.get_last_run_dir()
+        except Exception:
+            return None
 
     # ------------- Session / File management -------------
 
@@ -695,6 +1132,7 @@ class CalibrationManager(QObject):
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
             self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
             self.activeCalibration.presentImageSignal.connect(self.onPresentImage)
+            self._begin_process_recording(self.activeCalibration)
             self.activeCalibration.start()
 
     def stop(self):
@@ -709,6 +1147,7 @@ class CalibrationManager(QObject):
             if hasattr(self.activeCalibration, "requestGracefulStop"):
                 try:
                     self.activeCalibration.requestGracefulStop("User requested graceful stop")
+                    self._finalize_process_recording("stopped", error_message="Calibration terminated by user")
                     return
                 except Exception:
                     pass
@@ -717,6 +1156,7 @@ class CalibrationManager(QObject):
         if len(self.calibration_queue) > 0:
             self.clear_calibration_queue()
         self.calibrationStageChanged.emit("Calibration stopped","orange")
+        self._finalize_process_recording("stopped", error_message="Calibration terminated by user")
         self.calibrationError.emit("Calibration terminated by user")
 
     # =================== Pulse-Width Sweep Orchestration ===================
@@ -1177,10 +1617,16 @@ class CalibrationManager(QObject):
     @Slot(str)
     def onCalibrationStageChanged(self, message):
         self.calibrationStageChanged.emit(message, "dark_gray")
+        self.record_process_event(
+            "stage_changed",
+            {"message": str(message)},
+            state_name=getattr(self.activeCalibration, "phase_name", None),
+        )
 
     @Slot()
     def onCalibrationCompleted(self):
         self.calibrationStageChanged.emit("Calibration completed successfully", "green")
+        self._finalize_process_recording("completed")
         self.activeCalibration = None
         self._emit_readiness()
         self.calibrationCompleted.emit()
@@ -1193,6 +1639,7 @@ class CalibrationManager(QObject):
     @Slot(str)
     def onCalibrationError(self, error_message):
         self.calibrationStageChanged.emit("Calibration error: " + error_message, "red")
+        self._finalize_process_recording("error", error_message=str(error_message))
         # NEW: hard-stop the running calibration FSM to prevent any queued transitions
         if self.activeCalibration is not None:
             try:
@@ -1241,6 +1688,14 @@ class CalibrationManager(QObject):
         # Append to steps
         run = self.data["runs"][self._run_idx]
         run["steps"].setdefault(phase_key, []).append(payload)
+
+        self.record_analysis(
+            {
+                "kind": "calibration_data_updated",
+                "phase": phase_key,
+                "payload": payload,
+            }
+        )
 
         # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
         # self._try_append_flat_rows_from_payload(run, phase_key, payload)
@@ -1515,13 +1970,17 @@ class BaseCalibrationProcess(QObject):
         self.state_machine = QStateMachine(self)
         self.phase_name = None
         self._active_timers = set()
+        self._last_capture_refs = {}
+        self._active_capture_pair_id = None
 
     def start(self):
         """Start the calibration process by starting the state machine."""
+        self._record_event("state_machine_start", {"phase_name": str(self.phase_name or "")})
         self.state_machine.start()
 
     def stop(self):
         """Stop the state machine if needed."""
+        self._record_event("state_machine_stop", {"phase_name": str(self.phase_name or "")})
         # Cancel all active timers.
         for t in list(self._active_timers):
             try:
@@ -1537,6 +1996,61 @@ class BaseCalibrationProcess(QObject):
     def onCalibrationCompleted(self):
         """Emit the completion signal."""
         self.calibrationCompleted.emit()
+
+    # ---------- recorder helpers ----------
+    def _record_event(self, event_type: str, payload: dict | None = None, *, state_name: str | None = None, level: str = "info"):
+        try:
+            if hasattr(self.calibration_manager, "record_process_event"):
+                self.calibration_manager.record_process_event(
+                    str(event_type),
+                    payload or {},
+                    state_name=state_name or getattr(self, "phase_name", None),
+                    level=level,
+                )
+        except Exception:
+            pass
+
+    def _record_analysis(self, payload: dict):
+        try:
+            if hasattr(self.calibration_manager, "record_analysis"):
+                self.calibration_manager.record_analysis(payload or {})
+        except Exception:
+            pass
+
+    def _record_decision(self, decision: str, payload: dict | None = None):
+        out = dict(payload or {})
+        out["decision"] = str(decision)
+        self._record_event("decision", out)
+
+    def _record_error(self, message: str, payload: dict | None = None):
+        out = dict(payload or {})
+        out["error_message"] = str(message)
+        self._record_event("error", out, level="error")
+
+    def _record_capture(self, frame, *, role: str, metadata: dict | None = None):
+        if frame is None:
+            return None
+        try:
+            if hasattr(self.calibration_manager, "record_capture_frame"):
+                return self.calibration_manager.record_capture_frame(
+                    frame,
+                    role=str(role),
+                    metadata=metadata or {},
+                )
+        except Exception:
+            return None
+        return None
+
+    def _request_settings_with_recording(self, settings: dict, callback, *, context: str = ""):
+        settings_obj = dict(settings or {})
+        self._record_event("settings_requested", {"settings": settings_obj, "context": str(context or "")})
+
+        def _wrapped(*args, **kwargs):
+            self._record_event("settings_completed", {"settings": settings_obj, "context": str(context or "")})
+            if callback is not None:
+                callback(*args, **kwargs)
+
+        self.calibration_manager.changeSettingsRequested.emit(settings_obj, _wrapped)
 
     def _capture_with_policy(
         self,
@@ -1562,6 +2076,15 @@ class BaseCalibrationProcess(QObject):
         guard_timer_ref = {"t": None}  # so we can cancel from inner callback
 
         def _arm_one_attempt():
+            self._record_event(
+                "capture_attempt",
+                {
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "attempt": int(state["attempt"]),
+                    "attempts_total": int(attempts_total),
+                },
+            )
             # # Stage text (with retry suffix after the first attempt)
             # if state["attempt"] == 1:
             #     self.stageChanged.emit(stage_text)
@@ -1584,6 +2107,16 @@ class BaseCalibrationProcess(QObject):
                 guard_timer_ref["t"] = None
 
                 if frame is None:
+                    self._record_event(
+                        "capture_result",
+                        {
+                            "set_attr": str(set_attr),
+                            "stage_text": str(stage_text),
+                            "attempt": int(state["attempt"]),
+                            "status": "failed",
+                        },
+                        level="warning",
+                    )
                     # Failed this attempt
                     if state["attempt"] < attempts_total:
                         state["attempt"] += 1
@@ -1591,6 +2124,14 @@ class BaseCalibrationProcess(QObject):
                         QTimer.singleShot(retry_delay_ms, _arm_one_attempt)
                         return
                     # Final failure
+                    self._record_error(
+                        final_error_msg,
+                        {
+                            "set_attr": str(set_attr),
+                            "stage_text": str(stage_text),
+                            "attempts_total": int(attempts_total),
+                        },
+                    )
                     if on_final_failure is not None:
                         on_final_failure()
                     else:
@@ -1599,6 +2140,46 @@ class BaseCalibrationProcess(QObject):
 
                 # Success
                 setattr(self, set_attr, frame)
+                role = str(set_attr).replace("_image", "")
+                capture_meta = {
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "attempt": int(state["attempt"]),
+                }
+                if set_attr == "background_image":
+                    self._active_capture_pair_id = str(uuid.uuid4())
+                    capture_meta.update(
+                        {
+                            "pair_id": self._active_capture_pair_id,
+                            "pair_role": "background",
+                            "pair_order": 1,
+                        }
+                    )
+                elif set_attr == "droplet_image":
+                    bg_ref = self._last_capture_refs.get("background_image") or {}
+                    pair_id = self._active_capture_pair_id or bg_ref.get("pair_id") or str(uuid.uuid4())
+                    capture_meta.update(
+                        {
+                            "pair_id": pair_id,
+                            "pair_role": "droplet",
+                            "pair_order": 2,
+                            "subtract_background_capture_id": bg_ref.get("capture_id", ""),
+                            "subtract_background_image_relpath": bg_ref.get("image_relpath", ""),
+                        }
+                    )
+                capture_ref = self._record_capture(frame, role=role or "capture", metadata=capture_meta)
+                if capture_ref is not None:
+                    self._last_capture_refs[set_attr] = capture_ref
+                self._record_event(
+                    "capture_result",
+                    {
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "attempt": int(state["attempt"]),
+                        "status": "success",
+                        "capture_ref": capture_ref or {},
+                    },
+                )
                 if on_success is not None:
                     try:
                         on_success(frame)
@@ -1671,8 +2252,10 @@ class BaseCalibrationProcess(QObject):
             self._cancel_timeout(t_ref["t"])
             t_ref["t"] = None
             if not ok:
+                self._record_error(why or fail_msg, {"mode": "relative", "move_vector": move_vector})
                 self.calibrationError.emit(why or fail_msg)
                 return
+            self._record_event("move_completed", {"mode": "relative", "move_vector": move_vector})
             if callable(on_done):
                 try:
                     on_done()
@@ -1684,6 +2267,10 @@ class BaseCalibrationProcess(QObject):
         t_ref["t"] = self._start_timeout(
             int(timeout_ms),
             on_timeout=lambda: _finish(False, fail_msg),
+        )
+        self._record_event(
+            "move_requested",
+            {"mode": "relative", "move_vector": move_vector, "timeout_ms": int(timeout_ms)},
         )
         try:
             self.calibration_manager.moveRequested.emit(
@@ -1716,8 +2303,10 @@ class BaseCalibrationProcess(QObject):
             self._cancel_timeout(t_ref["t"])
             t_ref["t"] = None
             if not ok:
+                self._record_error(why or fail_msg, {"mode": "absolute", "target_position": target_position})
                 self.calibrationError.emit(why or fail_msg)
                 return
+            self._record_event("move_completed", {"mode": "absolute", "target_position": target_position})
             if callable(on_done):
                 try:
                     on_done()
@@ -1729,6 +2318,10 @@ class BaseCalibrationProcess(QObject):
         t_ref["t"] = self._start_timeout(
             int(timeout_ms),
             on_timeout=lambda: _finish(False, fail_msg),
+        )
+        self._record_event(
+            "move_requested",
+            {"mode": "absolute", "target_position": target_position, "timeout_ms": int(timeout_ms)},
         )
         try:
             self.calibration_manager.moveAbsoluteRequested.emit(
@@ -2063,6 +2656,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             initial_position['Z'],
         )
         print(f"Moving to initial position: {move_vector}")
+        self._record_event("initial_position_target", {"target_position": move_vector})
         self._request_move_absolute_with_timeout(
             move_vector,
             timeout_ms=self.move_timeout_ms,
@@ -2078,7 +2672,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             "num_droplets": 0,
             "flash_delay": int(self.initial_flash_delay_us)
         }
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="nozzle_prepare_background",
+        )
 
     @Slot()
     def onCaptureBackground(self):
@@ -2106,7 +2704,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             "num_droplets": 1,
             "flash_delay": int(self._clamp_delay(self._base_delay_us)),
         }
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="nozzle_prepare_droplet",
+        )
     @Slot()
     def onCaptureDroplet(self):
         # Slightly more aggressive retries for flash timing hiccups
@@ -2134,22 +2736,59 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 "flash_delay": int(self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])),
                 # keep current pressure (no key needed if your stack preserves it)
             }
-            self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+            self._record_decision(
+                "discard_warmup_frame",
+                {"settings": settings, "delay_idx": int(self._delay_idx), "pressure_level": int(self._pressure_level)},
+            )
+            self._request_settings_with_recording(
+                settings,
+                self.calibration_manager.emitSettingsChangeCompleted,
+                context="nozzle_warmup_recapture",
+            )
             return
 
         status, nozzle_px, n_contours, debug_img = self._detect_nozzle_point(bg, dr)
+        pair_ctx = {
+            "background_capture_id": (self._last_capture_refs.get("background_image") or {}).get("capture_id", ""),
+            "background_image_relpath": (self._last_capture_refs.get("background_image") or {}).get("image_relpath", ""),
+            "droplet_capture_id": (self._last_capture_refs.get("droplet_image") or {}).get("capture_id", ""),
+            "droplet_image_relpath": (self._last_capture_refs.get("droplet_image") or {}).get("image_relpath", ""),
+        }
+        self._record_analysis(
+            {
+                "kind": "nozzle_detection",
+                "status": str(status),
+                "nozzle_px": nozzle_px,
+                "n_contours": int(n_contours),
+                "scan_state": {
+                    "base_delay_us": int(self._base_delay_us),
+                    "delay_idx": int(self._delay_idx),
+                    "pressure_level": int(self._pressure_level),
+                    "base_pressure": float(self._base_pressure) if self._base_pressure is not None else None,
+                    "recenter_iterations": int(self._recenter_iters),
+                },
+                "detection": dict(getattr(self, "_last_detection_details", {}) or {}),
+                "pair": pair_ctx,
+            }
+        )
 
         if status == "OK":
             if n_contours > 1:
                 self.stageChanged.emit(f"Nozzle Pos - Multiple contours found ({n_contours}); using top-most candidate.")
             self.presentImageSignal.emit(debug_img)
-            self._recenter_or_finish(nozzle_px)
+            decision = self._recenter_or_finish(nozzle_px)
+            if decision:
+                self._record_decision(
+                    decision,
+                    {"status": "OK", "nozzle_px": nozzle_px, "n_contours": int(n_contours)},
+                )
             return
 
         if status == "NO_SIGNAL":
             # Substantial pressure bump and immediate retest
             advanced, settings_or_err = self._escalate_pressure_on_no_signal()
             if not advanced:
+                self._record_decision("abort_no_signal", {"reason": str(settings_or_err)})
                 self.calibrationError.emit(settings_or_err)  # error message string
                 return
             
@@ -2157,20 +2796,32 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self._throwaway_pending = True
             self.stageChanged.emit(settings_or_err.get("_stage_msg", "Raising pressure and retesting"))
             # apply new pressure (and keep current delay)
-            self.calibration_manager.changeSettingsRequested.emit(
-                {k: v for k, v in settings_or_err.items() if not k.startswith("_")},
-                self.calibration_manager.emitSettingsChangeCompleted
+            new_settings = {k: v for k, v in settings_or_err.items() if not k.startswith("_")}
+            self._record_decision("pressure_bump", {"status": "NO_SIGNAL", "settings": new_settings})
+            self._request_settings_with_recording(
+                new_settings,
+                self.calibration_manager.emitSettingsChangeCompleted,
+                context="nozzle_no_signal_pressure_bump",
             )
             return
 
         # status == "NONE" → keep your existing delay-scan plan, then (smaller) pressure bump
         advanced, settings = self._advance_scan_plan()
         if not advanced:
+            self._record_decision("abort_delay_scan", {"status": "NONE"})
             self.calibrationError.emit("Nozzle Pos - No droplet/nozzle detected after scanning delays and pressure levels.")
             return
         if "print_pressure" in settings:
             self._throwaway_pending = True
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._record_decision(
+            "pressure_bump" if "print_pressure" in settings else "delay_scan",
+            {"status": "NONE", "settings": settings},
+        )
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="nozzle_none_scan_advance",
+        )
 
     # ----------------- Helpers: detection & movement -----------------
 
@@ -2208,7 +2859,13 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         - NO_SIGNAL: Otsu mask has too few foreground pixels → likely nothing ejected.
         - NONE: some foreground but no valid contour after filtering (noise/specks).
         """
+        self._last_detection_details = {}
         if bg is None or dr is None:
+            self._last_detection_details = {
+                "status": "NO_SIGNAL",
+                "reason": "missing_frame",
+                "threshold_value": int(self.fixed_thresh_value),
+            }
             return ("NO_SIGNAL", None, 0, None)
 
         a = dr; b = bg
@@ -2225,8 +2882,15 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         _, th = cv2.threshold(blur, int(self.fixed_thresh_value), 255, cv2.THRESH_BINARY)
 
         fg_px = int(np.count_nonzero(th))
+        details = {
+            "threshold_value": int(self.fixed_thresh_value),
+            "foreground_pixels": int(fg_px),
+            "no_signal_min_fg_px": int(self.no_signal_min_fg_px),
+        }
         if fg_px < int(self.no_signal_min_fg_px):
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            details.update({"status": "NO_SIGNAL", "reason": "foreground_below_min"})
+            self._last_detection_details = details
             return ("NO_SIGNAL", None, 0, dbg)
 
         # Morphological clean-up
@@ -2235,8 +2899,11 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
 
         contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        details["raw_contour_count"] = int(len(contours))
         if not contours:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            details.update({"status": "NONE", "reason": "no_contours_after_threshold"})
+            self._last_detection_details = details
             return ("NONE", None, 0, dbg)
 
         H, W = gray.shape[:2]
@@ -2257,8 +2924,12 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 continue
             kept.append((c, area, top_y, x, y, w, h))
 
+        details["kept_contour_count"] = int(len(kept))
+        details["top_band_limit_px"] = int(top_band_limit)
         if not kept:
             dbg = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+            details.update({"status": "NONE", "reason": "no_contours_after_filters"})
+            self._last_detection_details = details
             return ("NONE", None, 0, dbg)
 
         # Prefer the contour with the lowest *bottom* (closest to nozzle top origin) and larger area
@@ -2271,6 +2942,22 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         n = len(kept)
         mid_x = int(round(x + w / 2.0))
         nozzle_xy = (mid_x, int(top_y))
+        details["candidate_summaries"] = [
+            {
+                "area": float(it[1]),
+                "top_y": int(it[2]),
+                "bbox": [int(it[3]), int(it[4]), int(it[5]), int(it[6])],
+                "bottom_y": int(bottom_y(it[0])),
+            }
+            for it in kept[:5]
+        ]
+        details["chosen"] = {
+            "bbox": [int(x), int(y), int(w), int(h)],
+            "top_y": int(top_y),
+            "nozzle_xy": [int(nozzle_xy[0]), int(nozzle_xy[1])],
+        }
+        details["status"] = "OK"
+        self._last_detection_details = details
 
         # Debug overlay
         dbg = a.copy() if (a.ndim == 3 and a.shape[2] == 3) else cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
@@ -2293,11 +2980,20 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             self.calibration_manager.set_nozzle_center_image_position(nozzle_px)
             self.calibration_manager.set_nozzle_center(machine_pos)
             self.nozzleCentered.emit()
-            return
+            return "finish"
 
         if self._recenter_iters >= self.max_recenter_iterations:
+            self._record_error(
+                "Too many recenter attempts-aborting to avoid oscillation.",
+                {
+                    "recenter_iterations": int(self._recenter_iters),
+                    "max_recenter_iterations": int(self.max_recenter_iterations),
+                    "nozzle_px": nozzle_px,
+                    "target_px": target,
+                },
+            )
             self.calibrationError.emit("Too many recenter attempts-aborting to avoid oscillation.")
-            return
+            return None
 
         # compute move vector from pixel-to-motor; clamp per-step + absolute target
         move_vector = self.model.droplet_camera_model.calculate_move_to_target(nozzle_px, target)
@@ -2318,16 +3014,36 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
                 f"Nozzle offset move clamped: requested {move_vector}, applied {clamped_move}"
             )
         if clamped_move == (0, 0, 0):
+            self._record_error(
+                "Nozzle Pos - Recenter move collapsed to zero at bounds.",
+                {
+                    "requested_move": move_vector,
+                    "applied_move": clamped_move,
+                    "target_position": tgt,
+                },
+            )
             self.calibrationError.emit("Nozzle Pos - Recenter move collapsed to zero at bounds.")
-            return
+            return None
 
         self.stageChanged.emit(f"Nozzle offset detected; moving by {clamped_move}")
+        self._record_event(
+            "recenter_planned",
+            {
+                "nozzle_px": nozzle_px,
+                "target_px": target,
+                "requested_move": move_vector,
+                "applied_move": clamped_move,
+                "target_position": tgt,
+                "recenter_iterations": int(self._recenter_iters),
+            },
+        )
         self._recenter_iters += 1
         self._request_move_absolute_with_timeout(
             tgt,
             timeout_ms=self.move_timeout_ms,
             err_msg="Nozzle Pos - Recenter move timed out."
         )
+        return "recenter_move"
 
     def _is_top_centered(self, pt, img_size, target):
         x, y = pt
