@@ -5450,12 +5450,17 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # --- replicate policy ---
         self.min_reps           = int(min_reps)
-        self.escalate_to        = int(escalate_to)
+        self.escalate_to        = max(int(escalate_to), self.min_reps)
         self.replicates_target  = self.min_reps
         self.reps               = []
         self._invalid_skip_count = 0
         self._invalid_skip_cap   = 6
         self._discard_next       = True   # skip first frame after pressure change (settling)
+        # Confidence gates reduce overreaction to single noisy replicates.
+        self.single_confidence_min = 0.70
+        self.none_confidence_min = 0.70
+        self.multiple_confidence_min = 0.40
+        self.multiple_min_count = 2
 
         # --- outputs ---
         self.samples          = []
@@ -5701,52 +5706,49 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         }
         self.reps.append(rep)
         self.replicateReady.emit()
-
     @Slot()
     def onDecide(self):
-        # Short-circuit: if any non-single appears, decide immediately
-        classes = [r["cls"] for r in self.reps]
-
-        if "multiple" in classes:
-            verdict = "multiple"
-            self._store_pressure_summary(verdict, escalated=False)
-            if self._maybe_start_or_update_brackets(verdict):
-                self._prev_verdict = verdict
-                self._prev_pressure = self._current_pressure
-                self._advance_or_finish(); return
-            self._choose_next_pressure(verdict)
-            self._prev_verdict = verdict
-            self._prev_pressure = self._current_pressure
-            self._advance_or_finish(); return
-
-        if ("none" in classes) and ("multiple" not in classes):
-            verdict = "none"
-            self._store_pressure_summary(verdict, escalated=False)
-            if self._maybe_start_or_update_brackets(verdict):
-                self._prev_verdict = verdict
-                self._prev_pressure = self._current_pressure
-                self._advance_or_finish(); return
-            self._choose_next_pressure(verdict)
-            self._prev_verdict = verdict
-            self._prev_pressure = self._current_pressure
-            self._advance_or_finish(); return
-
-        # All observed so far are single; collect enough reps for confidence
-        if len(self.reps) < self.min_reps:
+        counts, total = self._replicate_class_counts()
+        if total < self.min_reps:
+            self.replicates_target = self.min_reps
             self.continueReplicate.emit()
             return
 
-        # After min_reps, still all single → call it SINGLE
-        verdict = "single"
-        self._store_pressure_summary(verdict, escalated=False)
-        if self._maybe_start_or_update_brackets(verdict):
-            self._prev_verdict = verdict
-            self._prev_pressure = self._current_pressure
-            self._advance_or_finish(); return
-        self._choose_next_pressure(verdict)
-        self._prev_verdict = verdict
-        self._prev_pressure = self._current_pressure
-        self._advance_or_finish()
+        verdict, confidence, decision = self._classify_replicate_outcome(counts, total)
+        if verdict == "ambiguous" and total < self.escalate_to:
+            self.replicates_target = self.escalate_to
+            self.stageChanged.emit(
+                f"Pressure {self._current_pressure:.3f} psi ambiguous "
+                f"(single={counts['single']}, none={counts['none']}, multiple={counts['multiple']}); "
+                f"collecting up to {self.escalate_to} reps"
+            )
+            self.continueReplicate.emit()
+            return
+
+        if verdict == "ambiguous":
+            verdict = self._fallback_verdict_from_counts(counts)
+            decision["reason"] = "ambiguous_fallback"
+            decision["fallback_verdict"] = verdict
+
+        decision.update(
+            {
+                "class_counts": dict(counts),
+                "class_fractions": dict(decision.get("fractions") or {}),
+                "confidence": float(confidence),
+                "total_reps": int(total),
+            }
+        )
+        escalated = total > self.min_reps
+        self._store_pressure_summary(verdict, escalated=escalated, decision=decision)
+        self._record_decision(
+            "pressure_scan_verdict",
+            {
+                "pressure_psi": float(self._current_pressure),
+                "verdict": str(verdict),
+                "decision": dict(decision),
+            },
+        )
+        self._apply_verdict_and_advance(verdict)
 
     @Slot()
     def onCalibrationCompleted(self):
@@ -5785,6 +5787,64 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         winners = [k for k, v in counts.items() if v == max_ct]
         return winners[0] if len(winners) == 1 else "ambiguous"
 
+    def _replicate_class_counts(self):
+        counts = {"none": 0, "single": 0, "multiple": 0}
+        for r in self.reps:
+            cls = str(r.get("cls", ""))
+            if cls in counts:
+                counts[cls] += 1
+        total = int(sum(counts.values()))
+        return counts, total
+
+    @staticmethod
+    def _class_fractions_from_counts(counts: dict, total: int):
+        if int(total) <= 0:
+            return {"none": 0.0, "single": 0.0, "multiple": 0.0}
+        d = float(total)
+        return {
+            "none": float(counts.get("none", 0)) / d,
+            "single": float(counts.get("single", 0)) / d,
+            "multiple": float(counts.get("multiple", 0)) / d,
+        }
+
+    def _classify_replicate_outcome(self, counts: dict, total: int):
+        fr = self._class_fractions_from_counts(counts, total)
+        p_none = float(fr["none"])
+        p_single = float(fr["single"])
+        p_multiple = float(fr["multiple"])
+
+        # Treat "multiple" conservatively, but require repeat evidence to ignore one-off noise.
+        if int(counts.get("multiple", 0)) >= int(self.multiple_min_count) and p_multiple >= float(self.multiple_confidence_min):
+            return "multiple", p_multiple, {"reason": "multiple_confident", "fractions": fr}
+
+        # For single/none, only declare confidence if no multiple was observed.
+        if int(counts.get("multiple", 0)) == 0 and p_single >= float(self.single_confidence_min):
+            return "single", p_single, {"reason": "single_confident", "fractions": fr}
+        if int(counts.get("multiple", 0)) == 0 and p_none >= float(self.none_confidence_min):
+            return "none", p_none, {"reason": "none_confident", "fractions": fr}
+
+        top = max(fr.items(), key=lambda kv: kv[1])
+        return "ambiguous", float(top[1]), {"reason": "insufficient_confidence", "fractions": fr}
+
+    def _fallback_verdict_from_counts(self, counts: dict):
+        # Conservative deterministic fallback at replicate cap.
+        if int(counts.get("multiple", 0)) >= int(self.multiple_min_count):
+            return "multiple"
+        if int(counts.get("single", 0)) > int(counts.get("none", 0)):
+            return "single"
+        return "none"
+
+    def _apply_verdict_and_advance(self, verdict: str):
+        if self._maybe_start_or_update_brackets(verdict):
+            self._prev_verdict = verdict
+            self._prev_pressure = self._current_pressure
+            self._advance_or_finish()
+            return
+        self._choose_next_pressure(verdict)
+        self._prev_verdict = verdict
+        self._prev_pressure = self._current_pressure
+        self._advance_or_finish()
+
     def _effective_step_caps(self):
         """
         Returns (dp_max_eff, multi_big_eff, none_jump_eff) based on pulse width
@@ -5818,15 +5878,24 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         return dp_max_pw, big_step_pw, none_jump_pw
 
-    def _store_pressure_summary(self, verdict: str, escalated: bool):
+    def _store_pressure_summary(self, verdict: str, escalated: bool, decision: dict | None = None):
+        counts, total = self._replicate_class_counts()
+        fractions = self._class_fractions_from_counts(counts, total)
+        decision = dict(decision or {})
         rec = {
             "pressure": float(self._current_pressure),
             "n_reps": len(self.reps),
             "escalated": bool(escalated),
             "verdict": verdict,
             "dy_min_px_med": self._median_dy(self.reps),
-            "replicates": self.reps[:]
+            "replicates": self.reps[:],
+            "class_counts": dict(counts),
+            "class_fractions": dict(fractions),
+            "decision_reason": str(decision.get("reason", "")),
+            "confidence": float(decision.get("confidence", 0.0)),
         }
+        if "fallback_verdict" in decision:
+            rec["fallback_verdict"] = str(decision.get("fallback_verdict"))
         self.samples.append(rec)
 
         # Track lowest SINGLE tested so far (for skipping duplicates after upper-edge refine)
