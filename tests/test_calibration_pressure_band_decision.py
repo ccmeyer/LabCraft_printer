@@ -30,6 +30,17 @@ def _build_decide_proc(reps):
     proc._current_pressure = 1.23
     proc._prev_verdict = None
     proc._prev_pressure = None
+    proc.classify_delay_us = 5850
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc._delay_retest_done_for_pressure = False
+    proc._delay_retest_in_progress = False
+    proc.fast_single_bottom_margin_px = 220
+    proc.fast_single_risk_fraction = 0.60
+    proc.fast_single_risk_min_count = 3
+    proc.fast_single_dy_threshold_px = 1000
     proc.stageChanged = Recorder()
     proc.continueReplicate = Recorder()
     proc._record_decision = lambda *args, **kwargs: None
@@ -79,8 +90,8 @@ def test_pressure_band_on_decide_accepts_confident_multiple_at_min_reps():
         [
             _rep("multiple"),
             _rep("multiple"),
-            _rep("single"),
-            _rep("single"),
+            _rep("multiple"),
+            _rep("multiple"),
             _rep("none"),
         ]
     )
@@ -106,7 +117,7 @@ def test_pressure_band_on_decide_uses_fallback_when_still_ambiguous_at_cap():
             _rep("none"),
             _rep("none"),
             _rep("none"),
-            _rep("multiple"),
+            _rep("none"),
         ]
     )
 
@@ -120,3 +131,50 @@ def test_pressure_band_on_decide_uses_fallback_when_still_ambiguous_at_cap():
     assert proc._store_calls[0]["escalated"] is True
     assert proc._choose_calls == ["none"]
     assert len(proc._advance_calls) == 1
+
+
+def test_pressure_band_on_decide_triggers_delay_retest_for_mixed_single_multiple():
+    proc = _build_decide_proc(
+        [
+            _rep("multiple"),
+            _rep("multiple"),
+            _rep("single"),
+            _rep("single"),
+            _rep("none"),
+        ]
+    )
+    retest_reasons = []
+    proc._start_delay_retest = (
+        lambda reason, verdict, counts, decision: retest_reasons.append(str(reason)) or True
+    )
+
+    proc.onDecide()
+
+    assert retest_reasons == ["mixed_single_multiple"]
+    assert proc._store_calls == []
+    assert proc._choose_calls == []
+    assert proc._advance_calls == []
+
+
+def test_pressure_band_on_decide_triggers_delay_retest_for_edge_single():
+    proc = _build_decide_proc(
+        [
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+        ]
+    )
+    proc.samples = [{"pressure": 1.24, "verdict": "multiple"}]
+    retest_reasons = []
+    proc._start_delay_retest = (
+        lambda reason, verdict, counts, decision: retest_reasons.append(str(reason)) or True
+    )
+
+    proc.onDecide()
+
+    assert retest_reasons == ["edge_single_with_upper_multiple"]
+    assert proc._store_calls == []
+    assert proc._choose_calls == []
+    assert proc._advance_calls == []

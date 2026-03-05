@@ -5447,6 +5447,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 pw = 1500
             classification_delay_us = int(max(0, (self.emergence_time_us or 0) + pw + 1000))
         self.classify_delay_us = int(classification_delay_us)
+        self._base_classify_delay_us = int(self.classify_delay_us)
+        self._active_classify_delay_us = int(self.classify_delay_us)
+        self.delay_retest_step_us = 500
+        self.delay_retest_min_us = 2000
+        self.delay_retest_timeout_ms = 15_000
+        self._delay_retest_done_for_pressure = False
+        self._delay_retest_in_progress = False
 
         # --- pressure bounds ---
         try:
@@ -5659,14 +5666,17 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.replicates_target = self.min_reps
         self._invalid_skip_count = 0
         self._discard_next = True
+        self._active_classify_delay_us = int(self._base_classify_delay_us)
+        self._delay_retest_done_for_pressure = False
+        self._delay_retest_in_progress = False
 
         settings = {
             "print_pressure": self._current_pressure,
             "num_droplets": 1,
-            "flash_delay": int(self.classify_delay_us)
+            "flash_delay": int(self._active_classify_delay_us),
         }
         self.stageChanged.emit(
-            f"Set pressure={self._current_pressure:.3f} psi; delay={self.classify_delay_us} μs"
+            f"Set pressure={self._current_pressure:.3f} psi; delay={self._active_classify_delay_us} μs"
         )
         def _after(): self.pressureApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit(settings, _after)
@@ -5746,6 +5756,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "nozzle_attached_area": int(nozzle_area or 0),
             "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
             "frame_height_px": int(self.droplet_image.shape[0]) if getattr(self, "droplet_image", None) is not None else None,
+            "flash_delay_us": int(
+                getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
+            ),
         }
         self.reps.append(rep)
         self.replicateReady.emit()
@@ -5773,6 +5786,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 decision["reason"] = "single_exit_risk_override"
                 decision["override_from"] = "single"
 
+        retest_reason = self._should_run_delay_retest(verdict, counts, decision)
+        if retest_reason is not None:
+            if self._start_delay_retest(retest_reason, verdict, counts, decision):
+                return
+
         if verdict == "ambiguous" and total < self.escalate_to:
             self.replicates_target = self.escalate_to
             self.stageChanged.emit(
@@ -5788,12 +5806,18 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             decision["reason"] = "ambiguous_fallback"
             decision["fallback_verdict"] = verdict
 
+        base_delay_us = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
+        active_delay_us = int(getattr(self, "_active_classify_delay_us", base_delay_us))
+
         decision.update(
             {
                 "class_counts": dict(counts),
                 "class_fractions": dict(decision.get("fractions") or {}),
                 "confidence": float(confidence),
                 "total_reps": int(total),
+                "classify_delay_us": int(active_delay_us),
+                "base_classify_delay_us": int(base_delay_us),
+                "delay_retest_applied": bool(int(active_delay_us) != int(base_delay_us)),
             }
         )
         escalated = total > self.min_reps
@@ -5969,6 +5993,104 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "dy_threshold_px": int(self.fast_single_dy_threshold_px),
             "bottom_margin_px": int(self.fast_single_bottom_margin_px),
         }
+
+    def _earlier_delay_candidate_us(self):
+        base = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
+        cur = int(getattr(self, "_active_classify_delay_us", base))
+        step = int(max(0, getattr(self, "delay_retest_step_us", 500)))
+        min_delay = int(max(0, getattr(self, "delay_retest_min_us", 2000)))
+        candidate = int(max(min_delay, base - step))
+        if candidate >= cur:
+            return None
+        return candidate
+
+    def _should_run_delay_retest(self, verdict: str, counts: dict, decision: dict):
+        if bool(getattr(self, "_delay_retest_done_for_pressure", False)):
+            return None
+        if self._earlier_delay_candidate_us() is None:
+            return None
+
+        n_single = int((counts or {}).get("single", 0))
+        n_multiple = int((counts or {}).get("multiple", 0))
+        if n_single > 0 and n_multiple > 0:
+            return "mixed_single_multiple"
+
+        if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+            return "edge_single_with_upper_multiple"
+
+        return None
+
+    def _start_delay_retest(self, reason: str, verdict: str, counts: dict, decision: dict):
+        new_delay = self._earlier_delay_candidate_us()
+        if new_delay is None:
+            return False
+
+        self._delay_retest_done_for_pressure = True
+        self._delay_retest_in_progress = True
+        prev_delay = int(
+            getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
+        )
+        self._active_classify_delay_us = int(new_delay)
+        self.reps = []
+        self.replicates_target = int(self.min_reps)
+        self._invalid_skip_count = 0
+        self._discard_next = True
+
+        self.stageChanged.emit(
+            f"Pressure {self._current_pressure:.3f} psi {str(reason).replace('_', ' ')}; "
+            f"retesting at earlier delay {self._active_classify_delay_us} μs"
+        )
+        self._record_decision(
+            "pressure_step_delay_retest",
+            {
+                "pressure_psi": float(self._current_pressure),
+                "reason": str(reason),
+                "from_delay_us": int(prev_delay),
+                "to_delay_us": int(self._active_classify_delay_us),
+                "prior_verdict": str(verdict),
+                "class_counts": dict(counts or {}),
+                "decision_reason": str((decision or {}).get("reason", "")),
+            },
+        )
+
+        done = {"fired": False}
+        t_ref = {"t": None}
+
+        def _finish(ok: bool, why: str):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            self._delay_retest_in_progress = False
+            if not ok:
+                msg = (
+                    f"Failed to apply delay retest settings @ {self._current_pressure:.3f} psi "
+                    f"({why})"
+                )
+                self._record_error(
+                    msg,
+                    {
+                        "pressure_psi": float(self._current_pressure),
+                        "to_delay_us": int(self._active_classify_delay_us),
+                        "reason": str(reason),
+                    },
+                )
+                self.calibrationError.emit(msg)
+                self.finalize.emit()
+                return
+            self.continueReplicate.emit()
+
+        t_ref["t"] = self._start_timeout(
+            int(getattr(self, "delay_retest_timeout_ms", 15_000)),
+            on_timeout=lambda: _finish(False, "timeout"),
+        )
+        self._request_settings_with_recording(
+            {"flash_delay": int(self._active_classify_delay_us), "num_droplets": 1},
+            lambda *args, **kwargs: _finish(True, "callback"),
+            context=f"pressure_delay_retest:{reason}",
+        )
+        return True
 
     def _effective_step_caps(self):
         """
