@@ -5509,6 +5509,14 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.near_nozzle_px            = int(self.safety_clearance_px * 1.6)
         self.far_nozzle_px             = int(self.safety_clearance_px * 3.0)
         self.auto_stop_on_nozzle_wet   = bool(auto_stop_on_nozzle_wet)
+        self.too_close_reclassify_phase_names = {"scan", "reacquire_up", "seek_upper", "bisect_gap"}
+        self.too_close_soft_limit_pre_single = 8
+        self.too_close_hard_stop_after_single_hits = 3
+        self._too_close_pre_single_hits = 0
+        self._too_close_post_single_hits = 0
+        self.nozzle_wet_confirm_reps = 2
+        self.nozzle_wet_pre_single_defer_points = 8
+        self._nozzle_wet_pre_single_points = 0
 
         # --- replicate policy ---
         self.min_reps           = int(min_reps)
@@ -5539,6 +5547,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.conservative_band_width_threshold_psi = 0.10
         self.conservative_band_inset_psi = 0.02
         self.conservative_finalize_narrow_width_psi = 0.05
+        self.min_singles_for_conservative_finalize = 2
+        self.min_points_for_empty_band = 4
+        self.min_span_for_empty_band_psi = 0.20
+        self.min_single_points_per_band = 2
+        self.allow_single_point_band_if_bracketed = False
         self.max_upper_refine_points = 2
         self.max_lower_refine_points = 1
         self._upper_refine_points_done = 0
@@ -5825,41 +5838,85 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if dy_list:
                 dy_min = min(dy_list)
 
-        # ---- SAFETY: ignore "too close" if MULTIPLE ----
-        # If "too close" and this is the FIRST point, do NOT terminate.
+        # ---- SAFETY: handle "too close" statefully to avoid premature termination ----
         if (cls != "multiple") and (dy_min is not None) and (dy_min < self.safety_clearance_px):
-            if str(getattr(self, "_phase", "")) == "reacquire_up":
+            phase = str(getattr(self, "_phase", ""))
+            pre_single_discovery = getattr(self, "_min_single_pressure", None) is None
+            soft_phases = set(
+                getattr(
+                    self,
+                    "too_close_reclassify_phase_names",
+                    {"scan", "reacquire_up", "seek_upper", "bisect_gap"},
+                )
+            )
+            if phase == "reacquire_up" or (pre_single_discovery and phase in soft_phases):
+                self._too_close_pre_single_hits = int(max(0, getattr(self, "_too_close_pre_single_hits", 0)) + 1)
                 self.stageChanged.emit(
-                    f"Re-acquire sample too close to nozzle (dy={int(dy_min)} px); continuing upward scan"
+                    f"Near-nozzle sample (dy={int(dy_min)} px) during discovery; reclassifying as none"
                 )
                 self._record_decision(
-                    "reacquire_near_nozzle_reclassified_none",
+                    "pre_single_near_nozzle_reclassified_none",
                     {
                         "pressure_psi": float(self._current_pressure),
+                        "phase": phase,
                         "dy_min_px": int(dy_min),
                         "safety_clearance_px": int(self.safety_clearance_px),
+                        "hit_count": int(self._too_close_pre_single_hits),
                     },
                 )
                 cls = "none"
                 dy_min = None
             elif self._prev_verdict is None:
-                self.stageChanged.emit(
-                    "First sample is too close to nozzle → increasing pressure to re-acquire safely"
+                self._too_close_pre_single_hits = int(max(0, getattr(self, "_too_close_pre_single_hits", 0)) + 1)
+                self.stageChanged.emit("First sample is near nozzle; treating as none and re-acquiring")
+                self._record_decision(
+                    "first_sample_near_nozzle_reclassified_none",
+                    {
+                        "pressure_psi": float(self._current_pressure),
+                        "phase": phase,
+                        "dy_min_px": int(dy_min),
+                        "safety_clearance_px": int(self.safety_clearance_px),
+                        "hit_count": int(self._too_close_pre_single_hits),
+                    },
                 )
-                # Let decision logic handle upward seek; treat as a normal SINGLE result.
-                pass
+                cls = "none"
+                dy_min = None
             else:
-                self._early_stop = True
-                self._stop_reason = f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
-                self._terminate_at_pressure = float(self._current_pressure)
-                self.stageChanged.emit(
-                    f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
-                )
-                self.finalize.emit()
-                return
+                self._too_close_post_single_hits = int(max(0, getattr(self, "_too_close_post_single_hits", 0)) + 1)
+                hard_cap = int(max(1, getattr(self, "too_close_hard_stop_after_single_hits", 3)))
+                if self._too_close_post_single_hits < hard_cap:
+                    self.stageChanged.emit(
+                        f"Near-nozzle sample after single-band discovery (dy={int(dy_min)} px); retrying"
+                    )
+                    self._record_decision(
+                        "post_single_near_nozzle_reclassified_none",
+                        {
+                            "pressure_psi": float(self._current_pressure),
+                            "phase": phase,
+                            "dy_min_px": int(dy_min),
+                            "safety_clearance_px": int(self.safety_clearance_px),
+                            "hit_count": int(self._too_close_post_single_hits),
+                            "hard_stop_after_hits": int(hard_cap),
+                        },
+                    )
+                    cls = "none"
+                    dy_min = None
+                else:
+                    self._early_stop = True
+                    self._stop_reason = (
+                        f"Droplet too close to nozzle (dy={int(dy_min)} px < {self.safety_clearance_px})"
+                    )
+                    self._terminate_at_pressure = float(self._current_pressure)
+                    self.stageChanged.emit(
+                        f"Safety stop: droplet too close (dy={int(dy_min)} px) at {self._current_pressure:.3f} psi"
+                    )
+                    self.finalize.emit()
+                    return
+        else:
+            if (dy_min is None) or (dy_min >= self.safety_clearance_px):
+                self._too_close_post_single_hits = 0
 
-
-        # Nozzle-wet handling stays as-is (we log per-rep; final stop handled in _choose_next_pressure)
+        # Nozzle-wet stop/deferral is resolved in _choose_next_pressure.
         if cls == "invalid":
             self._invalid_skip_count += 1
             self.stageChanged.emit("Nozzle-contact / invalid replicate → re-capturing")
@@ -6023,7 +6080,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         raw_bands = self._compute_single_bands()
-        if not raw_bands:
+        raw_bands = [[float(min(lo, hi)), float(max(lo, hi))] for (lo, hi) in list(raw_bands or [])]
+        bands = self._filter_reportable_single_bands(raw_bands)
+        if not bands:
+            explore = self._exploration_summary()
             msg = "Pressure scan found no valid single-droplet pressure band."
             self._record_error(
                 msg,
@@ -6031,11 +6091,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     "pressure_count": int(len(self.samples)),
                     "start_pressure": float(self.start_pressure),
                     "pressure_bounds": [float(self.P_MIN), float(self.P_MAX)],
+                    "exploration": dict(explore),
+                    "raw_single_bands": [list(b) for b in raw_bands],
                 },
             )
             self.calibrationError.emit(msg)
             return
-        bands = [[float(min(lo, hi)), float(max(lo, hi))] for (lo, hi) in raw_bands]
         raw_primary_band = list(bands[0]) if bands else None
         primary_band = self._compute_conservative_primary_band(bands)
 
@@ -6046,7 +6107,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "pressure_bounds": [self.P_MIN, self.P_MAX],
             "pressures": self.samples,
             "single_bands": bands,
-            "raw_single_bands": [list(b) for b in bands],
+            "raw_single_bands": [list(b) for b in raw_bands],
             "primary_band": primary_band,
             "raw_primary_band": raw_primary_band,
             "conservative_primary_band_applied": bool(primary_band != raw_primary_band),
@@ -6329,6 +6390,14 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if not evidence:
             return False
         if not bool(evidence.get("has_low_none")) or not bool(evidence.get("has_high_multiple")):
+            return False
+        min_singles = int(max(1, getattr(self, "min_singles_for_conservative_finalize", 2)))
+        if int(evidence.get("single_count", 0)) < min_singles:
+            return False
+        if not self._has_minimum_exploration(
+            min_points=int(max(1, getattr(self, "min_points_for_empty_band", 4))),
+            min_span_psi=float(max(0.0, getattr(self, "min_span_for_empty_band_psi", 0.20))),
+        ):
             return False
 
         width = float(max(0.0, evidence.get("single_width_psi", 0.0)))
@@ -6781,6 +6850,97 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         from statistics import median
         return int(median(vals))
 
+    def _exploration_summary(self):
+        points = []
+        verdict_counts = {"single": 0, "none": 0, "multiple": 0}
+        for rec in list(getattr(self, "samples", []) or []):
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            points.append(p)
+            v = str(rec.get("verdict", ""))
+            if v in verdict_counts:
+                verdict_counts[v] += 1
+
+        span = float(max(points) - min(points)) if len(points) >= 2 else 0.0
+        return {
+            "point_count": int(len(points)),
+            "span_psi": float(max(0.0, span)),
+            "verdict_counts": dict(verdict_counts),
+            "min_pressure": (None if not points else float(min(points))),
+            "max_pressure": (None if not points else float(max(points))),
+        }
+
+    def _has_minimum_exploration(self, *, min_points: int, min_span_psi: float) -> bool:
+        summary = self._exploration_summary()
+        return bool(
+            int(summary.get("point_count", 0)) >= int(max(0, min_points))
+            and float(summary.get("span_psi", 0.0)) >= float(max(0.0, min_span_psi))
+        )
+
+    def _band_support_stats(self, lo: float, hi: float):
+        lo0 = float(lo)
+        hi0 = float(hi)
+        lo = float(min(lo0, hi0))
+        hi = float(max(lo0, hi0))
+        single_points = set()
+        has_low_none = False
+        has_high_multiple = False
+        for rec in list(getattr(self, "samples", []) or []):
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            v = str(rec.get("verdict", ""))
+            if v == "single" and (lo - 1e-9) <= p <= (hi + 1e-9):
+                single_points.add(round(float(p), 5))
+            elif v == "none" and p < (lo - 1e-9):
+                has_low_none = True
+            elif v == "multiple" and p > (hi + 1e-9):
+                has_high_multiple = True
+        return {
+            "single_points": int(len(single_points)),
+            "has_low_none": bool(has_low_none),
+            "has_high_multiple": bool(has_high_multiple),
+        }
+
+    def _filter_reportable_single_bands(self, raw_bands):
+        bands = []
+        provisional = []
+        min_pts = int(max(1, getattr(self, "min_single_points_per_band", 2)))
+        allow_single_point = bool(getattr(self, "allow_single_point_band_if_bracketed", False))
+
+        for band in list(raw_bands or []):
+            if not isinstance(band, (list, tuple)) or len(band) != 2:
+                continue
+            lo = float(min(band))
+            hi = float(max(band))
+            stats = self._band_support_stats(lo, hi)
+            if int(stats.get("single_points", 0)) >= min_pts:
+                bands.append([lo, hi])
+                continue
+            if (
+                allow_single_point
+                and int(stats.get("single_points", 0)) == 1
+                and bool(stats.get("has_low_none"))
+                and bool(stats.get("has_high_multiple"))
+            ):
+                bands.append([lo, hi])
+                continue
+            provisional.append({"band": [lo, hi], "support": dict(stats)})
+
+        if provisional and callable(getattr(self, "_record_decision", None)):
+            self._record_decision(
+                "pressure_scan_provisional_band_rejected",
+                {
+                    "provisional_bands": provisional,
+                    "min_single_points_per_band": int(min_pts),
+                    "allow_single_point_band_if_bracketed": bool(allow_single_point),
+                },
+            )
+        return bands
+
     def _choose_next_pressure(self, verdict: str):
         if self._phase != "scan":
             return
@@ -6793,32 +6953,77 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             moved_px = abs(dy_med - self._prev_dy)
 
         wet_hits = sum(1 for r in self.reps if bool(r.get("nozzle_wet")))
+        wet_confirm_reps = int(max(1, getattr(self, "nozzle_wet_confirm_reps", 2)))
+        wet_confirmed = int(wet_hits) >= int(wet_confirm_reps)
+        pre_single_discovery = getattr(self, "_min_single_pressure", None) is None
+        effective_verdict = str(verdict)
+
         if wet_hits > 0 and self.auto_stop_on_nozzle_wet:
-            # High-start scans can show wet/nozzle-contact at clearly-too-high pressures.
-            # If we have not discovered any single-droplet region yet and this point is
-            # still MULTIPLE, continue scanning downward instead of terminating immediately.
-            if (verdict == "multiple") and (self._min_single_pressure is None):
+            if pre_single_discovery and verdict == "none":
+                effective_verdict = "multiple"
                 self._record_decision(
-                    "nozzle_wet_deferred_while_high_multiple",
+                    "nozzle_wet_none_reclassified_multiple",
                     {
                         "pressure_psi": float(self._current_pressure),
                         "wet_replicates": int(wet_hits),
                         "n_reps": int(len(self.reps)),
                     },
                 )
+
+            if not wet_confirmed:
+                self._record_decision(
+                    "nozzle_wet_unconfirmed_deferred",
+                    {
+                        "pressure_psi": float(self._current_pressure),
+                        "wet_replicates": int(wet_hits),
+                        "required_confirm_replicates": int(wet_confirm_reps),
+                        "n_reps": int(len(self.reps)),
+                    },
+                )
+            elif pre_single_discovery and effective_verdict in ("multiple", "none", "ambiguous"):
+                self._nozzle_wet_pre_single_points = int(
+                    max(0, getattr(self, "_nozzle_wet_pre_single_points", 0)) + 1
+                )
+                defer_cap = int(max(1, getattr(self, "nozzle_wet_pre_single_defer_points", 8)))
+                explored_enough = self._has_minimum_exploration(
+                    min_points=int(max(1, getattr(self, "min_points_for_empty_band", 4))),
+                    min_span_psi=float(max(0.0, getattr(self, "min_span_for_empty_band_psi", 0.20))),
+                )
+                if (
+                    self._nozzle_wet_pre_single_points <= defer_cap
+                    or not explored_enough
+                ):
+                    self._record_decision(
+                        "nozzle_wet_deferred_during_discovery",
+                        {
+                            "pressure_psi": float(self._current_pressure),
+                            "wet_replicates": int(wet_hits),
+                            "defer_point_index": int(self._nozzle_wet_pre_single_points),
+                            "defer_point_cap": int(defer_cap),
+                            "explored_enough": bool(explored_enough),
+                        },
+                    )
+                else:
+                    self._early_stop = True
+                    self._stop_reason = "Nozzle wet detected during scan"
+                    self._terminate_at_pressure = float(self._current_pressure)
+                    self.finalize.emit()
+                    return
             else:
                 self._early_stop = True
                 self._stop_reason = "Nozzle wet detected during scan"
                 self._terminate_at_pressure = float(self._current_pressure)
                 self.finalize.emit()
                 return
+        else:
+            self._nozzle_wet_pre_single_points = 0
 
-        if verdict == "multiple":
+        if effective_verdict == "multiple":
             # Downward nudge but obey PW/Bracket caps
             step = min(dp_max_eff, max(self.dp, multi_big_eff))
             next_p = self._current_pressure - step
 
-        elif verdict == "single":
+        elif effective_verdict == "single":
             # Movement-sensitive tuning, then obey cap
             if moved_px is not None:
                 if moved_px < self.small_move_px:
@@ -6833,7 +7038,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.dp = min(self.dp, dp_max_eff)
             next_p = self._current_pressure - self.dp
 
-        else:  # verdict == "none"
+        else:  # effective verdict == "none"/"ambiguous"
             up = max(self.dp, none_jump_eff)
             self.dp = min(dp_max_eff, max(self.dp, none_jump_eff))
             proposed = self._current_pressure + up
@@ -12349,6 +12554,7 @@ class RefuelCameraModel(QObject):
     def get_current_level(self):
         return self.current_level
         
+
 
 
 

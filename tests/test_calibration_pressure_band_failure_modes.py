@@ -162,6 +162,31 @@ def test_pressure_band_nozzle_wet_still_stops_after_single_region_seen():
     assert proc.finalize.calls
 
 
+def test_pressure_band_nozzle_wet_requires_confirmation_before_stop():
+    proc = _build_choose_proc(verdict="multiple", min_single_pressure=0.82)
+    proc.nozzle_wet_confirm_reps = 2
+    proc.reps[0]["nozzle_wet"] = True
+    proc.reps[1]["nozzle_wet"] = False
+    proc.reps[2]["nozzle_wet"] = False
+
+    proc._choose_next_pressure("multiple")
+
+    assert proc._early_stop is False
+    assert proc.finalize.calls == []
+    assert proc._next_pressure < 0.90
+
+
+def test_pressure_band_wet_none_is_reclassified_to_multiple_direction_pre_single():
+    proc = _build_choose_proc(verdict="none", min_single_pressure=None)
+    proc.nozzle_wet_confirm_reps = 1
+
+    proc._choose_next_pressure("none")
+
+    assert proc._early_stop is False
+    assert proc.finalize.calls == []
+    assert proc._next_pressure < 0.90
+
+
 def test_pressure_band_reacquire_too_close_is_reclassified_none_not_stop():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc._discard_next = False
@@ -199,6 +224,50 @@ def test_pressure_band_reacquire_too_close_is_reclassified_none_not_stop():
     assert proc.reps[0]["cls"] == "none"
     assert proc.reps[0]["dy_min_px"] is None
     assert decision_calls
+
+
+def test_pressure_band_scan_too_close_pre_single_is_reclassified_none_not_stop():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._discard_next = False
+    proc._phase = "scan"
+    proc._prev_verdict = "multiple"
+    proc._current_pressure = 1.05
+    proc.safety_clearance_px = 350
+    proc.nozzle_center_px = (100, 100)
+    proc.nozzle_area_threshold = 8000
+    proc.background_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.droplet_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.reps = []
+    proc._invalid_skip_count = 0
+    proc._invalid_skip_cap = 6
+    proc._active_classify_delay_us = 5850
+    proc.classify_delay_us = 5850
+    proc._min_single_pressure = None
+    proc.stageChanged = Recorder()
+    proc.replicateReady = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationError = Recorder()
+    proc.presentImageSignal = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: ([(100, 120)], 0, np.zeros((220, 220), dtype=np.uint8))
+        )
+    )
+
+    proc.onAnalyzeReplicate()
+
+    assert proc.finalize.calls == []
+    assert proc.replicateReady.calls
+    assert len(proc.reps) == 1
+    assert proc.reps[0]["cls"] == "none"
+    assert proc.reps[0]["dy_min_px"] is None
+    assert decision_calls
+    assert any(
+        args and args[0] == "pre_single_near_nozzle_reclassified_none"
+        for args, _kwargs in decision_calls
+    )
 
 
 def test_pressure_band_reacquire_guard_resumes_scan_after_max_steps():
@@ -643,3 +712,38 @@ def test_pressure_band_completion_reports_conservative_primary_band_for_wide_ban
     assert result["raw_primary_band"] == [1.1, 1.3]
     assert result["primary_band"] == [1.12, 1.28]
     assert result["conservative_primary_band_applied"] is True
+
+
+def test_pressure_band_completion_rejects_single_point_band_by_default():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.samples = [
+        {"pressure": 0.95, "verdict": "multiple"},
+        {"pressure": 0.88, "verdict": "single"},
+        {"pressure": 0.72, "verdict": "none"},
+    ]
+    proc.start_pressure = 0.95
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.classify_delay_us = 5850
+    proc._pulse_width_us = 1600
+    proc._early_stop = False
+    proc._stop_reason = None
+    proc._terminate_at_pressure = None
+    proc.stageChanged = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.min_single_points_per_band = 2
+    proc.allow_single_point_band_if_bracketed = False
+    proc._record_error = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc.calibration_manager = SimpleNamespace(
+        set_primary_pressure_band=lambda _payload: (_ for _ in ()).throw(AssertionError("should not set band"))
+    )
+    proc._compute_single_bands = lambda: [[0.88, 0.88]]
+
+    proc.onCalibrationCompleted()
+
+    assert proc.calibrationError.calls
+    assert proc.calibrationDataUpdated.calls == []
+    assert proc.calibrationCompleted.calls == []
