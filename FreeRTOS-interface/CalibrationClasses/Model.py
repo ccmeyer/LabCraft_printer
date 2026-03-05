@@ -726,7 +726,7 @@ class CalibrationManager(QObject):
 
         # --- Pulse-Width Sweep State ---
         self._pw_sweep_active = False
-        self._pw_values = []     # list[int] pulse widths in µs
+        self._pw_values = []     # list[int] pulse widths in us
         self._pw_index  = -1     # current index in _pw_values
 
         # --- Async apply-PW wait plumbing ---
@@ -1245,7 +1245,7 @@ class CalibrationManager(QObject):
         self._pw_values = vals
         self._pw_index = -1
         self.calibrationStageChanged.emit(
-            f"Starting pulse-width sweep: {vals[0]}→{vals[-1]} µs (n={len(vals)}, step={abs(st)} µs)", "dark_blue"
+            f"Starting pulse-width sweep: {vals[0]}→{vals[-1]} us (n={len(vals)}, step={abs(st)} us)", "dark_blue"
         )
         self._advance_pw_sweep()
 
@@ -1289,7 +1289,7 @@ class CalibrationManager(QObject):
             return
 
         self.calibrationStageChanged.emit(
-            f"Applying print pulse width = {pw_us} µs…", "dark_blue"
+            f"Applying print pulse width = {pw_us} us…", "dark_blue"
         )
 
         token = object()
@@ -1308,7 +1308,7 @@ class CalibrationManager(QObject):
 
             if not ok:
                 self.calibrationStageChanged.emit(
-                    f"Failed to apply PW {pw_us} µs ({why}). Stopping sweep.", "red"
+                    f"Failed to apply PW {pw_us} us ({why}). Stopping sweep.", "red"
                 )
                 # Stop sweep + any activity
                 self._pw_sweep_active = False
@@ -1322,7 +1322,7 @@ class CalibrationManager(QObject):
 
             # Success → queue “Calibrate All” for this PW
             self.calibrationStageChanged.emit(
-                f"PW applied: {pw_us} µs. Running Calibrate All…", "blue"
+                f"PW applied: {pw_us} us. Running Calibrate All…", "blue"
             )
             self.clear_calibration_queue()
             self.add_all_calibrations_to_queue()
@@ -1365,7 +1365,7 @@ class CalibrationManager(QObject):
 
         pw = int(self._pw_values[self._pw_index])
         self.calibrationStageChanged.emit(
-            f"PW sweep [{self._pw_index+1}/{len(self._pw_values)}]: target = {pw} µs", "blue"
+            f"PW sweep [{self._pw_index+1}/{len(self._pw_values)}]: target = {pw} us", "blue"
         )
 
         # Apply PW via controller (with callback) and only proceed on confirmation
@@ -3461,7 +3461,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         if self._delay_idx + 1 < len(self.delay_scan_increments):
             self._delay_idx += 1
             new_delay = self._clamp_delay(self._base_delay_us + self.delay_scan_increments[self._delay_idx])
-            self.stageChanged.emit(f"No contour; trying longer flash delay: {new_delay} µs (idx={self._delay_idx})")
+            self.stageChanged.emit(f"No contour; trying longer flash delay: {new_delay} us (idx={self._delay_idx})")
             return True, {"num_droplets": 1, "flash_delay": int(new_delay)}
         # else try next pressure level (if any)
         if self._pressure_level + 1 < self.max_pressure_levels:
@@ -3470,7 +3470,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
             new_pressure = self._clamp_pressure(self._base_pressure + self._pressure_level * self.pressure_step)
             new_delay = self._clamp_delay(self._base_delay_us)
             self.stageChanged.emit(
-                f"No contour after delay scan; raising pressure to {new_pressure:.3f} psi and resetting delay to {new_delay} µs"
+                f"No contour after delay scan; raising pressure to {new_pressure:.3f} psi and resetting delay to {new_delay} us"
             )
             return True, {"num_droplets": 1, "flash_delay": int(new_delay), "print_pressure": float(new_pressure)}
         # out of options
@@ -5451,10 +5451,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._active_classify_delay_us = int(self.classify_delay_us)
         self.delay_retest_step_us = 500
         self.delay_retest_min_us = 2000
-        self.delay_retest_max_steps = 2
+        self.delay_retest_max_earlier_steps = 1
+        self.delay_retest_max_later_steps = 2
+        self.delay_retest_max_later_offset_us = 1000
+        self.delay_retest_abs_max_us = 20_000
         self.delay_retest_timeout_ms = 15_000
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
+        self._delay_retest_earlier_steps_done_for_pressure = 0
+        self._delay_retest_later_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
         self._delay_retest_context = None
 
@@ -5488,6 +5493,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         # --- thresholds & safety ---
         self.nozzle_area_threshold     = 8000
+        self.pre_ejection_attached_area_px = 8000
+        self.pre_ejection_attached_ratio = 0.60
         self.safety_clearance_px       = int(safety_clearance_px)
         self.near_nozzle_px            = int(self.safety_clearance_px * 1.6)
         self.far_nozzle_px             = int(self.safety_clearance_px * 3.0)
@@ -5677,6 +5684,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._active_classify_delay_us = int(self._base_classify_delay_us)
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
+        self._delay_retest_earlier_steps_done_for_pressure = 0
+        self._delay_retest_later_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
         self._delay_retest_context = None
 
@@ -5810,6 +5819,35 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 decision["reason"] = "single_exit_risk_override"
                 decision["override_from"] = "single"
 
+        timing = self._attached_timing_summary()
+        decision["attached_timing"] = dict(timing)
+        if self._should_shift_delay_later_for_attached(verdict, counts, timing):
+            if self._start_delay_retest(
+                "attached_stream_requires_later_delay",
+                verdict,
+                counts,
+                decision,
+                confidence,
+                direction="later",
+            ):
+                return
+            msg = (
+                f"Unable to resolve pre-ejection attached-stream timing "
+                f"@ {self._current_pressure:.3f} psi."
+            )
+            self._record_error(
+                msg,
+                {
+                    "pressure_psi": float(self._current_pressure),
+                    "active_delay_us": int(getattr(self, "_active_classify_delay_us", 0)),
+                    "base_delay_us": int(getattr(self, "_base_classify_delay_us", 0)),
+                    "attached_timing": dict(timing),
+                },
+            )
+            self.calibrationError.emit(msg)
+            self.finalize.emit()
+            return
+
         retest_reason = self._should_run_delay_retest(verdict, counts, decision)
         if retest_reason is not None:
             if self._start_delay_retest(retest_reason, verdict, counts, decision, confidence):
@@ -5851,6 +5889,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "base_classify_delay_us": int(base_delay_us),
                 "delay_retest_applied": bool(int(active_delay_us) != int(base_delay_us)),
                 "delay_retest_steps_done": int(getattr(self, "_delay_retest_steps_done_for_pressure", 0)),
+                "delay_retest_earlier_steps_done": int(
+                    getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)
+                ),
+                "delay_retest_later_steps_done": int(
+                    getattr(self, "_delay_retest_later_steps_done_for_pressure", 0)
+                ),
             }
         )
         if retest_ctx:
@@ -6030,6 +6074,79 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "bottom_margin_px": int(self.fast_single_bottom_margin_px),
         }
 
+    def _attached_timing_summary(self):
+        reps = list(getattr(self, "reps", []) or [])
+        total = int(len(reps))
+        if total <= 0:
+            return {
+                "total_reps": 0,
+                "attached_hits": 0,
+                "attached_ratio": 0.0,
+                "attached_single_hits": 0,
+                "attached_none_hits": 0,
+                "attached_area_median_px": 0,
+                "attached_area_threshold_px": int(getattr(self, "pre_ejection_attached_area_px", 8000)),
+                "attached_ratio_threshold": float(getattr(self, "pre_ejection_attached_ratio", 0.60)),
+                "attached_dominant": False,
+            }
+
+        threshold_px = int(getattr(self, "pre_ejection_attached_area_px", 8000))
+        ratio_threshold = float(getattr(self, "pre_ejection_attached_ratio", 0.60))
+        attached_hits = 0
+        attached_single_hits = 0
+        attached_none_hits = 0
+        attached_areas = []
+        for r in reps:
+            cls = str(r.get("cls", ""))
+            area = int(r.get("nozzle_attached_area") or 0)
+            wet = bool(r.get("nozzle_wet"))
+            attached = wet or (area >= threshold_px)
+            if not attached:
+                continue
+            attached_hits += 1
+            attached_areas.append(area)
+            if cls == "single":
+                attached_single_hits += 1
+            elif cls == "none":
+                attached_none_hits += 1
+
+        from statistics import median
+
+        attached_ratio = (float(attached_hits) / float(total)) if total > 0 else 0.0
+        area_med = int(median(attached_areas)) if attached_areas else 0
+        attached_dominant = bool(
+            attached_ratio >= ratio_threshold and (attached_single_hits > 0 or attached_none_hits > 0)
+        )
+        return {
+            "total_reps": int(total),
+            "attached_hits": int(attached_hits),
+            "attached_ratio": float(attached_ratio),
+            "attached_single_hits": int(attached_single_hits),
+            "attached_none_hits": int(attached_none_hits),
+            "attached_area_median_px": int(area_med),
+            "attached_area_threshold_px": int(threshold_px),
+            "attached_ratio_threshold": float(ratio_threshold),
+            "attached_dominant": bool(attached_dominant),
+        }
+
+    def _should_shift_delay_later_for_attached(self, verdict: str, counts: dict, timing: dict):
+        if not bool((timing or {}).get("attached_dominant", False)):
+            return False
+        if str(verdict) == "multiple":
+            return False
+
+        n_single = int((counts or {}).get("single", 0))
+        n_multiple = int((counts or {}).get("multiple", 0))
+        base = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
+        active = int(getattr(self, "_active_classify_delay_us", base))
+        # If current delay is already earlier than base, attached-dominant behavior is
+        # strong evidence of pre-ejection timing (move later).
+        if active < base:
+            return True
+        # Otherwise require some free-droplet evidence so pure NONE-at-low-pressure does
+        # not force delay growth.
+        return bool(n_single > 0 or n_multiple > 0)
+
     def _earlier_delay_candidate_us(self):
         base = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
         cur = int(getattr(self, "_active_classify_delay_us", base))
@@ -6040,33 +6157,39 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return None
         return candidate
 
+    def _later_delay_candidate_us(self):
+        base = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
+        cur = int(getattr(self, "_active_classify_delay_us", base))
+        step = int(max(0, getattr(self, "delay_retest_step_us", 500)))
+        max_offset = int(max(0, getattr(self, "delay_retest_max_later_offset_us", 1000)))
+        abs_max = int(max(base, getattr(self, "delay_retest_abs_max_us", 20_000)))
+        if step <= 0:
+            return None
+
+        # First move back toward base, then allow limited extension past base.
+        if cur < base:
+            candidate = min(base, cur + step)
+        else:
+            candidate = min(cur + step, base + max_offset)
+        candidate = int(min(candidate, abs_max))
+        if candidate <= cur:
+            return None
+        return candidate
+
     def _should_run_delay_retest(self, verdict: str, counts: dict, decision: dict):
-        steps_done = int(max(0, getattr(self, "_delay_retest_steps_done_for_pressure", 0)))
-        steps_max = int(max(1, getattr(self, "delay_retest_max_steps", 1)))
-        if steps_done >= steps_max:
+        steps_done = int(max(0, getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)))
+        steps_max = int(max(0, getattr(self, "delay_retest_max_earlier_steps", 1)))
+        if steps_max <= 0 or steps_done >= steps_max:
             return None
         if self._earlier_delay_candidate_us() is None:
             return None
 
         n_single = int((counts or {}).get("single", 0))
         n_multiple = int((counts or {}).get("multiple", 0))
-        if steps_done == 0:
-            if n_single > 0 and n_multiple > 0:
-                return "mixed_single_multiple"
-            if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
-                return "edge_single_with_upper_multiple"
-            return None
-
-        # Additional retest step: if prior pass saw multiple evidence and this pass is still
-        # "single", shift earlier again before accepting a final downgrade.
-        ctx = dict(getattr(self, "_delay_retest_context", {}) or {})
-        prior_verdict = str(ctx.get("prior_verdict", ""))
-        prior_counts = dict(ctx.get("prior_counts", {}) or {})
-        prior_multiple = int(prior_counts.get("multiple", 0))
-        had_upper_multi = bool((ctx.get("prior_decision") or {}).get("has_upper_multiple_evidence", False))
-        if str(verdict) == "single":
-            if prior_verdict in ("multiple", "ambiguous") or prior_multiple > 0 or had_upper_multi:
-                return "persistent_single_after_retest"
+        if n_single > 0 and n_multiple > 0:
+            return "mixed_single_multiple"
+        if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+            return "edge_single_with_upper_multiple"
 
         return None
 
@@ -6103,8 +6226,32 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         return verdict, confidence, decision
 
-    def _start_delay_retest(self, reason: str, verdict: str, counts: dict, decision: dict, confidence: float):
-        new_delay = self._earlier_delay_candidate_us()
+    def _start_delay_retest(
+        self,
+        reason: str,
+        verdict: str,
+        counts: dict,
+        decision: dict,
+        confidence: float,
+        direction: str = "earlier",
+    ):
+        direction = str(direction or "earlier").strip().lower()
+        if direction not in ("earlier", "later"):
+            direction = "earlier"
+
+        if direction == "later":
+            steps_done = int(max(0, getattr(self, "_delay_retest_later_steps_done_for_pressure", 0)))
+            steps_max = int(max(0, getattr(self, "delay_retest_max_later_steps", 2)))
+            if steps_max <= 0 or steps_done >= steps_max:
+                return False
+            new_delay = self._later_delay_candidate_us()
+        else:
+            steps_done = int(max(0, getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)))
+            steps_max = int(max(0, getattr(self, "delay_retest_max_earlier_steps", 1)))
+            if steps_max <= 0 or steps_done >= steps_max:
+                return False
+            new_delay = self._earlier_delay_candidate_us()
+
         if new_delay is None:
             return False
 
@@ -6112,6 +6259,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._delay_retest_steps_done_for_pressure = int(
             max(0, getattr(self, "_delay_retest_steps_done_for_pressure", 0)) + 1
         )
+        if direction == "later":
+            self._delay_retest_later_steps_done_for_pressure = int(
+                max(0, getattr(self, "_delay_retest_later_steps_done_for_pressure", 0)) + 1
+            )
+        else:
+            self._delay_retest_earlier_steps_done_for_pressure = int(
+                max(0, getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)) + 1
+            )
+
         self._delay_retest_in_progress = True
         if not getattr(self, "_delay_retest_context", None):
             self._delay_retest_context = {
@@ -6133,19 +6289,28 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         self.stageChanged.emit(
             f"Pressure {self._current_pressure:.3f} psi {str(reason).replace('_', ' ')}; "
-            f"retesting at earlier delay {self._active_classify_delay_us} μs"
+            f"retesting at {direction} delay {self._active_classify_delay_us} us"
         )
         self._record_decision(
             "pressure_step_delay_retest",
             {
                 "pressure_psi": float(self._current_pressure),
                 "reason": str(reason),
+                "direction": str(direction),
                 "from_delay_us": int(prev_delay),
                 "to_delay_us": int(self._active_classify_delay_us),
                 "prior_verdict": str(verdict),
                 "class_counts": dict(counts or {}),
                 "decision_reason": str((decision or {}).get("reason", "")),
                 "retest_step": int(getattr(self, "_delay_retest_steps_done_for_pressure", 0)),
+                "retest_step_direction": int(
+                    getattr(
+                        self,
+                        "_delay_retest_later_steps_done_for_pressure" if direction == "later"
+                        else "_delay_retest_earlier_steps_done_for_pressure",
+                        0,
+                    )
+                ),
             },
         )
 
@@ -6170,6 +6335,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                         "pressure_psi": float(self._current_pressure),
                         "to_delay_us": int(self._active_classify_delay_us),
                         "reason": str(reason),
+                        "direction": str(direction),
                     },
                 )
                 self.calibrationError.emit(msg)
@@ -6184,10 +6350,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._request_settings_with_recording(
             {"flash_delay": int(self._active_classify_delay_us), "num_droplets": 1},
             lambda *args, **kwargs: _finish(True, "callback"),
-            context=f"pressure_delay_retest:{reason}",
+            context=f"pressure_delay_retest:{reason}:{direction}",
         )
         return True
-
     def _effective_step_caps(self):
         """
         Returns (dp_max_eff, multi_big_eff, none_jump_eff) based on pulse width
@@ -7153,7 +7318,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.p_index = 0
         self._current_pressure = None
 
-        # --- delays (absolute flash delays, in µs) ---
+        # --- delays (absolute flash delays, in us) ---
         if delays_us is None:
             # Default: 3 timepoints ~ clean free-flight window
             try:
@@ -7316,7 +7481,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         delay = int(self.delays_us[self.d_index])
         settings = {"print_pressure": self._current_pressure, "num_droplets": 1, "flash_delay": delay}
         self.stageChanged.emit(
-            f"Trajectory: P={self._current_pressure:.3f} psi, delay={delay} µs "
+            f"Trajectory: P={self._current_pressure:.3f} psi, delay={delay} us "
             f"({self._completed.count(True)+1}/{len(self.delays_us)})"
         )
         def _after(): self.pressureApplied.emit()
@@ -7333,7 +7498,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
         delay = int(self.delays_us[self.d_index])
         self.stageChanged.emit(
-            f"Trajectory: update delay → {delay} µs at P={self._current_pressure:.3f} psi"
+            f"Trajectory: update delay → {delay} us at P={self._current_pressure:.3f} psi"
         )
         def _after(): self.delayApplied.emit()
         self.calibration_manager.changeSettingsRequested.emit({"flash_delay": delay}, _after)
@@ -7347,7 +7512,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capture @ {self._current_pressure:.3f} psi, delay={self.delays_us[self.d_index]} µs "
+            stage_text=f"Capture @ {self._current_pressure:.3f} psi, delay={self.delays_us[self.d_index]} us "
                        f"(rep {self._rep_count+1}/{self.replicates_per_delay})",
             attempts_total=5,
             retry_delay_ms=75,
@@ -7438,7 +7603,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         # 1) too many fails at this delay → mark completed (skipped) and move on
         if self._failed_caps_this_delay >= self.max_failed_captures_per_delay:
             self.stageChanged.emit(
-                f"Delay {self.delays_us[self.d_index]} µs: too many failed captures → skipping"
+                f"Delay {self.delays_us[self.d_index]} us: too many failed captures → skipping"
             )
             self._mark_current_delay_completed(aggregated=False)
             if self._stop_delays_after_this and len(self.points) >= self.min_points:
@@ -7718,7 +7883,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         return self._find_next_uncompleted_index(prefer="after_current")
 
     def _fit_velocity(self, points):
-        """Least-squares for x(t), y(t). Returns (vx, vy) in px/µs."""
+        """Least-squares for x(t), y(t). Returns (vx, vy) in px/us."""
         t = np.array([p["t_us"] for p in points], dtype=float)
         x = np.array([p["center_px"][0] for p in points], dtype=float)
         y = np.array([p["center_px"][1] for p in points], dtype=float)
@@ -9071,7 +9236,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         We assume image-x -> stage X; image-y -> stage Z (note: image y+ is down).
         """
         kx, ky, kz = self._compute_stage_scales_steps_per_px()
-        s_per_us = 1e6  # µs -> s
+        s_per_us = 1e6  # us -> s
         vX = kx * vx_px_per_us * s_per_us
         # many rigs don't shift stage Y from image motion; keep 0 unless you really map it
         vY = 0.0
@@ -9124,7 +9289,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.target_delay_us = self._clamp_delay(seed)
 
         self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
-                               f"(vx={vx:.4f} px/µs, vy={vy:.4f} px/µs)")
+                               f"(vx={vx:.4f} px/us, vy={vy:.4f} px/us)")
         self._reset_char_buffers()
         self._centered = False
         self._char_need_capture = False
@@ -9143,7 +9308,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         tgt = ( int(tgt[0] + self._x_track_offset_steps),
                 int(tgt[1] + self._y_focus_offset_steps),
                 int(tgt[2] + self._z_track_offset_steps) )
-        self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} µs → {tgt}")
+        self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} us → {tgt}")
         self._safe_move_abs(tgt)
 
     @Slot()
@@ -9196,7 +9361,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
         self._delay_try_index += 1
         self.current_delay_us = self._clamp_delay(d)
-        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} µs (search)")
+        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} us (search)")
         self.calibration_manager.changeSettingsRequested.emit(
             {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
             self.delayApplied.emit
@@ -9206,9 +9371,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onCaptureDroplet(self):
         self._capture_with_policy(
             set_attr="droplet_image",
-            stage_text=f"Capture droplet @ {self.current_delay_us} µs",
+            stage_text=f"Capture droplet @ {self.current_delay_us} us",
             attempts_total=5, retry_delay_ms=75, guard_timeout_ms=10_000,
-            final_error_msg=f"Failed to capture droplet @ {self.current_delay_us} µs."
+            final_error_msg=f"Failed to capture droplet @ {self.current_delay_us} us."
         )
 
     @Slot()
@@ -9742,8 +9907,8 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
     Capture a time course of the droplet generation process.
 
     Behavior:
-      - Compute start = first whole 100 µs BEFORE the emergence time (clamped at 0).
-      - Capture 1 image every 100 µs from start to start + window_us (inclusive).
+      - Compute start = first whole 100 us BEFORE the emergence time (clamped at 0).
+      - Capture 1 image every 100 us from start to start + window_us (inclusive).
       - Stamp each image with the current flash delay (bottom-right, large black font).
       - Do NOT change pressure or pulse width; we only set flash_delay and num_droplets=1.
 
@@ -9889,7 +10054,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
 
     # ---------- helpers ----------
     def _put_delay_stamp(self, img, delay_us: int):
-        """Draw large black 'XXXX µs' at bottom-right."""
+        """Draw large black 'XXXX us' at bottom-right."""
         if img is None:
             return None
         if img.ndim == 2:
@@ -9918,8 +10083,8 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
             return
 
         self.stageChanged.emit(
-            f"Timecourse: emergence={int(self.emergence_time_us)} µs, "
-            f"start={self.start_delay_us} µs, step={self.step_us} µs, window={self.window_us} µs "
+            f"Timecourse: emergence={int(self.emergence_time_us)} us, "
+            f"start={self.start_delay_us} us, step={self.step_us} us, window={self.window_us} us "
             f"({len(self.delays)} frames)"
         )
 
@@ -9935,7 +10100,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
 
         d = int(self.delays[self._delay_index])
         self.current_delay_us = d
-        self.stageChanged.emit(f"Setting flash_delay = {d} µs")
+        self.stageChanged.emit(f"Setting flash_delay = {d} us")
         # Only manipulate flash delay and ensure a single droplet per capture
         settings = {"flash_delay": d, "num_droplets": 1}
         self.calibration_manager.changeSettingsRequested.emit(settings, self.delayApplied.emit)
@@ -9945,9 +10110,9 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         d = int(self.current_delay_us)
         self._capture_with_policy(
             set_attr="raw_frame_image",
-            stage_text=f"Capturing timecourse frame @ {d} µs",
+            stage_text=f"Capturing timecourse frame @ {d} us",
             attempts_total=5, retry_delay_ms=50, guard_timeout_ms=8000,
-            final_error_msg=f"Capture failed at delay {d} µs"
+            final_error_msg=f"Capture failed at delay {d} us"
         )
 
     @Slot()
@@ -9956,7 +10121,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         ok = hasattr(self, "raw_frame_image") and (self.raw_frame_image is not None)
         if not ok:
             self.frames.append({"delay_us": d, "ok": False})
-            self.stageChanged.emit(f"Frame @ {d} µs: missing image")
+            self.stageChanged.emit(f"Frame @ {d} us: missing image")
         else:
             ann = self._put_delay_stamp(self.raw_frame_image, d)
             self.annotated_image = ann
@@ -11706,6 +11871,7 @@ class RefuelCameraModel(QObject):
     def get_current_level(self):
         return self.current_level
         
+
 
 
 

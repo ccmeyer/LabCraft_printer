@@ -254,14 +254,14 @@ def test_pressure_band_seek_upper_guard_resumes_scan_after_span_or_steps():
     assert decision_calls[0][0][0] == "seek_upper_guard_resume_scan"
 
 
-def test_pressure_band_retest_second_step_triggers_when_single_persists_after_multiple_evidence():
+def test_pressure_band_retest_does_not_request_second_earlier_step_after_cap():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc._base_classify_delay_us = 5850
     proc._active_classify_delay_us = 5350
     proc.delay_retest_step_us = 500
     proc.delay_retest_min_us = 2000
-    proc.delay_retest_max_steps = 2
-    proc._delay_retest_steps_done_for_pressure = 1
+    proc.delay_retest_max_earlier_steps = 1
+    proc._delay_retest_earlier_steps_done_for_pressure = 1
     proc._delay_retest_context = {
         "prior_verdict": "multiple",
         "prior_counts": {"none": 0, "single": 3, "multiple": 2},
@@ -275,7 +275,7 @@ def test_pressure_band_retest_second_step_triggers_when_single_persists_after_mu
         {"has_upper_multiple_evidence": True},
     )
 
-    assert reason == "persistent_single_after_retest"
+    assert reason is None
 
 
 def test_pressure_band_retest_merge_keeps_multiple_when_prior_multiple_evidence_exists():
@@ -301,3 +301,63 @@ def test_pressure_band_retest_merge_keeps_multiple_when_prior_multiple_evidence_
     assert verdict == "multiple"
     assert confidence >= 0.75
     assert merged["reason"] == "retest_conflict_keep_multiple"
+
+
+def test_pressure_band_later_delay_candidate_moves_back_toward_base():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.classify_delay_us = 5850
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5350
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_max_later_offset_us = 1000
+    proc.delay_retest_abs_max_us = 20000
+
+    assert proc._later_delay_candidate_us() == 5850
+
+
+def test_pressure_band_start_delay_retest_later_increments_later_counter():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.classify_delay_us = 5850
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5350
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc.delay_retest_max_later_steps = 2
+    proc.delay_retest_max_later_offset_us = 1000
+    proc.delay_retest_abs_max_us = 20000
+    proc.delay_retest_timeout_ms = 15000
+    proc._delay_retest_done_for_pressure = False
+    proc._delay_retest_steps_done_for_pressure = 0
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._delay_retest_later_steps_done_for_pressure = 0
+    proc._delay_retest_in_progress = False
+    proc._delay_retest_context = None
+    proc._current_pressure = 1.20
+    proc.min_reps = 5
+    proc.reps = []
+    proc._invalid_skip_count = 0
+    proc._discard_next = False
+    proc.stageChanged = Recorder()
+    proc.continueReplicate = Recorder()
+    proc.calibrationError = Recorder()
+    proc.finalize = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._record_error = lambda *args, **kwargs: None
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+    proc._start_timeout = lambda *_args, **_kwargs: "timer-token"
+    proc._request_settings_with_recording = lambda _settings, cb, context=None: cb()
+
+    ok = proc._start_delay_retest(
+        "attached_stream_requires_later_delay",
+        "single",
+        {"single": 5, "none": 0, "multiple": 0},
+        {"reason": "single_confident"},
+        1.0,
+        direction="later",
+    )
+
+    assert ok is True
+    assert proc._active_classify_delay_us == 5850
+    assert proc._delay_retest_later_steps_done_for_pressure == 1
+    assert proc._delay_retest_earlier_steps_done_for_pressure == 0

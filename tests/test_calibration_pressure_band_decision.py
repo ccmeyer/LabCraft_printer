@@ -35,11 +35,17 @@ def _build_decide_proc(reps):
     proc._active_classify_delay_us = 5850
     proc.delay_retest_step_us = 500
     proc.delay_retest_min_us = 2000
-    proc.delay_retest_max_steps = 2
+    proc.delay_retest_max_earlier_steps = 1
+    proc.delay_retest_max_later_steps = 2
+    proc.delay_retest_max_later_offset_us = 1000
     proc._delay_retest_done_for_pressure = False
     proc._delay_retest_steps_done_for_pressure = 0
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._delay_retest_later_steps_done_for_pressure = 0
     proc._delay_retest_in_progress = False
     proc._delay_retest_context = None
+    proc.pre_ejection_attached_area_px = 8000
+    proc.pre_ejection_attached_ratio = 0.60
     proc.fast_single_bottom_margin_px = 220
     proc.fast_single_risk_fraction = 0.60
     proc.fast_single_risk_min_count = 3
@@ -178,6 +184,43 @@ def test_pressure_band_on_decide_triggers_delay_retest_for_edge_single():
     proc.onDecide()
 
     assert retest_reasons == ["edge_single_with_upper_multiple"]
+    assert proc._store_calls == []
+    assert proc._choose_calls == []
+    assert proc._advance_calls == []
+
+
+def test_pressure_band_on_decide_attached_stream_triggers_later_delay_retest():
+    proc = _build_decide_proc(
+        [
+            {
+                **_rep("single"),
+                "nozzle_attached_area": 20000,
+                "nozzle_wet": True,
+            }
+            for _ in range(5)
+        ]
+    )
+    proc._active_classify_delay_us = 5350
+    proc._base_classify_delay_us = 5850
+
+    calls = []
+
+    def _start(reason, verdict, counts, decision, confidence, **kwargs):
+        calls.append(
+            {
+                "reason": str(reason),
+                "direction": str(kwargs.get("direction", "")),
+            }
+        )
+        return True
+
+    proc._start_delay_retest = _start
+
+    proc.onDecide()
+
+    assert calls
+    assert calls[0]["reason"] == "attached_stream_requires_later_delay"
+    assert calls[0]["direction"] == "later"
     assert proc._store_calls == []
     assert proc._choose_calls == []
     assert proc._advance_calls == []
