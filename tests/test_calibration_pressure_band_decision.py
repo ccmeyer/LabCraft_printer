@@ -19,6 +19,7 @@ def _rep(cls_name: str):
 def _build_decide_proc(reps):
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc.min_reps = 5
+    proc.initial_reps_target = 3
     proc.escalate_to = 9
     proc.replicates_target = proc.min_reps
     proc.single_confidence_min = 0.70
@@ -278,3 +279,26 @@ def test_pressure_band_on_decide_uses_retest_replicate_target_without_escalation
     assert proc.continueReplicate.calls == []
     assert proc._store_calls
     assert proc._store_calls[0]["verdict"] == "single"
+
+
+def test_pressure_band_on_decide_expands_to_full_reps_for_boundary_adjacent_single():
+    proc = _build_decide_proc(
+        [
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+        ]
+    )
+    proc.replicates_target = 3
+    proc.samples = [{"pressure": 1.24, "verdict": "multiple"}]
+    proc._start_delay_retest = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("delay retest should not run before full replicate expansion")
+    )
+
+    proc.onDecide()
+
+    assert proc.replicates_target == 5
+    assert proc.continueReplicate.calls
+    assert proc._store_calls == []
+    assert proc._choose_calls == []
+    assert proc._advance_calls == []

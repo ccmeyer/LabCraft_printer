@@ -5461,6 +5461,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.edge_retest_cooldown_psi = 0.03
         self.edge_retest_max_per_run = 3
         self.edge_retest_proximity_window_psi = 0.03
+        self.edge_retest_max_per_side = 1
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_earlier_steps_done_for_pressure = 0
@@ -5470,6 +5471,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._retest_mode_active = False
         self._edge_retest_pressures = []
         self._edge_retest_count = 0
+        self._edge_retest_side_counts = {"upper": 0, "lower": 0}
 
         # --- pressure bounds ---
         try:
@@ -5511,11 +5513,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # --- replicate policy ---
         self.min_reps           = int(min_reps)
         self.escalate_to        = max(int(escalate_to), self.min_reps)
-        self.replicates_target  = self.min_reps
+        self.initial_reps_target = int(max(1, min(3, self.min_reps)))
+        self.replicates_target  = int(self.initial_reps_target)
         self.reps               = []
         self._invalid_skip_count = 0
         self._invalid_skip_cap   = 6
         self._discard_next       = True   # skip first frame after pressure change (settling)
+        self.discard_first_after_major_pressure_change = True
+        self.settle_discard_pressure_delta_psi = 0.03
+        self.boundary_expand_window_psi = 0.04
         # Confidence gates reduce overreaction to single noisy replicates.
         self.single_confidence_min = 0.70
         self.none_confidence_min = 0.70
@@ -5532,6 +5538,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.stream_min_area_px = 1200
         self.conservative_band_width_threshold_psi = 0.10
         self.conservative_band_inset_psi = 0.02
+        self.conservative_finalize_narrow_width_psi = 0.05
+        self.max_upper_refine_points = 2
+        self.max_lower_refine_points = 1
+        self._upper_refine_points_done = 0
+        self._lower_refine_points_done = 0
 
         # --- outputs ---
         self.samples          = []
@@ -5654,6 +5665,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if not self._ready:
             self.calibrationError.emit("Pressure scan requires nozzle-center, background, and emergence time.")
             self.finalize.emit(); return
+        self._edge_retest_side_counts = {"upper": 0, "lower": 0}
         self.stageChanged.emit(
             f"Pressure scan: preparing background (num_droplets=0, nozzle_center_source={self.nozzle_center_source})"
         )
@@ -5689,12 +5701,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 self.finalize.emit(); return
 
         # Set up for this pressure
+        prev_pressure = self._current_pressure
         self._current_pressure = target
         self._next_pressure = None
         self.reps = []
-        self.replicates_target = self.min_reps
+        self.replicates_target = int(self._initial_reps_target())
         self._invalid_skip_count = 0
-        self._discard_next = True
+        self._discard_next = bool(self._should_discard_settling_shot(prev_pressure, target))
         self._active_classify_delay_us = int(self._base_classify_delay_us)
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
@@ -5890,8 +5903,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if verdict == "single":
             risk = self._single_exit_risk_summary()
             has_upper_multi = self._has_multiple_at_or_above_current_pressure()
+            has_lower_none = self._has_none_at_or_below_current_pressure()
             decision["single_exit_risk"] = dict(risk)
             decision["has_upper_multiple_evidence"] = bool(has_upper_multi)
+            decision["has_lower_none_evidence"] = bool(has_lower_none)
             if (
                 bool(has_upper_multi)
                 and int(risk.get("risky_single_count", 0)) >= int(self.fast_single_risk_min_count)
@@ -5929,6 +5944,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             )
             self.calibrationError.emit(msg)
             self.finalize.emit()
+            return
+
+        if self._should_expand_replicates_for_decision(verdict, counts, total, decision):
+            full_target = int(max(1, getattr(self, "min_reps", 5)))
+            self.replicates_target = full_target
+            self.stageChanged.emit(
+                f"Pressure {self._current_pressure:.3f} psi gathering additional reps "
+                f"({total}/{full_target}) for stable classification"
+            )
+            self.continueReplicate.emit()
             return
 
         retest_reason = self._should_run_delay_retest(verdict, counts, decision)
@@ -6062,6 +6087,59 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         total = int(sum(counts.values()))
         return counts, total
 
+    def _initial_reps_target(self) -> int:
+        full = int(max(1, getattr(self, "min_reps", 5)))
+        initial = int(getattr(self, "initial_reps_target", min(3, full)))
+        return int(max(1, min(full, initial)))
+
+    def _should_discard_settling_shot(self, prev_pressure: float | None, target_pressure: float) -> bool:
+        if not bool(getattr(self, "discard_first_after_major_pressure_change", True)):
+            return False
+        if prev_pressure is None:
+            return True
+        try:
+            delta = abs(float(target_pressure) - float(prev_pressure))
+        except Exception:
+            return True
+        thresh = float(max(0.0, getattr(self, "settle_discard_pressure_delta_psi", 0.03)))
+        return bool(delta >= thresh)
+
+    def _should_expand_replicates_for_decision(self, verdict: str, counts: dict, total: int, decision: dict) -> bool:
+        if bool(getattr(self, "_retest_mode_active", False)):
+            return False
+        full_target = int(max(1, getattr(self, "min_reps", 5)))
+        if int(total) >= full_target:
+            return False
+
+        n_single = int((counts or {}).get("single", 0))
+        n_multiple = int((counts or {}).get("multiple", 0))
+        if str(verdict) == "ambiguous":
+            return True
+        if n_single > 0 and n_multiple > 0:
+            return True
+
+        if self._is_boundary_adjacent_decision(verdict, decision):
+            return True
+        return False
+
+    def _is_boundary_adjacent_decision(self, verdict: str, decision: dict) -> bool:
+        window = float(max(0.0, getattr(self, "boundary_expand_window_psi", 0.04)))
+        if window <= 0.0:
+            return False
+
+        if str(verdict) == "single":
+            up = self._nearest_upper_multiple_delta_psi()
+            if up is not None and up <= (window + 1e-9):
+                return True
+            low = self._nearest_lower_none_delta_psi()
+            if low is not None and low <= (window + 1e-9):
+                return True
+            if bool((decision or {}).get("has_upper_multiple_evidence", False)):
+                return True
+            if bool((decision or {}).get("has_lower_none_evidence", False)):
+                return True
+        return False
+
     @staticmethod
     def _class_fractions_from_counts(counts: dict, total: int):
         if int(total) <= 0:
@@ -6101,6 +6179,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         return "none"
 
     def _apply_verdict_and_advance(self, verdict: str):
+        if self._maybe_finalize_conservative_band():
+            self._prev_verdict = verdict
+            self._prev_pressure = self._current_pressure
+            return
         if self._maybe_start_or_update_brackets(verdict):
             self._prev_verdict = verdict
             self._prev_pressure = self._current_pressure
@@ -6126,6 +6208,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 return True
         return False
 
+    def _has_none_at_or_below_current_pressure(self) -> bool:
+        cur = float(self._current_pressure) if self._current_pressure is not None else None
+        if cur is None:
+            return False
+        for rec in self.samples:
+            if str(rec.get("verdict", "")) != "none":
+                continue
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            if p <= (cur + 1e-9):
+                return True
+        return False
+
     def _nearest_upper_multiple_delta_psi(self):
         cur = float(self._current_pressure) if self._current_pressure is not None else None
         if cur is None:
@@ -6146,6 +6243,113 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if best is None:
             return None
         return float(max(0.0, best))
+
+    def _nearest_lower_none_delta_psi(self):
+        cur = float(self._current_pressure) if self._current_pressure is not None else None
+        if cur is None:
+            return None
+        best = None
+        for rec in self.samples:
+            if str(rec.get("verdict", "")) != "none":
+                continue
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            delta = float(cur - p)
+            if delta < -1e-9:
+                continue
+            if best is None or delta < best:
+                best = delta
+        if best is None:
+            return None
+        return float(max(0.0, best))
+
+    def _edge_retest_side_count(self, side: str) -> int:
+        side = str(side or "").strip().lower()
+        d = dict(getattr(self, "_edge_retest_side_counts", {}) or {})
+        return int(max(0, d.get(side, 0)))
+
+    def _increment_edge_retest_side_count(self, side: str):
+        side = str(side or "").strip().lower()
+        if not side:
+            return
+        d = dict(getattr(self, "_edge_retest_side_counts", {}) or {})
+        d[side] = int(max(0, d.get(side, 0)) + 1)
+        self._edge_retest_side_counts = d
+
+    def _band_boundary_evidence(self):
+        if not self.samples:
+            return None
+        singles = []
+        for rec in self.samples:
+            if str(rec.get("verdict", "")) != "single":
+                continue
+            try:
+                singles.append(float(rec.get("pressure")))
+            except Exception:
+                continue
+        singles = sorted(singles)
+        if not singles:
+            return None
+        lo = float(min(singles))
+        hi = float(max(singles))
+        has_low_none = False
+        has_high_multiple = False
+        for rec in self.samples:
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            v = str(rec.get("verdict", ""))
+            if v == "none" and p < (lo - 1e-9):
+                has_low_none = True
+            elif v == "multiple" and p > (hi + 1e-9):
+                has_high_multiple = True
+            if has_low_none and has_high_multiple:
+                break
+        return {
+            "single_lo": float(lo),
+            "single_hi": float(hi),
+            "single_width_psi": float(max(0.0, hi - lo)),
+            "single_count": int(len(singles)),
+            "has_low_none": bool(has_low_none),
+            "has_high_multiple": bool(has_high_multiple),
+        }
+
+    def _boundary_probe_budget_exhausted(self) -> bool:
+        up_done = int(max(0, getattr(self, "_upper_refine_points_done", 0)))
+        lo_done = int(max(0, getattr(self, "_lower_refine_points_done", 0)))
+        up_max = int(max(0, getattr(self, "max_upper_refine_points", 2)))
+        lo_max = int(max(0, getattr(self, "max_lower_refine_points", 1)))
+        return bool(up_done >= up_max and lo_done >= lo_max)
+
+    def _maybe_finalize_conservative_band(self) -> bool:
+        evidence = self._band_boundary_evidence()
+        if not evidence:
+            return False
+        if not bool(evidence.get("has_low_none")) or not bool(evidence.get("has_high_multiple")):
+            return False
+
+        width = float(max(0.0, evidence.get("single_width_psi", 0.0)))
+        narrow = float(max(0.0, getattr(self, "conservative_finalize_narrow_width_psi", 0.05)))
+        if width <= narrow and not self._boundary_probe_budget_exhausted():
+            return False
+
+        self._record_decision(
+            "pressure_scan_conservative_finalize",
+            {
+                "pressure_psi": float(self._current_pressure),
+                "evidence": dict(evidence),
+                "narrow_width_threshold_psi": float(narrow),
+                "phase": str(getattr(self, "_phase", "scan")),
+            },
+        )
+        self.stageChanged.emit(
+            f"Conservative pressure-band finalize: [{evidence['single_lo']:.3f}, {evidence['single_hi']:.3f}] psi"
+        )
+        self.finalize.emit()
+        return True
 
     def _single_exit_risk_summary(self):
         singles = [r for r in self.reps if str(r.get("cls", "")) == "single"]
@@ -6315,11 +6519,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if n_single > 0 and n_multiple > 0:
             return "mixed_single_multiple"
         if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+            if self._boundary_probe_budget_exhausted():
+                return None
             nearest_upper_delta = self._nearest_upper_multiple_delta_psi()
             if nearest_upper_delta is None:
                 return None
             window = float(max(0.0, getattr(self, "edge_retest_proximity_window_psi", 0.03)))
             if nearest_upper_delta > (window + 1e-9):
+                return None
+            max_per_side = int(max(0, getattr(self, "edge_retest_max_per_side", 1)))
+            if self._edge_retest_side_count("upper") >= max_per_side:
                 return None
             if bool(getattr(self, "edge_retest_scan_only", True)) and str(getattr(self, "_phase", "scan")) != "scan":
                 return None
@@ -6435,6 +6644,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                     recent = recent[-64:]
                 self._edge_retest_pressures = recent
                 self._edge_retest_count = int(max(0, getattr(self, "_edge_retest_count", 0)) + 1)
+                self._increment_edge_retest_side_count("upper")
             except Exception:
                 pass
 
@@ -6676,6 +6886,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 hi = max(cur, prev_p)
                 self._upper_bracket = [lo, hi]
                 self._phase = "refine_upper"
+                self._upper_refine_points_done = 0
                 width = hi - lo
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = (lo + hi) / 2.0
@@ -6690,6 +6901,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 hi = max(cur, prev_p)  # single side (higher)
                 self._lower_bracket = [lo, hi]
                 self._phase = "refine_lower"
+                self._lower_refine_points_done = 0
                 width = hi - lo
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = (lo + hi) / 2.0
@@ -6768,6 +6980,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 hi = max(self._first_single_pressure, cur)
                 self._upper_bracket = [lo, hi]
                 self._phase = "refine_upper"
+                self._upper_refine_points_done = 0
                 width = hi - lo
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = (lo + hi) / 2.0
@@ -6822,6 +7035,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 # Found a SINGLE → start refining lower edge immediately
                 self._lower_bracket = [lo, max(lo, min(hi, self._current_pressure))]
                 self._phase = "refine_lower"
+                self._lower_refine_points_done = 0
                 width = self._lower_bracket[1] - self._lower_bracket[0]
                 self.dp = max(self.dp_min, min(self.dp, width/2.0))
                 self._next_pressure = sum(self._lower_bracket) / 2.0
@@ -6863,6 +7077,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 lo, hi = hi, lo
             width = hi - lo
             self._upper_bracket = [lo, hi]
+            self._upper_refine_points_done = int(max(0, getattr(self, "_upper_refine_points_done", 0)) + 1)
+            upper_cap = int(max(0, getattr(self, "max_upper_refine_points", 2)))
+            if upper_cap > 0 and self._upper_refine_points_done > upper_cap:
+                self.stageChanged.emit(
+                    f"Upper edge probe cap reached ({upper_cap}); locking conservative upper edge near {lo:.3f} psi"
+                )
+                self._phase = "scan"
+                self._upper_edge_locked = True
+                self._upper_bracket = None
+                self._first_single_pressure = None
+                resume_from = self._min_single_pressure if self._min_single_pressure is not None else lo
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, 0.02)))
+                return True
 
             if width <= self._edge_eps:
                 self.stageChanged.emit(f"Upper edge ≈ {lo:.3f}–{hi:.3f} psi (≤ {self._edge_eps:.2f}); resume scan")
@@ -6890,6 +7117,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 lo, hi = hi, lo
             width = hi - lo
             self._lower_bracket = [lo, hi]
+            self._lower_refine_points_done = int(max(0, getattr(self, "_lower_refine_points_done", 0)) + 1)
+            lower_cap = int(max(0, getattr(self, "max_lower_refine_points", 1)))
+            if lower_cap > 0 and self._lower_refine_points_done > lower_cap:
+                self._lower_edge_locked = True
+                self._lower_edge_value = float(hi)
+                self.stageChanged.emit(
+                    f"Lower edge probe cap reached ({lower_cap}); locking conservative lower edge near {self._lower_edge_value:.3f} psi"
+                )
+                if self._upper_edge_locked:
+                    self.finalize.emit()
+                    return True
+                self._phase = "scan"
+                resume_from = self._min_single_pressure if self._min_single_pressure is not None else self._lower_edge_value
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, width / 2.0)))
+                return True
 
             if width <= self._edge_eps:
                 # SNAP to the lowest known SINGLE if we're close, and lock the lower edge

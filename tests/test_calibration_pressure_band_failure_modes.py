@@ -394,6 +394,39 @@ def test_pressure_band_edge_retest_cooldown_skips_nearby_pressure():
     assert near_edge == "edge_single_with_upper_multiple"
 
 
+def test_pressure_band_edge_retest_respects_per_side_cap():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._phase = "scan"
+    proc.edge_retest_scan_only = True
+    proc.edge_retest_cooldown_psi = 0.03
+    proc.edge_retest_max_per_run = 3
+    proc.edge_retest_proximity_window_psi = 0.03
+    proc.edge_retest_max_per_side = 1
+    proc._edge_retest_count = 1
+    proc._edge_retest_pressures = [1.50]
+    proc._edge_retest_side_counts = {"upper": 1, "lower": 0}
+    proc.samples = [{"pressure": 1.56, "verdict": "multiple"}]
+    proc._current_pressure = 1.55
+    proc._upper_refine_points_done = 0
+    proc._lower_refine_points_done = 0
+    proc.max_upper_refine_points = 2
+    proc.max_lower_refine_points = 1
+
+    reason = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+
+    assert reason is None
+
+
 def test_pressure_band_start_delay_retest_later_increments_later_counter():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc.classify_delay_us = 5850
@@ -445,6 +478,69 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     assert proc.replicates_target == 3
     assert proc._discard_next is False
     assert proc._retest_mode_active is True
+
+
+def test_pressure_band_settling_discard_only_for_major_pressure_change():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.discard_first_after_major_pressure_change = True
+    proc.settle_discard_pressure_delta_psi = 0.03
+
+    assert proc._should_discard_settling_shot(None, 1.20) is True
+    assert proc._should_discard_settling_shot(1.20, 1.22) is False
+    assert proc._should_discard_settling_shot(1.20, 1.24) is True
+
+
+def test_pressure_band_conservative_finalize_triggers_when_band_is_bracketed():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.samples = [
+        {"pressure": 0.70, "verdict": "none"},
+        {"pressure": 0.80, "verdict": "single"},
+        {"pressure": 0.88, "verdict": "single"},
+        {"pressure": 0.95, "verdict": "multiple"},
+    ]
+    proc._current_pressure = 0.88
+    proc._phase = "scan"
+    proc.conservative_finalize_narrow_width_psi = 0.05
+    proc.max_upper_refine_points = 2
+    proc.max_lower_refine_points = 1
+    proc._upper_refine_points_done = 0
+    proc._lower_refine_points_done = 0
+    proc.stageChanged = Recorder()
+    proc.finalize = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+
+    ok = proc._maybe_finalize_conservative_band()
+
+    assert ok is True
+    assert proc.finalize.calls
+    assert decision_calls
+
+
+def test_pressure_band_refine_upper_respects_probe_cap():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._phase = "refine_upper"
+    proc._current_pressure = 1.05
+    proc._prev_pressure = 1.10
+    proc._prev_verdict = "multiple"
+    proc._upper_bracket = [1.00, 1.10]
+    proc._first_single_pressure = 1.00
+    proc._upper_edge_locked = False
+    proc._min_single_pressure = 0.96
+    proc._upper_refine_points_done = 2
+    proc.max_upper_refine_points = 2
+    proc.dp_min = 0.01
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.stageChanged = Recorder()
+
+    transitioned = proc._maybe_start_or_update_brackets("single")
+
+    assert transitioned is True
+    assert proc._phase == "scan"
+    assert proc._upper_edge_locked is True
+    assert proc._upper_bracket is None
+    assert proc._next_pressure < 0.96
 
 
 def test_pressure_band_analyze_reclassifies_stream_like_single_as_multiple():
