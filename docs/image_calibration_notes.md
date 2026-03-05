@@ -674,6 +674,179 @@
 6. Stream/auxiliary classification:
 - stream-like single frames should not be treated as clean trajectory points without confirmation.
 
+## PressureSweepCharacterizationProcess: Goal, Flow, Prerequisites, Risks, and Improvements
+
+## Goal
+- Characterize droplet volume repeatability across a pressure set derived from trajectory and pressure-band results.
+- For each pressure, predict droplet location from trajectory velocity, move there, then center/focus and collect replicate volume measurements.
+- Persist per-pressure records used by the summary table and final pressure selection.
+
+## Current call path
+1. UI: `DropletImagingDialog.toggle_start_pressure_sweep_calibration(...)`.
+2. Controller: `Controller.start_pressure_sweep_characterization()`.
+3. Manager: `CalibrationManager.start_pressure_sweep_characterization()` -> `_try_start_process(PressureSweepCharacterizationProcess, ...)`.
+4. Process FSM:
+- `state_pick` -> `state_applyP` -> `state_move` -> `state_prepBG` -> `state_capBG` -> `state_setDelay` -> `state_capture` -> `state_analyze` -> `state_center` -> `state_char` -> `state_anBatch` -> `state_final`.
+5. Settings/capture/move execution:
+- process emits `changeSettingsRequested`, `captureImageRequested`, and move requests;
+- controller/machine callbacks drive `settingsChangeCompleted`, `captureCompleted`, and move completion.
+6. Persistence path:
+- process emits incremental `calibrationDataUpdated` payloads per pressure;
+- manager appends steps and updates summary rows.
+
+## Current algorithm flow
+1. Build pressure plan:
+- use primary pressure band when available, else use min/max of trajectory-tested pressures;
+- build count-based pressure grid with minimum separation;
+- interpolate `vx, vy` for each pressure from trajectory fit points.
+
+2. For each pressure:
+- apply pressure (`print_pressure`) and prep background (`num_droplets=0`);
+- predict target XYZ at `emergence_time + sphere_delay` using interpolated velocity;
+- apply persistent X/Z tracking offset and Y focus offset;
+- move to predicted target and capture background.
+
+3. Search for droplet at this pressure:
+- set droplet capture settings (`flash_delay`, `num_droplets=1`);
+- capture/analyze using `identify_droplet_contour(...)`;
+- if not found, sweep delay offsets `[0, +500, -500, +1000, -1000, +1500, -1500]`;
+- if sweep exhausted, perform up to 2 half-frame-up probes, then nudge along trajectory;
+- if repeated search failures exceed cap, mark pressure invalid and advance.
+
+4. Centering:
+- when contour found, center to image center with clamped X/Z moves;
+- guard with recenter and out-of-bounds limits.
+
+5. Characterization loop:
+- run `characterize_droplet(...)` on each replicate frame;
+- enforce center-first policy before focus moves;
+- if focus below threshold, move Y and recapture;
+- accept replicate when focus passes threshold and store volume/circularity/focus/center;
+- early-stop when rolling mean/CV drift converges.
+
+6. Batch decision:
+- keep only replicates with `circularity_ellipse < threshold`;
+- if enough good replicates, mark valid and store mean volume, CV, and machine-space center;
+- otherwise mark invalid and advance to next pressure.
+
+## Enforced prerequisites (today)
+- `Nozzle center (machine coords)` via `cm.get_nozzle_center()`.
+- `Nozzle center (image coords)` via `cm.get_nozzle_center_image_position()`.
+- `Background image`.
+- `Emergence time`.
+- `Pressure trajectory scan results`.
+
+## Effective prerequisites (operational)
+- Trajectory fits must be physically meaningful (not sparse/noisy) so interpolation predicts usable targets.
+- Pressure band or trajectory pressure range must cover at least one stable single-droplet regime.
+- Camera capture and stage motion callback paths must be stable.
+
+## Key risks and edge cases
+
+## High priority
+1. Nozzle reference source mismatch.
+- Sweep still uses `get_nozzle_center_image_position()` instead of the emergence-derived real nozzle center path.
+- Risk: attached/near-nozzle classification and centering can be biased when legacy nozzle point tracks reflection geometry.
+
+2. Settings transitions in this process are not timeout-guarded.
+- `onApplyPressure`, `onPrepareBG`, and `onSetDelay` emit settings changes directly.
+- Risk: missing settings callback can stall the FSM.
+
+3. Multiple-droplet evidence is not used as a hard invalidation signal.
+- In `onCharacterizeLoop`, `result == "Multiple"` increments a counter and skips replicate, but does not disqualify pressure.
+- Risk: pressure can still be marked valid after repeated auxiliary-droplet events.
+
+4. Stream-like elongated contours can pass as single droplets.
+- `characterize_droplet(...)` does not apply explicit stream-shape rejection beyond a loose width/height filter.
+- Risk: high-pressure streams can bias volume statistics and pressure selection.
+
+5. Validity decision can pass on partial/biased subsets.
+- Final validity only checks circularity-filtered count threshold, not invalid-hit ratio, stream-hit ratio, or multiple-hit ratio.
+- Risk: false-valid pressures in noisy sessions.
+
+## Medium priority
+6. Interpolation accepts fit records with missing velocity keys as zero.
+- Planning uses `rec.get("fit", {}).get("vx_px_per_us", 0.0)` and same for `vy`.
+- Risk: silent zero-velocity plans can move to poor targets instead of failing fast.
+
+7. Presentation throttling knobs are mostly unused.
+- `lightweight_overlays` and `present_every_k` are configured but not consistently applied in hot loops.
+- Risk: avoidable UI/render overhead.
+
+8. No explicit settings restore on completion/error.
+- Process changes `print_pressure`, `flash_delay`, and `num_droplets` without restoring prior values.
+- Risk: next manual action or process starts from an unintended state.
+
+9. Debug `print(...)` calls remain in high-frequency paths.
+- Risk: avoidable console I/O latency and noisy logs during long sweeps.
+
+## Performance bottlenecks
+1. High default replicate target (`20`) with focus/centering recaptures can produce many captures per pressure.
+2. Characterization path re-runs full-frame diff/threshold/contours each capture.
+3. Search fallback (delay sweep + probes + nudge cycles) can consume many captures before skip.
+4. Recorder-enabled runs add per-capture I/O overhead (expected but should be operator-toggleable for speed checks).
+
+## Recommended reliability and performance changes
+
+## Control-path changes
+1. Switch sweep nozzle image prerequisite/source to emergence-real center.
+- Use `get_pressure_scan_nozzle_center_image_position()` (or `get_real_nozzle_center_image_position()`) in `missing_requirements` and initialization.
+
+2. Use trajectory-derived pressure band as the sweep planning source.
+- Use trajectory-qualified outputs (`valid_fit_pressures` / `trajectory_pressure_band`) from pressure-trajectory results.
+- Do not use pressure-band-process `primary_band` as the sweep planner source.
+
+3. Add settings timeout wrapper usage in sweep states.
+- Route settings changes through a timeout-aware helper (same deterministic behavior as move timeout guards).
+
+4. Add strict pressure invalidation policy for multi/stream evidence.
+- Disqualify a pressure when replicate evidence includes multiple droplets or stream-like singles above configured limits.
+
+5. Tighten validity gate before marking a pressure valid.
+- Require minimum accepted replicates plus maximum allowed invalid/multiple/stream hit ratios.
+
+## Analysis-path changes
+5. Add stream-shape rejection to characterization.
+- Include aspect/circularity/area gates (or reuse `identify_droplets(..., return_details=True)` geometry flags) before accepting a replicate.
+
+6. Fail fast on unusable trajectory fit inputs.
+- Reject fit points missing velocity fields rather than silently substituting zeros.
+
+7. Normalize key thresholds by image dimensions where possible.
+- Focus, area, and edge guard thresholds should scale better across optics/resolution changes.
+
+## Performance changes
+8. Apply overlay throttling consistently.
+- Emit overlays every `k` frames in search/char loops unless an error branch requires immediate display.
+
+9. Add ROI-first path for characterization contouring.
+- Reuse last center as cropped ROI first, with full-frame fallback on miss.
+
+10. Keep fixed statistical replicate collection for CV.
+- Keep the sweep target at 20 accepted replicates per pressure for representative CV.
+- Disable early-stop by default in this process so runs capture the full sample count.
+- Keep a bounded max-attempt policy only as a safety escape hatch.
+
+## Recommended tests (currently missing)
+1. Prerequisite/source tests:
+- sweep should require emergence-real nozzle center path (with backward-compatible fallback only when intended).
+
+2. Settings timeout tests:
+- missing `settingsChangeCompleted` callback should error out, not hang.
+
+3. Multi/stream invalidation tests:
+- repeated `Multiple` or stream-like single detections should invalidate pressure deterministically.
+
+4. Validity gate tests:
+- partial batches with high invalid ratios must not be marked valid.
+
+5. Interpolation integrity tests:
+- missing fit velocity fields should produce deterministic start/plan failure.
+
+6. Performance contract tests:
+- benchmark capture count and loop wall-time on synthetic fixtures;
+- keep non-blocking trend outputs (p50/p95) for regression visibility.
+
 ## Validation Coverage Status
 
 ## Already covered by automated tests

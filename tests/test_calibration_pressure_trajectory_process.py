@@ -288,3 +288,51 @@ def test_pressure_trajectory_completion_errors_when_no_valid_fit():
     assert proc.calibrationError.calls
     assert proc.calibrationDataUpdated.calls == []
     assert proc.calibrationCompleted.calls == []
+
+
+def test_pressure_trajectory_completion_publishes_valid_fit_band_fields():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc.samples = [
+        {
+            "pressure": 1.10,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": {"vx_px_per_us": 0.01, "vy_px_per_us": 0.02},
+        },
+        {
+            "pressure": 1.00,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": None,
+            "reason": "multiple_droplets",
+            "disqualified": True,
+        },
+        {
+            "pressure": 0.95,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.03},
+        },
+    ]
+    proc._base_delays_us = [5000, 5700, 6400]
+    proc.nozzle_center_px = (100, 100)
+    proc.emergence_time_us = 4500
+    proc.calibrationError = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.stageChanged = Recorder()
+    proc._record_error = lambda *args, **kwargs: None
+    persisted = []
+    proc.calibration_manager = SimpleNamespace(
+        get_primary_pressure_band=lambda: (0.9, 1.2),
+        set_pressure_trajectory_result=lambda payload: persisted.append(dict(payload)),
+    )
+
+    proc.onCalibrationCompleted()
+
+    assert not proc.calibrationError.calls
+    assert proc.calibrationCompleted.calls
+    assert proc.calibrationDataUpdated.calls
+    payload = proc.calibrationDataUpdated.calls[-1][0][0]["result"]
+    assert payload["valid_fit_count"] == 2
+    assert payload["valid_fit_pressures"] == [0.95, 1.1]
+    assert payload["trajectory_pressure_band"] == [0.95, 1.1]
+    assert payload["disqualified_pressures"] == [1.0]
+    assert persisted

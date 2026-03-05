@@ -1627,6 +1627,78 @@ class CalibrationManager(QObject):
     def get_pressure_trajectory_result(self):
         return self._pressure_traj_result
 
+    def get_trajectory_valid_fit_pressures(self):
+        """
+        Return sorted unique pressures that produced valid trajectory fits.
+        Prefers explicit trajectory result fields and falls back to deriving from
+        per-pressure records for backward compatibility.
+        """
+        result = self.get_pressure_trajectory_result()
+        if not isinstance(result, dict):
+            return []
+
+        values = result.get("valid_fit_pressures")
+        out = []
+        seen = set()
+
+        if isinstance(values, (list, tuple)):
+            for p in values:
+                try:
+                    fp = round(float(p), 3)
+                except Exception:
+                    continue
+                key = float(fp)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+            out.sort()
+            if out:
+                return out
+
+        for rec in list(result.get("pressures") or []):
+            if not isinstance(rec, dict):
+                continue
+            if not isinstance(rec.get("fit"), dict):
+                continue
+            if bool(rec.get("disqualified", False)):
+                continue
+            try:
+                fp = round(float(rec.get("pressure")), 3)
+            except Exception:
+                continue
+            key = float(fp)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+
+        out.sort()
+        return out
+
+    def get_trajectory_pressure_band(self):
+        """
+        Return a (lo, hi) pressure tuple derived from trajectory-qualified results.
+        Falls back to min/max of valid-fit pressures if the explicit field is absent.
+        """
+        result = self.get_pressure_trajectory_result()
+        if not isinstance(result, dict):
+            return None
+
+        band = result.get("trajectory_pressure_band")
+        if isinstance(band, (list, tuple)) and len(band) == 2:
+            try:
+                lo = float(min(band[0], band[1]))
+                hi = float(max(band[0], band[1]))
+                return (lo, hi)
+            except Exception:
+                pass
+
+        vals = self.get_trajectory_valid_fit_pressures()
+        if vals:
+            return (float(vals[0]), float(vals[-1]))
+        return None
+
     # ------------- Offsets helper -------------
 
     def update_offsets_from_nozzle(self):
@@ -8548,10 +8620,42 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit(msg)
             return
 
+        valid_fit_pressures = []
+        _seen_valid = set()
+        disqualified_pressures = []
+        _seen_disq = set()
+        for rec in list(self.samples or []):
+            if not isinstance(rec, dict):
+                continue
+            try:
+                p = round(float(rec.get("pressure")), 3)
+            except Exception:
+                continue
+            if isinstance(rec.get("fit"), dict) and not bool(rec.get("disqualified", False)):
+                if p not in _seen_valid:
+                    _seen_valid.add(p)
+                    valid_fit_pressures.append(float(p))
+            if bool(rec.get("disqualified", False)):
+                if p not in _seen_disq:
+                    _seen_disq.add(p)
+                    disqualified_pressures.append(float(p))
+
+        valid_fit_pressures.sort()
+        disqualified_pressures.sort()
+        trajectory_pressure_band = None
+        if valid_fit_pressures:
+            trajectory_pressure_band = [
+                float(valid_fit_pressures[0]),
+                float(valid_fit_pressures[-1]),
+            ]
+
         result = {
             "pressures": self.samples,
             "delays_us": list(self._base_delays_us),
             "band_used": self.calibration_manager.get_primary_pressure_band(),
+            "trajectory_pressure_band": trajectory_pressure_band,
+            "valid_fit_pressures": valid_fit_pressures,
+            "disqualified_pressures": disqualified_pressures,
             "nozzle_center_px": self.nozzle_center_px,
             "emergence_time_us": self.emergence_time_us,
             "valid_fit_count": int(valid_fit_count),
@@ -9869,6 +9973,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  max_oob_total: int = 12,
                  lightweight_overlays: bool = True,
                  present_every_k: int = 3,
+                 settings_timeout_ms: int = 12000,
+                 enable_early_stop: bool = False,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
@@ -9880,16 +9986,45 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         # ---------- prerequisites ----------
         self.num_samples           = self.calibration_manager.get_num_pressure_tests()
         self.nozzle_center_machine = self.calibration_manager.get_nozzle_center()
-        self.nozzle_center_px      = self.calibration_manager.get_nozzle_center_image_position()
+        get_ps_center = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_image_position", None)
+        if callable(get_ps_center):
+            self.nozzle_center_px = get_ps_center()
+        else:
+            get_real_center = getattr(self.calibration_manager, "get_real_nozzle_center_image_position", None)
+            self.nozzle_center_px = get_real_center() if callable(get_real_center) else None
         self.emergence_time_us     = self.calibration_manager.get_emergence_time()
         self.prev_background       = self.calibration_manager.get_background_image()
-        
-        get_band = getattr(self.calibration_manager, "get_primary_pressure_band", None)
-        self.primary_band = get_band() if callable(get_band) else None
+
+        get_traj_band = getattr(self.calibration_manager, "get_trajectory_pressure_band", None)
+        self.trajectory_band = get_traj_band() if callable(get_traj_band) else None
+        get_valid_fit_pressures = getattr(self.calibration_manager, "get_trajectory_valid_fit_pressures", None)
+        self.trajectory_valid_pressures = (
+            list(get_valid_fit_pressures() or []) if callable(get_valid_fit_pressures) else []
+        )
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
         self.traj = traj() if callable(traj) else None
+
+        if not self.trajectory_valid_pressures and isinstance(self.traj, dict):
+            for rec in list(self.traj.get("pressures") or []):
+                if not isinstance(rec, dict):
+                    continue
+                if not isinstance(rec.get("fit"), dict):
+                    continue
+                if bool(rec.get("disqualified", False)):
+                    continue
+                try:
+                    p = round(float(rec.get("pressure")), 3)
+                except Exception:
+                    continue
+                self.trajectory_valid_pressures.append(float(p))
+            self.trajectory_valid_pressures = sorted(set(self.trajectory_valid_pressures))
+        if (self.trajectory_band is None) and self.trajectory_valid_pressures:
+            self.trajectory_band = (
+                float(min(self.trajectory_valid_pressures)),
+                float(max(self.trajectory_valid_pressures)),
+            )
 
         if not (self.nozzle_center_machine and self.nozzle_center_px and self.emergence_time_us and self.traj and self.traj.get("pressures")):
             self.calibrationError.emit("Sweep requires nozzle center, background, emergence, and trajectory scan results.")
@@ -9897,28 +10032,55 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         else:
             self._ready = True
 
-        # list of (pressure, fit) we’ll actually use (build grid from traj min/max using scan step)
+        # list of (pressure, fit) we'll actually use (build grid from trajectory-derived band)
         self.plan = []
         if self._ready:
-            all_tested = [float(rec.get("pressure")) for rec in self.traj["pressures"] if "pressure" in rec]
-            if self.primary_band and len(self.primary_band) == 2:
-                p_lo, p_hi = float(min(self.primary_band)), float(max(self.primary_band))
-            elif all_tested:
-                p_lo, p_hi = min(all_tested), max(all_tested)
-            else:
-                self.calibrationError.emit("Sweep needs a single band or trajectory pressures to plan.")
+            plan_band = self._resolve_trajectory_planning_band(
+                self.trajectory_band,
+                self.trajectory_valid_pressures,
+            )
+            if not plan_band:
+                self.calibrationError.emit("Sweep needs a trajectory-derived pressure band to plan.")
                 self._ready = False
-
+            else:
+                p_lo, p_hi = float(plan_band[0]), float(plan_band[1])
 
             if self._ready:
                 # 2) Build evenly-spaced set with min-separation guard
-                grid = self._make_pressure_set_by_count(p_lo, p_hi, int(self.num_samples), float(min_pressure_separation))
+                if abs(float(p_hi) - float(p_lo)) < 1e-9:
+                    grid = [round(float(p_lo), 3)]
+                else:
+                    grid = self._make_pressure_set_by_count(
+                        p_lo, p_hi, int(self.num_samples), float(min_pressure_separation)
+                    )
 
                 # 3) Prepare velocity interpolation from trajectory fits
-                fit_pts = [(float(rec["pressure"]),
-                            float(rec.get("fit", {}).get("vx_px_per_us", 0.0)),
-                            float(rec.get("fit", {}).get("vy_px_per_us", 0.0)))
-                           for rec in (self.traj["pressures"] if self.traj else []) if rec.get("fit")]
+                valid_fit_set = {
+                    round(float(p), 3) for p in list(self.trajectory_valid_pressures or [])
+                    if p is not None
+                }
+                fit_map = {}
+                for rec in (self.traj["pressures"] if self.traj else []):
+                    if not isinstance(rec, dict):
+                        continue
+                    fit = rec.get("fit")
+                    if not isinstance(fit, dict):
+                        continue
+                    if ("vx_px_per_us" not in fit) or ("vy_px_per_us" not in fit):
+                        continue
+                    try:
+                        p = round(float(rec.get("pressure")), 3)
+                        vx = float(fit.get("vx_px_per_us"))
+                        vy = float(fit.get("vy_px_per_us"))
+                    except Exception:
+                        continue
+                    if not (np.isfinite(vx) and np.isfinite(vy)):
+                        continue
+                    if valid_fit_set and (p not in valid_fit_set):
+                        continue
+                    fit_map[p] = (vx, vy)
+
+                fit_pts = [(float(p), float(v[0]), float(v[1])) for p, v in fit_map.items()]
                 if not fit_pts:
                     self.calibrationError.emit("Trajectory scan had no valid fits to interpolate velocities.")
                     self._ready = False
@@ -9947,12 +10109,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         # ---------- policy / settings ----------
         self.sphere_delay_us   = int(sphere_delay_us)
         self.edge_guard_px     = int(edge_guard_px)
-        self.repl_target       = int(replicates_per_pressure)
+        self.repl_target       = int(max(20, int(replicates_per_pressure)))
         self.focus_ok_threshold = float(focus_ok_threshold)
+        self.enable_early_stop = bool(enable_early_stop)
         self.early_stop_min_reps = 12
         self.early_stop_window = 6
         self.early_stop_mean_drift_pct = 1.5
         self.early_stop_cv_drift_pct = 1.0
+        self.settings_timeout_ms = int(max(1_000, int(settings_timeout_ms)))
 
         self.max_search_cycles   = int(max_search_cycles)
         self.max_recenter_moves  = int(max_recenter_moves)
@@ -10080,15 +10244,62 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         missing = []
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
-        if cm.get_nozzle_center_image_position() is None:
-            missing.append("Nozzle center (image coords)")
+        get_real_center = getattr(cm, "get_real_nozzle_center_image_position", None)
+        real_center = get_real_center() if callable(get_real_center) else None
+        if real_center is None:
+            missing.append("Real nozzle center (image coords, from emergence)")
         if cm.get_background_image() is None:
             missing.append("Background image")
         if cm.get_emergence_time() is None:
             missing.append("Emergence time")
-        if cm.get_pressure_trajectory_result() is None:
+        traj = cm.get_pressure_trajectory_result()
+        if traj is None:
             missing.append("Pressure trajectory scan results")
+        else:
+            get_traj_band = getattr(cm, "get_trajectory_pressure_band", None)
+            traj_band = get_traj_band() if callable(get_traj_band) else None
+            if traj_band is None:
+                valid_fit_pressures = []
+                get_valid_fit = getattr(cm, "get_trajectory_valid_fit_pressures", None)
+                if callable(get_valid_fit):
+                    try:
+                        valid_fit_pressures = list(get_valid_fit() or [])
+                    except Exception:
+                        valid_fit_pressures = []
+                if not valid_fit_pressures and isinstance(traj, dict):
+                    for rec in list(traj.get("pressures") or []):
+                        if not isinstance(rec, dict):
+                            continue
+                        if not isinstance(rec.get("fit"), dict):
+                            continue
+                        if bool(rec.get("disqualified", False)):
+                            continue
+                        try:
+                            valid_fit_pressures.append(float(rec.get("pressure")))
+                        except Exception:
+                            continue
+                if not valid_fit_pressures:
+                    missing.append("Trajectory-derived pressure band")
         return missing
+
+    @staticmethod
+    def _resolve_trajectory_planning_band(trajectory_band, trajectory_valid_pressures):
+        if isinstance(trajectory_band, (list, tuple)) and len(trajectory_band) == 2:
+            try:
+                lo = float(min(trajectory_band[0], trajectory_band[1]))
+                hi = float(max(trajectory_band[0], trajectory_band[1]))
+                return (lo, hi)
+            except Exception:
+                return None
+        vals = []
+        for p in list(trajectory_valid_pressures or []):
+            try:
+                vals.append(float(p))
+            except Exception:
+                continue
+        if not vals:
+            return None
+        return (float(min(vals)), float(max(vals)))
 
     # ---------- helpers (generic) ----------
     def _get_axis_bounds_safe(self, axis:str, default_span:int):
@@ -10147,6 +10358,48 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             drop = i+1 if (i+1) < (len(out)-1) else i
             out.pop(drop)
         return out
+
+    def _request_settings_with_timeout(self, settings: dict, *, on_done, context: str):
+        done = {"fired": False}
+        t_ref = {"t": None}
+        timeout_ms = int(max(1_000, getattr(self, "settings_timeout_ms", 12_000)))
+
+        def _finish(ok: bool, why: str | None = None):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            if not ok:
+                msg = str(why or "Settings update failed.")
+                self._record_error(msg, {"context": str(context), "settings": dict(settings or {})})
+                self.calibrationError.emit(msg)
+                self.finalize.emit()
+                return
+            try:
+                on_done()
+            except Exception as exc:
+                msg = f"Settings completion handler failed: {exc}"
+                self._record_error(msg, {"context": str(context)})
+                self.calibrationError.emit(msg)
+                self.finalize.emit()
+
+        t_ref["t"] = self._start_timeout(
+            timeout_ms,
+            on_timeout=lambda: _finish(False, f"Settings timeout after {timeout_ms} ms ({context})"),
+        )
+        self._request_settings_with_recording(
+            dict(settings or {}),
+            lambda *args, **kwargs: _finish(True, "callback"),
+            context=str(context or ""),
+        )
+
+    def _count_good_replicates(self) -> int:
+        circularity_values = list(getattr(self, "circularity_values", []) or [])
+        threshold = float(getattr(self, "circularity_threshold", 1.18))
+        return int(
+            sum(1 for c in circularity_values if float(c) < threshold)
+        )
 
     def _reset_char_buffers(self):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
@@ -10285,7 +10538,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onApplyPressure(self):
         settings = {"print_pressure": float(self.cur_pressure), "num_droplets": 0}
         self.stageChanged.emit(f"Applying pressure {self.cur_pressure:.3f} psi and preparing background")
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.calibration_manager.emitSettingsChangeCompleted)
+        self._request_settings_with_timeout(
+            settings,
+            on_done=self.calibration_manager.emitSettingsChangeCompleted,
+            context="pressure_sweep_apply_pressure",
+        )
 
     @Slot()
     def onMoveToTarget(self):
@@ -10300,8 +10557,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onPrepareBG(self):
         self.stageChanged.emit("Setting num_droplets=0 and capturing background")
-        self.calibration_manager.changeSettingsRequested.emit(
-            {"num_droplets": 0}, self.calibration_manager.emitSettingsChangeCompleted
+        self._request_settings_with_timeout(
+            {"num_droplets": 0},
+            on_done=self.calibration_manager.emitSettingsChangeCompleted,
+            context="pressure_sweep_prepare_background",
         )
 
     @Slot()
@@ -10348,9 +10607,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._delay_try_index += 1
         self.current_delay_us = self._clamp_delay(d)
         self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} us (search)")
-        self.calibration_manager.changeSettingsRequested.emit(
+        self._request_settings_with_timeout(
             {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
-            self.delayApplied.emit
+            on_done=self.delayApplied.emit,
+            context="pressure_sweep_set_delay",
         )
 
     @Slot()
@@ -10579,14 +10839,21 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             # After the move completes, state_char → (moveDone) → state_capture → fresh frame.
             return
 
-        if self._should_early_stop_batch():
+        if self.enable_early_stop and self._should_early_stop_batch():
             self.stageChanged.emit(
                 f"Pressure {self.cur_pressure:.3f} characterization converged early at {self.image_counter} replicates."
             )
             self.analyzeBatch.emit()
             return
 
-        if self.image_counter < self.num_images:
+        good_count = self._count_good_replicates()
+        if good_count < self.num_images:
+            if self._char_attempts >= self._char_attempt_limit:
+                self.stageChanged.emit(
+                    f"Reached characterization attempt budget with {good_count}/{self.num_images} good replicates."
+                )
+                self.analyzeBatch.emit()
+                return
             self.continueCap.emit()
         else:
             self.analyzeBatch.emit()
@@ -10595,9 +10862,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
         good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
-        if len(good) < max(3, self.num_images // 2):
-            self.stageChanged.emit("Too few good replicates (circularity) → mark invalid and continue")
-            self._record_pressure_result(valid=False)
+        if len(good) < int(self.num_images):
+            self.stageChanged.emit(
+                f"Insufficient accepted replicates ({len(good)}/{self.num_images}) → mark invalid and continue"
+            )
+            self._record_pressure_result(valid=False, reason="insufficient_good_replicates")
         else:
             mean_vol = float(np.mean(good))
             cv_vol   = float(np.std(good) / (mean_vol + 1e-9) * 100.0)
@@ -10622,6 +10891,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "cv_volume_percent": cv_vol,
                 "volumes": [float(v) for v in self.droplet_volumes],
                 "circularity_values": [float(c) for c in self.circularity_values],
+                "accepted_replicates": int(len(good)),
+                "captured_replicates": int(len(self.droplet_volumes)),
                 "mean_position_machine": drop_machine,
                 "multiple_detections": int(self.multiple_droplet_hits),
                 "y_focus_offset_steps": int(self._y_focus_offset_steps),
@@ -10667,6 +10938,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "volumes": [],
             # "focus_values": [],
             "circularity_values": [],
+            "accepted_replicates": int(self._count_good_replicates()),
+            "captured_replicates": int(len(getattr(self, "droplet_volumes", []) or [])),
             "mean_position_machine": None,
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
