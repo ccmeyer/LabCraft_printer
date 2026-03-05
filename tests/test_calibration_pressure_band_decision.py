@@ -44,6 +44,14 @@ def _build_decide_proc(reps):
     proc._delay_retest_later_steps_done_for_pressure = 0
     proc._delay_retest_in_progress = False
     proc._delay_retest_context = None
+    proc._retest_mode_active = False
+    proc._phase = "scan"
+    proc.edge_retest_scan_only = True
+    proc.edge_retest_cooldown_psi = 0.03
+    proc.edge_retest_max_per_run = 3
+    proc._edge_retest_pressures = []
+    proc._edge_retest_count = 0
+    proc.retest_min_reps = 3
     proc.pre_ejection_attached_area_px = 8000
     proc.pre_ejection_attached_ratio = 0.60
     proc.fast_single_bottom_margin_px = 220
@@ -224,3 +232,23 @@ def test_pressure_band_on_decide_attached_stream_triggers_later_delay_retest():
     assert proc._store_calls == []
     assert proc._choose_calls == []
     assert proc._advance_calls == []
+
+
+def test_pressure_band_on_decide_uses_retest_replicate_target_without_escalation():
+    proc = _build_decide_proc(
+        [
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+        ]
+    )
+    proc.min_reps = 5
+    proc.replicates_target = 3
+    proc._retest_mode_active = True
+    proc.samples = []
+
+    proc.onDecide()
+
+    assert proc.continueReplicate.calls == []
+    assert proc._store_calls
+    assert proc._store_calls[0]["verdict"] == "single"

@@ -315,6 +315,70 @@ def test_pressure_band_later_delay_candidate_moves_back_toward_base():
     assert proc._later_delay_candidate_us() == 5850
 
 
+def test_pressure_band_edge_retest_only_allowed_in_scan_phase():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._current_pressure = 1.50
+    proc._edge_retest_pressures = []
+    proc._edge_retest_count = 0
+    proc.edge_retest_scan_only = True
+    proc.edge_retest_cooldown_psi = 0.03
+    proc.edge_retest_max_per_run = 3
+
+    proc._phase = "refine_upper"
+    r1 = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+    assert r1 is None
+
+    proc._phase = "scan"
+    r2 = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+    assert r2 == "edge_single_with_upper_multiple"
+
+
+def test_pressure_band_edge_retest_cooldown_skips_nearby_pressure():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._phase = "scan"
+    proc.edge_retest_scan_only = True
+    proc.edge_retest_cooldown_psi = 0.03
+    proc.edge_retest_max_per_run = 3
+    proc._edge_retest_count = 1
+    proc._edge_retest_pressures = [1.50]
+    proc._current_pressure = 1.515
+
+    near = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+    assert near is None
+
+    proc._current_pressure = 1.55
+    far = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+    assert far == "edge_single_with_upper_multiple"
+
+
 def test_pressure_band_start_delay_retest_later_increments_later_counter():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc.classify_delay_us = 5850
@@ -333,8 +397,10 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     proc._delay_retest_later_steps_done_for_pressure = 0
     proc._delay_retest_in_progress = False
     proc._delay_retest_context = None
+    proc._retest_mode_active = False
     proc._current_pressure = 1.20
     proc.min_reps = 5
+    proc.retest_min_reps = 3
     proc.reps = []
     proc._invalid_skip_count = 0
     proc._discard_next = False
@@ -361,3 +427,6 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     assert proc._active_classify_delay_us == 5850
     assert proc._delay_retest_later_steps_done_for_pressure == 1
     assert proc._delay_retest_earlier_steps_done_for_pressure == 0
+    assert proc.replicates_target == 3
+    assert proc._discard_next is False
+    assert proc._retest_mode_active is True

@@ -5456,12 +5456,19 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.delay_retest_max_later_offset_us = 1000
         self.delay_retest_abs_max_us = 20_000
         self.delay_retest_timeout_ms = 15_000
+        self.retest_min_reps = 3
+        self.edge_retest_scan_only = True
+        self.edge_retest_cooldown_psi = 0.03
+        self.edge_retest_max_per_run = 3
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_earlier_steps_done_for_pressure = 0
         self._delay_retest_later_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
         self._delay_retest_context = None
+        self._retest_mode_active = False
+        self._edge_retest_pressures = []
+        self._edge_retest_count = 0
 
         # --- pressure bounds ---
         try:
@@ -5537,7 +5544,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._phase = "scan"                       # scan | refine_upper | refine_lower
         self._upper_bracket = None                 # [lo(single), hi(multiple)]
         self._lower_bracket = None                 # [lo(none/too_close), hi(single)]
-        self._edge_eps = 0.01                        # stop refining upper/lower once bracket ≤ 0.01 psi
+        self._edge_eps = 0.02                        # stop refining upper/lower once bracket ≤ 0.02 psi
         self._prev_verdict = None
         self._first_single_pressure = None
         self._min_single_pressure = None
@@ -5688,6 +5695,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._delay_retest_later_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
         self._delay_retest_context = None
+        self._retest_mode_active = False
 
         settings = {
             "print_pressure": self._current_pressure,
@@ -5798,8 +5806,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onDecide(self):
         counts, total = self._replicate_class_counts()
-        if total < self.min_reps:
-            self.replicates_target = self.min_reps
+        required_reps = int(max(1, getattr(self, "replicates_target", self.min_reps)))
+        if total < required_reps:
+            self.replicates_target = required_reps
             self.continueReplicate.emit()
             return
 
@@ -5853,7 +5862,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if self._start_delay_retest(retest_reason, verdict, counts, decision, confidence):
                 return
 
-        if verdict == "ambiguous" and total < self.escalate_to:
+        if (not bool(getattr(self, "_retest_mode_active", False))) and verdict == "ambiguous" and total < self.escalate_to:
             self.replicates_target = self.escalate_to
             self.stageChanged.emit(
                 f"Pressure {self._current_pressure:.3f} psi ambiguous "
@@ -6176,6 +6185,20 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             return None
         return candidate
 
+    def _edge_retest_recently_done(self) -> bool:
+        cur = float(self._current_pressure) if self._current_pressure is not None else None
+        if cur is None:
+            return False
+        cooldown = float(max(0.0, getattr(self, "edge_retest_cooldown_psi", 0.03)))
+        recent = list(getattr(self, "_edge_retest_pressures", []) or [])
+        for p in recent:
+            try:
+                if abs(float(cur) - float(p)) <= cooldown:
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _should_run_delay_retest(self, verdict: str, counts: dict, decision: dict):
         steps_done = int(max(0, getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)))
         steps_max = int(max(0, getattr(self, "delay_retest_max_earlier_steps", 1)))
@@ -6189,6 +6212,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if n_single > 0 and n_multiple > 0:
             return "mixed_single_multiple"
         if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+            if bool(getattr(self, "edge_retest_scan_only", True)) and str(getattr(self, "_phase", "scan")) != "scan":
+                return None
+            if int(max(0, getattr(self, "_edge_retest_count", 0))) >= int(max(0, getattr(self, "edge_retest_max_per_run", 3))):
+                return None
+            if self._edge_retest_recently_done():
+                return None
             return "edge_single_with_upper_multiple"
 
         return None
@@ -6283,9 +6312,22 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         )
         self._active_classify_delay_us = int(new_delay)
         self.reps = []
-        self.replicates_target = int(self.min_reps)
+        self.replicates_target = int(max(1, min(int(self.min_reps), int(getattr(self, "retest_min_reps", 3)))))
         self._invalid_skip_count = 0
-        self._discard_next = True
+        # Delay-only retests do not require pressure-settling discard.
+        self._discard_next = False
+        self._retest_mode_active = True
+        if str(reason) == "edge_single_with_upper_multiple":
+            try:
+                cur = float(self._current_pressure)
+                recent = list(getattr(self, "_edge_retest_pressures", []) or [])
+                recent.append(cur)
+                if len(recent) > 64:
+                    recent = recent[-64:]
+                self._edge_retest_pressures = recent
+                self._edge_retest_count = int(max(0, getattr(self, "_edge_retest_count", 0)) + 1)
+            except Exception:
+                pass
 
         self.stageChanged.emit(
             f"Pressure {self._current_pressure:.3f} psi {str(reason).replace('_', ' ')}; "
