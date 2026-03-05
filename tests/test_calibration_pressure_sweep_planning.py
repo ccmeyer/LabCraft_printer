@@ -138,3 +138,99 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     sig = inspect.signature(PressureSweepCharacterizationProcess.__init__)
     assert sig.parameters["replicates_per_pressure"].default == 20
     assert sig.parameters["enable_early_stop"].default is False
+
+
+def test_pressure_sweep_capture_redirects_to_background_when_stale():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc._background_stale = True
+    proc.stageChanged = Recorder()
+    proc.backgroundRefreshNeeded = Recorder()
+    called = {"capture": False}
+    proc._capture_with_policy = lambda **kwargs: called.__setitem__("capture", True)
+
+    proc.onCaptureDroplet()
+
+    assert proc.backgroundRefreshNeeded.calls
+    assert called["capture"] is False
+
+
+def test_pressure_sweep_mark_background_stale_resets_contour_tracker():
+    reset_calls = {"n": 0}
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            reset_droplet_contour_tracker=lambda: reset_calls.__setitem__("n", reset_calls["n"] + 1)
+        )
+    )
+    proc._record_event = lambda *args, **kwargs: None
+    proc._background_stale = False
+
+    proc._mark_background_stale("unit_test")
+
+    assert proc._background_stale is True
+    assert reset_calls["n"] == 1
+
+
+def test_pressure_sweep_safe_move_abs_clamps_to_imaging_envelope():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.x_lo, proc.x_hi = 0, 50000
+    proc.y_lo, proc.y_hi = 0, 50000
+    proc.z_lo, proc.z_hi = 0, 200000
+    proc._search_anchor_xyz = (1000, 2000, 3000)
+    proc.max_anchor_dx_steps = 200
+    proc.max_anchor_dz_steps = 400
+    proc.imaging_guard_hit_cap = 5
+    proc._imaging_guard_hit_count = 0
+    proc.stageChanged = Recorder()
+    proc._record_event = lambda *args, **kwargs: None
+    proc._record_pressure_result = lambda *args, **kwargs: None
+    proc.nextPressure = Recorder()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1000, "Y": 2000, "Z": 3000})
+    )
+    proc.moveDone = Recorder()
+    captured = {"target": None}
+
+    def _req(target, *, on_done=None, **_kwargs):
+        captured["target"] = tuple(target)
+        if callable(on_done):
+            on_done()
+
+    proc._request_move_absolute_with_timeout = _req
+
+    proc._safe_move_abs((4000, 2000, 12000))
+
+    assert captured["target"] == (1200, 2000, 3400)
+    assert proc.moveDone.calls
+
+
+def test_pressure_sweep_safe_move_abs_guard_cap_skips_pressure():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.x_lo, proc.x_hi = 0, 50000
+    proc.y_lo, proc.y_hi = 0, 50000
+    proc.z_lo, proc.z_hi = 0, 200000
+    proc._search_anchor_xyz = (1000, 2000, 3000)
+    proc.max_anchor_dx_steps = 50
+    proc.max_anchor_dz_steps = 100
+    proc.imaging_guard_hit_cap = 1
+    proc._imaging_guard_hit_count = 0
+    proc.stageChanged = Recorder()
+    proc._record_event = lambda *args, **kwargs: None
+    recorded = []
+    proc._record_pressure_result = lambda valid, reason=None: recorded.append((valid, reason))
+    proc.nextPressure = Recorder()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1000, "Y": 2000, "Z": 3000})
+    )
+    proc.moveDone = Recorder()
+    proc.i = 0
+    proc._bad_reason = None
+    proc._request_move_absolute_with_timeout = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("should not issue move when imaging guard cap is exceeded")
+    )
+
+    proc._safe_move_abs((9000, 2000, 9000))
+
+    assert recorded
+    assert recorded[-1] == (False, "imaging_guard_limit")
+    assert proc.nextPressure.calls

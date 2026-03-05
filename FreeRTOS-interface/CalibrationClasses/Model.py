@@ -9957,6 +9957,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     analyzeBatch    = Signal()
     nextPressure    = Signal()
     finalize        = Signal()
+    backgroundRefreshNeeded = Signal()
 
     def __init__(self,
                  calibration_manager,
@@ -9975,6 +9976,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  present_every_k: int = 3,
                  settings_timeout_ms: int = 12000,
                  enable_early_stop: bool = False,
+                 imaging_x_guard_steps: int = 350,
+                 imaging_z_guard_steps: int = 5000,
+                 imaging_guard_hit_cap: int = 6,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
@@ -10117,6 +10121,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.early_stop_mean_drift_pct = 1.5
         self.early_stop_cv_drift_pct = 1.0
         self.settings_timeout_ms = int(max(1_000, int(settings_timeout_ms)))
+        self.max_anchor_dx_steps = int(max(50, int(imaging_x_guard_steps)))
+        self.max_anchor_dz_steps = int(max(200, int(imaging_z_guard_steps)))
+        self.imaging_guard_hit_cap = int(max(1, int(imaging_guard_hit_cap)))
 
         self.max_search_cycles   = int(max_search_cycles)
         self.max_recenter_moves  = int(max_recenter_moves)
@@ -10131,6 +10138,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._oob_positions = []            # recent out-of-bound centers (pixels)
 
         self._incremental_emitted = False
+        self._background_stale = False
+        self._search_anchor_xyz = None
+        self._imaging_guard_hit_count = 0
 
         # --- offsets (persist across pressures) ---
         self._y_focus_offset_steps = 0            # persistent Y offset (steps) for best focus so far
@@ -10202,6 +10212,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         self.state_setDelay.addTransition(self.delayApplied, self.state_capture)
         self.state_setDelay.addTransition(self.moveDone, self.state_setDelay)
+        self.state_capture.addTransition(self.backgroundRefreshNeeded, self.state_prepBG)
         self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
 
         # search: loop until found or retries exhausted
@@ -10315,8 +10326,63 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 max(self.y_lo, min(self.y_hi, int(y))),
                 max(self.z_lo, min(self.z_hi, int(z))))
 
+    def _reset_contour_tracker(self):
+        cam = getattr(self.model, "droplet_camera_model", None)
+        if cam is None:
+            return
+        try:
+            if hasattr(cam, "reset_droplet_contour_tracker"):
+                cam.reset_droplet_contour_tracker()
+            else:
+                cam._last_droplet_center_px = None
+        except Exception:
+            pass
+
+    def _mark_background_stale(self, reason: str):
+        self._background_stale = True
+        self._reset_contour_tracker()
+        self._record_event("background_marked_stale", {"reason": str(reason or "")})
+
+    def _on_background_captured(self, _frame):
+        self._background_stale = False
+        self._imaging_guard_hit_count = 0
+        self._record_event("background_refreshed", {"status": "ok"})
+
+    def _apply_imaging_envelope(self, xyz):
+        if self._search_anchor_xyz is None:
+            return (int(xyz[0]), int(xyz[1]), int(xyz[2])), False
+        ax, ay, az = [int(v) for v in self._search_anchor_xyz]
+        tx, ty, tz = [int(v) for v in xyz]
+        cx = max(ax - self.max_anchor_dx_steps, min(ax + self.max_anchor_dx_steps, tx))
+        cz = max(az - self.max_anchor_dz_steps, min(az + self.max_anchor_dz_steps, tz))
+        changed = (cx != tx) or (cz != tz)
+        return (int(cx), int(ty), int(cz)), bool(changed)
+
     def _safe_move_abs(self, xyz):
         X, Y, Z = self._clamp_xyz(*xyz)
+        (X, Y, Z), envelope_changed = self._apply_imaging_envelope((X, Y, Z))
+        if envelope_changed:
+            self._imaging_guard_hit_count += 1
+            self.stageChanged.emit(
+                f"Imaging guard clamped target to ({X}, {Y}, {Z}) "
+                f"[hit {self._imaging_guard_hit_count}/{self.imaging_guard_hit_cap}]"
+            )
+            self._record_event(
+                "imaging_guard_clamp",
+                {
+                    "target_after_clamp": [int(X), int(Y), int(Z)],
+                    "hit_count": int(self._imaging_guard_hit_count),
+                    "hit_cap": int(self.imaging_guard_hit_cap),
+                },
+                level="warning",
+            )
+            if self._imaging_guard_hit_count >= self.imaging_guard_hit_cap:
+                self.stageChanged.emit("Imaging guard hit limit → skip pressure")
+                self._bad_reason = "imaging_guard_limit"
+                self._record_pressure_result(valid=False, reason=self._bad_reason)
+                self.i += 1
+                self.nextPressure.emit()
+                return
         cur = self.model.machine_model.get_current_position_dict()
         if (int(cur['X']) == X) and (int(cur['Y']) == Y) and (int(cur['Z']) == Z):
             self.moveDone.emit()
@@ -10532,6 +10598,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._reset_char_buffers()
         self._centered = False
         self._char_need_capture = False
+        self._background_stale = False
+        self._search_anchor_xyz = None
+        self._imaging_guard_hit_count = 0
+        self._reset_contour_tracker()
         self.pressureReady.emit()
 
     @Slot()
@@ -10551,6 +10621,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         tgt = ( int(tgt[0] + self._x_track_offset_steps),
                 int(tgt[1] + self._y_focus_offset_steps),
                 int(tgt[2] + self._z_track_offset_steps) )
+        self._search_anchor_xyz = self._clamp_xyz(*tgt)
+        self._imaging_guard_hit_count = 0
+        self._mark_background_stale("pressure_target_move")
         self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} us → {tgt}")
         self._safe_move_abs(tgt)
 
@@ -10569,6 +10642,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             set_attr="background_image",
             stage_text="Capturing background",
             attempts_total=3, retry_delay_ms=120, guard_timeout_ms=10_000,
+            on_success=self._on_background_captured,
             final_error_msg="Background capture failed."
         )
 
@@ -10597,6 +10671,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
             nudge = 0.002
             self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
+            self._mark_background_stale("search_nudge_move")
             self._safe_move_abs(
                 self._predict_target_xyz(self.vec_steps_per_s,
                                         self.target_delay_us + int(1000 * nudge))
@@ -10605,7 +10680,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
         self._delay_try_index += 1
+        prev_delay = self.current_delay_us
         self.current_delay_us = self._clamp_delay(d)
+        if prev_delay is None or int(self.current_delay_us) != int(prev_delay):
+            self._reset_contour_tracker()
         self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} us (search)")
         self._request_settings_with_timeout(
             {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
@@ -10615,6 +10693,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureDroplet(self):
+        if bool(getattr(self, "_background_stale", False)):
+            self.stageChanged.emit("Background stale after movement → refreshing background")
+            self.backgroundRefreshNeeded.emit()
+            return
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text=f"Capture droplet @ {self.current_delay_us} us",
@@ -10624,11 +10706,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyzeDroplet(self):
-        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
-            self.droplet_image, self.background_image
+        contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image, self.background_image, return_details=True
         )
         if contour is None:
-            self.stageChanged.emit("No droplet in frame → try next delay")
+            reason = str((details or {}).get("reason", "no_contour"))
+            if reason in {"low_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
+                self._reset_contour_tracker()
+            self.stageChanged.emit(f"No droplet in frame ({reason}) → try next delay")
             self.presentImageSignal.emit(overlay)
             self.continueSearch.emit()
             return
@@ -10650,16 +10735,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCenter(self):
-        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
-            self.droplet_image, self.background_image
+        contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image, self.background_image, return_details=True
         )
         if contour is None:
+            reason = str((details or {}).get("reason", "no_contour"))
+            if reason in {"low_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
+                self._reset_contour_tracker()
             self._lost_count += 1
             if self._lost_count > self._lost_limit:
                 self.stageChanged.emit("Droplet repeatedly lost while centering → restart search")
                 self.continueSearch.emit()
                 return
-            self.stageChanged.emit("Droplet lost while centering → retry delay sweep")
+            self.stageChanged.emit(f"Droplet lost while centering ({reason}) → retry delay sweep")
             self.presentImageSignal.emit(overlay)
             self.continueSearch.emit()
             return
@@ -10693,6 +10781,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return
         
         self.stageChanged.emit(f"Recentering move (clamped): {dX},{0},{dZ}")
+        self._mark_background_stale("centering_recenter_move")
         self._safe_move_abs(self._clamp_xyz(
             self.model.machine_model.get_current_position_dict()['X'] + dX,
             self.model.machine_model.get_current_position_dict()['Y'] + 0,
@@ -10990,6 +11079,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         cur = self.model.machine_model.get_current_position_dict()
         self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
         self._char_need_capture = True  # after motion, take a fresh frame
+        self._mark_background_stale("center_first_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
 
     def _check_boundary_and_maybe_recenter(self, center_px) -> bool:
@@ -11049,7 +11139,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.i += 1
             self.nextPressure.emit()
             return True
-        
+        self._mark_background_stale("boundary_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True
 
@@ -11112,6 +11202,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             cur = self.model.machine_model.get_current_position_dict()
             tgt = (cur['X'], cur['Y'], cur['Z'] + dZ)
             self.stageChanged.emit(f"No droplet after sweep → half-frame UP probe #{self._vertical_probe_tries}/{self._max_vertical_probes}")
+            self._mark_background_stale("vertical_probe_move")
             self._safe_move_abs(self._clamp_xyz(*tgt))  # state_setDelay has a moveDone→state_setDelay transition
         except Exception as e:
             self.stageChanged.emit(f"Half-frame probe failed: {e}")
@@ -12618,7 +12709,18 @@ class DropletCameraModel(QObject):
             return payload[0], payload[1], payload[2], details
         return payload
     
-    def identify_droplet_contour(self, image, background):
+    def identify_droplet_contour(
+        self,
+        image,
+        background,
+        *,
+        return_details: bool = False,
+        min_signal_p95: float = 8.0,
+        max_bbox_area_frac: float = 0.12,
+        max_contour_area_frac: float = 0.08,
+        roi_half_size_px: int = 240,
+        border_margin_px: int = 1,
+    ):
         """
         Identifies the contour of the droplet in the image.
         - Uses the background image to compute the difference image.
@@ -12627,9 +12729,29 @@ class DropletCameraModel(QObject):
         - Returns the contour and the annotated image.
         """
         image_gray, diff = self.calc_diff_image(image, background)
+        details = {
+            "status": "init",
+            "reason": "",
+            "roi_used": False,
+            "roi_fallback_to_full": False,
+            "center": None,
+            "bbox": None,
+            "contour_area": 0.0,
+            "bbox_area": 0,
+            "p95": 0.0,
+            "border_touch": False,
+            "bbox_area_frac": 0.0,
+            "contour_area_frac": 0.0,
+        }
         if diff is None:
             print('Difference image is None')
+            details.update({"status": "none", "reason": "difference_none"})
+            if return_details:
+                return None, None, details
             return None, None
+
+        H, W = diff.shape[:2]
+        full_area = float(max(1, H * W))
 
         def _threshold_region(region):
             blur = cv2.GaussianBlur(region, (5, 5), 0)
@@ -12656,14 +12778,69 @@ class DropletCameraModel(QObject):
                 out.append(contour)
             return out
 
+        def _quality_metrics(contour):
+            x, y, w, h = cv2.boundingRect(contour)
+            patch = diff[y:y + h, x:x + w]
+            p95 = 0.0
+            if patch.size > 0:
+                p95 = float(np.percentile(patch, 95))
+            contour_area = float(cv2.contourArea(contour))
+            bbox_area = int(w * h)
+            bbox_area_frac = float(bbox_area) / full_area
+            contour_area_frac = float(contour_area) / full_area
+            border_touch = bool(
+                x <= int(border_margin_px)
+                or y <= int(border_margin_px)
+                or (x + w) >= (W - int(border_margin_px))
+                or (y + h) >= (H - int(border_margin_px))
+            )
+            low_signal = bool(p95 < float(min_signal_p95))
+            oversize = bool(
+                bbox_area_frac > float(max_bbox_area_frac)
+                or contour_area_frac > float(max_contour_area_frac)
+            )
+            border_blob = bool(border_touch and bbox_area_frac > 0.03 and p95 < float(min_signal_p95 * 1.5))
+            reject = bool(low_signal or oversize or border_blob)
+            reason = ""
+            if low_signal:
+                reason = "low_signal"
+            elif oversize:
+                reason = "oversize_blob"
+            elif border_blob:
+                reason = "border_blob"
+            return {
+                "x": int(x),
+                "y": int(y),
+                "w": int(w),
+                "h": int(h),
+                "center": (int(x + w // 2), int(y + h // 2)),
+                "contour_area": float(contour_area),
+                "bbox_area": int(bbox_area),
+                "p95": float(p95),
+                "border_touch": bool(border_touch),
+                "bbox_area_frac": float(bbox_area_frac),
+                "contour_area_frac": float(contour_area_frac),
+                "reject": bool(reject),
+                "reason": str(reason),
+            }
+
+        def _choose(filtered):
+            if not filtered:
+                return None
+            return sorted(
+                filtered,
+                key=lambda c: (-cv2.contourArea(c), -cv2.boundingRect(c)[1])
+            )[0]
+
         # Fast path: ROI around last center, fallback to full frame if no valid contour.
         roi_used = False
         x0 = y0 = 0
         x1, y1 = diff.shape[1], diff.shape[0]
         last = self._last_droplet_center_px
+        filtered = []
         if last is not None:
             cx, cy = int(last[0]), int(last[1])
-            half = 240
+            half = int(max(80, int(roi_half_size_px)))
             x0 = max(0, cx - half)
             y0 = max(0, cy - half)
             x1 = min(diff.shape[1], cx + half)
@@ -12677,18 +12854,16 @@ class DropletCameraModel(QObject):
                     roi_used = True
                     # map ROI contour -> full image coords
                     filtered = [c + np.array([[[x0, y0]]], dtype=c.dtype) for c in filtered_roi]
-                else:
-                    filtered = []
-            else:
-                filtered = []
-        else:
-            filtered = []
+                    details["roi_used"] = True
 
         if not filtered:
             th = _threshold_region(diff)
             contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if len(contours) == 0:
                 print('No contours detected')
+                details.update({"status": "none", "reason": "no_contours"})
+                if return_details:
+                    return None, image, details
                 return None, image
             filtered = _filter(contours)
             if len(filtered) == 0:
@@ -12699,22 +12874,87 @@ class DropletCameraModel(QObject):
                     area = cv2.contourArea(contour)
                     x, y, w, h = cv2.boundingRect(contour)
                     cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                details.update({"status": "none", "reason": "no_large_contours"})
+                if return_details:
+                    return None, annotated_image, details
                 return None, annotated_image
 
         # Deterministic contour selection in ambiguous scenes.
-        largest_contour = sorted(
-            filtered,
-            key=lambda c: (-cv2.contourArea(c), -cv2.boundingRect(c)[1])
-        )[0]
+        largest_contour = _choose(filtered)
+        metrics = _quality_metrics(largest_contour)
+
+        # If ROI candidate fails quality, retry from full frame once.
+        if bool(roi_used) and bool(metrics.get("reject", False)):
+            details["roi_fallback_to_full"] = True
+            th = _threshold_region(diff)
+            contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            filtered_full = _filter(contours)
+            largest_full = _choose(filtered_full)
+            if largest_full is not None:
+                largest_contour = largest_full
+                metrics = _quality_metrics(largest_contour)
+                roi_used = False
 
         annotated_image = image.copy()
+        if bool(metrics.get("reject", False)):
+            x = int(metrics.get("x", 0))
+            y = int(metrics.get("y", 0))
+            w = int(metrics.get("w", 0))
+            h = int(metrics.get("h", 0))
+            if w > 0 and h > 0:
+                cv2.rectangle(annotated_image, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                cv2.putText(
+                    annotated_image,
+                    str(metrics.get("reason", "rejected")),
+                    (x, max(16, y - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    1,
+                )
+            details.update({
+                "status": "none",
+                "reason": str(metrics.get("reason", "rejected")),
+                "center": [int(metrics.get("center", (0, 0))[0]), int(metrics.get("center", (0, 0))[1])],
+                "bbox": [x, y, w, h],
+                "contour_area": float(metrics.get("contour_area", 0.0)),
+                "bbox_area": int(metrics.get("bbox_area", 0)),
+                "p95": float(metrics.get("p95", 0.0)),
+                "border_touch": bool(metrics.get("border_touch", False)),
+                "bbox_area_frac": float(metrics.get("bbox_area_frac", 0.0)),
+                "contour_area_frac": float(metrics.get("contour_area_frac", 0.0)),
+            })
+            if return_details:
+                return None, annotated_image, details
+            return None, annotated_image
+
         cv2.drawContours(annotated_image, [largest_contour], -1, (0, 255, 0), 2)
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        self._last_droplet_center_px = (int(x + w // 2), int(y + h // 2))
+        x = int(metrics.get("x", 0))
+        y = int(metrics.get("y", 0))
+        w = int(metrics.get("w", 0))
+        h = int(metrics.get("h", 0))
+        self._last_droplet_center_px = tuple(metrics.get("center", (int(x + w // 2), int(y + h // 2))))
         if roi_used:
             cv2.rectangle(annotated_image, (x0, y0), (x1, y1), (128, 128, 255), 1)
+        details.update({
+            "status": "ok",
+            "reason": "ok",
+            "center": [int(self._last_droplet_center_px[0]), int(self._last_droplet_center_px[1])],
+            "bbox": [x, y, w, h],
+            "contour_area": float(metrics.get("contour_area", 0.0)),
+            "bbox_area": int(metrics.get("bbox_area", 0)),
+            "p95": float(metrics.get("p95", 0.0)),
+            "border_touch": bool(metrics.get("border_touch", False)),
+            "bbox_area_frac": float(metrics.get("bbox_area_frac", 0.0)),
+            "contour_area_frac": float(metrics.get("contour_area_frac", 0.0)),
+        })
 
+        if return_details:
+            return largest_contour, annotated_image, details
         return largest_contour, annotated_image
+
+    def reset_droplet_contour_tracker(self):
+        self._last_droplet_center_px = None
 
     def characterize_droplet(self, image, background,um_per_pixel=1.5696):
         """

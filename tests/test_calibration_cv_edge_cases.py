@@ -55,6 +55,41 @@ def test_identify_droplet_contour_accepts_edge_touching_blob():
     assert contour is not None
 
 
+def test_identify_droplet_contour_rejects_low_signal_border_blob():
+    cam = _camera_stub()
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    cv2.rectangle(img, (0, 0), (210, 210), (6, 6, 6), -1)
+
+    contour, _, details = cam.identify_droplet_contour(img, bg, return_details=True)
+    assert contour is None
+    assert details.get("status") == "none"
+    assert details.get("reason") in {"low_signal", "border_blob", "oversize_blob"}
+
+
+def test_identify_droplet_contour_roi_fallback_to_full_frame():
+    cam = _camera_stub()
+    cam._last_droplet_center_px = (70, 70)
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    # Large stale ROI blob near top-left should be rejected by quality gates.
+    cv2.rectangle(img, (0, 0), (180, 180), (40, 40, 40), -1)
+    # Actual droplet elsewhere should be recovered by full-frame fallback.
+    cv2.circle(img, (320, 300), 28, (255, 255, 255), -1)
+
+    contour, _, details = cam.identify_droplet_contour(
+        img,
+        bg,
+        return_details=True,
+        roi_half_size_px=120,
+    )
+    assert contour is not None
+    x, y, w, h = cv2.boundingRect(contour)
+    cx, cy = (x + w // 2, y + h // 2)
+    assert cx > 250 and cy > 240
+    assert details.get("roi_fallback_to_full") is True
+
+
 def test_characterize_droplet_returns_multiple_for_similar_dual_blobs():
     cam = _camera_stub()
     bg = np.zeros((420, 420, 3), dtype=np.uint8)
