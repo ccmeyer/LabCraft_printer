@@ -1825,14 +1825,17 @@ class CalibrationManager(QObject):
         except Exception:
             return None
 
-    def _process_missing(self, proc_cls) -> list[str]:
+    def _process_missing(self, proc_cls, *args, **kwargs) -> list[str]:
         fn = getattr(proc_cls, "missing_requirements", None)
         if callable(fn):
-            return list(fn(self)) or []
+            try:
+                return list(fn(self, *args, **kwargs)) or []
+            except TypeError:
+                return list(fn(self)) or []
         return []
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
-        missing = self._process_missing(proc_cls)
+        missing = self._process_missing(proc_cls, *args, **kwargs)
         phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
 
         if missing:
@@ -7898,9 +7901,14 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                  edge_guard_px: int = 200,
                  miss_streak_limit: int = 2,
                  delay_floor_margin_us: int = 300,           # emergence+PW+margin is the earliest allowed
+                 settings_timeout_ms: int = 12_000,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
-        missing_requirements = self.missing_requirements(calibration_manager)
+        require_primary_band = pressures is None
+        missing_requirements = self.missing_requirements(
+            calibration_manager,
+            require_primary_band=require_primary_band,
+        )
         if missing_requirements:
             raise ValueError("Cannot start PressureTrajectoryCalibrationProcess; missing prerequisites: "
                                + ", ".join(missing_requirements))
@@ -7929,7 +7937,17 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                     hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
                     cur = (hw_lo + hw_hi) * 0.5
                 pressures = [round(cur, 3)]
-        self.pressures = list(pressures)
+        self.pressures = self._canonicalize_pressures(pressures)
+        try:
+            p_lo_hw, p_hi_hw = self.model.machine_model.get_print_pressure_bounds()
+            clamped = []
+            for p in self.pressures:
+                clamped.append(round(float(min(max(float(p), float(p_lo_hw)), float(p_hi_hw))), 3))
+            self.pressures = self._canonicalize_pressures(clamped)
+        except Exception:
+            pass
+        if not self.pressures:
+            raise ValueError("Cannot start PressureTrajectoryCalibrationProcess; no valid pressures to scan.")
         self.p_index = 0
         self._current_pressure = None
 
@@ -7943,7 +7961,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             start = int((self.emergence_time_us or 1000) + pw + 1500)
             step  = 700
             delays_us = [start + i * step for i in range(3)]
-        self.delays_us = sorted(list(map(int, delays_us)))
+        self._base_delays_us = self._canonicalize_delays(delays_us)
+        if not self._base_delays_us:
+            raise ValueError("Cannot start PressureTrajectoryCalibrationProcess; no valid flash delays to scan.")
+        self.delays_us = list(self._base_delays_us)
         self.d_index = 0
 
         # --- policy / guards ---
@@ -7954,14 +7975,19 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.edge_guard_px                    = int(edge_guard_px)
         self.miss_streak_limit                = int(miss_streak_limit)
         self.delay_floor_margin_us            = int(delay_floor_margin_us)
-        
+        self.settings_timeout_ms              = int(max(1_000, settings_timeout_ms))
+
         self._pending_pressure_adjustment = None  # float | None
+        self._pending_adjust_reason = None
+        self._pending_adjust_payload = {}
         self._adjust_attempts_at_pressure = 0
         self._adjust_attempts_limit = 5          # avoid infinite loops
 
-        # Low-pressure detection thresholds (tunable)
+        # Low-pressure / true-ejection detection thresholds (tunable)
         self._min_radial_growth_px  = 4.0        # net |r(t_last) - r(t_first)| must exceed this
         self._reverse_step_px       = 1.0        # allow small noise; require >1 px reversal to trigger
+        self._min_downward_growth_px = 6.0       # dy must increase by at least this much
+        self._min_downward_slope_px_per_us = 0.0010
 
         # earliest allowable delay (do not go earlier than this)
         try:
@@ -7987,6 +8013,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         # points: aggregated timepoints (one per delay): [{"t_us": int, "center_px": (dx,dy)} ...]
         self.points = []
         self.samples = []
+        self._disqualified_pressures = []
 
         # -------------- states --------------
         self.state_prepare_bg = QState()
@@ -8032,8 +8059,16 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.setInitialState(self.state_prepare_bg)
 
     @staticmethod
-    def missing_requirements(cm) -> list[str]:
+    def missing_requirements(
+        cm,
+        *,
+        require_primary_band: bool = True,
+        pressures: list[float] | None = None,
+        **_kwargs,
+    ) -> list[str]:
         """Return a list of human-readable missing prerequisites."""
+        if pressures is not None:
+            require_primary_band = False
         missing = []
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
@@ -8043,7 +8078,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             missing.append("Background image")
         if cm.get_emergence_time() is None:
             missing.append("Emergence time")
-        if cm.get_primary_pressure_band() is None:
+        if require_primary_band and cm.get_primary_pressure_band() is None:
             missing.append("Primary pressure band")
         return missing
 
@@ -8057,9 +8092,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             return
 
         self.stageChanged.emit("Trajectory: preparing (num_droplets=0)")
-        self.calibration_manager.changeSettingsRequested.emit(
+        self._request_settings_with_timeout(
             {"num_droplets": 0},
-            self.calibration_manager.emitSettingsChangeCompleted
+            on_done=self.calibration_manager.emitSettingsChangeCompleted,
+            context="pressure_trajectory_prepare",
         )
 
     @Slot()
@@ -8073,14 +8109,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self._current_pressure = target
             self.points = []
             self.d_index = 0
+            self.delays_us = list(self._base_delays_us)
             self._reset_delay_state()
             self._miss_streak = 0
             self._stop_delays_after_this = False
             self._discard_next = bool(self.discard_first_after_pressure)
             self._max_delay_allowed_us = None
             self._pending_pressure_adjustment = None
-            self._adjust_attempts_at_pressure = 0
-            self._saw_multiple_this_pressure = False
+            self._pending_adjust_reason = None
+            self._pending_adjust_payload = {}
 
             # reset completion map for this pressure
             self._completed = [False] * len(self.delays_us)
@@ -8100,7 +8137,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             f"({self._completed.count(True)+1}/{len(self.delays_us)})"
         )
         def _after(): self.pressureApplied.emit()
-        self.calibration_manager.changeSettingsRequested.emit(settings, _after)
+        self._request_settings_with_timeout(
+            settings,
+            on_done=_after,
+            context="pressure_trajectory_apply",
+        )
 
     @Slot()
     def onSetDelay(self):
@@ -8116,7 +8157,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             f"Trajectory: update delay → {delay} us at P={self._current_pressure:.3f} psi"
         )
         def _after(): self.delayApplied.emit()
-        self.calibration_manager.changeSettingsRequested.emit({"flash_delay": delay}, _after)
+        self._request_settings_with_timeout(
+            {"flash_delay": delay},
+            on_done=_after,
+            context="pressure_trajectory_set_delay",
+        )
 
     @Slot()
     def onCaptureTimepoint(self):
@@ -8143,14 +8188,20 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.timepointReady.emit()
             return
 
-        droplets, nozzle_area, overlay = self.model.droplet_camera_model.identify_droplets(
+        det = self.model.droplet_camera_model.identify_droplets(
             self.droplet_image,
             self.background_image,
             self.nozzle_center_px,
             min_area=900,
             satellite_band_px=12,
-            min_free_offset_px=18
+            min_free_offset_px=18,
+            return_details=True,
         )
+        if isinstance(det, tuple) and len(det) >= 4:
+            droplets, nozzle_area, overlay, droplet_details = det[0], det[1], det[2], det[3]
+        else:
+            droplets, nozzle_area, overlay = det
+            droplet_details = {}
 
         good = False
         edge_close_now = False
@@ -8162,8 +8213,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit(
                 f"Multiple droplets detected at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
             )
-            self._pending_pressure_adjustment = new_p
-            self._saw_multiple_this_pressure = True
+            self._set_pending_adjustment(
+                new_p,
+                reason="multiple_droplets",
+                payload={
+                    "droplet_count": int(len(droplets)),
+                    "details": dict(droplet_details or {}),
+                    "disqualify_pressure": True,
+                },
+            )
             # Continue to present overlay and let state flow into onDecide()
             try:
                 self.presentImageSignal.emit(overlay)
@@ -8212,8 +8270,14 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onDecide(self):
         if self._pending_pressure_adjustment is not None:
-            self._restart_current_pressure_with(self._pending_pressure_adjustment,
-                                                reason="multiple_droplets")
+            reason = str(getattr(self, "_pending_adjust_reason", "") or "pressure_adjustment")
+            payload = dict(getattr(self, "_pending_adjust_payload", {}) or {})
+            if reason == "multiple_droplets":
+                self._append_disqualified_pressure_record(reason=reason, details=payload)
+            self._restart_current_pressure_with(
+                self._pending_pressure_adjustment,
+                reason=reason,
+            )
             return
         # 1) too many fails at this delay → mark completed (skipped) and move on
         if self._failed_caps_this_delay >= self.max_failed_captures_per_delay:
@@ -8256,6 +8320,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 new_p = round(float(self._current_pressure) + 0.01, 3)
                 self.stageChanged.emit(
                     f"Weak/negative radial motion at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
+                )
+                self._set_pending_adjustment(
+                    new_p,
+                    reason="low_pressure_retraction",
+                    payload={"point_count": int(len(self.points))},
                 )
                 self._restart_current_pressure_with(new_p, reason="low_pressure_retraction")
                 return
@@ -8311,27 +8380,39 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.samples.append({
                 "pressure": float(self._current_pressure),
                 "points": self.points[:],
-                "fit": None
+                "fit": None,
+                "reason": "insufficient_points",
             })
         else:
-            vx, vy = self._fit_velocity(self.points)
-            speed = math.hypot(vx, vy)
-            angle_deg = math.degrees(math.atan2(vy, vx))  # image coords; +y downward
-            self.samples.append({
-                "pressure": float(self._current_pressure),
-                "points": self.points[:],
-                "fit": {
-                    "vx_px_per_us": float(vx),
-                    "vy_px_per_us": float(vy),
-                    "speed_px_per_us": float(speed),
-                    "angle_deg": float(angle_deg),
-                    "n_points": int(len(self.points))
-                }
-            })
+            vx, vy, fit_quality = self._fit_velocity_with_quality(self.points)
+            if self._is_valid_trajectory_fit(vx, vy, fit_quality):
+                speed = math.hypot(vx, vy)
+                angle_deg = math.degrees(math.atan2(vy, vx))  # image coords; +y downward
+                self.samples.append({
+                    "pressure": float(self._current_pressure),
+                    "points": self.points[:],
+                    "fit": {
+                        "vx_px_per_us": float(vx),
+                        "vy_px_per_us": float(vy),
+                        "speed_px_per_us": float(speed),
+                        "angle_deg": float(angle_deg),
+                        "n_points": int(len(self.points)),
+                        "quality": dict(fit_quality),
+                    }
+                })
+            else:
+                self.samples.append({
+                    "pressure": float(self._current_pressure),
+                    "points": self.points[:],
+                    "fit": None,
+                    "reason": "invalid_fit_quality",
+                    "fit_quality": dict(fit_quality),
+                })
 
         # advance pressure or finish
         self.p_index += 1
         self._current_pressure = None
+        self.delays_us = list(self._base_delays_us)
         self.d_index = 0
         self._reset_delay_state()
         self._miss_streak = 0
@@ -8339,8 +8420,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._max_delay_allowed_us = None
         self._completed = [False] * len(self.delays_us)
         self._pending_pressure_adjustment = None
+        self._pending_adjust_reason = None
+        self._pending_adjust_payload = {}
         self._adjust_attempts_at_pressure = 0
-        self._saw_multiple_this_pressure = False
 
         if self.p_index >= len(self.pressures):
             self.finalize.emit()
@@ -8349,12 +8431,28 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCalibrationCompleted(self):
+        valid_fit_count = int(
+            sum(1 for rec in list(self.samples or []) if isinstance(rec.get("fit"), dict))
+        )
+        if valid_fit_count <= 0:
+            msg = "Trajectory scan produced no valid trajectory fits."
+            self._record_error(
+                msg,
+                {
+                    "pressure_count": int(len(self.samples)),
+                    "pressures": [float(rec.get("pressure", 0.0)) for rec in list(self.samples or [])],
+                },
+            )
+            self.calibrationError.emit(msg)
+            return
+
         result = {
             "pressures": self.samples,
-            "delays_us": self.delays_us,
+            "delays_us": list(self._base_delays_us),
             "band_used": self.calibration_manager.get_primary_pressure_band(),
             "nozzle_center_px": self.nozzle_center_px,
-            "emergence_time_us": self.emergence_time_us
+            "emergence_time_us": self.emergence_time_us,
+            "valid_fit_count": int(valid_fit_count),
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         try:
@@ -8365,6 +8463,90 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.calibrationCompleted.emit()
 
     # ----------------- helpers -----------------
+
+    @staticmethod
+    def _canonicalize_pressures(pressures):
+        out = []
+        seen = set()
+        for p in list(pressures or []):
+            try:
+                v = round(float(p), 3)
+            except Exception:
+                continue
+            key = float(v)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(float(v))
+        return out
+
+    @staticmethod
+    def _canonicalize_delays(delays_us):
+        out = []
+        seen = set()
+        for d in list(delays_us or []):
+            try:
+                v = int(d)
+            except Exception:
+                continue
+            if v in seen:
+                continue
+            seen.add(v)
+            out.append(v)
+        out.sort()
+        return out
+
+    def _request_settings_with_timeout(self, settings: dict, *, on_done, context: str):
+        done = {"fired": False}
+        t_ref = {"t": None}
+        timeout_ms = int(max(1_000, getattr(self, "settings_timeout_ms", 12_000)))
+
+        def _finish(ok: bool, why: str | None = None):
+            if done["fired"]:
+                return
+            done["fired"] = True
+            self._cancel_timeout(t_ref["t"])
+            t_ref["t"] = None
+            if not ok:
+                msg = str(why or "Settings update failed.")
+                self._record_error(msg, {"context": str(context), "settings": dict(settings or {})})
+                self.calibrationError.emit(msg)
+                self.finalize.emit()
+                return
+            try:
+                on_done()
+            except Exception as exc:
+                msg = f"Settings completion handler failed: {exc}"
+                self._record_error(msg, {"context": str(context)})
+                self.calibrationError.emit(msg)
+                self.finalize.emit()
+
+        t_ref["t"] = self._start_timeout(
+            timeout_ms,
+            on_timeout=lambda: _finish(False, f"Settings timeout after {timeout_ms} ms ({context})"),
+        )
+        self._request_settings_with_recording(
+            dict(settings or {}),
+            lambda *args, **kwargs: _finish(True, "callback"),
+            context=str(context or ""),
+        )
+
+    def _set_pending_adjustment(self, new_pressure: float, *, reason: str, payload: dict | None = None):
+        self._pending_pressure_adjustment = float(new_pressure)
+        self._pending_adjust_reason = str(reason or "pressure_adjustment")
+        self._pending_adjust_payload = dict(payload or {})
+
+    def _append_disqualified_pressure_record(self, *, reason: str, details: dict | None = None):
+        rec = {
+            "pressure": float(self._current_pressure),
+            "points": self.points[:],
+            "fit": None,
+            "reason": str(reason or "disqualified"),
+            "disqualified": True,
+            "details": dict(details or {}),
+        }
+        self.samples.append(rec)
+        self._disqualified_pressures.append(float(self._current_pressure))
 
     def _reset_delay_state(self):
         self._rep_count = 0
@@ -8508,6 +8690,57 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         vy = np.sum((t - t_mean) * (y - y.mean())) / denom
         return -float(vx), float(vy)
 
+    def _fit_velocity_with_quality(self, points):
+        t = np.array([p["t_us"] for p in points], dtype=float)
+        x = np.array([p["center_px"][0] for p in points], dtype=float)
+        y = np.array([p["center_px"][1] for p in points], dtype=float)
+        t_mean = float(np.mean(t))
+        denom = float(np.sum((t - t_mean) ** 2) or 1.0)
+
+        vx_raw = float(np.sum((t - t_mean) * (x - float(np.mean(x)))) / denom)
+        vy_raw = float(np.sum((t - t_mean) * (y - float(np.mean(y)))) / denom)
+
+        x_hat = float(np.mean(x)) + vx_raw * (t - t_mean)
+        y_hat = float(np.mean(y)) + vy_raw * (t - t_mean)
+
+        x_res = x - x_hat
+        y_res = y - y_hat
+        rmse_x = float(np.sqrt(np.mean(x_res * x_res))) if x_res.size else 0.0
+        rmse_y = float(np.sqrt(np.mean(y_res * y_res))) if y_res.size else 0.0
+
+        sst_x = float(np.sum((x - float(np.mean(x))) ** 2))
+        sst_y = float(np.sum((y - float(np.mean(y))) ** 2))
+        sse_x = float(np.sum(x_res * x_res))
+        sse_y = float(np.sum(y_res * y_res))
+        r2_x = float(1.0 - (sse_x / sst_x)) if sst_x > 1e-9 else 1.0
+        r2_y = float(1.0 - (sse_y / sst_y)) if sst_y > 1e-9 else 1.0
+
+        quality = {
+            "rmse_x_px": float(rmse_x),
+            "rmse_y_px": float(rmse_y),
+            "r2_x": float(r2_x),
+            "r2_y": float(r2_y),
+            "n_points": int(len(points)),
+        }
+        # Keep existing sign convention used by downstream stage conversion.
+        return -float(vx_raw), float(vy_raw), quality
+
+    def _is_valid_trajectory_fit(self, vx: float, vy: float, fit_quality: dict) -> bool:
+        if not fit_quality:
+            return False
+        if int(fit_quality.get("n_points", 0)) < int(max(2, self.min_points)):
+            return False
+        if float(fit_quality.get("r2_y", -1.0)) < 0.20:
+            return False
+        if float(fit_quality.get("rmse_y_px", 1e9)) > 35.0:
+            return False
+        if not np.isfinite(float(vx)) or not np.isfinite(float(vy)):
+            return False
+        direction = self._trajectory_direction_summary()
+        if not bool(direction.get("moving_away", False)):
+            return False
+        return True
+
     def _annotate_path_overlay(self, overlay, abs_center_now):
         """
         Draw historical aggregated points (green) and current replicate center (cyan).
@@ -8539,33 +8772,58 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         cv2.rectangle(overlay, (eg, eg), (w-1-eg, h-1-eg), (80, 80, 80), 1)
         return overlay
 
-    def _should_raise_low_pressure_due_to_retraction(self) -> bool:
-        """
-        Return True if aggregated points at the current pressure show that the droplet
-        is not moving away from the nozzle (flat) or is reversing toward it.
-        Uses radial distance r = sqrt(dx^2+dy^2) vs. delay.
-        """
+    def _trajectory_direction_summary(self):
         if len(self.points) < 2:
-            return False
+            return {
+                "point_count": int(len(self.points)),
+                "net_radial_growth_px": 0.0,
+                "net_downward_growth_px": 0.0,
+                "downward_slope_px_per_us": 0.0,
+                "has_reversal": False,
+                "moving_away": False,
+            }
 
         pts = sorted(self.points, key=lambda p: p["t_us"])
-        r = [float(math.hypot(p["center_px"][0], p["center_px"][1])) for p in pts]
+        t = np.array([float(p["t_us"]) for p in pts], dtype=float)
+        dx = np.array([float(p["center_px"][0]) for p in pts], dtype=float)
+        dy = np.array([float(p["center_px"][1]) for p in pts], dtype=float)
+        r = np.sqrt(dx * dx + dy * dy)
 
-        # Net growth across the window
-        net = r[-1] - r[0]
-        if net <= self._min_radial_growth_px:
-            return True
+        net_radial = float(r[-1] - r[0])
+        net_downward = float(dy[-1] - dy[0])
+        t_mean = float(np.mean(t))
+        denom = float(np.sum((t - t_mean) ** 2) or 1.0)
+        dy_slope = float(np.sum((t - t_mean) * (dy - float(np.mean(dy)))) / denom)
 
-        # Local reversal on last step (be tolerant to noise)
-        if len(r) >= 2 and (r[-1] < (r[-2] - self._reverse_step_px)):
-            return True
+        has_reversal = False
+        for i in range(len(dy) - 1):
+            if float(dy[i + 1] - dy[i]) < -float(self._reverse_step_px):
+                has_reversal = True
+                break
 
-        return False
+        moving_away = bool(
+            net_radial > float(self._min_radial_growth_px)
+            and net_downward > float(self._min_downward_growth_px)
+            and dy_slope > float(self._min_downward_slope_px_per_us)
+            and (not has_reversal)
+        )
+        return {
+            "point_count": int(len(pts)),
+            "net_radial_growth_px": float(net_radial),
+            "net_downward_growth_px": float(net_downward),
+            "downward_slope_px_per_us": float(dy_slope),
+            "has_reversal": bool(has_reversal),
+            "moving_away": bool(moving_away),
+        }
+
+    def _should_raise_low_pressure_due_to_retraction(self) -> bool:
+        summary = self._trajectory_direction_summary()
+        return not bool(summary.get("moving_away", False))
     
     def _restart_current_pressure_with(self, new_pressure: float, *, reason: str):
         """
         Do NOT advance p_index. Replace the current pressure value with `new_pressure`,
-        reset per-pressure state, optionally update the band, then jump back to state_apply.
+        reset per-pressure state, then jump back to state_apply.
         """
         # safety clamp to hardware bounds if available
         try:
@@ -8586,9 +8844,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 "pressure": float(self._current_pressure),
                 "points": self.points[:],
                 "fit": None,
-                "note": f"skipped after repeated '{reason}' adjustments"
+                "reason": f"skipped_after_{str(reason)}",
             })
             self._pending_pressure_adjustment = None
+            self._pending_adjust_reason = None
+            self._pending_adjust_payload = {}
             self._finish_pressure_and_advance()
             return
 
@@ -8596,24 +8856,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         if 0 <= self.p_index < len(self.pressures):
             self.pressures[self.p_index] = new_pressure
 
-        # Optional: try to update the primary pressure band on the manager
-        try:
-            band = self.calibration_manager.get_primary_pressure_band()
-            if isinstance(band, (list, tuple)) and len(band) == 2:
-                lo, hi = float(min(band)), float(max(band))
-                if reason == "low_pressure_retraction":
-                    lo = min(hi, new_pressure)
-                elif reason == "multiple_droplets":
-                    hi = max(lo, new_pressure)
-                setter = getattr(self.calibration_manager, "set_primary_pressure_band", None)
-                if callable(setter):
-                    # Before (problematic): setter((round(lo, 3), round(hi, 3)))
-                    setter({"primary_band": (round(lo, 3), round(hi, 3))})
-        except Exception:
-            pass
-
         # Reset per-pressure state
         self._current_pressure = None
+        self.delays_us = list(self._base_delays_us)
         self.points = []
         self._completed = [False] * len(self.delays_us)
         self._reset_delay_state()
@@ -8621,7 +8866,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._stop_delays_after_this = False
         self._max_delay_allowed_us = None
         self._pending_pressure_adjustment = None
-        self._saw_multiple_this_pressure = False
+        self._pending_adjust_reason = None
+        self._pending_adjust_payload = {}
         self._discard_next = bool(self.discard_first_after_pressure)
 
         # Jump back to apply state for this same p_index

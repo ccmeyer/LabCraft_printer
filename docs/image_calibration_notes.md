@@ -1,4 +1,4 @@
-# Droplet Imaging Calibration Notes (Updated March 4, 2026)
+# Droplet Imaging Calibration Notes (Updated March 5, 2026)
 
 ## Scope and Baseline
 - Reviewed:
@@ -527,6 +527,152 @@
 
 6. Regression tests for center reference integrity:
 - emergence completion must not corrupt nozzle tip reference unless explicitly intended.
+
+## PressureTrajectoryCalibrationProcess: Goal, Flow, Prerequisites, Risks, and Improvements
+
+## Goal
+- Measure droplet trajectory as a per-pressure velocity fit (`vx_px_per_us`, `vy_px_per_us`) for downstream pressure sweep planning.
+- Capture enough timepoints per pressure to fit a stable line `center(t)` while handling edge-of-FOV conditions.
+- Persist result payload through `CalibrationManager.set_pressure_trajectory_result(...)`.
+
+## Current call path
+1. UI: `DropletImagingDialog.toggle_start_pressure_trajectory_calibration(...)`.
+2. Controller: `Controller.start_pressure_trajectory_calibration()`.
+3. Manager: `CalibrationManager.start_pressure_trajectory_calibration()` -> `_try_start_process(PressureTrajectoryCalibrationProcess)`.
+4. Process FSM:
+   - `state_prepare_bg` -> `state_apply` -> (`state_capture` <-> `state_analyze` <-> `state_decide` / `state_set_delay`) -> `state_final`.
+5. Settings/capture execution:
+   - process emits `changeSettingsRequested` and `captureImageRequested`;
+   - controller/machine callbacks drive `settingsChangeCompleted` / `captureCompleted`.
+
+## Current algorithm flow
+1. Build pressure set:
+- If no explicit pressures are passed, use primary band `[lo, mid, hi]`.
+- Else use provided list.
+
+2. Build delay set:
+- Default delays are `emergence_time + pulse_width + 1500 us` with 700 us spacing (3 points).
+
+3. Per-pressure loop:
+- Apply pressure + initial delay.
+- Capture replicate frames per delay (default 3, median center used).
+- If no/failed detections exceed cap: mark delay skipped.
+- If edge-of-FOV is hit: stop exploring later delays and insert earlier/mid delays to reach `min_points`.
+- If multiple droplets: reduce pressure by 0.01 psi and restart same pressure slot.
+- If weak/reversing radial motion: increase pressure by 0.01 psi and restart same pressure slot.
+
+4. Fit and persist:
+- If enough points (`>= min_points`), fit `(vx, vy)` by least squares.
+- Append per-pressure fit (or `fit=None` if insufficient points).
+- Final state emits `set_pressure_trajectory_result(...)`.
+
+## Enforced prerequisites (today)
+- `Nozzle center (machine coords)`
+- `Nozzle center (image coords)`
+- `Background image`
+- `Emergence time`
+- `Primary pressure band`
+
+## Key inconsistencies, vulnerabilities, and edge cases
+
+## High priority
+1. Settings transitions are not timeout-guarded.
+- `onPrepare`, `onApplyPressure`, and `onSetDelay` emit settings requests directly (no timeout helper), so missing callbacks can stall FSM progress.
+
+2. Pressure adjustment loop guard is effectively disabled.
+- `_restart_current_pressure_with(...)` increments `_adjust_attempts_at_pressure`, but later resets it to `0` before reapply, so repeated adjust loops can continue far longer than intended.
+
+3. Process can complete with zero valid fits.
+- Completion always emits success payload even when all pressure entries have `fit=None`; downstream sweep then fails later with poorer operator feedback.
+
+4. Delay plan mutates globally across pressures.
+- Earlier/mid delay insertion modifies `self.delays_us` permanently; later pressures inherit expanded delay lists, increasing runtime and changing behavior pressure-to-pressure.
+
+5. Multiple-droplet branch triggers on any single frame.
+- A single noisy multi-contour frame can force immediate pressure decrement/restart, with no replicate consensus check.
+
+## Medium priority
+6. Stream-like single discrimination is not used in this process.
+- `identify_droplets(...)` supports rich details (`is_stream_like`, aspect, circularity), but trajectory process calls it without `return_details=True`; elongated stream cases can be misinterpreted as clean singles.
+
+7. Primary band requirement is unconditional.
+- Even if explicit `pressures` are provided by caller, `missing_requirements` still requires a primary band.
+
+8. Default `[lo, mid, hi]` pressure set is not deduplicated.
+- Narrow bands can create duplicate pressures after rounding, wasting captures and reducing information value.
+
+9. Band is modified during trajectory adjustment.
+- `_restart_current_pressure_with(...)` attempts to update manager primary band in-process; this side effect can narrow/widen later planning unexpectedly.
+
+10. Fixed spatial thresholds are resolution-dependent.
+- `edge_guard_px=200`, `min_area=900`, and related constants are not normalized by image size/nozzle scale.
+
+## Lower priority
+11. Unused state fields indicate incomplete logic paths.
+- `_saw_multiple_this_pressure` and `_edge_close_now` are set but not consumed for decisions.
+
+12. `num_droplets=0` prepare stage does not recapture background.
+- Process relies on cached background and still incurs a settings step; this can add latency without new image quality assurance.
+
+## Recommended reliability and performance changes
+
+## Control-path changes
+1. Wrap all settings requests with timeout/recording helper.
+- Use `_request_settings_with_recording(...)` plus timeout handling in `onPrepare`, `onApplyPressure`, and `onSetDelay`.
+
+2. Fix adjustment-attempt guard semantics.
+- Track attempts per pressure slot without resetting on each restart.
+- Hard-fail or skip slot deterministically once cap is reached.
+
+3. Do not emit success when no usable fit exists.
+- Require at least one valid fit for process success; otherwise emit calibration error with per-pressure diagnostics.
+
+4. Make primary-band requirement conditional.
+- If explicit `pressures` are supplied, allow start without primary band.
+
+5. Remove in-loop band mutation side effects.
+- Keep trajectory pressure adjustments local; update primary band only through a clearly scoped policy at process end (or not at all).
+
+## Analysis-path changes
+6. Enable `identify_droplets(..., return_details=True)` and apply quality gates.
+- Reject or down-rank stream-like singles.
+- Require replicate consensus before triggering pressure adjust (`multiple` or `low_pressure_retraction`).
+
+7. Preserve per-pressure delay plans.
+- Keep immutable base delays and clone per pressure; do not carry inserted delays across pressure slots.
+
+8. Add fit quality metrics.
+- Persist residual error/R^2 and mark low-confidence fits.
+- Use confidence thresholds before accepting fit for downstream interpolation.
+
+9. Normalize key thresholds.
+- Scale edge guard and min-area gates with image dimensions and expected droplet size.
+
+## Performance changes
+10. Reduce unnecessary restarts and captures.
+- Require 2-of-3 replicate evidence before pressure restart.
+- Early-stop delay probing when fit confidence is already above threshold.
+- Deduplicate pressure list before scan.
+
+## Recommended tests (currently missing)
+1. Start-path requirements:
+- explicit pressures with no primary band should be allowed.
+- missing required prerequisites should fail with deterministic message.
+
+2. Settings timeout safety:
+- missing `settingsChangeCompleted` callback should emit error, not hang.
+
+3. Adjustment loop guard:
+- repeated `multiple` or `retraction` conditions must stop at configured attempt cap.
+
+4. Delay-plan isolation:
+- inserted delays at pressure A should not alter delay schedule at pressure B.
+
+5. Fit validity contract:
+- process should error when no pressure yields a valid fit.
+
+6. Stream/auxiliary classification:
+- stream-like single frames should not be treated as clean trajectory points without confirmation.
 
 ## Validation Coverage Status
 
