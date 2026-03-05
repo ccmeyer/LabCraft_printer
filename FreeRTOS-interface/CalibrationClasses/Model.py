@@ -743,6 +743,7 @@ class CalibrationManager(QObject):
         self.nozzle_center = None
         self.nozzle_center_image_position = None
         self.emergence_nozzle_center_image_position = None
+        self.real_nozzle_center_image_position = None
         self.droplet_trajectory_vector = None
         self.trajectory_delay = None
         self.min_start_delay = None
@@ -960,6 +961,7 @@ class CalibrationManager(QObject):
         self.calibration_file_path = calibration_file_path
         # Per-run derived center used by pressure band; avoid stale cross-session carryover.
         self.emergence_nozzle_center_image_position = None
+        self.real_nozzle_center_image_position = None
         print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
@@ -1528,9 +1530,14 @@ class CalibrationManager(QObject):
     def set_nozzle_center_image_position(self, center): 
         self.nozzle_center_image_position = center
         self._emit_readiness()
-    def set_emergence_nozzle_center_image_position(self, center):
+    def set_real_nozzle_center_image_position(self, center):
+        self.real_nozzle_center_image_position = center
+        # Keep legacy alias synchronized.
         self.emergence_nozzle_center_image_position = center
         self._emit_readiness()
+    def set_emergence_nozzle_center_image_position(self, center):
+        # Backward-compatible alias for the emergence-derived real nozzle center.
+        self.set_real_nozzle_center_image_position(center)
     def set_trajectory_vector(self, vector): 
         self.droplet_trajectory_vector = vector
         self._emit_readiness()
@@ -1579,19 +1586,20 @@ class CalibrationManager(QObject):
     def get_background_image(self): return self.background_image
     def get_nozzle_center(self): return self.nozzle_center
     def get_nozzle_center_image_position(self): return self.nozzle_center_image_position
+    def get_real_nozzle_center_image_position(self):
+        real_center = getattr(self, "real_nozzle_center_image_position", None)
+        if real_center is not None:
+            return real_center
+        # Backward-compatible alias path.
+        return getattr(self, "emergence_nozzle_center_image_position", None)
     def get_emergence_nozzle_center_image_position(self):
-        return self.emergence_nozzle_center_image_position
+        # Backward-compatible alias path.
+        return self.get_real_nozzle_center_image_position()
     def get_pressure_scan_nozzle_center_image_position(self):
-        return (
-            self.emergence_nozzle_center_image_position
-            if self.emergence_nozzle_center_image_position is not None
-            else self.nozzle_center_image_position
-        )
+        return self.get_real_nozzle_center_image_position()
     def get_pressure_scan_nozzle_center_source(self):
-        if self.emergence_nozzle_center_image_position is not None:
-            return "emergence"
-        if self.nozzle_center_image_position is not None:
-            return "nozzle_position"
+        if self.get_real_nozzle_center_image_position() is not None:
+            return "emergence_real_nozzle"
         return "none"
     def get_trajectory_vector(self): return self.droplet_trajectory_vector
     def get_trajectory_delay(self): return self.trajectory_delay
@@ -5433,7 +5441,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if callable(get_ps_center):
             self.nozzle_center_px = get_ps_center()
         else:
-            self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
+            get_real_center = getattr(self.calibration_manager, "get_real_nozzle_center_image_position", None)
+            self.nozzle_center_px = get_real_center() if callable(get_real_center) else None
         get_ps_source = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_source", None)
         self.nozzle_center_source = str(get_ps_source()) if callable(get_ps_source) else "legacy"
         self.background_image   = self.calibration_manager.get_background_image()
@@ -5658,8 +5667,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         missing = []
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
-        if cm.get_nozzle_center_image_position() is None:
-            missing.append("Nozzle center (image coords)")
+        get_real_center = getattr(cm, "get_real_nozzle_center_image_position", None)
+        real_center = get_real_center() if callable(get_real_center) else None
+        if real_center is None:
+            missing.append("Real nozzle center (image coords, from emergence)")
         if cm.get_background_image() is None:
             missing.append("Background image")
         if cm.get_emergence_time() is None:
@@ -7916,7 +7927,12 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.phase_name = "pressure_trajectory"
 
         # --- prerequisites ---
-        self.nozzle_center_px  = self.calibration_manager.get_nozzle_center_image_position()
+        get_ps_center = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_image_position", None)
+        if callable(get_ps_center):
+            self.nozzle_center_px = get_ps_center()
+        else:
+            get_real_center = getattr(self.calibration_manager, "get_real_nozzle_center_image_position", None)
+            self.nozzle_center_px = get_real_center() if callable(get_real_center) else None
         self.background_image  = self.calibration_manager.get_background_image()
         self.emergence_time_us = self.calibration_manager.get_emergence_time()
         self._ready = (self.nozzle_center_px is not None and
@@ -8072,8 +8088,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         missing = []
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
-        if cm.get_nozzle_center_image_position() is None:
-            missing.append("Nozzle center (image coords)")
+        get_real_center = getattr(cm, "get_real_nozzle_center_image_position", None)
+        real_center = get_real_center() if callable(get_real_center) else None
+        if real_center is None:
+            missing.append("Real nozzle center (image coords, from emergence)")
         if cm.get_background_image() is None:
             missing.append("Background image")
         if cm.get_emergence_time() is None:

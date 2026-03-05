@@ -13,7 +13,7 @@ from CalibrationClasses.Model import PressureTrajectoryCalibrationProcess  # noq
 def test_pressure_trajectory_missing_requirements_primary_band_optional_with_explicit_pressures():
     cm = SimpleNamespace(
         get_nozzle_center=lambda: {"X": 0, "Y": 0, "Z": 0},
-        get_nozzle_center_image_position=lambda: (100, 100),
+        get_real_nozzle_center_image_position=lambda: (100, 100),
         get_background_image=lambda: np.zeros((64, 64), dtype=np.uint8),
         get_emergence_time=lambda: 4500,
         get_primary_pressure_band=lambda: None,
