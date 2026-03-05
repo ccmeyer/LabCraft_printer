@@ -19,6 +19,9 @@ def _rep(cls_name: str, *, dy: int | None = None, cy: int | None = None, h: int 
         "nozzle_attached_area": 0,
         "nozzle_wet": False,
         "frame_height_px": int(h),
+        "stream_like_count": 0,
+        "max_aspect_h_over_w": None,
+        "min_circularity": None,
     }
 
 
@@ -329,6 +332,8 @@ def test_pressure_band_edge_retest_only_allowed_in_scan_phase():
     proc.edge_retest_scan_only = True
     proc.edge_retest_cooldown_psi = 0.03
     proc.edge_retest_max_per_run = 3
+    proc.edge_retest_proximity_window_psi = 0.03
+    proc.samples = [{"pressure": 1.52, "verdict": "multiple"}]
 
     proc._phase = "refine_upper"
     r1 = proc._should_run_delay_retest(
@@ -359,8 +364,10 @@ def test_pressure_band_edge_retest_cooldown_skips_nearby_pressure():
     proc.edge_retest_scan_only = True
     proc.edge_retest_cooldown_psi = 0.03
     proc.edge_retest_max_per_run = 3
+    proc.edge_retest_proximity_window_psi = 0.03
     proc._edge_retest_count = 1
     proc._edge_retest_pressures = [1.50]
+    proc.samples = [{"pressure": 1.56, "verdict": "multiple"}]
     proc._current_pressure = 1.515
 
     near = proc._should_run_delay_retest(
@@ -377,6 +384,14 @@ def test_pressure_band_edge_retest_cooldown_skips_nearby_pressure():
         {"has_upper_multiple_evidence": True},
     )
     assert far == "edge_single_with_upper_multiple"
+
+    proc.samples = [{"pressure": 1.575, "verdict": "multiple"}]
+    near_edge = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+    assert near_edge == "edge_single_with_upper_multiple"
 
 
 def test_pressure_band_start_delay_retest_later_increments_later_counter():
@@ -430,3 +445,105 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     assert proc.replicates_target == 3
     assert proc._discard_next is False
     assert proc._retest_mode_active is True
+
+
+def test_pressure_band_analyze_reclassifies_stream_like_single_as_multiple():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._discard_next = False
+    proc._phase = "scan"
+    proc._prev_verdict = "single"
+    proc._current_pressure = 1.55
+    proc.safety_clearance_px = 350
+    proc.nozzle_center_px = (100, 100)
+    proc.nozzle_area_threshold = 8000
+    proc.background_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.droplet_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.reps = []
+    proc._invalid_skip_count = 0
+    proc._invalid_skip_cap = 6
+    proc._active_classify_delay_us = 5850
+    proc.classify_delay_us = 5850
+    proc.stream_aspect_hard = 2.0
+    proc.stream_aspect_soft = 1.6
+    proc.stream_circularity_max = 0.55
+    proc.stream_min_area_px = 1200
+    proc.stageChanged = Recorder()
+    proc.replicateReady = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationError = Recorder()
+    proc.presentImageSignal = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(110, 540)],
+                0,
+                np.zeros((220, 220), dtype=np.uint8),
+                {
+                    "free_droplets": [
+                        {
+                            "area_px": 2600,
+                            "aspect_h_over_w": 2.4,
+                            "circularity": 0.31,
+                            "is_stream_like": True,
+                        }
+                    ]
+                },
+            )
+        )
+    )
+
+    proc.onAnalyzeReplicate()
+
+    assert proc.finalize.calls == []
+    assert proc.replicateReady.calls
+    assert len(proc.reps) == 1
+    rep = proc.reps[0]
+    assert rep["cls"] == "multiple"
+    assert rep["stream_like_count"] == 1
+    assert rep["max_aspect_h_over_w"] >= 2.4
+    assert rep["min_circularity"] <= 0.31
+    assert decision_calls
+    assert any(
+        args and args[0] == "stream_like_single_reclassified_multiple"
+        for args, _kwargs in decision_calls
+    )
+
+
+def test_pressure_band_completion_reports_conservative_primary_band_for_wide_band():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.samples = [
+        {"pressure": 1.30, "verdict": "single"},
+        {"pressure": 1.20, "verdict": "single"},
+        {"pressure": 1.10, "verdict": "single"},
+    ]
+    proc.start_pressure = 1.30
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.classify_delay_us = 5850
+    proc._pulse_width_us = 1600
+    proc._early_stop = False
+    proc._stop_reason = None
+    proc._terminate_at_pressure = None
+    proc.stageChanged = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.conservative_band_width_threshold_psi = 0.10
+    proc.conservative_band_inset_psi = 0.02
+    proc._record_error = lambda *args, **kwargs: None
+    proc.calibration_manager = SimpleNamespace(
+        set_primary_pressure_band=lambda _payload: None
+    )
+    proc._compute_single_bands = lambda: [[1.10, 1.30]]
+
+    proc.onCalibrationCompleted()
+
+    assert proc.calibrationError.calls == []
+    assert proc.calibrationDataUpdated.calls
+    result = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert result["single_bands"] == [[1.1, 1.3]]
+    assert result["raw_primary_band"] == [1.1, 1.3]
+    assert result["primary_band"] == [1.12, 1.28]
+    assert result["conservative_primary_band_applied"] is True

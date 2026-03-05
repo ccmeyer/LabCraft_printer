@@ -49,6 +49,7 @@ def _build_decide_proc(reps):
     proc.edge_retest_scan_only = True
     proc.edge_retest_cooldown_psi = 0.03
     proc.edge_retest_max_per_run = 3
+    proc.edge_retest_proximity_window_psi = 0.03
     proc._edge_retest_pressures = []
     proc._edge_retest_count = 0
     proc.retest_min_reps = 3
@@ -195,6 +196,31 @@ def test_pressure_band_on_decide_triggers_delay_retest_for_edge_single():
     assert proc._store_calls == []
     assert proc._choose_calls == []
     assert proc._advance_calls == []
+
+
+def test_pressure_band_on_decide_skips_edge_retest_when_upper_multiple_is_far():
+    proc = _build_decide_proc(
+        [
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+            _rep("single"),
+        ]
+    )
+    proc.samples = [{"pressure": 1.35, "verdict": "multiple"}]
+    retest_reasons = []
+    proc._start_delay_retest = (
+        lambda reason, verdict, counts, decision, confidence: retest_reasons.append(str(reason)) or True
+    )
+
+    proc.onDecide()
+
+    assert retest_reasons == []
+    assert proc._store_calls
+    assert proc._store_calls[0]["verdict"] == "single"
+    assert proc._choose_calls == ["single"]
+    assert len(proc._advance_calls) == 1
 
 
 def test_pressure_band_on_decide_attached_stream_triggers_later_delay_retest():

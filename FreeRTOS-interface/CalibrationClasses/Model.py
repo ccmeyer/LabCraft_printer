@@ -5460,6 +5460,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.edge_retest_scan_only = True
         self.edge_retest_cooldown_psi = 0.03
         self.edge_retest_max_per_run = 3
+        self.edge_retest_proximity_window_psi = 0.03
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_earlier_steps_done_for_pressure = 0
@@ -5525,6 +5526,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.fast_single_risk_fraction = 0.60
         self.fast_single_risk_min_count = 3
         self.fast_single_dy_threshold_px = int(self.far_nozzle_px)
+        self.stream_aspect_hard = 2.0
+        self.stream_aspect_soft = 1.6
+        self.stream_circularity_max = 0.55
+        self.stream_min_area_px = 1200
+        self.conservative_band_width_threshold_psi = 0.10
+        self.conservative_band_inset_psi = 0.02
 
         # --- outputs ---
         self.samples          = []
@@ -5725,18 +5732,78 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             self.replicateReady.emit()
             return
 
-        droplets, nozzle_area, overlay = self.model.droplet_camera_model.identify_droplets(
+        det = self.model.droplet_camera_model.identify_droplets(
             self.droplet_image,
             self.background_image,
             self.nozzle_center_px,
             min_area=1000,
             satellite_band_px=12,
-            min_free_offset_px=18
+            min_free_offset_px=18,
+            return_details=True,
         )
+        if isinstance(det, tuple) and len(det) >= 4:
+            droplets, nozzle_area, overlay, droplet_details = det[0], det[1], det[2], det[3]
+        else:
+            droplets, nozzle_area, overlay = det
+            droplet_details = {}
         self.presentImageSignal.emit(overlay)
 
         # Classify first so safety-stop logic can depend on class
         cls = self._classify_from_detection(droplets)
+        free_blob_details = []
+        if isinstance(droplet_details, dict):
+            free_blob_details = list(droplet_details.get("free_droplets", []) or [])
+
+        stream_like_count = 0
+        max_aspect_h_over_w = None
+        min_circularity = None
+        stream_min_area = int(max(1, getattr(self, "stream_min_area_px", 1200)))
+        aspect_hard = float(max(1.0, getattr(self, "stream_aspect_hard", 2.0)))
+        aspect_soft = float(max(1.0, getattr(self, "stream_aspect_soft", 1.6)))
+        circularity_max = float(max(0.0, getattr(self, "stream_circularity_max", 0.55)))
+        for info in free_blob_details:
+            try:
+                aspect = float(info.get("aspect_h_over_w", 0.0))
+            except Exception:
+                aspect = 0.0
+            try:
+                circularity = float(info.get("circularity", 1.0))
+            except Exception:
+                circularity = 1.0
+            try:
+                area_px = int(info.get("area_px", 0))
+            except Exception:
+                area_px = 0
+            is_stream_like = bool(info.get("is_stream_like", False))
+            if (not is_stream_like) and area_px >= stream_min_area:
+                is_stream_like = bool(
+                    (aspect >= aspect_hard)
+                    or ((aspect >= aspect_soft) and (circularity <= circularity_max))
+                )
+            if is_stream_like:
+                stream_like_count += 1
+            if max_aspect_h_over_w is None or aspect > max_aspect_h_over_w:
+                max_aspect_h_over_w = float(aspect)
+            if min_circularity is None or circularity < min_circularity:
+                min_circularity = float(circularity)
+        if cls == "single" and stream_like_count > 0:
+            cls = "multiple"
+            self.stageChanged.emit(
+                f"Pressure {self._current_pressure:.3f} psi: stream-like single reclassified as multiple"
+            )
+            self._record_decision(
+                "stream_like_single_reclassified_multiple",
+                {
+                    "pressure_psi": float(self._current_pressure),
+                    "stream_like_count": int(stream_like_count),
+                    "max_aspect_h_over_w": (
+                        None if max_aspect_h_over_w is None else float(max_aspect_h_over_w)
+                    ),
+                    "min_circularity": (
+                        None if min_circularity is None else float(min_circularity)
+                    ),
+                },
+            )
 
         nx, ny = int(self.nozzle_center_px[0]), int(self.nozzle_center_px[1])
         dy_min = None
@@ -5797,6 +5864,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "nozzle_attached_area": int(nozzle_area or 0),
             "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
             "frame_height_px": int(self.droplet_image.shape[0]) if getattr(self, "droplet_image", None) is not None else None,
+            "stream_like_count": int(stream_like_count),
+            "max_aspect_h_over_w": (
+                None if max_aspect_h_over_w is None else float(max_aspect_h_over_w)
+            ),
+            "min_circularity": (
+                None if min_circularity is None else float(min_circularity)
+            ),
             "flash_delay_us": int(
                 getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
             ),
@@ -5923,8 +5997,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCalibrationCompleted(self):
-        bands = self._compute_single_bands()
-        if not bands:
+        raw_bands = self._compute_single_bands()
+        if not raw_bands:
             msg = "Pressure scan found no valid single-droplet pressure band."
             self._record_error(
                 msg,
@@ -5936,6 +6010,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             )
             self.calibrationError.emit(msg)
             return
+        bands = [[float(min(lo, hi)), float(max(lo, hi))] for (lo, hi) in raw_bands]
+        raw_primary_band = list(bands[0]) if bands else None
+        primary_band = self._compute_conservative_primary_band(bands)
 
         result = {
             "pulse_width_us": self._pulse_width_us,
@@ -5944,7 +6021,10 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "pressure_bounds": [self.P_MIN, self.P_MAX],
             "pressures": self.samples,
             "single_bands": bands,
-            "primary_band": (bands[0] if bands else None),
+            "raw_single_bands": [list(b) for b in bands],
+            "primary_band": primary_band,
+            "raw_primary_band": raw_primary_band,
+            "conservative_primary_band_applied": bool(primary_band != raw_primary_band),
             "terminated_early": bool(self._early_stop),
             "stop_reason": (self._stop_reason if self._early_stop else None),
             "terminate_pressure": (float(self._terminate_at_pressure)
@@ -5952,7 +6032,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         }
         self.calibrationDataUpdated.emit({"measurements": [], "result": result})
         self.calibration_manager.set_primary_pressure_band(result)
-        self.stageChanged.emit(f"Pressure scan complete: single bands: {bands}")
+        self.stageChanged.emit(
+            f"Pressure scan complete: single bands={bands}, primary={primary_band}"
+        )
         self.calibrationCompleted.emit()
 
     # ---------- helpers (unchanged) ----------
@@ -6043,6 +6125,27 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if p >= (cur - 1e-9):
                 return True
         return False
+
+    def _nearest_upper_multiple_delta_psi(self):
+        cur = float(self._current_pressure) if self._current_pressure is not None else None
+        if cur is None:
+            return None
+        best = None
+        for rec in self.samples:
+            if str(rec.get("verdict", "")) != "multiple":
+                continue
+            try:
+                p = float(rec.get("pressure"))
+            except Exception:
+                continue
+            delta = float(p - cur)
+            if delta < -1e-9:
+                continue
+            if best is None or delta < best:
+                best = delta
+        if best is None:
+            return None
+        return float(max(0.0, best))
 
     def _single_exit_risk_summary(self):
         singles = [r for r in self.reps if str(r.get("cls", "")) == "single"]
@@ -6212,6 +6315,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if n_single > 0 and n_multiple > 0:
             return "mixed_single_multiple"
         if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+            nearest_upper_delta = self._nearest_upper_multiple_delta_psi()
+            if nearest_upper_delta is None:
+                return None
+            window = float(max(0.0, getattr(self, "edge_retest_proximity_window_psi", 0.03)))
+            if nearest_upper_delta > (window + 1e-9):
+                return None
             if bool(getattr(self, "edge_retest_scan_only", True)) and str(getattr(self, "_phase", "scan")) != "scan":
                 return None
             if int(max(0, getattr(self, "_edge_retest_count", 0))) >= int(max(0, getattr(self, "edge_retest_max_per_run", 3))):
@@ -6875,6 +6984,23 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # Sort by width (largest first) to keep your previous behavior
         bands.sort(key=lambda ab: (ab[1] - ab[0]), reverse=True)
         return bands
+
+    def _compute_conservative_primary_band(self, bands):
+        if not bands:
+            return None
+        first_lo, first_hi = bands[0]
+        lo = float(min(first_lo, first_hi))
+        hi = float(max(first_lo, first_hi))
+        width = float(hi - lo)
+        width_threshold = float(max(0.0, getattr(self, "conservative_band_width_threshold_psi", 0.10)))
+        inset = float(max(0.0, getattr(self, "conservative_band_inset_psi", 0.02)))
+        if width <= width_threshold or inset <= 0.0:
+            return [float(lo), float(hi)]
+        max_inset = max(0.0, (width / 2.0) - 1e-6)
+        effective_inset = min(inset, max_inset)
+        if effective_inset <= 0.0:
+            return [float(lo), float(hi)]
+        return [float(lo + effective_inset), float(hi - effective_inset)]
     
 class TrajectoryCalibrationProcess(BaseCalibrationProcess):
     continueTrajectory = Signal()
@@ -10223,6 +10349,10 @@ class DropletCameraModel(QObject):
         self.circularity_threshold = 1.18
         self.min_area_threshold = 10
         self.edge_margin = 10
+        self.stream_aspect_hard = 2.0
+        self.stream_aspect_soft = 1.6
+        self.stream_circularity_max = 0.55
+        self.stream_min_area_px = 1200
 
         self._k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         self._roi_cache = None  # (h, w, nzy, margin_up, band_half, roi_top, mask)
@@ -11227,7 +11357,8 @@ class DropletCameraModel(QObject):
         return metric_area, center, overlay
 
     def identify_droplets(self, image, background, nozzle_center, min_area=1000,
-                          margin_up_px: int=8,satellite_band_px: int=12, min_free_offset_px: int=18):
+                          margin_up_px: int=8, satellite_band_px: int=12, min_free_offset_px: int=18,
+                          return_details: bool = False):
         """
         Robust droplet identification:
           - works on diff = |image - background|
@@ -11239,10 +11370,22 @@ class DropletCameraModel(QObject):
           droplets: list[(cx, cy)] or None
           nozzle_attached_area: int or None   # includes band satellites + area below nozzle within nozzle bbox
           overlay_bgr: np.ndarray
+          details: dict (optional, when return_details=True)
         """
 
         img_gray, diff = self.calc_diff_image(image, background)
+        details = {
+            "status": "init",
+            "free_droplets": [],
+            "attached_components": 0,
+            "component_count": 0,
+            "roi_top": None,
+            "free_min_y": None,
+        }
         if diff is None or nozzle_center is None:
+            details.update({"status": "none", "reason": "invalid_input"})
+            if return_details:
+                return None, None, image, details
             return None, None, image
 
         h, w = diff.shape[:2]
@@ -11253,6 +11396,7 @@ class DropletCameraModel(QObject):
         # We process only rows from (nzy - margin_up) down to bottom.
         roi_top = max(0, nzy - int(margin_up_px))
         roi = diff[roi_top:, :]  # H_roi x W
+        details["roi_top"] = int(roi_top)
 
         # ---------- threshold on ROI ----------
         # Small Gaussian -> Otsu on ROI (fast); fall back to a "mu+3*sd" if ROI is too empty
@@ -11269,6 +11413,9 @@ class DropletCameraModel(QObject):
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, self._k3, iterations=1)
         if cv2.countNonZero(th) < 60:
             overlay = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            details.update({"status": "none", "reason": "insufficient_fg"})
+            if return_details:
+                return None, None, overlay, details
             return None, None, overlay
 
         # ---------- components (faster than findContours) ----------
@@ -11287,6 +11434,12 @@ class DropletCameraModel(QObject):
         band_top = max(0, nzy - int(satellite_band_px))
         band_bot = min(h - 1, nzy + int(satellite_band_px))
         free_min_y = min(h - 1, band_bot + int(min_free_offset_px))
+        details["free_min_y"] = int(free_min_y)
+        details["component_count"] = int(max(0, nlab - 1))
+        stream_aspect_hard = float(max(1.0, getattr(self, "stream_aspect_hard", 2.0)))
+        stream_aspect_soft = float(max(1.0, getattr(self, "stream_aspect_soft", 1.6)))
+        stream_circularity_max = float(max(0.0, getattr(self, "stream_circularity_max", 0.55)))
+        stream_min_area_px = int(max(1, getattr(self, "stream_min_area_px", 1200)))
 
         for lab in range(1, nlab):
             x, y, ww, hh, area = stats[lab]
@@ -11314,6 +11467,7 @@ class DropletCameraModel(QObject):
                 below_h = max(0, y1 - max(y0, nzy))
                 if below_h > 0:
                     nozzle_attached_area += int(below_h * ww)
+                details["attached_components"] = int(details["attached_components"]) + 1
                 cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 200, 255), 2)  # amber: attached
                 continue
 
@@ -11322,16 +11476,56 @@ class DropletCameraModel(QObject):
                 cx = x0 + ww // 2
                 cy = y0 + hh // 2
                 droplets.append((cx, cy))
+                bbox_area = max(1, int(ww * hh))
+                aspect_h_over_w = float(hh) / float(max(1, ww))
+                fill_ratio = float(area) / float(bbox_area)
+                mask = np.uint8(labels[y:y + hh, x:x + ww] == lab) * 255
+                contour_mask, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                perimeter = 0.0
+                if contour_mask:
+                    perimeter = float(cv2.arcLength(contour_mask[0], True))
+                circularity = 0.0
+                if perimeter > 1e-6:
+                    circularity = float((4.0 * np.pi * float(area)) / (perimeter * perimeter))
+                is_stream_like = bool(
+                    area >= stream_min_area_px
+                    and (
+                        (aspect_h_over_w >= stream_aspect_hard)
+                        or (
+                            aspect_h_over_w >= stream_aspect_soft
+                            and circularity <= stream_circularity_max
+                        )
+                    )
+                )
+                details["free_droplets"].append(
+                    {
+                        "center": [int(cx), int(cy)],
+                        "bbox": [int(x0), int(y0), int(ww), int(hh)],
+                        "area_px": int(area),
+                        "aspect_h_over_w": float(aspect_h_over_w),
+                        "fill_ratio": float(fill_ratio),
+                        "circularity": float(circularity),
+                        "is_stream_like": bool(is_stream_like),
+                    }
+                )
                 cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 255), 2)
                 cv2.circle(overlay, (cx, cy), 6, (0, 0, 255), -1)
 
         if droplets:
             cv2.putText(overlay, f"Droplets: {len(droplets)}", (10, 24),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 0), 2)
+        details["status"] = "ok"
+        details["droplet_count"] = int(len(droplets))
+        details["nozzle_attached_area"] = int(nozzle_attached_area)
 
-        return (droplets if droplets else None,
-                (int(nozzle_attached_area) if nozzle_attached_area > 0 else None),
-                overlay)
+        payload = (
+            droplets if droplets else None,
+            (int(nozzle_attached_area) if nozzle_attached_area > 0 else None),
+            overlay,
+        )
+        if return_details:
+            return payload[0], payload[1], payload[2], details
+        return payload
     
     def identify_droplet_contour(self, image, background):
         """
