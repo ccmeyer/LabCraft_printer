@@ -1,4 +1,4 @@
-from unittest import result
+﻿from unittest import result
 import pandas as pd
 import numpy as np
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -7997,13 +7997,16 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._pending_adjust_reason = None
         self._pending_adjust_payload = {}
         self._adjust_attempts_at_pressure = 0
-        self._adjust_attempts_limit = 5          # avoid infinite loops
+        self._adjust_attempts_limit = 8          # avoid infinite loops while allowing farther reacquire
+        self._low_pressure_adjusted_this_pressure = False
 
         # Low-pressure / true-ejection detection thresholds (tunable)
         self._min_radial_growth_px  = 4.0        # net |r(t_last) - r(t_first)| must exceed this
         self._reverse_step_px       = 1.0        # allow small noise; require >1 px reversal to trigger
         self._min_downward_growth_px = 6.0       # dy must increase by at least this much
         self._min_downward_slope_px_per_us = 0.0010
+        self._min_points_for_retraction_check = 2
+        self._min_delay_span_us_for_retraction = max(200, int(self.delay_floor_margin_us // 2))
 
         # earliest allowable delay (do not go earlier than this)
         try:
@@ -8136,6 +8139,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self._pending_pressure_adjustment = None
             self._pending_adjust_reason = None
             self._pending_adjust_payload = {}
+            self._low_pressure_adjusted_this_pressure = False
 
             # reset completion map for this pressure
             self._completed = [False] * len(self.delays_us)
@@ -8231,6 +8235,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.stageChanged.emit(
                 f"Multiple droplets detected at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
             )
+            self._record_decision(
+                "pressure_down_multiple_droplets",
+                {
+                    "pressure": float(self._current_pressure),
+                    "delay_us": int(self.delays_us[self.d_index]),
+                    "droplet_count": int(len(droplets)),
+                    "next_pressure": float(new_p),
+                },
+            )
             self._set_pending_adjustment(
                 new_p,
                 reason="multiple_droplets",
@@ -8290,6 +8303,15 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         if self._pending_pressure_adjustment is not None:
             reason = str(getattr(self, "_pending_adjust_reason", "") or "pressure_adjustment")
             payload = dict(getattr(self, "_pending_adjust_payload", {}) or {})
+            self._record_decision(
+                "apply_pending_pressure_adjustment",
+                {
+                    "reason": str(reason),
+                    "pressure": float(self._current_pressure) if self._current_pressure is not None else None,
+                    "next_pressure": float(self._pending_pressure_adjustment),
+                    "payload": dict(payload),
+                },
+            )
             if reason == "multiple_droplets":
                 self._append_disqualified_pressure_record(reason=reason, details=payload)
             self._restart_current_pressure_with(
@@ -8297,10 +8319,21 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 reason=reason,
             )
             return
-        # 1) too many fails at this delay → mark completed (skipped) and move on
+
+        # 1) too many invalid detections at this delay → mark completed (skipped) and move on
         if self._failed_caps_this_delay >= self.max_failed_captures_per_delay:
             self.stageChanged.emit(
-                f"Delay {self.delays_us[self.d_index]} us: too many failed captures → skipping"
+                f"Delay {self.delays_us[self.d_index]} us: no valid detections after "
+                f"{self._failed_caps_this_delay} attempts → skipping"
+            )
+            self._record_decision(
+                "skip_delay_no_valid_detections",
+                {
+                    "pressure": float(self._current_pressure) if self._current_pressure is not None else None,
+                    "delay_us": int(self.delays_us[self.d_index]),
+                    "failed_detections": int(self._failed_caps_this_delay),
+                    "max_failed_detections": int(self.max_failed_captures_per_delay),
+                },
             )
             self._mark_current_delay_completed(aggregated=False)
             if self._stop_delays_after_this and len(self.points) >= self.min_points:
@@ -8320,7 +8353,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             self.continueCapture.emit()
             return
 
-        # 3) last capture was bad but we haven't exceeded fail cap → retry same delay
+        # 3) last capture was invalid but fail cap not reached → retry same delay
         if not self._analyze_good:
             self.continueCapture.emit()
             return
@@ -8329,16 +8362,67 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         if self._rep_count >= self.replicates_per_delay and len(self._rep_buffer) > 0:
             dx_med = float(np.median([p[0] for p in self._rep_buffer]))
             dy_med = float(np.median([p[1] for p in self._rep_buffer]))
-            t_now  = int(self.delays_us[self.d_index])
+            t_now = int(self.delays_us[self.d_index])
             self.points.append({"t_us": t_now, "center_px": (dx_med, dy_med)})
             self._mark_current_delay_completed(aggregated=True)
 
-            # Low-pressure edge case — check radial growth vs. nozzle across delays
-            if self._should_raise_low_pressure_due_to_retraction():
+            point_count = int(len(self.points))
+            distinct_delays = sorted(
+                {
+                    int(p.get("t_us", 0))
+                    for p in list(self.points or [])
+                    if isinstance(p, dict) and ("t_us" in p)
+                }
+            )
+            delay_span_us = int(distinct_delays[-1] - distinct_delays[0]) if len(distinct_delays) >= 2 else 0
+            summary = self._trajectory_direction_summary()
+            self._record_decision(
+                "aggregate_timepoint",
+                {
+                    "pressure": float(self._current_pressure) if self._current_pressure is not None else None,
+                    "delay_us": int(t_now),
+                    "point_count": int(point_count),
+                    "distinct_delays": list(distinct_delays),
+                    "delay_span_us": int(delay_span_us),
+                    "center_px_offset": [float(dx_med), float(dy_med)],
+                    "direction_summary": dict(summary),
+                },
+            )
+
+            # Low-pressure edge case: evaluate only after enough multi-delay evidence.
+            has_retraction_evidence = self._trajectory_has_min_retraction_evidence()
+            if not has_retraction_evidence:
+                self._record_decision(
+                    "defer_low_pressure_check_insufficient_evidence",
+                    {
+                        "pressure": float(self._current_pressure) if self._current_pressure is not None else None,
+                        "point_count": int(point_count),
+                        "distinct_delay_count": int(len(distinct_delays)),
+                        "delay_span_us": int(delay_span_us),
+                        "min_points_required": int(max(2, getattr(self, "_min_points_for_retraction_check", 2))),
+                        "min_delay_span_us_required": int(max(0, getattr(self, "_min_delay_span_us_for_retraction", 0))),
+                    },
+                )
+            if (
+                has_retraction_evidence
+                and (not bool(getattr(self, "_low_pressure_adjusted_this_pressure", False)))
+                and self._should_raise_low_pressure_due_to_retraction()
+            ):
                 new_p = round(float(self._current_pressure) + 0.01, 3)
                 self.stageChanged.emit(
                     f"Weak/negative radial motion at P={self._current_pressure:.3f} → retest at {new_p:.3f} psi"
                 )
+                self._record_decision(
+                    "pressure_up_low_pressure_retraction",
+                    {
+                        "pressure": float(self._current_pressure),
+                        "next_pressure": float(new_p),
+                        "point_count": int(point_count),
+                        "delay_span_us": int(delay_span_us),
+                        "direction_summary": dict(summary),
+                    },
+                )
+                self._low_pressure_adjusted_this_pressure = True
                 self._set_pending_adjustment(
                     new_p,
                     reason="low_pressure_retraction",
@@ -8369,7 +8453,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                     self.setNextDelay.emit()
                 return
 
-            # Also stop if we've been missing repeatedly at later delays
+            # Also stop if we have been missing repeatedly at later delays
             if self._miss_streak >= self.miss_streak_limit and len(self.points) >= self.min_points:
                 self.stageChanged.emit(f"Miss streak (≥{self.miss_streak_limit}) → stop larger delays")
                 self._finish_pressure_and_advance()
@@ -8386,7 +8470,6 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
 
         # Fallback: keep capturing at this delay
         self.continueCapture.emit()
-
     # ----------------- end states -----------------
 
     def _finish_pressure_and_advance(self):
@@ -8441,6 +8524,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._pending_adjust_reason = None
         self._pending_adjust_payload = {}
         self._adjust_attempts_at_pressure = 0
+        self._low_pressure_adjusted_this_pressure = False
 
         if self.p_index >= len(self.pressures):
             self.finalize.emit()
@@ -8834,7 +8918,29 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             "moving_away": bool(moving_away),
         }
 
+    def _trajectory_has_min_retraction_evidence(self) -> bool:
+        points = list(self.points or [])
+        min_points = int(max(2, getattr(self, "_min_points_for_retraction_check", 2)))
+        if len(points) < min_points:
+            return False
+
+        delays = sorted(
+            {
+                int(p.get("t_us", 0))
+                for p in points
+                if isinstance(p, dict) and ("t_us" in p)
+            }
+        )
+        if len(delays) < 2:
+            return False
+
+        min_span = int(max(0, getattr(self, "_min_delay_span_us_for_retraction", 0)))
+        delay_span = int(delays[-1] - delays[0])
+        return delay_span >= min_span
+
     def _should_raise_low_pressure_due_to_retraction(self) -> bool:
+        if not self._trajectory_has_min_retraction_evidence():
+            return False
         summary = self._trajectory_direction_summary()
         return not bool(summary.get("moving_away", False))
     
@@ -8887,6 +8993,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._pending_adjust_reason = None
         self._pending_adjust_payload = {}
         self._discard_next = bool(self.discard_first_after_pressure)
+        self._low_pressure_adjusted_this_pressure = False
 
         # Jump back to apply state for this same p_index
         self.reapplyPressure.emit()

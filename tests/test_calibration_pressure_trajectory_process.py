@@ -191,6 +191,77 @@ def test_pressure_trajectory_true_ejection_check_requires_downward_motion():
     assert proc._should_raise_low_pressure_due_to_retraction() is True
 
 
+def test_pressure_trajectory_retraction_check_requires_multi_delay_evidence():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc._min_radial_growth_px = 4.0
+    proc._min_downward_growth_px = 6.0
+    proc._min_downward_slope_px_per_us = 0.0010
+    proc._reverse_step_px = 1.0
+    proc._min_points_for_retraction_check = 2
+    proc._min_delay_span_us_for_retraction = 300
+
+    proc.points = [{"t_us": 5950, "center_px": (2.0, 14.0)}]
+    assert proc._trajectory_has_min_retraction_evidence() is False
+    assert proc._should_raise_low_pressure_due_to_retraction() is False
+
+    proc.points = [
+        {"t_us": 5950, "center_px": (2.0, 14.0)},
+        {"t_us": 5950, "center_px": (3.0, 12.0)},
+    ]
+    assert proc._trajectory_has_min_retraction_evidence() is False
+    assert proc._should_raise_low_pressure_due_to_retraction() is False
+
+    proc.points = [
+        {"t_us": 5950, "center_px": (2.0, 14.0)},
+        {"t_us": 6300, "center_px": (3.0, 12.0)},
+    ]
+    assert proc._trajectory_has_min_retraction_evidence() is True
+    assert proc._should_raise_low_pressure_due_to_retraction() is True
+
+
+def test_pressure_trajectory_on_decide_does_not_retest_pressure_after_first_point():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc._pending_pressure_adjustment = None
+    proc._pending_adjust_reason = None
+    proc._pending_adjust_payload = {}
+    proc._failed_caps_this_delay = 0
+    proc.max_failed_captures_per_delay = 4
+    proc._rep_count = 3
+    proc.replicates_per_delay = 3
+    proc._analyze_good = True
+    proc._rep_buffer = [(8.0, 14.0), (9.0, 15.0), (8.0, 15.0)]
+    proc.delays_us = [5950, 6650, 7350]
+    proc.d_index = 0
+    proc.points = []
+    proc._completed = [False, False, False]
+    proc._stop_delays_after_this = False
+    proc._max_delay_allowed_us = None
+    proc._miss_streak = 0
+    proc.miss_streak_limit = 2
+    proc.min_points = 3
+    proc._current_pressure = 0.91
+    proc._low_pressure_adjusted_this_pressure = False
+    proc._min_points_for_retraction_check = 2
+    proc._min_delay_span_us_for_retraction = 300
+    proc._edge_close_now = False
+    proc.stageChanged = Recorder()
+    proc.setNextDelay = Recorder()
+    proc.continueCapture = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    finish_calls = []
+    restart_calls = []
+    proc._finish_pressure_and_advance = lambda: finish_calls.append(True)
+    proc._restart_current_pressure_with = lambda new_p, reason: restart_calls.append((new_p, reason))
+
+    proc.onDecide()
+
+    assert restart_calls == []
+    assert finish_calls == []
+    assert len(proc.points) == 1
+    assert proc._completed[0] is True
+    assert proc.setNextDelay.calls
+
+
 def test_pressure_trajectory_completion_errors_when_no_valid_fit():
     proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
     proc.samples = [
