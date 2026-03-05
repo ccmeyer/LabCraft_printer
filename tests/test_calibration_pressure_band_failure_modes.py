@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import numpy as np
+
 from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
 
 
@@ -155,3 +157,147 @@ def test_pressure_band_nozzle_wet_still_stops_after_single_region_seen():
     assert proc._early_stop is True
     assert proc._stop_reason == "Nozzle wet detected during scan"
     assert proc.finalize.calls
+
+
+def test_pressure_band_reacquire_too_close_is_reclassified_none_not_stop():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._discard_next = False
+    proc._phase = "reacquire_up"
+    proc._prev_verdict = "none"
+    proc._current_pressure = 1.10
+    proc.safety_clearance_px = 350
+    proc.nozzle_center_px = (100, 100)
+    proc.nozzle_area_threshold = 8000
+    proc.background_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.droplet_image = np.zeros((220, 220), dtype=np.uint8)
+    proc.reps = []
+    proc._invalid_skip_count = 0
+    proc._invalid_skip_cap = 6
+    proc._active_classify_delay_us = 5850
+    proc.classify_delay_us = 5850
+    proc.stageChanged = Recorder()
+    proc.replicateReady = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationError = Recorder()
+    proc.presentImageSignal = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: ([(100, 120)], 0, np.zeros((220, 220), dtype=np.uint8))
+        )
+    )
+
+    proc.onAnalyzeReplicate()
+
+    assert proc.finalize.calls == []
+    assert proc.replicateReady.calls
+    assert len(proc.reps) == 1
+    assert proc.reps[0]["cls"] == "none"
+    assert proc.reps[0]["dy_min_px"] is None
+    assert decision_calls
+
+
+def test_pressure_band_reacquire_guard_resumes_scan_after_max_steps():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._phase = "reacquire_up"
+    proc._current_pressure = 1.20
+    proc._prev_pressure = None
+    proc._prev_verdict = None
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.dp_min = 0.01
+    proc._reacquire_step = 0.10
+    proc._reacquire_growth = 1.7
+    proc._reacquire_step_max = 0.30
+    proc._reacquire_steps_taken = 17
+    proc._reacquire_max_steps = 18
+    proc.stageChanged = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+
+    transitioned = proc._maybe_start_or_update_brackets("none")
+
+    assert transitioned is True
+    assert proc._phase == "scan"
+    assert proc._next_pressure < 1.20
+    assert decision_calls
+    assert decision_calls[0][0][0] == "reacquire_guard_resume_scan"
+
+
+def test_pressure_band_seek_upper_guard_resumes_scan_after_span_or_steps():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._phase = "seek_upper"
+    proc._current_pressure = 2.05
+    proc._prev_pressure = None
+    proc._prev_verdict = "single"
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.dp_min = 0.01
+    proc._seek_step = 0.08
+    proc._seek_growth = 1.7
+    proc._seek_step_max = 0.20
+    proc._seek_upper_steps = 9
+    proc._seek_upper_max_steps = 10
+    proc._seek_upper_max_span_psi = 0.80
+    proc._first_single_pressure = 1.10
+    proc.stageChanged = Recorder()
+    decision_calls = []
+    proc._record_decision = lambda *args, **kwargs: decision_calls.append((args, kwargs))
+
+    transitioned = proc._maybe_start_or_update_brackets("single")
+
+    assert transitioned is True
+    assert proc._phase == "scan"
+    assert proc._next_pressure <= 1.10
+    assert decision_calls
+    assert decision_calls[0][0][0] == "seek_upper_guard_resume_scan"
+
+
+def test_pressure_band_retest_second_step_triggers_when_single_persists_after_multiple_evidence():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5350
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_steps = 2
+    proc._delay_retest_steps_done_for_pressure = 1
+    proc._delay_retest_context = {
+        "prior_verdict": "multiple",
+        "prior_counts": {"none": 0, "single": 3, "multiple": 2},
+        "prior_decision": {"has_upper_multiple_evidence": True},
+        "trigger_reason": "mixed_single_multiple",
+    }
+
+    reason = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": True},
+    )
+
+    assert reason == "persistent_single_after_retest"
+
+
+def test_pressure_band_retest_merge_keeps_multiple_when_prior_multiple_evidence_exists():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.multiple_confidence_min = 0.40
+    proc._delay_retest_context = {
+        "trigger_reason": "mixed_single_multiple",
+        "prior_verdict": "multiple",
+        "prior_counts": {"none": 0, "single": 2, "multiple": 3},
+        "prior_decision": {"has_upper_multiple_evidence": True},
+        "prior_confidence": 0.75,
+        "prior_reason": "multiple_confident",
+    }
+    decision = {"reason": "single_confident"}
+
+    verdict, confidence, merged = proc._merge_delay_retest_decision(
+        "single",
+        0.70,
+        {"none": 0, "single": 5, "multiple": 0},
+        decision,
+    )
+
+    assert verdict == "multiple"
+    assert confidence >= 0.75
+    assert merged["reason"] == "retest_conflict_keep_multiple"

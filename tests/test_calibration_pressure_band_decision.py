@@ -35,8 +35,11 @@ def _build_decide_proc(reps):
     proc._active_classify_delay_us = 5850
     proc.delay_retest_step_us = 500
     proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_steps = 2
     proc._delay_retest_done_for_pressure = False
+    proc._delay_retest_steps_done_for_pressure = 0
     proc._delay_retest_in_progress = False
+    proc._delay_retest_context = None
     proc.fast_single_bottom_margin_px = 220
     proc.fast_single_risk_fraction = 0.60
     proc.fast_single_risk_min_count = 3
@@ -145,7 +148,7 @@ def test_pressure_band_on_decide_triggers_delay_retest_for_mixed_single_multiple
     )
     retest_reasons = []
     proc._start_delay_retest = (
-        lambda reason, verdict, counts, decision: retest_reasons.append(str(reason)) or True
+        lambda reason, verdict, counts, decision, confidence: retest_reasons.append(str(reason)) or True
     )
 
     proc.onDecide()
@@ -169,7 +172,7 @@ def test_pressure_band_on_decide_triggers_delay_retest_for_edge_single():
     proc.samples = [{"pressure": 1.24, "verdict": "multiple"}]
     retest_reasons = []
     proc._start_delay_retest = (
-        lambda reason, verdict, counts, decision: retest_reasons.append(str(reason)) or True
+        lambda reason, verdict, counts, decision, confidence: retest_reasons.append(str(reason)) or True
     )
 
     proc.onDecide()

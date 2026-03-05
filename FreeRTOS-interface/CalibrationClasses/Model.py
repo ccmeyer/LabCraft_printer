@@ -5451,9 +5451,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._active_classify_delay_us = int(self.classify_delay_us)
         self.delay_retest_step_us = 500
         self.delay_retest_min_us = 2000
+        self.delay_retest_max_steps = 2
         self.delay_retest_timeout_ms = 15_000
         self._delay_retest_done_for_pressure = False
+        self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
+        self._delay_retest_context = None
 
         # --- pressure bounds ---
         try:
@@ -5544,11 +5547,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._seek_step = max(self.dp_min, min(0.05, self.dp))  # gentle initial nudge up
         self._seek_step_max = 0.20
         self._seek_growth = 1.7
+        self._seek_upper_steps = 0
+        self._seek_upper_max_steps = 10
+        self._seek_upper_max_span_psi = 0.80
 
         # Upward re-acquire params (used if first verdict is NONE or “too close”)
         self._reacquire_step = 0.10
-        self._reacquire_step_max = 0.10
+        self._reacquire_step_max = 0.30
         self._reacquire_growth = 1.7
+        self._reacquire_steps_taken = 0
+        self._reacquire_max_steps = 18
 
         try:
             self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
@@ -5668,7 +5676,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._discard_next = True
         self._active_classify_delay_us = int(self._base_classify_delay_us)
         self._delay_retest_done_for_pressure = False
+        self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_in_progress = False
+        self._delay_retest_context = None
 
         settings = {
             "print_pressure": self._current_pressure,
@@ -5721,7 +5731,21 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # ---- SAFETY: ignore "too close" if MULTIPLE ----
         # If "too close" and this is the FIRST point, do NOT terminate.
         if (cls != "multiple") and (dy_min is not None) and (dy_min < self.safety_clearance_px):
-            if self._prev_verdict is None:
+            if str(getattr(self, "_phase", "")) == "reacquire_up":
+                self.stageChanged.emit(
+                    f"Re-acquire sample too close to nozzle (dy={int(dy_min)} px); continuing upward scan"
+                )
+                self._record_decision(
+                    "reacquire_near_nozzle_reclassified_none",
+                    {
+                        "pressure_psi": float(self._current_pressure),
+                        "dy_min_px": int(dy_min),
+                        "safety_clearance_px": int(self.safety_clearance_px),
+                    },
+                )
+                cls = "none"
+                dy_min = None
+            elif self._prev_verdict is None:
                 self.stageChanged.emit(
                     "First sample is too close to nozzle → increasing pressure to re-acquire safely"
                 )
@@ -5788,7 +5812,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
         retest_reason = self._should_run_delay_retest(verdict, counts, decision)
         if retest_reason is not None:
-            if self._start_delay_retest(retest_reason, verdict, counts, decision):
+            if self._start_delay_retest(retest_reason, verdict, counts, decision, confidence):
                 return
 
         if verdict == "ambiguous" and total < self.escalate_to:
@@ -5806,8 +5830,16 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             decision["reason"] = "ambiguous_fallback"
             decision["fallback_verdict"] = verdict
 
+        verdict, confidence, decision = self._merge_delay_retest_decision(
+            verdict,
+            confidence,
+            counts,
+            decision,
+        )
+
         base_delay_us = int(getattr(self, "_base_classify_delay_us", getattr(self, "classify_delay_us", 0)))
         active_delay_us = int(getattr(self, "_active_classify_delay_us", base_delay_us))
+        retest_ctx = dict(getattr(self, "_delay_retest_context", {}) or {})
 
         decision.update(
             {
@@ -5818,8 +5850,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "classify_delay_us": int(active_delay_us),
                 "base_classify_delay_us": int(base_delay_us),
                 "delay_retest_applied": bool(int(active_delay_us) != int(base_delay_us)),
+                "delay_retest_steps_done": int(getattr(self, "_delay_retest_steps_done_for_pressure", 0)),
             }
         )
+        if retest_ctx:
+            decision.setdefault("retest_trigger_reason", str(retest_ctx.get("trigger_reason", "")))
+            decision.setdefault("retest_prior_verdict", str(retest_ctx.get("prior_verdict", "")))
         escalated = total > self.min_reps
         self._store_pressure_summary(verdict, escalated=escalated, decision=decision)
         self._record_decision(
@@ -5999,34 +6035,93 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         cur = int(getattr(self, "_active_classify_delay_us", base))
         step = int(max(0, getattr(self, "delay_retest_step_us", 500)))
         min_delay = int(max(0, getattr(self, "delay_retest_min_us", 2000)))
-        candidate = int(max(min_delay, base - step))
+        candidate = int(max(min_delay, cur - step))
         if candidate >= cur:
             return None
         return candidate
 
     def _should_run_delay_retest(self, verdict: str, counts: dict, decision: dict):
-        if bool(getattr(self, "_delay_retest_done_for_pressure", False)):
+        steps_done = int(max(0, getattr(self, "_delay_retest_steps_done_for_pressure", 0)))
+        steps_max = int(max(1, getattr(self, "delay_retest_max_steps", 1)))
+        if steps_done >= steps_max:
             return None
         if self._earlier_delay_candidate_us() is None:
             return None
 
         n_single = int((counts or {}).get("single", 0))
         n_multiple = int((counts or {}).get("multiple", 0))
-        if n_single > 0 and n_multiple > 0:
-            return "mixed_single_multiple"
+        if steps_done == 0:
+            if n_single > 0 and n_multiple > 0:
+                return "mixed_single_multiple"
+            if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
+                return "edge_single_with_upper_multiple"
+            return None
 
-        if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
-            return "edge_single_with_upper_multiple"
+        # Additional retest step: if prior pass saw multiple evidence and this pass is still
+        # "single", shift earlier again before accepting a final downgrade.
+        ctx = dict(getattr(self, "_delay_retest_context", {}) or {})
+        prior_verdict = str(ctx.get("prior_verdict", ""))
+        prior_counts = dict(ctx.get("prior_counts", {}) or {})
+        prior_multiple = int(prior_counts.get("multiple", 0))
+        had_upper_multi = bool((ctx.get("prior_decision") or {}).get("has_upper_multiple_evidence", False))
+        if str(verdict) == "single":
+            if prior_verdict in ("multiple", "ambiguous") or prior_multiple > 0 or had_upper_multi:
+                return "persistent_single_after_retest"
 
         return None
 
-    def _start_delay_retest(self, reason: str, verdict: str, counts: dict, decision: dict):
+    def _merge_delay_retest_decision(self, verdict: str, confidence: float, counts: dict, decision: dict):
+        ctx = dict(getattr(self, "_delay_retest_context", {}) or {})
+        if not ctx:
+            return verdict, confidence, decision
+
+        prior_verdict = str(ctx.get("prior_verdict", ""))
+        prior_counts = dict(ctx.get("prior_counts", {}) or {})
+        prior_conf = float(ctx.get("prior_confidence", 0.0))
+        prior_reason = str(ctx.get("prior_reason", ""))
+        trigger_reason = str(ctx.get("trigger_reason", ""))
+        prior_multiple = int(prior_counts.get("multiple", 0))
+        had_multiple_evidence = (prior_verdict == "multiple") or (prior_multiple > 0)
+
+        if had_multiple_evidence and str(verdict) == "single":
+            # Conservative fusion: do not allow a retest single to erase
+            # earlier multiple evidence at the same pressure.
+            decision["reason"] = "retest_conflict_keep_multiple"
+            decision["override_from"] = "single"
+            decision["retest_trigger_reason"] = str(trigger_reason)
+            decision["retest_prior_verdict"] = str(prior_verdict)
+            decision["retest_prior_reason"] = str(prior_reason)
+            decision["retest_prior_counts"] = dict(prior_counts)
+            verdict = "multiple"
+            confidence = max(float(confidence), float(prior_conf), float(self.multiple_confidence_min))
+        elif (prior_verdict == "single") and (str(verdict) == "multiple"):
+            decision["reason"] = "retest_conflict_multiple_wins"
+            decision["retest_trigger_reason"] = str(trigger_reason)
+            decision["retest_prior_verdict"] = str(prior_verdict)
+            decision["retest_prior_reason"] = str(prior_reason)
+            confidence = max(float(confidence), float(prior_conf))
+
+        return verdict, confidence, decision
+
+    def _start_delay_retest(self, reason: str, verdict: str, counts: dict, decision: dict, confidence: float):
         new_delay = self._earlier_delay_candidate_us()
         if new_delay is None:
             return False
 
         self._delay_retest_done_for_pressure = True
+        self._delay_retest_steps_done_for_pressure = int(
+            max(0, getattr(self, "_delay_retest_steps_done_for_pressure", 0)) + 1
+        )
         self._delay_retest_in_progress = True
+        if not getattr(self, "_delay_retest_context", None):
+            self._delay_retest_context = {
+                "trigger_reason": str(reason),
+                "prior_verdict": str(verdict),
+                "prior_counts": dict(counts or {}),
+                "prior_decision": dict(decision or {}),
+                "prior_confidence": float(confidence),
+                "prior_reason": str((decision or {}).get("reason", "")),
+            }
         prev_delay = int(
             getattr(self, "_active_classify_delay_us", getattr(self, "classify_delay_us", 0))
         )
@@ -6050,6 +6145,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 "prior_verdict": str(verdict),
                 "class_counts": dict(counts or {}),
                 "decision_reason": str((decision or {}).get("reason", "")),
+                "retest_step": int(getattr(self, "_delay_retest_steps_done_for_pressure", 0)),
             },
         )
 
@@ -6237,6 +6333,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             # Re-acquire upward if the first point was NONE/AMBIG (unchanged)
             if prev_v is None and verdict in ("none", "ambiguous"):
                 self._phase = "reacquire_up"
+                self._reacquire_steps_taken = 0
+                self._reacquire_step = 0.10
                 self._next_pressure = float(min(self.P_MAX, cur + self._reacquire_step))
                 self.stageChanged.emit(
                     f"First point {verdict.upper()} @ {cur:.3f} psi → re-acquiring upward (+{self._reacquire_step:.2f} psi)"
@@ -6247,6 +6345,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             if verdict == "single" and self.backtrack_after_first_single and prev_v is None and not self._upper_edge_locked:
                 self._first_single_pressure = cur
                 self._phase = "seek_upper"
+                self._seek_upper_steps = 0
+                self._seek_step = max(self.dp_min, min(0.05, self.dp))
                 self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
                 self.stageChanged.emit(
                     f"First point SINGLE @ {cur:.3f} psi → seeking MULTIPLE upward (+{self._seek_step:.2f} psi)"
@@ -6311,11 +6411,27 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 # Got SINGLE at higher P → immediately start seek_upper to bracket upper edge
                 self._first_single_pressure = cur
                 self._phase = "seek_upper"
+                self._seek_upper_steps = 0
+                self._seek_step = max(self.dp_min, min(0.05, self.dp))
                 self._next_pressure = float(min(self.P_MAX, cur + self._seek_step))
                 self.stageChanged.emit("Re-acquired SINGLE at higher pressure → seeking MULTIPLE upward")
                 return True
 
             # Still NONE/AMBIG – keep going up, grow step
+            self._reacquire_steps_taken = int(max(0, getattr(self, "_reacquire_steps_taken", 0)) + 1)
+            if self._reacquire_steps_taken >= int(max(1, getattr(self, "_reacquire_max_steps", 18))):
+                self._phase = "scan"
+                self._next_pressure = float(max(self.P_MIN, cur - max(self.dp_min, 0.05)))
+                self._record_decision(
+                    "reacquire_guard_resume_scan",
+                    {
+                        "pressure_psi": float(cur),
+                        "steps_taken": int(self._reacquire_steps_taken),
+                        "max_steps": int(getattr(self, "_reacquire_max_steps", 18)),
+                    },
+                )
+                self.stageChanged.emit("Re-acquire step guard hit; resuming downward scan")
+                return True
             next_up = float(min(self.P_MAX, cur + self._reacquire_step))
             if next_up <= cur + 1e-9:
                 # Can't go higher → give up and scan down anyway
@@ -6342,6 +6458,30 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 self.stageChanged.emit(
                     f"Found MULTIPLE @ {cur:.3f} psi → refining upper edge in [{lo:.3f}, {hi:.3f}]"
                 )
+                return True
+
+            self._seek_upper_steps = int(max(0, getattr(self, "_seek_upper_steps", 0)) + 1)
+            span = 0.0
+            if self._first_single_pressure is not None:
+                span = abs(float(cur) - float(self._first_single_pressure))
+            if (
+                self._seek_upper_steps >= int(max(1, getattr(self, "_seek_upper_max_steps", 10)))
+                or span >= float(max(0.05, getattr(self, "_seek_upper_max_span_psi", 0.80)))
+            ):
+                self._phase = "scan"
+                resume_from = self._first_single_pressure if self._first_single_pressure is not None else cur
+                self._next_pressure = float(max(self.P_MIN, resume_from - max(self.dp_min, 0.02)))
+                self._record_decision(
+                    "seek_upper_guard_resume_scan",
+                    {
+                        "pressure_psi": float(cur),
+                        "steps_taken": int(self._seek_upper_steps),
+                        "max_steps": int(getattr(self, "_seek_upper_max_steps", 10)),
+                        "span_psi": float(span),
+                        "max_span_psi": float(getattr(self, "_seek_upper_max_span_psi", 0.80)),
+                    },
+                )
+                self.stageChanged.emit("Seek-upper guard hit; resuming downward scan")
                 return True
 
             # keep stepping up
