@@ -263,7 +263,7 @@ def test_pressure_sweep_safe_move_abs_guard_cap_skips_pressure():
     assert proc.nextPressure.calls
 
 
-def test_pressure_sweep_analyze_droplet_requires_stable_hits_before_lock():
+def test_pressure_sweep_analyze_droplet_startup_centers_on_first_hit():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     contour = contour_from_rect(20, 30, 8, 8)
     overlay = np.zeros((80, 80, 3), dtype=np.uint8)
@@ -302,15 +302,64 @@ def test_pressure_sweep_analyze_droplet_requires_stable_hits_before_lock():
     proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
     proc._record_decision = lambda *args, **kwargs: None
     proc._invalidate_current_pressure = lambda *args, **kwargs: (_ for _ in ()).throw(
-        AssertionError("should not invalidate in stable-hit test")
+        AssertionError("should not invalidate in startup immediate-center test")
+    )
+
+    proc.onAnalyzeDroplet()
+    assert proc.dropletFound.calls
+    assert not proc.continueSearch.calls
+    assert len(proc.measurements) == 1
+
+
+def test_pressure_sweep_analyze_droplet_quantification_requires_confirmation():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    contour = contour_from_rect(20, 30, 8, 8)
+    overlay = np.zeros((80, 80, 3), dtype=np.uint8)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplet_contour=lambda *_args, **_kwargs: (
+                contour,
+                overlay,
+                {"reason": "ok", "p95": 15.0, "center": [24, 34]},
+            )
+        )
+    )
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.dropletFound = Recorder()
+    proc.readyToCharacterize = Recorder()
+    proc.measurements = []
+    proc.current_delay_us = 7000
+    proc._centered = True
+    proc._lost_count = 0
+    proc._vertical_probe_tries = 0
+    proc.search_stable_hits_required = 2
+    proc.search_min_signal_p95 = 10.0
+    proc.search_center_jump_max_px = 280.0
+    proc.search_low_signal_streak_limit = 10
+    proc.search_no_contour_streak_limit = 8
+    proc.search_center_jump_streak_limit = 4
+    proc._search_last_center = None
+    proc._search_stable_hits = 0
+    proc._search_low_signal_streak = 0
+    proc._search_no_contour_streak = 0
+    proc._search_center_jump_streak = 0
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._invalidate_current_pressure = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("should not invalidate in quantification confirmation test")
     )
 
     proc.onAnalyzeDroplet()
     assert proc.continueSearch.calls
-    assert not proc.dropletFound.calls
+    assert not proc.readyToCharacterize.calls
 
     proc.onAnalyzeDroplet()
-    assert proc.dropletFound.calls
+    assert proc.readyToCharacterize.calls
+    assert not proc.dropletFound.calls
     assert len(proc.measurements) == 1
 
 
@@ -318,6 +367,7 @@ def test_pressure_sweep_set_delay_uses_same_delay_for_confirmation():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc._search_confirm_same_delay_pending = True
     proc.current_delay_us = 7300
+    proc._centered = True
     proc._delay_try_index = 4
     proc._delay_offsets_us = [0, 500, -500]
     proc.stageChanged = Recorder()
@@ -449,6 +499,23 @@ def test_pressure_sweep_set_delay_invalidates_on_search_elapsed_timeout():
 
     assert invalidated
     assert invalidated[-1][0] == "search_elapsed_timeout"
+
+
+def test_pressure_sweep_search_jump_streak_does_not_abort_after_center_lock():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.search_low_signal_streak_limit = 10
+    proc.search_no_contour_streak_limit = 8
+    proc.search_center_jump_streak_limit = 4
+    proc.search_background_artifact_streak_limit = 8
+    proc.search_max_elapsed_s = 90.0
+    proc._search_started_at_monotonic = time.monotonic()
+    proc._centered = True
+    proc._search_low_signal_streak = 0
+    proc._search_no_contour_streak = 0
+    proc._search_center_jump_streak = 4
+    proc._search_background_artifact_streak = 0
+
+    assert proc._search_streak_abort_reason() is None
 
 
 def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():

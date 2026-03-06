@@ -10586,6 +10586,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return "search_elapsed_timeout"
         return None
 
+    def _reset_search_consistency_after_motion(self):
+        # Recenter moves intentionally shift the target; stale center continuity
+        # should not drive jump rejection on the very next acquisition frame.
+        self._search_last_center = None
+        self._search_last_delay_us = None
+        self._search_stable_hits = 0
+        self._search_low_signal_streak = 0
+        self._search_no_contour_streak = 0
+        self._search_center_jump_streak = 0
+        self._search_confirm_same_delay_pending = False
+
     def _search_streak_snapshot(self) -> dict:
         return {
             "stable_hits": int(getattr(self, "_search_stable_hits", 0)),
@@ -10663,6 +10674,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if int(getattr(self, "_search_no_contour_streak", 0)) >= int(no_contour_limit):
             return "search_no_contour_streak_limit"
         if int(getattr(self, "_search_center_jump_streak", 0)) >= int(jump_limit):
+            if bool(getattr(self, "_centered", False)):
+                return None
             return "search_center_jump_streak_limit"
         if int(getattr(self, "_search_background_artifact_streak", 0)) >= int(artifact_limit):
             return "search_background_artifact_streak_limit"
@@ -10894,7 +10907,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             )
             return
 
-        if bool(getattr(self, "_search_confirm_same_delay_pending", False)) and self.current_delay_us is not None:
+        if (
+            bool(getattr(self, "_search_confirm_same_delay_pending", False))
+            and self.current_delay_us is not None
+            and bool(getattr(self, "_centered", False))
+        ):
             self.stageChanged.emit(
                 f"Confirming candidate at same delay {int(self.current_delay_us)} us"
             )
@@ -10911,6 +10928,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 context="pressure_sweep_set_delay_confirm",
             )
             return
+        if bool(getattr(self, "_search_confirm_same_delay_pending", False)):
+            self._search_confirm_same_delay_pending = False
 
         if self._delay_try_index >= len(self._delay_offsets_us):
             # exhausted a sweep
@@ -11029,10 +11048,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         confirmation_frame = bool(getattr(self, "_search_confirm_same_delay_pending", False))
         self._search_confirm_same_delay_pending = False
+        startup_centering_mode = not bool(getattr(self, "_centered", False))
         reason = str(details.get("reason", ""))
         p95 = float(details.get("p95", 0.0) or 0.0)
         min_signal_p95 = float(getattr(self, "search_min_signal_p95", 10.0))
-        stable_hits_required = int(getattr(self, "search_stable_hits_required", 2))
+        stable_hits_required_cfg = int(getattr(self, "search_stable_hits_required", 2))
+        stable_hits_required = 1 if startup_centering_mode else stable_hits_required_cfg
         artifact_refresh_streak = int(getattr(self, "search_background_artifact_refresh_streak", 2))
 
         if contour is None:
@@ -11257,6 +11278,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             )
             self.continueSearch.emit()
             return
+        if startup_centering_mode:
+            self.stageChanged.emit("Startup acquisition hit → centering immediately")
 
         self._search_confirm_same_delay_pending = False
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
@@ -11268,6 +11291,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "center_px": list(cxy),
                 "p95": float(p95),
                 "stable_hits": int(self._search_stable_hits),
+                "startup_centering_mode": bool(startup_centering_mode),
             },
         )
         if self._centered:
@@ -11304,6 +11328,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "center_lost_restart_search",
                     {"reason": str(reason), "lost_count": int(self._lost_count)},
                 )
+                self._reset_search_consistency_after_motion()
                 self.continueSearch.emit()
                 return
             self.stageChanged.emit(f"Droplet lost while centering ({reason}) → retry delay sweep")
@@ -11312,6 +11337,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "center_retry",
                 {"reason": str(reason), "lost_count": int(self._lost_count)},
             )
+            self._reset_search_consistency_after_motion()
             self.continueSearch.emit()
             return
 
@@ -11322,37 +11348,58 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         stable_hits_for_bias = int(getattr(self, "center_stable_hits_for_bias_update", 3))
         center_jump = self._center_distance_px(cxy, self._center_last_center)
         if self._center_last_center is not None and float(center_jump) > float(center_jump_reject_px):
-            self._center_jump_reject_streak += 1
-            self._record_pressure_sweep_analysis(
-                "pressure_sweep_center",
-                {
-                    "status": "rejected_jump",
-                    "reason": "center_jump",
-                    "center_px": list(cxy),
-                    "jump_distance_px": float(center_jump),
-                    "jump_streak": int(self._center_jump_reject_streak),
-                    "details": details,
-                },
-            )
-            if int(self._center_jump_reject_streak) >= int(center_jump_streak_limit):
-                self._invalidate_current_pressure(
-                    "center_jump_reject_limit",
-                    stage_message="Centering unstable across frames → skip pressure",
+            if not bool(getattr(self, "_centered", False)):
+                self._record_pressure_sweep_analysis(
+                    "pressure_sweep_center",
+                    {
+                        "status": "jump_observed_startup",
+                        "reason": "center_jump_startup_allowed",
+                        "center_px": list(cxy),
+                        "jump_distance_px": float(center_jump),
+                        "details": details,
+                    },
                 )
+                self._record_decision(
+                    "center_jump_observed_startup",
+                    {
+                        "center_px": list(cxy),
+                        "jump_distance_px": float(center_jump),
+                    },
+                )
+                self._center_jump_reject_streak = 0
+            else:
+                self._center_jump_reject_streak += 1
+                self._record_pressure_sweep_analysis(
+                    "pressure_sweep_center",
+                    {
+                        "status": "rejected_jump",
+                        "reason": "center_jump",
+                        "center_px": list(cxy),
+                        "jump_distance_px": float(center_jump),
+                        "jump_streak": int(self._center_jump_reject_streak),
+                        "details": details,
+                    },
+                )
+                if int(self._center_jump_reject_streak) >= int(center_jump_streak_limit):
+                    self._invalidate_current_pressure(
+                        "center_jump_reject_limit",
+                        stage_message="Centering unstable across frames → skip pressure",
+                    )
+                    return
+                self.stageChanged.emit(
+                    f"Centering rejected unstable jump ({center_jump:.0f}px) → retry delay search"
+                )
+                self._record_decision(
+                    "center_jump_rejected",
+                    {
+                        "center_px": list(cxy),
+                        "jump_distance_px": float(center_jump),
+                        "jump_streak": int(self._center_jump_reject_streak),
+                    },
+                )
+                self._reset_search_consistency_after_motion()
+                self.continueSearch.emit()
                 return
-            self.stageChanged.emit(
-                f"Centering rejected unstable jump ({center_jump:.0f}px) → retry delay search"
-            )
-            self._record_decision(
-                "center_jump_rejected",
-                {
-                    "center_px": list(cxy),
-                    "jump_distance_px": float(center_jump),
-                    "jump_streak": int(self._center_jump_reject_streak),
-                },
-            )
-            self.continueSearch.emit()
-            return
 
         self._center_jump_reject_streak = 0
         if self._center_last_center is None:
@@ -11432,6 +11479,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "recenter_moves": int(self._recenter_moves),
             },
         )
+        self._reset_search_consistency_after_motion()
         self._mark_background_stale("centering_recenter_move")
         cur = self.model.machine_model.get_current_position_dict()
         self._safe_move_abs(self._clamp_xyz(
@@ -11952,6 +12000,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "recenter_moves": int(self._recenter_moves),
             },
         )
+        self._reset_search_consistency_after_motion()
         self._mark_background_stale("center_first_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
 
@@ -12018,6 +12067,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "recenter_moves": int(self._recenter_moves),
             },
         )
+        self._reset_search_consistency_after_motion()
         self._mark_background_stale("boundary_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True
