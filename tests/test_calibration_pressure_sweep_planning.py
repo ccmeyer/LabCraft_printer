@@ -389,6 +389,34 @@ def test_pressure_sweep_set_delay_uses_same_delay_for_confirmation():
     assert decisions
 
 
+def test_pressure_sweep_set_delay_uses_reacquire_same_delay_budget():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.search_max_elapsed_s = 90.0
+    proc._search_started_at_monotonic = time.monotonic()
+    proc._search_confirm_same_delay_pending = False
+    proc._centered = False
+    proc.current_delay_us = 7300
+    proc._delay_try_index = 2
+    proc._delay_offsets_us = [0, 500, -500]
+    proc._search_reacquire_same_delay_remaining = 2
+    proc.search_reacquire_same_delay_retries = 2
+    proc.stageChanged = Recorder()
+    proc.delayApplied = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    called = {}
+    proc._request_settings_with_timeout = lambda settings, on_done, context: called.update(
+        {"settings": dict(settings), "context": str(context)}
+    )
+
+    proc.onSetDelay()
+
+    assert called["settings"]["flash_delay"] == 7300
+    assert called["settings"]["num_droplets"] == 1
+    assert called["context"] == "pressure_sweep_set_delay_reacquire"
+    assert proc._delay_try_index == 2
+    assert proc._search_reacquire_same_delay_remaining == 1
+
+
 def test_pressure_sweep_set_delay_repeats_sweep_when_candidate_seen():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.search_max_elapsed_s = 90.0
@@ -516,6 +544,98 @@ def test_pressure_sweep_search_jump_streak_does_not_abort_after_center_lock():
     proc._search_background_artifact_streak = 0
 
     assert proc._search_streak_abort_reason() is None
+
+
+def test_pressure_sweep_recenter_immediate_keeps_background_and_reenters_startup_mode():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.droplet_image = np.zeros((80, 80, 3), dtype=np.uint8)
+    proc._centered = True
+    proc._center_last_center = (30, 30)
+    proc._center_stable_hits = 4
+    proc._center_jump_reject_streak = 1
+    proc.search_reacquire_same_delay_retries = 2
+    proc._search_reacquire_same_delay_remaining = 0
+    proc.center_recenter_gain_tracking = 0.5
+    proc.center_recenter_max_step_tracking = 700
+    proc._recenter_moves = 1
+    proc.stageChanged = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._reset_search_consistency_after_motion = lambda: None
+    proc._clamp_xyz = lambda x, y, z: (int(x), int(y), int(z))
+    moved = {}
+    proc._safe_move_abs = lambda xyz: moved.__setitem__("target", tuple(map(int, xyz)))
+    proc._mark_background_stale = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("recenter_immediate should not force background refresh")
+    )
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 100, "Y": 200, "Z": 300}),
+        droplet_camera_model=SimpleNamespace(calculate_move_to_target=lambda *_args, **_kwargs: (1000, 0, 1000)),
+    )
+
+    proc._recenter_immediate((12, 18))
+
+    assert proc._centered is False
+    assert proc._char_need_capture is True
+    assert proc._search_reacquire_same_delay_remaining == 2
+    assert moved["target"] == (600, 200, 800)
+
+
+def test_pressure_sweep_on_center_recenter_uses_damped_move_without_bg_refresh():
+    contour = contour_from_rect(0, 0, 8, 8)
+    overlay = np.zeros((500, 500, 3), dtype=np.uint8)
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc._centered = False
+    proc._center_last_center = None
+    proc._center_stable_hits = 0
+    proc._center_jump_reject_streak = 0
+    proc._lost_count = 0
+    proc._lost_limit = 5
+    proc._recenter_moves = 0
+    proc.max_recenter_moves = 10
+    proc.center_jump_reject_px = 320.0
+    proc.search_center_jump_streak_limit = 4
+    proc.center_stable_hits_for_bias_update = 3
+    proc.center_recenter_gain_startup = 0.5
+    proc.center_recenter_max_step_startup = 600
+    proc.search_reacquire_same_delay_retries = 2
+    proc._search_reacquire_same_delay_remaining = 0
+    proc._xz_offset_updated_this_pressure = False
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.dropletCentered = Recorder()
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._reset_search_consistency_after_motion = lambda: None
+    proc._clamp_xyz = lambda x, y, z: (int(x), int(y), int(z))
+    proc._invalidate_current_pressure = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("centering recenter move should not invalidate in this scenario")
+    )
+    proc._mark_background_stale = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("centering recenter should not force background refresh")
+    )
+    moved = {}
+    proc._safe_move_abs = lambda xyz: moved.__setitem__("target", tuple(map(int, xyz)))
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 500, "Y": 600, "Z": 700}),
+        droplet_camera_model=SimpleNamespace(
+            identify_droplet_contour=lambda *_args, **_kwargs: (
+                contour,
+                overlay,
+                {"reason": "ok", "center": [4, 4]},
+            ),
+            calculate_move_to_target=lambda *_args, **_kwargs: (1000, 0, -1000),
+        ),
+    )
+
+    proc.onCenter()
+
+    assert moved["target"] == (1000, 600, 200)
+    assert proc._search_reacquire_same_delay_remaining == 2
+    assert not proc.dropletCentered.calls
+    assert not proc.continueSearch.calls
 
 
 def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
