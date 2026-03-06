@@ -9992,6 +9992,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  background_refresh_limit_per_pressure: int = 20,
                  center_stable_hits_for_bias_update: int = 3,
                  center_jump_reject_px: float = 320.0,
+                 center_recenter_gain_startup: float = 0.60,
+                 center_recenter_gain_tracking: float = 0.70,
+                 center_recenter_max_step_startup: int = 900,
+                 center_recenter_max_step_tracking: int = 1100,
+                 search_reacquire_same_delay_retries: int = 2,
                  char_stream_circularity_max: float = 0.58,
                  char_max_invalid_ratio: float = 0.45,
                  char_max_multiple_ratio: float = 0.20,
@@ -10159,6 +10164,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.background_refresh_limit_per_pressure = int(max(1, int(background_refresh_limit_per_pressure)))
         self.center_stable_hits_for_bias_update = int(max(1, int(center_stable_hits_for_bias_update)))
         self.center_jump_reject_px = float(max(20.0, float(center_jump_reject_px)))
+        self.center_recenter_gain_startup = float(
+            max(0.10, min(1.00, float(center_recenter_gain_startup)))
+        )
+        self.center_recenter_gain_tracking = float(
+            max(0.10, min(1.00, float(center_recenter_gain_tracking)))
+        )
+        self.center_recenter_max_step_startup = int(
+            max(100, int(center_recenter_max_step_startup))
+        )
+        self.center_recenter_max_step_tracking = int(
+            max(100, int(center_recenter_max_step_tracking))
+        )
+        self.search_reacquire_same_delay_retries = int(max(0, int(search_reacquire_same_delay_retries)))
         self.char_stream_circularity_max = float(max(0.05, min(0.99, float(char_stream_circularity_max))))
         self.char_max_invalid_ratio = float(max(0.0, min(1.0, float(char_max_invalid_ratio))))
         self.char_max_multiple_ratio = float(max(0.0, min(1.0, float(char_max_multiple_ratio))))
@@ -10189,6 +10207,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._search_center_jump_streak = 0
         self._search_background_artifact_streak = 0
         self._search_confirm_same_delay_pending = False
+        self._search_reacquire_same_delay_remaining = 0
         self._search_candidate_seen_since_sweep = False
         self._search_candidate_seen_ever = False
         self._search_started_at_monotonic = time.monotonic()
@@ -10586,6 +10605,47 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return "search_elapsed_timeout"
         return None
 
+    def _set_startup_centering_mode(self, reason: str, *, schedule_same_delay_retry: bool = False):
+        was_centered = bool(getattr(self, "_centered", False))
+        self._centered = False
+        self._center_last_center = None
+        self._center_stable_hits = 0
+        self._center_jump_reject_streak = 0
+        if bool(schedule_same_delay_retry):
+            self._search_reacquire_same_delay_remaining = int(
+                max(0, int(getattr(self, "search_reacquire_same_delay_retries", 0)))
+            )
+        self._record_decision(
+            "centering_mode_startup",
+            {
+                "reason": str(reason or ""),
+                "was_centered": bool(was_centered),
+                "same_delay_retries_remaining": int(
+                    getattr(self, "_search_reacquire_same_delay_remaining", 0)
+                ),
+            },
+        )
+
+    def _damped_recenter_move(self, dX: int, dZ: int, *, tracking_mode: bool) -> tuple[int, int]:
+        if bool(tracking_mode):
+            gain = float(getattr(self, "center_recenter_gain_tracking", 0.70))
+            max_step = int(getattr(self, "center_recenter_max_step_tracking", 1100))
+        else:
+            gain = float(getattr(self, "center_recenter_gain_startup", 0.60))
+            max_step = int(getattr(self, "center_recenter_max_step_startup", 900))
+
+        sx = int(round(float(dX) * float(gain)))
+        sz = int(round(float(dZ) * float(gain)))
+        if int(dX) != 0 and sx == 0:
+            sx = 1 if int(dX) > 0 else -1
+        if int(dZ) != 0 and sz == 0:
+            sz = 1 if int(dZ) > 0 else -1
+
+        max_step = int(max(100, max_step))
+        sx = int(max(-max_step, min(max_step, sx)))
+        sz = int(max(-max_step, min(max_step, sz)))
+        return int(sx), int(sz)
+
     def _reset_search_consistency_after_motion(self):
         # Recenter moves intentionally shift the target; stale center continuity
         # should not drive jump rejection on the very next acquisition frame.
@@ -10754,6 +10814,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._search_center_jump_streak = 0
         self._search_background_artifact_streak = 0
         self._search_confirm_same_delay_pending = False
+        self._search_reacquire_same_delay_remaining = 0
         self._search_candidate_seen_since_sweep = False
         self._search_candidate_seen_ever = False
         self._search_started_at_monotonic = time.monotonic()
@@ -10930,6 +10991,31 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return
         if bool(getattr(self, "_search_confirm_same_delay_pending", False)):
             self._search_confirm_same_delay_pending = False
+
+        if bool(getattr(self, "_centered", False)):
+            self._search_reacquire_same_delay_remaining = 0
+        else:
+            reacquire_remaining = int(getattr(self, "_search_reacquire_same_delay_remaining", 0))
+            if reacquire_remaining > 0 and self.current_delay_us is not None:
+                self._search_reacquire_same_delay_remaining = int(max(0, reacquire_remaining - 1))
+                self.stageChanged.emit(
+                    f"Reacquire: reusing same delay {int(self.current_delay_us)} us "
+                    f"({int(reacquire_remaining)}/{int(getattr(self, 'search_reacquire_same_delay_retries', 0))})"
+                )
+                self._record_decision(
+                    "search_reacquire_same_delay",
+                    {
+                        "flash_delay_us": int(self.current_delay_us),
+                        "remaining_after_apply": int(self._search_reacquire_same_delay_remaining),
+                        "retry_budget": int(getattr(self, "search_reacquire_same_delay_retries", 0)),
+                    },
+                )
+                self._request_settings_with_timeout(
+                    {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                    on_done=self.delayApplied.emit,
+                    context="pressure_sweep_set_delay_reacquire",
+                )
+                return
 
         if self._delay_try_index >= len(self._delay_offsets_us):
             # exhausted a sweep
@@ -11328,6 +11414,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "center_lost_restart_search",
                     {"reason": str(reason), "lost_count": int(self._lost_count)},
                 )
+                self._set_startup_centering_mode("center_lost_restart_search")
                 self._reset_search_consistency_after_motion()
                 self.continueSearch.emit()
                 return
@@ -11337,6 +11424,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "center_retry",
                 {"reason": str(reason), "lost_count": int(self._lost_count)},
             )
+            self._set_startup_centering_mode("center_retry")
             self._reset_search_consistency_after_motion()
             self.continueSearch.emit()
             return
@@ -11397,6 +11485,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                         "jump_streak": int(self._center_jump_reject_streak),
                     },
                 )
+                self._set_startup_centering_mode("center_jump_rejected")
                 self._reset_search_consistency_after_motion()
                 self.continueSearch.emit()
                 return
@@ -11445,9 +11534,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self.dropletCentered.emit()
             return
 
-        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
-        dX = int(max(-1200, min(1200, dX)))
-        dZ = int(max(-1200, min(1200, dZ)))
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
+        dX, dZ = self._damped_recenter_move(
+            int(dX_raw),
+            int(dZ_raw),
+            tracking_mode=bool(getattr(self, "_centered", False)),
+        )
 
         # Count recenter attempt during centering
         self._recenter_moves += 1
@@ -11468,6 +11560,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "stable_hits": int(self._center_stable_hits),
                 "jump_distance_px": float(center_jump),
                 "move_xyz": [int(dX), 0, int(dZ)],
+                "move_raw_xyz": [int(dX_raw), 0, int(dZ_raw)],
                 "recenter_moves": int(self._recenter_moves),
             },
         )
@@ -11476,11 +11569,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             {
                 "center_px": list(cxy),
                 "move_xyz": [int(dX), 0, int(dZ)],
+                "move_raw_xyz": [int(dX_raw), 0, int(dZ_raw)],
                 "recenter_moves": int(self._recenter_moves),
             },
         )
+        self._set_startup_centering_mode(
+            "center_recenter_move",
+            schedule_same_delay_retry=True,
+        )
         self._reset_search_consistency_after_motion()
-        self._mark_background_stale("centering_recenter_move")
         cur = self.model.machine_model.get_current_position_dict()
         self._safe_move_abs(self._clamp_xyz(
             cur['X'] + dX,
@@ -11982,26 +12079,32 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         """Single-shot recenter to the current droplet center, then recapture."""
         H, W = self.droplet_image.shape[:2]
         target = (W // 2, H // 2)
-        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target(
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(
             (int(center_px[0]), int(center_px[1])), target
         )
-        # center moves are X/Z only; clamp for safety
-        dX = int(max(-1200, min(1200, dX)))
-        dZ = int(max(-1200, min(1200, dZ)))
+        dX, dZ = self._damped_recenter_move(
+            int(dX_raw),
+            int(dZ_raw),
+            tracking_mode=True,
+        )
 
         cur = self.model.machine_model.get_current_position_dict()
         self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
         self._char_need_capture = True  # after motion, take a fresh frame
+        self._set_startup_centering_mode(
+            "center_first_recenter",
+            schedule_same_delay_retry=True,
+        )
         self._record_decision(
             "center_first_recenter_move",
             {
                 "center_px": [int(center_px[0]), int(center_px[1])],
                 "move_xyz": [int(dX), 0, int(dZ)],
+                "move_raw_xyz": [int(dX_raw), 0, int(dZ_raw)],
                 "recenter_moves": int(self._recenter_moves),
             },
         )
         self._reset_search_consistency_after_motion()
-        self._mark_background_stale("center_first_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
 
     def _check_boundary_and_maybe_recenter(self, center_px) -> bool:
@@ -12040,16 +12143,22 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         H, W = self.droplet_image.shape[:2]
         target = (W // 2, H // 2)
-        dX, dY, dZ = self.model.droplet_camera_model.calculate_move_to_target((avgx, avgy), target)
-        # center moves are X/Z only
-        dX = int(max(-1200, min(1200, dX)))
-        dZ = int(max(-1200, min(1200, dZ)))
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target((avgx, avgy), target)
+        dX, dZ = self._damped_recenter_move(
+            int(dX_raw),
+            int(dZ_raw),
+            tracking_mode=True,
+        )
 
         cur = self.model.machine_model.get_current_position_dict()
         self.stageChanged.emit(f"2x out-of-bound → recenter to averaged offset: move XZ=({dX},{dZ})")
         self._oob_streak = 0
         self._oob_positions.clear()
         self._char_need_capture = True  # get a fresh frame after motion
+        self._set_startup_centering_mode(
+            "boundary_recenter",
+            schedule_same_delay_retry=True,
+        )
         
         self._recenter_moves += 1               # NEW: count recenter moves
         if self._recenter_moves >= self.max_recenter_moves:
@@ -12063,12 +12172,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             {
                 "average_oob_center_px": [int(avgx), int(avgy)],
                 "move_xyz": [int(dX), 0, int(dZ)],
+                "move_raw_xyz": [int(dX_raw), 0, int(dZ_raw)],
                 "oob_total": int(self._oob_total),
                 "recenter_moves": int(self._recenter_moves),
             },
         )
         self._reset_search_consistency_after_motion()
-        self._mark_background_stale("boundary_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True
 
