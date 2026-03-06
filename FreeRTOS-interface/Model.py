@@ -35,6 +35,7 @@ import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
 import importlib
+from CalibrationMemoryStore import CalibrationMemoryStore
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
@@ -5435,6 +5436,8 @@ class Model(QObject):
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(prof=self.profile)
+        self.calibration_memory_store = None
+        self._initialize_calibration_memory_store()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
@@ -5453,7 +5456,21 @@ class Model(QObject):
         importlib.reload(CalibrationClasses)
         self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
+        self._initialize_calibration_memory_store()
         self.droplet_camera_model.record_metadata_signal.connect(self.record_image_metadata)
+
+    def _initialize_calibration_memory_store(self):
+        try:
+            store = getattr(self, "calibration_memory_store", None)
+            if isinstance(store, CalibrationMemoryStore):
+                store.set_model(self)
+            else:
+                store = CalibrationMemoryStore(model=self)
+            store.ensure_initialized()
+            self.calibration_memory_store = store
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to initialize store: {e}")
+            self.calibration_memory_store = None
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:

@@ -776,6 +776,66 @@ class CalibrationManager(QObject):
             meta["settings_snapshot"] = {}
         return meta
 
+    # ------------- Calibration memory sidecar -------------
+
+    def _get_calibration_memory_store(self):
+        return getattr(self.model, "calibration_memory_store", None)
+
+    def _warn_calibration_memory(self, action: str, exc: Exception):
+        print(f"[CalibrationMemory] {action} failed: {exc}")
+
+    def _start_calibration_memory_run(self, *, notes: str = None):
+        store = self._get_calibration_memory_store()
+        if store is None or not self._run_id:
+            return
+        try:
+            context = store.context_builder.build(
+                model=self.model,
+                calibration_file_path=self.calibration_file_path,
+            )
+            store.create_run(
+                self._run_id,
+                context=context,
+                calibration_manager=self,
+                notes=notes,
+                manager_meta=self._build_recorder_meta(),
+            )
+        except Exception as e:
+            self._warn_calibration_memory("create_run", e)
+
+    def _write_calibration_memory_summary(self):
+        store = self._get_calibration_memory_store()
+        if store is None or not self._run_id:
+            return
+        try:
+            summary = store.build_run_summary(self)
+            store.write_run_summary(self._run_id, summary)
+        except Exception as e:
+            self._warn_calibration_memory("write_run_summary", e)
+
+    def _append_calibration_memory_observation(
+        self,
+        observation_type: str,
+        payload: dict | None = None,
+        *,
+        phase_name: str | None = None,
+        artifact_refs: dict | None = None,
+    ):
+        store = self._get_calibration_memory_store()
+        if store is None or not self._run_id:
+            return None
+        try:
+            return store.append_observation_from_manager(
+                self,
+                str(observation_type),
+                payload or {},
+                phase_name=phase_name,
+                artifact_refs=artifact_refs or {},
+            )
+        except Exception as e:
+            self._warn_calibration_memory(f"append_observation:{observation_type}", e)
+            return None
+
     def _begin_process_recording(self, process_obj):
         if not getattr(self, "record_mode_enabled", False):
             return
@@ -947,6 +1007,67 @@ class CalibrationManager(QObject):
     def get_record_mode_enabled(self) -> bool:
         return bool(getattr(self, "record_mode_enabled", False))
 
+    def record_memory_event(
+        self,
+        event_type: str,
+        payload: dict | None = None,
+        *,
+        state_name: str | None = None,
+        level: str = "info",
+    ):
+        phase_name = getattr(getattr(self, "activeCalibration", None), "phase_name", None) or state_name
+        return self._append_calibration_memory_observation(
+            "process_event",
+            {
+                "event_type": str(event_type),
+                "state_name": str(state_name or ""),
+                "level": str(level),
+                "payload": payload or {},
+            },
+            phase_name=phase_name,
+        )
+
+    def record_memory_analysis(self, payload: dict | None = None, *, phase_name: str | None = None):
+        return self._append_calibration_memory_observation(
+            "process_analysis",
+            payload or {},
+            phase_name=phase_name,
+        )
+
+    def record_memory_capture(
+        self,
+        *,
+        role: str,
+        metadata: dict | None = None,
+        capture_ref: dict | None = None,
+        phase_name: str | None = None,
+    ):
+        artifact_refs = {
+            "process_recording_capture": capture_ref or {},
+        }
+        latest_dir = self.get_latest_recording_directory()
+        if latest_dir:
+            artifact_refs["process_recording_run_dir"] = latest_dir
+        return self._append_calibration_memory_observation(
+            "process_capture",
+            {
+                "capture_role": str(role),
+                "metadata": metadata or {},
+            },
+            phase_name=phase_name,
+            artifact_refs=artifact_refs,
+        )
+
+    def record_memory_error(self, message: str, payload: dict | None = None, *, phase_name: str | None = None):
+        return self._append_calibration_memory_observation(
+            "process_error",
+            {
+                "error_message": str(message),
+                "payload": payload or {},
+            },
+            phase_name=phase_name,
+        )
+
     # ------------- Session / File management -------------
 
     def begin_session(self, calibration_file_path: str, notes: str = None):
@@ -994,6 +1115,7 @@ class CalibrationManager(QObject):
         self.data["runs"].append(run_meta)
         self._run_idx = len(self.data["runs"]) - 1
         self._save_atomic()
+        self._start_calibration_memory_run(notes=notes)
 
         self.calibrationStageChanged.emit(
             f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})",
@@ -1007,6 +1129,7 @@ class CalibrationManager(QObject):
         if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
             self.data["runs"][self._run_idx]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._save_atomic()
+            self._write_calibration_memory_summary()
             self.calibrationStageChanged.emit("Calibration session ended", "purple")
 
         self._run_id = None
@@ -1814,6 +1937,7 @@ class CalibrationManager(QObject):
         # self._try_append_flat_rows_from_payload(run, phase_key, payload)
 
         self._save_atomic()
+        self._write_calibration_memory_summary()
 
         # Notify listeners to refresh the summary table when relevant
         if phase_key in ("pressure_sweep_characterization", "droplet_search"):
@@ -2123,6 +2247,13 @@ class BaseCalibrationProcess(QObject):
                     state_name=state_name or getattr(self, "phase_name", None),
                     level=level,
                 )
+            if hasattr(self.calibration_manager, "record_memory_event"):
+                self.calibration_manager.record_memory_event(
+                    str(event_type),
+                    payload or {},
+                    state_name=state_name or getattr(self, "phase_name", None),
+                    level=level,
+                )
         except Exception:
             pass
 
@@ -2130,6 +2261,11 @@ class BaseCalibrationProcess(QObject):
         try:
             if hasattr(self.calibration_manager, "record_analysis"):
                 self.calibration_manager.record_analysis(payload or {})
+            if hasattr(self.calibration_manager, "record_memory_analysis"):
+                self.calibration_manager.record_memory_analysis(
+                    payload or {},
+                    phase_name=getattr(self, "phase_name", None),
+                )
         except Exception:
             pass
 
@@ -2142,17 +2278,34 @@ class BaseCalibrationProcess(QObject):
         out = dict(payload or {})
         out["error_message"] = str(message)
         self._record_event("error", out, level="error")
+        try:
+            if hasattr(self.calibration_manager, "record_memory_error"):
+                self.calibration_manager.record_memory_error(
+                    str(message),
+                    payload or {},
+                    phase_name=getattr(self, "phase_name", None),
+                )
+        except Exception:
+            pass
 
     def _record_capture(self, frame, *, role: str, metadata: dict | None = None):
         if frame is None:
             return None
         try:
             if hasattr(self.calibration_manager, "record_capture_frame"):
-                return self.calibration_manager.record_capture_frame(
+                rec = self.calibration_manager.record_capture_frame(
                     frame,
                     role=str(role),
                     metadata=metadata or {},
                 )
+                if hasattr(self.calibration_manager, "record_memory_capture"):
+                    self.calibration_manager.record_memory_capture(
+                        role=str(role),
+                        metadata=metadata or {},
+                        capture_ref=rec,
+                        phase_name=getattr(self, "phase_name", None),
+                    )
+                return rec
         except Exception:
             return None
         return None
