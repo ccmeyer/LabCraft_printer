@@ -9985,6 +9985,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  search_low_signal_streak_limit: int = 10,
                  search_no_contour_streak_limit: int = 8,
                  search_center_jump_streak_limit: int = 4,
+                 search_cross_delay_jump_scale: float = 1.8,
+                 search_background_artifact_refresh_streak: int = 2,
+                 search_background_artifact_streak_limit: int = 8,
+                 search_max_elapsed_s: float = 90.0,
                  background_refresh_limit_per_pressure: int = 20,
                  center_stable_hits_for_bias_update: int = 3,
                  center_jump_reject_px: float = 320.0,
@@ -10143,6 +10147,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.search_low_signal_streak_limit = int(max(1, int(search_low_signal_streak_limit)))
         self.search_no_contour_streak_limit = int(max(1, int(search_no_contour_streak_limit)))
         self.search_center_jump_streak_limit = int(max(1, int(search_center_jump_streak_limit)))
+        self.search_cross_delay_jump_scale = float(max(1.0, float(search_cross_delay_jump_scale)))
+        self.search_background_artifact_refresh_streak = int(max(1, int(search_background_artifact_refresh_streak)))
+        self.search_background_artifact_streak_limit = int(
+            max(
+                self.search_background_artifact_refresh_streak,
+                int(search_background_artifact_streak_limit),
+            )
+        )
+        self.search_max_elapsed_s = float(max(5.0, float(search_max_elapsed_s)))
         self.background_refresh_limit_per_pressure = int(max(1, int(background_refresh_limit_per_pressure)))
         self.center_stable_hits_for_bias_update = int(max(1, int(center_stable_hits_for_bias_update)))
         self.center_jump_reject_px = float(max(20.0, float(center_jump_reject_px)))
@@ -10169,10 +10182,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._imaging_guard_hit_count = 0
         self._background_refresh_count = 0
         self._search_last_center = None
+        self._search_last_delay_us = None
         self._search_stable_hits = 0
         self._search_low_signal_streak = 0
         self._search_no_contour_streak = 0
         self._search_center_jump_streak = 0
+        self._search_background_artifact_streak = 0
+        self._search_confirm_same_delay_pending = False
+        self._search_candidate_seen_since_sweep = False
+        self._search_candidate_seen_ever = False
+        self._search_started_at_monotonic = time.monotonic()
         self._center_last_center = None
         self._center_stable_hits = 0
         self._center_jump_reject_streak = 0
@@ -10535,12 +10554,45 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         except Exception:
             return 0.0
 
+    def _search_jump_thresholds_px(self) -> tuple[float, float, bool]:
+        base_jump = float(getattr(self, "search_center_jump_max_px", 280.0))
+        cross_scale = float(getattr(self, "search_cross_delay_jump_scale", 1.8))
+        cross_scale = float(max(1.0, cross_scale))
+        last_delay = getattr(self, "_search_last_delay_us", None)
+        cur_delay = getattr(self, "current_delay_us", None)
+        same_delay = bool(
+            last_delay is not None
+            and cur_delay is not None
+            and int(last_delay) == int(cur_delay)
+        )
+        jump_limit = float(base_jump if same_delay else (base_jump * cross_scale))
+        stable_jump = float(base_jump * (0.5 if same_delay else 0.85))
+        return float(jump_limit), float(max(8.0, stable_jump)), bool(same_delay)
+
+    def _search_elapsed_seconds(self) -> float:
+        started = getattr(self, "_search_started_at_monotonic", None)
+        if started is None:
+            return 0.0
+        try:
+            return float(max(0.0, time.monotonic() - float(started)))
+        except Exception:
+            return 0.0
+
+    def _search_elapsed_abort_reason(self) -> str | None:
+        limit_s = float(getattr(self, "search_max_elapsed_s", 0.0) or 0.0)
+        if limit_s <= 0.0:
+            return None
+        if float(self._search_elapsed_seconds()) >= float(limit_s):
+            return "search_elapsed_timeout"
+        return None
+
     def _search_streak_snapshot(self) -> dict:
         return {
             "stable_hits": int(getattr(self, "_search_stable_hits", 0)),
             "low_signal_streak": int(getattr(self, "_search_low_signal_streak", 0)),
             "no_contour_streak": int(getattr(self, "_search_no_contour_streak", 0)),
             "center_jump_streak": int(getattr(self, "_search_center_jump_streak", 0)),
+            "background_artifact_streak": int(getattr(self, "_search_background_artifact_streak", 0)),
         }
 
     def _char_ratio_snapshot(self) -> dict:
@@ -10602,12 +10654,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         low_signal_limit = int(getattr(self, "search_low_signal_streak_limit", 10))
         no_contour_limit = int(getattr(self, "search_no_contour_streak_limit", 8))
         jump_limit = int(getattr(self, "search_center_jump_streak_limit", 4))
+        artifact_limit = int(getattr(self, "search_background_artifact_streak_limit", 8))
+        elapsed_reason = self._search_elapsed_abort_reason()
+        if elapsed_reason is not None:
+            return str(elapsed_reason)
         if int(getattr(self, "_search_low_signal_streak", 0)) >= int(low_signal_limit):
             return "search_low_signal_streak_limit"
         if int(getattr(self, "_search_no_contour_streak", 0)) >= int(no_contour_limit):
             return "search_no_contour_streak_limit"
         if int(getattr(self, "_search_center_jump_streak", 0)) >= int(jump_limit):
             return "search_center_jump_streak_limit"
+        if int(getattr(self, "_search_background_artifact_streak", 0)) >= int(artifact_limit):
+            return "search_background_artifact_streak_limit"
         return None
 
     def _characterization_ratio_abort_reason(self) -> str | None:
@@ -10676,10 +10734,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._max_vertical_probes  = 2
         self._background_refresh_count = 0
         self._search_last_center = None
+        self._search_last_delay_us = None
         self._search_stable_hits = 0
         self._search_low_signal_streak = 0
         self._search_no_contour_streak = 0
         self._search_center_jump_streak = 0
+        self._search_background_artifact_streak = 0
+        self._search_confirm_same_delay_pending = False
+        self._search_candidate_seen_since_sweep = False
+        self._search_candidate_seen_ever = False
+        self._search_started_at_monotonic = time.monotonic()
         self._center_last_center = None
         self._center_stable_hits = 0
         self._center_jump_reject_streak = 0
@@ -10773,6 +10837,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._background_stale = False
         self._search_anchor_xyz = None
         self._imaging_guard_hit_count = 0
+        self._search_started_at_monotonic = time.monotonic()
         self._reset_contour_tracker()
         self.pressureReady.emit()
 
@@ -10820,49 +10885,95 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onSetDelay(self):
+        elapsed_reason = self._search_elapsed_abort_reason()
+        if elapsed_reason is not None:
+            elapsed_s = float(self._search_elapsed_seconds())
+            self._invalidate_current_pressure(
+                str(elapsed_reason),
+                stage_message=f"Search timeout ({elapsed_s:.1f}s) → skip pressure",
+            )
+            return
+
+        if bool(getattr(self, "_search_confirm_same_delay_pending", False)) and self.current_delay_us is not None:
+            self.stageChanged.emit(
+                f"Confirming candidate at same delay {int(self.current_delay_us)} us"
+            )
+            self._record_decision(
+                "search_confirm_same_delay",
+                {
+                    "flash_delay_us": int(self.current_delay_us),
+                    "background_stale": bool(getattr(self, "_background_stale", False)),
+                },
+            )
+            self._request_settings_with_timeout(
+                {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                on_done=self.delayApplied.emit,
+                context="pressure_sweep_set_delay_confirm",
+            )
+            return
+
         if self._delay_try_index >= len(self._delay_offsets_us):
             # exhausted a sweep
             self._delay_try_index = 0
 
-            # try up to two half-frame-up probes BEFORE counting a search cycle
-            if self._vertical_probe_tries < self._max_vertical_probes:
-                self._vertical_probe_tries += 1
-                self._probe_half_frame_up()
-                return  # will come back here via moveDone→state_setDelay
-
-            # If probes are exhausted, proceed with your existing nudge/cycle logic
-            self._vertical_probe_tries = 0
-            self._search_fail_cycles += 1
-            if self._search_fail_cycles >= self.max_search_cycles:
-                self._invalidate_current_pressure(
-                    "search_fail_cycles",
-                    stage_message="Inconsistent imaging: too many delay sweeps → skip pressure",
+            if bool(getattr(self, "_search_candidate_seen_since_sweep", False)):
+                self._search_candidate_seen_since_sweep = False
+                self._vertical_probe_tries = 0
+                if self.current_delay_us is not None:
+                    self.target_delay_us = self._clamp_delay(int(self.current_delay_us))
+                self.stageChanged.emit(
+                    "Candidate seen in prior sweep → repeating sweep around last delay before probes"
                 )
-                return
+                self._record_decision(
+                    "search_repeat_sweep_after_candidate",
+                    {
+                        "target_delay_us": int(self.target_delay_us),
+                        "last_delay_us": (
+                            None if self.current_delay_us is None else int(self.current_delay_us)
+                        ),
+                        "search_fail_cycles": int(getattr(self, "_search_fail_cycles", 0)),
+                    },
+                )
+            else:
+                # try up to two half-frame-up probes BEFORE counting a search cycle
+                if self._vertical_probe_tries < self._max_vertical_probes:
+                    self._vertical_probe_tries += 1
+                    self._probe_half_frame_up()
+                    return  # will come back here via moveDone→state_setDelay
 
-            # Move the search anchor by a meaningful delay offset (old +2 us nudge was ineffective).
-            nudge_us = int(max(500, abs(int(self._delay_offsets_us[-1]))))
-            direction = +1 if (int(self._search_fail_cycles) % 2 == 1) else -1
-            nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * nudge_us))
-            if int(nudged_delay) == int(self.target_delay_us):
-                nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * 250))
-            self.target_delay_us = int(nudged_delay)
-            self.stageChanged.emit(
-                f"Droplet not found yet → nudging trajectory anchor to {self.target_delay_us} us"
-            )
-            self._record_decision(
-                "search_nudge_trajectory",
-                {
-                    "search_fail_cycles": int(self._search_fail_cycles),
-                    "nudge_us": int(direction * nudge_us),
-                    "target_delay_us": int(self.target_delay_us),
-                },
-            )
-            self._mark_background_stale("search_nudge_move")
-            self._safe_move_abs(
-                self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
-            )
-            return  # wait for moveDone
+                # If probes are exhausted, proceed with your existing nudge/cycle logic
+                self._vertical_probe_tries = 0
+                self._search_fail_cycles += 1
+                if self._search_fail_cycles >= self.max_search_cycles:
+                    self._invalidate_current_pressure(
+                        "search_fail_cycles",
+                        stage_message="Inconsistent imaging: too many delay sweeps → skip pressure",
+                    )
+                    return
+
+                # Move the search anchor by a meaningful delay offset (old +2 us nudge was ineffective).
+                nudge_us = int(max(500, abs(int(self._delay_offsets_us[-1]))))
+                direction = +1 if (int(self._search_fail_cycles) % 2 == 1) else -1
+                nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * nudge_us))
+                if int(nudged_delay) == int(self.target_delay_us):
+                    nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * 250))
+                self.target_delay_us = int(nudged_delay)
+                self.stageChanged.emit(
+                    f"Droplet not found yet → nudging trajectory anchor to {self.target_delay_us} us"
+                )
+                self._record_decision(
+                    "search_nudge_trajectory",
+                    {
+                        "search_fail_cycles": int(self._search_fail_cycles),
+                        "nudge_us": int(direction * nudge_us),
+                        "target_delay_us": int(self.target_delay_us),
+                    },
+                )
+                self._mark_background_stale("search_nudge_move")
+                self._safe_move_abs(
+                    self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
+                )
+                return  # wait for moveDone
 
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
         self._delay_try_index += 1
@@ -10916,23 +11027,39 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         details = dict(details or {})
         self.presentImageSignal.emit(overlay)
 
+        confirmation_frame = bool(getattr(self, "_search_confirm_same_delay_pending", False))
+        self._search_confirm_same_delay_pending = False
         reason = str(details.get("reason", ""))
         p95 = float(details.get("p95", 0.0) or 0.0)
         min_signal_p95 = float(getattr(self, "search_min_signal_p95", 10.0))
-        center_jump_max_px = float(getattr(self, "search_center_jump_max_px", 280.0))
         stable_hits_required = int(getattr(self, "search_stable_hits_required", 2))
+        artifact_refresh_streak = int(getattr(self, "search_background_artifact_refresh_streak", 2))
 
         if contour is None:
-            if reason in {"low_signal", "weak_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
+            if reason in {
+                "low_signal",
+                "weak_signal",
+                "oversize_blob",
+                "border_blob",
+                "background_artifact",
+                "invalid_quality_metrics",
+            }:
                 self._reset_contour_tracker()
 
-            self._search_no_contour_streak += 1
+            is_background_artifact = bool(reason == "background_artifact")
+            if is_background_artifact:
+                self._search_background_artifact_streak += 1
+                self._search_no_contour_streak = 0
+            else:
+                self._search_no_contour_streak += 1
+                self._search_background_artifact_streak = 0
             if reason in {"low_signal", "weak_signal"}:
                 self._search_low_signal_streak += 1
             else:
                 self._search_low_signal_streak = 0
             self._search_stable_hits = 0
             self._search_last_center = None
+            self._search_last_delay_us = None
             self._search_center_jump_streak = 0
 
             self._record_pressure_sweep_analysis(
@@ -10941,15 +11068,48 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "status": "none",
                     "reason": str(reason or "no_contour"),
                     "p95": float(p95),
+                    "confirmation_frame": bool(confirmation_frame),
                     "details": details,
                     "streaks": self._search_streak_snapshot(),
                 },
             )
+
+            if (
+                is_background_artifact
+                and int(self._search_background_artifact_streak) >= int(artifact_refresh_streak)
+                and not bool(getattr(self, "_background_stale", False))
+            ):
+                self.stageChanged.emit(
+                    "Background artifact streak detected → refreshing background before retry"
+                )
+                self._mark_background_stale("search_background_artifact")
+                self._search_confirm_same_delay_pending = True
+                self._record_decision(
+                    "search_background_artifact_refresh",
+                    {
+                        "artifact_streak": int(self._search_background_artifact_streak),
+                        "refresh_streak_trigger": int(artifact_refresh_streak),
+                        "flash_delay_us": (
+                            None
+                            if getattr(self, "current_delay_us", None) is None
+                            else int(self.current_delay_us)
+                        ),
+                    },
+                )
+                self.continueSearch.emit()
+                return
+
             abort_reason = self._search_streak_abort_reason()
             if abort_reason:
+                if str(abort_reason) == "search_elapsed_timeout":
+                    stage_message = (
+                        f"Search timeout ({self._search_elapsed_seconds():.1f}s) → skip pressure"
+                    )
+                else:
+                    stage_message = f"Search reliability limit hit ({abort_reason}) → skip pressure"
                 self._invalidate_current_pressure(
                     abort_reason,
-                    stage_message=f"Search reliability limit hit ({abort_reason}) → skip pressure",
+                    stage_message=stage_message,
                 )
                 return
 
@@ -10959,6 +11119,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 {
                     "reason": str(reason or "no_contour"),
                     "p95": float(p95),
+                    "confirmation_frame": bool(confirmation_frame),
                     "streaks": self._search_streak_snapshot(),
                 },
             )
@@ -10969,15 +11130,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         x, y, w, h = cv2.boundingRect(contour)
         cxy = self._normalize_center(details.get("center")) or (int(x + w // 2), int(y + h // 2))
         jump_dist = self._center_distance_px(cxy, self._search_last_center)
+        jump_limit_px, stable_jump_px, same_delay_as_last = self._search_jump_thresholds_px()
         signal_ok = float(p95) >= float(min_signal_p95)
         jump_rejected = (
             self._search_last_center is not None
-            and float(jump_dist) > float(center_jump_max_px)
+            and float(jump_dist) > float(jump_limit_px)
         )
 
         if (not signal_ok) or jump_rejected:
             self._search_no_contour_streak += 1
             self._search_stable_hits = 0
+            self._search_last_delay_us = None
+            self._search_background_artifact_streak = 0
             if not signal_ok:
                 self._search_low_signal_streak += 1
             else:
@@ -10995,7 +11159,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "reason": str(reject_reason),
                     "center_px": list(cxy),
                     "jump_distance_px": float(jump_dist),
+                    "jump_limit_px": float(jump_limit_px),
+                    "same_delay_as_last": bool(same_delay_as_last),
                     "p95": float(p95),
+                    "confirmation_frame": bool(confirmation_frame),
                     "details": details,
                     "streaks": self._search_streak_snapshot(),
                 },
@@ -11003,9 +11170,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
             abort_reason = self._search_streak_abort_reason()
             if abort_reason:
+                if str(abort_reason) == "search_elapsed_timeout":
+                    stage_message = (
+                        f"Search timeout ({self._search_elapsed_seconds():.1f}s) → skip pressure"
+                    )
+                else:
+                    stage_message = f"Search reliability limit hit ({abort_reason}) → skip pressure"
                 self._invalidate_current_pressure(
                     abort_reason,
-                    stage_message=f"Search reliability limit hit ({abort_reason}) → skip pressure",
+                    stage_message=stage_message,
                 )
                 return
 
@@ -11023,7 +11196,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "reason": str(reject_reason),
                     "center_px": list(cxy),
                     "jump_distance_px": float(jump_dist),
+                    "jump_limit_px": float(jump_limit_px),
+                    "same_delay_as_last": bool(same_delay_as_last),
                     "p95": float(p95),
+                    "confirmation_frame": bool(confirmation_frame),
                     "streaks": self._search_streak_snapshot(),
                 },
             )
@@ -11033,15 +11209,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._search_no_contour_streak = 0
         self._search_low_signal_streak = 0
         self._search_center_jump_streak = 0
+        self._search_background_artifact_streak = 0
         if self._search_last_center is None:
             self._search_stable_hits = 1
         else:
-            stable_jump = float(center_jump_max_px) * 0.5
-            if float(jump_dist) <= float(max(8.0, stable_jump)):
+            if bool(same_delay_as_last) and float(jump_dist) <= float(stable_jump_px):
                 self._search_stable_hits += 1
             else:
                 self._search_stable_hits = 1
         self._search_last_center = tuple(cxy)
+        if self.current_delay_us is not None:
+            self._search_last_delay_us = int(self.current_delay_us)
+        self._search_candidate_seen_since_sweep = True
+        self._search_candidate_seen_ever = True
 
         self._record_pressure_sweep_analysis(
             "pressure_sweep_search",
@@ -11050,16 +11230,20 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "reason": "ok",
                 "center_px": list(cxy),
                 "jump_distance_px": float(jump_dist),
+                "jump_limit_px": float(jump_limit_px),
+                "same_delay_as_last": bool(same_delay_as_last),
                 "p95": float(p95),
+                "confirmation_frame": bool(confirmation_frame),
                 "details": details,
                 "streaks": self._search_streak_snapshot(),
             },
         )
 
         if int(self._search_stable_hits) < int(stable_hits_required):
+            self._search_confirm_same_delay_pending = True
             self.stageChanged.emit(
                 f"Droplet candidate hit {self._search_stable_hits}/{stable_hits_required} → "
-                "requesting confirmation frame"
+                "requesting same-delay confirmation frame"
             )
             self._record_decision(
                 "search_continue",
@@ -11068,11 +11252,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "center_px": list(cxy),
                     "p95": float(p95),
                     "stable_hits": int(self._search_stable_hits),
+                    "same_delay_confirmation": True,
                 },
             )
             self.continueSearch.emit()
             return
 
+        self._search_confirm_same_delay_pending = False
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
         self._vertical_probe_tries = 0
@@ -11100,7 +11286,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         details = dict(details or {})
         if contour is None:
             reason = str(details.get("reason", "no_contour"))
-            if reason in {"low_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
+            if reason in {"low_signal", "oversize_blob", "border_blob", "background_artifact", "invalid_quality_metrics"}:
                 self._reset_contour_tracker()
             self._lost_count += 1
             self._record_pressure_sweep_analysis(
@@ -13493,9 +13679,19 @@ class DropletCameraModel(QObject):
                 or contour_area_frac > float(max_contour_area_frac)
             )
             border_blob = bool(border_touch and bbox_area_frac > 0.03 and p95 < float(min_signal_p95 * 1.5))
-            reject = bool(low_signal or oversize or border_blob)
+            background_artifact = bool(
+                border_touch
+                and p95 < float(min_signal_p95 * 1.35)
+                and (
+                    bbox_area_frac > float(max(0.06, float(max_bbox_area_frac) * 0.65))
+                    or contour_area_frac > float(max(0.04, float(max_contour_area_frac) * 0.65))
+                )
+            )
+            reject = bool(low_signal or oversize or border_blob or background_artifact)
             reason = ""
-            if low_signal:
+            if background_artifact:
+                reason = "background_artifact"
+            elif low_signal:
                 reason = "low_signal"
             elif oversize:
                 reason = "oversize_blob"
@@ -13513,6 +13709,7 @@ class DropletCameraModel(QObject):
                 "border_touch": bool(border_touch),
                 "bbox_area_frac": float(bbox_area_frac),
                 "contour_area_frac": float(contour_area_frac),
+                "background_artifact": bool(background_artifact),
                 "reject": bool(reject),
                 "reason": str(reason),
             }
@@ -13616,6 +13813,7 @@ class DropletCameraModel(QObject):
                 "border_touch": bool(metrics.get("border_touch", False)),
                 "bbox_area_frac": float(metrics.get("bbox_area_frac", 0.0)),
                 "contour_area_frac": float(metrics.get("contour_area_frac", 0.0)),
+                "background_artifact": bool(metrics.get("background_artifact", False)),
             })
             if return_details:
                 return None, annotated_image, details
@@ -13640,6 +13838,7 @@ class DropletCameraModel(QObject):
             "border_touch": bool(metrics.get("border_touch", False)),
             "bbox_area_frac": float(metrics.get("bbox_area_frac", 0.0)),
             "contour_area_frac": float(metrics.get("contour_area_frac", 0.0)),
+            "background_artifact": bool(metrics.get("background_artifact", False)),
         })
 
         if return_details:

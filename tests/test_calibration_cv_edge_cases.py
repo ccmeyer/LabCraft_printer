@@ -64,7 +64,7 @@ def test_identify_droplet_contour_rejects_low_signal_border_blob():
     contour, _, details = cam.identify_droplet_contour(img, bg, return_details=True)
     assert contour is None
     assert details.get("status") == "none"
-    assert details.get("reason") in {"low_signal", "border_blob", "oversize_blob"}
+    assert details.get("reason") in {"low_signal", "border_blob", "oversize_blob", "background_artifact"}
 
 
 def test_identify_droplet_contour_roi_fallback_to_full_frame():

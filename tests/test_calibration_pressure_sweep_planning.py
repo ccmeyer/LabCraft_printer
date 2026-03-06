@@ -1,4 +1,5 @@
 import inspect
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -311,6 +312,143 @@ def test_pressure_sweep_analyze_droplet_requires_stable_hits_before_lock():
     proc.onAnalyzeDroplet()
     assert proc.dropletFound.calls
     assert len(proc.measurements) == 1
+
+
+def test_pressure_sweep_set_delay_uses_same_delay_for_confirmation():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc._search_confirm_same_delay_pending = True
+    proc.current_delay_us = 7300
+    proc._delay_try_index = 4
+    proc._delay_offsets_us = [0, 500, -500]
+    proc.stageChanged = Recorder()
+    proc.delayApplied = Recorder()
+    decisions = []
+    proc._record_decision = lambda *args, **kwargs: decisions.append((args, kwargs))
+    called = {}
+    proc._request_settings_with_timeout = lambda settings, on_done, context: called.update(
+        {"settings": dict(settings), "context": str(context)}
+    )
+
+    proc.onSetDelay()
+
+    assert called["settings"]["flash_delay"] == 7300
+    assert called["settings"]["num_droplets"] == 1
+    assert called["context"] == "pressure_sweep_set_delay_confirm"
+    assert proc._delay_try_index == 4
+    assert proc._search_confirm_same_delay_pending is True
+    assert decisions
+
+
+def test_pressure_sweep_set_delay_repeats_sweep_when_candidate_seen():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.search_max_elapsed_s = 90.0
+    proc._search_started_at_monotonic = time.monotonic()
+    proc._search_confirm_same_delay_pending = False
+    proc._delay_offsets_us = [0, 500, -500]
+    proc._delay_try_index = 3
+    proc._search_candidate_seen_since_sweep = True
+    proc.current_delay_us = 8100
+    proc.target_delay_us = 7200
+    proc._vertical_probe_tries = 0
+    proc._max_vertical_probes = 2
+    proc._search_fail_cycles = 0
+    proc.min_delay_us = 0
+    proc.max_delay_us = 50000
+    proc.stageChanged = Recorder()
+    proc.delayApplied = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._probe_half_frame_up = lambda: (_ for _ in ()).throw(
+        AssertionError("candidate-seen sweep should not probe")
+    )
+    proc._safe_move_abs = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("candidate-seen sweep should not nudge")
+    )
+    called = {}
+    proc._request_settings_with_timeout = lambda settings, on_done, context: called.update(
+        {"settings": dict(settings), "context": str(context)}
+    )
+
+    proc.onSetDelay()
+
+    assert proc.target_delay_us == 8100
+    assert proc.current_delay_us == 8100
+    assert proc._delay_try_index == 1
+    assert proc._search_candidate_seen_since_sweep is False
+    assert proc._search_fail_cycles == 0
+    assert called["settings"]["flash_delay"] == 8100
+    assert called["context"] == "pressure_sweep_set_delay"
+
+
+def test_pressure_sweep_analyze_droplet_refreshes_on_background_artifact_streak():
+    overlay = np.zeros((80, 80, 3), dtype=np.uint8)
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplet_contour=lambda *_args, **_kwargs: (
+                None,
+                overlay,
+                {"reason": "background_artifact", "p95": 2.0, "center": None},
+            )
+        )
+    )
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.search_background_artifact_refresh_streak = 2
+    proc.search_low_signal_streak_limit = 10
+    proc.search_no_contour_streak_limit = 8
+    proc.search_center_jump_streak_limit = 4
+    proc.search_background_artifact_streak_limit = 8
+    proc.search_max_elapsed_s = 90.0
+    proc._search_started_at_monotonic = time.monotonic()
+    proc._search_confirm_same_delay_pending = False
+    proc._search_background_artifact_streak = 0
+    proc._search_no_contour_streak = 0
+    proc._search_low_signal_streak = 0
+    proc._search_stable_hits = 0
+    proc._search_last_center = None
+    proc._search_last_delay_us = None
+    proc._search_center_jump_streak = 0
+    proc._background_stale = False
+    mark_calls = {"n": 0}
+    proc._mark_background_stale = lambda *_args, **_kwargs: mark_calls.__setitem__("n", mark_calls["n"] + 1)
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._invalidate_current_pressure = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("artifact streak should refresh, not invalidate")
+    )
+
+    proc.onAnalyzeDroplet()
+    assert mark_calls["n"] == 0
+
+    proc.onAnalyzeDroplet()
+    assert mark_calls["n"] == 1
+    assert proc._search_confirm_same_delay_pending is True
+    assert proc.continueSearch.calls
+
+
+def test_pressure_sweep_set_delay_invalidates_on_search_elapsed_timeout():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.search_max_elapsed_s = 1.0
+    proc._search_started_at_monotonic = time.monotonic() - 3.0
+    proc._search_confirm_same_delay_pending = False
+    proc._delay_try_index = 0
+    proc._delay_offsets_us = [0, 500]
+    proc.stageChanged = Recorder()
+    proc._request_settings_with_timeout = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("timeout path should invalidate before settings call")
+    )
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onSetDelay()
+
+    assert invalidated
+    assert invalidated[-1][0] == "search_elapsed_timeout"
 
 
 def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():

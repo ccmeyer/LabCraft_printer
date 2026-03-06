@@ -857,6 +857,22 @@
 7. Replay tooling coverage.
 - `tools/replay_calibration_run.py` now supports `PressureSweepCharacterizationProcess` summary replay in addition to nozzle replay.
 
+8. Same-delay confirmation in search.
+- Candidate confirmation frames now reuse the current flash delay instead of advancing to the next sweep offset.
+- This prevents false confirmation failures caused by evaluating a different delay on the second hit.
+
+9. Delay-aware jump gating.
+- Search jump rejection now uses a stricter threshold for same-delay comparisons and a wider threshold across delay changes.
+- Stable-hit accumulation now requires same-delay consistency to avoid locking from cross-delay center drift.
+
+10. Background artifact handling.
+- `identify_droplet_contour(...)` now emits `background_artifact` for low-signal, border-touching, large-area blobs.
+- Search logic requests a bounded background refresh on artifact streaks and retries same-delay confirmation.
+
+11. Candidate-aware sweep exhaustion policy.
+- If candidate contours were seen in the current sweep, the process repeats sweep offsets around the last candidate delay before probing/nudging trajectory.
+- Added per-pressure elapsed-search timeout to prevent runaway loops even when probes/nudges are deferred.
+
 ## Recommended tests (currently missing)
 1. Prerequisite/source tests:
 - sweep should require emergence-real nozzle center path (with backward-compatible fallback only when intended).
