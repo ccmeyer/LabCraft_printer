@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
@@ -86,7 +86,9 @@ def test_pressure_sweep_analyze_batch_requires_full_target_replicates():
     proc.circularity_values = [1.0] * 19 + [1.5]
     proc.stageChanged = Recorder()
     recorded = []
-    proc._record_pressure_result = lambda valid, reason=None: recorded.append((bool(valid), str(reason)))
+    proc._record_pressure_result = (
+        lambda valid, reason=None, **_kwargs: recorded.append((bool(valid), str(reason)))
+    )
     proc.i = 0
     proc._reset_char_buffers = lambda: None
     proc.nextPressure = Recorder()
@@ -143,8 +145,14 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
 def test_pressure_sweep_capture_redirects_to_background_when_stale():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc._background_stale = True
+    proc._background_refresh_count = 0
+    proc.background_refresh_limit_per_pressure = 5
     proc.stageChanged = Recorder()
     proc.backgroundRefreshNeeded = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._invalidate_current_pressure = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("should not invalidate while under refresh cap")
+    )
     called = {"capture": False}
     proc._capture_with_policy = lambda **kwargs: called.__setitem__("capture", True)
 
@@ -152,6 +160,24 @@ def test_pressure_sweep_capture_redirects_to_background_when_stale():
 
     assert proc.backgroundRefreshNeeded.calls
     assert called["capture"] is False
+
+
+def test_pressure_sweep_capture_stale_limit_skips_pressure():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc._background_stale = True
+    proc._background_refresh_count = 1
+    proc.background_refresh_limit_per_pressure = 1
+    proc.stageChanged = Recorder()
+    proc.backgroundRefreshNeeded = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append((reason, stage_message))
+
+    proc.onCaptureDroplet()
+
+    assert invalidated
+    assert invalidated[-1][0] == "background_refresh_limit"
+    assert not proc.backgroundRefreshNeeded.calls
 
 
 def test_pressure_sweep_mark_background_stale_resets_contour_tracker():
@@ -234,3 +260,96 @@ def test_pressure_sweep_safe_move_abs_guard_cap_skips_pressure():
     assert recorded
     assert recorded[-1] == (False, "imaging_guard_limit")
     assert proc.nextPressure.calls
+
+
+def test_pressure_sweep_analyze_droplet_requires_stable_hits_before_lock():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    contour = contour_from_rect(20, 30, 8, 8)
+    overlay = np.zeros((80, 80, 3), dtype=np.uint8)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplet_contour=lambda *_args, **_kwargs: (
+                contour,
+                overlay,
+                {"reason": "ok", "p95": 15.0, "center": [24, 34]},
+            )
+        )
+    )
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.dropletFound = Recorder()
+    proc.readyToCharacterize = Recorder()
+    proc.measurements = []
+    proc.current_delay_us = 7000
+    proc._centered = False
+    proc._lost_count = 0
+    proc._vertical_probe_tries = 0
+    proc.search_stable_hits_required = 2
+    proc.search_min_signal_p95 = 10.0
+    proc.search_center_jump_max_px = 280.0
+    proc.search_low_signal_streak_limit = 10
+    proc.search_no_contour_streak_limit = 8
+    proc.search_center_jump_streak_limit = 4
+    proc._search_last_center = None
+    proc._search_stable_hits = 0
+    proc._search_low_signal_streak = 0
+    proc._search_no_contour_streak = 0
+    proc._search_center_jump_streak = 0
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._invalidate_current_pressure = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("should not invalidate in stable-hit test")
+    )
+
+    proc.onAnalyzeDroplet()
+    assert proc.continueSearch.calls
+    assert not proc.dropletFound.calls
+
+    proc.onAnalyzeDroplet()
+    assert proc.dropletFound.calls
+    assert len(proc.measurements) == 1
+
+
+def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.num_images = 20
+    proc.circularity_threshold = 1.18
+    proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
+    proc.circularity_values = [1.0] * 20
+    proc.droplet_positions = [(120, 230)] * 20
+    proc.cur_pressure = 1.20
+    proc.current_delay_us = 7000
+    proc.target_delay_us = 7000
+    proc.multiple_droplet_hits = 0
+    proc._char_stream_hits = 0
+    proc._char_invalid_hits = 9
+    proc._char_frames_evaluated = 20
+    proc.char_max_invalid_ratio = 0.20
+    proc.char_max_multiple_ratio = 0.90
+    proc.char_max_stream_ratio = 0.90
+    proc._y_focus_offset_steps = 0
+    proc.samples = []
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1, "Y": 2, "Z": 3}),
+        droplet_camera_model=SimpleNamespace(
+            convert_pixel_position_to_motor_steps=lambda _center, pos: dict(pos)
+        ),
+    )
+    proc._annotate_char_summary_image = lambda *_args, **_kwargs: np.zeros((32, 32, 3), dtype=np.uint8)
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._emit_incremental_pressure_step = lambda rec: None
+    proc.i = 0
+    proc._reset_char_buffers = lambda: None
+    proc.nextPressure = Recorder()
+
+    proc.onAnalyzeBatch()
+
+    assert proc.samples
+    assert proc.samples[-1]["valid"] is False
+    assert proc.samples[-1]["invalid_reason"] == "char_invalid_ratio_exceeded"

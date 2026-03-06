@@ -827,6 +827,36 @@
 - Disable early-stop by default in this process so runs capture the full sample count.
 - Keep a bounded max-attempt policy only as a safety escape hatch.
 
+## Implemented in current pressure-sweep patch
+1. Search confidence hysteresis and streak guards.
+- Added per-pressure streak tracking for low-signal, no-contour, and center-jump conditions.
+- Added stable-hit requirement before accepting a search detection and entering centering.
+- Added deterministic pressure invalidation when configured streak limits are exceeded.
+
+2. Centering stability checks.
+- Added center-jump rejection guard during centering.
+- Added stable-center hit requirement before applying persistent X/Z trajectory bias updates.
+- Added structured decision/analysis records for center lock and recenter actions.
+
+3. Background refresh runaway guard.
+- Added per-pressure cap on background refresh loops when repeated movement marks background stale.
+- Exceeding the cap now invalidates the pressure deterministically instead of looping indefinitely.
+
+4. Characterization quality gating.
+- Added stream-like frame rejection via `circularity_ellipse` threshold.
+- Added invalid/multiple/stream ratio tracking during characterization attempts.
+- Added early partial-batch bailout when quality-ratio limits are exceeded.
+
+5. Final batch validity policy hardening.
+- Batch validity now checks accepted replicate count plus max invalid/multiple/stream ratios.
+- Invalid pressure records now carry richer diagnostics (`invalid_frame_hits`, stream/multiple counts, ratios).
+
+6. Search nudge correction.
+- Replaced ineffective +2 us nudge with meaningful delay-anchor adjustments (hundreds to thousands of microseconds).
+
+7. Replay tooling coverage.
+- `tools/replay_calibration_run.py` now supports `PressureSweepCharacterizationProcess` summary replay in addition to nozzle replay.
+
 ## Recommended tests (currently missing)
 1. Prerequisite/source tests:
 - sweep should require emergence-real nozzle center path (with backward-compatible fallback only when intended).

@@ -9979,6 +9979,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  imaging_x_guard_steps: int = 350,
                  imaging_z_guard_steps: int = 5000,
                  imaging_guard_hit_cap: int = 6,
+                 search_stable_hits_required: int = 2,
+                 search_min_signal_p95: float = 10.0,
+                 search_center_jump_max_px: float = 280.0,
+                 search_low_signal_streak_limit: int = 10,
+                 search_no_contour_streak_limit: int = 8,
+                 search_center_jump_streak_limit: int = 4,
+                 background_refresh_limit_per_pressure: int = 20,
+                 center_stable_hits_for_bias_update: int = 3,
+                 center_jump_reject_px: float = 320.0,
+                 char_stream_circularity_max: float = 0.58,
+                 char_max_invalid_ratio: float = 0.45,
+                 char_max_multiple_ratio: float = 0.20,
+                 char_max_stream_ratio: float = 0.20,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
@@ -10124,6 +10137,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.max_anchor_dx_steps = int(max(50, int(imaging_x_guard_steps)))
         self.max_anchor_dz_steps = int(max(200, int(imaging_z_guard_steps)))
         self.imaging_guard_hit_cap = int(max(1, int(imaging_guard_hit_cap)))
+        self.search_stable_hits_required = int(max(1, int(search_stable_hits_required)))
+        self.search_min_signal_p95 = float(max(0.0, float(search_min_signal_p95)))
+        self.search_center_jump_max_px = float(max(20.0, float(search_center_jump_max_px)))
+        self.search_low_signal_streak_limit = int(max(1, int(search_low_signal_streak_limit)))
+        self.search_no_contour_streak_limit = int(max(1, int(search_no_contour_streak_limit)))
+        self.search_center_jump_streak_limit = int(max(1, int(search_center_jump_streak_limit)))
+        self.background_refresh_limit_per_pressure = int(max(1, int(background_refresh_limit_per_pressure)))
+        self.center_stable_hits_for_bias_update = int(max(1, int(center_stable_hits_for_bias_update)))
+        self.center_jump_reject_px = float(max(20.0, float(center_jump_reject_px)))
+        self.char_stream_circularity_max = float(max(0.05, min(0.99, float(char_stream_circularity_max))))
+        self.char_max_invalid_ratio = float(max(0.0, min(1.0, float(char_max_invalid_ratio))))
+        self.char_max_multiple_ratio = float(max(0.0, min(1.0, float(char_max_multiple_ratio))))
+        self.char_max_stream_ratio = float(max(0.0, min(1.0, float(char_max_stream_ratio))))
 
         self.max_search_cycles   = int(max_search_cycles)
         self.max_recenter_moves  = int(max_recenter_moves)
@@ -10141,6 +10167,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._background_stale = False
         self._search_anchor_xyz = None
         self._imaging_guard_hit_count = 0
+        self._background_refresh_count = 0
+        self._search_last_center = None
+        self._search_stable_hits = 0
+        self._search_low_signal_streak = 0
+        self._search_no_contour_streak = 0
+        self._search_center_jump_streak = 0
+        self._center_last_center = None
+        self._center_stable_hits = 0
+        self._center_jump_reject_streak = 0
+        self._char_invalid_hits = 0
+        self._char_stream_hits = 0
+        self._char_frames_evaluated = 0
 
         # --- offsets (persist across pressures) ---
         self._y_focus_offset_steps = 0            # persistent Y offset (steps) for best focus so far
@@ -10377,11 +10415,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 level="warning",
             )
             if self._imaging_guard_hit_count >= self.imaging_guard_hit_cap:
-                self.stageChanged.emit("Imaging guard hit limit → skip pressure")
-                self._bad_reason = "imaging_guard_limit"
-                self._record_pressure_result(valid=False, reason=self._bad_reason)
-                self.i += 1
-                self.nextPressure.emit()
+                self._invalidate_current_pressure(
+                    "imaging_guard_limit",
+                    stage_message="Imaging guard hit limit → skip pressure",
+                )
                 return
         cur = self.model.machine_model.get_current_position_dict()
         if (int(cur['X']) == X) and (int(cur['Y']) == Y) and (int(cur['Z']) == Z):
@@ -10467,6 +10504,129 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             sum(1 for c in circularity_values if float(c) < threshold)
         )
 
+    def _pair_capture_context(self) -> dict:
+        refs = getattr(self, "_last_capture_refs", {}) or {}
+        bg_ref = refs.get("background_image") or {}
+        dr_ref = refs.get("droplet_image") or {}
+        return {
+            "background_capture_id": bg_ref.get("capture_id", ""),
+            "background_image_relpath": bg_ref.get("image_relpath", ""),
+            "droplet_capture_id": dr_ref.get("capture_id", ""),
+            "droplet_image_relpath": dr_ref.get("image_relpath", ""),
+        }
+
+    @staticmethod
+    def _normalize_center(center) -> tuple[int, int] | None:
+        if center is None:
+            return None
+        try:
+            return (int(center[0]), int(center[1]))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _center_distance_px(a, b) -> float:
+        if a is None or b is None:
+            return 0.0
+        try:
+            dx = float(a[0]) - float(b[0])
+            dy = float(a[1]) - float(b[1])
+            return float(math.hypot(dx, dy))
+        except Exception:
+            return 0.0
+
+    def _search_streak_snapshot(self) -> dict:
+        return {
+            "stable_hits": int(getattr(self, "_search_stable_hits", 0)),
+            "low_signal_streak": int(getattr(self, "_search_low_signal_streak", 0)),
+            "no_contour_streak": int(getattr(self, "_search_no_contour_streak", 0)),
+            "center_jump_streak": int(getattr(self, "_search_center_jump_streak", 0)),
+        }
+
+    def _char_ratio_snapshot(self) -> dict:
+        total = int(max(0, int(getattr(self, "_char_frames_evaluated", 0))))
+        if total <= 0:
+            return {
+                "evaluated_frames": 0,
+                "invalid_hits": int(getattr(self, "_char_invalid_hits", 0)),
+                "multiple_hits": int(getattr(self, "multiple_droplet_hits", 0)),
+                "stream_hits": int(getattr(self, "_char_stream_hits", 0)),
+                "invalid_ratio": 0.0,
+                "multiple_ratio": 0.0,
+                "stream_ratio": 0.0,
+            }
+        invalid_hits = int(getattr(self, "_char_invalid_hits", 0))
+        multiple_hits = int(getattr(self, "multiple_droplet_hits", 0))
+        stream_hits = int(getattr(self, "_char_stream_hits", 0))
+        denom = float(max(1, total))
+        return {
+            "evaluated_frames": int(total),
+            "invalid_hits": int(invalid_hits),
+            "multiple_hits": int(multiple_hits),
+            "stream_hits": int(stream_hits),
+            "invalid_ratio": float(invalid_hits / denom),
+            "multiple_ratio": float(multiple_hits / denom),
+            "stream_ratio": float(stream_hits / denom),
+        }
+
+    def _record_pressure_sweep_analysis(self, kind: str, payload: dict | None = None):
+        out = {
+            "kind": str(kind),
+            "pressure": float(getattr(self, "cur_pressure", 0.0)),
+            "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
+            "pair": self._pair_capture_context(),
+        }
+        if isinstance(payload, dict):
+            out.update(payload)
+        self._record_analysis(out)
+
+    def _invalidate_current_pressure(self, reason: str, *, stage_message: str | None = None):
+        if stage_message:
+            self.stageChanged.emit(str(stage_message))
+        self._bad_reason = str(reason or "unspecified")
+        self._record_decision(
+            "pressure_invalidated",
+            {
+                "reason": str(self._bad_reason),
+                "pressure": float(getattr(self, "cur_pressure", 0.0)),
+                "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
+                "search_streaks": self._search_streak_snapshot(),
+                "char_ratios": self._char_ratio_snapshot(),
+            },
+        )
+        self._record_pressure_result(valid=False, reason=self._bad_reason)
+        self.i += 1
+        self.nextPressure.emit()
+
+    def _search_streak_abort_reason(self) -> str | None:
+        low_signal_limit = int(getattr(self, "search_low_signal_streak_limit", 10))
+        no_contour_limit = int(getattr(self, "search_no_contour_streak_limit", 8))
+        jump_limit = int(getattr(self, "search_center_jump_streak_limit", 4))
+        if int(getattr(self, "_search_low_signal_streak", 0)) >= int(low_signal_limit):
+            return "search_low_signal_streak_limit"
+        if int(getattr(self, "_search_no_contour_streak", 0)) >= int(no_contour_limit):
+            return "search_no_contour_streak_limit"
+        if int(getattr(self, "_search_center_jump_streak", 0)) >= int(jump_limit):
+            return "search_center_jump_streak_limit"
+        return None
+
+    def _characterization_ratio_abort_reason(self) -> str | None:
+        ratios = self._char_ratio_snapshot()
+        repl_target = int(getattr(self, "repl_target", getattr(self, "num_images", 20)))
+        min_frames = int(max(6, min(repl_target, 10)))
+        max_invalid = float(getattr(self, "char_max_invalid_ratio", 0.45))
+        max_multiple = float(getattr(self, "char_max_multiple_ratio", 0.20))
+        max_stream = float(getattr(self, "char_max_stream_ratio", 0.20))
+        if int(ratios.get("evaluated_frames", 0)) < min_frames:
+            return None
+        if float(ratios.get("invalid_ratio", 0.0)) > float(max_invalid):
+            return "char_invalid_ratio_exceeded"
+        if float(ratios.get("multiple_ratio", 0.0)) > float(max_multiple):
+            return "char_multiple_ratio_exceeded"
+        if float(ratios.get("stream_ratio", 0.0)) > float(max_stream):
+            return "char_stream_ratio_exceeded"
+        return None
+
     def _reset_char_buffers(self):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
@@ -10482,6 +10642,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # track multiple-droplet frames & a guard to prevent hangs
         self.multiple_droplet_hits = 0
+        self._char_invalid_hits = 0
+        self._char_stream_hits = 0
+        self._char_frames_evaluated = 0
         self._char_attempts = 0
         # e.g., allow up to 4× the requested replicates worth of attempts
         self._char_attempt_limit = max(3 * self.repl_target, self.repl_target + 20)
@@ -10511,6 +10674,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         self._vertical_probe_tries = 0    # how many half-frame-up probes we've tried (max 2)
         self._max_vertical_probes  = 2
+        self._background_refresh_count = 0
+        self._search_last_center = None
+        self._search_stable_hits = 0
+        self._search_low_signal_streak = 0
+        self._search_no_contour_streak = 0
+        self._search_center_jump_streak = 0
+        self._center_last_center = None
+        self._center_stable_hits = 0
+        self._center_jump_reject_streak = 0
 
     # ---------- per-pressure planning ----------
     def _compute_stage_scales_steps_per_px(self):
@@ -10662,19 +10834,33 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self._vertical_probe_tries = 0
             self._search_fail_cycles += 1
             if self._search_fail_cycles >= self.max_search_cycles:
-                self.stageChanged.emit("Inconsistent imaging: too many delay sweeps → skip pressure")
-                self._bad_reason = "search_fail_cycles"
-                self._record_pressure_result(valid=False, reason=self._bad_reason)
-                self.i += 1
-                self.nextPressure.emit()
+                self._invalidate_current_pressure(
+                    "search_fail_cycles",
+                    stage_message="Inconsistent imaging: too many delay sweeps → skip pressure",
+                )
                 return
 
-            nudge = 0.002
-            self.stageChanged.emit("Droplet not found yet → nudging along predicted path")
+            # Move the search anchor by a meaningful delay offset (old +2 us nudge was ineffective).
+            nudge_us = int(max(500, abs(int(self._delay_offsets_us[-1]))))
+            direction = +1 if (int(self._search_fail_cycles) % 2 == 1) else -1
+            nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * nudge_us))
+            if int(nudged_delay) == int(self.target_delay_us):
+                nudged_delay = self._clamp_delay(int(self.target_delay_us) + int(direction * 250))
+            self.target_delay_us = int(nudged_delay)
+            self.stageChanged.emit(
+                f"Droplet not found yet → nudging trajectory anchor to {self.target_delay_us} us"
+            )
+            self._record_decision(
+                "search_nudge_trajectory",
+                {
+                    "search_fail_cycles": int(self._search_fail_cycles),
+                    "nudge_us": int(direction * nudge_us),
+                    "target_delay_us": int(self.target_delay_us),
+                },
+            )
             self._mark_background_stale("search_nudge_move")
             self._safe_move_abs(
-                self._predict_target_xyz(self.vec_steps_per_s,
-                                        self.target_delay_us + int(1000 * nudge))
+                self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
             )
             return  # wait for moveDone
 
@@ -10694,7 +10880,25 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onCaptureDroplet(self):
         if bool(getattr(self, "_background_stale", False)):
+            self._background_refresh_count = int(getattr(self, "_background_refresh_count", 0)) + 1
+            refresh_limit = int(getattr(self, "background_refresh_limit_per_pressure", 20))
+            if int(self._background_refresh_count) > int(refresh_limit):
+                self._invalidate_current_pressure(
+                    "background_refresh_limit",
+                    stage_message=(
+                        f"Background refresh cap reached ({self._background_refresh_count}/"
+                        f"{refresh_limit}) → skip pressure"
+                    ),
+                )
+                return
             self.stageChanged.emit("Background stale after movement → refreshing background")
+            self._record_decision(
+                "background_refresh_requested",
+                {
+                    "refresh_count": int(self._background_refresh_count),
+                    "refresh_limit": int(refresh_limit),
+                },
+            )
             self.backgroundRefreshNeeded.emit()
             return
         self._capture_with_policy(
@@ -10709,22 +10913,177 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
             self.droplet_image, self.background_image, return_details=True
         )
+        details = dict(details or {})
+        self.presentImageSignal.emit(overlay)
+
+        reason = str(details.get("reason", ""))
+        p95 = float(details.get("p95", 0.0) or 0.0)
+        min_signal_p95 = float(getattr(self, "search_min_signal_p95", 10.0))
+        center_jump_max_px = float(getattr(self, "search_center_jump_max_px", 280.0))
+        stable_hits_required = int(getattr(self, "search_stable_hits_required", 2))
+
         if contour is None:
-            reason = str((details or {}).get("reason", "no_contour"))
-            if reason in {"low_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
+            if reason in {"low_signal", "weak_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
                 self._reset_contour_tracker()
-            self.stageChanged.emit(f"No droplet in frame ({reason}) → try next delay")
-            self.presentImageSignal.emit(overlay)
+
+            self._search_no_contour_streak += 1
+            if reason in {"low_signal", "weak_signal"}:
+                self._search_low_signal_streak += 1
+            else:
+                self._search_low_signal_streak = 0
+            self._search_stable_hits = 0
+            self._search_last_center = None
+            self._search_center_jump_streak = 0
+
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_search",
+                {
+                    "status": "none",
+                    "reason": str(reason or "no_contour"),
+                    "p95": float(p95),
+                    "details": details,
+                    "streaks": self._search_streak_snapshot(),
+                },
+            )
+            abort_reason = self._search_streak_abort_reason()
+            if abort_reason:
+                self._invalidate_current_pressure(
+                    abort_reason,
+                    stage_message=f"Search reliability limit hit ({abort_reason}) → skip pressure",
+                )
+                return
+
+            self.stageChanged.emit(f"No droplet in frame ({reason or 'no_contour'}) → try next delay")
+            self._record_decision(
+                "search_continue",
+                {
+                    "reason": str(reason or "no_contour"),
+                    "p95": float(p95),
+                    "streaks": self._search_streak_snapshot(),
+                },
+            )
             self.continueSearch.emit()
             return
 
-        # Found something
+        # Found a candidate contour.
         x, y, w, h = cv2.boundingRect(contour)
-        cxy = (x + w//2, y + h//2)
-        self.presentImageSignal.emit(overlay)
+        cxy = self._normalize_center(details.get("center")) or (int(x + w // 2), int(y + h // 2))
+        jump_dist = self._center_distance_px(cxy, self._search_last_center)
+        signal_ok = float(p95) >= float(min_signal_p95)
+        jump_rejected = (
+            self._search_last_center is not None
+            and float(jump_dist) > float(center_jump_max_px)
+        )
+
+        if (not signal_ok) or jump_rejected:
+            self._search_no_contour_streak += 1
+            self._search_stable_hits = 0
+            if not signal_ok:
+                self._search_low_signal_streak += 1
+            else:
+                self._search_low_signal_streak = 0
+            if jump_rejected:
+                self._search_center_jump_streak += 1
+            else:
+                self._search_center_jump_streak = 0
+
+            reject_reason = "center_jump" if jump_rejected else "low_signal"
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_search",
+                {
+                    "status": "rejected",
+                    "reason": str(reject_reason),
+                    "center_px": list(cxy),
+                    "jump_distance_px": float(jump_dist),
+                    "p95": float(p95),
+                    "details": details,
+                    "streaks": self._search_streak_snapshot(),
+                },
+            )
+
+            abort_reason = self._search_streak_abort_reason()
+            if abort_reason:
+                self._invalidate_current_pressure(
+                    abort_reason,
+                    stage_message=f"Search reliability limit hit ({abort_reason}) → skip pressure",
+                )
+                return
+
+            if jump_rejected:
+                self.stageChanged.emit(
+                    f"Unstable center jump ({jump_dist:.0f}px) → continue delay search"
+                )
+            else:
+                self.stageChanged.emit(
+                    f"Contour signal too weak (p95={p95:.1f}) → continue delay search"
+                )
+            self._record_decision(
+                "search_continue",
+                {
+                    "reason": str(reject_reason),
+                    "center_px": list(cxy),
+                    "jump_distance_px": float(jump_dist),
+                    "p95": float(p95),
+                    "streaks": self._search_streak_snapshot(),
+                },
+            )
+            self.continueSearch.emit()
+            return
+
+        self._search_no_contour_streak = 0
+        self._search_low_signal_streak = 0
+        self._search_center_jump_streak = 0
+        if self._search_last_center is None:
+            self._search_stable_hits = 1
+        else:
+            stable_jump = float(center_jump_max_px) * 0.5
+            if float(jump_dist) <= float(max(8.0, stable_jump)):
+                self._search_stable_hits += 1
+            else:
+                self._search_stable_hits = 1
+        self._search_last_center = tuple(cxy)
+
+        self._record_pressure_sweep_analysis(
+            "pressure_sweep_search",
+            {
+                "status": "candidate",
+                "reason": "ok",
+                "center_px": list(cxy),
+                "jump_distance_px": float(jump_dist),
+                "p95": float(p95),
+                "details": details,
+                "streaks": self._search_streak_snapshot(),
+            },
+        )
+
+        if int(self._search_stable_hits) < int(stable_hits_required):
+            self.stageChanged.emit(
+                f"Droplet candidate hit {self._search_stable_hits}/{stable_hits_required} → "
+                "requesting confirmation frame"
+            )
+            self._record_decision(
+                "search_continue",
+                {
+                    "reason": "candidate_needs_confirmation",
+                    "center_px": list(cxy),
+                    "p95": float(p95),
+                    "stable_hits": int(self._search_stable_hits),
+                },
+            )
+            self.continueSearch.emit()
+            return
+
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
         self._vertical_probe_tries = 0
+        self._record_decision(
+            "search_locked",
+            {
+                "center_px": list(cxy),
+                "p95": float(p95),
+                "stable_hits": int(self._search_stable_hits),
+            },
+        )
         if self._centered:
             # In replicate mode: go straight to characterization (don’t re-center)
             self.readyToCharacterize.emit()
@@ -10738,29 +11097,118 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
             self.droplet_image, self.background_image, return_details=True
         )
+        details = dict(details or {})
         if contour is None:
-            reason = str((details or {}).get("reason", "no_contour"))
+            reason = str(details.get("reason", "no_contour"))
             if reason in {"low_signal", "oversize_blob", "border_blob", "invalid_quality_metrics"}:
                 self._reset_contour_tracker()
             self._lost_count += 1
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_center",
+                {
+                    "status": "lost",
+                    "reason": str(reason),
+                    "lost_count": int(self._lost_count),
+                    "details": details,
+                },
+            )
             if self._lost_count > self._lost_limit:
                 self.stageChanged.emit("Droplet repeatedly lost while centering → restart search")
+                self._record_decision(
+                    "center_lost_restart_search",
+                    {"reason": str(reason), "lost_count": int(self._lost_count)},
+                )
                 self.continueSearch.emit()
                 return
             self.stageChanged.emit(f"Droplet lost while centering ({reason}) → retry delay sweep")
             self.presentImageSignal.emit(overlay)
+            self._record_decision(
+                "center_retry",
+                {"reason": str(reason), "lost_count": int(self._lost_count)},
+            )
             self.continueSearch.emit()
             return
 
         x, y, w, h = cv2.boundingRect(contour)
-        cxy = (x + w//2, y + h//2)
+        cxy = self._normalize_center(details.get("center")) or (int(x + w // 2), int(y + h // 2))
+        center_jump_reject_px = float(getattr(self, "center_jump_reject_px", 320.0))
+        center_jump_streak_limit = int(getattr(self, "search_center_jump_streak_limit", 4))
+        stable_hits_for_bias = int(getattr(self, "center_stable_hits_for_bias_update", 3))
+        center_jump = self._center_distance_px(cxy, self._center_last_center)
+        if self._center_last_center is not None and float(center_jump) > float(center_jump_reject_px):
+            self._center_jump_reject_streak += 1
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_center",
+                {
+                    "status": "rejected_jump",
+                    "reason": "center_jump",
+                    "center_px": list(cxy),
+                    "jump_distance_px": float(center_jump),
+                    "jump_streak": int(self._center_jump_reject_streak),
+                    "details": details,
+                },
+            )
+            if int(self._center_jump_reject_streak) >= int(center_jump_streak_limit):
+                self._invalidate_current_pressure(
+                    "center_jump_reject_limit",
+                    stage_message="Centering unstable across frames → skip pressure",
+                )
+                return
+            self.stageChanged.emit(
+                f"Centering rejected unstable jump ({center_jump:.0f}px) → retry delay search"
+            )
+            self._record_decision(
+                "center_jump_rejected",
+                {
+                    "center_px": list(cxy),
+                    "jump_distance_px": float(center_jump),
+                    "jump_streak": int(self._center_jump_reject_streak),
+                },
+            )
+            self.continueSearch.emit()
+            return
+
+        self._center_jump_reject_streak = 0
+        if self._center_last_center is None:
+            self._center_stable_hits = 1
+        else:
+            if float(center_jump) <= float(max(8.0, center_jump_reject_px * 0.35)):
+                self._center_stable_hits += 1
+            else:
+                self._center_stable_hits = 1
+        self._center_last_center = tuple(cxy)
+
         H, W = overlay.shape[:2]
-        target = (W//2, H//2)
+        target = (W // 2, H // 2)
         tol = 150
-        if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
+        if abs(cxy[0] - target[0]) <= tol and abs(cxy[1] - target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
+            if (
+                int(self._center_stable_hits) >= int(stable_hits_for_bias)
+                and not getattr(self, "_xz_offset_updated_this_pressure", False)
+            ):
+                self._update_xz_track_offset()
+                self._xz_offset_updated_this_pressure = True
             self._centered = True
             self._char_need_capture = True
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_center",
+                {
+                    "status": "locked",
+                    "center_px": list(cxy),
+                    "stable_hits": int(self._center_stable_hits),
+                    "jump_distance_px": float(center_jump),
+                    "details": details,
+                },
+            )
+            self._record_decision(
+                "center_locked",
+                {
+                    "center_px": list(cxy),
+                    "stable_hits": int(self._center_stable_hits),
+                    "jump_distance_px": float(center_jump),
+                },
+            )
             self.dropletCentered.emit()
             return
 
@@ -10770,22 +11218,40 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # Count recenter attempt during centering
         self._recenter_moves += 1
-        print('Recenter counter (onCenter):', self._recenter_moves)
         self.stageChanged.emit(f"Centering recenter #{self._recenter_moves}/{self.max_recenter_moves}")
         if self._recenter_moves >= self.max_recenter_moves:
-            self.stageChanged.emit("Inconsistent imaging: too many recenter moves (centering) → skip pressure")
-            self._bad_reason = "recentre_limit_center"
-            self._record_pressure_result(valid=False, reason=self._bad_reason)
-            self.i += 1
-            self.nextPressure.emit()
+            self._invalidate_current_pressure(
+                "recentre_limit_center",
+                stage_message="Inconsistent imaging: too many recenter moves (centering) → skip pressure",
+            )
             return
         
         self.stageChanged.emit(f"Recentering move (clamped): {dX},{0},{dZ}")
+        self._record_pressure_sweep_analysis(
+            "pressure_sweep_center",
+            {
+                "status": "recenter_move",
+                "center_px": list(cxy),
+                "stable_hits": int(self._center_stable_hits),
+                "jump_distance_px": float(center_jump),
+                "move_xyz": [int(dX), 0, int(dZ)],
+                "recenter_moves": int(self._recenter_moves),
+            },
+        )
+        self._record_decision(
+            "center_recenter_move",
+            {
+                "center_px": list(cxy),
+                "move_xyz": [int(dX), 0, int(dZ)],
+                "recenter_moves": int(self._recenter_moves),
+            },
+        )
         self._mark_background_stale("centering_recenter_move")
+        cur = self.model.machine_model.get_current_position_dict()
         self._safe_move_abs(self._clamp_xyz(
-            self.model.machine_model.get_current_position_dict()['X'] + dX,
-            self.model.machine_model.get_current_position_dict()['Y'] + 0,
-            self.model.machine_model.get_current_position_dict()['Z'] + dZ
+            cur['X'] + dX,
+            cur['Y'],
+            cur['Z'] + dZ
         ))
 
     @Slot()
@@ -10802,9 +11268,29 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # Count every frame we evaluate so we can bail out safely if needed
         self._char_attempts += 1
+        self._char_frames_evaluated += 1
+        if annotated is not None:
+            self.presentImageSignal.emit(annotated)
 
         if result is None:
+            self._char_invalid_hits += 1
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_characterization_frame",
+                {
+                    "status": "invalid",
+                    "reason": "no_result",
+                    "char_attempts": int(self._char_attempts),
+                    "char_attempt_limit": int(self._char_attempt_limit),
+                    "ratios": self._char_ratio_snapshot(),
+                },
+            )
             self.stageChanged.emit("Replicate failed → recapturing")
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self.stageChanged.emit("Characterization quality ratios exceeded → analyzing partial batch")
+                self._bad_reason = str(ratio_reason)
+                self.analyzeBatch.emit()
+                return
             if self._char_attempts >= self._char_attempt_limit:
                 self.stageChanged.emit("Too many failed frames → analyzing partial batch")
                 self.analyzeBatch.emit()
@@ -10815,13 +11301,29 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         # tolerate multiple droplets — log and keep going, do not count as a replicate
         if result == 'Multiple':
             self.multiple_droplet_hits += 1
+            self._char_invalid_hits += 1
             self.measurements.append({
                 "flash_delay": int(self.current_delay_us),
                 "pressure": float(self.cur_pressure),
                 "event": "multiple_droplets"
             })
-            self.presentImageSignal.emit(annotated)
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_characterization_frame",
+                {
+                    "status": "invalid",
+                    "reason": "multiple_droplets",
+                    "char_attempts": int(self._char_attempts),
+                    "char_attempt_limit": int(self._char_attempt_limit),
+                    "ratios": self._char_ratio_snapshot(),
+                },
+            )
             self.stageChanged.emit("Multiple droplets in frame → skipping (replicate not counted)")
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self.stageChanged.emit("Characterization quality ratios exceeded → analyzing partial batch")
+                self._bad_reason = str(ratio_reason)
+                self.analyzeBatch.emit()
+                return
             if self._char_attempts >= self._char_attempt_limit:
                 self.stageChanged.emit("Too many problematic frames (multiple/failed) → analyzing partial batch")
                 self.analyzeBatch.emit()
@@ -10831,8 +11333,58 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         
         # ---------- CENTER FIRST ----------
         center_px = tuple(map(int, result.get("center", (0, 0))))
-        self.presentImageSignal.emit(annotated)
-        if self._is_within(center_px, self.center_first_tol_px) and not getattr(self, "_xz_offset_updated_this_pressure", False):
+        circularity_ellipse = float(result.get("circularity_ellipse", 99.0))
+        focus_val = float(result.get('focus', 0.0))
+
+        # Reject stream-like elongated shapes before any focus / center acceptance.
+        stream_threshold = float(getattr(self, "char_stream_circularity_max", 0.58))
+        if float(circularity_ellipse) <= float(stream_threshold):
+            self._char_stream_hits += 1
+            self._char_invalid_hits += 1
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_characterization_frame",
+                {
+                    "status": "invalid",
+                    "reason": "stream_like",
+                    "center_px": list(center_px),
+                    "circularity_ellipse": float(circularity_ellipse),
+                    "stream_circularity_threshold": float(stream_threshold),
+                    "focus": float(focus_val),
+                    "ratios": self._char_ratio_snapshot(),
+                },
+            )
+            self.stageChanged.emit(
+                f"Stream-like frame rejected (circularity={circularity_ellipse:.2f}) → recapturing"
+            )
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self.stageChanged.emit("Characterization quality ratios exceeded → analyzing partial batch")
+                self._bad_reason = str(ratio_reason)
+                self.analyzeBatch.emit()
+                return
+            if self._char_attempts >= self._char_attempt_limit:
+                self.stageChanged.emit("Too many problematic frames → analyzing partial batch")
+                self.analyzeBatch.emit()
+                return
+            self.continueCap.emit()
+            return
+
+        center_jump = self._center_distance_px(center_px, self._center_last_center)
+        center_jump_reject_px = float(getattr(self, "center_jump_reject_px", 320.0))
+        if self._center_last_center is None:
+            self._center_stable_hits = 1
+        else:
+            if float(center_jump) <= float(max(8.0, center_jump_reject_px * 0.35)):
+                self._center_stable_hits += 1
+            else:
+                self._center_stable_hits = 1
+        self._center_last_center = tuple(center_px)
+
+        if (
+            self._is_within(center_px, self.center_first_tol_px)
+            and int(self._center_stable_hits) >= int(getattr(self, "center_stable_hits_for_bias_update", 3))
+            and not getattr(self, "_xz_offset_updated_this_pressure", False)
+        ):
             self._update_xz_track_offset()
             self._xz_offset_updated_this_pressure = True
 
@@ -10840,37 +11392,41 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if not self._is_within(center_px, self.center_first_tol_px):
             # Count as a recenter attempt (center-first path)
             self._recenter_moves += 1
-            print('Recenter counter (onCharacterizeLoop):', self._recenter_moves)
 
             self.stageChanged.emit(f"Center-first recenter #{self._recenter_moves}/{self.max_recenter_moves}")
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_characterization_frame",
+                {
+                    "status": "recenter_needed",
+                    "reason": "center_outside_tight_tol",
+                    "center_px": list(center_px),
+                    "jump_distance_px": float(center_jump),
+                    "recenter_moves": int(self._recenter_moves),
+                },
+            )
 
             # If it's far outside the broader boundary, count as OOB too
             if not self._is_within(center_px, self.boundary_tol_px):
                 self._oob_total += 1
                 self.stageChanged.emit(f"OOB (center-first path): total={self._oob_total}/{self.max_oob_total}")
                 if self._oob_total >= self.max_oob_total:
-                    self.stageChanged.emit("Inconsistent imaging: too many out-of-bounds hits → skip pressure")
-                    self._bad_reason = "oob_total_limit_centerfirst"
-                    self._record_pressure_result(valid=False, reason=self._bad_reason)
-                    self.i += 1
-                    self.nextPressure.emit()
+                    self._invalidate_current_pressure(
+                        "oob_total_limit_centerfirst",
+                        stage_message="Inconsistent imaging: too many out-of-bounds hits → skip pressure",
+                    )
                     return
 
             # Recenter-move guard
             if self._recenter_moves >= self.max_recenter_moves:
-                self.stageChanged.emit("Inconsistent imaging: too many recenter moves (center-first) → skip pressure")
-                self._bad_reason = "recentre_limit_centerfirst"
-                self._record_pressure_result(valid=False, reason=self._bad_reason)
-                self.i += 1
-                self.nextPressure.emit()
+                self._invalidate_current_pressure(
+                    "recentre_limit_centerfirst",
+                    stage_message="Inconsistent imaging: too many recenter moves (center-first) → skip pressure",
+                )
                 return
 
             # Proceed with the move
             self._recenter_immediate(center_px)
             return
-        
-        focus_val = float(result.get('focus', 0.0))
-        self.presentImageSignal.emit(annotated)
 
         # If focus is already good, capture this Y as a candidate best
         if focus_val >= self.focus_ok_threshold:
@@ -10878,6 +11434,25 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # focus control (same policy as your search process)
         if focus_val < self.focus_ok_threshold:
+            self._char_invalid_hits += 1
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_characterization_frame",
+                {
+                    "status": "focus_adjust",
+                    "reason": "focus_below_threshold",
+                    "center_px": list(center_px),
+                    "focus": float(focus_val),
+                    "focus_ok_threshold": float(self.focus_ok_threshold),
+                    "circularity_ellipse": float(circularity_ellipse),
+                    "ratios": self._char_ratio_snapshot(),
+                },
+            )
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self.stageChanged.emit("Characterization quality ratios exceeded → analyzing partial batch")
+                self._bad_reason = str(ratio_reason)
+                self.analyzeBatch.emit()
+                return
             if self._focus_best <= 0.0:
                 self._focus_best = focus_val
 
@@ -10894,18 +11469,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     self.focus_dir_switches += 1
                     self.focus_step = min(16, max(self.focus_min_step, self.focus_step * 2))
                     if self.focus_dir_switches > 6:
-                        self.stageChanged.emit("Focus oscillation limit reached → advance pressure")
-                        self._record_pressure_result(valid=False)
-                        self.i += 1
-                        self.nextPressure.emit()
+                        self._invalidate_current_pressure(
+                            "focus_oscillation_limit",
+                            stage_message="Focus oscillation limit reached → advance pressure",
+                        )
                         return
 
             self._focus_moves_done += 1
             if self._focus_moves_done > 60:
-                self.stageChanged.emit("Focus budget exceeded → advance pressure")
-                self._record_pressure_result(valid=False)
-                self.i += 1
-                self.nextPressure.emit()
+                self._invalidate_current_pressure(
+                    "focus_move_budget_exceeded",
+                    stage_message="Focus budget exceeded → advance pressure",
+                )
                 return
 
             dY = int(self.focus_dir * self.focus_step)
@@ -10916,12 +11491,23 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # Accept replicate
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
-        center_px = tuple(map(int, result.get("center", (0, 0))))
-        self.circularity_values.append(float(result.get("circularity_ellipse", 99.0)))
+        self.circularity_values.append(float(circularity_ellipse))
         self.droplet_positions.append(center_px)
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
+        self._record_pressure_sweep_analysis(
+            "pressure_sweep_characterization_frame",
+            {
+                "status": "accepted",
+                "center_px": list(center_px),
+                "focus": float(focus_val),
+                "volume": float(result.get("volume", 0.0)),
+                "circularity_ellipse": float(circularity_ellipse),
+                "accepted_replicates": int(self.image_counter),
+                "ratios": self._char_ratio_snapshot(),
+            },
+        )
 
         if self._check_boundary_and_maybe_recenter(center_px):
             # A recenter move was issued (average of 2 consecutive OOB hits).
@@ -10951,11 +11537,64 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
         good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
+        ratios = self._char_ratio_snapshot()
+        max_invalid_ratio = float(getattr(self, "char_max_invalid_ratio", 0.45))
+        max_multiple_ratio = float(getattr(self, "char_max_multiple_ratio", 0.20))
+        max_stream_ratio = float(getattr(self, "char_max_stream_ratio", 0.20))
+        invalid_reasons = []
         if len(good) < int(self.num_images):
-            self.stageChanged.emit(
-                f"Insufficient accepted replicates ({len(good)}/{self.num_images}) → mark invalid and continue"
+            invalid_reasons.append("insufficient_good_replicates")
+        if float(ratios.get("invalid_ratio", 0.0)) > float(max_invalid_ratio):
+            invalid_reasons.append("char_invalid_ratio_exceeded")
+        if float(ratios.get("multiple_ratio", 0.0)) > float(max_multiple_ratio):
+            invalid_reasons.append("char_multiple_ratio_exceeded")
+        if float(ratios.get("stream_ratio", 0.0)) > float(max_stream_ratio):
+            invalid_reasons.append("char_stream_ratio_exceeded")
+
+        if invalid_reasons:
+            reason = str(invalid_reasons[0])
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_batch",
+                {
+                    "status": "invalid",
+                    "reason": str(reason),
+                    "all_reasons": list(invalid_reasons),
+                    "accepted_replicates": int(len(good)),
+                    "required_replicates": int(self.num_images),
+                    "ratios": ratios,
+                },
             )
-            self._record_pressure_result(valid=False, reason="insufficient_good_replicates")
+            self.stageChanged.emit(
+                f"Pressure invalid ({reason}); accepted={len(good)}/{self.num_images}, "
+                f"ratios invalid={ratios.get('invalid_ratio', 0.0):.2f}, "
+                f"multiple={ratios.get('multiple_ratio', 0.0):.2f}, "
+                f"stream={ratios.get('stream_ratio', 0.0):.2f}"
+            )
+            self._record_decision(
+                "batch_invalid",
+                {
+                    "reason": str(reason),
+                    "all_reasons": list(invalid_reasons),
+                    "accepted_replicates": int(len(good)),
+                    "required_replicates": int(self.num_images),
+                    "ratios": ratios,
+                },
+            )
+            self._record_pressure_result(
+                valid=False,
+                reason=str(reason),
+                extra={
+                    "accepted_replicates": int(len(good)),
+                    "captured_replicates": int(len(self.droplet_volumes)),
+                    "multiple_detections": int(getattr(self, "multiple_droplet_hits", 0)),
+                    "stream_like_detections": int(getattr(self, "_char_stream_hits", 0)),
+                    "invalid_frame_hits": int(getattr(self, "_char_invalid_hits", 0)),
+                    "characterization_frames": int(getattr(self, "_char_frames_evaluated", 0)),
+                    "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
+                    "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
+                    "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
+                },
+            )
         else:
             mean_vol = float(np.mean(good))
             cv_vol   = float(np.std(good) / (mean_vol + 1e-9) * 100.0)
@@ -10983,11 +11622,37 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "accepted_replicates": int(len(good)),
                 "captured_replicates": int(len(self.droplet_volumes)),
                 "mean_position_machine": drop_machine,
-                "multiple_detections": int(self.multiple_droplet_hits),
+                "multiple_detections": int(getattr(self, "multiple_droplet_hits", 0)),
+                "stream_like_detections": int(getattr(self, "_char_stream_hits", 0)),
+                "invalid_frame_hits": int(getattr(self, "_char_invalid_hits", 0)),
+                "characterization_frames": int(getattr(self, "_char_frames_evaluated", 0)),
+                "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
+                "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
+                "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
                 "y_focus_offset_steps": int(self._y_focus_offset_steps),
                 "valid": True
             }
             self.samples.append(rec)
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_batch",
+                {
+                    "status": "valid",
+                    "accepted_replicates": int(len(good)),
+                    "required_replicates": int(self.num_images),
+                    "mean_volume": float(mean_vol),
+                    "cv_volume_percent": float(cv_vol),
+                    "ratios": ratios,
+                },
+            )
+            self._record_decision(
+                "batch_valid",
+                {
+                    "accepted_replicates": int(len(good)),
+                    "required_replicates": int(self.num_images),
+                    "ratios": ratios,
+                    "cv_volume_percent": float(cv_vol),
+                },
+            )
             self._emit_incremental_pressure_step(rec)      # <- NEW incremental emit
 
         # advance plan
@@ -11016,7 +11681,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             and cv_drift <= float(self.early_stop_cv_drift_pct)
         )
 
-    def _record_pressure_result(self, valid: bool, reason: str | None = None):
+    def _record_pressure_result(self, valid: bool, reason: str | None = None, extra: dict | None = None):
+        ratios = self._char_ratio_snapshot()
         rec = {
             "pressure": float(self.cur_pressure),
             "delay_us": int(self.current_delay_us or self.target_delay_us),
@@ -11029,12 +11695,25 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "circularity_values": [],
             "accepted_replicates": int(self._count_good_replicates()),
             "captured_replicates": int(len(getattr(self, "droplet_volumes", []) or [])),
+            "multiple_detections": int(getattr(self, "multiple_droplet_hits", 0)),
+            "stream_like_detections": int(getattr(self, "_char_stream_hits", 0)),
+            "invalid_frame_hits": int(getattr(self, "_char_invalid_hits", 0)),
+            "characterization_frames": int(getattr(self, "_char_frames_evaluated", 0)),
+            "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
+            "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
+            "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
             "mean_position_machine": None,
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
         }
+        if isinstance(extra, dict):
+            rec.update(extra)
         
         self.samples.append(rec)
+        self._record_pressure_sweep_analysis(
+            "pressure_sweep_pressure_result",
+            {"result": dict(rec)},
+        )
         self._emit_incremental_pressure_step(rec)  # <- NEW incremental emit
     
     def _annotate_char_summary_image(self, mean_center, mean_vol, cv_vol):
@@ -11079,6 +11758,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         cur = self.model.machine_model.get_current_position_dict()
         self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
         self._char_need_capture = True  # after motion, take a fresh frame
+        self._record_decision(
+            "center_first_recenter_move",
+            {
+                "center_px": [int(center_px[0]), int(center_px[1])],
+                "move_xyz": [int(dX), 0, int(dZ)],
+                "recenter_moves": int(self._recenter_moves),
+            },
+        )
         self._mark_background_stale("center_first_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
 
@@ -11101,11 +11788,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
                 # Hard limits on OOB behavior
         if self._oob_total >= self.max_oob_total:
-            self.stageChanged.emit("Inconsistent imaging: too many out-of-bounds hits → skip pressure")
-            self._bad_reason = "oob_total_limit"
-            self._record_pressure_result(valid=False, reason=self._bad_reason)
-            self.i += 1
-            self.nextPressure.emit()
+            self._invalidate_current_pressure(
+                "oob_total_limit",
+                stage_message="Inconsistent imaging: too many out-of-bounds hits → skip pressure",
+            )
             return True  # (we are leaving anyway)
 
         if self._oob_streak < 2:
@@ -11131,14 +11817,21 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._char_need_capture = True  # get a fresh frame after motion
         
         self._recenter_moves += 1               # NEW: count recenter moves
-        print('Recenter counter (check_boundary):', self._recenter_moves)
         if self._recenter_moves >= self.max_recenter_moves:
-            self.stageChanged.emit("Inconsistent imaging: too many recenter moves → skip pressure")
-            self._bad_reason = "recentre_limit"
-            self._record_pressure_result(valid=False, reason=self._bad_reason)
-            self.i += 1
-            self.nextPressure.emit()
+            self._invalidate_current_pressure(
+                "recentre_limit",
+                stage_message="Inconsistent imaging: too many recenter moves → skip pressure",
+            )
             return True
+        self._record_decision(
+            "boundary_recenter_move",
+            {
+                "average_oob_center_px": [int(avgx), int(avgy)],
+                "move_xyz": [int(dX), 0, int(dZ)],
+                "oob_total": int(self._oob_total),
+                "recenter_moves": int(self._recenter_moves),
+            },
+        )
         self._mark_background_stale("boundary_recenter")
         self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
         return True

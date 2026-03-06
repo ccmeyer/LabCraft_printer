@@ -1,4 +1,5 @@
 import argparse
+from collections import Counter
 import json
 import os
 import sys
@@ -69,6 +70,132 @@ def replay_nozzle_pair(background_rgb, droplet_rgb):
     }
 
 
+def _as_float_or_none(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _collect_pressure_rows_from_analyses(analyses):
+    direct_rows = []
+    legacy_rows = []
+    for a in analyses:
+        kind = str(a.get("kind", ""))
+        if kind == "pressure_sweep_pressure_result":
+            rec = a.get("result")
+            if isinstance(rec, dict):
+                direct_rows.append(dict(rec))
+            continue
+        if kind != "calibration_data_updated":
+            continue
+        payload = a.get("payload") or {}
+        result = payload.get("result") or {}
+        rows = result.get("pressures") or []
+        for row in rows:
+            if isinstance(row, dict):
+                legacy_rows.append(dict(row))
+    return direct_rows if direct_rows else legacy_rows
+
+
+def replay_pressure_sweep_run(run_dir: Path, analyses, events):
+    rows = _collect_pressure_rows_from_analyses(analyses)
+    decision_events = [
+        e for e in events
+        if str(e.get("event_type", "")).lower() == "decision"
+    ]
+
+    pressure_results = []
+    invalid_reason_counts = Counter()
+    valid_pressures = 0
+    for i, row in enumerate(rows):
+        valid = bool(row.get("valid", False))
+        reason = str(row.get("invalid_reason", "") or "")
+        if valid:
+            valid_pressures += 1
+        else:
+            invalid_reason_counts[str(reason or "unspecified")] += 1
+        pressure_results.append(
+            {
+                "index": int(i),
+                "pressure": _as_float_or_none(row.get("pressure")),
+                "delay_us": row.get("delay_us"),
+                "valid": bool(valid),
+                "invalid_reason": (None if valid else str(reason or "unspecified")),
+                "accepted_replicates": row.get("accepted_replicates"),
+                "captured_replicates": row.get("captured_replicates"),
+                "multiple_detections": row.get("multiple_detections"),
+                "stream_like_detections": row.get("stream_like_detections"),
+                "invalid_frame_hits": row.get("invalid_frame_hits"),
+            }
+        )
+
+    decision_counts = Counter()
+    for evt in decision_events:
+        payload = evt.get("payload") or {}
+        decision = str(payload.get("decision", "")).strip()
+        if decision:
+            decision_counts[decision] += 1
+
+    search_analyses = [a for a in analyses if str(a.get("kind", "")) == "pressure_sweep_search"]
+    search_status_counts = Counter(str(a.get("status", "")) for a in search_analyses)
+    search_reason_counts = Counter(str(a.get("reason", "")) for a in search_analyses)
+
+    char_frames = [a for a in analyses if str(a.get("kind", "")) == "pressure_sweep_characterization_frame"]
+    char_status_counts = Counter(str(a.get("status", "")) for a in char_frames)
+    char_reason_counts = Counter(str(a.get("reason", "")) for a in char_frames)
+
+    capture_saved = [e for e in events if str(e.get("event_type", "")) == "capture_saved"]
+    background_captures = 0
+    droplet_captures = 0
+    for evt in capture_saved:
+        payload = evt.get("payload") or {}
+        role = str(payload.get("capture_role", "")).strip().lower()
+        if role == "background":
+            background_captures += 1
+        elif role == "droplet":
+            droplet_captures += 1
+
+    background_refreshes = sum(1 for e in events if str(e.get("event_type", "")) == "background_refreshed")
+    background_marked_stale = sum(1 for e in events if str(e.get("event_type", "")) == "background_marked_stale")
+
+    total_pressures = int(len(pressure_results))
+    invalid_pressures = int(total_pressures - valid_pressures)
+
+    return {
+        "run_dir": str(run_dir),
+        "process_name": "PressureSweepCharacterizationProcess",
+        "supported": True,
+        "mode": "pressure_sweep_summary",
+        "pressure_results": pressure_results,
+        "invalid_reason_counts": dict(sorted(invalid_reason_counts.items())),
+        "decision_counts": dict(sorted(decision_counts.items())),
+        "search_summary": {
+            "count": int(len(search_analyses)),
+            "status_counts": dict(sorted(search_status_counts.items())),
+            "reason_counts": dict(sorted(search_reason_counts.items())),
+        },
+        "characterization_summary": {
+            "count": int(len(char_frames)),
+            "status_counts": dict(sorted(char_status_counts.items())),
+            "reason_counts": dict(sorted(char_reason_counts.items())),
+        },
+        "summary": {
+            # Preserve existing top-level aggregator keys for replay_root.
+            "total": int(total_pressures),
+            "matched": int(valid_pressures),
+            "mismatched": int(invalid_pressures),
+            "skipped": 0,
+            "valid_pressures": int(valid_pressures),
+            "invalid_pressures": int(invalid_pressures),
+            "background_captures": int(background_captures),
+            "droplet_captures": int(droplet_captures),
+            "background_refreshes": int(background_refreshes),
+            "background_marked_stale": int(background_marked_stale),
+        },
+    }
+
+
 def replay_run(run_dir: str | Path):
     run_dir = Path(run_dir)
     run_meta_path = run_dir / "run_meta.json"
@@ -82,17 +209,24 @@ def replay_run(run_dir: str | Path):
     process_name = str(run_meta.get("process_name", ""))
 
     analyses = _load_jsonl(analysis_path)
+    events = _load_jsonl(events_path)
     decision_events = [
-        e for e in _load_jsonl(events_path)
+        e for e in events
         if str(e.get("event_type", "")).lower() == "decision"
     ]
+
+    if process_name == "PressureSweepCharacterizationProcess":
+        return replay_pressure_sweep_run(run_dir, analyses, events)
 
     if process_name != "NozzlePositionCalibrationProcess":
         return {
             "run_dir": str(run_dir),
             "process_name": process_name,
             "supported": False,
-            "reason": "Replay currently supports NozzlePositionCalibrationProcess only.",
+            "reason": (
+                "Replay currently supports NozzlePositionCalibrationProcess and "
+                "PressureSweepCharacterizationProcess."
+            ),
             "results": [],
             "summary": {"total": 0, "matched": 0, "mismatched": 0, "skipped": 0},
         }
@@ -230,7 +364,7 @@ def _write_report(path: Path, payload: dict):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Replay recorded calibration runs with current nozzle analysis logic.")
+    ap = argparse.ArgumentParser(description="Replay recorded calibration runs with current analysis logic.")
     ap.add_argument("--run-dir", type=str, default="", help="Path to a single recorded run directory.")
     ap.add_argument("--root", type=str, default="", help="Root directory containing many run directories.")
     ap.add_argument("--output", type=str, default="", help="Optional output JSON path.")
