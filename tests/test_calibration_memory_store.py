@@ -211,3 +211,50 @@ def test_context_builder_prefers_explicit_runtime_identity_metadata(tmp_path):
     assert context["measured_nozzle_diameter_um"] == 101.2
     assert context["identity_quality"]["printer_head_id"] == "explicit"
     assert context["identity_quality"]["head_type_id"] == "explicit"
+
+
+def test_completed_summary_write_still_succeeds_if_snapshot_refresh_fails(tmp_path, monkeypatch):
+    model = _make_dummy_model(tmp_path)
+    store = CalibrationMemoryStore(model=model, root_dir=str(tmp_path / "CalibrationMemory"))
+    built_context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    store.create_run("run_complete", context=built_context, notes="refresh failure")
+
+    def _boom():
+        raise RuntimeError("snapshot rebuild failed")
+
+    monkeypatch.setattr(store, "refresh_derived_memory", _boom)
+
+    summary = store.write_run_summary(
+        "run_complete",
+        {
+            "context": built_context,
+            "run_status": "completed",
+            "run_timing": {
+                "started_at_utc": "2026-03-06T18:00:00Z",
+                "ended_at_utc": "2026-03-06T18:10:00Z",
+            },
+            "phase_counts": {
+                "droplet_search": 1,
+            },
+            "process_results": {
+                "droplet_search": {
+                    "step_count": 1,
+                    "latest_settings": {"print_width": 1500},
+                    "latest_result": {
+                        "pressure": 1.6,
+                        "mean_volume": 9.8,
+                        "cv_volume_percent": 4.1,
+                        "valid": True,
+                        "print_pulse_width_us": 1500,
+                    },
+                }
+            },
+        },
+    )
+
+    assert summary["run_id"] == "run_complete"
+    saved = json.loads(Path(store.get_run_paths("run_complete")["run_summary_path"]).read_text(encoding="utf-8"))
+    assert saved["run_status"] == "completed"

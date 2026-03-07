@@ -38,11 +38,95 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
         class _FigureCanvasQTAgg:
             pass
 
+        class _Axes:
+            def plot(self, *args, **kwargs):
+                return []
+
+            def step(self, *args, **kwargs):
+                return []
+
+            def bar(self, *args, **kwargs):
+                return []
+
+            def scatter(self, *args, **kwargs):
+                return []
+
+            def imshow(self, *args, **kwargs):
+                return object()
+
+            def axvline(self, *args, **kwargs):
+                return None
+
+            def axhline(self, *args, **kwargs):
+                return None
+
+            def set_ylabel(self, *args, **kwargs):
+                return None
+
+            def set_xlabel(self, *args, **kwargs):
+                return None
+
+            def set_title(self, *args, **kwargs):
+                return None
+
+            def set_ylim(self, *args, **kwargs):
+                return None
+
+            def set_yticks(self, *args, **kwargs):
+                return None
+
+            def set_yticklabels(self, *args, **kwargs):
+                return None
+
+            def set_xticks(self, *args, **kwargs):
+                return None
+
+            def set_xticklabels(self, *args, **kwargs):
+                return None
+
+            def grid(self, *args, **kwargs):
+                return None
+
+            def legend(self, *args, **kwargs):
+                return None
+
         class _Figure:
-            pass
+            def suptitle(self, *args, **kwargs):
+                return None
+
+            def tight_layout(self, *args, **kwargs):
+                return None
+
+            def colorbar(self, *args, **kwargs):
+                return None
+
+            def savefig(self, path, *args, **kwargs):
+                with open(path, "wb") as handle:
+                    handle.write(b"stub-figure")
 
         backend_qt5agg.FigureCanvasQTAgg = _FigureCanvasQTAgg
         figure_mod.Figure = _Figure
+        mpl.use = lambda *a, **k: None
+        plt.close = lambda *a, **k: None
+
+        def _subplots(nrows=1, ncols=1, **kwargs):
+            fig = _Figure()
+            if nrows == 1 and ncols == 1:
+                return fig, _Axes()
+            axes = [_Axes() for _ in range(nrows * ncols)]
+            if nrows == 1 or ncols == 1:
+                return fig, axes
+            grid = []
+            idx = 0
+            for _ in range(nrows):
+                row = []
+                for _ in range(ncols):
+                    row.append(axes[idx])
+                    idx += 1
+                grid.append(row)
+            return fig, grid
+
+        plt.subplots = _subplots
         mpl.pyplot = plt
         mpl.figure = figure_mod
         mpl.backends = backends
@@ -56,6 +140,97 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
         sys.modules["matplotlib.pyplot"] = plt
         if "matplotlib" in sys.modules:
             sys.modules["matplotlib"].pyplot = plt
+            if not hasattr(sys.modules["matplotlib"], "use"):
+                sys.modules["matplotlib"].use = lambda *a, **k: None
+    if "matplotlib.pyplot" in sys.modules:
+        plt = sys.modules["matplotlib.pyplot"]
+        if not hasattr(plt, "close"):
+            plt.close = lambda *a, **k: None
+        if not hasattr(plt, "subplots"):
+            class _Axes:
+                def plot(self, *args, **kwargs):
+                    return []
+
+                def step(self, *args, **kwargs):
+                    return []
+
+                def bar(self, *args, **kwargs):
+                    return []
+
+                def scatter(self, *args, **kwargs):
+                    return []
+
+                def imshow(self, *args, **kwargs):
+                    return object()
+
+                def axvline(self, *args, **kwargs):
+                    return None
+
+                def axhline(self, *args, **kwargs):
+                    return None
+
+                def set_ylabel(self, *args, **kwargs):
+                    return None
+
+                def set_xlabel(self, *args, **kwargs):
+                    return None
+
+                def set_title(self, *args, **kwargs):
+                    return None
+
+                def set_ylim(self, *args, **kwargs):
+                    return None
+
+                def set_yticks(self, *args, **kwargs):
+                    return None
+
+                def set_yticklabels(self, *args, **kwargs):
+                    return None
+
+                def set_xticks(self, *args, **kwargs):
+                    return None
+
+                def set_xticklabels(self, *args, **kwargs):
+                    return None
+
+                def grid(self, *args, **kwargs):
+                    return None
+
+                def legend(self, *args, **kwargs):
+                    return None
+
+            class _Figure:
+                def suptitle(self, *args, **kwargs):
+                    return None
+
+                def tight_layout(self, *args, **kwargs):
+                    return None
+
+                def colorbar(self, *args, **kwargs):
+                    return None
+
+                def savefig(self, path, *args, **kwargs):
+                    with open(path, "wb") as handle:
+                        handle.write(b"stub-figure")
+
+            def _subplots(nrows=1, ncols=1, **kwargs):
+                fig = _Figure()
+                if nrows == 1 and ncols == 1:
+                    return fig, _Axes()
+                axes = [_Axes() for _ in range(nrows * ncols)]
+                if nrows == 1 or ncols == 1:
+                    return fig, axes
+                grid = []
+                idx = 0
+                for _ in range(nrows):
+                    row = []
+                    for _ in range(ncols):
+                        row.append(axes[idx])
+                        idx += 1
+                    grid.append(row)
+                return fig, grid
+
+            plt.subplots = _subplots
     if (force or _find_spec_or_none("matplotlib.backends") is None) and "matplotlib.backends" not in sys.modules:
         sys.modules["matplotlib.backends"] = types.ModuleType("matplotlib.backends")
     if (force or _find_spec_or_none("matplotlib.figure") is None) and "matplotlib.figure" not in sys.modules:

@@ -751,6 +751,7 @@ class CalibrationManager(QObject):
 
         self._last_pressure_scan_result = None
         self._pressure_traj_result = None
+        self._calibration_memory_prior_candidate = None
 
         self.calibration_queue = []
 
@@ -784,6 +785,44 @@ class CalibrationManager(QObject):
     def _warn_calibration_memory(self, action: str, exc: Exception):
         print(f"[CalibrationMemory] {action} failed: {exc}")
 
+    def _get_calibration_memory_target_pulse_width(self):
+        try:
+            settings = self.get_current_settings()
+        except Exception:
+            return None
+        if not isinstance(settings, dict):
+            return None
+        value = settings.get("print_width")
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _lookup_calibration_memory_prior(self, context):
+        self._calibration_memory_prior_candidate = None
+        store = self._get_calibration_memory_store()
+        if store is None:
+            return None
+        try:
+            target_pulse_width_us = self._get_calibration_memory_target_pulse_width()
+            prior = store.get_best_prior(
+                context,
+                target_pulse_width_us=target_pulse_width_us,
+            )
+            self._calibration_memory_prior_candidate = prior
+            if prior:
+                print(
+                    "[CalibrationMemory] Advisory prior "
+                    f"{prior.get('aggregation_level')} "
+                    f"({prior.get('pulse_match_type')}, confidence={prior.get('recommendation_confidence_adjusted')})"
+                )
+            return prior
+        except Exception as e:
+            self._warn_calibration_memory("get_best_prior", e)
+            return None
+
     def _start_calibration_memory_run(self, *, notes: str = None):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
@@ -793,12 +832,22 @@ class CalibrationManager(QObject):
                 model=self.model,
                 calibration_file_path=self.calibration_file_path,
             )
+            prior = self._lookup_calibration_memory_prior(context)
             store.create_run(
                 self._run_id,
                 context=context,
                 calibration_manager=self,
                 notes=notes,
                 manager_meta=self._build_recorder_meta(),
+                advisory_prior=prior,
+            )
+            self._append_calibration_memory_observation(
+                "advisory_prior_lookup",
+                {
+                    "found": bool(prior),
+                    "target_pulse_width_us": self._get_calibration_memory_target_pulse_width(),
+                    "prior": prior or {},
+                },
             )
         except Exception as e:
             self._warn_calibration_memory("create_run", e)
@@ -1083,6 +1132,7 @@ class CalibrationManager(QObject):
         # Per-run derived center used by pressure band; avoid stale cross-session carryover.
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
+        self._calibration_memory_prior_candidate = None
         print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
@@ -1134,6 +1184,7 @@ class CalibrationManager(QObject):
 
         self._run_id = None
         self._run_idx = None
+        self._calibration_memory_prior_candidate = None
 
     # Back-compat: keep these, but redirect through session I/O
     def create_calibration_file(self, file_path):

@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
@@ -152,3 +154,75 @@ def test_calibration_memory_failures_do_not_break_calibration(tmp_path, capsys, 
     saved = json.loads(calibration_json.read_text(encoding="utf-8"))
     assert saved["runs"]
     assert saved["runs"][0]["steps"]["droplet_search"][0]["result"]["mean_volume"] == 10.01
+
+
+def test_begin_session_records_advisory_prior_without_changing_behavior(tmp_path):
+    model = _make_model(tmp_path)
+    printer_head = model.rack_model.get_gripper_printer_head()
+    stock = printer_head.get_stock_solution()
+    stock.reagent_id = "water"
+    stock.display_name = "Water"
+    stock.reagent_family = "aqueous"
+    stock.glycerol_percent = 0.0
+    stock.tags = ["baseline"]
+    stock.notes = ""
+    printer_head.printer_head_id = "nozzle_100um_h03"
+    printer_head.head_type_id = "nozzle_100um"
+    printer_head.display_name = "100 um H03"
+    printer_head.nominal_nozzle_diameter_um = 100.0
+    printer_head.identity_tags = ["baseline"]
+    printer_head.identity_notes = ""
+
+    store = model.calibration_memory_store
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    paths = store.create_run("prior_run", context=context, notes="seed prior")
+    store.write_run_summary(
+        "prior_run",
+        {
+            "context": context,
+            "run_status": "completed",
+            "run_timing": {
+                "started_at_utc": "2026-03-06T18:00:00Z",
+                "ended_at_utc": "2026-03-06T18:10:00Z",
+            },
+            "phase_counts": {"droplet_search": 1},
+            "process_results": {
+                "droplet_search": {
+                    "step_count": 1,
+                    "latest_settings": {"print_width": 1500},
+                    "latest_result": {
+                        "pressure": 1.61,
+                        "mean_volume": 9.95,
+                        "cv_volume_percent": 4.1,
+                        "valid": True,
+                        "print_pulse_width_us": 1500,
+                        "delay_us": 4300,
+                    },
+                }
+            },
+            "artifact_refs": {},
+            "source_refs": paths,
+            "authoritative_refs": {},
+            "last_updated_at_utc": "2026-03-06T18:10:00Z",
+        },
+    )
+
+    manager = CalibrationManager(model)
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="advisory test")
+
+    run_id = manager._run_id
+    run_dir = Path(store.get_run_paths(run_id)["run_dir"])
+    summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+    observations = [
+        json.loads(line)
+        for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert summary["advisory_prior"]["aggregation_level"] == "exact_pair"
+    assert summary["advisory_prior"]["advisory_only"] is True
+    assert manager._calibration_memory_prior_candidate["recommended_pressure_psi"] == pytest.approx(1.61)
+    assert any(row["observation_type"] == "advisory_prior_lookup" for row in observations)

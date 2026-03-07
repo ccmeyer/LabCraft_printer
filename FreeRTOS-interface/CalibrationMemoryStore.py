@@ -5,6 +5,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from CalibrationMemoryAggregator import CalibrationMemoryAggregator
 from CalibrationIdentity import CalibrationIdentityRegistry
 
 
@@ -319,6 +320,7 @@ class CalibrationMemoryStore:
         self.schema_path = os.path.join(self.root_dir, "schema.json")
         self.run_catalog_path = os.path.join(self.indices_dir, "run_catalog.jsonl")
         self.identity_registry = CalibrationIdentityRegistry(self.root_dir)
+        self.aggregator = CalibrationMemoryAggregator(self.root_dir)
         self.context_builder = CalibrationContextBuilder(model, identity_registry=self.identity_registry)
         self._lock = threading.Lock()
 
@@ -337,6 +339,9 @@ class CalibrationMemoryStore:
         self.model = model
         self.context_builder.set_model(model)
 
+    def _warn(self, action, exc):
+        print(f"[CalibrationMemory] {action} failed: {exc}")
+
     def ensure_initialized(self):
         with self._lock:
             os.makedirs(self.root_dir, exist_ok=True)
@@ -344,6 +349,7 @@ class CalibrationMemoryStore:
             os.makedirs(self.indices_dir, exist_ok=True)
             os.makedirs(self.runs_dir, exist_ok=True)
             self.identity_registry.ensure_initialized()
+            self.aggregator.ensure_initialized()
             if not os.path.exists(self.schema_path):
                 payload = {
                     "schema_family": self.SCHEMA_FAMILY,
@@ -401,6 +407,27 @@ class CalibrationMemoryStore:
             "observations_path": self._get_observations_path(run_id),
         }
 
+    @staticmethod
+    def _summary_is_completed(payload):
+        record = dict(payload or {})
+        run_status = str(record.get("run_status") or "").strip().lower()
+        if run_status == "completed":
+            return True
+        run_timing = record.get("run_timing") or {}
+        return bool(run_timing.get("ended_at_utc"))
+
+    def refresh_derived_memory(self):
+        self.ensure_initialized()
+        return self.aggregator.rebuild()
+
+    def get_best_prior(self, context, *, target_pulse_width_us=None, target_volume_nl=None):
+        self.ensure_initialized()
+        return self.aggregator.get_best_prior(
+            context,
+            target_pulse_width_us=target_pulse_width_us,
+            target_volume_nl=target_volume_nl,
+        )
+
     def _build_artifact_refs(self, *, context=None, calibration_manager=None):
         context = dict(context or {})
         calibration_path = self._clean_str(context.get("calibration_file_path"))
@@ -444,6 +471,7 @@ class CalibrationMemoryStore:
         calibration_manager=None,
         notes=None,
         manager_meta=None,
+        advisory_prior=None,
     ):
         self.ensure_initialized()
         run_id = str(run_id)
@@ -457,11 +485,13 @@ class CalibrationMemoryStore:
         open(paths["observations_path"], "a", encoding="utf-8").close()
 
         now = self._now_utc()
+        run_idx = getattr(calibration_manager, "_run_idx", None) if calibration_manager is not None else None
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
             "schema_version": int(self.SCHEMA_VERSION),
             "run_id": run_id,
             "context": context,
+            "run_status": "in_progress",
             "run_timing": {
                 "started_at_utc": now,
                 "ended_at_utc": None,
@@ -474,7 +504,13 @@ class CalibrationMemoryStore:
                 "run_summary_path": paths["run_summary_path"],
                 "observations_path": paths["observations_path"],
             },
+            "authoritative_refs": {
+                "calibration_json_path": self._clean_str(getattr(calibration_manager, "calibration_file_path", None)),
+                "calibration_run_id": run_id,
+                "calibration_run_index": run_idx,
+            },
             "manager_meta": dict(manager_meta or {}),
+            "advisory_prior": dict(advisory_prior or {}) if advisory_prior else None,
             "last_updated_at_utc": now,
         }
         self.write_run_summary(run_id, summary)
@@ -520,6 +556,11 @@ class CalibrationMemoryStore:
         record["run_id"] = str(run_id)
         record.setdefault("last_updated_at_utc", self._now_utc())
         self._write_json_atomic(self._get_run_summary_path(run_id), record)
+        if self._summary_is_completed(record):
+            try:
+                self.refresh_derived_memory()
+            except Exception as e:
+                self._warn("refresh_derived_memory", e)
         return record
 
     def append_observation(self, run_id, payload):
@@ -558,6 +599,7 @@ class CalibrationMemoryStore:
             calibration_file_path=getattr(calibration_manager, "calibration_file_path", None),
         )
         run_id = str(run.get("run_id") or getattr(calibration_manager, "_run_id", ""))
+        paths = self.get_run_paths(run_id)
 
         phase_counts = {}
         process_results = {}
@@ -579,11 +621,23 @@ class CalibrationMemoryStore:
                 result_entry["latest_payload"] = latest
             process_results[phase_name] = result_entry
 
+        run_status = "completed" if self._clean_str(run.get("ended_at")) else "in_progress"
+        advisory_prior = getattr(calibration_manager, "_calibration_memory_prior_candidate", None)
+
+        manager_meta = {}
+        try:
+            meta_getter = getattr(calibration_manager, "_build_recorder_meta", None)
+            if callable(meta_getter):
+                manager_meta = dict(meta_getter() or {})
+        except Exception:
+            manager_meta = {}
+
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
             "schema_version": int(self.SCHEMA_VERSION),
             "run_id": run_id,
             "context": context,
+            "run_status": run_status,
             "run_timing": {
                 "started_at_utc": run.get("started_at"),
                 "ended_at_utc": run.get("ended_at"),
@@ -597,8 +651,24 @@ class CalibrationMemoryStore:
                 "calibration_run_id": run_id,
                 "calibration_run_index": run_idx,
             },
+            "source_refs": {
+                "run_summary_path": paths["run_summary_path"],
+                "observations_path": paths["observations_path"],
+            },
+            "manager_meta": manager_meta,
+            "advisory_prior": dict(advisory_prior or {}) if advisory_prior else None,
             "last_updated_at_utc": self._now_utc(),
         }
+        try:
+            summary["derived_metrics"] = self.aggregator.extract_run_features(summary, authoritative_run=run)
+        except Exception as e:
+            self._warn("extract_run_features", e)
+            summary["derived_metrics"] = {
+                "schema_name": f"{self.SCHEMA_FAMILY}.run_features",
+                "schema_version": int(self.SCHEMA_VERSION),
+                "usable_for_aggregation": False,
+                "qualification_reasons": ["feature_extraction_failed"],
+            }
         return summary
 
     def build_observation(
