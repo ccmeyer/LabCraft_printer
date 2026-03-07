@@ -753,6 +753,7 @@ class CalibrationManager(QObject):
         self._pressure_traj_result = None
         self._calibration_memory_prior_candidate = None
         self._calibration_memory_prior_runtime = {}
+        self._calibration_memory_ui_recommendation = {}
 
         self.calibration_queue = []
 
@@ -818,6 +819,32 @@ class CalibrationManager(QObject):
             "first_single_pressure_psi": None,
         }
 
+    def _new_calibration_memory_ui_recommendation_state(self):
+        return {
+            "mode": str(self._get_calibration_memory_mode() or "advisory"),
+            "shown": False,
+            "shown_count": 0,
+            "applied": False,
+            "apply_count": 0,
+            "ignored": False,
+            "ignore_count": 0,
+            "last_action": None,
+            "last_action_at_utc": None,
+            "last_reason": None,
+            "candidate_found": False,
+            "prior": None,
+            "aggregation_level": None,
+            "confidence": None,
+            "qualification": {},
+            "seed_values": {},
+            "manual_apply_allowed": False,
+            "manual_apply_reason": None,
+            "target_pulse_width_us": None,
+            "target_volume_nl": None,
+            "context": {},
+            "pending_events": [],
+        }
+
     def _reset_calibration_memory_prior_runtime(self, *, mode: str | None = None):
         self._calibration_memory_prior_candidate = None
         self._calibration_memory_prior_runtime = self._new_calibration_memory_prior_runtime(mode=mode)
@@ -829,11 +856,232 @@ class CalibrationManager(QObject):
             state = self._reset_calibration_memory_prior_runtime()
         return state
 
+    def _reset_calibration_memory_ui_recommendation_state(self):
+        self._calibration_memory_ui_recommendation = self._new_calibration_memory_ui_recommendation_state()
+        return self._calibration_memory_ui_recommendation
+
+    def _get_calibration_memory_ui_recommendation_state(self):
+        state = getattr(self, "_calibration_memory_ui_recommendation", None)
+        if not isinstance(state, dict) or not state:
+            state = self._reset_calibration_memory_ui_recommendation_state()
+        return state
+
+    def clear_calibration_memory_ui_recommendation_state(self):
+        return self._reset_calibration_memory_ui_recommendation_state()
+
     def _get_calibration_memory_target_pulse_width(self):
         try:
             settings = self.get_current_settings()
         except Exception:
             return None
+
+    def preview_calibration_memory_recommendation(
+        self,
+        *,
+        target_pulse_width_us: int | None = None,
+        target_volume_nl: float | None = None,
+    ):
+        preview = {
+            "mode": str(self._get_calibration_memory_mode() or "advisory"),
+            "candidate_found": False,
+            "prior": None,
+            "qualification": {},
+            "seed_values": {},
+            "manual_apply_allowed": False,
+            "manual_apply_reason": "no_prior",
+            "context": {},
+            "target_pulse_width_us": None,
+            "target_volume_nl": None,
+            "error": None,
+        }
+        store = self._get_calibration_memory_store()
+        if store is None:
+            preview["manual_apply_reason"] = "store_unavailable"
+            return preview
+
+        if target_pulse_width_us is None:
+            target_pulse_width_us = self._get_calibration_memory_target_pulse_width()
+        try:
+            preview["target_pulse_width_us"] = (
+                None if target_pulse_width_us is None else int(target_pulse_width_us)
+            )
+        except Exception:
+            preview["target_pulse_width_us"] = None
+        try:
+            preview["target_volume_nl"] = (
+                None if target_volume_nl is None else float(target_volume_nl)
+            )
+        except Exception:
+            preview["target_volume_nl"] = None
+
+        try:
+            context = store.context_builder.build(
+                model=self.model,
+                calibration_file_path=self.calibration_file_path,
+            )
+            preview["context"] = dict(context or {})
+        except Exception as e:
+            self._warn_calibration_memory("preview_context", e)
+            preview["manual_apply_reason"] = "context_build_failed"
+            preview["error"] = "context_build_failed"
+            return preview
+
+        try:
+            prior = store.get_best_prior(
+                preview["context"],
+                target_pulse_width_us=preview.get("target_pulse_width_us"),
+                target_volume_nl=preview.get("target_volume_nl"),
+            )
+        except Exception as e:
+            self._warn_calibration_memory("preview_get_best_prior", e)
+            preview["manual_apply_reason"] = "lookup_error"
+            preview["error"] = "lookup_error"
+            return preview
+
+        preview["candidate_found"] = bool(prior)
+        preview["prior"] = dict(prior or {}) if prior else None
+        if not prior:
+            preview["manual_apply_reason"] = "no_prior"
+            return preview
+
+        try:
+            qualification = store.qualify_prior_for_application(
+                prior,
+                context=preview["context"],
+                target_pulse_width_us=preview.get("target_pulse_width_us"),
+                target_volume_nl=preview.get("target_volume_nl"),
+            )
+        except Exception as e:
+            self._warn_calibration_memory("preview_qualify_prior", e)
+            qualification = {
+                "qualified": False,
+                "reason": "qualification_error",
+                "checks": {},
+            }
+        preview["qualification"] = dict(qualification or {})
+        preview["manual_apply_allowed"] = bool(qualification.get("qualified"))
+        preview["manual_apply_reason"] = str(
+            qualification.get("reason") or ("qualified" if preview["manual_apply_allowed"] else "qualification_failed")
+        )
+
+        try:
+            pressure_bounds = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            pressure_bounds = None
+        try:
+            preview["seed_values"] = dict(
+                store.derive_prior_seed_values(
+                    prior,
+                    baseline_start_pressure_psi=self.start_pressure,
+                    pressure_bounds=pressure_bounds,
+                )
+                or {}
+            )
+        except Exception:
+            preview["seed_values"] = {}
+        return preview
+
+    def record_calibration_memory_ui_interaction(
+        self,
+        action: str,
+        preview: dict | None = None,
+        *,
+        extra: dict | None = None,
+    ):
+        state = self._get_calibration_memory_ui_recommendation_state()
+        preview = dict(preview or {})
+        prior = dict(preview.get("prior") or {})
+        qualification = dict(preview.get("qualification") or {})
+        seed_values = dict(preview.get("seed_values") or {})
+        action = str(action or "").strip().lower()
+        if action not in {"shown", "applied", "ignored"}:
+            raise ValueError(f"Unsupported calibration-memory UI action: {action}")
+
+        mode = str(preview.get("mode") or self._get_calibration_memory_mode() or "advisory")
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        state["mode"] = mode
+        state["candidate_found"] = bool(preview.get("candidate_found")) or bool(prior)
+        state["prior"] = dict(prior or {}) if prior else None
+        state["aggregation_level"] = prior.get("aggregation_level")
+        conf = prior.get("recommendation_confidence_adjusted", prior.get("recommendation_confidence"))
+        try:
+            state["confidence"] = None if conf is None else float(conf)
+        except Exception:
+            state["confidence"] = None
+        state["qualification"] = qualification
+        state["seed_values"] = seed_values
+        state["manual_apply_allowed"] = bool(preview.get("manual_apply_allowed"))
+        state["manual_apply_reason"] = str(preview.get("manual_apply_reason") or "")
+        state["target_pulse_width_us"] = preview.get("target_pulse_width_us")
+        state["target_volume_nl"] = preview.get("target_volume_nl")
+        state["context"] = dict(preview.get("context") or {})
+        state["last_action"] = action
+        state["last_action_at_utc"] = timestamp
+        state["last_reason"] = str(
+            (extra or {}).get("reason")
+            or preview.get("manual_apply_reason")
+            or qualification.get("reason")
+            or ""
+        )
+        if action == "shown":
+            state["shown"] = True
+            state["shown_count"] = int(state.get("shown_count") or 0) + 1
+        elif action == "applied":
+            state["applied"] = True
+            state["apply_count"] = int(state.get("apply_count") or 0) + 1
+        elif action == "ignored":
+            state["ignored"] = True
+            state["ignore_count"] = int(state.get("ignore_count") or 0) + 1
+
+        payload = {
+            "action": action,
+            "mode": mode,
+            "candidate_found": state["candidate_found"],
+            "aggregation_level": state.get("aggregation_level"),
+            "confidence": state.get("confidence"),
+            "manual_apply_allowed": state.get("manual_apply_allowed"),
+            "manual_apply_reason": state.get("manual_apply_reason"),
+            "target_pulse_width_us": state.get("target_pulse_width_us"),
+            "target_volume_nl": state.get("target_volume_nl"),
+            "prior": prior,
+            "qualification": qualification,
+            "seed_values": seed_values,
+            "extra": dict(extra or {}),
+        }
+
+        observation_type = f"ui_recommendation_{action}"
+        if self._run_id:
+            self._append_calibration_memory_observation(
+                observation_type,
+                payload,
+                phase_name="calibration_memory",
+            )
+        else:
+            pending = list(state.get("pending_events") or [])
+            pending.append(
+                {
+                    "observation_type": observation_type,
+                    "payload": payload,
+                }
+            )
+            state["pending_events"] = pending
+        return payload
+
+    def _flush_calibration_memory_ui_events(self):
+        state = self._get_calibration_memory_ui_recommendation_state()
+        pending = list(state.get("pending_events") or [])
+        if not pending or not self._run_id:
+            return
+        remaining = []
+        for event in pending:
+            result = self._append_calibration_memory_observation(
+                str(event.get("observation_type") or "ui_recommendation_event"),
+                dict(event.get("payload") or {}),
+                phase_name="calibration_memory",
+            )
+            if result is None:
+                remaining.append(event)
+        state["pending_events"] = remaining
         if not isinstance(settings, dict):
             return None
         value = settings.get("print_width")
@@ -1159,6 +1407,16 @@ class CalibrationManager(QObject):
         runtime["usefulness_summary"] = usefulness
         return runtime
 
+    def get_calibration_memory_ui_recommendation_summary(self):
+        summary = dict(self._get_calibration_memory_ui_recommendation_state() or {})
+        summary["prior"] = dict(summary.get("prior") or {}) if summary.get("prior") else None
+        summary["qualification"] = dict(summary.get("qualification") or {})
+        summary["seed_values"] = dict(summary.get("seed_values") or {})
+        summary["context"] = dict(summary.get("context") or {})
+        summary["pending_event_count"] = int(len(summary.get("pending_events") or []))
+        summary.pop("pending_events", None)
+        return summary
+
     def _start_calibration_memory_run(self, *, notes: str = None):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
@@ -1189,6 +1447,7 @@ class CalibrationManager(QObject):
                     "prior": prior or {},
                 },
             )
+            self._flush_calibration_memory_ui_events()
         except Exception as e:
             self._warn_calibration_memory("create_run", e)
 
@@ -1525,6 +1784,7 @@ class CalibrationManager(QObject):
         self._run_id = None
         self._run_idx = None
         self._reset_calibration_memory_prior_runtime()
+        self._reset_calibration_memory_ui_recommendation_state()
 
     # Back-compat: keep these, but redirect through session I/O
     def create_calibration_file(self, file_path):

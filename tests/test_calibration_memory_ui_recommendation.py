@@ -1,0 +1,205 @@
+from types import SimpleNamespace
+
+import pytest
+from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QPushButton, QSpinBox
+
+from tests.calibration_test_utils import ensure_calibration_import_stubs
+
+
+ensure_calibration_import_stubs(force=True)
+
+from CalibrationClasses.View import DropletImagingDialog
+
+
+class _RecommendationManager:
+    def __init__(self, preview):
+        self.preview = dict(preview or {})
+        self.preview_requests = []
+        self.records = []
+
+    def clear_calibration_memory_ui_recommendation_state(self):
+        return None
+
+    def preview_calibration_memory_recommendation(self, **kwargs):
+        self.preview_requests.append(dict(kwargs))
+        return dict(self.preview)
+
+    def record_calibration_memory_ui_interaction(self, action, preview, *, extra=None):
+        payload = {
+            "action": str(action),
+            "preview": dict(preview or {}),
+            "extra": dict(extra or {}),
+        }
+        self.records.append(payload)
+        return payload
+
+
+def _make_preview(
+    *,
+    aggregation_level="exact_pair",
+    manual_apply_allowed=True,
+    manual_apply_reason="qualified",
+    candidate_found=True,
+):
+    prior = None
+    seed_values = {}
+    if candidate_found:
+        prior = {
+            "aggregation_level": aggregation_level,
+            "pulse_width_us": 1500,
+            "recommended_pressure_psi": 1.62,
+            "stable_single_droplet_band_psi": [1.52, 1.70],
+            "emergence_time_us": 4300,
+            "expected_mean_volume_nL": 9.95,
+            "expected_cv_pct": 4.1,
+            "contributing_runs": 4,
+            "source_run_ids": ["run-a", "run-b", "run-c", "run-d"],
+            "recommendation_confidence_adjusted": 0.84,
+            "pulse_match_type": "exact",
+        }
+        seed_values = {
+            "start_pressure_psi": 1.62,
+            "seed_source": "recommended_pressure_psi",
+        }
+    return {
+        "mode": "advisory",
+        "candidate_found": bool(candidate_found),
+        "prior": prior,
+        "qualification": {
+            "qualified": bool(manual_apply_allowed),
+            "reason": manual_apply_reason,
+        },
+        "seed_values": seed_values,
+        "manual_apply_allowed": bool(manual_apply_allowed),
+        "manual_apply_reason": manual_apply_reason,
+        "target_pulse_width_us": 1400,
+        "target_volume_nl": 10.0,
+    }
+
+
+def _make_dialog_stub(preview, qapp):
+    manager = _RecommendationManager(preview)
+    dialog = SimpleNamespace()
+    dialog.model = SimpleNamespace(calibration_manager=manager)
+    dialog.hw_lo = 0.10
+    dialog.hw_hi = 5.00
+    dialog.stageLabel = QLabel("Status: Idle")
+    dialog.memory_recommendation_status_label = QLabel("")
+    dialog.memory_recommendation_seed_label = QLabel("")
+    dialog.memory_recommendation_expected_label = QLabel("")
+    dialog.memory_recommendation_mode_label = QLabel("")
+    dialog.memory_recommendation_apply_btn = QPushButton("Use Recommended Seed")
+    dialog.memory_recommendation_ignore_btn = QPushButton("Keep Manual Start")
+    dialog.print_pulse_width_spinbox = QSpinBox()
+    dialog.print_pulse_width_spinbox.setRange(0, 5000)
+    dialog.print_pulse_width_spinbox.setValue(1400)
+    dialog.start_pressure_spin = QDoubleSpinBox()
+    dialog.start_pressure_spin.setRange(0.10, 5.00)
+    dialog.start_pressure_spin.setDecimals(2)
+    dialog.start_pressure_spin.setValue(0.80)
+    dialog._memory_recommendation_preview = None
+    dialog._memory_recommendation_logged_fingerprint = None
+    dialog.print_pulse_width_changes = []
+    dialog.start_pressure_changes = []
+    dialog._bridge_get_calibration_manager = lambda: manager
+    dialog._get_calibration_memory_target_volume_nL = lambda: 10.0
+    dialog.handle_print_pulse_width_change = lambda value: dialog.print_pulse_width_changes.append(value)
+    dialog.set_start_pressure = lambda value: dialog.start_pressure_changes.append(value)
+    dialog.isVisible = lambda: True
+
+    dialog._calibration_memory_source_label = DropletImagingDialog._calibration_memory_source_label
+    dialog._calibration_memory_mode_description = DropletImagingDialog._calibration_memory_mode_description
+    dialog._format_pressure_band_psi = DropletImagingDialog._format_pressure_band_psi
+    dialog._calibration_memory_preview_fingerprint = DropletImagingDialog._calibration_memory_preview_fingerprint
+    dialog._render_calibration_memory_recommendation = (
+        DropletImagingDialog._render_calibration_memory_recommendation.__get__(dialog, DropletImagingDialog)
+    )
+    dialog.refresh_calibration_memory_recommendation = (
+        DropletImagingDialog.refresh_calibration_memory_recommendation.__get__(dialog, DropletImagingDialog)
+    )
+    dialog.apply_calibration_memory_recommendation = (
+        DropletImagingDialog.apply_calibration_memory_recommendation.__get__(dialog, DropletImagingDialog)
+    )
+    dialog.ignore_calibration_memory_recommendation = (
+        DropletImagingDialog.ignore_calibration_memory_recommendation.__get__(dialog, DropletImagingDialog)
+    )
+    return dialog, manager
+
+
+def test_recommendation_panel_shows_exact_pair_prior(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(), qapp)
+
+    preview = dialog.refresh_calibration_memory_recommendation()
+
+    assert preview["candidate_found"] is True
+    assert "Exact pair" in dialog.memory_recommendation_status_label.text()
+    assert "confidence 0.84" in dialog.memory_recommendation_status_label.text()
+    assert "PW 1500 us" in dialog.memory_recommendation_seed_label.text()
+    assert "start 1.620 psi" in dialog.memory_recommendation_seed_label.text()
+    assert "volume 9.950 nL" in dialog.memory_recommendation_expected_label.text()
+    assert dialog.memory_recommendation_apply_btn.isEnabled() is True
+    assert dialog.memory_recommendation_ignore_btn.isEnabled() is True
+    assert manager.records[0]["action"] == "shown"
+    assert manager.preview_requests[0]["target_pulse_width_us"] == 1400
+    assert manager.preview_requests[0]["target_volume_nl"] == pytest.approx(10.0)
+
+
+def test_recommendation_panel_shows_no_prior_state_without_changing_controls(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(candidate_found=False), qapp)
+
+    dialog.refresh_calibration_memory_recommendation()
+
+    assert "No prior found" in dialog.memory_recommendation_status_label.text()
+    assert dialog.memory_recommendation_apply_btn.isEnabled() is False
+    assert dialog.memory_recommendation_ignore_btn.isEnabled() is False
+    assert dialog.print_pulse_width_spinbox.value() == 1400
+    assert dialog.start_pressure_spin.value() == pytest.approx(0.80)
+    assert dialog.print_pulse_width_changes == []
+    assert dialog.start_pressure_changes == []
+    assert manager.records == []
+
+
+def test_reference_only_grouped_prior_disables_apply_and_surfaces_reason(qapp):
+    dialog, _manager = _make_dialog_stub(
+        _make_preview(
+            aggregation_level="head_type_only",
+            manual_apply_allowed=False,
+            manual_apply_reason="aggregation_level_not_allowed",
+        ),
+        qapp,
+    )
+
+    dialog.refresh_calibration_memory_recommendation()
+
+    assert "Reference prior" in dialog.memory_recommendation_status_label.text()
+    assert "Head-type fallback" in dialog.memory_recommendation_status_label.text()
+    assert dialog.memory_recommendation_apply_btn.isEnabled() is False
+    assert "aggregation_level_not_allowed" in dialog.memory_recommendation_expected_label.text()
+
+
+def test_apply_recommendation_updates_start_controls_only_on_user_action(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(), qapp)
+    dialog.refresh_calibration_memory_recommendation()
+
+    assert dialog.print_pulse_width_changes == []
+    assert dialog.start_pressure_changes == []
+
+    dialog.apply_calibration_memory_recommendation()
+
+    assert dialog.print_pulse_width_spinbox.value() == 1500
+    assert dialog.start_pressure_spin.value() == pytest.approx(1.62)
+    assert dialog.print_pulse_width_changes == [1500]
+    assert dialog.start_pressure_changes == [pytest.approx(1.62)]
+    assert manager.records[-1]["action"] == "applied"
+    assert "Loaded recommended seed" in dialog.stageLabel.text()
+
+
+def test_ignore_recommendation_logs_manual_choice(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(), qapp)
+    dialog.refresh_calibration_memory_recommendation()
+
+    dialog.ignore_calibration_memory_recommendation()
+
+    assert manager.records[-1]["action"] == "ignored"
+    assert manager.records[-1]["extra"]["reason"] == "user_kept_manual_start"
+    assert "Keeping manual calibration start values" in dialog.stageLabel.text()

@@ -197,6 +197,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.capturing = False
 
         self._bridge_preview_payload = None
+        self._memory_recommendation_preview = None
+        self._memory_recommendation_logged_fingerprint = None
+        try:
+            self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
+        except Exception:
+            pass
 
         self.setWindowTitle("Droplet Imaging")
         self.resize(1200, 1000)
@@ -413,6 +419,41 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add groups to left panel
         left_panel_v.addWidget(manual_group)
         left_panel_v.addWidget(calib_group)
+
+        recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
+        recommendation_v = QtWidgets.QVBoxLayout(recommendation_group)
+        recommendation_v.setContentsMargins(8, 8, 8, 8)
+        recommendation_v.setSpacing(6)
+
+        self.memory_recommendation_status_label = QtWidgets.QLabel("No calibration-memory recommendation loaded yet.")
+        self.memory_recommendation_status_label.setWordWrap(True)
+        self.memory_recommendation_seed_label = QtWidgets.QLabel("Seed: -")
+        self.memory_recommendation_seed_label.setWordWrap(True)
+        self.memory_recommendation_expected_label = QtWidgets.QLabel("Expected: -")
+        self.memory_recommendation_expected_label.setWordWrap(True)
+        self.memory_recommendation_mode_label = QtWidgets.QLabel("Mode: -")
+        self.memory_recommendation_mode_label.setWordWrap(True)
+
+        recommendation_btn_h = QtWidgets.QHBoxLayout()
+        self.memory_recommendation_refresh_btn = QtWidgets.QPushButton("Refresh Recommendation")
+        self.memory_recommendation_refresh_btn.clicked.connect(self.refresh_calibration_memory_recommendation)
+        self.memory_recommendation_apply_btn = QtWidgets.QPushButton("Use Recommended Seed")
+        self.memory_recommendation_apply_btn.setEnabled(False)
+        self.memory_recommendation_apply_btn.clicked.connect(self.apply_calibration_memory_recommendation)
+        self.memory_recommendation_ignore_btn = QtWidgets.QPushButton("Keep Manual Start")
+        self.memory_recommendation_ignore_btn.setEnabled(False)
+        self.memory_recommendation_ignore_btn.clicked.connect(self.ignore_calibration_memory_recommendation)
+        recommendation_btn_h.addWidget(self.memory_recommendation_refresh_btn)
+        recommendation_btn_h.addWidget(self.memory_recommendation_apply_btn)
+        recommendation_btn_h.addWidget(self.memory_recommendation_ignore_btn)
+
+        recommendation_v.addWidget(self.memory_recommendation_status_label)
+        recommendation_v.addWidget(self.memory_recommendation_seed_label)
+        recommendation_v.addWidget(self.memory_recommendation_expected_label)
+        recommendation_v.addWidget(self.memory_recommendation_mode_label)
+        recommendation_v.addLayout(recommendation_btn_h)
+
+        left_panel_v.addWidget(recommendation_group)
 
         # --- Group 3: Characterization Summary ---
         summary_group = QtWidgets.QGroupBox("Characterization Summary")
@@ -776,6 +817,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Handles changes to the print pulse width.
         """
         self.controller.set_print_pulse_width(value, manual=True)
+        self.refresh_calibration_memory_recommendation()
 
     def set_exposure_time(self, exposure_time):
         """
@@ -1216,6 +1258,86 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
         return None
 
+    def _bridge_get_current_design_droplet_volume_nL(self) -> float | None:
+        em = getattr(self.model, "experiment_model", None)
+        reagent = self._bridge_get_current_reagent_name()
+        self.refresh_calibration_memory_recommendation()
+        if em is None or not reagent:
+            return None
+        try:
+            if reagent == em.get_fill_reagent_name():
+                return float(em.metadata.get("fill_droplet_volume_nL", 10.0))
+        except Exception:
+            pass
+        try:
+            key_opt = em.find_option_by_reagent_name(reagent)
+        except Exception:
+            key_opt = None
+        if not key_opt:
+            return None
+        _key, opt = key_opt
+        try:
+            return float(opt.droplet_nL)
+        except Exception:
+            return None
+
+    def _get_calibration_memory_target_volume_nL(self) -> float | None:
+        target = self._bridge_get_current_design_droplet_volume_nL()
+        if target is not None:
+            return target
+        try:
+            mean_nL, _source = self._preferred_char_mean_nL()
+        except Exception:
+            mean_nL = None
+        try:
+            return float(mean_nL) if mean_nL is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _calibration_memory_source_label(aggregation_level: str | None) -> str:
+        mapping = {
+            "exact_pair": "Exact pair",
+            "exact_reagent_head_type": "Reagent + head type",
+            "reagent_family_head_type": "Reagent family + head type fallback",
+            "reagent_only": "Reagent-only fallback",
+            "head_type_only": "Head-type fallback",
+        }
+        return mapping.get(str(aggregation_level or ""), str(aggregation_level or "Unknown"))
+
+    @staticmethod
+    def _calibration_memory_mode_description(mode: str | None) -> str:
+        mode = str(mode or "advisory")
+        if mode == "off":
+            return "Mode: off. No automatic prior steering; this panel is manual only."
+        if mode == "seed_start":
+            return "Mode: seed_start. Runtime may also seed startup internally; this button only preloads dialog controls."
+        return "Mode: advisory. Recommendation is visible, but calibration stays manual unless you click apply."
+
+    @staticmethod
+    def _format_pressure_band_psi(band) -> str:
+        if not isinstance(band, (list, tuple)) or len(band) != 2:
+            return "-"
+        try:
+            lo = float(min(band[0], band[1]))
+            hi = float(max(band[0], band[1]))
+        except Exception:
+            return "-"
+        return f"{lo:.3f}-{hi:.3f} psi"
+
+    @staticmethod
+    def _calibration_memory_preview_fingerprint(preview: dict | None):
+        preview = dict(preview or {})
+        prior = dict(preview.get("prior") or {})
+        return (
+            bool(preview.get("candidate_found")),
+            str(prior.get("aggregation_level") or ""),
+            prior.get("pulse_width_us"),
+            prior.get("recommended_pressure_psi"),
+            prior.get("recommendation_confidence_adjusted", prior.get("recommendation_confidence")),
+            tuple(prior.get("source_run_ids") or []),
+        )
+
     def _bridge_refresh_design_labels(self):
         em = self.model.experiment_model
         reagent = self._bridge_get_current_reagent_name()
@@ -1228,6 +1350,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.bridge_design_targets_label.setText("Design targets: — (fill top-up)")
             self.bridge_design_stock_label.setText("Stock concentration(s): —")
             self._bridge_clear_preview()
+            self.refresh_calibration_memory_recommendation()
             return
 
         # Normal reagents (unchanged)
@@ -1264,6 +1387,245 @@ class DropletImagingDialog(QtWidgets.QDialog):
         super().showEvent(ev)
         # populate the labels when the dialog appears
         self._bridge_refresh_design_labels()
+        self.refresh_calibration_memory_recommendation(force_log=True)
+
+    def _render_calibration_memory_recommendation(self, preview: dict | None):
+        preview = dict(preview or {})
+        prior = dict(preview.get("prior") or {})
+        mode = str(preview.get("mode") or "advisory")
+        self.memory_recommendation_mode_label.setText(
+            self._calibration_memory_mode_description(mode)
+        )
+
+        if not prior:
+            self.memory_recommendation_status_label.setText(
+                "No prior found for the current reagent / printer-head / pulse-width context."
+            )
+            self.memory_recommendation_seed_label.setText("Seed: -")
+            self.memory_recommendation_expected_label.setText("Expected: -")
+            self.memory_recommendation_apply_btn.setEnabled(False)
+            self.memory_recommendation_apply_btn.setToolTip("No recommendation is available to preload.")
+            self.memory_recommendation_ignore_btn.setEnabled(False)
+            self.memory_recommendation_ignore_btn.setToolTip("")
+            return
+
+        source_label = self._calibration_memory_source_label(prior.get("aggregation_level"))
+        confidence = prior.get("recommendation_confidence_adjusted", prior.get("recommendation_confidence"))
+        conf_text = "-"
+        try:
+            conf_text = f"{float(confidence):.2f}"
+        except Exception:
+            pass
+        source_runs = int(prior.get("contributing_runs") or 0)
+        pulse_match = str(prior.get("pulse_match_type") or "")
+        pulse_match_text = "exact pulse" if pulse_match == "exact" else ("nearest pulse" if pulse_match else "pulse n/a")
+        authority_prefix = "Best prior"
+        if str(prior.get("aggregation_level") or "") in {"reagent_family_head_type", "reagent_only", "head_type_only"}:
+            authority_prefix = "Fallback prior"
+        if not bool(preview.get("manual_apply_allowed")):
+            authority_prefix = "Reference prior"
+        self.memory_recommendation_status_label.setText(
+            f"{authority_prefix}: {source_label} | confidence {conf_text} | {pulse_match_text} | {source_runs} run(s)"
+        )
+
+        seed_values = dict(preview.get("seed_values") or {})
+        seed_pressure = seed_values.get("start_pressure_psi", prior.get("recommended_pressure_psi"))
+        seed_parts = []
+        if prior.get("pulse_width_us") is not None:
+            try:
+                seed_parts.append(f"PW {int(prior.get('pulse_width_us'))} us")
+            except Exception:
+                pass
+        if seed_pressure is not None:
+            try:
+                seed_parts.append(f"start {float(seed_pressure):.3f} psi")
+            except Exception:
+                pass
+        band = (
+            prior.get("stable_single_droplet_band_psi")
+            or prior.get("recommended_pressure_band_psi")
+            or prior.get("trajectory_pressure_band_psi")
+        )
+        if band is not None:
+            seed_parts.append(f"band {self._format_pressure_band_psi(band)}")
+        if prior.get("emergence_time_us") is not None:
+            try:
+                seed_parts.append(f"emergence {int(prior.get('emergence_time_us'))} us")
+            except Exception:
+                pass
+        self.memory_recommendation_seed_label.setText(
+            "Seed: " + ("; ".join(seed_parts) if seed_parts else "-")
+        )
+
+        expected_parts = []
+        if prior.get("expected_mean_volume_nL") is not None:
+            try:
+                expected_parts.append(f"volume {float(prior.get('expected_mean_volume_nL')):.3f} nL")
+            except Exception:
+                pass
+        if prior.get("expected_cv_pct") is not None:
+            try:
+                expected_parts.append(f"CV {float(prior.get('expected_cv_pct')):.2f}%")
+            except Exception:
+                pass
+        if prior.get("run_to_run_volume_cv_pct") is not None:
+            try:
+                expected_parts.append(f"run-to-run CV {float(prior.get('run_to_run_volume_cv_pct')):.2f}%")
+            except Exception:
+                pass
+        if prior.get("source_run_ids"):
+            expected_parts.append(f"sources {len(prior.get('source_run_ids') or [])}")
+        if not bool(preview.get("manual_apply_allowed")):
+            reason = str(preview.get("manual_apply_reason") or "")
+            if reason:
+                expected_parts.append(f"manual apply disabled: {reason}")
+        self.memory_recommendation_expected_label.setText(
+            "Expected: " + ("; ".join(expected_parts) if expected_parts else "-")
+        )
+
+        can_apply = bool(preview.get("manual_apply_allowed")) and bool(seed_values)
+        self.memory_recommendation_apply_btn.setEnabled(can_apply)
+        self.memory_recommendation_apply_btn.setToolTip(
+            "" if can_apply else f"Recommendation is reference-only: {preview.get('manual_apply_reason') or 'not qualified'}."
+        )
+        self.memory_recommendation_ignore_btn.setEnabled(True)
+        self.memory_recommendation_ignore_btn.setToolTip("Keep the current manual startup values and ignore this recommendation.")
+
+    def refresh_calibration_memory_recommendation(self, *, force_log: bool = False):
+        cm = self._bridge_get_calibration_manager()
+        if cm is None:
+            self._memory_recommendation_preview = None
+            self._render_calibration_memory_recommendation({})
+            return None
+        try:
+            target_pulse = int(self.print_pulse_width_spinbox.value())
+        except Exception:
+            target_pulse = None
+        target_volume = self._get_calibration_memory_target_volume_nL()
+        try:
+            preview = cm.preview_calibration_memory_recommendation(
+                target_pulse_width_us=target_pulse,
+                target_volume_nl=target_volume,
+            )
+        except Exception as e:
+            print(f"[CalibrationMemoryUI] preview failed: {e}")
+            preview = {
+                "mode": "advisory",
+                "candidate_found": False,
+                "prior": None,
+                "qualification": {},
+                "seed_values": {},
+                "manual_apply_allowed": False,
+                "manual_apply_reason": "preview_error",
+            }
+        self._memory_recommendation_preview = dict(preview or {})
+        self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
+
+        prior = dict(self._memory_recommendation_preview.get("prior") or {})
+        fingerprint = self._calibration_memory_preview_fingerprint(self._memory_recommendation_preview)
+        should_log = bool(force_log)
+        if not should_log:
+            try:
+                should_log = bool(self.isVisible())
+            except Exception:
+                should_log = True
+        if prior and should_log and (force_log or fingerprint != self._memory_recommendation_logged_fingerprint):
+            try:
+                cm.record_calibration_memory_ui_interaction(
+                    "shown",
+                    self._memory_recommendation_preview,
+                    extra={"visible_in_dialog": True},
+                )
+            except Exception as e:
+                print(f"[CalibrationMemoryUI] show log failed: {e}")
+            self._memory_recommendation_logged_fingerprint = fingerprint
+        elif not prior:
+            self._memory_recommendation_logged_fingerprint = None
+        return self._memory_recommendation_preview
+
+    def apply_calibration_memory_recommendation(self):
+        preview = dict(getattr(self, "_memory_recommendation_preview", None) or {})
+        prior = dict(preview.get("prior") or {})
+        if not prior:
+            QtWidgets.QMessageBox.information(self, "Recommendation", "No recommendation is available to apply.")
+            return
+        if not bool(preview.get("manual_apply_allowed")):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Recommendation",
+                f"This recommendation is shown for reference only: {preview.get('manual_apply_reason') or 'not qualified for direct apply'}.",
+            )
+            return
+
+        seed_values = dict(preview.get("seed_values") or {})
+        seed_pressure = seed_values.get("start_pressure_psi", prior.get("recommended_pressure_psi"))
+        if seed_pressure is None:
+            QtWidgets.QMessageBox.warning(self, "Recommendation", "The recommendation does not include a usable start pressure.")
+            return
+        try:
+            seed_pressure = float(seed_pressure)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Recommendation", "The recommended start pressure is not numeric.")
+            return
+        seed_pressure = min(max(seed_pressure, float(self.hw_lo)), float(self.hw_hi))
+
+        recommended_pw = prior.get("pulse_width_us")
+        try:
+            recommended_pw = None if recommended_pw is None else int(round(float(recommended_pw)))
+        except Exception:
+            recommended_pw = None
+
+        if recommended_pw is not None:
+            self.print_pulse_width_spinbox.blockSignals(True)
+            self.print_pulse_width_spinbox.setValue(recommended_pw)
+            self.print_pulse_width_spinbox.blockSignals(False)
+            self.handle_print_pulse_width_change(recommended_pw)
+
+        self.start_pressure_spin.blockSignals(True)
+        self.start_pressure_spin.setValue(seed_pressure)
+        self.start_pressure_spin.blockSignals(False)
+        self.set_start_pressure(seed_pressure)
+
+        cm = self._bridge_get_calibration_manager()
+        if cm is not None:
+            try:
+                cm.record_calibration_memory_ui_interaction(
+                    "applied",
+                    preview,
+                    extra={
+                        "seeded_start_pressure_psi": seed_pressure,
+                        "seeded_pulse_width_us": recommended_pw,
+                    },
+                )
+            except Exception as e:
+                print(f"[CalibrationMemoryUI] apply log failed: {e}")
+
+        source_label = self._calibration_memory_source_label(prior.get("aggregation_level"))
+        if recommended_pw is not None:
+            self.stageLabel.setText(
+                f"Status: Loaded recommended seed ({source_label}, PW {recommended_pw} us, start {seed_pressure:.3f} psi)"
+            )
+        else:
+            self.stageLabel.setText(
+                f"Status: Loaded recommended seed ({source_label}, start {seed_pressure:.3f} psi)"
+            )
+
+    def ignore_calibration_memory_recommendation(self):
+        preview = dict(getattr(self, "_memory_recommendation_preview", None) or {})
+        prior = dict(preview.get("prior") or {})
+        if not prior:
+            return
+        cm = self._bridge_get_calibration_manager()
+        if cm is not None:
+            try:
+                cm.record_calibration_memory_ui_interaction(
+                    "ignored",
+                    preview,
+                    extra={"reason": "user_kept_manual_start"},
+                )
+            except Exception as e:
+                print(f"[CalibrationMemoryUI] ignore log failed: {e}")
+        self.stageLabel.setText("Status: Keeping manual calibration start values")
 
     # def _bridge_preview_from_last_char(self):
     #     cm = self._bridge_get_calibration_manager()
@@ -1646,6 +2008,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.print_pulse_width_spinbox.blockSignals(True)
             self.print_pulse_width_spinbox.setValue(pw)
             self.print_pulse_width_spinbox.blockSignals(False)
+            self.refresh_calibration_memory_recommendation()
 
             # We don't have a dedicated "live print pressure" spinbox in this panel;
             # if you add one later, mirror pres into it here.
@@ -1752,6 +2115,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.summary_table.setItem(i, 3, mean_item)
             self.summary_table.setItem(i, 4, cv_item)
             self.summary_table.setItem(i, 5, valid_item)
+        self.refresh_calibration_memory_recommendation()
 
     def center_nozzle(self):
         self.controller.center_nozzle_in_camera(position='top')

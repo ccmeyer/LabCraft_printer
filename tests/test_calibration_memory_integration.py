@@ -84,6 +84,52 @@ def _make_model(tmp_path):
     return model
 
 
+def _seed_completed_prior_run(store, run_id, context, *, pressure=1.61, pulse_width_us=1500):
+    paths = store.create_run(run_id, context=context, notes="seed prior")
+    store.write_run_summary(
+        run_id,
+        {
+            "context": context,
+            "run_status": "completed",
+            "run_timing": {
+                "started_at_utc": "2026-03-06T18:00:00Z",
+                "ended_at_utc": "2026-03-06T18:10:00Z",
+            },
+            "phase_counts": {
+                "droplet_search": 1,
+                "pressure_scan": 1,
+            },
+            "process_results": {
+                "droplet_search": {
+                    "step_count": 1,
+                    "latest_settings": {"print_width": pulse_width_us, "print_pressure": pressure},
+                    "latest_result": {
+                        "pressure": pressure,
+                        "mean_volume": 9.95,
+                        "cv_volume_percent": 4.1,
+                        "valid": True,
+                        "print_pulse_width_us": pulse_width_us,
+                        "delay_us": 4300,
+                    },
+                },
+                "pressure_scan": {
+                    "step_count": 1,
+                    "latest_settings": {"print_width": pulse_width_us},
+                    "latest_result": {
+                        "pulse_width_us": pulse_width_us,
+                        "primary_band": [pressure - 0.10, pressure + 0.10],
+                        "delay_us": 4300,
+                    },
+                },
+            },
+            "artifact_refs": {},
+            "source_refs": paths,
+            "authoritative_refs": {},
+            "last_updated_at_utc": "2026-03-06T18:10:00Z",
+        },
+    )
+
+
 def test_calibration_manager_writes_sidecar_summary_and_observations(tmp_path):
     model = _make_model(tmp_path)
     manager = CalibrationManager(model)
@@ -226,3 +272,66 @@ def test_begin_session_records_advisory_prior_without_changing_behavior(tmp_path
     assert summary["advisory_prior"]["advisory_only"] is True
     assert manager._calibration_memory_prior_candidate["recommended_pressure_psi"] == pytest.approx(1.61)
     assert any(row["observation_type"] == "advisory_prior_lookup" for row in observations)
+
+
+def test_ui_recommendation_events_are_flushed_into_sidecar_run(tmp_path):
+    model = _make_model(tmp_path)
+    printer_head = model.rack_model.get_gripper_printer_head()
+    stock = printer_head.get_stock_solution()
+    stock.reagent_id = "water"
+    stock.display_name = "Water"
+    stock.reagent_family = "aqueous"
+    stock.glycerol_percent = 0.0
+    printer_head.printer_head_id = "nozzle_100um_h03"
+    printer_head.head_type_id = "nozzle_100um"
+    printer_head.display_name = "100 um H03"
+    printer_head.nominal_nozzle_diameter_um = 100.0
+
+    store = model.calibration_memory_store
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    _seed_completed_prior_run(store, "ui_prior", context)
+
+    manager = CalibrationManager(model)
+    preview = manager.preview_calibration_memory_recommendation(
+        target_pulse_width_us=1500,
+        target_volume_nl=10.0,
+    )
+    assert preview["candidate_found"] is True
+
+    manager.record_calibration_memory_ui_interaction(
+        "shown",
+        preview,
+        extra={"visible_in_dialog": True},
+    )
+    manager.record_calibration_memory_ui_interaction(
+        "applied",
+        preview,
+        extra={
+            "seeded_start_pressure_psi": 1.61,
+            "seeded_pulse_width_us": 1500,
+        },
+    )
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="ui recommendation")
+    manager.end_session()
+
+    run_dir = Path(store.get_run_paths(manager.data["runs"][-1]["run_id"])["run_dir"])
+    observations = [
+        json.loads(line)
+        for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+
+    assert any(row["observation_type"] == "ui_recommendation_shown" for row in observations)
+    assert any(row["observation_type"] == "ui_recommendation_applied" for row in observations)
+    ui_summary = summary["ui_recommendation"]
+    assert ui_summary["shown"] is True
+    assert ui_summary["applied"] is True
+    assert ui_summary["aggregation_level"] == "exact_pair"
+    assert ui_summary["confidence"] == pytest.approx(
+        preview["prior"]["recommendation_confidence_adjusted"]
+    )

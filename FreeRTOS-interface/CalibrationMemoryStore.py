@@ -780,6 +780,7 @@ class CalibrationMemoryStore:
 
         now = self._now_utc()
         prior_runtime = {}
+        ui_recommendation = {}
         if calibration_manager is not None:
             try:
                 runtime_getter = getattr(calibration_manager, "get_calibration_memory_prior_runtime_summary", None)
@@ -787,6 +788,12 @@ class CalibrationMemoryStore:
                     prior_runtime = dict(runtime_getter() or {})
             except Exception:
                 prior_runtime = {}
+            try:
+                ui_getter = getattr(calibration_manager, "get_calibration_memory_ui_recommendation_summary", None)
+                if callable(ui_getter):
+                    ui_recommendation = dict(ui_getter() or {})
+            except Exception:
+                ui_recommendation = {}
         run_idx = getattr(calibration_manager, "_run_idx", None) if calibration_manager is not None else None
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
@@ -825,6 +832,7 @@ class CalibrationMemoryStore:
             "prior_fallback_reason": prior_runtime.get("fallback_reason"),
             "prior_usefulness_summary": dict(prior_runtime.get("usefulness_summary") or {}),
             "prior_qualification": dict(prior_runtime.get("qualification") or {}),
+            "ui_recommendation": ui_recommendation,
             "last_updated_at_utc": now,
         }
         self.write_run_summary(run_id, summary)
@@ -984,6 +992,7 @@ class CalibrationMemoryStore:
                 "qualification_reasons": ["feature_extraction_failed"],
             }
         prior_runtime_summary = {}
+        ui_recommendation_summary = {}
         try:
             runtime_getter = getattr(calibration_manager, "get_calibration_memory_prior_runtime_summary", None)
             if callable(runtime_getter):
@@ -991,6 +1000,13 @@ class CalibrationMemoryStore:
         except Exception as e:
             self._warn("get_prior_runtime_summary", e)
             prior_runtime_summary = {}
+        try:
+            ui_getter = getattr(calibration_manager, "get_calibration_memory_ui_recommendation_summary", None)
+            if callable(ui_getter):
+                ui_recommendation_summary = dict(ui_getter() or {})
+        except Exception as e:
+            self._warn("get_ui_recommendation_summary", e)
+            ui_recommendation_summary = {}
         summary["prior_application_mode"] = prior_runtime_summary.get("mode")
         summary["prior_lookup_performed"] = bool(prior_runtime_summary.get("looked_up"))
         summary["prior_candidate_found"] = bool(prior_runtime_summary.get("candidate_found"))
@@ -1004,6 +1020,7 @@ class CalibrationMemoryStore:
         summary["prior_fallback_reason"] = prior_runtime_summary.get("fallback_reason")
         summary["prior_usefulness_summary"] = dict(prior_runtime_summary.get("usefulness_summary") or {})
         summary["prior_qualification"] = dict(prior_runtime_summary.get("qualification") or {})
+        summary["ui_recommendation"] = ui_recommendation_summary
         if not summary.get("advisory_prior") and summary["prior_candidate"]:
             summary["advisory_prior"] = dict(summary["prior_candidate"])
         return summary
