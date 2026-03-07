@@ -752,6 +752,7 @@ class CalibrationManager(QObject):
         self._last_pressure_scan_result = None
         self._pressure_traj_result = None
         self._calibration_memory_prior_candidate = None
+        self._calibration_memory_prior_runtime = {}
 
         self.calibration_queue = []
 
@@ -785,6 +786,49 @@ class CalibrationManager(QObject):
     def _warn_calibration_memory(self, action: str, exc: Exception):
         print(f"[CalibrationMemory] {action} failed: {exc}")
 
+    def _get_calibration_memory_mode(self):
+        store = self._get_calibration_memory_store()
+        if store is None:
+            return "advisory"
+        try:
+            return str(store.get_prior_application_mode() or "advisory")
+        except Exception as e:
+            self._warn_calibration_memory("get_prior_application_mode", e)
+            return "advisory"
+
+    def _new_calibration_memory_prior_runtime(self, *, mode: str | None = None):
+        return {
+            "mode": str(mode or self._get_calibration_memory_mode() or "advisory"),
+            "looked_up": False,
+            "lookup_skipped_reason": None,
+            "candidate_found": False,
+            "candidate": None,
+            "qualified": False,
+            "qualification": {},
+            "applied": False,
+            "application_reason": None,
+            "rejected_reason": None,
+            "seed_values": None,
+            "seed_process": None,
+            "fallback_triggered": False,
+            "fallback_reason": None,
+            "pressure_probe_count": 0,
+            "first_probe": None,
+            "first_single_probe_index": None,
+            "first_single_pressure_psi": None,
+        }
+
+    def _reset_calibration_memory_prior_runtime(self, *, mode: str | None = None):
+        self._calibration_memory_prior_candidate = None
+        self._calibration_memory_prior_runtime = self._new_calibration_memory_prior_runtime(mode=mode)
+        return self._calibration_memory_prior_runtime
+
+    def _get_calibration_memory_prior_runtime(self):
+        state = getattr(self, "_calibration_memory_prior_runtime", None)
+        if not isinstance(state, dict) or not state:
+            state = self._reset_calibration_memory_prior_runtime()
+        return state
+
     def _get_calibration_memory_target_pulse_width(self):
         try:
             settings = self.get_current_settings()
@@ -801,9 +845,17 @@ class CalibrationManager(QObject):
             return None
 
     def _lookup_calibration_memory_prior(self, context):
+        runtime = self._get_calibration_memory_prior_runtime()
+        runtime["candidate"] = None
+        runtime["candidate_found"] = False
+        runtime["looked_up"] = False
+        runtime["lookup_skipped_reason"] = None
         self._calibration_memory_prior_candidate = None
         store = self._get_calibration_memory_store()
         if store is None:
+            return None
+        if str(runtime.get("mode") or "advisory") == "off":
+            runtime["lookup_skipped_reason"] = "mode_off"
             return None
         try:
             target_pulse_width_us = self._get_calibration_memory_target_pulse_width()
@@ -811,6 +863,9 @@ class CalibrationManager(QObject):
                 context,
                 target_pulse_width_us=target_pulse_width_us,
             )
+            runtime["looked_up"] = True
+            runtime["candidate_found"] = bool(prior)
+            runtime["candidate"] = dict(prior or {}) if prior else None
             self._calibration_memory_prior_candidate = prior
             if prior:
                 print(
@@ -821,13 +876,295 @@ class CalibrationManager(QObject):
             return prior
         except Exception as e:
             self._warn_calibration_memory("get_best_prior", e)
+            runtime["lookup_skipped_reason"] = "lookup_error"
             return None
+
+    def _record_calibration_memory_prior_application(self, observation_type: str, payload: dict):
+        return self._append_calibration_memory_observation(
+            observation_type,
+            payload or {},
+            phase_name="calibration_memory",
+        )
+
+    def _prepare_calibration_memory_prior_application(self, proc_cls, kwargs: dict | None = None):
+        kwargs = dict(kwargs or {})
+        runtime = self._get_calibration_memory_prior_runtime()
+        mode = str(runtime.get("mode") or "advisory")
+        if mode != "seed_start":
+            runtime["qualified"] = False
+            if mode == "off":
+                runtime["rejected_reason"] = "mode_off"
+            return kwargs
+
+        if runtime.get("fallback_triggered"):
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "fallback_already_triggered"
+            return kwargs
+
+        store = self._get_calibration_memory_store()
+        if store is None:
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "store_unavailable"
+            return kwargs
+
+        proc_name = str(getattr(proc_cls, "__name__", "") or "")
+        if proc_name not in ("PressureBandCalibrationProcess", "PressureCalibrationProcess"):
+            return kwargs
+
+        context = None
+        try:
+            context = store.context_builder.build(
+                model=self.model,
+                calibration_file_path=self.calibration_file_path,
+            )
+        except Exception as e:
+            self._warn_calibration_memory("build_prior_context", e)
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "context_build_failed"
+            return kwargs
+
+        if runtime.get("candidate") is None and mode != "off":
+            self._lookup_calibration_memory_prior(context)
+            runtime = self._get_calibration_memory_prior_runtime()
+
+        candidate = runtime.get("candidate") or self._calibration_memory_prior_candidate
+        if not isinstance(candidate, dict):
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "no_prior_candidate"
+            self._record_calibration_memory_prior_application(
+                "prior_application_decision",
+                {
+                    "mode": mode,
+                    "process": proc_name,
+                    "qualified": False,
+                    "applied": False,
+                    "reason": runtime["rejected_reason"],
+                },
+            )
+            return kwargs
+
+        try:
+            qual = store.qualify_prior_for_application(
+                candidate,
+                context=context,
+                target_pulse_width_us=self._get_calibration_memory_target_pulse_width(),
+            )
+        except Exception as e:
+            self._warn_calibration_memory("qualify_prior_for_application", e)
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "qualification_error"
+            return kwargs
+
+        runtime["qualified"] = bool(qual.get("qualified"))
+        runtime["qualification"] = dict(qual or {})
+        if not bool(qual.get("qualified")):
+            runtime["applied"] = False
+            runtime["application_reason"] = None
+            runtime["rejected_reason"] = str(qual.get("reason") or "qualification_failed")
+            self._record_calibration_memory_prior_application(
+                "prior_application_decision",
+                {
+                    "mode": mode,
+                    "process": proc_name,
+                    "qualified": False,
+                    "applied": False,
+                    "reason": runtime["rejected_reason"],
+                    "prior": candidate,
+                    "qualification": qual,
+                },
+            )
+            return kwargs
+
+        try:
+            pressure_bounds = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            pressure_bounds = None
+        try:
+            seed_values = store.derive_prior_seed_values(
+                candidate,
+                baseline_start_pressure_psi=self.start_pressure,
+                pressure_bounds=pressure_bounds,
+            )
+        except Exception as e:
+            self._warn_calibration_memory("derive_prior_seed_values", e)
+            runtime["qualified"] = False
+            runtime["rejected_reason"] = "seed_derivation_failed"
+            return kwargs
+
+        if proc_name == "PressureBandCalibrationProcess":
+            kwargs.setdefault("start_pressure", float(seed_values["start_pressure_psi"]))
+        elif proc_name == "PressureCalibrationProcess":
+            kwargs.setdefault("seed_pressure", float(seed_values["start_pressure_psi"]))
+
+        runtime["applied"] = True
+        runtime["application_reason"] = "seed_start_applied"
+        runtime["rejected_reason"] = None
+        runtime["seed_values"] = dict(seed_values)
+        runtime["seed_process"] = proc_name
+        self._record_calibration_memory_prior_application(
+            "prior_application_decision",
+            {
+                "mode": mode,
+                "process": proc_name,
+                "qualified": True,
+                "applied": True,
+                "reason": runtime["application_reason"],
+                "prior": candidate,
+                "qualification": qual,
+                "seed_values": seed_values,
+            },
+        )
+        return kwargs
+
+    def _trigger_calibration_memory_prior_fallback(self, reason: str, extra: dict | None = None):
+        runtime = self._get_calibration_memory_prior_runtime()
+        if not bool(runtime.get("applied")) or bool(runtime.get("fallback_triggered")):
+            return
+        runtime["fallback_triggered"] = True
+        runtime["fallback_reason"] = str(reason or "prior_seed_inconsistent")
+        self._record_calibration_memory_prior_application(
+            "prior_application_fallback",
+            {
+                "mode": runtime.get("mode"),
+                "process": runtime.get("seed_process"),
+                "reason": runtime.get("fallback_reason"),
+                "seed_values": runtime.get("seed_values") or {},
+                "prior": runtime.get("candidate") or {},
+                "extra": extra or {},
+            },
+        )
+
+    def record_calibration_memory_prior_probe(
+        self,
+        *,
+        phase_name: str,
+        pressure_psi: float | None = None,
+        verdict: str | None = None,
+        decision_reason: str | None = None,
+        confidence: float | None = None,
+    ):
+        runtime = self._get_calibration_memory_prior_runtime()
+        if not bool(runtime.get("applied")):
+            return
+
+        runtime["pressure_probe_count"] = int(runtime.get("pressure_probe_count") or 0) + 1
+        probe = {
+            "phase_name": str(phase_name or ""),
+            "probe_index": int(runtime["pressure_probe_count"]),
+            "pressure_psi": (None if pressure_psi is None else float(pressure_psi)),
+            "verdict": (None if verdict is None else str(verdict)),
+            "decision_reason": str(decision_reason or ""),
+            "confidence": (None if confidence is None else float(confidence)),
+        }
+        if runtime.get("first_probe") is None:
+            runtime["first_probe"] = dict(probe)
+        if str(verdict or "") == "single" and runtime.get("first_single_probe_index") is None:
+            runtime["first_single_probe_index"] = int(probe["probe_index"])
+            runtime["first_single_pressure_psi"] = probe["pressure_psi"]
+
+        candidate = runtime.get("candidate") or {}
+        predicted_band = candidate.get("stable_single_droplet_band_psi")
+        predicted_pressure = candidate.get("recommended_pressure_psi")
+        fallback_reason = None
+        if isinstance(predicted_band, (list, tuple)) and len(predicted_band) == 2 and pressure_psi is not None:
+            try:
+                lo = float(min(predicted_band[0], predicted_band[1]))
+                hi = float(max(predicted_band[0], predicted_band[1]))
+                if lo <= float(pressure_psi) <= hi and str(verdict or "") not in ("single", "selected"):
+                    fallback_reason = "seed_pressure_inside_predicted_band_but_behavior_mismatched"
+            except Exception:
+                fallback_reason = None
+        elif predicted_pressure is not None and pressure_psi is not None:
+            try:
+                if abs(float(pressure_psi) - float(predicted_pressure)) <= 0.05 and str(verdict or "") not in ("single", "selected"):
+                    fallback_reason = "seed_pressure_near_predicted_pressure_but_behavior_mismatched"
+            except Exception:
+                fallback_reason = None
+
+        self._record_calibration_memory_prior_application(
+            "prior_seed_probe",
+            {
+                "probe": probe,
+                "seed_values": runtime.get("seed_values") or {},
+                "prior": candidate,
+                "fallback_reason": fallback_reason,
+            },
+        )
+        if fallback_reason:
+            self._trigger_calibration_memory_prior_fallback(
+                fallback_reason,
+                extra={"probe": probe},
+            )
+
+    def get_calibration_memory_prior_runtime_summary(self, *, derived_metrics: dict | None = None):
+        runtime = dict(self._get_calibration_memory_prior_runtime() or {})
+        prior = dict(runtime.get("candidate") or {})
+        seed_values = dict(runtime.get("seed_values") or {})
+        usefulness = {
+            "looked_up": bool(runtime.get("looked_up")),
+            "candidate_found": bool(runtime.get("candidate_found")),
+            "qualified": bool(runtime.get("qualified")),
+            "applied": bool(runtime.get("applied")),
+            "seed_process": runtime.get("seed_process"),
+            "pressure_probe_count": int(runtime.get("pressure_probe_count") or 0),
+            "first_probe": dict(runtime.get("first_probe") or {}),
+            "steps_until_first_single": runtime.get("first_single_probe_index"),
+            "first_single_pressure_psi": runtime.get("first_single_pressure_psi"),
+            "fallback_triggered": bool(runtime.get("fallback_triggered")),
+            "fallback_reason": runtime.get("fallback_reason"),
+        }
+        if seed_values.get("start_pressure_psi") is not None and runtime.get("first_single_pressure_psi") is not None:
+            usefulness["first_single_seed_error_psi"] = (
+                float(runtime["first_single_pressure_psi"]) - float(seed_values["start_pressure_psi"])
+            )
+        else:
+            usefulness["first_single_seed_error_psi"] = None
+
+        band = None
+        actual_pressure = None
+        actual_volume = None
+        if isinstance(derived_metrics, dict):
+            band = derived_metrics.get("single_droplet_band_psi")
+            actual_pressure = derived_metrics.get("recommended_pressure_psi")
+            actual_volume = derived_metrics.get("expected_mean_volume_nL")
+        seed_pressure = seed_values.get("start_pressure_psi")
+        usefulness["seed_inside_actual_single_band"] = None
+        if isinstance(band, (list, tuple)) and len(band) == 2 and seed_pressure is not None:
+            try:
+                lo = float(min(band[0], band[1]))
+                hi = float(max(band[0], band[1]))
+                usefulness["seed_inside_actual_single_band"] = bool(lo <= float(seed_pressure) <= hi)
+            except Exception:
+                usefulness["seed_inside_actual_single_band"] = None
+        usefulness["actual_vs_prior_pressure_error_psi"] = None
+        if actual_pressure is not None and prior.get("recommended_pressure_psi") is not None:
+            usefulness["actual_vs_prior_pressure_error_psi"] = (
+                float(actual_pressure) - float(prior.get("recommended_pressure_psi"))
+            )
+        usefulness["actual_vs_prior_volume_error_nL"] = None
+        if actual_volume is not None and prior.get("expected_mean_volume_nL") is not None:
+            usefulness["actual_vs_prior_volume_error_nL"] = (
+                float(actual_volume) - float(prior.get("expected_mean_volume_nL"))
+            )
+        if not bool(runtime.get("applied")):
+            usefulness["usefulness_signal"] = "not_applied"
+        elif bool(runtime.get("fallback_triggered")):
+            usefulness["usefulness_signal"] = "mismatch"
+        elif usefulness.get("steps_until_first_single") == 1 and usefulness.get("seed_inside_actual_single_band") is not False:
+            usefulness["usefulness_signal"] = "likely_helpful"
+        elif usefulness.get("steps_until_first_single") is not None and int(usefulness["steps_until_first_single"]) <= 2:
+            usefulness["usefulness_signal"] = "possibly_helpful"
+        else:
+            usefulness["usefulness_signal"] = "inconclusive"
+        runtime["usefulness_summary"] = usefulness
+        return runtime
 
     def _start_calibration_memory_run(self, *, notes: str = None):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
             return
         try:
+            runtime = self._get_calibration_memory_prior_runtime()
             context = store.context_builder.build(
                 model=self.model,
                 calibration_file_path=self.calibration_file_path,
@@ -844,6 +1181,9 @@ class CalibrationManager(QObject):
             self._append_calibration_memory_observation(
                 "advisory_prior_lookup",
                 {
+                    "mode": runtime.get("mode"),
+                    "looked_up": bool(runtime.get("looked_up")),
+                    "lookup_skipped_reason": runtime.get("lookup_skipped_reason"),
                     "found": bool(prior),
                     "target_pulse_width_us": self._get_calibration_memory_target_pulse_width(),
                     "prior": prior or {},
@@ -1132,7 +1472,7 @@ class CalibrationManager(QObject):
         # Per-run derived center used by pressure band; avoid stale cross-session carryover.
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
-        self._calibration_memory_prior_candidate = None
+        self._reset_calibration_memory_prior_runtime()
         print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
@@ -1184,7 +1524,7 @@ class CalibrationManager(QObject):
 
         self._run_id = None
         self._run_idx = None
-        self._calibration_memory_prior_candidate = None
+        self._reset_calibration_memory_prior_runtime()
 
     # Back-compat: keep these, but redirect through session I/O
     def create_calibration_file(self, file_path):
@@ -2090,6 +2430,10 @@ class CalibrationManager(QObject):
         return []
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
+        try:
+            kwargs = self._prepare_calibration_memory_prior_application(proc_cls, kwargs)
+        except Exception as e:
+            self._warn_calibration_memory("prepare_prior_application", e)
         missing = self._process_missing(proc_cls, *args, **kwargs)
         phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
 
@@ -5012,7 +5356,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     dropletDetected = Signal()
     replicateContinue = Signal()  # loop Analyze -> Capture for more replicates
 
-    def __init__(self, calibration_manager, model, parent=None):
+    def __init__(self, calibration_manager, model, *, seed_pressure: float | None = None, parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
         if missing_requirements:
@@ -5032,7 +5376,9 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         lo_hw, hi_hw = self._pressure_bounds()
         self.lower_pressure = max(lo_hw, self.lower_pressure)
         self.upper_pressure = min(hi_hw, self.upper_pressure)
-        self.candidate_pressure = self._clampP(self.candidate_pressure)
+        self.candidate_pressure = self._clampP(
+            float(seed_pressure) if seed_pressure is not None else self.candidate_pressure
+        )
         
         # --- bracketed search state ---
         self.bracket_lo = None   # highest pressure confirmed ACCEPTABLE
@@ -5638,6 +5984,18 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         self.stageChanged.emit("Pressure calibration complete")
+        try:
+            prior_probe = getattr(self.calibration_manager, "record_calibration_memory_prior_probe", None)
+            if callable(prior_probe):
+                prior_probe(
+                    phase_name=str(self.phase_name or ""),
+                    pressure_psi=float(self.candidate_pressure),
+                    verdict="selected",
+                    decision_reason="pressure_calibration_completed",
+                    confidence=1.0 if self.final_condition_found else 0.5,
+                )
+        except Exception:
+            pass
         self.calibrationDataUpdated.emit({'measurements': self.measurements, 'result': {'pressure': self.candidate_pressure}})
         self.calibrationCompleted.emit()
 
@@ -5696,6 +6054,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model,
                  *,
+                 start_pressure: float | None = None,
                  min_reps: int = 5,
                  escalate_to: int = 9,
                  classification_delay_us: int | None = None,
@@ -5712,7 +6071,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.phase_name = "pressure_scan"
 
         # --- prerequisites ---
-        self.start_pressure     = self.calibration_manager.get_start_pressure()
+        self.start_pressure     = (
+            float(start_pressure)
+            if start_pressure is not None
+            else float(self.calibration_manager.get_start_pressure())
+        )
         get_ps_center = getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_image_position", None)
         if callable(get_ps_center):
             self.nozzle_center_px = get_ps_center()
@@ -7125,6 +7488,18 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if "fallback_verdict" in decision:
             rec["fallback_verdict"] = str(decision.get("fallback_verdict"))
         self.samples.append(rec)
+        try:
+            prior_probe = getattr(self.calibration_manager, "record_calibration_memory_prior_probe", None)
+            if callable(prior_probe):
+                prior_probe(
+                    phase_name=str(self.phase_name or ""),
+                    pressure_psi=float(self._current_pressure),
+                    verdict=str(verdict),
+                    decision_reason=str(decision.get("reason", "")),
+                    confidence=float(decision.get("confidence", 0.0)),
+                )
+        except Exception:
+            pass
 
         # Track lowest SINGLE tested so far (for skipping duplicates after upper-edge refine)
         if verdict == "single":

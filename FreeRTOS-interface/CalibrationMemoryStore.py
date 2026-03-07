@@ -309,6 +309,18 @@ class CalibrationMemoryStore:
     RUN_SUMMARY_SCHEMA = f"{SCHEMA_FAMILY}.run_summary"
     OBSERVATION_SCHEMA = f"{SCHEMA_FAMILY}.observation"
     RUN_CATALOG_SCHEMA = f"{SCHEMA_FAMILY}.run_catalog_entry"
+    RUNTIME_CONFIG_SCHEMA = f"{SCHEMA_FAMILY}.runtime_config"
+
+    PRIOR_MODE_OFF = "off"
+    PRIOR_MODE_ADVISORY = "advisory"
+    PRIOR_MODE_SEED_START = "seed_start"
+    PRIOR_MODE_AGGRESSIVE = "aggressive"
+    PRIOR_MODES = (
+        PRIOR_MODE_OFF,
+        PRIOR_MODE_ADVISORY,
+        PRIOR_MODE_SEED_START,
+        PRIOR_MODE_AGGRESSIVE,
+    )
 
     def __init__(self, model=None, root_dir=None):
         self.model = model
@@ -318,6 +330,7 @@ class CalibrationMemoryStore:
         self.indices_dir = os.path.join(self.root_dir, "indices")
         self.runs_dir = os.path.join(self.root_dir, "runs")
         self.schema_path = os.path.join(self.root_dir, "schema.json")
+        self.runtime_config_path = os.path.join(self.root_dir, "config.json")
         self.run_catalog_path = os.path.join(self.indices_dir, "run_catalog.jsonl")
         self.identity_registry = CalibrationIdentityRegistry(self.root_dir)
         self.aggregator = CalibrationMemoryAggregator(self.root_dir)
@@ -342,6 +355,82 @@ class CalibrationMemoryStore:
     def _warn(self, action, exc):
         print(f"[CalibrationMemory] {action} failed: {exc}")
 
+    @classmethod
+    def _default_runtime_config(cls):
+        return {
+            "schema_name": cls.RUNTIME_CONFIG_SCHEMA,
+            "schema_version": int(cls.SCHEMA_VERSION),
+            "updated_at_utc": cls._now_utc(),
+            "prior_application_mode": cls.PRIOR_MODE_ADVISORY,
+            "prior_application_policy": {
+                "allowed_aggregation_levels_for_seed_start": [
+                    CalibrationMemoryAggregator.AGGREGATION_LEVEL_EXACT_PAIR,
+                    CalibrationMemoryAggregator.AGGREGATION_LEVEL_REAGENT_HEAD_TYPE,
+                ],
+                "min_confidence_by_aggregation_level": {
+                    CalibrationMemoryAggregator.AGGREGATION_LEVEL_EXACT_PAIR: 0.80,
+                    CalibrationMemoryAggregator.AGGREGATION_LEVEL_REAGENT_HEAD_TYPE: 0.78,
+                },
+                "max_pulse_distance_us_for_seed_start": 100,
+                "max_age_days_for_seed_start": 365,
+                "max_target_volume_relative_error": 0.25,
+                "allow_grouped_seed_start": False,
+                "allow_inferred_identity_seed_start": False,
+            },
+        }
+
+    @classmethod
+    def _normalize_prior_application_mode(cls, value):
+        mode = cls._clean_str(value)
+        if mode is None:
+            return cls.PRIOR_MODE_ADVISORY
+        mode = mode.lower()
+        if mode not in cls.PRIOR_MODES:
+            return cls.PRIOR_MODE_ADVISORY
+        if mode == cls.PRIOR_MODE_AGGRESSIVE:
+            return cls.PRIOR_MODE_SEED_START
+        return mode
+
+    @classmethod
+    def _normalize_runtime_config(cls, payload):
+        config = cls._default_runtime_config()
+        raw = dict(payload or {})
+        mode = raw.get("prior_application_mode", config["prior_application_mode"])
+        config["prior_application_mode"] = cls._normalize_prior_application_mode(mode)
+        policy = dict(config.get("prior_application_policy") or {})
+        policy.update(dict(raw.get("prior_application_policy") or {}))
+        policy["allowed_aggregation_levels_for_seed_start"] = list(
+            dict.fromkeys(str(item) for item in list(policy.get("allowed_aggregation_levels_for_seed_start") or []))
+        )
+        min_conf = {}
+        for key, value in dict(policy.get("min_confidence_by_aggregation_level") or {}).items():
+            try:
+                min_conf[str(key)] = float(value)
+            except Exception:
+                continue
+        policy["min_confidence_by_aggregation_level"] = min_conf
+        for key in (
+            "max_pulse_distance_us_for_seed_start",
+            "max_age_days_for_seed_start",
+        ):
+            try:
+                policy[key] = int(policy.get(key))
+            except Exception:
+                policy[key] = int(config["prior_application_policy"][key])
+        try:
+            policy["max_target_volume_relative_error"] = float(policy.get("max_target_volume_relative_error"))
+        except Exception:
+            policy["max_target_volume_relative_error"] = float(
+                config["prior_application_policy"]["max_target_volume_relative_error"]
+            )
+        policy["allow_grouped_seed_start"] = bool(policy.get("allow_grouped_seed_start", False))
+        policy["allow_inferred_identity_seed_start"] = bool(policy.get("allow_inferred_identity_seed_start", False))
+        config["prior_application_policy"] = policy
+        config["schema_name"] = cls.RUNTIME_CONFIG_SCHEMA
+        config["schema_version"] = int(cls.SCHEMA_VERSION)
+        config["updated_at_utc"] = cls._now_utc()
+        return config
+
     def ensure_initialized(self):
         with self._lock:
             os.makedirs(self.root_dir, exist_ok=True)
@@ -357,6 +446,8 @@ class CalibrationMemoryStore:
                     "created_at_utc": self._now_utc(),
                 }
                 self._write_json_atomic(self.schema_path, payload)
+            if not os.path.exists(self.runtime_config_path):
+                self._write_json_atomic(self.runtime_config_path, self._default_runtime_config())
 
     @staticmethod
     def _write_json_atomic(path, payload):
@@ -428,6 +519,209 @@ class CalibrationMemoryStore:
             target_volume_nl=target_volume_nl,
         )
 
+    def load_runtime_config(self):
+        self.ensure_initialized()
+        try:
+            with open(self.runtime_config_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            payload = {}
+        normalized = self._normalize_runtime_config(payload)
+        if payload != normalized:
+            self._write_json_atomic(self.runtime_config_path, normalized)
+        return normalized
+
+    def save_runtime_config(self, payload):
+        self.ensure_initialized()
+        normalized = self._normalize_runtime_config(payload)
+        self._write_json_atomic(self.runtime_config_path, normalized)
+        return normalized
+
+    def get_prior_application_mode(self):
+        config = self.load_runtime_config()
+        return self._normalize_prior_application_mode(config.get("prior_application_mode"))
+
+    def set_prior_application_mode(self, mode):
+        config = self.load_runtime_config()
+        config["prior_application_mode"] = self._normalize_prior_application_mode(mode)
+        return self.save_runtime_config(config)
+
+    def get_prior_application_policy(self):
+        config = self.load_runtime_config()
+        return dict(config.get("prior_application_policy") or {})
+
+    @staticmethod
+    def _parse_utc(value):
+        if value is None:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _relative_volume_error(target_volume_nl, expected_volume_nl):
+        try:
+            target = float(target_volume_nl)
+            expected = float(expected_volume_nl)
+        except Exception:
+            return None
+        if abs(target) < 1e-9:
+            return None
+        return abs(expected - target) / abs(target)
+
+    def qualify_prior_for_application(
+        self,
+        prior,
+        *,
+        context=None,
+        target_pulse_width_us=None,
+        target_volume_nl=None,
+    ):
+        policy = self.get_prior_application_policy()
+        result = {
+            "qualified": False,
+            "reason": "no_prior",
+            "mode": self.get_prior_application_mode(),
+            "aggregation_level": None,
+            "checks": {},
+        }
+        if not isinstance(prior, dict):
+            return result
+
+        aggregation_level = str(prior.get("aggregation_level") or "")
+        confidence = prior.get("recommendation_confidence_adjusted", prior.get("recommendation_confidence"))
+        pulse_distance_us = prior.get("pulse_distance_us")
+        updated_at = self._parse_utc(prior.get("updated_at_utc"))
+        now = datetime.now(timezone.utc)
+        age_days = None
+        if updated_at is not None:
+            age_days = max(0.0, (now - updated_at).total_seconds() / 86400.0)
+        min_conf = dict(policy.get("min_confidence_by_aggregation_level") or {}).get(aggregation_level)
+        allowed_levels = list(policy.get("allowed_aggregation_levels_for_seed_start") or [])
+        allow_grouped = bool(policy.get("allow_grouped_seed_start", False))
+        max_pulse_distance_us = int(policy.get("max_pulse_distance_us_for_seed_start", 100))
+        max_age_days = int(policy.get("max_age_days_for_seed_start", 365))
+        max_target_volume_relative_error = float(policy.get("max_target_volume_relative_error", 0.25))
+        allow_inferred_identity = bool(policy.get("allow_inferred_identity_seed_start", False))
+
+        quality_summary = dict(prior.get("identity_quality_summary") or {})
+        inferred_identity_present = False
+        for field_name in ("reagent_id", "printer_head_id", "head_type_id"):
+            counts = dict(quality_summary.get(field_name) or {})
+            if int(counts.get("inferred", 0) or 0) > 0 or int(counts.get("unknown", 0) or 0) > 0:
+                inferred_identity_present = True
+                break
+
+        relative_volume_error = self._relative_volume_error(
+            target_volume_nl,
+            prior.get("expected_mean_volume_nL"),
+        )
+        grouped_level = aggregation_level not in (
+            CalibrationMemoryAggregator.AGGREGATION_LEVEL_EXACT_PAIR,
+            CalibrationMemoryAggregator.AGGREGATION_LEVEL_REAGENT_HEAD_TYPE,
+        )
+
+        checks = {
+            "allowed_aggregation_level": aggregation_level in allowed_levels or (allow_grouped and grouped_level),
+            "confidence_threshold_met": (confidence is not None and min_conf is not None and float(confidence) >= float(min_conf)),
+            "pulse_distance_ok": (
+                pulse_distance_us is None or int(abs(float(pulse_distance_us))) <= int(max_pulse_distance_us)
+            ),
+            "age_ok": (age_days is None or age_days <= float(max_age_days)),
+            "target_volume_ok": (
+                relative_volume_error is None
+                or relative_volume_error <= float(max_target_volume_relative_error)
+            ),
+            "identity_quality_ok": (allow_inferred_identity or not inferred_identity_present),
+            "recommended_pressure_present": prior.get("recommended_pressure_psi") is not None
+            or prior.get("stable_single_droplet_band_psi") is not None
+            or prior.get("trajectory_pressure_band_psi") is not None,
+        }
+        result["checks"] = checks
+        result["aggregation_level"] = aggregation_level
+        result["confidence"] = None if confidence is None else float(confidence)
+        result["pulse_distance_us"] = None if pulse_distance_us is None else int(abs(float(pulse_distance_us)))
+        result["age_days"] = None if age_days is None else round(float(age_days), 3)
+        result["relative_target_volume_error"] = (
+            None if relative_volume_error is None else round(float(relative_volume_error), 4)
+        )
+        result["min_confidence_required"] = None if min_conf is None else float(min_conf)
+
+        for reason, ok in (
+            ("aggregation_level_not_allowed", checks["allowed_aggregation_level"]),
+            ("confidence_below_threshold", checks["confidence_threshold_met"]),
+            ("pulse_distance_too_large", checks["pulse_distance_ok"]),
+            ("prior_is_stale", checks["age_ok"]),
+            ("target_volume_incompatible", checks["target_volume_ok"]),
+            ("identity_quality_too_weak", checks["identity_quality_ok"]),
+            ("missing_seed_pressure", checks["recommended_pressure_present"]),
+        ):
+            if not ok:
+                result["reason"] = reason
+                return result
+
+        result["qualified"] = True
+        result["reason"] = "qualified"
+        return result
+
+    def derive_prior_seed_values(
+        self,
+        prior,
+        *,
+        baseline_start_pressure_psi=None,
+        pressure_bounds=None,
+    ):
+        if not isinstance(prior, dict):
+            raise ValueError("prior is required")
+
+        stable_band = prior.get("stable_single_droplet_band_psi")
+        trajectory_band = prior.get("trajectory_pressure_band_psi")
+        recommended_pressure = prior.get("recommended_pressure_psi")
+        seed_pressure = None
+        seed_source = None
+        if recommended_pressure is not None:
+            seed_pressure = float(recommended_pressure)
+            seed_source = "recommended_pressure_psi"
+        elif isinstance(stable_band, (list, tuple)) and len(stable_band) == 2:
+            seed_pressure = float((float(stable_band[0]) + float(stable_band[1])) / 2.0)
+            seed_source = "stable_single_droplet_band_midpoint"
+        elif isinstance(trajectory_band, (list, tuple)) and len(trajectory_band) == 2:
+            seed_pressure = float((float(trajectory_band[0]) + float(trajectory_band[1])) / 2.0)
+            seed_source = "trajectory_pressure_band_midpoint"
+        else:
+            raise ValueError("prior does not contain a usable seed pressure")
+
+        clamped = False
+        clamped_to_bounds = None
+        if isinstance(pressure_bounds, (list, tuple)) and len(pressure_bounds) == 2:
+            lo = float(min(pressure_bounds[0], pressure_bounds[1]))
+            hi = float(max(pressure_bounds[0], pressure_bounds[1]))
+            original = seed_pressure
+            seed_pressure = max(lo, min(hi, seed_pressure))
+            clamped = abs(seed_pressure - original) > 1e-9
+            clamped_to_bounds = [lo, hi]
+
+        return {
+            "start_pressure_psi": float(seed_pressure),
+            "baseline_start_pressure_psi": (
+                None if baseline_start_pressure_psi is None else float(baseline_start_pressure_psi)
+            ),
+            "seed_pressure_delta_from_baseline_psi": (
+                None
+                if baseline_start_pressure_psi is None
+                else float(seed_pressure) - float(baseline_start_pressure_psi)
+            ),
+            "seed_source": seed_source,
+            "seed_single_droplet_band_psi": stable_band,
+            "seed_trajectory_pressure_band_psi": trajectory_band,
+            "seed_expected_mean_volume_nL": prior.get("expected_mean_volume_nL"),
+            "seed_expected_cv_pct": prior.get("expected_cv_pct"),
+            "seed_pulse_width_us": prior.get("pulse_width_us"),
+            "pressure_bounds_psi": clamped_to_bounds,
+            "clamped_to_bounds": bool(clamped),
+        }
+
     def _build_artifact_refs(self, *, context=None, calibration_manager=None):
         context = dict(context or {})
         calibration_path = self._clean_str(context.get("calibration_file_path"))
@@ -485,6 +779,14 @@ class CalibrationMemoryStore:
         open(paths["observations_path"], "a", encoding="utf-8").close()
 
         now = self._now_utc()
+        prior_runtime = {}
+        if calibration_manager is not None:
+            try:
+                runtime_getter = getattr(calibration_manager, "get_calibration_memory_prior_runtime_summary", None)
+                if callable(runtime_getter):
+                    prior_runtime = dict(runtime_getter() or {})
+            except Exception:
+                prior_runtime = {}
         run_idx = getattr(calibration_manager, "_run_idx", None) if calibration_manager is not None else None
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
@@ -511,6 +813,18 @@ class CalibrationMemoryStore:
             },
             "manager_meta": dict(manager_meta or {}),
             "advisory_prior": dict(advisory_prior or {}) if advisory_prior else None,
+            "prior_application_mode": prior_runtime.get("mode", self.get_prior_application_mode()),
+            "prior_lookup_performed": bool(prior_runtime.get("looked_up")),
+            "prior_candidate_found": bool(prior_runtime.get("candidate_found")) or bool(advisory_prior),
+            "prior_candidate": dict(prior_runtime.get("candidate") or advisory_prior or {}),
+            "prior_applied": bool(prior_runtime.get("applied")),
+            "prior_application_reason": prior_runtime.get("application_reason"),
+            "prior_rejected_reason": prior_runtime.get("rejected_reason"),
+            "prior_seed_values": dict(prior_runtime.get("seed_values") or {}),
+            "prior_fallback_triggered": bool(prior_runtime.get("fallback_triggered")),
+            "prior_fallback_reason": prior_runtime.get("fallback_reason"),
+            "prior_usefulness_summary": dict(prior_runtime.get("usefulness_summary") or {}),
+            "prior_qualification": dict(prior_runtime.get("qualification") or {}),
             "last_updated_at_utc": now,
         }
         self.write_run_summary(run_id, summary)
@@ -669,6 +983,29 @@ class CalibrationMemoryStore:
                 "usable_for_aggregation": False,
                 "qualification_reasons": ["feature_extraction_failed"],
             }
+        prior_runtime_summary = {}
+        try:
+            runtime_getter = getattr(calibration_manager, "get_calibration_memory_prior_runtime_summary", None)
+            if callable(runtime_getter):
+                prior_runtime_summary = dict(runtime_getter(derived_metrics=summary.get("derived_metrics")) or {})
+        except Exception as e:
+            self._warn("get_prior_runtime_summary", e)
+            prior_runtime_summary = {}
+        summary["prior_application_mode"] = prior_runtime_summary.get("mode")
+        summary["prior_lookup_performed"] = bool(prior_runtime_summary.get("looked_up"))
+        summary["prior_candidate_found"] = bool(prior_runtime_summary.get("candidate_found"))
+        summary["prior_qualified"] = bool(prior_runtime_summary.get("qualified"))
+        summary["prior_candidate"] = dict(prior_runtime_summary.get("candidate") or {})
+        summary["prior_applied"] = bool(prior_runtime_summary.get("applied"))
+        summary["prior_application_reason"] = prior_runtime_summary.get("application_reason")
+        summary["prior_rejected_reason"] = prior_runtime_summary.get("rejected_reason")
+        summary["prior_seed_values"] = dict(prior_runtime_summary.get("seed_values") or {})
+        summary["prior_fallback_triggered"] = bool(prior_runtime_summary.get("fallback_triggered"))
+        summary["prior_fallback_reason"] = prior_runtime_summary.get("fallback_reason")
+        summary["prior_usefulness_summary"] = dict(prior_runtime_summary.get("usefulness_summary") or {})
+        summary["prior_qualification"] = dict(prior_runtime_summary.get("qualification") or {})
+        if not summary.get("advisory_prior") and summary["prior_candidate"]:
+            summary["advisory_prior"] = dict(summary["prior_candidate"])
         return summary
 
     def build_observation(
