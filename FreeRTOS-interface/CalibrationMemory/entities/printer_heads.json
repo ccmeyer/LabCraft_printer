@@ -1,0 +1,232 @@
+{
+  "schema_name": "labcraft.calibration_memory.printer_heads_registry",
+  "schema_version": 1,
+  "updated_at_utc": "2026-03-06T00:00:00Z",
+  "items": [
+    {
+      "printer_head_id": "nozzle_80um_h01",
+      "head_type_id": "nozzle_80um",
+      "display_name": "80 um H01",
+      "nominal_nozzle_diameter_um": 80.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_80um_h01"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_80um_h02",
+      "head_type_id": "nozzle_80um",
+      "display_name": "80 um H02",
+      "nominal_nozzle_diameter_um": 80.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_80um_h02"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_80um_h03",
+      "head_type_id": "nozzle_80um",
+      "display_name": "80 um H03",
+      "nominal_nozzle_diameter_um": 80.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_80um_h03"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_80um_h04",
+      "head_type_id": "nozzle_80um",
+      "display_name": "80 um H04",
+      "nominal_nozzle_diameter_um": 80.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_80um_h04"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_80um_h05",
+      "head_type_id": "nozzle_80um",
+      "display_name": "80 um H05",
+      "nominal_nozzle_diameter_um": 80.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_80um_h05"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_100um_h01",
+      "head_type_id": "nozzle_100um",
+      "display_name": "100 um H01",
+      "nominal_nozzle_diameter_um": 100.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_100um_h01"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_100um_h02",
+      "head_type_id": "nozzle_100um",
+      "display_name": "100 um H02",
+      "nominal_nozzle_diameter_um": 100.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_100um_h02"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_100um_h03",
+      "head_type_id": "nozzle_100um",
+      "display_name": "100 um H03",
+      "nominal_nozzle_diameter_um": 100.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_100um_h03"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_100um_h04",
+      "head_type_id": "nozzle_100um",
+      "display_name": "100 um H04",
+      "nominal_nozzle_diameter_um": 100.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_100um_h04"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_100um_h05",
+      "head_type_id": "nozzle_100um",
+      "display_name": "100 um H05",
+      "nominal_nozzle_diameter_um": 100.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_100um_h05"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_120um_h01",
+      "head_type_id": "nozzle_120um",
+      "display_name": "120 um H01",
+      "nominal_nozzle_diameter_um": 120.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_120um_h01"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_120um_h02",
+      "head_type_id": "nozzle_120um",
+      "display_name": "120 um H02",
+      "nominal_nozzle_diameter_um": 120.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_120um_h02"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_120um_h03",
+      "head_type_id": "nozzle_120um",
+      "display_name": "120 um H03",
+      "nominal_nozzle_diameter_um": 120.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_120um_h03"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_120um_h04",
+      "head_type_id": "nozzle_120um",
+      "display_name": "120 um H04",
+      "nominal_nozzle_diameter_um": 120.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_120um_h04"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "printer_head_id": "nozzle_120um_h05",
+      "head_type_id": "nozzle_120um",
+      "display_name": "120 um H05",
+      "nominal_nozzle_diameter_um": 120.0,
+      "measured_nozzle_diameter_um": null,
+      "manufacturer_batch": null,
+      "aliases": [
+        "nozzle_120um_h05"
+      ],
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    }
+  ]
+}

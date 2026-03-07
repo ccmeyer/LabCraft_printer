@@ -1,0 +1,54 @@
+{
+  "schema_name": "labcraft.calibration_memory.reagents_registry",
+  "schema_version": 1,
+  "updated_at_utc": "2026-03-06T00:00:00Z",
+  "items": [
+    {
+      "reagent_id": "water",
+      "display_name": "Water",
+      "stock_ids": [],
+      "aliases": [
+        "water",
+        "Water"
+      ],
+      "reagent_family": "aqueous",
+      "glycerol_percent": 0.0,
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "reagent_id": "glycerol_25pct",
+      "display_name": "25% Glycerol",
+      "stock_ids": [],
+      "aliases": [
+        "glycerol_25pct",
+        "25% glycerol",
+        "25 percent glycerol"
+      ],
+      "reagent_family": "aqueous_glycerol",
+      "glycerol_percent": 25.0,
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    },
+    {
+      "reagent_id": "glycerol_50pct",
+      "display_name": "50% Glycerol",
+      "stock_ids": [],
+      "aliases": [
+        "glycerol_50pct",
+        "50% glycerol",
+        "50 percent glycerol"
+      ],
+      "reagent_family": "aqueous_glycerol",
+      "glycerol_percent": 50.0,
+      "tags": [
+        "baseline_study"
+      ],
+      "notes": ""
+    }
+  ]
+}

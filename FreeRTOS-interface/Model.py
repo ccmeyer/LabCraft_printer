@@ -3191,6 +3191,12 @@ class StockSolution(QObject):
         # self.concentration = concentration
         self.units = units
         self.required_volume = required_volume
+        self.reagent_id = None
+        self.display_name = None
+        self.reagent_family = None
+        self.glycerol_percent = None
+        self.tags = []
+        self.notes = ""
 
     def get_stock_id(self):
         return self.stock_id
@@ -3208,6 +3214,33 @@ class StockSolution(QObject):
             return f"{self.reagent_name}\n{self.concentration} {self.units}"
         else:
             return f"{self.reagent_name} - {self.concentration} {self.units}"
+
+    def set_reagent_identity(
+        self,
+        *,
+        reagent_id=None,
+        display_name=None,
+        reagent_family=None,
+        glycerol_percent=None,
+        tags=None,
+        notes=None,
+    ):
+        self.reagent_id = reagent_id
+        self.display_name = display_name
+        self.reagent_family = reagent_family
+        self.glycerol_percent = glycerol_percent
+        self.tags = list(tags or [])
+        self.notes = "" if notes is None else str(notes)
+
+    def get_reagent_identity(self):
+        return {
+            "reagent_id": self.reagent_id,
+            "display_name": self.display_name,
+            "reagent_family": self.reagent_family,
+            "glycerol_percent": self.glycerol_percent,
+            "tags": list(self.tags or []),
+            "notes": self.notes,
+        }
 
 
 class Reagent(QObject):
@@ -4087,6 +4120,14 @@ class PrinterHead(QObject):
         self.calibration_chip = calibration_chip
         self.predictive_model = None
         self.resistance_pulse_width = None
+        self.printer_head_id = None
+        self.head_type_id = None
+        self.display_name = None
+        self.nominal_nozzle_diameter_um = None
+        self.measured_nozzle_diameter_um = None
+        self.manufacturer_batch = None
+        self.identity_tags = []
+        self.identity_notes = ""
 
     def record_droplet_volume_lost(self,droplet_count):
         if self.target_droplet_volume is not None:
@@ -4183,6 +4224,39 @@ class PrinterHead(QObject):
 
     def get_prediction_data(self):
         return self.current_volume,self.effective_resistance, self.target_droplet_volume, self.bias, self.predictive_model, self.resistance_pulse_width
+
+    def set_identity_metadata(
+        self,
+        *,
+        printer_head_id=None,
+        head_type_id=None,
+        display_name=None,
+        nominal_nozzle_diameter_um=None,
+        measured_nozzle_diameter_um=None,
+        manufacturer_batch=None,
+        tags=None,
+        notes=None,
+    ):
+        self.printer_head_id = printer_head_id
+        self.head_type_id = head_type_id
+        self.display_name = display_name
+        self.nominal_nozzle_diameter_um = nominal_nozzle_diameter_um
+        self.measured_nozzle_diameter_um = measured_nozzle_diameter_um
+        self.manufacturer_batch = manufacturer_batch
+        self.identity_tags = list(tags or [])
+        self.identity_notes = "" if notes is None else str(notes)
+
+    def get_identity_metadata(self):
+        return {
+            "printer_head_id": self.printer_head_id,
+            "head_type_id": self.head_type_id,
+            "display_name": self.display_name,
+            "nominal_nozzle_diameter_um": self.nominal_nozzle_diameter_um,
+            "measured_nozzle_diameter_um": self.measured_nozzle_diameter_um,
+            "manufacturer_batch": self.manufacturer_batch,
+            "tags": list(self.identity_tags or []),
+            "notes": self.identity_notes,
+        }
 
 
 class PrinterHeadManager(QObject):

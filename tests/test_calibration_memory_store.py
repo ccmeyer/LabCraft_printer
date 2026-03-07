@@ -13,6 +13,12 @@ class _DummyStockSolution:
         self._reagent_name = reagent_name
         self._concentration = concentration
         self.units = units
+        self.reagent_id = None
+        self.display_name = None
+        self.reagent_family = None
+        self.glycerol_percent = None
+        self.tags = []
+        self.notes = ""
 
     def get_stock_id(self):
         return self._stock_id
@@ -23,6 +29,13 @@ class _DummyStockSolution:
     def get_stock_concentration(self):
         return self._concentration
 
+    def get_stock_name(self):
+        return self._reagent_name
+
+    def set_reagent_identity(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 
 class _DummyPrinterHead:
     def __init__(self, stock_solution, serial="PH-001"):
@@ -30,9 +43,21 @@ class _DummyPrinterHead:
         self.serial = serial
         self.color = "Blue"
         self.calibration_chip = False
+        self.printer_head_id = None
+        self.head_type_id = None
+        self.display_name = None
+        self.nominal_nozzle_diameter_um = None
+        self.measured_nozzle_diameter_um = None
+        self.manufacturer_batch = None
+        self.identity_tags = []
+        self.identity_notes = ""
 
     def get_stock_solution(self):
         return self._stock_solution
+
+    def set_identity_metadata(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 def _make_dummy_model(tmp_path):
@@ -74,7 +99,10 @@ def test_calibration_memory_store_creates_run_summary_catalog_and_observations(t
     assert context["stock_id"] == "Water_0.00_--"
     assert context["reagent_id"] == "water"
     assert context["printer_head_id"] == "PH-001"
-    assert context["identity_quality"]["reagent_id"] == "derived"
+    assert context["reagent_family"] == "aqueous"
+    assert context["identity_quality"]["reagent_id"] == "inferred"
+    assert context["identity_quality"]["printer_head_id"] == "explicit"
+    assert (Path(store.root_dir) / "entities" / "reagents.json").exists()
 
     paths = store.create_run(
         "run_test_001",
@@ -145,3 +173,41 @@ def test_calibration_memory_atomic_write_preserves_previous_file_on_replace_fail
 
     assert json.loads(target.read_text(encoding="utf-8")) == baseline
     assert list(target.parent.glob("._tmp_*")) == []
+
+
+def test_context_builder_prefers_explicit_runtime_identity_metadata(tmp_path):
+    model = _make_dummy_model(tmp_path)
+    stock = model.rack_model.get_gripper_printer_head().get_stock_solution()
+    stock.set_reagent_identity(
+        reagent_id="glycerol_25pct",
+        display_name="25% Glycerol",
+        reagent_family="aqueous_glycerol",
+        glycerol_percent=25.0,
+        tags=["baseline_study"],
+    )
+    printer_head = model.rack_model.get_gripper_printer_head()
+    printer_head.set_identity_metadata(
+        printer_head_id="nozzle_100um_h03",
+        head_type_id="nozzle_100um",
+        display_name="100 um H03",
+        nominal_nozzle_diameter_um=100.0,
+        measured_nozzle_diameter_um=101.2,
+        manufacturer_batch="batch-a",
+        tags=["baseline_study"],
+    )
+
+    store = CalibrationMemoryStore(model=model, root_dir=str(tmp_path / "CalibrationMemory"))
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+
+    assert context["reagent_id"] == "glycerol_25pct"
+    assert context["reagent_display_name"] == "25% Glycerol"
+    assert context["identity_quality"]["reagent_id"] == "explicit"
+    assert context["printer_head_id"] == "nozzle_100um_h03"
+    assert context["head_type_id"] == "nozzle_100um"
+    assert context["nominal_nozzle_diameter_um"] == 100.0
+    assert context["measured_nozzle_diameter_um"] == 101.2
+    assert context["identity_quality"]["printer_head_id"] == "explicit"
+    assert context["identity_quality"]["head_type_id"] == "explicit"

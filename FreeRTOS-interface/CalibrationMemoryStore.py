@@ -5,6 +5,8 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from CalibrationIdentity import CalibrationIdentityRegistry
+
 
 def _json_default(obj):
     try:
@@ -26,11 +28,15 @@ def _json_default(obj):
 
 
 class CalibrationContextBuilder:
-    def __init__(self, model=None):
+    def __init__(self, model=None, identity_registry=None):
         self.model = model
+        self.identity_registry = identity_registry
 
     def set_model(self, model):
         self.model = model
+
+    def set_identity_registry(self, identity_registry):
+        self.identity_registry = identity_registry
 
     @staticmethod
     def _now_utc():
@@ -134,11 +140,9 @@ class CalibrationContextBuilder:
             if reagent_name is None:
                 reagent_name = self._clean_str(getattr(stock_solution, "reagent_name", None))
 
-        reagent_id = self._slugify(reagent_name)
-        reagent_quality = "derived" if reagent_id else "missing"
-
         stock_concentration = None
         stock_units = None
+        stock_display_name = None
         if stock_solution is not None:
             try:
                 getter = getattr(stock_solution, "get_stock_concentration", None)
@@ -149,18 +153,14 @@ class CalibrationContextBuilder:
             if stock_concentration is None:
                 stock_concentration = self._clean_str(getattr(stock_solution, "concentration", None))
             stock_units = self._clean_str(getattr(stock_solution, "units", None))
-
-        printer_head_id = None
-        printer_head_quality = "missing"
-        if printer_head is not None:
-            printer_head_id = self._clean_str(getattr(printer_head, "serial", None))
-            if printer_head_id is None:
-                printer_head_id = self._clean_str(getattr(printer_head, "id", None))
-            if printer_head_id:
-                printer_head_quality = "explicit"
-            elif slot_number is not None:
-                printer_head_id = f"gripper_slot_{slot_number}"
-                printer_head_quality = "derived"
+            getter = getattr(stock_solution, "get_stock_name", None)
+            if callable(getter):
+                try:
+                    stock_display_name = self._clean_str(getter())
+                except Exception:
+                    stock_display_name = None
+            if stock_display_name is None:
+                stock_display_name = reagent_name
 
         experiment_dir = None
         if mdl is not None:
@@ -190,26 +190,113 @@ class CalibrationContextBuilder:
         if mdl is not None:
             profile_name = self._clean_str(getattr(getattr(mdl, "profile", None), "name", None))
 
+        reagent_info = {
+            "reagent_id": self._slugify(reagent_name),
+            "display_name": reagent_name,
+            "reagent_family": None,
+            "glycerol_percent": None,
+            "tags": [],
+            "notes": "",
+            "quality": {
+                "stock_id": "explicit" if stock_id else "unknown",
+                "reagent_id": "inferred" if reagent_name else "unknown",
+            },
+            "match_source": "derived_from_name" if reagent_name else "unknown",
+        }
+        head_info = {
+            "printer_head_id": None,
+            "display_name": None,
+            "head_type_id": None,
+            "head_type_display_name": None,
+            "nominal_nozzle_diameter_um": None,
+            "measured_nozzle_diameter_um": None,
+            "manufacturer_batch": None,
+            "tags": [],
+            "notes": "",
+            "quality": {
+                "printer_head_id": "unknown",
+                "head_type_id": "unknown",
+                "nominal_nozzle_diameter_um": "unknown",
+                "measured_nozzle_diameter_um": "unknown",
+            },
+            "match_source": {
+                "printer_head": "unknown",
+                "head_type": "unknown",
+            },
+        }
+
+        if printer_head is not None:
+            fallback_printer_head_id = self._clean_str(getattr(printer_head, "serial", None))
+            if fallback_printer_head_id is None:
+                fallback_printer_head_id = self._clean_str(getattr(printer_head, "id", None))
+            if fallback_printer_head_id:
+                head_info["printer_head_id"] = fallback_printer_head_id
+                head_info["display_name"] = fallback_printer_head_id
+                head_info["quality"]["printer_head_id"] = "explicit"
+                head_info["match_source"]["printer_head"] = "runtime_id"
+            elif slot_number is not None:
+                head_info["printer_head_id"] = f"gripper_slot_{slot_number}"
+                head_info["display_name"] = head_info["printer_head_id"]
+                head_info["quality"]["printer_head_id"] = "inferred"
+                head_info["match_source"]["printer_head"] = "gripper_slot"
+
+        registry = getattr(self, "identity_registry", None)
+        if registry is not None:
+            try:
+                reagent_info = registry.resolve_reagent(
+                    stock_solution=stock_solution,
+                    stock_id=stock_id,
+                    reagent_name=reagent_name,
+                )
+            except Exception:
+                pass
+            try:
+                head_info = registry.resolve_printer_head(
+                    printer_head=printer_head,
+                    slot_number=slot_number,
+                )
+            except Exception:
+                pass
+
         context = {
-            "reagent_id": reagent_id,
+            "reagent_id": reagent_info.get("reagent_id"),
             "reagent_name": reagent_name,
-            "reagent_display_name": reagent_name,
+            "reagent_display_name": reagent_info.get("display_name") or reagent_name,
+            "reagent_family": reagent_info.get("reagent_family"),
+            "glycerol_percent": reagent_info.get("glycerol_percent"),
+            "reagent_tags": list(reagent_info.get("tags") or []),
+            "reagent_notes": reagent_info.get("notes") or "",
             "stock_id": stock_id,
+            "stock_display_name": stock_display_name,
             "stock_concentration": stock_concentration,
             "stock_units": stock_units,
-            "printer_head_id": printer_head_id,
+            "printer_head_id": head_info.get("printer_head_id"),
+            "printer_head_display_name": head_info.get("display_name"),
             "gripper_slot_number": slot_number,
-            "head_type_id": None,
-            "nozzle_diameter_um": None,
+            "head_type_id": head_info.get("head_type_id"),
+            "head_type_display_name": head_info.get("head_type_display_name"),
+            "nominal_nozzle_diameter_um": head_info.get("nominal_nozzle_diameter_um"),
+            "measured_nozzle_diameter_um": head_info.get("measured_nozzle_diameter_um"),
+            "manufacturer_batch": head_info.get("manufacturer_batch"),
+            "printer_head_tags": list(head_info.get("tags") or []),
+            "printer_head_notes": head_info.get("notes") or "",
+            "nozzle_diameter_um": head_info.get("nominal_nozzle_diameter_um"),
             "profile_name": profile_name,
             "experiment_dir": experiment_dir,
             "calibration_file_path": cal_path,
+            "identity_sources": {
+                "reagent": reagent_info.get("match_source"),
+                "printer_head": (head_info.get("match_source") or {}).get("printer_head"),
+                "head_type": (head_info.get("match_source") or {}).get("head_type"),
+            },
             "identity_quality": {
-                "reagent_id": reagent_quality,
-                "stock_id": stock_quality,
-                "printer_head_id": printer_head_quality,
-                "head_type_id": "missing",
-                "nozzle_diameter_um": "missing",
+                "reagent_id": (reagent_info.get("quality") or {}).get("reagent_id", "unknown"),
+                "stock_id": (reagent_info.get("quality") or {}).get("stock_id", stock_quality),
+                "printer_head_id": (head_info.get("quality") or {}).get("printer_head_id", "unknown"),
+                "head_type_id": (head_info.get("quality") or {}).get("head_type_id", "unknown"),
+                "nominal_nozzle_diameter_um": (head_info.get("quality") or {}).get("nominal_nozzle_diameter_um", "unknown"),
+                "measured_nozzle_diameter_um": (head_info.get("quality") or {}).get("measured_nozzle_diameter_um", "unknown"),
+                "nozzle_diameter_um": (head_info.get("quality") or {}).get("nominal_nozzle_diameter_um", "unknown"),
             },
         }
         return context
@@ -231,7 +318,8 @@ class CalibrationMemoryStore:
         self.runs_dir = os.path.join(self.root_dir, "runs")
         self.schema_path = os.path.join(self.root_dir, "schema.json")
         self.run_catalog_path = os.path.join(self.indices_dir, "run_catalog.jsonl")
-        self.context_builder = CalibrationContextBuilder(model)
+        self.identity_registry = CalibrationIdentityRegistry(self.root_dir)
+        self.context_builder = CalibrationContextBuilder(model, identity_registry=self.identity_registry)
         self._lock = threading.Lock()
 
     @staticmethod
@@ -255,6 +343,7 @@ class CalibrationMemoryStore:
             os.makedirs(self.entities_dir, exist_ok=True)
             os.makedirs(self.indices_dir, exist_ok=True)
             os.makedirs(self.runs_dir, exist_ok=True)
+            self.identity_registry.ensure_initialized()
             if not os.path.exists(self.schema_path):
                 payload = {
                     "schema_family": self.SCHEMA_FAMILY,
@@ -399,10 +488,14 @@ class CalibrationMemoryStore:
                 "reagent_id": context.get("reagent_id"),
                 "stock_id": context.get("stock_id"),
                 "reagent_display_name": context.get("reagent_display_name"),
+                "reagent_family": context.get("reagent_family"),
                 "printer_head_id": context.get("printer_head_id"),
+                "printer_head_display_name": context.get("printer_head_display_name"),
                 "head_type_id": context.get("head_type_id"),
+                "nominal_nozzle_diameter_um": context.get("nominal_nozzle_diameter_um"),
                 "nozzle_diameter_um": context.get("nozzle_diameter_um"),
                 "identity_quality": context.get("identity_quality", {}),
+                "identity_sources": context.get("identity_sources", {}),
             },
             "notes": str(notes or ""),
             "paths": paths,
