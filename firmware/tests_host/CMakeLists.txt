@@ -17,6 +17,7 @@ add_executable(fw_tests
     tests/test_pressure_regulator_math.cpp
     tests/test_pressure_trace_math.cpp
     tests/test_stepper_profile_math.cpp
+    tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):

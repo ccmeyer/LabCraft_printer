@@ -283,7 +283,15 @@ private:
   IRQn_Type     _innerIRQn        = (IRQn_Type)0;
   uint8_t       _innerLine        = 0; // 0..15
 
+  inline bool _isInnerLimitAsserted() const {
+    GPIO_PinState s = HAL_GPIO_ReadPin(_innerPort, _innerPin);
+    return (s == GPIO_PIN_SET) == _innerActiveHigh;
+  }
   void _onRawInnerLimitInterruptFromIsr();
+  void _maskInnerExtiLineFromIsr();
+  void _unmaskInnerExtiLineFromIsr();
+  void _unmaskInnerExtiLine();
+  void _notifyInnerLimitFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
   static void _innerDebounceTimerCb(TimerHandle_t t);
 
   // Notification bit to request homing from the task context

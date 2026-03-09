@@ -6,11 +6,13 @@
  */
 
 #include "Stepper.h"
+#include "ExtiDebounce.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
 #include "Logger.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
+#include "task.h"
 #include "timers.h"
 #include "stm32f4xx_hal.h"
 #include <stdint.h>
@@ -50,6 +52,11 @@ static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
   }
   TickType_t ticks = pdMS_TO_TICKS(ms);
   return (ticks == 0u) ? 1u : ticks;
+}
+
+static inline bool stepper_rtos_running()
+{
+  return xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
 }
 // Compute ARR from desired square-wave frequency
 static inline uint32_t arr_for_freq(uint32_t tclk_eff, uint32_t freq_hz) {
@@ -586,7 +593,7 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
 {
   _limPort = port;
   _limPin  = pin;
-  _limitActiveHigh = true;
+  _limitActiveHigh = activeHigh;
 
   auto enable_gpio_clock = [](GPIO_TypeDef* p){
     if (p==GPIOA) __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -625,36 +632,51 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   else                     _extiIRQn = EXTI15_10_IRQn;
 
   HAL_NVIC_SetPriority(_extiIRQn, 6, 0);
-  HAL_NVIC_EnableIRQ(_extiIRQn);
+  __HAL_GPIO_EXTI_CLEAR_FLAG(pin);
 
   // 4) Create one-shot debounce timer
   _debounceTimer = xTimerCreate(
     "LmtDbnc", debounceMs, pdFALSE, this,
-    [](TimerHandle_t t){
-      auto *self = static_cast<Stepper*>(pvTimerGetTimerID(t));
-      // Clear pending and re-enable the IRQ we disabled in ISR:
-      __HAL_GPIO_EXTI_CLEAR_FLAG(self->_limPin);
-      HAL_NVIC_EnableIRQ(self->_extiIRQn);
-      // Confirm still pressed with the configured polarity
-      GPIO_PinState s = HAL_GPIO_ReadPin(self->_limPort, self->_limPin);
-      const bool pressed = (s == GPIO_PIN_SET) == self->_limitActiveHigh;
-      if (pressed) self->onLimitTriggered();
-    }
+    Stepper::_debounceTimerCb
   );
+  if (_debounceTimer == nullptr) {
+    Logger::instance()->log("[Stepper %d] debounce timer create failed\r\n", (int)_axis);
+  }
+  HAL_NVIC_EnableIRQ(_extiIRQn);
 }
 
 // This should be called from your HAL_GPIO_EXTI_Callback in main.c:
 void Stepper::_onRawLimitInterruptFromIsr()
 {
-  BaseType_t woken = pdFALSE;
-  // 1) disable EXTI line IRQ to debounce
-//  HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
-  HAL_NVIC_DisableIRQ(_extiIRQn);           // disable the *correct* IRQ group
+  if (!stepper_rtos_running()) {
+    __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
+    return;
+  }
 
-  // 2) clear any stray pending interrupt
+  BaseType_t woken = pdFALSE;
+  _maskExtiLineFromIsr();
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
-  // 3) start the debounce timer
-  xTimerStartFromISR(_debounceTimer, &woken);
+
+  BaseType_t timerRc = pdFAIL;
+  if (_debounceTimer != nullptr) {
+    timerRc = xTimerStartFromISR(_debounceTimer, &woken);
+  }
+
+  const auto armAction = ExtiDebounce::decideArmAction(
+      true,
+      _debounceTimer != nullptr,
+      timerRc == pdPASS);
+  if (armAction == ExtiDebounce::ArmAction::Armed) {
+    portYIELD_FROM_ISR(woken);
+    return;
+  }
+
+  const bool pressed = _isLimitAsserted();
+  __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
+  _unmaskExtiLineFromIsr();
+  if (pressed) {
+    _onLimitTriggeredFromIsr(&woken);
+  }
   portYIELD_FROM_ISR(woken);
 }
 
@@ -672,14 +694,7 @@ void Stepper::onLimitTriggered()
   // stop the motor immediately
   stop();
 
-  // if you want to treat a limit hit as “done” for the orchestrator:
-  BaseType_t w = pdFALSE;
-  xEventGroupSetBitsFromISR(
-    Orchestrator::getDoneEvents(),
-    _doneBit,
-    &w
-  );
-  portYIELD_FROM_ISR(w);
+  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
 }
 
 //------------------------------------------------------------------------------
@@ -692,6 +707,57 @@ void Stepper::handleExtiFromIsr(uint16_t pin)
 	  s->_onRawLimitInterruptFromIsr();
 	  break;
 	}
+  }
+}
+
+void Stepper::_maskExtiLineFromIsr()
+{
+  const uint32_t mask = ExtiDebounce::lineMask(_extiLine);
+  if (mask != 0u) {
+    EXTI->IMR &= ~mask;
+  }
+}
+
+void Stepper::_unmaskExtiLineFromIsr()
+{
+  const uint32_t mask = ExtiDebounce::lineMask(_extiLine);
+  if (mask != 0u) {
+    EXTI->IMR |= mask;
+  }
+}
+
+void Stepper::_unmaskExtiLine()
+{
+  taskENTER_CRITICAL();
+  _unmaskExtiLineFromIsr();
+  taskEXIT_CRITICAL();
+}
+
+void Stepper::_onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken)
+{
+  if (_softStopOnLimit && _togglesRemaining != 0) {
+    _requestSoftStop();
+    return;
+  }
+
+  stop();
+  xEventGroupSetBitsFromISR(
+      Orchestrator::getDoneEvents(),
+      _doneBit,
+      pxHigherPriorityTaskWoken);
+}
+
+void Stepper::_debounceTimerCb(TimerHandle_t timer)
+{
+  auto* self = static_cast<Stepper*>(pvTimerGetTimerID(timer));
+  if (self == nullptr) {
+    return;
+  }
+
+  __HAL_GPIO_EXTI_CLEAR_FLAG(self->_limPin);
+  self->_unmaskExtiLine();
+  if (self->_isLimitAsserted()) {
+    self->onLimitTriggered();
   }
 }
 

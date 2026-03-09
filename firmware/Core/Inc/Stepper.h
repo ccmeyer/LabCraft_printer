@@ -236,6 +236,10 @@ private:
 
   // ISR entrypoint
   void _onRawLimitInterruptFromIsr();
+  void _maskExtiLineFromIsr();
+  void _unmaskExtiLineFromIsr();
+  void _unmaskExtiLine();
+  void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
 
   // software‐timer callback (runs in task context)
   static void _debounceTimerCb(TimerHandle_t timer);

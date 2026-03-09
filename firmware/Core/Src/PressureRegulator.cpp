@@ -6,6 +6,7 @@
  */
 
 #include "PressureRegulator.h"
+#include "ExtiDebounce.h"
 #include "PressureRegulatorMath.h"
 #include "Orchestrator.h"
 #include "Logger.h"
@@ -858,21 +859,12 @@ void PressureRegulator::attachInnerLimitSwitch(GPIO_TypeDef* port,
   // 5) Software one-shot debounce timer
   _innerDebounceTmr = xTimerCreate(
     "RegInnerDbnc", debounceMs, pdFALSE, this,
-    [](TimerHandle_t t){
-      auto *self = static_cast<PressureRegulator*>(pvTimerGetTimerID(t));
-      // Clear & re-enable the IRQ we disabled in ISR:
-      __HAL_GPIO_EXTI_CLEAR_FLAG(self->_innerPin);
-      HAL_NVIC_EnableIRQ(self->_innerIRQn);
-
-      // Confirm it's still pressed with the configured polarity
-      GPIO_PinState s = HAL_GPIO_ReadPin(self->_innerPort, self->_innerPin);
-      const bool pressed = ((s == GPIO_PIN_SET) == self->_innerActiveHigh);
-      if (pressed && self->_taskHandle) {
-        xTaskNotify(self->_taskHandle, NOTIF_INNER_LIMIT, eSetBits);
-      }
-    }
-
+    PressureRegulator::_innerDebounceTimerCb
   );
+  if (_innerDebounceTmr == nullptr) {
+    Logger::instance()->log("[PReg] debounce timer create failed port=%u\r\n",
+                            (unsigned)_sensorPort);
+  }
   HAL_NVIC_EnableIRQ(_innerIRQn);
 
 }
@@ -880,15 +872,35 @@ void PressureRegulator::attachInnerLimitSwitch(GPIO_TypeDef* port,
 void PressureRegulator::_onRawInnerLimitInterruptFromIsr()
 {
   // If RTOS isn't running yet, just clear and bail. We'll catch it later.
-  if (!rtos_running() || _innerDebounceTmr == nullptr) {
+  if (!rtos_running()) {
     __HAL_GPIO_EXTI_CLEAR_FLAG(_innerPin);
     return;
   }
 
   BaseType_t woken = pdFALSE;
-  HAL_NVIC_DisableIRQ(_innerIRQn);
+  _maskInnerExtiLineFromIsr();
   __HAL_GPIO_EXTI_CLEAR_FLAG(_innerPin);
-  xTimerStartFromISR(_innerDebounceTmr, &woken);
+
+  BaseType_t timerRc = pdFAIL;
+  if (_innerDebounceTmr != nullptr) {
+    timerRc = xTimerStartFromISR(_innerDebounceTmr, &woken);
+  }
+
+  const auto armAction = ExtiDebounce::decideArmAction(
+      true,
+      _innerDebounceTmr != nullptr,
+      timerRc == pdPASS);
+  if (armAction == ExtiDebounce::ArmAction::Armed) {
+    portYIELD_FROM_ISR(woken);
+    return;
+  }
+
+  const bool pressed = _isInnerLimitAsserted();
+  __HAL_GPIO_EXTI_CLEAR_FLAG(_innerPin);
+  _unmaskInnerExtiLineFromIsr();
+  if (pressed) {
+    _notifyInnerLimitFromIsr(&woken);
+  }
   portYIELD_FROM_ISR(woken);
 }
 
@@ -900,6 +912,50 @@ void PressureRegulator::handleInnerLimitFromIsr(uint16_t pin)
       r->_onRawInnerLimitInterruptFromIsr();
       break;
     }
+  }
+}
+
+void PressureRegulator::_maskInnerExtiLineFromIsr()
+{
+  const uint32_t mask = ExtiDebounce::lineMask(_innerLine);
+  if (mask != 0u) {
+    EXTI->IMR &= ~mask;
+  }
+}
+
+void PressureRegulator::_unmaskInnerExtiLineFromIsr()
+{
+  const uint32_t mask = ExtiDebounce::lineMask(_innerLine);
+  if (mask != 0u) {
+    EXTI->IMR |= mask;
+  }
+}
+
+void PressureRegulator::_unmaskInnerExtiLine()
+{
+  taskENTER_CRITICAL();
+  _unmaskInnerExtiLineFromIsr();
+  taskEXIT_CRITICAL();
+}
+
+void PressureRegulator::_notifyInnerLimitFromIsr(BaseType_t* pxHigherPriorityTaskWoken)
+{
+  if (_taskHandle != nullptr) {
+    xTaskNotifyFromISR(_taskHandle, NOTIF_INNER_LIMIT, eSetBits, pxHigherPriorityTaskWoken);
+  }
+}
+
+void PressureRegulator::_innerDebounceTimerCb(TimerHandle_t timer)
+{
+  auto* self = static_cast<PressureRegulator*>(pvTimerGetTimerID(timer));
+  if (self == nullptr) {
+    return;
+  }
+
+  __HAL_GPIO_EXTI_CLEAR_FLAG(self->_innerPin);
+  self->_unmaskInnerExtiLine();
+  if (self->_isInnerLimitAsserted() && self->_taskHandle != nullptr) {
+    xTaskNotify(self->_taskHandle, NOTIF_INNER_LIMIT, eSetBits);
   }
 }
 
