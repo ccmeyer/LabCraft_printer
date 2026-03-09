@@ -25,7 +25,7 @@ from skimage.metrics import structural_similarity as ssim
 import random
 import pyDOE3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import glob
 import shutil
 import csv
@@ -138,6 +138,10 @@ class OptionSpec:
     units: str                     # e.g. 'mM'
     droplet_nL: float              # droplet volume for this reagent
     starting_conc: float = 0.0     # starting concentration for this reagent
+    reagent_id: str | None = None
+    reagent_display_name: str | None = None
+    intended_head_type_id: str | None = None
+    intended_head_type_display_name: str | None = None
 
 
 @dataclass
@@ -300,12 +304,27 @@ class ExperimentModel(QObject):
 
     # ------------- Factor management -------------
 
-    def add_additive(self, name: str, targets: List[float], units: str, droplet_nL: float,
-                    starting_conc: float = 0.0, forced_stock_conc: float | None = None):
+    def add_additive(
+        self,
+        name: str,
+        targets: List[float],
+        units: str,
+        droplet_nL: float,
+        starting_conc: float = 0.0,
+        forced_stock_conc: float | None = None,
+        reagent_id: str | None = None,
+        reagent_display_name: str | None = None,
+        intended_head_type_id: str | None = None,
+        intended_head_type_display_name: str | None = None,
+    ):
         o = OptionSpec(name=f"{name}",
                     targets=list(targets), units=units,
                     droplet_nL=float(droplet_nL),
-                    starting_conc=float(starting_conc or 0.0))
+                    starting_conc=float(starting_conc or 0.0),
+                    reagent_id=reagent_id,
+                    reagent_display_name=reagent_display_name,
+                    intended_head_type_id=intended_head_type_id,
+                    intended_head_type_display_name=intended_head_type_display_name)
         if forced_stock_conc is not None:
             try:
                 setattr(o, "forced_stock_conc", float(forced_stock_conc))
@@ -318,12 +337,28 @@ class ExperimentModel(QObject):
     def add_choice_group(self, group_name: str):
         self.factors.append(FactorSpec(name=group_name, kind="choice", options=[]))
 
-    def add_choice_option(self, group_name: str, option_name: str, targets: List[float], units: str,
-                        droplet_nL: float, starting_conc: float = 0.0, forced_stock_conc: float | None = None):
+    def add_choice_option(
+        self,
+        group_name: str,
+        option_name: str,
+        targets: List[float],
+        units: str,
+        droplet_nL: float,
+        starting_conc: float = 0.0,
+        forced_stock_conc: float | None = None,
+        reagent_id: str | None = None,
+        reagent_display_name: str | None = None,
+        intended_head_type_id: str | None = None,
+        intended_head_type_display_name: str | None = None,
+    ):
         for f in self.factors:
             if f.name == group_name and f.kind == "choice":
                 o = OptionSpec(option_name, list(targets), units,
-                            float(droplet_nL), float(starting_conc or 0.0))
+                            float(droplet_nL), float(starting_conc or 0.0),
+                            reagent_id=reagent_id,
+                            reagent_display_name=reagent_display_name,
+                            intended_head_type_id=intended_head_type_id,
+                            intended_head_type_display_name=intended_head_type_display_name)
                 if forced_stock_conc is not None:
                     try:
                         setattr(o, "forced_stock_conc", float(forced_stock_conc))
@@ -332,9 +367,62 @@ class ExperimentModel(QObject):
                 f.options.append(o)
                 return
         self.add_choice_group(group_name)
-        self.add_choice_option(group_name, option_name, targets, units, droplet_nL, starting_conc, forced_stock_conc)
+        self.add_choice_option(
+            group_name,
+            option_name,
+            targets,
+            units,
+            droplet_nL,
+            starting_conc,
+            forced_stock_conc,
+            reagent_id,
+            reagent_display_name,
+            intended_head_type_id,
+            intended_head_type_display_name,
+        )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _iter_factor_options(self):
+        for factor in self.factors:
+            for option in factor.options:
+                yield factor, option
+
+    def _get_option_spec_for_stock_row(self, factor_name: str, option_name: str | None):
+        opt_name = (option_name or "").strip()
+        for factor, option in self._iter_factor_options():
+            if factor.name != factor_name:
+                continue
+            if factor.kind == "additive":
+                return option
+            if option.name == opt_name:
+                return option
+        return None
+
+    def _build_stock_row(
+        self,
+        *,
+        factor_name: str,
+        option_name: str,
+        stock_concentration: float,
+        delta_per_drop: float,
+        units: str,
+        droplet_volume_nL: float,
+    ) -> Dict[str, Any]:
+        option = self._get_option_spec_for_stock_row(factor_name, option_name)
+        row = {
+            "factor_name": factor_name,
+            "option_name": option_name,
+            "stock_concentration": stock_concentration,
+            "delta_per_drop": delta_per_drop,
+            "units": units,
+            "droplet_volume_nL": droplet_volume_nL,
+            "reagent_id": getattr(option, "reagent_id", None) if option is not None else None,
+            "reagent_display_name": getattr(option, "reagent_display_name", None) if option is not None else None,
+            "intended_head_type_id": getattr(option, "intended_head_type_id", None) if option is not None else None,
+            "intended_head_type_display_name": getattr(option, "intended_head_type_display_name", None) if option is not None else None,
+        }
+        return row
 
     def get_random_seed(self) -> Optional[int]:
         """Only return a seed when randomization is enabled."""
@@ -1112,8 +1200,22 @@ class ExperimentModel(QObject):
                         },
                     ]
                 }
-                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
-                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p2.stock_concs[1], "delta_per_drop": p2.deltas[1], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+                stock_rows.append(self._build_stock_row(
+                    factor_name=name,
+                    option_name="",
+                    stock_concentration=p2.stock_concs[0],
+                    delta_per_drop=p2.deltas[0],
+                    units=p2.units,
+                    droplet_volume_nL=p2.droplet_nL,
+                ))
+                stock_rows.append(self._build_stock_row(
+                    factor_name=name,
+                    option_name="",
+                    stock_concentration=p2.stock_concs[1],
+                    delta_per_drop=p2.deltas[1],
+                    units=p2.units,
+                    droplet_volume_nL=p2.droplet_nL,
+                ))
             else:
                 p1 = singles[add_idx[name]]
                 self.plans_per_option[(name, None)] = {
@@ -1129,7 +1231,14 @@ class ExperimentModel(QObject):
                         }
                     ]
                 }
-                stock_rows.append({"factor_name": name, "option_name": "", "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
+                stock_rows.append(self._build_stock_row(
+                    factor_name=name,
+                    option_name="",
+                    stock_concentration=p1.stock_concentration,
+                    delta_per_drop=p1.delta_per_drop,
+                    units=p1.units,
+                    droplet_volume_nL=p1.droplet_nL,
+                ))
 
         for gname, bucket in choice_groups.items():
             for oname, singles, twos in bucket:
@@ -1157,8 +1266,22 @@ class ExperimentModel(QObject):
                             },
                         ]
                     }
-                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p2.stock_concs[0], "delta_per_drop": p2.deltas[0], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
-                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p2.stock_concs[1], "delta_per_drop": p2.deltas[1], "units": p2.units, "droplet_volume_nL": p2.droplet_nL})
+                    stock_rows.append(self._build_stock_row(
+                        factor_name=gname,
+                        option_name=oname,
+                        stock_concentration=p2.stock_concs[0],
+                        delta_per_drop=p2.deltas[0],
+                        units=p2.units,
+                        droplet_volume_nL=p2.droplet_nL,
+                    ))
+                    stock_rows.append(self._build_stock_row(
+                        factor_name=gname,
+                        option_name=oname,
+                        stock_concentration=p2.stock_concs[1],
+                        delta_per_drop=p2.deltas[1],
+                        units=p2.units,
+                        droplet_volume_nL=p2.droplet_nL,
+                    ))
                 else:
                     p1 = singles[ch_idx[key]]
                     self.plans_per_option[key] = {
@@ -1174,7 +1297,14 @@ class ExperimentModel(QObject):
                             },
                         ]
                     }
-                    stock_rows.append({"factor_name": gname, "option_name": oname, "stock_concentration": p1.stock_concentration, "delta_per_drop": p1.delta_per_drop, "units": p1.units, "droplet_volume_nL": p1.droplet_nL})
+                    stock_rows.append(self._build_stock_row(
+                        factor_name=gname,
+                        option_name=oname,
+                        stock_concentration=p1.stock_concentration,
+                        delta_per_drop=p1.delta_per_drop,
+                        units=p1.units,
+                        droplet_volume_nL=p1.droplet_nL,
+                    ))
 
         self._stock_rows_cache = stock_rows
         self._fill_row_cache = None
@@ -1705,6 +1835,10 @@ class ExperimentModel(QObject):
             "total_droplets": int(fill_total_drops),
             "total_volume_uL": round(fill_uL, 3),
             "max_per_rxn_nL": "",
+            "reagent_id": None,
+            "reagent_display_name": None,
+            "intended_head_type_id": None,
+            "intended_head_type_display_name": None,
         }
         # --- replicate-expand the row list so _reactions_df matches actual run order ---
         base_rows = rows
@@ -2144,6 +2278,10 @@ class ExperimentModel(QObject):
                             "units": o.units,
                             "droplet_nL": float(o.droplet_nL),
                             "starting_conc": float(getattr(o, "starting_conc", 0.0) or 0.0),
+                            "reagent_id": getattr(o, "reagent_id", None),
+                            "reagent_display_name": getattr(o, "reagent_display_name", None),
+                            "intended_head_type_id": getattr(o, "intended_head_type_id", None),
+                            "intended_head_type_display_name": getattr(o, "intended_head_type_display_name", None),
                             "forced_stock_conc": (
                                 float(getattr(o, "forced_stock_conc"))
                                 if getattr(o, "forced_stock_conc", None) is not None
@@ -2216,6 +2354,10 @@ class ExperimentModel(QObject):
                     units=o.get("units", ""),
                     droplet_nL=float(o.get("droplet_nL", 10.0)),
                     starting_conc=float(o.get("starting_conc", 0.0)),
+                    reagent_id=o.get("reagent_id"),
+                    reagent_display_name=o.get("reagent_display_name"),
+                    intended_head_type_id=o.get("intended_head_type_id"),
+                    intended_head_type_display_name=o.get("intended_head_type_display_name"),
                 )
                 if "forced_stock_conc" in o and o["forced_stock_conc"] is not None:
                     try:
@@ -3197,6 +3339,11 @@ class StockSolution(QObject):
         self.glycerol_percent = None
         self.tags = []
         self.notes = ""
+        self.intended_head_type_id = None
+        self.intended_head_type_display_name = None
+        self.intended_nominal_nozzle_diameter_um = None
+        self.intended_head_type_tags = []
+        self.intended_head_type_notes = ""
 
     def get_stock_id(self):
         return self.stock_id
@@ -3240,6 +3387,30 @@ class StockSolution(QObject):
             "glycerol_percent": self.glycerol_percent,
             "tags": list(self.tags or []),
             "notes": self.notes,
+        }
+
+    def set_intended_head_type(
+        self,
+        *,
+        head_type_id=None,
+        display_name=None,
+        nominal_nozzle_diameter_um=None,
+        tags=None,
+        notes=None,
+    ):
+        self.intended_head_type_id = head_type_id
+        self.intended_head_type_display_name = display_name
+        self.intended_nominal_nozzle_diameter_um = nominal_nozzle_diameter_um
+        self.intended_head_type_tags = list(tags or [])
+        self.intended_head_type_notes = "" if notes is None else str(notes)
+
+    def get_intended_head_type(self):
+        return {
+            "head_type_id": self.intended_head_type_id,
+            "display_name": self.intended_head_type_display_name,
+            "nominal_nozzle_diameter_um": self.intended_nominal_nozzle_diameter_um,
+            "tags": list(self.intended_head_type_tags or []),
+            "notes": self.intended_head_type_notes,
         }
 
 
@@ -5511,6 +5682,7 @@ class Model(QObject):
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(prof=self.profile)
         self.calibration_memory_store = None
+        self._disposable_printer_head_counter = 0
         self._initialize_calibration_memory_store()
 
         self.well_plate.plate_format_changed_signal.connect(self.update_well_plate)
@@ -5545,6 +5717,373 @@ class Model(QObject):
         except Exception as e:
             print(f"[CalibrationMemory] Failed to initialize store: {e}")
             self.calibration_memory_store = None
+
+    @staticmethod
+    def _clean_identity_text(value):
+        if value is None:
+            return None
+        out = str(value).strip()
+        return out or None
+
+    @classmethod
+    def _slugify_identity_token(cls, value):
+        value = cls._clean_identity_text(value)
+        if value is None:
+            return None
+        chars = []
+        prev_us = False
+        for ch in value.lower():
+            if ch.isalnum():
+                chars.append(ch)
+                prev_us = False
+            else:
+                if not prev_us:
+                    chars.append("_")
+                    prev_us = True
+        slug = "".join(chars).strip("_")
+        return slug or None
+
+    def _get_calibration_identity_registry(self):
+        store = getattr(self, "calibration_memory_store", None)
+        return getattr(store, "identity_registry", None) if store is not None else None
+
+    def list_known_reagent_identities(self):
+        registry = self._get_calibration_identity_registry()
+        if registry is None:
+            return []
+        try:
+            items = list((registry.load_reagents() or {}).values())
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to load reagent identities: {e}")
+            return []
+        payloads = []
+        for item in items:
+            payloads.append({
+                "reagent_id": item.reagent_id,
+                "display_name": item.display_name,
+                "aliases": list(item.aliases or []),
+                "stock_ids": list(item.stock_ids or []),
+                "reagent_family": item.reagent_family,
+                "glycerol_percent": item.glycerol_percent,
+                "tags": list(item.tags or []),
+                "notes": item.notes,
+            })
+        payloads.sort(key=lambda row: ((row.get("display_name") or "").lower(), row.get("reagent_id") or ""))
+        return payloads
+
+    def list_known_printer_head_types(self):
+        registry = self._get_calibration_identity_registry()
+        if registry is None:
+            return []
+        try:
+            items = list((registry.load_printer_head_types() or {}).values())
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to load printer head types: {e}")
+            return []
+        payloads = []
+        for item in items:
+            payloads.append({
+                "head_type_id": item.head_type_id,
+                "display_name": item.display_name,
+                "nominal_nozzle_diameter_um": item.nominal_nozzle_diameter_um,
+                "tags": list(item.tags or []),
+                "notes": item.notes,
+            })
+        payloads.sort(
+            key=lambda row: (
+                float(row.get("nominal_nozzle_diameter_um")) if row.get("nominal_nozzle_diameter_um") is not None else 1e9,
+                (row.get("display_name") or "").lower(),
+            )
+        )
+        return payloads
+
+    def resolve_design_reagent_identity(self, *, reagent_name=None, reagent_id=None, stock_label=None):
+        registry = self._get_calibration_identity_registry()
+        raw_name = self._clean_identity_text(reagent_name) or self._clean_identity_text(stock_label)
+        explicit_reagent_id = self._slugify_identity_token(reagent_id)
+
+        if registry is None:
+            derived_id = explicit_reagent_id or self._slugify_identity_token(raw_name)
+            return {
+                "reagent_id": derived_id,
+                "display_name": raw_name,
+                "reagent_family": None,
+                "glycerol_percent": None,
+                "tags": [],
+                "notes": "",
+                "known": False,
+                "quality": {
+                    "stock_id": "unknown",
+                    "reagent_id": "explicit" if explicit_reagent_id else ("inferred" if derived_id else "unknown"),
+                },
+                "match_source": "unavailable",
+            }
+
+        resolved = None
+        if explicit_reagent_id:
+            item = registry.get_reagent(explicit_reagent_id)
+            if item is not None:
+                resolved = {
+                    "reagent_id": item.reagent_id,
+                    "display_name": item.display_name,
+                    "reagent_family": item.reagent_family,
+                    "glycerol_percent": item.glycerol_percent,
+                    "tags": list(item.tags or []),
+                    "notes": item.notes,
+                    "quality": {"stock_id": "unknown", "reagent_id": "explicit"},
+                    "match_source": "reagent_id",
+                    "known": True,
+                }
+
+        if resolved is None:
+            try:
+                resolved = dict(registry.resolve_reagent(reagent_name=raw_name) or {})
+            except Exception as e:
+                print(f"[CalibrationMemory] Failed to resolve reagent identity: {e}")
+                resolved = {}
+
+        resolved.setdefault("reagent_id", explicit_reagent_id or self._slugify_identity_token(raw_name))
+        resolved["display_name"] = self._clean_identity_text(
+            resolved.get("display_name") or raw_name or resolved.get("reagent_id")
+        )
+        resolved.setdefault("reagent_family", None)
+        resolved.setdefault("glycerol_percent", None)
+        resolved.setdefault("tags", [])
+        resolved.setdefault("notes", "")
+        quality = dict(resolved.get("quality") or {})
+        quality.setdefault("stock_id", "unknown")
+        quality.setdefault(
+            "reagent_id",
+            "explicit" if explicit_reagent_id else ("inferred" if resolved.get("reagent_id") else "unknown"),
+        )
+        resolved["quality"] = quality
+        if explicit_reagent_id and not resolved.get("reagent_id"):
+            resolved["reagent_id"] = explicit_reagent_id
+        if explicit_reagent_id:
+            resolved["reagent_id"] = explicit_reagent_id
+        match_source = str(resolved.get("match_source") or "")
+        resolved["known"] = bool(
+            registry.get_reagent(resolved.get("reagent_id")) is not None
+            or match_source in {"alias", "stock_id", "reagent_id", "runtime_reagent_id"}
+        )
+        return resolved
+
+    def preview_experiment_design_prior(
+        self,
+        *,
+        reagent_name=None,
+        reagent_id=None,
+        head_type_id=None,
+        target_volume_nl=None,
+        stock_label=None,
+    ):
+        resolved_reagent = self.resolve_design_reagent_identity(
+            reagent_name=reagent_name,
+            reagent_id=reagent_id,
+            stock_label=stock_label,
+        )
+        clean_head_type_id = self._slugify_identity_token(head_type_id)
+        head_type = None
+        registry = self._get_calibration_identity_registry()
+        if registry is not None and clean_head_type_id:
+            try:
+                head_type = registry.get_head_type(clean_head_type_id)
+            except Exception:
+                head_type = None
+
+        if clean_head_type_id is None:
+            return {
+                "status": "head_type_missing",
+                "status_label": "Head type not set",
+                "prior": None,
+                "resolved_reagent": resolved_reagent,
+                "head_type": head_type.to_dict() if head_type is not None else None,
+            }
+
+        store = getattr(self, "calibration_memory_store", None)
+        if store is None:
+            return {
+                "status": "memory_unavailable",
+                "status_label": "Memory unavailable",
+                "prior": None,
+                "resolved_reagent": resolved_reagent,
+                "head_type": head_type.to_dict() if head_type is not None else {
+                    "head_type_id": clean_head_type_id,
+                    "display_name": clean_head_type_id,
+                },
+            }
+
+        prior = None
+        try:
+            prior = store.get_best_prior(
+                {
+                    "reagent_id": resolved_reagent.get("reagent_id"),
+                    "reagent_family": resolved_reagent.get("reagent_family"),
+                    "printer_head_id": None,
+                    "head_type_id": clean_head_type_id,
+                },
+                target_volume_nl=target_volume_nl,
+            )
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to preview design prior: {e}")
+
+        if prior is None:
+            return {
+                "status": "none",
+                "status_label": "No prior",
+                "prior": None,
+                "resolved_reagent": resolved_reagent,
+                "head_type": head_type.to_dict() if head_type is not None else {
+                    "head_type_id": clean_head_type_id,
+                    "display_name": clean_head_type_id,
+                },
+            }
+
+        confidence = prior.get("recommendation_confidence_adjusted", prior.get("recommendation_confidence"))
+        try:
+            confidence = float(confidence) if confidence is not None else None
+        except Exception:
+            confidence = None
+        level = str(prior.get("aggregation_level") or "")
+        strong = level in {"exact_pair", "exact_reagent_head_type"} and confidence is not None and confidence >= 0.75
+        status = "strong" if strong else "some"
+        return {
+            "status": status,
+            "status_label": "Strong prior" if strong else "Some prior",
+            "prior": dict(prior),
+            "resolved_reagent": resolved_reagent,
+            "head_type": head_type.to_dict() if head_type is not None else {
+                "head_type_id": clean_head_type_id,
+                "display_name": clean_head_type_id,
+            },
+        }
+
+    def register_experiment_design_reagents(self, experiment_model=None):
+        registry = self._get_calibration_identity_registry()
+        model = experiment_model or self.experiment_model
+        if registry is None or model is None:
+            return []
+
+        registered = []
+        for factor in getattr(model, "factors", []):
+            for option in getattr(factor, "options", []):
+                display_name = self._clean_identity_text(
+                    getattr(option, "reagent_display_name", None) or getattr(option, "name", None)
+                )
+                resolved = self.resolve_design_reagent_identity(
+                    reagent_name=display_name,
+                    reagent_id=getattr(option, "reagent_id", None),
+                    stock_label=getattr(option, "name", None),
+                )
+                reagent_id = self._slugify_identity_token(resolved.get("reagent_id"))
+                if reagent_id is None or display_name is None:
+                    continue
+                existing = registry.get_reagent(reagent_id)
+                aliases = []
+                if existing is not None:
+                    aliases.extend(list(existing.aliases or []))
+                aliases.extend([display_name, getattr(option, "name", None)])
+                aliases = [alias for alias in dict.fromkeys(self._clean_identity_text(item) for item in aliases) if alias]
+                payload = {
+                    "reagent_id": reagent_id,
+                    "display_name": display_name,
+                    "stock_ids": list(getattr(existing, "stock_ids", []) or []),
+                    "aliases": aliases,
+                    "reagent_family": resolved.get("reagent_family") if existing is None else existing.reagent_family,
+                    "glycerol_percent": resolved.get("glycerol_percent") if existing is None else existing.glycerol_percent,
+                    "tags": list(getattr(existing, "tags", []) or resolved.get("tags", []) or []),
+                    "notes": getattr(existing, "notes", "") or resolved.get("notes", ""),
+                }
+                try:
+                    saved = registry.upsert_reagent(payload)
+                except Exception as e:
+                    print(f"[CalibrationMemory] Failed to upsert reagent '{reagent_id}': {e}")
+                    continue
+                option.reagent_id = saved.reagent_id
+                option.reagent_display_name = saved.display_name
+                registered.append(saved.reagent_id)
+        return registered
+
+    def _apply_design_identity_to_stock_solution(self, stock_solution, stock_row):
+        if stock_solution is None or not isinstance(stock_row, dict):
+            return
+
+        registry = self._get_calibration_identity_registry()
+        reagent_id = self._slugify_identity_token(stock_row.get("reagent_id"))
+        reagent_display_name = self._clean_identity_text(stock_row.get("reagent_display_name"))
+        if reagent_id or reagent_display_name:
+            reagent_payload = None
+            if registry is not None and reagent_id:
+                try:
+                    reagent_payload = registry.get_reagent(reagent_id)
+                except Exception:
+                    reagent_payload = None
+            stock_solution.set_reagent_identity(
+                reagent_id=reagent_id or getattr(reagent_payload, "reagent_id", None),
+                display_name=reagent_display_name or getattr(reagent_payload, "display_name", None),
+                reagent_family=getattr(reagent_payload, "reagent_family", None),
+                glycerol_percent=getattr(reagent_payload, "glycerol_percent", None),
+                tags=list(getattr(reagent_payload, "tags", []) or []),
+                notes=getattr(reagent_payload, "notes", ""),
+            )
+
+        head_type_id = self._slugify_identity_token(stock_row.get("intended_head_type_id"))
+        head_type_display_name = self._clean_identity_text(stock_row.get("intended_head_type_display_name"))
+        if head_type_id or head_type_display_name:
+            head_type_payload = None
+            if registry is not None and head_type_id:
+                try:
+                    head_type_payload = registry.get_head_type(head_type_id)
+                except Exception:
+                    head_type_payload = None
+            stock_solution.set_intended_head_type(
+                head_type_id=head_type_id or getattr(head_type_payload, "head_type_id", None),
+                display_name=head_type_display_name or getattr(head_type_payload, "display_name", None),
+                nominal_nozzle_diameter_um=getattr(head_type_payload, "nominal_nozzle_diameter_um", None),
+                tags=list(getattr(head_type_payload, "tags", []) or []),
+                notes=getattr(head_type_payload, "notes", ""),
+            )
+
+    def _generate_disposable_printer_head_id(self, head_type_id=None):
+        self._disposable_printer_head_counter = int(getattr(self, "_disposable_printer_head_counter", 0)) + 1
+        head_token = self._slugify_identity_token(head_type_id) or "unknown_head_type"
+        exp_token = self._slugify_identity_token(
+            getattr(getattr(self, "experiment_model", None), "metadata", {}).get("name")
+        ) or "experiment"
+        ts_token = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"{head_token}__{exp_token}__{ts_token}__{self._disposable_printer_head_counter:03d}"
+
+    def _apply_runtime_printer_head_identity(self, printer_head):
+        if printer_head is None or getattr(printer_head, "calibration_chip", False):
+            return
+        stock_solution = None
+        try:
+            stock_solution = printer_head.get_stock_solution()
+        except Exception:
+            stock_solution = getattr(printer_head, "stock_solution", None)
+        head_type_id = self._slugify_identity_token(getattr(stock_solution, "intended_head_type_id", None))
+        registry = self._get_calibration_identity_registry()
+        head_type_payload = None
+        if registry is not None and head_type_id:
+            try:
+                head_type_payload = registry.get_head_type(head_type_id)
+            except Exception:
+                head_type_payload = None
+        printer_head_id = self._generate_disposable_printer_head_id(head_type_id=head_type_id)
+        printer_head.set_identity_metadata(
+            printer_head_id=printer_head_id,
+            head_type_id=head_type_id,
+            display_name=printer_head_id,
+            nominal_nozzle_diameter_um=(
+                getattr(head_type_payload, "nominal_nozzle_diameter_um", None)
+                if head_type_payload is not None
+                else getattr(stock_solution, "intended_nominal_nozzle_diameter_um", None)
+            ),
+            measured_nozzle_diameter_um=None,
+            manufacturer_batch=None,
+            tags=list(getattr(head_type_payload, "tags", []) or getattr(stock_solution, "intended_head_type_tags", []) or []),
+            notes=getattr(head_type_payload, "notes", "") or getattr(stock_solution, "intended_head_type_notes", ""),
+        )
 
     def load_colors(self, file_path):
         with open(file_path, 'r') as file:
@@ -5711,6 +6250,17 @@ class Model(QObject):
         from math import isfinite, ceil
 
         ssm = StockSolutionManager()
+        stock_row_lookup = {}
+
+        def _stock_lookup_key(reagent_name, concentration, units):
+            try:
+                return (
+                    str(reagent_name),
+                    f"{float(concentration):.2f}",
+                    str(units),
+                )
+            except Exception:
+                return (str(reagent_name), str(concentration), str(units))
 
         # ---------- 1) STOCKS (include fill) ----------
         stock_rows = self.experiment_model.get_stock_table_rows(include_fill=True)
@@ -5719,6 +6269,7 @@ class Model(QObject):
             reagent_name = row.get("option_name") or row.get("factor_name") or ""
             conc = float(row.get("stock_concentration", 0.0))
             units = row.get("units", "mM")
+            stock_row_lookup[_stock_lookup_key(reagent_name, conc, units)] = dict(row)
 
             total_uL = row.get("total_volume_uL", None)
             if total_uL is None:
@@ -5731,6 +6282,8 @@ class Model(QObject):
                     reagent_name, conc, units,
                     required_volume=(total_uL if isfinite(total_uL) else None)
                 )
+                stock = ssm.get_stock_solution(reagent_name, conc, units)
+                self._apply_design_identity_to_stock_solution(stock, row)
 
         # ---------- 2) REACTIONS (non-fill + fill) ----------
         rc = ReactionCollection()
@@ -5766,6 +6319,10 @@ class Model(QObject):
                 if stock is None:
                     ssm.add_stock_solution(reagent_name, conc, units)
                     stock = ssm.get_stock_solution(reagent_name, conc, units)
+                    self._apply_design_identity_to_stock_solution(
+                        stock,
+                        stock_row_lookup.get(_stock_lookup_key(reagent_name, conc, units), {}),
+                    )
                 rxn.add_reagent(stock, int(drops))
 
             # Fill reagent
@@ -5776,6 +6333,10 @@ class Model(QObject):
                     # Safety net; should exist from stock table, but add if needed
                     ssm.add_stock_solution(fill_name, fill_conc, fill_units)
                     fill_stock = ssm.get_stock_solution(fill_name, fill_conc, fill_units)
+                    self._apply_design_identity_to_stock_solution(
+                        fill_stock,
+                        stock_row_lookup.get(_stock_lookup_key(fill_name, fill_conc, fill_units), {}),
+                    )
                 rxn.add_reagent(fill_stock, fill_drops)
 
             rc.add_reaction(rxn)
@@ -6022,6 +6583,12 @@ class Model(QObject):
         """Assign printer heads to the slots in the rack."""
         # Create and assign printer heads for each unique pair
         self.printer_head_manager.create_printer_heads(self.stock_solutions)
+        for printer_head in list(getattr(self.printer_head_manager, "unassigned_printer_heads", []) or []):
+            if getattr(printer_head, "calibration_chip", False):
+                continue
+            if getattr(printer_head, "printer_head_id", None):
+                continue
+            self._apply_runtime_printer_head_identity(printer_head)
         for i in range(self.rack_model.get_num_slots()):
             current_slot = self.rack_model.get_slot_info(i)
             if current_slot['printer_head'] != None:
