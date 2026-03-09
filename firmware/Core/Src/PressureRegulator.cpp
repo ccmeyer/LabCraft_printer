@@ -49,6 +49,15 @@ static inline bool rtos_running() {
   return xTaskGetSchedulerState() == taskSCHEDULER_RUNNING;
 }
 
+static TickType_t pregMsToAtLeast1Tick(uint32_t ms)
+{
+  if (ms == 0u) {
+    return 0u;
+  }
+  TickType_t ticks = pdMS_TO_TICKS(ms);
+  return (ticks == 0u) ? 1u : ticks;
+}
+
 // ——— Registry init ———
 PressureRegulator* PressureRegulator::_registry[PressureRegulator::MAX_REGS] = { nullptr };
 int                PressureRegulator::_regCount = 0;
@@ -369,16 +378,39 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     _homing = true;
     Printer::instance()->pauseDispense();
     const CrashTaskId watchdogTaskId = (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
-//    if (_taskHandle) vTaskSuspend(_taskHandle);
-    // If called from our own control task, don't suspend ourselves.
     TaskHandle_t me = xTaskGetCurrentTaskHandle();
     const bool calledFromOwnTask = (_taskHandle && me == _taskHandle);
+    const bool taskHandlePresent = (_taskHandle != nullptr);
+    bool homeOk = false;
 
-    if (!calledFromOwnTask && _taskHandle) {
+    // If called from our own control task, temporarily remove it from watchdog coverage.
+    if (calledFromOwnTask) {
+      Watchdog_DisableTask(watchdogTaskId);
+    } else if (_taskHandle) {
       vTaskSuspend(_taskHandle);
       Watchdog_DisableTask(watchdogTaskId);
     }
 
+    auto finishHome = [&]() {
+      HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
+      _homing = false;
+
+      if (calledFromOwnTask) {
+        Watchdog_EnableTask(watchdogTaskId);
+        Watchdog_CheckIn(watchdogTaskId);
+      } else if (_active && taskHandlePresent) {
+        vTaskResume(_taskHandle);
+        Watchdog_EnableTask(watchdogTaskId);
+      }
+
+      if (homeOk) {
+        Printer::instance()->resumeDispense();
+        Logger::instance()->log("homing-complete\r\n");
+      } else {
+        Printer::instance()->cancelDispense();
+        Logger::instance()->log("[PReg] Homing failed or timed out; dispense canceled\r\n");
+      }
+    };
 
     // Open valve
     HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_SET);
@@ -387,34 +419,55 @@ void PressureRegulator::homeWithValve(uint32_t fastHz, uint32_t slowHz, uint32_t
     if (_stepping) {
         _stepper->stop();         // kill the hardware timer
         _stepping = false;        // clear our flag
-        vTaskDelay(pdMS_TO_TICKS(10)); // give it a moment to settle
+        vTaskDelay(pregMsToAtLeast1Tick(10u)); // give it a moment to settle
     }
 
     // Perform homing on the stepper
-    _stepper->home(fastHz, slowHz, backoffSteps);
-
-    // Close valve
-    HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
-
-    // Resume control loop
-    _homing = false;
-    // Only resume if we are supposed to be active
-//    if (_active && _taskHandle) {
-//      vTaskResume(_taskHandle);
-//    }
-    if (!calledFromOwnTask && _active && _taskHandle) {
-      vTaskResume(_taskHandle);
-      Watchdog_EnableTask(watchdogTaskId);
-    }
-    Printer::instance()->resumeDispense();
-    Logger::instance()->log("homing-complete\r\n");
+    homeOk = _stepper->home(fastHz, slowHz, backoffSteps);
+    finishHome();
 }
 
-void PressureRegulator::resetSyringe() {
+void PressureRegulator::resetSyringe(CrashTaskId callerWatchdogTaskId) {
     // 1) mark and pause
     _resetting = true;
     Logger::instance()->log("[PReg] Starting syringe reset\r\n");
     Printer::instance()->pauseDispense();
+    bool resetOk = true;
+
+    auto checkInCaller = [&]() {
+      if (callerWatchdogTaskId != CRASH_TASK_NONE) {
+        Watchdog_CheckIn(callerWatchdogTaskId);
+      }
+    };
+
+    auto delayWithCallerCheckIn = [&](uint32_t delayMs) {
+      TickType_t remaining = pregMsToAtLeast1Tick(delayMs);
+      const TickType_t slice = pregMsToAtLeast1Tick(20u);
+      while (remaining > 0u) {
+        checkInCaller();
+        TickType_t step = (remaining > slice) ? slice : remaining;
+        vTaskDelay(step);
+        remaining -= step;
+      }
+    };
+
+    auto waitForResetMove = [&](uint32_t steps, uint32_t runHz) -> bool {
+      const TickType_t waitPeriod = pregMsToAtLeast1Tick(5u);
+      const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, runHz);
+      const uint32_t startMs = HAL_GetTick();
+      while (_stepper->isBusy()) {
+        checkInCaller();
+        vTaskDelay(waitPeriod);
+        if ((HAL_GetTick() - startMs) >= timeoutMs) {
+          _stepper->stop();
+          Logger::instance()->log("[PReg] Syringe reset timed out steps=%lu hz=%lu\r\n",
+                                  (unsigned long)steps,
+                                  (unsigned long)runHz);
+          return false;
+        }
+      }
+      return true;
+    };
 
     // 2) open the valve for free flow
     HAL_GPIO_WritePin(_valvePort,_valvePin,GPIO_PIN_SET);
@@ -422,7 +475,7 @@ void PressureRegulator::resetSyringe() {
     if (_stepping) {
         _stepper->stop();         // kill the hardware timer
         _stepping = false;        // clear our flag
-        vTaskDelay(pdMS_TO_TICKS(10)); // give it a moment to settle
+        delayWithCallerCheckIn(10u); // give it a moment to settle
     }
 
     int32_t pos   = _stepper->getPosition();
@@ -440,20 +493,21 @@ void PressureRegulator::resetSyringe() {
 	  _stepper->move(dir, steps, runHz, /*accel*/2000);
 
 	  // 6) block until it’s done
-	  const TickType_t waitPeriod = pdMS_TO_TICKS(5);
-	  while (_stepper->isBusy()) {
-		  vTaskDelay(waitPeriod);
-	  }
+	  resetOk = waitForResetMove(steps, runHz);
 	} else {
 	  Logger::instance()->log("[PReg] Already at RESET_POS, skipping motion\r\n");
 	}
 
     // 6) close the valve and resume printing
     HAL_GPIO_WritePin(_valvePort,_valvePin,GPIO_PIN_RESET);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // give it a moment to settle
-    Printer::instance()->resumeDispense();
-
-    Logger::instance()->log("[PReg] Syringe reset complete\r\n");
+    if (resetOk) {
+      delayWithCallerCheckIn(1000u); // give it a moment to settle
+      Printer::instance()->resumeDispense();
+      Logger::instance()->log("[PReg] Syringe reset complete\r\n");
+    } else {
+      Printer::instance()->cancelDispense();
+      Logger::instance()->log("[PReg] Syringe reset failed; dispense canceled\r\n");
+    }
     _resetting = false;
 }
 

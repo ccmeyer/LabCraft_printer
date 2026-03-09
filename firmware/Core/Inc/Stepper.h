@@ -70,12 +70,13 @@ public:
 
   void setSpeedHz(uint32_t freqHz);		/// Change speed on the fly (constant‐rate mode only)
 
-  /// Homing sequence.  Blocks (via event-group) until done.
+  /// Homing sequence. Returns false if any phase times out.
   /// @param fastHz   coarse feed rate
   /// @param slowHz   fine feed rate
   /// @param backoffSteps  number of full steps to back off between phases
-  void home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps);
-  void waitUntilDone();
+  bool home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps);
+  bool waitUntilDone(uint32_t timeoutMs = 0u);
+  static uint32_t recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz);
 
   void setHomeDir(bool toward_limit) { _homeTowardLimitDir = toward_limit; }
   void setHomeGuardSteps(uint32_t s) { _homeGuardSteps = s ? s : 100000; }

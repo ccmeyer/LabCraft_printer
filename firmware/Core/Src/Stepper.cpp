@@ -38,6 +38,19 @@ static inline uint32_t timer_input_hz(TIM_HandleTypeDef* htim, uint16_t prescale
 static inline uint32_t timer_max_arr(TIM_HandleTypeDef* htim) {
   return is_32bit_timer(htim->Instance) ? 0xFFFFFFFFu : 0xFFFFu;
 }
+static constexpr uint32_t kMoveWaitPollMs = 20u;
+static constexpr uint32_t kMoveWaitSlackMs = 4000u;
+static constexpr uint32_t kMoveWaitMinMs = 1000u;
+static constexpr uint32_t kMoveWaitMaxMs = 30000u;
+
+static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
+{
+  if (ms == 0u) {
+    return 0u;
+  }
+  TickType_t ticks = pdMS_TO_TICKS(ms);
+  return (ticks == 0u) ? 1u : ticks;
+}
 // Compute ARR from desired square-wave frequency
 static inline uint32_t arr_for_freq(uint32_t tclk_eff, uint32_t freq_hz) {
   return StepperProfileMath::arrForFreq(tclk_eff, freq_hz);
@@ -253,18 +266,58 @@ void Stepper::_requestSoftStop()
   _inSoftStop = true;
 }
 
-void Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
+uint32_t Stepper::recommendedWaitTimeoutMs(uint32_t steps, uint32_t freqHz)
+{
+  const uint32_t safeHz = (freqHz == 0u) ? 1u : freqHz;
+  const uint64_t motionMs = (((uint64_t)steps * 1000u) + safeHz - 1u) / safeHz;
+  uint64_t timeoutMs = motionMs + kMoveWaitSlackMs;
+  if (timeoutMs < kMoveWaitMinMs) timeoutMs = kMoveWaitMinMs;
+  if (timeoutMs > kMoveWaitMaxMs) timeoutMs = kMoveWaitMaxMs;
+  return (uint32_t)timeoutMs;
+}
+
+bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
 	Logger::instance()->log(
 	  "[Home %d] lim pin=%u activeHigh=%d initial=%s\r\n",
 	  (int)_axis, (unsigned)_limPin, (int)_limitActiveHigh,
 	  _isLimitAsserted() ? "PRESSED" : "released");
 
+  const float    saved_override = _softstop_accel_override_sps2;
+  const uint32_t saved_floor    = _softstop_floor_hz;
+  auto restoreHomeState = [&]() {
+    _softstop_accel_override_sps2 = saved_override;
+    _softstop_floor_hz = saved_floor;
+    _softStopOnLimit = false;
+  };
+
+  auto runMoveAndWait = [&](bool direction, uint32_t steps, uint32_t freqHz) -> bool {
+    xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+    move(direction, steps, freqHz, 0u);
+    if (steps == 0u) {
+      return true;
+    }
+    const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
+    if (waitUntilDone(timeoutMs)) {
+      return true;
+    }
+    Logger::instance()->log("[Home %d] move timeout steps=%lu hz=%lu\r\n",
+                            (int)_axis,
+                            (unsigned long)steps,
+                            (unsigned long)freqHz);
+    restoreHomeState();
+    return false;
+  };
+
 	// Replace the raw HAL_GPIO_ReadPin(...) comparisons with _isLimitAsserted():
 	if (_isLimitAsserted()) {
-	  move(!_homeTowardLimitDir, backoffSteps*2, slowHz, 0); waitUntilDone();
+	  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz)) {
+        return false;
+      }
 	  while (_isLimitAsserted()) {
-	    move(!_homeTowardLimitDir, backoffSteps*2, slowHz, 0); waitUntilDone();
+	    if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz)) {
+          return false;
+        }
 	  }
 	}
 //  // If already pressed, back off in the opposite direction until it releases
@@ -274,10 +327,6 @@ void Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 //      move(!_homeTowardLimitDir, backoffSteps*2, slowHz, 0); waitUntilDone();
 //    }
 //  }
-
-  const float    saved_override = _softstop_accel_override_sps2;
-  const uint32_t saved_floor    = _softstop_floor_hz;
-
   const float kMinHomeBrakeAccel = 800000.f; // steps/s^2
   float home_brake_accel = _accel_sps2 * _softstop_accel_factor;
   if (home_brake_accel < kMinHomeBrakeAccel) home_brake_accel = kMinHomeBrakeAccel;
@@ -287,22 +336,23 @@ void Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   // Coarse approach with finite guard
   _softStopOnLimit = true;
-  move(_homeTowardLimitDir, _homeGuardSteps, fastHz, 0);
-  waitUntilDone();
+  if (!runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz)) {
+    return false;
+  }
   _softStopOnLimit = false;
 
 
   if (!_isLimitAsserted()) {
     _softStopOnLimit = true;
-    move(_homeTowardLimitDir, backoffSteps*4, slowHz, 0);
-    waitUntilDone();
+    if (!runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz)) {
+      return false;
+    }
     _softStopOnLimit = false;
 
     if (!_isLimitAsserted()) {
       Logger::instance()->log("[Home] Limit not detected on %d — abort\r\n", (int)_axis);
-      _softstop_accel_override_sps2 = saved_override;
-      _softstop_floor_hz            = saved_floor;
-      return;
+      restoreHomeState();
+      return false;
     }
   }
 //  // If we arrived without the switch, try a short slow probe; else abort
@@ -324,33 +374,68 @@ void Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   // Back off a bit
   _softstop_accel_override_sps2 = 0.f;
-  move(!_homeTowardLimitDir, backoffSteps, slowHz, 0);
-  waitUntilDone();
+  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps, slowHz)) {
+    return false;
+  }
 
   // Fine approach (short)
   _softstop_accel_override_sps2 = home_brake_accel;
   _softStopOnLimit = true;
-  move(_homeTowardLimitDir, backoffSteps*8, slowHz, 0);
-  waitUntilDone();
+  if (!runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz)) {
+    return false;
+  }
   _softStopOnLimit = false;
 
   // Zero & move off switch slightly
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
-  move(!_homeTowardLimitDir, 100, slowHz, 0);
-  waitUntilDone();
+  if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz)) {
+    return false;
+  }
 
-  _softstop_accel_override_sps2 = saved_override;
-  _softstop_floor_hz            = saved_floor;
+  restoreHomeState();
+  return true;
 }
 
-void Stepper::waitUntilDone() {
-  xEventGroupWaitBits(
-      Orchestrator::getDoneEvents(),
-      _doneBit,
-      pdTRUE, pdTRUE,
-      portMAX_DELAY
-  );
+bool Stepper::waitUntilDone(uint32_t timeoutMs) {
+  if (_togglesRemaining == 0u) {
+    return true;
+  }
+
+  if (timeoutMs == 0u) {
+    xEventGroupWaitBits(
+        Orchestrator::getDoneEvents(),
+        _doneBit,
+        pdTRUE, pdTRUE,
+        portMAX_DELAY
+    );
+    return true;
+  }
+
+  const TickType_t pollTicks = stepperMsToAtLeast1Tick(kMoveWaitPollMs);
+  const uint32_t startMs = HAL_GetTick();
+  while (_togglesRemaining != 0u) {
+    const EventBits_t result = xEventGroupWaitBits(
+        Orchestrator::getDoneEvents(),
+        _doneBit,
+        pdTRUE, pdTRUE,
+        pollTicks
+    );
+    if ((result & _doneBit) != 0u || _togglesRemaining == 0u) {
+      return true;
+    }
+    if ((HAL_GetTick() - startMs) >= timeoutMs) {
+      Logger::instance()->log("[Stepper %d] wait timeout rem=%lu pos=%ld target=%ld\r\n",
+                              (int)_axis,
+                              (unsigned long)_togglesRemaining,
+                              (long)_pos,
+                              (long)_targetPos);
+      stop();
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      return false;
+    }
+  }
+  return true;
 }
 
 

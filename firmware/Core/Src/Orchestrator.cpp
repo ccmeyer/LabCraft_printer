@@ -803,12 +803,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
 		  break;
 		}
 		case CMD_RESET_PRINT: {
-			PressureRegulator::regP().resetSyringe();
+			PressureRegulator::regP().resetSyringe(CRASH_TASK_ORCH);
 			break;
 		}
 		case CMD_RESET_REFUEL: {
 		#if (LC_PRESSURE_PORTS > 1)
-		  PressureRegulator::regR().resetSyringe();
+		  PressureRegulator::regR().resetSyringe(CRASH_TASK_ORCH);
 		#else
 		  Logger::instance()->log("Legacy has no refuel channel");
 		#endif

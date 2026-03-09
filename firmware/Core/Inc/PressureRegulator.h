@@ -7,6 +7,7 @@
 
 #ifndef INC_PRESSUREREGULATOR_H_
 #define INC_PRESSUREREGULATOR_H_
+#include "CrashLog.h"
 #include "Stepper.h"
 #include "PressureSensor.h"
 #include "PressureTraceRecorder.h"
@@ -95,7 +96,7 @@ public:
   void homeWithValveFast();
   void requestSafetyHome();
 
-  void resetSyringe();
+  void resetSyringe(CrashTaskId callerWatchdogTaskId = CRASH_TASK_NONE);
 
   void openValve();
   void closeValve();
