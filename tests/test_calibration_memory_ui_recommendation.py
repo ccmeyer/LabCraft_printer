@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QPushButton, QSpinBox
 
-from tests.calibration_test_utils import ensure_calibration_import_stubs
+from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs(force=True)
@@ -304,3 +304,76 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
 
     assert applied
     assert refresh_calls == [True]
+
+
+def _build_real_dialog_for_layout(monkeypatch, qapp):
+    for method_name in (
+        "setup_shortcuts",
+        "start_droplet_camera",
+        "set_exposure_time",
+        "set_flash_delay",
+        "set_flash_duration",
+        "set_imaging_droplets",
+        "set_start_pressure",
+        "set_num_pressure_tests",
+        "populate_summary_table",
+    ):
+        monkeypatch.setattr(DropletImagingDialog, method_name, lambda self, *args, **kwargs: None)
+
+    droplet_camera_model = SimpleNamespace(
+        flash_duration=1000,
+        flash_delay=2000,
+        num_droplets=1,
+        exposure_time=5000,
+        droplet_image_updated=SignalStub(),
+        flash_signal=SignalStub(),
+    )
+    calibration_manager = SimpleNamespace(
+        analyzedImageUpdated=SignalStub(),
+        calibrationStageChanged=SignalStub(),
+        calibrationCompleted=SignalStub(),
+        calibrationQueueCompleted=SignalStub(),
+        calibrationError=SignalStub(),
+        position_diff_dict_signal=SignalStub(),
+        characterizationSummaryUpdated=SignalStub(),
+        readinessChanged=SignalStub(),
+        clear_calibration_memory_ui_recommendation_state=lambda: None,
+        get_record_mode_enabled=lambda: True,
+        _emit_readiness=lambda: None,
+    )
+    machine_model = SimpleNamespace(
+        get_print_pressure_bounds=lambda: (0.10, 5.00),
+        get_print_pulse_width=lambda: 1400,
+        get_current_print_pressure=lambda: 0.80,
+    )
+    model = SimpleNamespace(
+        droplet_camera_model=droplet_camera_model,
+        calibration_manager=calibration_manager,
+        machine_model=machine_model,
+    )
+    controller = SimpleNamespace(start_read_camera=lambda: None)
+    main_window = SimpleNamespace(color_dict={})
+    dialog = DropletImagingDialog(main_window, model, controller)
+    return dialog
+
+
+def test_real_dialog_uses_three_column_layout_with_separate_info_panel(monkeypatch, qapp):
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+
+    assert dialog.width() == 1600
+    assert dialog.layout.count() == 3
+    assert dialog.layout.itemAt(0).widget() is dialog.info_panel
+    assert dialog.layout.itemAt(1).widget() is dialog.control_panel
+    assert dialog.layout.itemAt(2).widget() is dialog.analysis_panel
+    assert dialog.recommendation_group.parentWidget() is dialog.info_panel
+    assert dialog.summary_group.parentWidget() is dialog.info_panel
+    assert dialog.manual_group.parentWidget() is dialog.control_panel
+    assert dialog.calib_group.parentWidget() is dialog.control_panel
+    assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.flash_button.minimumHeight() >= 32
+    assert dialog.calibrate_all_button.minimumHeight() >= 32
+    assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32
+    assert dialog.load_selected_button.minimumHeight() >= 32
+
+    dialog.deleteLater()

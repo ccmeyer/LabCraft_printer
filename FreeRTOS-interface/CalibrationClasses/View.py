@@ -206,22 +206,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
 
         self.setWindowTitle("Droplet Imaging")
-        self.resize(1200, 1000)
+        self.resize(1600, 1000)
 
         # =========================
-        # Main two-column layout
+        # Main three-column layout
         # =========================
         self.layout = QtWidgets.QHBoxLayout(self)
+        self.layout.setContentsMargins(8, 8, 8, 8)
+        self.layout.setSpacing(10)
 
-        # ---------- LEFT PANEL (fixed width): two groups ----------
-        left_panel = QtWidgets.QWidget()
-        left_panel_v = QtWidgets.QVBoxLayout(left_panel)
-        left_panel_v.setContentsMargins(6, 6, 6, 6)
-        left_panel_v.setSpacing(8)
+        # ---------- FAR-LEFT INFO PANEL (fixed width): memory + summary ----------
+        self.info_panel = QtWidgets.QWidget()
+        info_panel_v = QtWidgets.QVBoxLayout(self.info_panel)
+        info_panel_v.setContentsMargins(6, 6, 6, 6)
+        info_panel_v.setSpacing(8)
+
+        # ---------- LEFT CONTROL PANEL (fixed width): manual + calibration ----------
+        self.control_panel = QtWidgets.QWidget()
+        control_panel_v = QtWidgets.QVBoxLayout(self.control_panel)
+        control_panel_v.setContentsMargins(6, 6, 6, 6)
+        control_panel_v.setSpacing(8)
 
         # --- Group 1: Manual Controls ---
-        manual_group = QtWidgets.QGroupBox("Manual Controls")
-        manual_grid = QtWidgets.QGridLayout(manual_group)
+        self.manual_group = QtWidgets.QGroupBox("Manual Controls")
+        manual_grid = QtWidgets.QGridLayout(self.manual_group)
         manual_grid.setHorizontalSpacing(8)
         manual_grid.setVerticalSpacing(6)
         row = 0
@@ -287,8 +295,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         manual_grid.addWidget(self.benchmark_profile_button, row, 0, 1, 2); row += 1
 
         # --- Group 2: Calibration (with Starting Pressure) ---
-        calib_group = QtWidgets.QGroupBox("Calibration")
-        calib_grid = QtWidgets.QGridLayout(calib_group)
+        self.calib_group = QtWidgets.QGroupBox("Calibration")
+        calib_grid = QtWidgets.QGridLayout(self.calib_group)
         calib_grid.setHorizontalSpacing(8)
         calib_grid.setVerticalSpacing(6)
         crow = 0
@@ -417,12 +425,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         calib_grid.addWidget(self.stageLabel, crow, 0, 1, 2); crow += 1
 
-        # Add groups to left panel
-        left_panel_v.addWidget(manual_group)
-        left_panel_v.addWidget(calib_group)
+        for button in (
+            self.flash_button,
+            self.benchmark_profile_button,
+            self.prime_head_button,
+            self.calibrate_nozzle_button,
+            self.calibrate_focus_button,
+            self.calibrate_emergence_button,
+            self.calibrate_pressure_scan_button,
+            self.scan_trajectory_button,
+            self.calibrate_pressure_sweep_button,
+            self.calibrate_characterization_button,
+            self.calibrate_timecourse_button,
+            self.calibrate_all_button,
+            self.calibrate_all_pw_button,
+        ):
+            button.setMinimumHeight(32)
 
-        recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
-        recommendation_v = QtWidgets.QVBoxLayout(recommendation_group)
+        # Add groups to control panel
+        control_panel_v.addWidget(self.manual_group)
+        control_panel_v.addWidget(self.calib_group)
+
+        self.recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
+        recommendation_v = QtWidgets.QVBoxLayout(self.recommendation_group)
         recommendation_v.setContentsMargins(8, 8, 8, 8)
         recommendation_v.setSpacing(6)
 
@@ -444,6 +469,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.memory_recommendation_ignore_btn = QtWidgets.QPushButton("Keep Manual Start")
         self.memory_recommendation_ignore_btn.setEnabled(False)
         self.memory_recommendation_ignore_btn.clicked.connect(self.ignore_calibration_memory_recommendation)
+        self.memory_recommendation_refresh_btn.setMinimumHeight(32)
+        self.memory_recommendation_apply_btn.setMinimumHeight(32)
+        self.memory_recommendation_ignore_btn.setMinimumHeight(32)
         recommendation_btn_h.addWidget(self.memory_recommendation_refresh_btn)
         recommendation_btn_h.addWidget(self.memory_recommendation_apply_btn)
         recommendation_btn_h.addWidget(self.memory_recommendation_ignore_btn)
@@ -454,11 +482,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         recommendation_v.addWidget(self.memory_recommendation_mode_label)
         recommendation_v.addLayout(recommendation_btn_h)
 
-        left_panel_v.addWidget(recommendation_group)
+        info_panel_v.addWidget(self.recommendation_group)
 
         # --- Group 3: Characterization Summary ---
-        summary_group = QtWidgets.QGroupBox("Characterization Summary")
-        summary_v = QtWidgets.QVBoxLayout(summary_group)
+        self.summary_group = QtWidgets.QGroupBox("Characterization Summary")
+        self.summary_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        summary_v = QtWidgets.QVBoxLayout(self.summary_group)
 
         self.summary_table = QtWidgets.QTableWidget()
         self.summary_table = QtWidgets.QTableWidget()
@@ -480,35 +509,40 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
 
-        self.summary_table.setMinimumHeight(180)
-        self.summary_table.setMaximumHeight(300)
+        self.summary_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.summary_table.setMinimumHeight(220)
         self.summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.summary_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
-        summary_v.addWidget(self.summary_table)
+        summary_v.addWidget(self.summary_table, 1)
 
         # Load Selected button
         self.load_selected_button = QtWidgets.QPushButton("Load selected")
+        self.load_selected_button.setMinimumHeight(32)
         self.load_selected_button.setEnabled(False)
         self.load_selected_button.setToolTip("Select a row above, then click to apply its PW & pressure.")
         self.load_selected_button.clicked.connect(self.load_selected_summary_row)
         summary_v.addWidget(self.load_selected_button)
 
-        left_panel_v.addWidget(summary_group)
+        info_panel_v.addWidget(self.summary_group, 1)
 
-        left_panel_v.addStretch(1)
+        control_panel_v.addStretch(1)
 
-        # Keep left panel a stable width so buttons/labels don't resize
-        left_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
-        # Use size hint to set a fixed width after contents are laid out
-        left_panel.adjustSize()
-        left_panel.setFixedWidth(max(500, left_panel.sizeHint().width()))
+        # Keep the left-side panels stable so buttons and labels remain readable.
+        self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.info_panel.adjustSize()
+        self.control_panel.adjustSize()
+        self.info_panel.setFixedWidth(max(520, self.info_panel.sizeHint().width()))
+        self.control_panel.setFixedWidth(max(520, self.control_panel.sizeHint().width()))
 
-        # Add left panel to main layout
-        self.layout.addWidget(left_panel, 0)
-        self.layout.setStretchFactor(left_panel, 0)
+        # Add left-side panels to main layout.
+        self.layout.addWidget(self.info_panel, 0)
+        self.layout.setStretchFactor(self.info_panel, 0)
+        self.layout.addWidget(self.control_panel, 0)
+        self.layout.setStretchFactor(self.control_panel, 0)
 
         # ---------- RIGHT PANEL (image + analysis/logs): expands ----------
         self.analysis_layout = QtWidgets.QVBoxLayout()
@@ -611,11 +645,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_layout.addWidget(self.stage_table)
 
         # Add RIGHT to main layout; give it stretch to expand
-        right_container = QtWidgets.QWidget()
-        right_container.setLayout(self.analysis_layout)
-        right_container.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.layout.addWidget(right_container, 1)
-        self.layout.setStretchFactor(right_container, 1)
+        self.analysis_panel = QtWidgets.QWidget()
+        self.analysis_panel.setLayout(self.analysis_layout)
+        self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.layout.addWidget(self.analysis_panel, 1)
+        self.layout.setStretchFactor(self.analysis_panel, 1)
 
         # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
