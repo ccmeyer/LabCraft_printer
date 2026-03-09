@@ -741,22 +741,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if image is None:
             return QImage()  # return a null QImage if no frame
 
-        # shape should be (height, width, 3)
-        height, width, channels = image.shape
-        if channels != 3:
-            print("Warning: expected 3 channels (RGB), but got", channels)
+        arr = np.asarray(image)
+        if arr.ndim == 2:
+            height, width = arr.shape
+            return QImage(arr.data, width, height, width, QImage.Format_Grayscale8).copy()
+        if arr.ndim != 3:
+            print("Warning: expected image with 2 or 3 dimensions, but got", getattr(arr, "shape", None))
             return QImage()
-        
-        height, width, channels = image.shape
+
+        height, width, channels = arr.shape
+        if channels == 4:
+            bytes_per_line = channels * width
+            return QImage(arr.data, width, height, bytes_per_line, QImage.Format_RGBA8888).copy()
+        if channels != 3:
+            print("Warning: expected 3 or 4 channels, but got", channels)
+            return QImage()
+
         bytes_per_line = channels * width
         qimage = QImage(
-            image,                 # the actual data (byte array)
+            arr.data,              # the actual data (byte array)
             width,
             height,
             bytes_per_line,
             QImage.Format_RGB888  # We assume the data is truly RGB
-        )        
-        return qimage
+        )
+        return qimage.copy()
 
     def toggle_repeat_capture(self):
         """
@@ -915,7 +924,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.update_stage_and_log("Calibration Completed", "green")
         self.reset_calibration_buttons()
-        self._prompt_calibration_verdict(default_outcome="success")
+        QTimer.singleShot(0, lambda: self._prompt_calibration_verdict(default_outcome="success"))
 
     def on_calibration_queue_completed(self):
         """
@@ -935,34 +944,34 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_all_button.setText("Calibrate All")
         self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
-        self._prompt_calibration_verdict(default_outcome="failed", error_message=str(error_message))
+        QTimer.singleShot(
+            0,
+            lambda err=str(error_message): self._prompt_calibration_verdict(
+                default_outcome="failed",
+                error_message=err,
+            ),
+        )
 
     def _prompt_calibration_verdict(self, *, default_outcome: str, error_message: str = ""):
         mgr = self.model.calibration_manager
-        latest_dir = None
+        pending = None
         try:
-            latest_dir = mgr.get_latest_recording_directory()
+            pending = mgr.get_pending_process_verdict()
         except Exception:
-            latest_dir = None
-        if not latest_dir:
+            pending = None
+        if not pending:
             return
-
-        process_name = "unknown"
-        try:
-            process_name = os.path.basename(os.path.dirname(str(latest_dir))) or "unknown"
-        except Exception:
-            process_name = "unknown"
 
         dlg = CalibrationVerdictDialog(
             self,
-            process_name=process_name,
-            default_outcome=default_outcome,
-            error_message=error_message,
+            process_name=str(pending.get("process_name") or pending.get("phase_name") or "unknown"),
+            default_outcome=str(pending.get("default_outcome") or default_outcome or "unknown"),
+            error_message=str(pending.get("error_message") or error_message or ""),
         )
         if dlg.exec():
             verdict = dlg.get_verdict_payload()
             try:
-                mgr.submit_latest_process_verdict(
+                mgr.submit_pending_process_verdict(
                     outcome=verdict.get("outcome", "unknown"),
                     failure_summary=verdict.get("failure_summary", ""),
                     suspected_cause=verdict.get("suspected_cause", ""),
@@ -971,6 +980,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 )
             except Exception as e:
                 print(f"Failed to submit calibration verdict: {e}")
+        else:
+            try:
+                mgr.clear_pending_process_verdict(reason="ui_skipped")
+            except Exception:
+                pass
 
     def reset_calibration_buttons(self):
         """

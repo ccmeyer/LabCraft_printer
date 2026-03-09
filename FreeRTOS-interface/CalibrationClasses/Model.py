@@ -754,6 +754,7 @@ class CalibrationManager(QObject):
         self._calibration_memory_prior_candidate = None
         self._calibration_memory_prior_runtime = {}
         self._calibration_memory_ui_recommendation = {}
+        self._pending_process_verdict = None
 
         self.calibration_queue = []
 
@@ -1485,12 +1486,19 @@ class CalibrationManager(QObject):
             return None
 
     def _begin_process_recording(self, process_obj):
+        if process_obj is None:
+            return
+        try:
+            process_obj._recorder_process_name = process_obj.__class__.__name__
+            process_obj._recorder_phase_name = getattr(process_obj, "phase_name", None) or process_obj._recorder_process_name
+            process_obj._recorder_run_dir = None
+            process_obj._recorder_verdict_eligible = False
+        except Exception:
+            pass
         if not getattr(self, "record_mode_enabled", False):
             return
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
-            return
-        if process_obj is None:
             return
         try:
             process_name = process_obj.__class__.__name__
@@ -1509,8 +1517,84 @@ class CalibrationManager(QObject):
                     "run_dir": run_dir,
                 },
             )
+            process_obj._recorder_process_name = process_name
+            process_obj._recorder_phase_name = phase_name
+            process_obj._recorder_run_dir = run_dir
+            process_obj._recorder_verdict_eligible = bool(
+                getattr(process_obj, "supports_operator_verdict", True)
+            )
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to start process recording: {e}")
+
+    def _build_pending_process_verdict_context(
+        self,
+        process_obj,
+        *,
+        default_outcome: str,
+        error_message: str = "",
+    ) -> dict | None:
+        if process_obj is None:
+            return None
+        try:
+            run_dir = getattr(process_obj, "_recorder_run_dir", None)
+            eligible = bool(getattr(process_obj, "_recorder_verdict_eligible", False))
+            if not run_dir or not eligible:
+                return None
+            process_name = getattr(process_obj, "_recorder_process_name", None) or process_obj.__class__.__name__
+            phase_name = getattr(process_obj, "_recorder_phase_name", None) or getattr(process_obj, "phase_name", None) or process_name
+            return {
+                "run_dir": str(run_dir),
+                "process_name": str(process_name),
+                "phase_name": str(phase_name),
+                "default_outcome": str(default_outcome or "unknown"),
+                "error_message": str(error_message or ""),
+            }
+        except Exception:
+            return None
+
+    def get_pending_process_verdict(self):
+        pending = getattr(self, "_pending_process_verdict", None)
+        if not pending:
+            return None
+        return dict(pending)
+
+    def clear_pending_process_verdict(self, *, reason: str = ""):
+        pending = getattr(self, "_pending_process_verdict", None)
+        self._pending_process_verdict = None
+        return pending
+
+    def _disconnect_process_callbacks(self, process_obj):
+        if process_obj is None:
+            return
+        signal_pairs = (
+            ("stageChanged", self.onCalibrationStageChanged),
+            ("calibrationCompleted", self.onCalibrationCompleted),
+            ("calibrationError", self.onCalibrationError),
+            ("calibrationDataUpdated", self.onCalibrationDataUpdated),
+            ("presentImageSignal", self.onPresentImage),
+        )
+        for signal_name, slot in signal_pairs:
+            try:
+                signal_obj = getattr(process_obj, signal_name, None)
+                if signal_obj is not None:
+                    signal_obj.disconnect(slot)
+            except Exception:
+                pass
+
+    def _cleanup_finished_process(self, process_obj):
+        if process_obj is None:
+            return
+        self._disconnect_process_callbacks(process_obj)
+        try:
+            release_fn = getattr(process_obj, "release_runtime_resources", None)
+            if callable(release_fn):
+                release_fn()
+        except Exception:
+            pass
+        try:
+            process_obj.deleteLater()
+        except Exception:
+            pass
 
     def _finalize_process_recording(self, outcome: str, *, error_message: str = ""):
         recorder = getattr(self, "_process_recorder", None)
@@ -1607,7 +1691,7 @@ class CalibrationManager(QObject):
             print(f"[CalibrationRecorder] Failed to save capture image: {e}")
             return None
 
-    def submit_latest_process_verdict(
+    def submit_pending_process_verdict(
         self,
         *,
         outcome: str,
@@ -1616,10 +1700,15 @@ class CalibrationManager(QObject):
         notes: str = "",
         submitted_by: str = "ui",
     ):
+        pending = getattr(self, "_pending_process_verdict", None)
+        if not pending:
+            return None
         if not getattr(self, "record_mode_enabled", False):
+            self._pending_process_verdict = None
             return None
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
+            self._pending_process_verdict = None
             return None
         try:
             verdict = recorder.write_verdict(
@@ -1629,14 +1718,29 @@ class CalibrationManager(QObject):
                 notes=str(notes or ""),
                 submitted_by=str(submitted_by or "ui"),
             )
-            recorder.append_event(
-                "verdict_submitted",
-                verdict or {},
-            )
             return verdict
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to write verdict: {e}")
             return None
+        finally:
+            self._pending_process_verdict = None
+
+    def submit_latest_process_verdict(
+        self,
+        *,
+        outcome: str,
+        failure_summary: str = "",
+        suspected_cause: str = "",
+        notes: str = "",
+        submitted_by: str = "ui",
+    ):
+        return self.submit_pending_process_verdict(
+            outcome=outcome,
+            failure_summary=failure_summary,
+            suspected_cause=suspected_cause,
+            notes=notes,
+            submitted_by=submitted_by,
+        )
 
     def get_latest_recording_directory(self):
         try:
@@ -1917,6 +2021,7 @@ class CalibrationManager(QObject):
 
     def start_active_calibration(self):
         if self.activeCalibration is not None:
+            self.clear_pending_process_verdict(reason="starting_new_process")
             # Ensure we have an open run to write into
             if self._run_idx is None:
                 # Create a default session in CWD if the caller forgot
@@ -1935,6 +2040,7 @@ class CalibrationManager(QObject):
         self._pw_values = []
         self._pw_index = -1
         self._cancel_pw_apply_wait()
+        self.clear_pending_process_verdict(reason="process_stopped")
 
         if self.activeCalibration is not None:
             # Prefer graceful finalize if the process supports it
@@ -1945,7 +2051,9 @@ class CalibrationManager(QObject):
                     return
                 except Exception:
                     pass
+            proc = self.activeCalibration
             self.activeCalibration.stop()
+            self._cleanup_finished_process(proc)
             self.activeCalibration = None
         if len(self.calibration_queue) > 0:
             self.clear_calibration_queue()
@@ -2158,7 +2266,7 @@ class CalibrationManager(QObject):
         self._try_start_process(HeadPrimeCalibrationProcess)
     
     def start_nozzle_calibration(self):
-        self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model)
+        self.activeCalibration = NozzlePositionCalibrationProcess(self, self.model, parent=self)
         self.start_active_calibration()
 
     def start_nozzle_focus_calibration(self):
@@ -2168,7 +2276,7 @@ class CalibrationManager(QObject):
         self._try_start_process(DropletEmergenceCalibrationProcess)
 
     def start_pressure_calibration(self):
-        self.activeCalibration = PressureCalibrationProcess(self, self.model)
+        self.activeCalibration = PressureCalibrationProcess(self, self.model, parent=self)
         self.start_active_calibration()
 
     # def start_pressure_scan_calibration(self):
@@ -2512,8 +2620,14 @@ class CalibrationManager(QObject):
 
     @Slot()
     def onCalibrationCompleted(self):
+        process_obj = self.activeCalibration
         self.calibrationStageChanged.emit("Calibration completed successfully", "green")
         self._finalize_process_recording("completed")
+        self._pending_process_verdict = self._build_pending_process_verdict_context(
+            process_obj,
+            default_outcome="success",
+        )
+        self._cleanup_finished_process(process_obj)
         self.activeCalibration = None
         self._emit_readiness()
         self.calibrationCompleted.emit()
@@ -2525,14 +2639,15 @@ class CalibrationManager(QObject):
 
     @Slot(str)
     def onCalibrationError(self, error_message):
+        process_obj = self.activeCalibration
         self.calibrationStageChanged.emit("Calibration error: " + error_message, "red")
         self._finalize_process_recording("error", error_message=str(error_message))
-        # NEW: hard-stop the running calibration FSM to prevent any queued transitions
-        if self.activeCalibration is not None:
-            try:
-                self.activeCalibration.stop()
-            except Exception:
-                pass
+        self._pending_process_verdict = self._build_pending_process_verdict_context(
+            process_obj,
+            default_outcome="failed",
+            error_message=str(error_message or ""),
+        )
+        self._cleanup_finished_process(process_obj)
         self.activeCalibration = None
         self.calibrationError.emit(error_message)
         if len(self.calibration_queue) > 0:
@@ -2703,6 +2818,8 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(msg)
             return False
 
+        kwargs = dict(kwargs or {})
+        kwargs.setdefault("parent", self)
         self.activeCalibration = proc_cls(self, self.model, *args, **kwargs)
         self.start_active_calibration()
         return True
@@ -2841,6 +2958,8 @@ class CalibrationManager(QObject):
         return rows
     
 class BaseCalibrationProcess(QObject):
+    supports_operator_verdict = True
+
     # Signal to update the current stage text.
     stageChanged = Signal(str)
 
@@ -2863,7 +2982,7 @@ class BaseCalibrationProcess(QObject):
         self.model = model
         # The state machine will govern the asynchronous flow.
         self.state_machine = QStateMachine(self)
-        self.phase_name = None
+        self.phase_name = getattr(type(self), "phase_name", None)
         self._active_timers = set()
         self._last_capture_refs = {}
         self._active_capture_pair_id = None
@@ -2877,6 +2996,15 @@ class BaseCalibrationProcess(QObject):
         """Stop the state machine if needed."""
         self._record_event("state_machine_stop", {"phase_name": str(self.phase_name or "")})
         # Cancel all active timers.
+        self.release_runtime_resources()
+        self.stageChanged.emit("Calibration stopped")
+
+    def onCalibrationCompleted(self):
+        """Emit the completion signal."""
+        self.calibrationCompleted.emit()
+
+    def release_runtime_resources(self):
+        """Stop timers and the state machine without emitting new UI/process events."""
         for t in list(self._active_timers):
             try:
                 t.stop()
@@ -2885,12 +3013,11 @@ class BaseCalibrationProcess(QObject):
                 pass
             finally:
                 self._active_timers.discard(t)
-        self.state_machine.stop()
-        self.stageChanged.emit("Calibration stopped")
-
-    def onCalibrationCompleted(self):
-        """Emit the completion signal."""
-        self.calibrationCompleted.emit()
+        try:
+            if self.state_machine.isRunning():
+                self.state_machine.stop()
+        except Exception:
+            pass
 
     # ---------- recorder helpers ----------
     def _record_event(self, event_type: str, payload: dict | None = None, *, state_name: str | None = None, level: str = "info"):
@@ -3265,6 +3392,7 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
       4) restores the original settings
     """
     phase_name = "head_prime"
+    supports_operator_verdict = False
 
     # ---------- minimal readiness check ----------
     # @staticmethod
@@ -3285,6 +3413,7 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
 
     def __init__(self, calibration_manager, model, parent=None):
         super().__init__(calibration_manager, model, parent)
+        self.phase_name = "head_prime"
 
         # Snapshots
         self._orig = None
@@ -3358,9 +3487,10 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
         }
 
         # Apply priming settings; proceed when controller emits settingsChangeCompleted
-        self.calibration_manager.changeSettingsRequested.emit(
+        self._request_settings_with_recording(
             self._priming,
-            self.calibration_manager.emitSettingsChangeCompleted
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="head_prime_apply_settings",
         )
 
     @Slot()
@@ -3419,9 +3549,10 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
             pass
 
         # Restore and move to final on settingsChangeCompleted
-        self.calibration_manager.changeSettingsRequested.emit(
+        self._request_settings_with_recording(
             restore,
-            self.calibration_manager.emitSettingsChangeCompleted
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="head_prime_restore_settings",
         )
 
 class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
