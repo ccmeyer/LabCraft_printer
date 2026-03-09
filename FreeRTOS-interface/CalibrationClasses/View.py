@@ -199,6 +199,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_preview_payload = None
         self._memory_recommendation_preview = None
         self._memory_recommendation_logged_fingerprint = None
+        self._memory_recommendation_refresh_active = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -1261,7 +1262,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _bridge_get_current_design_droplet_volume_nL(self) -> float | None:
         em = getattr(self.model, "experiment_model", None)
         reagent = self._bridge_get_current_reagent_name()
-        self.refresh_calibration_memory_recommendation()
         if em is None or not reagent:
             return None
         try:
@@ -1492,56 +1492,63 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.memory_recommendation_ignore_btn.setToolTip("Keep the current manual startup values and ignore this recommendation.")
 
     def refresh_calibration_memory_recommendation(self, *, force_log: bool = False):
-        cm = self._bridge_get_calibration_manager()
-        if cm is None:
-            self._memory_recommendation_preview = None
-            self._render_calibration_memory_recommendation({})
-            return None
-        try:
-            target_pulse = int(self.print_pulse_width_spinbox.value())
-        except Exception:
-            target_pulse = None
-        target_volume = self._get_calibration_memory_target_volume_nL()
-        try:
-            preview = cm.preview_calibration_memory_recommendation(
-                target_pulse_width_us=target_pulse,
-                target_volume_nl=target_volume,
-            )
-        except Exception as e:
-            print(f"[CalibrationMemoryUI] preview failed: {e}")
-            preview = {
-                "mode": "advisory",
-                "candidate_found": False,
-                "prior": None,
-                "qualification": {},
-                "seed_values": {},
-                "manual_apply_allowed": False,
-                "manual_apply_reason": "preview_error",
-            }
-        self._memory_recommendation_preview = dict(preview or {})
-        self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
+        if getattr(self, "_memory_recommendation_refresh_active", False):
+            return dict(getattr(self, "_memory_recommendation_preview", {}) or {})
 
-        prior = dict(self._memory_recommendation_preview.get("prior") or {})
-        fingerprint = self._calibration_memory_preview_fingerprint(self._memory_recommendation_preview)
-        should_log = bool(force_log)
-        if not should_log:
+        self._memory_recommendation_refresh_active = True
+        try:
+            cm = self._bridge_get_calibration_manager()
+            if cm is None:
+                self._memory_recommendation_preview = None
+                self._render_calibration_memory_recommendation({})
+                return None
             try:
-                should_log = bool(self.isVisible())
+                target_pulse = int(self.print_pulse_width_spinbox.value())
             except Exception:
-                should_log = True
-        if prior and should_log and (force_log or fingerprint != self._memory_recommendation_logged_fingerprint):
+                target_pulse = None
+            target_volume = self._get_calibration_memory_target_volume_nL()
             try:
-                cm.record_calibration_memory_ui_interaction(
-                    "shown",
-                    self._memory_recommendation_preview,
-                    extra={"visible_in_dialog": True},
+                preview = cm.preview_calibration_memory_recommendation(
+                    target_pulse_width_us=target_pulse,
+                    target_volume_nl=target_volume,
                 )
             except Exception as e:
-                print(f"[CalibrationMemoryUI] show log failed: {e}")
-            self._memory_recommendation_logged_fingerprint = fingerprint
-        elif not prior:
-            self._memory_recommendation_logged_fingerprint = None
-        return self._memory_recommendation_preview
+                print(f"[CalibrationMemoryUI] preview failed: {e}")
+                preview = {
+                    "mode": "advisory",
+                    "candidate_found": False,
+                    "prior": None,
+                    "qualification": {},
+                    "seed_values": {},
+                    "manual_apply_allowed": False,
+                    "manual_apply_reason": "preview_error",
+                }
+            self._memory_recommendation_preview = dict(preview or {})
+            self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
+
+            prior = dict(self._memory_recommendation_preview.get("prior") or {})
+            fingerprint = self._calibration_memory_preview_fingerprint(self._memory_recommendation_preview)
+            should_log = bool(force_log)
+            if not should_log:
+                try:
+                    should_log = bool(self.isVisible())
+                except Exception:
+                    should_log = True
+            if prior and should_log and (force_log or fingerprint != self._memory_recommendation_logged_fingerprint):
+                try:
+                    cm.record_calibration_memory_ui_interaction(
+                        "shown",
+                        self._memory_recommendation_preview,
+                        extra={"visible_in_dialog": True},
+                    )
+                except Exception as e:
+                    print(f"[CalibrationMemoryUI] show log failed: {e}")
+                self._memory_recommendation_logged_fingerprint = fingerprint
+            elif not prior:
+                self._memory_recommendation_logged_fingerprint = None
+            return self._memory_recommendation_preview
+        finally:
+            self._memory_recommendation_refresh_active = False
 
     def apply_calibration_memory_recommendation(self):
         preview = dict(getattr(self, "_memory_recommendation_preview", None) or {})
@@ -1838,6 +1845,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
             self._bridge_clear_preview()
             self._bridge_refresh_design_labels()
+            self.refresh_calibration_memory_recommendation()
             QtWidgets.QMessageBox.information(
                 self, "Applied (Fill)",
                 (
@@ -1882,6 +1890,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self._bridge_clear_preview()
         self._bridge_refresh_design_labels()
+        self.refresh_calibration_memory_recommendation()
         QtWidgets.QMessageBox.information(
             self, "Applied",
             f"Updated {payload['factor_name']}{('/' + payload['option_name']) if payload['option_name'] else ''} to {new_dv:.3f} nL."

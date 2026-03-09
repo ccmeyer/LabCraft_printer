@@ -8,6 +8,7 @@ from tests.calibration_test_utils import ensure_calibration_import_stubs
 
 ensure_calibration_import_stubs(force=True)
 
+import CalibrationClasses.View as calibration_view
 from CalibrationClasses.View import DropletImagingDialog
 
 
@@ -99,6 +100,7 @@ def _make_dialog_stub(preview, qapp):
     dialog.start_pressure_spin.setValue(0.80)
     dialog._memory_recommendation_preview = None
     dialog._memory_recommendation_logged_fingerprint = None
+    dialog._memory_recommendation_refresh_active = False
     dialog.print_pulse_width_changes = []
     dialog.start_pressure_changes = []
     dialog._bridge_get_calibration_manager = lambda: manager
@@ -124,6 +126,19 @@ def _make_dialog_stub(preview, qapp):
         DropletImagingDialog.ignore_calibration_memory_recommendation.__get__(dialog, DropletImagingDialog)
     )
     return dialog, manager
+
+
+def _bind_real_target_volume_helpers(dialog):
+    dialog._bridge_get_current_reagent_name = (
+        DropletImagingDialog._bridge_get_current_reagent_name.__get__(dialog, DropletImagingDialog)
+    )
+    dialog._bridge_get_current_design_droplet_volume_nL = (
+        DropletImagingDialog._bridge_get_current_design_droplet_volume_nL.__get__(dialog, DropletImagingDialog)
+    )
+    dialog._get_calibration_memory_target_volume_nL = (
+        DropletImagingDialog._get_calibration_memory_target_volume_nL.__get__(dialog, DropletImagingDialog)
+    )
+    return dialog
 
 
 def test_recommendation_panel_shows_exact_pair_prior(qapp):
@@ -203,3 +218,89 @@ def test_ignore_recommendation_logs_manual_choice(qapp):
     assert manager.records[-1]["action"] == "ignored"
     assert manager.records[-1]["extra"]["reason"] == "user_kept_manual_start"
     assert "Keeping manual calibration start values" in dialog.stageLabel.text()
+
+
+def test_design_droplet_volume_getter_is_side_effect_free_for_design_reagent(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(candidate_found=False), qapp)
+    dialog.model.experiment_model = SimpleNamespace(
+        metadata={"fill_droplet_volume_nL": 10.0},
+        get_fill_reagent_name=lambda: "Water",
+        find_option_by_reagent_name=lambda reagent: (
+            (("glycerol", None), SimpleNamespace(droplet_nL=12.5))
+            if reagent == "50% Glycerol"
+            else None
+        ),
+    )
+    dialog.model.rack_model = SimpleNamespace(get_gripper_printer_head=lambda: None)
+    manager._safe_get_stock_solution = lambda: "50% Glycerol"
+    _bind_real_target_volume_helpers(dialog)
+    dialog.refresh_calibration_memory_recommendation = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("design droplet-volume getter should not trigger recommendation refresh")
+    )
+
+    target = dialog._bridge_get_current_design_droplet_volume_nL()
+
+    assert target == pytest.approx(12.5)
+
+
+def test_refresh_recommendation_uses_real_design_droplet_volume_without_recursing(qapp):
+    dialog, manager = _make_dialog_stub(_make_preview(), qapp)
+    dialog.model.experiment_model = SimpleNamespace(
+        metadata={"fill_droplet_volume_nL": 10.0},
+        get_fill_reagent_name=lambda: "Water",
+        find_option_by_reagent_name=lambda reagent: (
+            (("glycerol", None), SimpleNamespace(droplet_nL=12.5))
+            if reagent == "50% Glycerol"
+            else None
+        ),
+    )
+    dialog.model.rack_model = SimpleNamespace(get_gripper_printer_head=lambda: None)
+    manager._safe_get_stock_solution = lambda: "50% Glycerol"
+    _bind_real_target_volume_helpers(dialog)
+
+    preview = dialog.refresh_calibration_memory_recommendation()
+
+    assert preview["candidate_found"] is True
+    assert manager.preview_requests[0]["target_volume_nl"] == pytest.approx(12.5)
+
+
+def test_refresh_recommendation_reentrancy_guard_returns_cached_preview(qapp):
+    dialog, _manager = _make_dialog_stub(_make_preview(candidate_found=False), qapp)
+    dialog._memory_recommendation_preview = {"candidate_found": False, "prior": None}
+    dialog._memory_recommendation_refresh_active = True
+
+    preview = dialog.refresh_calibration_memory_recommendation()
+
+    assert preview == {"candidate_found": False, "prior": None}
+
+
+def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qapp):
+    refresh_calls = []
+    applied = []
+    dialog = SimpleNamespace()
+    dialog._bridge_preview_payload = {
+        "factor_name": "glycerol",
+        "option_name": None,
+        "new_droplet_nL": 12.0,
+        "n_stocks": 1,
+    }
+    dialog.model = SimpleNamespace(
+        experiment_model=SimpleNamespace(
+            get_plan_for_key=lambda _key: {"stocks": [{"droplet_volume_nL": 10.0}]},
+            apply_droplet_volume_for_option=lambda *args, **kwargs: applied.append((args, kwargs)),
+        )
+    )
+    dialog._bridge_clear_preview = lambda: None
+    dialog._bridge_refresh_design_labels = lambda: None
+    dialog.refresh_calibration_memory_recommendation = lambda: refresh_calls.append(True)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+    monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+    dialog._apply_previewed_droplet_volume = (
+        DropletImagingDialog._apply_previewed_droplet_volume.__get__(dialog, DropletImagingDialog)
+    )
+
+    dialog._apply_previewed_droplet_volume()
+
+    assert applied
+    assert refresh_calls == [True]
