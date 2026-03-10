@@ -2396,12 +2396,16 @@ class CalibrationManager(QObject):
         *,
         sphere_delay_us=10000,
         imaging_z_offset_steps=-3500,
+        max_nominal_delay_us=15000,
+        min_nozzle_clearance_z_steps=1000,
         replicates_per_pressure=20,
         order="desc",
     ):
         self._try_start_process(PressureSweepCharacterizationProcess,
             sphere_delay_us=sphere_delay_us,
             imaging_z_offset_steps=imaging_z_offset_steps,
+            max_nominal_delay_us=max_nominal_delay_us,
+            min_nozzle_clearance_z_steps=min_nozzle_clearance_z_steps,
             replicates_per_pressure=replicates_per_pressure,
             order=order
         )
@@ -11060,6 +11064,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  *,
                  sphere_delay_us: int = 10000,
                  imaging_z_offset_steps: int = -3500,
+                 max_nominal_delay_us: int = 15000,
+                 min_nozzle_clearance_z_steps: int = 1000,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
@@ -11126,12 +11132,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.sphere_delay_us = int(sphere_delay_us)
         self.targeting_mode = "fixed_z_plane"
         self.imaging_z_offset_steps = int(imaging_z_offset_steps)
+        self.max_nominal_delay_us = int(max(0, int(max_nominal_delay_us)))
+        self.min_nozzle_clearance_z_steps = int(max(0, int(min_nozzle_clearance_z_steps)))
         self.min_delay_us, self.max_delay_us = 0, 50000
         nozzle_z = int(self.nozzle_center_machine.get('Z', 0)) if self.nozzle_center_machine else 0
         self.target_z_steps = int(nozzle_z + self.imaging_z_offset_steps)
+        self.nozzle_clearance_limit_z_steps = int(nozzle_z - self.min_nozzle_clearance_z_steps)
         self.current_plan_record = None
         self.nominal_target_xyz = None
         self.nominal_target_delay_us = None
+        self._forced_delay_us = None
         self._ensure_stage_bounds_initialized()
 
         # pull per-pressure trajectory fits
@@ -11409,6 +11419,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # characterization loop
         self.state_char.addTransition(self.continueCap,  self.state_capture)
+        self.state_char.addTransition(self.continueSearch, self.state_setDelay)
         self.state_char.addTransition(self.analyzeBatch, self.state_anBatch)
         self.state_char.addTransition(self.moveDone,   self.state_capture)  # recapture after focus move
         
@@ -11911,6 +11922,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     def _reset_char_buffers(self):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
+        self._forced_delay_us = None
         self.current_delay_us = None
         self.num_images = self.repl_target
         self.image_counter = 0
@@ -12038,6 +12050,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "delay_us": int(delay_us),
                 "dt_us": int(dt_us),
             }
+        max_nominal_delay_us = int(getattr(self, "max_nominal_delay_us", 0) or 0)
+        if max_nominal_delay_us > 0 and int(delay_us) > int(max_nominal_delay_us):
+            return {
+                "ok": False,
+                "reason": "target_plane_delay_over_limit",
+                "delay_us": int(delay_us),
+                "dt_us": int(dt_us),
+                "max_nominal_delay_us": int(max_nominal_delay_us),
+            }
         return {
             "ok": True,
             "target_delay_us": int(delay_us),
@@ -12112,6 +12133,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         rec = getattr(self, "current_plan_record", None)
         if not isinstance(rec, dict):
             return {}
+        nozzle_center_machine = getattr(self, "nozzle_center_machine", None) or {}
+        base_nozzle_z = int(nozzle_center_machine.get("Z", 0))
         out = {
             "targeting_mode": str(rec.get("targeting_mode") or getattr(self, "targeting_mode", "unknown")),
             "imaging_z_offset_steps": int(
@@ -12119,6 +12142,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             ),
             "target_z_steps": int(rec.get("target_z_steps", getattr(self, "target_z_steps", 0))),
             "target_plane_reachable": bool(rec.get("target_plane_reachable", False)),
+            "max_nominal_delay_us": int(getattr(self, "max_nominal_delay_us", 0)),
+            "min_nozzle_clearance_z_steps": int(getattr(self, "min_nozzle_clearance_z_steps", 0)),
+            "nozzle_clearance_limit_z_steps": int(
+                getattr(self, "nozzle_clearance_limit_z_steps", base_nozzle_z)
+            ),
         }
         nominal_delay_us = rec.get("nominal_delay_us")
         if nominal_delay_us is not None:
@@ -12136,6 +12164,149 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _clamp_delay(self, d_us: int) -> int:
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
+
+    def _nozzle_clearance_limit_z(self):
+        nozzle_center_machine = getattr(self, "nozzle_center_machine", None)
+        if not isinstance(nozzle_center_machine, dict):
+            return None
+        min_clearance = int(getattr(self, "min_nozzle_clearance_z_steps", 0) or 0)
+        if min_clearance <= 0:
+            return None
+        return int(
+            getattr(
+                self,
+                "nozzle_clearance_limit_z_steps",
+                int(nozzle_center_machine.get("Z", 0)) - int(min_clearance),
+            )
+        )
+
+    def _clearance_delay_increment_us(self) -> int:
+        offsets = list(getattr(self, "_delay_offsets_us", []) or [])
+        if len(offsets) >= 2:
+            try:
+                return int(max(500, abs(int(offsets[1]))))
+            except Exception:
+                pass
+        return 500
+
+    def _compute_nozzle_clearance_retarget_delay(self):
+        limit_z = self._nozzle_clearance_limit_z()
+        if limit_z is None:
+            return {"ok": False, "reason": "nozzle_clearance_unconfigured", "details": {}}
+        solved = self._solve_delay_for_target_z_steps(
+            self.vec_steps_per_s,
+            int(limit_z),
+        )
+        if not bool(solved.get("ok", False)):
+            reason = str(solved.get("reason") or "target_plane_unreachable")
+            return {
+                "ok": False,
+                "reason": (
+                    "nozzle_clearance_delay_over_limit"
+                    if reason == "target_plane_delay_over_limit"
+                    else f"nozzle_clearance_{reason}"
+                ),
+                "details": dict(solved),
+            }
+
+        current_anchor = getattr(self, "current_delay_us", None)
+        if current_anchor is None:
+            current_anchor = getattr(self, "target_delay_us", None)
+        current_anchor = int(current_anchor or 0)
+        proposed_delay_us = int(
+            max(
+                int(solved["target_delay_us"]),
+                int(current_anchor) + int(self._clearance_delay_increment_us()),
+            )
+        )
+        max_nominal_delay_us = int(getattr(self, "max_nominal_delay_us", 0) or 0)
+        if max_nominal_delay_us > 0 and int(proposed_delay_us) > int(max_nominal_delay_us):
+            return {
+                "ok": False,
+                "reason": "nozzle_clearance_delay_over_limit",
+                "details": {
+                    "proposed_delay_us": int(proposed_delay_us),
+                    "max_nominal_delay_us": int(max_nominal_delay_us),
+                    "solved_delay_us": int(solved["target_delay_us"]),
+                },
+            }
+
+        proposed_delay_us = int(self._clamp_delay(proposed_delay_us))
+        if int(proposed_delay_us) <= int(current_anchor):
+            return {
+                "ok": False,
+                "reason": "nozzle_clearance_delay_not_increasing",
+                "details": {
+                    "proposed_delay_us": int(proposed_delay_us),
+                    "current_delay_us": int(current_anchor),
+                },
+            }
+        return {
+            "ok": True,
+            "target_delay_us": int(proposed_delay_us),
+            "details": dict(solved),
+        }
+
+    def _maybe_retarget_delay_for_nozzle_clearance(
+        self,
+        proposed_xyz,
+        *,
+        source: str,
+        center_px=None,
+        move_xyz=None,
+        move_raw_xyz=None,
+    ) -> bool:
+        proposed_xyz = tuple(int(v) for v in proposed_xyz)
+        limit_z = self._nozzle_clearance_limit_z()
+        if limit_z is None:
+            return False
+        limit_z = int(limit_z)
+        proposed_z = int(proposed_xyz[2])
+        if int(proposed_z) <= int(limit_z):
+            return False
+
+        retarget = self._compute_nozzle_clearance_retarget_delay()
+        payload = {
+            "source": str(source or ""),
+            "proposed_target_xyz": [int(v) for v in proposed_xyz],
+            "proposed_target_z_steps": int(proposed_z),
+            "nozzle_clearance_limit_z_steps": int(limit_z),
+            "current_delay_us": (
+                None if getattr(self, "current_delay_us", None) is None else int(self.current_delay_us)
+            ),
+            "target_delay_us": int(getattr(self, "target_delay_us", 0) or 0),
+        }
+        if center_px is not None:
+            payload["center_px"] = [int(center_px[0]), int(center_px[1])]
+        if move_xyz is not None:
+            payload["move_xyz"] = [int(v) for v in move_xyz]
+        if move_raw_xyz is not None:
+            payload["move_raw_xyz"] = [int(v) for v in move_raw_xyz]
+
+        if not bool(retarget.get("ok", False)):
+            payload.update(dict(retarget.get("details") or {}))
+            payload["reason"] = str(retarget.get("reason") or "nozzle_clearance_delay_unavailable")
+            self._record_decision("nozzle_clearance_delay_unavailable", payload)
+            self._invalidate_current_pressure(
+                str(payload["reason"]),
+                stage_message="Nozzle clearance limit hit and no usable later delay exists -> skip pressure",
+            )
+            return True
+
+        forced_delay_us = int(retarget["target_delay_us"])
+        self._forced_delay_us = int(forced_delay_us)
+        self.target_delay_us = int(forced_delay_us)
+        payload.update(dict(retarget.get("details") or {}))
+        payload["forced_delay_us"] = int(forced_delay_us)
+        self.stageChanged.emit(
+            f"Nozzle clearance limit hit -> increasing flash delay to {forced_delay_us} us"
+        )
+        self._record_decision("nozzle_clearance_delay_retarget", payload)
+        self._set_startup_centering_mode(str(source or "nozzle_clearance_delay_retarget"))
+        self._reset_search_consistency_after_motion()
+        self._reset_contour_tracker()
+        self.continueSearch.emit()
+        return True
 
     def _make_pressure_grid(self, p_lo: float, p_hi: float, step: float) -> list[float]:
         """Inclusive grid from p_lo to p_hi using step, rounded nicely."""
@@ -12261,6 +12432,35 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self._invalidate_current_pressure(
                 str(elapsed_reason),
                 stage_message=f"Search timeout ({elapsed_s:.1f}s) → skip pressure",
+            )
+            return
+
+        forced_delay_us = getattr(self, "_forced_delay_us", None)
+        if forced_delay_us is not None:
+            forced_delay_us = int(forced_delay_us)
+            self._forced_delay_us = None
+            max_nominal_delay_us = int(getattr(self, "max_nominal_delay_us", 0) or 0)
+            if max_nominal_delay_us > 0 and int(forced_delay_us) > int(max_nominal_delay_us):
+                self._invalidate_current_pressure(
+                    "nozzle_clearance_delay_over_limit",
+                    stage_message="Nozzle clearance retarget exceeded delay limit -> skip pressure",
+                )
+                return
+            prev_delay = self.current_delay_us
+            self.target_delay_us = self._clamp_delay(int(forced_delay_us))
+            self.current_delay_us = int(self.target_delay_us)
+            self._delay_try_index = 0
+            self._search_confirm_same_delay_pending = False
+            self._search_reacquire_same_delay_remaining = 0
+            if prev_delay is None or int(self.current_delay_us) != int(prev_delay):
+                self._reset_contour_tracker()
+            self.stageChanged.emit(
+                f"Setting flash delay to {self.current_delay_us} us (nozzle clearance retarget)"
+            )
+            self._request_settings_with_timeout(
+                {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                on_done=self.delayApplied.emit,
+                context="pressure_sweep_set_delay_nozzle_clearance",
             )
             return
 
@@ -12834,6 +13034,20 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             int(dZ_raw),
             tracking_mode=bool(getattr(self, "_centered", False)),
         )
+        cur = self.model.machine_model.get_current_position_dict()
+        proposed_xyz = self._clamp_xyz(
+            cur['X'] + dX,
+            cur['Y'],
+            cur['Z'] + dZ,
+        )
+        if self._maybe_retarget_delay_for_nozzle_clearance(
+            proposed_xyz,
+            source="center_recenter_move",
+            center_px=cxy,
+            move_xyz=(int(dX), 0, int(dZ)),
+            move_raw_xyz=(int(dX_raw), 0, int(dZ_raw)),
+        ):
+            return
 
         # Count recenter attempt during centering
         self._recenter_moves += 1
@@ -12872,12 +13086,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             schedule_same_delay_retry=True,
         )
         self._reset_search_consistency_after_motion()
-        cur = self.model.machine_model.get_current_position_dict()
-        self._safe_move_abs(self._clamp_xyz(
-            cur['X'] + dX,
-            cur['Y'],
-            cur['Z'] + dZ
-        ))
+        self._safe_move_abs(proposed_xyz)
 
     @Slot()
     def onCharacterizeLoop(self):
@@ -13394,6 +13603,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         )
 
         cur = self.model.machine_model.get_current_position_dict()
+        proposed_xyz = self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ)
+        if self._maybe_retarget_delay_for_nozzle_clearance(
+            proposed_xyz,
+            source="center_first_recenter",
+            center_px=center_px,
+            move_xyz=(int(dX), 0, int(dZ)),
+            move_raw_xyz=(int(dX_raw), 0, int(dZ_raw)),
+        ):
+            return
         self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
         self._char_need_capture = True  # after motion, take a fresh frame
         self._set_startup_centering_mode(
@@ -13410,7 +13628,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             },
         )
         self._reset_search_consistency_after_motion()
-        self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
+        self._safe_move_abs(proposed_xyz)
 
     def _check_boundary_and_maybe_recenter(self, center_px) -> bool:
         """
@@ -13456,6 +13674,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         )
 
         cur = self.model.machine_model.get_current_position_dict()
+        proposed_xyz = self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ)
+        if self._maybe_retarget_delay_for_nozzle_clearance(
+            proposed_xyz,
+            source="boundary_recenter",
+            center_px=(avgx, avgy),
+            move_xyz=(int(dX), 0, int(dZ)),
+            move_raw_xyz=(int(dX_raw), 0, int(dZ_raw)),
+        ):
+            self._oob_streak = 0
+            self._oob_positions.clear()
+            return True
         self.stageChanged.emit(f"2x out-of-bound → recenter to averaged offset: move XZ=({dX},{dZ})")
         self._oob_streak = 0
         self._oob_positions.clear()
@@ -13483,7 +13712,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             },
         )
         self._reset_search_consistency_after_motion()
-        self._safe_move_abs(self._clamp_xyz(cur['X'] + dX, cur['Y'], cur['Z'] + dZ))
+        self._safe_move_abs(proposed_xyz)
         return True
 
     def _update_y_focus_offset(self):
