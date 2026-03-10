@@ -152,6 +152,7 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
 void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*accelSteps ignored*/) {
   if (!_htim || _togglesRemaining != 0) return;
 
+  _prepareForNewMove();
   _resetMoveLimitState();
 
   if (steps == 0u) {
@@ -490,6 +491,18 @@ void Stepper::stop() {
   _inSoftStop = false;
 }
 
+void Stepper::_prepareForNewMove()
+{
+  _moveGeneration = StepperLimitPolicy::nextMoveGeneration(_moveGeneration);
+  _debounceArmedGeneration = 0u;
+
+  if (_debounceTimer != nullptr) {
+    xTimerStop(_debounceTimer, 0u);
+  }
+  __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
+  _unmaskExtiLine();
+}
+
 bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
                                          uint32_t freqHz,
                                          uint32_t releaseGuardSteps,
@@ -802,6 +815,7 @@ void Stepper::_onRawLimitInterruptFromIsr()
 
   BaseType_t timerRc = pdFAIL;
   if (_debounceTimer != nullptr) {
+    _debounceArmedGeneration = _moveGeneration;
     timerRc = xTimerStartFromISR(_debounceTimer, &woken);
   }
 
@@ -814,6 +828,7 @@ void Stepper::_onRawLimitInterruptFromIsr()
     return;
   }
 
+  _debounceArmedGeneration = 0u;
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
   _unmaskExtiLineFromIsr();
   if (pressed && !_limitHandledThisMove) {
@@ -920,6 +935,11 @@ void Stepper::_debounceTimerCb(TimerHandle_t timer)
 
   __HAL_GPIO_EXTI_CLEAR_FLAG(self->_limPin);
   self->_unmaskExtiLine();
+  const uint32_t armedGeneration = self->_debounceArmedGeneration;
+  self->_debounceArmedGeneration = 0u;
+  if (!StepperLimitPolicy::shouldApplyDebounceCallback(armedGeneration, self->_moveGeneration)) {
+    return;
+  }
   const bool pressed = self->_isLimitAsserted();
   if (!pressed && self->_limitSeenThisMove) {
     self->_limitDroppedAfterLatch = true;

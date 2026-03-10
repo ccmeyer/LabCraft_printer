@@ -39,11 +39,25 @@ TEST(StepperLimitPolicyHelpers, ReleaseSearchGuardScalesFromBackoffSteps)
     LONGS_EQUAL(16000L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(1000u)));
 }
 
+TEST(StepperLimitPolicyHelpers, MoveGenerationWrapsWithoutUsingZero)
+{
+    LONGS_EQUAL(1L, static_cast<long>(StepperLimitPolicy::nextMoveGeneration(0u)));
+    LONGS_EQUAL(2L, static_cast<long>(StepperLimitPolicy::nextMoveGeneration(1u)));
+    LONGS_EQUAL(1L, static_cast<long>(StepperLimitPolicy::nextMoveGeneration(0xFFFFFFFFu)));
+}
+
 TEST(StepperLimitPolicyHelpers, FineHomeLimitDetectedRequiresFreshHitAfterRelease)
 {
     CHECK_TRUE(StepperLimitPolicy::fineHomeLimitDetected(true, true, false));
     CHECK_FALSE(StepperLimitPolicy::fineHomeLimitDetected(true, false, true));
     CHECK_TRUE(StepperLimitPolicy::fineHomeLimitDetected(false, false, true));
+}
+
+TEST(StepperLimitPolicyHelpers, StaleDebounceCallbackDoesNotApplyToNewMove)
+{
+    CHECK_TRUE(StepperLimitPolicy::shouldApplyDebounceCallback(7u, 7u));
+    CHECK_FALSE(StepperLimitPolicy::shouldApplyDebounceCallback(0u, 7u));
+    CHECK_FALSE(StepperLimitPolicy::shouldApplyDebounceCallback(7u, 8u));
 }
 
 TEST(StepperLimitPolicyHelpers, LatchedLimitActionHardStopsOnlyForConfiguredHomeAxis)

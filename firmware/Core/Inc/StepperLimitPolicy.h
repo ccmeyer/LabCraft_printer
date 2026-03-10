@@ -17,6 +17,11 @@ enum class LatchedLimitAction : uint8_t {
   HardStopNow
 };
 
+constexpr uint32_t nextMoveGeneration(uint32_t currentGeneration)
+{
+  return (currentGeneration == 0xFFFFFFFFu) ? 1u : (currentGeneration + 1u);
+}
+
 constexpr uint32_t normalizeBackoffSteps(uint32_t backoffSteps)
 {
   return (backoffSteps == 0u) ? 1u : backoffSteps;
@@ -49,6 +54,12 @@ constexpr bool fineHomeLimitDetected(bool releasedBeforeFine,
 {
   return releasedBeforeFine ? limitSeenLatched
                             : homeLimitDetected(limitSeenLatched, limitCurrentlyAsserted);
+}
+
+constexpr bool shouldApplyDebounceCallback(uint32_t armedGeneration,
+                                           uint32_t currentGeneration)
+{
+  return (armedGeneration != 0u) && (armedGeneration == currentGeneration);
 }
 
 constexpr LatchedLimitAction decideLatchedLimitAction(bool moveActive,

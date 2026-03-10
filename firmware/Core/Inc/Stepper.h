@@ -240,6 +240,8 @@ private:
   volatile bool _limitDroppedAfterLatch = false;
   volatile uint32_t _limitHitCount = 0u;
   volatile uint32_t _limitDropCount = 0u;
+  volatile uint32_t _moveGeneration = 0u;
+  volatile uint32_t _debounceArmedGeneration = 0u;
 
   bool     _homeTowardLimitDir = false;     // default; set per-axis in init
   uint32_t _homeGuardSteps     = 300000;    // large but finite
@@ -251,6 +253,7 @@ private:
   void _unmaskExtiLineFromIsr();
   void _unmaskExtiLine();
   void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
+  void _prepareForNewMove();
   bool _backOffLimitUntilReleased(uint32_t chunkSteps,
                                   uint32_t freqHz,
                                   uint32_t releaseGuardSteps,
