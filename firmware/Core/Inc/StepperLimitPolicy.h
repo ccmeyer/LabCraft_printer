@@ -17,6 +17,11 @@ enum class LatchedLimitAction : uint8_t {
   HardStopNow
 };
 
+constexpr uint32_t normalizeBackoffSteps(uint32_t backoffSteps)
+{
+  return (backoffSteps == 0u) ? 1u : backoffSteps;
+}
+
 constexpr PullMode resolvePullMode(PullMode requested, bool activeHigh)
 {
   if (requested != PullMode::Auto) {
@@ -28,6 +33,22 @@ constexpr PullMode resolvePullMode(PullMode requested, bool activeHigh)
 constexpr bool homeLimitDetected(bool limitSeenLatched, bool limitCurrentlyAsserted)
 {
   return limitSeenLatched || limitCurrentlyAsserted;
+}
+
+constexpr uint32_t releaseSearchGuardSteps(uint32_t backoffSteps)
+{
+  const uint32_t chunk = normalizeBackoffSteps(backoffSteps);
+  const uint64_t scaled = static_cast<uint64_t>(chunk) * 16u;
+  return (scaled < 1024u) ? 1024u
+                          : ((scaled > 100000u) ? 100000u : static_cast<uint32_t>(scaled));
+}
+
+constexpr bool fineHomeLimitDetected(bool releasedBeforeFine,
+                                     bool limitSeenLatched,
+                                     bool limitCurrentlyAsserted)
+{
+  return releasedBeforeFine ? limitSeenLatched
+                            : homeLimitDetected(limitSeenLatched, limitCurrentlyAsserted);
 }
 
 constexpr LatchedLimitAction decideLatchedLimitAction(bool moveActive,

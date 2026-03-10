@@ -32,6 +32,20 @@ TEST(StepperLimitPolicyHelpers, HomeLimitDetectedAcceptsLatchedOrCurrentAssertio
     CHECK_FALSE(StepperLimitPolicy::homeLimitDetected(false, false));
 }
 
+TEST(StepperLimitPolicyHelpers, ReleaseSearchGuardScalesFromBackoffSteps)
+{
+    LONGS_EQUAL(1024L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(0u)));
+    LONGS_EQUAL(1024L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(32u)));
+    LONGS_EQUAL(16000L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(1000u)));
+}
+
+TEST(StepperLimitPolicyHelpers, FineHomeLimitDetectedRequiresFreshHitAfterRelease)
+{
+    CHECK_TRUE(StepperLimitPolicy::fineHomeLimitDetected(true, true, false));
+    CHECK_FALSE(StepperLimitPolicy::fineHomeLimitDetected(true, false, true));
+    CHECK_TRUE(StepperLimitPolicy::fineHomeLimitDetected(false, false, true));
+}
+
 TEST(StepperLimitPolicyHelpers, LatchedLimitActionHardStopsOnlyForConfiguredHomeAxis)
 {
     LONGS_EQUAL(static_cast<long>(StepperLimitPolicy::LatchedLimitAction::ConfirmLater),

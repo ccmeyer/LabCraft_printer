@@ -295,6 +295,11 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   const float    saved_override = _softstop_accel_override_sps2;
   const uint32_t saved_floor    = _softstop_floor_hz;
+  const uint32_t releaseChunkSteps = StepperLimitPolicy::normalizeBackoffSteps(backoffSteps);
+  uint32_t releaseGuardSteps = StepperLimitPolicy::releaseSearchGuardSteps(releaseChunkSteps);
+  if (releaseGuardSteps > _homeGuardSteps) {
+    releaseGuardSteps = _homeGuardSteps;
+  }
   auto restoreHomeState = [&]() {
     _softstop_accel_override_sps2 = saved_override;
     _softstop_floor_hz = saved_floor;
@@ -337,17 +342,12 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     return result;
   };
 
-	// Replace the raw HAL_GPIO_ReadPin(...) comparisons with _isLimitAsserted():
-	if (_isLimitAsserted()) {
-	  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz).completed) {
-        return false;
-      }
-	  while (_isLimitAsserted()) {
-	    if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz).completed) {
-          return false;
-        }
-	  }
-	}
+  if (_isLimitAsserted()) {
+    if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release")) {
+      restoreHomeState();
+      return false;
+    }
+  }
 //  // If already pressed, back off in the opposite direction until it releases
 //  if (HAL_GPIO_ReadPin(_limPort, _limPin) == (_limitActiveHigh ? GPIO_PIN_SET : GPIO_PIN_RESET)) {
 //    move(!_homeTowardLimitDir, backoffSteps*2, slowHz, 0); waitUntilDone();
@@ -371,7 +371,8 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
   _softStopOnLimit = false;
 
 
-  if (!StepperLimitPolicy::homeLimitDetected(coarse.limitSeen, coarse.limitAsserted)) {
+  bool coarseDetected = StepperLimitPolicy::homeLimitDetected(coarse.limitSeen, coarse.limitAsserted);
+  if (!coarseDetected) {
     _softStopOnLimit = true;
     const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
     if (!probe.completed) {
@@ -379,7 +380,8 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     }
     _softStopOnLimit = false;
 
-    if (!StepperLimitPolicy::homeLimitDetected(probe.limitSeen, probe.limitAsserted)) {
+    coarseDetected = StepperLimitPolicy::homeLimitDetected(probe.limitSeen, probe.limitAsserted);
+    if (!coarseDetected) {
       Logger::instance()->log("[Home] Limit not detected on %d — abort\r\n", (int)_axis);
       _logLimitDebug("limit not detected after probe");
       restoreHomeState();
@@ -403,11 +405,12 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 //    }
 //  }
 
-  // Back off a bit
   _softstop_accel_override_sps2 = 0.f;
-  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps, slowHz).completed) {
+  if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, true, "pre-fine release")) {
+    restoreHomeState();
     return false;
   }
+  _resetMoveLimitState();
 
   // Fine approach (short)
   _softstop_accel_override_sps2 = home_brake_accel;
@@ -417,7 +420,7 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     return false;
   }
   _softStopOnLimit = false;
-  if (!StepperLimitPolicy::homeLimitDetected(fine.limitSeen, fine.limitAsserted)) {
+  if (!StepperLimitPolicy::fineHomeLimitDetected(true, fine.limitSeen, fine.limitAsserted)) {
     Logger::instance()->log("[Home %d] Fine limit not detected abort\r\n", (int)_axis);
     _logLimitDebug("fine limit not detected");
     restoreHomeState();
@@ -485,6 +488,55 @@ void Stepper::stop() {
 
   _togglesRemaining = _togglesDone = 0;
   _inSoftStop = false;
+}
+
+bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
+                                         uint32_t freqHz,
+                                         uint32_t releaseGuardSteps,
+                                         bool alwaysBackOffOnce,
+                                         const char* phaseLabel)
+{
+  const uint32_t chunk = StepperLimitPolicy::normalizeBackoffSteps(chunkSteps);
+  const uint32_t guard = (releaseGuardSteps == 0u) ? chunk : releaseGuardSteps;
+  uint32_t moved = 0u;
+  bool shouldMove = alwaysBackOffOnce || _isLimitAsserted();
+
+  while (shouldMove && moved < guard) {
+    uint32_t stepThisMove = chunk;
+    const uint32_t remainingGuard = guard - moved;
+    if (stepThisMove > remainingGuard) {
+      stepThisMove = remainingGuard;
+    }
+    if (stepThisMove == 0u) {
+      break;
+    }
+
+    xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+    move(!_homeTowardLimitDir, stepThisMove, freqHz, 0u);
+    const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(stepThisMove, freqHz);
+    if (!waitUntilDone(timeoutMs)) {
+      Logger::instance()->log("[Home %d] release move timeout phase=%s steps=%lu hz=%lu\r\n",
+                              (int)_axis,
+                              (phaseLabel != nullptr) ? phaseLabel : "release",
+                              (unsigned long)stepThisMove,
+                              (unsigned long)freqHz);
+      return false;
+    }
+
+    moved += stepThisMove;
+    shouldMove = _isLimitAsserted();
+  }
+
+  if (_isLimitAsserted()) {
+    Logger::instance()->log("[Home %d] limit release not detected phase=%s after %lu steps\r\n",
+                            (int)_axis,
+                            (phaseLabel != nullptr) ? phaseLabel : "release",
+                            (unsigned long)moved);
+    _logLimitDebug("limit release not detected");
+    return false;
+  }
+
+  return true;
 }
 
 void Stepper::_resetMoveLimitState()

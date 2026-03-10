@@ -251,6 +251,11 @@ private:
   void _unmaskExtiLineFromIsr();
   void _unmaskExtiLine();
   void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
+  bool _backOffLimitUntilReleased(uint32_t chunkSteps,
+                                  uint32_t freqHz,
+                                  uint32_t releaseGuardSteps,
+                                  bool alwaysBackOffOnce,
+                                  const char* phaseLabel);
   void _resetMoveLimitState();
   void _logLimitDebug(const char* reason) const;
 
