@@ -12,6 +12,109 @@ ensure_calibration_import_stubs()
 from CalibrationClasses.Model import CalibrationManager, PressureSweepCharacterizationProcess  # noqa: E402
 
 
+def _build_pressure_sweep_focus_proc(focus_values):
+    overlay = np.zeros((400, 400, 3), dtype=np.uint8)
+    state = {"pos": {"X": 500, "Y": 1000, "Z": 700}}
+    values = list(focus_values)
+
+    def _characterize(_img, _bg):
+        if not values:
+            raise AssertionError("No more focus values queued")
+        return (
+            {
+                "center": (200, 200),
+                "focus": float(values.pop(0)),
+                "circularity_ellipse": 0.9,
+                "volume": 1.0,
+            },
+            overlay.copy(),
+        )
+
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc.nozzle_center_machine = {"X": 500, "Y": 1000, "Z": 700}
+    proc.focus_ok_threshold = 5_000_000
+    proc.focus_dir = +1
+    proc.focus_step = 16
+    proc.focus_min_step = 8
+    proc.focus_dir_switches = 0
+    proc.focus_switch_limit = 6
+    proc._focus_best = 0.0
+    proc._focus_same_dir_tries = 0
+    proc._focus_moves_done = 0
+    proc._focus_move_budget = 60
+    proc._min_focus_gain = 0.02
+    proc._focus_best_y_offset_steps = None
+    proc._focus_best_source = ""
+    proc._y_focus_offset_steps = 0
+    proc._y_focus_ema_alpha = 0.35
+    proc._centered = True
+    proc._char_need_capture = False
+    proc.center_first_tol_px = 140
+    proc.boundary_tol_px = 250
+    proc._center_last_center = (200, 200)
+    proc._center_stable_hits = 3
+    proc._center_jump_reject_streak = 0
+    proc.center_jump_reject_px = 320.0
+    proc.center_stable_hits_for_bias_update = 3
+    proc._xz_offset_updated_this_pressure = True
+    proc._oob_total = 0
+    proc.max_oob_total = 12
+    proc._recenter_moves = 0
+    proc.max_recenter_moves = 10
+    proc.circularity_values = []
+    proc.droplet_positions = []
+    proc.droplet_focus = []
+    proc.droplet_volumes = []
+    proc.image_counter = 0
+    proc.num_images = 20
+    proc.repl_target = 20
+    proc.multiple_droplet_hits = 0
+    proc._char_stream_hits = 0
+    proc._char_invalid_hits = 0
+    proc._char_frames_evaluated = 0
+    proc._char_attempts = 0
+    proc._char_attempt_limit = 60
+    proc.char_max_invalid_ratio = 0.45
+    proc.char_max_multiple_ratio = 0.20
+    proc.char_max_stream_ratio = 0.20
+    proc.current_delay_us = 7000
+    proc.target_delay_us = 7000
+    proc.cur_pressure = 1.2
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueCap = Recorder()
+    proc.analyzeBatch = Recorder()
+    proc.nextPressure = Recorder()
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._emit_incremental_pressure_step = lambda *_args, **_kwargs: None
+    proc._update_xz_track_offset = lambda: None
+    proc._check_boundary_and_maybe_recenter = lambda _center_px: False
+    proc._should_early_stop_batch = lambda: False
+    proc._annotate_char_summary_image = lambda *_args, **_kwargs: overlay.copy()
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: dict(state["pos"])
+        ),
+        droplet_camera_model=SimpleNamespace(
+            characterize_droplet=_characterize,
+            convert_pixel_position_to_motor_steps=lambda _center, pos: dict(pos),
+        ),
+    )
+
+    moves = []
+
+    def _safe_move_abs(xyz):
+        xyz = tuple(map(int, xyz))
+        moves.append(xyz)
+        state["pos"] = {"X": xyz[0], "Y": xyz[1], "Z": xyz[2]}
+
+    proc._safe_move_abs = _safe_move_abs
+    return proc, state, moves
+
+
 def test_manager_trajectory_helpers_prefer_explicit_fields():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._pressure_traj_result = {
@@ -678,3 +781,68 @@ def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
     assert proc.samples
     assert proc.samples[-1]["valid"] is False
     assert proc.samples[-1]["invalid_reason"] == "char_invalid_ratio_exceeded"
+
+
+def test_pressure_sweep_focus_below_threshold_does_not_count_as_invalid_ratio_hit():
+    proc, _state, moves = _build_pressure_sweep_focus_proc([4_800_000])
+    proc._char_invalid_hits = 4
+    proc._char_frames_evaluated = 9
+    proc._char_attempts = 9
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onCharacterizeLoop()
+
+    assert proc._char_invalid_hits == 4
+    assert invalidated == []
+    assert proc.analyzeBatch.calls == []
+    assert moves
+    assert moves[-1][1] > 1000
+
+
+def test_pressure_sweep_focus_progress_updates_persistent_y_offset_before_threshold():
+    proc, _state, moves = _build_pressure_sweep_focus_proc([4_600_000, 4_760_000])
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+
+    assert invalidated == []
+    assert len(moves) >= 2
+    assert proc._focus_best >= 4_760_000
+    assert proc._focus_best_y_offset_steps is not None
+    assert proc._focus_best_y_offset_steps > 0
+    assert proc._y_focus_offset_steps > 0
+
+    proc.vec_steps_per_s = (0.0, 0.0, 0.0)
+    proc._x_track_offset_steps = 0
+    proc._z_track_offset_steps = 0
+    proc._predict_target_xyz = lambda *_args, **_kwargs: (100, 200, 300)
+    proc._clamp_xyz = lambda x, y, z: (int(x), int(y), int(z))
+    proc._mark_background_stale = lambda *_args, **_kwargs: None
+    target = {}
+    proc._safe_move_abs = lambda xyz: target.__setitem__("xyz", tuple(map(int, xyz)))
+
+    proc.onMoveToTarget()
+
+    assert target["xyz"][1] == 200 + int(proc._y_focus_offset_steps)
+
+
+def test_pressure_sweep_focus_stall_still_invalidates_on_move_budget():
+    proc, _state, _moves = _build_pressure_sweep_focus_proc([4_700_000])
+    proc._focus_best = 4_800_000
+    proc._focus_moves_done = 60
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onCharacterizeLoop()
+
+    assert invalidated
+    assert invalidated[-1][0] == "focus_move_budget_exceeded"

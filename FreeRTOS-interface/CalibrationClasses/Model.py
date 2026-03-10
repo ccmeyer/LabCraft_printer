@@ -11779,6 +11779,41 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "stream_ratio": float(stream_hits / denom),
         }
 
+    def _current_focus_delta_steps(self):
+        try:
+            cur = self.model.machine_model.get_current_position_dict()
+            base_y = int(self.nozzle_center_machine.get('Y', 0))
+            cur_y = int(cur.get('Y', base_y))
+            return int(cur_y - base_y)
+        except Exception:
+            return None
+
+    def _focus_improvement_abs_epsilon(self) -> float:
+        threshold = float(getattr(self, "focus_ok_threshold", 0.0) or 0.0)
+        return float(max(10_000.0, threshold * 0.002))
+
+    def _focus_is_improved(self, focus_val: float) -> bool:
+        best = float(getattr(self, "_focus_best", 0.0) or 0.0)
+        if best <= 0.0:
+            return True
+        rel_gain = float(max(0.0, getattr(self, "_min_focus_gain", 0.0)))
+        abs_eps = float(self._focus_improvement_abs_epsilon())
+        return bool(
+            float(focus_val) >= ((1.0 + rel_gain) * best)
+            or float(focus_val) >= (best + abs_eps)
+        )
+
+    def _register_focus_progress(self, focus_val: float, *, source: str):
+        self._focus_best = float(max(float(getattr(self, "_focus_best", 0.0) or 0.0), float(focus_val)))
+        delta_steps = self._current_focus_delta_steps()
+        if delta_steps is not None:
+            self._focus_best_y_offset_steps = int(delta_steps)
+            self._focus_best_source = str(source or "")
+        try:
+            self._update_y_focus_offset()
+        except Exception:
+            pass
+
     def _record_pressure_sweep_analysis(self, kind: str, payload: dict | None = None):
         out = {
             "kind": str(kind),
@@ -11878,6 +11913,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._focus_moves_done = 0
         self._focus_move_budget = 60
         self._min_focus_gain = 0.02
+        self._focus_best_y_offset_steps = None
+        self._focus_best_source = ""
         self._lost_count, self._lost_limit = 0, 5
         self._oob_streak = 0
         self._oob_positions = []
@@ -12846,13 +12883,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             self._recenter_immediate(center_px)
             return
 
-        # If focus is already good, capture this Y as a candidate best
+        # If focus is already good, capture this Y as a candidate best.
         if focus_val >= self.focus_ok_threshold:
-            self._update_y_focus_offset()
+            if self._focus_is_improved(focus_val):
+                self._register_focus_progress(focus_val, source="focus_threshold_met")
+            else:
+                self._update_y_focus_offset()
 
         # focus control (same policy as your search process)
         if focus_val < self.focus_ok_threshold:
-            self._char_invalid_hits += 1
             self._record_pressure_sweep_analysis(
                 "pressure_sweep_characterization_frame",
                 {
@@ -12863,6 +12902,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "focus_ok_threshold": float(self.focus_ok_threshold),
                     "circularity_ellipse": float(circularity_ellipse),
                     "ratios": self._char_ratio_snapshot(),
+                    "focus_best_so_far": float(getattr(self, "_focus_best", 0.0) or 0.0),
                 },
             )
             ratio_reason = self._characterization_ratio_abort_reason()
@@ -12871,12 +12911,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 self._bad_reason = str(ratio_reason)
                 self.analyzeBatch.emit()
                 return
-            if self._focus_best <= 0.0:
-                self._focus_best = focus_val
 
-            improved = (focus_val >= (1.0 + self._min_focus_gain) * self._focus_best)
+            improved = self._focus_is_improved(focus_val)
             if improved:
-                self._focus_best = focus_val
+                self._register_focus_progress(focus_val, source="focus_below_threshold")
                 self._focus_same_dir_tries = 0
                 self.focus_step = max(self.focus_min_step, self.focus_step // 2)
             else:
@@ -13048,6 +13086,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
                 "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
                 "y_focus_offset_steps": int(self._y_focus_offset_steps),
+                "best_focus_seen": float(getattr(self, "_focus_best", 0.0) or 0.0),
+                "focus_moves_done": int(getattr(self, "_focus_moves_done", 0)),
+                "focus_dir_switches": int(getattr(self, "focus_dir_switches", 0)),
+                "best_focus_y_offset_steps": getattr(self, "_focus_best_y_offset_steps", None),
                 "valid": True
             }
             self.samples.append(rec)
@@ -13117,6 +13159,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "stream_like_detections": int(getattr(self, "_char_stream_hits", 0)),
             "invalid_frame_hits": int(getattr(self, "_char_invalid_hits", 0)),
             "characterization_frames": int(getattr(self, "_char_frames_evaluated", 0)),
+            "best_focus_seen": float(getattr(self, "_focus_best", 0.0) or 0.0),
+            "focus_moves_done": int(getattr(self, "_focus_moves_done", 0)),
+            "focus_dir_switches": int(getattr(self, "focus_dir_switches", 0)),
+            "best_focus_y_offset_steps": getattr(self, "_focus_best_y_offset_steps", None),
             "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
             "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
             "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
