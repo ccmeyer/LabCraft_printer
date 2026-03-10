@@ -11132,6 +11132,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.current_plan_record = None
         self.nominal_target_xyz = None
         self.nominal_target_delay_us = None
+        self._ensure_stage_bounds_initialized()
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
@@ -11345,9 +11346,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._max_vertical_probes = 2
 
         # stage bounds safety
-        self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
-        self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
-        self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+        self._ensure_stage_bounds_initialized()
 
         # results
         self.samples = []   # list of per-pressure dicts
@@ -11504,7 +11503,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             base = int(self.nozzle_center_machine.get(axis, 0)) if self.nozzle_center_machine else 0
             return base - default_span, base + default_span
 
+    def _ensure_stage_bounds_initialized(self):
+        if not hasattr(self, "x_lo") or not hasattr(self, "x_hi"):
+            self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
+        if not hasattr(self, "y_lo") or not hasattr(self, "y_hi"):
+            self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
+        if not hasattr(self, "z_lo") or not hasattr(self, "z_hi"):
+            self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+
     def _clamp_xyz(self, x:int, y:int, z:int):
+        self._ensure_stage_bounds_initialized()
         return (max(self.x_lo, min(self.x_hi, int(x))),
                 max(self.y_lo, min(self.y_hi, int(y))),
                 max(self.z_lo, min(self.z_hi, int(z))))

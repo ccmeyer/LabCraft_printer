@@ -9,6 +9,7 @@ from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_cal
 
 ensure_calibration_import_stubs()
 
+from PySide6.QtCore import QObject, Signal  # noqa: E402
 from CalibrationClasses.Model import CalibrationManager, PressureSweepCharacterizationProcess  # noqa: E402
 
 
@@ -119,6 +120,74 @@ def _build_pressure_sweep_focus_proc(focus_values):
 
     proc._safe_move_abs = _safe_move_abs
     return proc, state, moves
+
+
+class _PressureSweepInitManager(QObject):
+    settingsChangeCompleted = Signal()
+    captureCompleted = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._background = np.zeros((64, 64), dtype=np.uint8)
+        self._traj = {
+            "pressures": [
+                {
+                    "pressure": 1.20,
+                    "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.10},
+                }
+            ]
+        }
+
+    def get_num_pressure_tests(self):
+        return 1
+
+    def get_nozzle_center(self):
+        return {"X": 1000, "Y": 2000, "Z": 9000}
+
+    def get_pressure_scan_nozzle_center_image_position(self):
+        return (100, 100)
+
+    def get_real_nozzle_center_image_position(self):
+        return (100, 100)
+
+    def get_emergence_time(self):
+        return 4000
+
+    def get_background_image(self):
+        return self._background.copy()
+
+    def get_trajectory_pressure_band(self):
+        return (1.20, 1.20)
+
+    def get_trajectory_valid_fit_pressures(self):
+        return [1.20]
+
+    def get_pressure_trajectory_result(self):
+        return dict(self._traj)
+
+
+def _build_pressure_sweep_init_model():
+    def _convert_pixel_position_to_motor_steps(pixel_position, current_motor_position):
+        px, py = pixel_position
+        return {
+            "X": int(current_motor_position["X"] + (px - 100)),
+            "Y": int(current_motor_position["Y"]),
+            "Z": int(current_motor_position["Z"] + (py - 100)),
+        }
+
+    return SimpleNamespace(
+        machine_model=SimpleNamespace(
+            get_axis_bounds=lambda axis: {
+                "X": (0, 30000),
+                "Y": (0, 30000),
+                "Z": (0, 30000),
+            }[axis],
+            get_current_position_dict=lambda: {"X": 1000, "Y": 2000, "Z": 9000},
+        ),
+        droplet_camera_model=SimpleNamespace(
+            convert_pixel_position_to_motor_steps=_convert_pixel_position_to_motor_steps
+        ),
+    )
 
 
 def test_manager_trajectory_helpers_prefer_explicit_fields():
@@ -253,6 +322,21 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     assert sig.parameters["enable_early_stop"].default is False
 
 
+def test_pressure_sweep_constructor_initializes_bounds_before_nominal_target_planning():
+    mgr = _PressureSweepInitManager()
+    model = _build_pressure_sweep_init_model()
+
+    proc = PressureSweepCharacterizationProcess(mgr, model)
+
+    assert (proc.x_lo, proc.x_hi) == (0, 30000)
+    assert (proc.y_lo, proc.y_hi) == (0, 30000)
+    assert (proc.z_lo, proc.z_hi) == (0, 30000)
+    assert proc.plan
+    assert proc.plan[0]["target_plane_reachable"] is True
+    assert proc.plan[0]["nominal_delay_us"] == 29000
+    assert proc.plan[0]["nominal_target_xyz"] == [1500, 2000, 6500]
+
+
 def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.nozzle_center_machine = {"X": 100, "Y": 200, "Z": 9000}
@@ -265,6 +349,19 @@ def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():
     assert solved["ok"] is True
     assert solved["dt_us"] == 5000
     assert solved["target_delay_us"] == 9000
+
+
+def test_pressure_sweep_clamp_xyz_lazily_initializes_bounds():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.nozzle_center_machine = {"X": 1000, "Y": 2000, "Z": 3000}
+    proc.model = _build_pressure_sweep_init_model()
+
+    xyz = proc._clamp_xyz(-5, 200, 40000)
+
+    assert xyz == (0, 200, 30000)
+    assert (proc.x_lo, proc.x_hi) == (0, 30000)
+    assert (proc.y_lo, proc.y_hi) == (0, 30000)
+    assert (proc.z_lo, proc.z_hi) == (0, 30000)
 
 
 def test_pressure_sweep_pick_pressure_skips_when_fixed_plane_unreachable():
