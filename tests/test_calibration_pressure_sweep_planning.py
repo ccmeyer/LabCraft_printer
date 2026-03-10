@@ -81,6 +81,12 @@ def _build_pressure_sweep_focus_proc(focus_values):
     proc.char_max_stream_ratio = 0.20
     proc.current_delay_us = 7000
     proc.target_delay_us = 7000
+    proc.targeting_mode = "fixed_z_plane"
+    proc.imaging_z_offset_steps = -2500
+    proc.target_z_steps = -1800
+    proc.current_plan_record = None
+    proc.nominal_target_xyz = None
+    proc.nominal_target_delay_us = None
     proc.cur_pressure = 1.2
     proc.stageChanged = Recorder()
     proc.presentImageSignal = Recorder()
@@ -243,7 +249,77 @@ def test_pressure_sweep_analyze_batch_marks_valid_with_20_good():
 def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     sig = inspect.signature(PressureSweepCharacterizationProcess.__init__)
     assert sig.parameters["replicates_per_pressure"].default == 20
+    assert sig.parameters["imaging_z_offset_steps"].default == -2500
     assert sig.parameters["enable_early_stop"].default is False
+
+
+def test_pressure_sweep_solves_nominal_delay_from_fixed_z_plane():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.nozzle_center_machine = {"X": 100, "Y": 200, "Z": 9000}
+    proc.emergence_time_us = 4000
+    proc.min_delay_us = 0
+    proc.max_delay_us = 50000
+
+    solved = proc._solve_delay_for_target_z_steps((0.0, 0.0, -500000.0), 6500)
+
+    assert solved["ok"] is True
+    assert solved["dt_us"] == 5000
+    assert solved["target_delay_us"] == 9000
+
+
+def test_pressure_sweep_pick_pressure_skips_when_fixed_plane_unreachable():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc._ready = True
+    proc.i = 0
+    proc.plan = [
+        {
+            "pressure": 1.25,
+            "vx": 0.02,
+            "vy": 0.03,
+            "vec_steps_per_s": [1500.0, 0.0, 0.0],
+            "targeting_mode": "fixed_z_plane",
+            "imaging_z_offset_steps": -2500,
+            "target_z_steps": 6500,
+            "target_plane_reachable": False,
+            "target_plane_reason": "target_plane_vz_zero",
+        }
+    ]
+    proc.stageChanged = Recorder()
+    proc.pressureReady = Recorder()
+    proc._reset_char_buffers = lambda: None
+    proc._reset_contour_tracker = lambda: None
+    proc._record_decision = lambda *args, **kwargs: None
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    proc.onPickPressure()
+
+    assert invalidated
+    assert invalidated[-1][0] == "target_plane_vz_zero"
+    assert not proc.pressureReady.calls
+
+
+def test_pressure_sweep_move_to_target_uses_stored_nominal_absolute_target():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.vec_steps_per_s = (999999.0, 0.0, -999999.0)
+    proc.target_delay_us = 9100
+    proc.nominal_target_delay_us = 9100
+    proc.nominal_target_xyz = (5000, 6000, 7000)
+    proc._x_track_offset_steps = 120
+    proc._y_focus_offset_steps = -40
+    proc._z_track_offset_steps = 75
+    proc._clamp_xyz = lambda x, y, z: (int(x), int(y), int(z))
+    proc._mark_background_stale = lambda *_args, **_kwargs: None
+    proc.stageChanged = Recorder()
+    moved = {}
+    proc._safe_move_abs = lambda xyz: moved.__setitem__("target", tuple(map(int, xyz)))
+
+    proc.onMoveToTarget()
+
+    assert proc._search_anchor_xyz == (5120, 5960, 7075)
+    assert moved["target"] == (5120, 5960, 7075)
 
 
 def test_pressure_sweep_capture_redirects_to_background_when_stale():

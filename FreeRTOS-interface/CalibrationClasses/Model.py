@@ -2391,9 +2391,17 @@ class CalibrationManager(QObject):
     def start_manual_droplet_characterization(self, *, start_delay_us: int | None = None):
         self._try_start_process(DropletSearchCalibrationProcess, manual_start=True)
 
-    def start_pressure_sweep_characterization(self, *, sphere_delay_us=10000, replicates_per_pressure=20, order="desc"):
+    def start_pressure_sweep_characterization(
+        self,
+        *,
+        sphere_delay_us=10000,
+        imaging_z_offset_steps=-2500,
+        replicates_per_pressure=20,
+        order="desc",
+    ):
         self._try_start_process(PressureSweepCharacterizationProcess,
             sphere_delay_us=sphere_delay_us,
+            imaging_z_offset_steps=imaging_z_offset_steps,
             replicates_per_pressure=replicates_per_pressure,
             order=order
         )
@@ -11025,7 +11033,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     Sweep across the pressures that were measured in the trajectory scan (high -> low).
     For each pressure:
       - compute per-pressure stage velocity (steps/s) from the trajectory fit (px/us)
-      - predict droplet XYZ at (emergence + sphere_delay) and move there
+      - solve the flash delay that images the droplet on a fixed Z plane, then move there
       - capture background, find/center/focus the droplet
       - capture N replicates and quantify volume consistency
     Emits: per-pressure entries with mean volume, CV, centers, etc.
@@ -11051,6 +11059,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  model,
                  *,
                  sphere_delay_us: int = 10000,
+                 imaging_z_offset_steps: int = -2500,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
@@ -11114,6 +11123,15 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.trajectory_valid_pressures = (
             list(get_valid_fit_pressures() or []) if callable(get_valid_fit_pressures) else []
         )
+        self.sphere_delay_us = int(sphere_delay_us)
+        self.targeting_mode = "fixed_z_plane"
+        self.imaging_z_offset_steps = int(imaging_z_offset_steps)
+        self.min_delay_us, self.max_delay_us = 0, 50000
+        nozzle_z = int(self.nozzle_center_machine.get('Z', 0)) if self.nozzle_center_machine else 0
+        self.target_z_steps = int(nozzle_z + self.imaging_z_offset_steps)
+        self.current_plan_record = None
+        self.nominal_target_xyz = None
+        self.nominal_target_delay_us = None
 
         # pull per-pressure trajectory fits
         traj = getattr(self.calibration_manager, "get_pressure_trajectory_result", None)
@@ -11206,7 +11224,13 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     for p in grid:
                         vx = float(np.interp(p, P_fit, VX_fit))
                         vy = float(np.interp(p, P_fit, VY_fit))
-                        self.plan.append({"pressure": float(round(p, 3)), "vx": vx, "vy": vy})
+                        self.plan.append(
+                            self._build_nominal_pressure_target(
+                                float(round(p, 3)),
+                                vx,
+                                vy,
+                            )
+                        )
 
         if self._ready and not self.plan:
             self.calibrationError.emit("No pressures to characterize after planning.")
@@ -11220,7 +11244,6 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.i = 0  # plan index
 
         # ---------- policy / settings ----------
-        self.sphere_delay_us   = int(sphere_delay_us)
         self.edge_guard_px     = int(edge_guard_px)
         self.repl_target       = int(max(20, int(replicates_per_pressure)))
         self.focus_ok_threshold = float(focus_ok_threshold)
@@ -11312,9 +11335,6 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._z_track_offset_steps = 0            # persistent Z offset in steps
         self._xz_offset_ema_alpha  = 0.35         # EMA smoothing for X/Z bias
         self._xz_offset_updated_this_pressure = False
-
-        # delay clamps (safety)
-        self.min_delay_us, self.max_delay_us = 0, 50000
 
         # characterize buffers (per pressure)
         self._reset_char_buffers()
@@ -11983,6 +12003,78 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         vZ = -kz * vy_px_per_us * s_per_us
         return float(vX), float(vY), float(vZ)
 
+    def _solve_delay_for_target_z_steps(self, vec_steps_per_s, target_z_steps: int):
+        try:
+            vZ = float(vec_steps_per_s[2])
+        except Exception:
+            return {"ok": False, "reason": "invalid_stage_velocity"}
+        if not np.isfinite(vZ):
+            return {"ok": False, "reason": "invalid_stage_velocity"}
+        if abs(vZ) < 1e-9:
+            return {"ok": False, "reason": "target_plane_vz_zero"}
+
+        nozzle_z = int(self.nozzle_center_machine['Z'])
+        dz_steps = float(int(target_z_steps) - nozzle_z)
+        dt_s = dz_steps / float(vZ)
+        if not np.isfinite(dt_s):
+            return {"ok": False, "reason": "target_plane_dt_invalid"}
+        if dt_s < 0.0:
+            return {"ok": False, "reason": "target_plane_behind_trajectory"}
+
+        dt_us = int(round(dt_s * 1e6))
+        delay_us = int(round(float(self.emergence_time_us) + dt_us))
+        if delay_us < int(self.min_delay_us) or delay_us > int(self.max_delay_us):
+            return {
+                "ok": False,
+                "reason": "target_plane_delay_out_of_range",
+                "delay_us": int(delay_us),
+                "dt_us": int(dt_us),
+            }
+        return {
+            "ok": True,
+            "target_delay_us": int(delay_us),
+            "dt_us": int(dt_us),
+        }
+
+    def _build_nominal_pressure_target(self, pressure: float, vx: float, vy: float) -> dict:
+        vec_steps_per_s = self._image_vel_to_stage_vel(vx, vy)
+        rec = {
+            "pressure": float(round(pressure, 3)),
+            "vx": float(vx),
+            "vy": float(vy),
+            "vec_steps_per_s": [float(v) for v in vec_steps_per_s],
+            "targeting_mode": str(self.targeting_mode),
+            "imaging_z_offset_steps": int(self.imaging_z_offset_steps),
+            "target_z_steps": int(self.target_z_steps),
+            "target_plane_reachable": False,
+            "target_plane_reason": None,
+            "nominal_delay_us": None,
+            "nominal_dt_us": None,
+            "nominal_target_xyz": None,
+        }
+        solved = self._solve_delay_for_target_z_steps(vec_steps_per_s, self.target_z_steps)
+        if not bool(solved.get("ok", False)):
+            rec["target_plane_reason"] = str(solved.get("reason") or "target_plane_unreachable")
+            fallback_delay = self._clamp_delay(int(self.emergence_time_us + self.sphere_delay_us))
+            rec["fallback_delay_us"] = int(fallback_delay)
+            rec["fallback_target_xyz"] = list(
+                self._predict_target_xyz(vec_steps_per_s, int(fallback_delay))
+            )
+            return rec
+
+        nominal_delay_us = int(solved["target_delay_us"])
+        rec.update(
+            {
+                "target_plane_reachable": True,
+                "nominal_delay_us": int(nominal_delay_us),
+                "nominal_dt_us": int(solved["dt_us"]),
+                "nominal_target_xyz": list(
+                    self._predict_target_xyz(vec_steps_per_s, nominal_delay_us)
+                ),
+            }
+        )
+        return rec
+
     def _predict_target_xyz(self, vec_steps_per_s, delay_us: int):
         dt_s = max(0.0, (int(delay_us) - int(self.emergence_time_us)) * 1e-6)
         vX, vY, vZ = vec_steps_per_s
@@ -11990,6 +12082,49 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         Y = int(round(self.nozzle_center_machine['Y'] + vY * dt_s))
         Z = int(round(self.nozzle_center_machine['Z'] + vZ * dt_s))
         return self._clamp_xyz(X, Y, Z)
+
+    def _target_xyz_for_delay(self, delay_us: int, *, include_offsets: bool = True):
+        nominal_delay = getattr(self, "nominal_target_delay_us", None)
+        nominal_xyz = getattr(self, "nominal_target_xyz", None)
+        if (
+            nominal_xyz is not None
+            and nominal_delay is not None
+            and int(delay_us) == int(nominal_delay)
+        ):
+            x, y, z = [int(v) for v in nominal_xyz]
+        else:
+            x, y, z = self._predict_target_xyz(self.vec_steps_per_s, int(delay_us))
+        if include_offsets:
+            x += int(getattr(self, "_x_track_offset_steps", 0))
+            y += int(getattr(self, "_y_focus_offset_steps", 0))
+            z += int(getattr(self, "_z_track_offset_steps", 0))
+        return self._clamp_xyz(x, y, z)
+
+    def _current_targeting_metadata(self) -> dict:
+        rec = getattr(self, "current_plan_record", None)
+        if not isinstance(rec, dict):
+            return {}
+        out = {
+            "targeting_mode": str(rec.get("targeting_mode") or getattr(self, "targeting_mode", "unknown")),
+            "imaging_z_offset_steps": int(
+                rec.get("imaging_z_offset_steps", getattr(self, "imaging_z_offset_steps", 0))
+            ),
+            "target_z_steps": int(rec.get("target_z_steps", getattr(self, "target_z_steps", 0))),
+            "target_plane_reachable": bool(rec.get("target_plane_reachable", False)),
+        }
+        nominal_delay_us = rec.get("nominal_delay_us")
+        if nominal_delay_us is not None:
+            out["nominal_delay_us"] = int(nominal_delay_us)
+        nominal_dt_us = rec.get("nominal_dt_us")
+        if nominal_dt_us is not None:
+            out["nominal_dt_us"] = int(nominal_dt_us)
+        nominal_target_xyz = rec.get("nominal_target_xyz")
+        if nominal_target_xyz is not None:
+            out["nominal_target_xyz"] = [int(v) for v in nominal_target_xyz]
+        target_plane_reason = rec.get("target_plane_reason")
+        if target_plane_reason:
+            out["target_plane_reason"] = str(target_plane_reason)
+        return out
 
     def _clamp_delay(self, d_us: int) -> int:
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
@@ -12018,14 +12153,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return
 
         rec = self.plan[self.i]
+        self.current_plan_record = rec
         self.cur_pressure = float(rec["pressure"])
         vx, vy = float(rec["vx"]), float(rec["vy"])
-        # compute per-pressure stage velocity
-        self.vec_steps_per_s = self._image_vel_to_stage_vel(vx, vy)
-
-        # choose a good initial delay
-        seed = int(self.emergence_time_us + self.sphere_delay_us)
-        self.target_delay_us = self._clamp_delay(seed)
+        vec_steps_per_s = rec.get("vec_steps_per_s")
+        if isinstance(vec_steps_per_s, (list, tuple)) and len(vec_steps_per_s) == 3:
+            self.vec_steps_per_s = tuple(float(v) for v in vec_steps_per_s)
+        else:
+            self.vec_steps_per_s = self._image_vel_to_stage_vel(vx, vy)
+        self.current_delay_us = None
+        self.target_delay_us = 0
+        self.nominal_target_xyz = None
+        self.nominal_target_delay_us = None
 
         self.stageChanged.emit(f"[{self.i+1}/{len(self.plan)}] Pressure {self.cur_pressure:.3f} psi "
                                f"(vx={vx:.4f} px/us, vy={vy:.4f} px/us)")
@@ -12037,6 +12176,33 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._imaging_guard_hit_count = 0
         self._search_started_at_monotonic = time.monotonic()
         self._reset_contour_tracker()
+        nominal_delay_us = rec.get("nominal_delay_us")
+        nominal_target_xyz = rec.get("nominal_target_xyz")
+        if (
+            not bool(rec.get("target_plane_reachable", False))
+            or nominal_delay_us is None
+            or nominal_target_xyz is None
+        ):
+            reason = str(rec.get("target_plane_reason") or "target_plane_unreachable")
+            self._record_decision(
+                "pressure_target_unreachable",
+                {
+                    "pressure": float(self.cur_pressure),
+                    "reason": str(reason),
+                    "targeting": self._current_targeting_metadata(),
+                },
+            )
+            self._invalidate_current_pressure(
+                str(reason),
+                stage_message=(
+                    f"Pressure {self.cur_pressure:.3f} psi cannot reach fixed imaging plane "
+                    f"({reason}) -> skip pressure"
+                ),
+            )
+            return
+        self.nominal_target_delay_us = int(nominal_delay_us)
+        self.nominal_target_xyz = tuple(int(v) for v in nominal_target_xyz)
+        self.target_delay_us = self._clamp_delay(self.nominal_target_delay_us)
         self.pressureReady.emit()
 
     @Slot()
@@ -12051,16 +12217,14 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onMoveToTarget(self):
-        tgt = self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
-        # apply persistent corrections
-        tgt = ( int(tgt[0] + self._x_track_offset_steps),
-                int(tgt[1] + self._y_focus_offset_steps),
-                int(tgt[2] + self._z_track_offset_steps) )
+        tgt = self._target_xyz_for_delay(self.target_delay_us, include_offsets=True)
         self._search_anchor_xyz = self._clamp_xyz(*tgt)
         self._imaging_guard_hit_count = 0
         self._mark_background_stale("pressure_target_move")
-        self.stageChanged.emit(f"Moving to predicted target @ {self.target_delay_us} us → {tgt}")
-        self._safe_move_abs(tgt)
+        self.stageChanged.emit(
+            f"Moving to predicted target @ {self.target_delay_us} us -> {self._search_anchor_xyz}"
+        )
+        self._safe_move_abs(self._search_anchor_xyz)
 
     @Slot()
     def onPrepareBG(self):
@@ -12199,9 +12363,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     },
                 )
                 self._mark_background_stale("search_nudge_move")
-                self._safe_move_abs(
-                    self._predict_target_xyz(self.vec_steps_per_s, self.target_delay_us)
-                )
+                self._safe_move_abs(self._target_xyz_for_delay(self.target_delay_us))
                 return  # wait for moveDone
 
         d = self.target_delay_us + self._delay_offsets_us[self._delay_try_index]
@@ -13092,6 +13254,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "best_focus_y_offset_steps": getattr(self, "_focus_best_y_offset_steps", None),
                 "valid": True
             }
+            rec.update(self._current_targeting_metadata())
             self.samples.append(rec)
             self._record_pressure_sweep_analysis(
                 "pressure_sweep_batch",
@@ -13170,6 +13333,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
         }
+        rec.update(self._current_targeting_metadata())
         if isinstance(extra, dict):
             rec.update(extra)
         
@@ -13387,6 +13551,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "pressures": [pressure_entry],                     # <- exactly one pressure
             "order": "desc",                                   # keep same metadata as final
             "sphere_delay_us": int(self.sphere_delay_us),
+            "targeting_mode": str(getattr(self, "targeting_mode", "fixed_delay")),
+            "imaging_z_offset_steps": int(getattr(self, "imaging_z_offset_steps", 0)),
+            "target_z_steps": int(getattr(self, "target_z_steps", 0)),
             "nozzle_center_px": self.nozzle_center_px,
             "nozzle_center_machine": self.nozzle_center_machine,
             "emergence_time_us": int(self.emergence_time_us),
@@ -13402,6 +13569,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "pressures": [],  # nothing new here; avoids duplicates in summary rows
                 "order": "desc",
                 "sphere_delay_us": int(self.sphere_delay_us),
+                "targeting_mode": str(getattr(self, "targeting_mode", "fixed_delay")),
+                "imaging_z_offset_steps": int(getattr(self, "imaging_z_offset_steps", 0)),
+                "target_z_steps": int(getattr(self, "target_z_steps", 0)),
                 "nozzle_center_px": self.nozzle_center_px,
                 "nozzle_center_machine": self.nozzle_center_machine,
                 "emergence_time_us": int(self.emergence_time_us),
@@ -13414,6 +13584,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "pressures": self.samples,
                 "order": "desc",
                 "sphere_delay_us": int(self.sphere_delay_us),
+                "targeting_mode": str(getattr(self, "targeting_mode", "fixed_delay")),
+                "imaging_z_offset_steps": int(getattr(self, "imaging_z_offset_steps", 0)),
+                "target_z_steps": int(getattr(self, "target_z_steps", 0)),
                 "nozzle_center_px": self.nozzle_center_px,
                 "nozzle_center_machine": self.nozzle_center_machine,
                 "emergence_time_us": int(self.emergence_time_us),
