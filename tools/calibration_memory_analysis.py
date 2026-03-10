@@ -362,6 +362,27 @@ def _read_run_summary_paths(root: Path):
     return sorted(path for path in runs_dir.glob("*/run_summary.json") if path.is_file())
 
 
+def _ensure_derived_snapshots(root: Path):
+    indices_dir = root / "indices"
+    required = (
+        indices_dir / "pair_memory.json",
+        indices_dir / "pair_type_memory.json",
+        indices_dir / "reagent_memory.json",
+        indices_dir / "head_type_memory.json",
+        indices_dir / "recommendation_index.json",
+    )
+    needs_refresh = any(not path.exists() for path in required)
+    try:
+        from CalibrationMemoryStore import CalibrationMemoryStore
+
+        store = CalibrationMemoryStore(root_dir=str(root))
+        needs_refresh = needs_refresh or store.is_derived_memory_dirty()
+        if needs_refresh:
+            store.refresh_derived_memory()
+    except Exception:
+        return
+
+
 def _phase_count_total(phase_counts):
     total = 0
     if not isinstance(phase_counts, dict):
@@ -1109,6 +1130,7 @@ def plot_trend_tables(
 
 def build_dataset_audit(root: str | Path | None = None):
     root_path = resolve_memory_root(root)
+    _ensure_derived_snapshots(root_path)
     summary_rows, summary_errors = build_run_summary_export_rows(root_path)
     observation_rows, observation_errors = build_observation_export_rows(root_path)
 

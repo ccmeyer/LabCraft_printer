@@ -17,13 +17,23 @@ class _RecommendationManager:
         self.preview = dict(preview or {})
         self.preview_requests = []
         self.records = []
+        self.memory_enabled = True
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
 
+    def get_calibration_memory_enabled(self):
+        return bool(self.memory_enabled)
+
+    def set_calibration_memory_enabled(self, enabled):
+        self.memory_enabled = bool(enabled)
+        return True
+
     def preview_calibration_memory_recommendation(self, **kwargs):
         self.preview_requests.append(dict(kwargs))
-        return dict(self.preview)
+        preview = dict(self.preview)
+        preview.setdefault("memory_enabled", bool(self.memory_enabled))
+        return preview
 
     def record_calibration_memory_ui_interaction(self, action, preview, *, extra=None):
         payload = {
@@ -41,6 +51,7 @@ def _make_preview(
     manual_apply_allowed=True,
     manual_apply_reason="qualified",
     candidate_found=True,
+    memory_enabled=True,
 ):
     prior = None
     seed_values = {}
@@ -63,6 +74,8 @@ def _make_preview(
             "seed_source": "recommended_pressure_psi",
         }
     return {
+        "memory_enabled": bool(memory_enabled),
+        "capture_level": "compact",
         "mode": "advisory",
         "candidate_found": bool(candidate_found),
         "prior": prior,
@@ -89,6 +102,7 @@ def _make_dialog_stub(preview, qapp):
     dialog.memory_recommendation_seed_label = QLabel("")
     dialog.memory_recommendation_expected_label = QLabel("")
     dialog.memory_recommendation_mode_label = QLabel("")
+    dialog.memory_recommendation_refresh_btn = QPushButton("Refresh Recommendation")
     dialog.memory_recommendation_apply_btn = QPushButton("Use Recommended Seed")
     dialog.memory_recommendation_ignore_btn = QPushButton("Keep Manual Start")
     dialog.print_pulse_width_spinbox = QSpinBox()
@@ -171,6 +185,23 @@ def test_recommendation_panel_shows_no_prior_state_without_changing_controls(qap
     assert dialog.start_pressure_spin.value() == pytest.approx(0.80)
     assert dialog.print_pulse_width_changes == []
     assert dialog.start_pressure_changes == []
+    assert manager.records == []
+
+
+def test_recommendation_panel_shows_disabled_state_when_memory_is_off(qapp):
+    dialog, manager = _make_dialog_stub(
+        _make_preview(candidate_found=False, manual_apply_allowed=False, manual_apply_reason="memory_disabled", memory_enabled=False),
+        qapp,
+    )
+    dialog.enable_calibration_memory_checkbox = QPushButton()
+    dialog.enable_calibration_memory_checkbox.setCheckable(True)
+
+    dialog.refresh_calibration_memory_recommendation()
+
+    assert "disabled" in dialog.memory_recommendation_status_label.text().lower()
+    assert dialog.memory_recommendation_apply_btn.isEnabled() is False
+    assert dialog.memory_recommendation_ignore_btn.isEnabled() is False
+    assert "disabled" in dialog.memory_recommendation_mode_label.text().lower()
     assert manager.records == []
 
 
@@ -339,6 +370,7 @@ def _build_real_dialog_for_layout(monkeypatch, qapp):
         readinessChanged=SignalStub(),
         clear_calibration_memory_ui_recommendation_state=lambda: None,
         get_record_mode_enabled=lambda: True,
+        get_calibration_memory_enabled=lambda: True,
         _emit_readiness=lambda: None,
     )
     machine_model = SimpleNamespace(

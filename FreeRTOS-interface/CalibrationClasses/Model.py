@@ -788,6 +788,26 @@ class CalibrationManager(QObject):
     def _warn_calibration_memory(self, action: str, exc: Exception):
         print(f"[CalibrationMemory] {action} failed: {exc}")
 
+    def _calibration_memory_enabled(self):
+        store = self._get_calibration_memory_store()
+        if store is None:
+            return False
+        try:
+            return bool(store.get_memory_enabled())
+        except Exception as e:
+            self._warn_calibration_memory("get_memory_enabled", e)
+            return False
+
+    def _get_calibration_memory_capture_level(self):
+        store = self._get_calibration_memory_store()
+        if store is None:
+            return "off"
+        try:
+            return str(store.get_observation_capture_level() or "compact")
+        except Exception as e:
+            self._warn_calibration_memory("get_observation_capture_level", e)
+            return "off" if not self._calibration_memory_enabled() else "compact"
+
     def _get_calibration_memory_mode(self):
         store = self._get_calibration_memory_store()
         if store is None:
@@ -800,6 +820,8 @@ class CalibrationManager(QObject):
 
     def _new_calibration_memory_prior_runtime(self, *, mode: str | None = None):
         return {
+            "memory_enabled": bool(self._calibration_memory_enabled()),
+            "capture_level": str(self._get_calibration_memory_capture_level() or "compact"),
             "mode": str(mode or self._get_calibration_memory_mode() or "advisory"),
             "looked_up": False,
             "lookup_skipped_reason": None,
@@ -822,6 +844,8 @@ class CalibrationManager(QObject):
 
     def _new_calibration_memory_ui_recommendation_state(self):
         return {
+            "memory_enabled": bool(self._calibration_memory_enabled()),
+            "capture_level": str(self._get_calibration_memory_capture_level() or "compact"),
             "mode": str(self._get_calibration_memory_mode() or "advisory"),
             "shown": False,
             "shown_count": 0,
@@ -883,6 +907,8 @@ class CalibrationManager(QObject):
         target_volume_nl: float | None = None,
     ):
         preview = {
+            "memory_enabled": bool(self._calibration_memory_enabled()),
+            "capture_level": str(self._get_calibration_memory_capture_level() or "compact"),
             "mode": str(self._get_calibration_memory_mode() or "advisory"),
             "candidate_found": False,
             "prior": None,
@@ -898,6 +924,9 @@ class CalibrationManager(QObject):
         store = self._get_calibration_memory_store()
         if store is None:
             preview["manual_apply_reason"] = "store_unavailable"
+            return preview
+        if not bool(preview.get("memory_enabled")):
+            preview["manual_apply_reason"] = "memory_disabled"
             return preview
 
         if target_pulse_width_us is None:
@@ -989,6 +1018,8 @@ class CalibrationManager(QObject):
         *,
         extra: dict | None = None,
     ):
+        if not self._calibration_memory_enabled():
+            return None
         state = self._get_calibration_memory_ui_recommendation_state()
         preview = dict(preview or {})
         prior = dict(preview.get("prior") or {})
@@ -1100,8 +1131,13 @@ class CalibrationManager(QObject):
         runtime["looked_up"] = False
         runtime["lookup_skipped_reason"] = None
         self._calibration_memory_prior_candidate = None
+        runtime["memory_enabled"] = bool(self._calibration_memory_enabled())
+        runtime["capture_level"] = str(self._get_calibration_memory_capture_level() or "compact")
         store = self._get_calibration_memory_store()
         if store is None:
+            return None
+        if not bool(runtime.get("memory_enabled")):
+            runtime["lookup_skipped_reason"] = "memory_disabled"
             return None
         if str(runtime.get("mode") or "advisory") == "off":
             runtime["lookup_skipped_reason"] = "mode_off"
@@ -1138,7 +1174,14 @@ class CalibrationManager(QObject):
     def _prepare_calibration_memory_prior_application(self, proc_cls, kwargs: dict | None = None):
         kwargs = dict(kwargs or {})
         runtime = self._get_calibration_memory_prior_runtime()
+        runtime["memory_enabled"] = bool(self._calibration_memory_enabled())
+        runtime["capture_level"] = str(self._get_calibration_memory_capture_level() or "compact")
         mode = str(runtime.get("mode") or "advisory")
+        if not bool(runtime.get("memory_enabled")):
+            runtime["qualified"] = False
+            runtime["lookup_skipped_reason"] = "memory_disabled"
+            runtime["rejected_reason"] = "memory_disabled"
+            return kwargs
         if mode != "seed_start":
             runtime["qualified"] = False
             if mode == "off":
@@ -1422,6 +1465,8 @@ class CalibrationManager(QObject):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
             return
+        if not self._calibration_memory_enabled():
+            return
         try:
             runtime = self._get_calibration_memory_prior_runtime()
             context = store.context_builder.build(
@@ -1456,6 +1501,8 @@ class CalibrationManager(QObject):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
             return
+        if not self._calibration_memory_enabled():
+            return
         try:
             summary = store.build_run_summary(self)
             store.write_run_summary(self._run_id, summary)
@@ -1472,6 +1519,10 @@ class CalibrationManager(QObject):
     ):
         store = self._get_calibration_memory_store()
         if store is None or not self._run_id:
+            return None
+        if not self._calibration_memory_enabled():
+            return None
+        if str(self._get_calibration_memory_capture_level() or "compact") == "off":
             return None
         try:
             return store.append_observation_from_manager(
@@ -1759,6 +1810,28 @@ class CalibrationManager(QObject):
     def get_record_mode_enabled(self) -> bool:
         return bool(getattr(self, "record_mode_enabled", False))
 
+    def set_calibration_memory_enabled(self, enabled: bool):
+        store = self._get_calibration_memory_store()
+        if store is None:
+            self.calibrationStageChanged.emit("Calibration memory unavailable.", "dark_red")
+            return False
+        try:
+            store.set_memory_enabled(bool(enabled))
+        except Exception as e:
+            self._warn_calibration_memory("set_memory_enabled", e)
+            return False
+        self._reset_calibration_memory_prior_runtime()
+        self._reset_calibration_memory_ui_recommendation_state()
+        state = "enabled" if bool(enabled) else "disabled"
+        self.calibrationStageChanged.emit(f"Calibration memory {state}.", "dark_blue")
+        return True
+
+    def get_calibration_memory_enabled(self) -> bool:
+        return bool(self._calibration_memory_enabled())
+
+    def get_calibration_memory_capture_level(self) -> str:
+        return str(self._get_calibration_memory_capture_level() or "compact")
+
     def record_memory_event(
         self,
         event_type: str,
@@ -1767,6 +1840,10 @@ class CalibrationManager(QObject):
         state_name: str | None = None,
         level: str = "info",
     ):
+        if not self._calibration_memory_enabled():
+            return None
+        if str(self._get_calibration_memory_capture_level() or "compact") != "verbose":
+            return None
         phase_name = getattr(getattr(self, "activeCalibration", None), "phase_name", None) or state_name
         return self._append_calibration_memory_observation(
             "process_event",
@@ -1780,6 +1857,10 @@ class CalibrationManager(QObject):
         )
 
     def record_memory_analysis(self, payload: dict | None = None, *, phase_name: str | None = None):
+        if not self._calibration_memory_enabled():
+            return None
+        if str(self._get_calibration_memory_capture_level() or "compact") == "off":
+            return None
         return self._append_calibration_memory_observation(
             "process_analysis",
             payload or {},
@@ -1794,6 +1875,10 @@ class CalibrationManager(QObject):
         capture_ref: dict | None = None,
         phase_name: str | None = None,
     ):
+        if not self._calibration_memory_enabled():
+            return None
+        if str(self._get_calibration_memory_capture_level() or "compact") != "verbose":
+            return None
         artifact_refs = {
             "process_recording_capture": capture_ref or {},
         }
@@ -1811,6 +1896,8 @@ class CalibrationManager(QObject):
         )
 
     def record_memory_error(self, message: str, payload: dict | None = None, *, phase_name: str | None = None):
+        if not self._calibration_memory_enabled():
+            return None
         return self._append_calibration_memory_observation(
             "process_error",
             {
@@ -2703,7 +2790,6 @@ class CalibrationManager(QObject):
         # self._try_append_flat_rows_from_payload(run, phase_key, payload)
 
         self._save_atomic()
-        self._write_calibration_memory_summary()
 
         # Notify listeners to refresh the summary table when relevant
         if phase_key in ("pressure_sweep_characterization", "droplet_search"):

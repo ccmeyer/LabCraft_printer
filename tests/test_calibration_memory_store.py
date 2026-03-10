@@ -91,6 +91,9 @@ def _make_dummy_model(tmp_path):
 def test_calibration_memory_store_creates_run_summary_catalog_and_observations(tmp_path):
     model = _make_dummy_model(tmp_path)
     store = CalibrationMemoryStore(model=model, root_dir=str(tmp_path / "CalibrationMemory"))
+    config = store.load_runtime_config()
+    assert config["memory_enabled"] is True
+    assert config["observation_capture_level"] == "compact"
 
     context = store.context_builder.build(
         model=model,
@@ -152,6 +155,7 @@ def test_calibration_memory_store_creates_run_summary_catalog_and_observations(t
     observations = [json.loads(line) for line in Path(paths["observations_path"]).read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(observations) == 1
     assert observations[0]["payload"]["volume_nL"] == 9.84
+    assert observations[0]["context"]["stock_id"] == "Water_0.00_--"
 
     run_summary = json.loads(Path(paths["run_summary_path"]).read_text(encoding="utf-8"))
     assert run_summary["process_results"]["droplet_search"]["latest_result"]["mean_volume"] == 9.84
@@ -222,11 +226,6 @@ def test_completed_summary_write_still_succeeds_if_snapshot_refresh_fails(tmp_pa
     )
     store.create_run("run_complete", context=built_context, notes="refresh failure")
 
-    def _boom():
-        raise RuntimeError("snapshot rebuild failed")
-
-    monkeypatch.setattr(store, "refresh_derived_memory", _boom)
-
     summary = store.write_run_summary(
         "run_complete",
         {
@@ -258,3 +257,12 @@ def test_completed_summary_write_still_succeeds_if_snapshot_refresh_fails(tmp_pa
     assert summary["run_id"] == "run_complete"
     saved = json.loads(Path(store.get_run_paths("run_complete")["run_summary_path"]).read_text(encoding="utf-8"))
     assert saved["run_status"] == "completed"
+    assert store.is_derived_memory_dirty() is True
+
+    def _boom():
+        raise RuntimeError("snapshot rebuild failed")
+
+    monkeypatch.setattr(store.aggregator, "rebuild", _boom)
+    with pytest.raises(RuntimeError, match="snapshot rebuild failed"):
+        store.refresh_derived_memory()
+    assert store.is_derived_memory_dirty() is True

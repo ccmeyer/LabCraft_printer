@@ -321,6 +321,14 @@ class CalibrationMemoryStore:
         PRIOR_MODE_SEED_START,
         PRIOR_MODE_AGGRESSIVE,
     )
+    OBSERVATION_CAPTURE_OFF = "off"
+    OBSERVATION_CAPTURE_COMPACT = "compact"
+    OBSERVATION_CAPTURE_VERBOSE = "verbose"
+    OBSERVATION_CAPTURE_LEVELS = (
+        OBSERVATION_CAPTURE_OFF,
+        OBSERVATION_CAPTURE_COMPACT,
+        OBSERVATION_CAPTURE_VERBOSE,
+    )
 
     def __init__(self, model=None, root_dir=None):
         self.model = model
@@ -332,10 +340,12 @@ class CalibrationMemoryStore:
         self.schema_path = os.path.join(self.root_dir, "schema.json")
         self.runtime_config_path = os.path.join(self.root_dir, "config.json")
         self.run_catalog_path = os.path.join(self.indices_dir, "run_catalog.jsonl")
+        self.derived_dirty_path = os.path.join(self.indices_dir, ".derived_memory_dirty")
         self.identity_registry = CalibrationIdentityRegistry(self.root_dir)
         self.aggregator = CalibrationMemoryAggregator(self.root_dir)
         self.context_builder = CalibrationContextBuilder(model, identity_registry=self.identity_registry)
         self._lock = threading.Lock()
+        self._runtime_config_cache = None
 
     @staticmethod
     def _now_utc():
@@ -361,6 +371,8 @@ class CalibrationMemoryStore:
             "schema_name": cls.RUNTIME_CONFIG_SCHEMA,
             "schema_version": int(cls.SCHEMA_VERSION),
             "updated_at_utc": cls._now_utc(),
+            "memory_enabled": True,
+            "observation_capture_level": cls.OBSERVATION_CAPTURE_COMPACT,
             "prior_application_mode": cls.PRIOR_MODE_ADVISORY,
             "prior_application_policy": {
                 "allowed_aggregation_levels_for_seed_start": [
@@ -392,9 +404,23 @@ class CalibrationMemoryStore:
         return mode
 
     @classmethod
+    def _normalize_observation_capture_level(cls, value):
+        level = cls._clean_str(value)
+        if level is None:
+            return cls.OBSERVATION_CAPTURE_COMPACT
+        level = level.lower()
+        if level not in cls.OBSERVATION_CAPTURE_LEVELS:
+            return cls.OBSERVATION_CAPTURE_COMPACT
+        return level
+
+    @classmethod
     def _normalize_runtime_config(cls, payload):
         config = cls._default_runtime_config()
         raw = dict(payload or {})
+        config["memory_enabled"] = bool(raw.get("memory_enabled", config["memory_enabled"]))
+        config["observation_capture_level"] = cls._normalize_observation_capture_level(
+            raw.get("observation_capture_level", config["observation_capture_level"])
+        )
         mode = raw.get("prior_application_mode", config["prior_application_mode"])
         config["prior_application_mode"] = cls._normalize_prior_application_mode(mode)
         policy = dict(config.get("prior_application_policy") or {})
@@ -509,10 +535,17 @@ class CalibrationMemoryStore:
 
     def refresh_derived_memory(self):
         self.ensure_initialized()
-        return self.aggregator.rebuild()
+        result = self.aggregator.rebuild()
+        self._clear_derived_memory_dirty()
+        return result
 
     def get_best_prior(self, context, *, target_pulse_width_us=None, target_volume_nl=None):
         self.ensure_initialized()
+        if self.is_derived_memory_dirty():
+            try:
+                self.refresh_derived_memory()
+            except Exception as e:
+                self._warn("refresh_derived_memory", e)
         return self.aggregator.get_best_prior(
             context,
             target_pulse_width_us=target_pulse_width_us,
@@ -521,6 +554,9 @@ class CalibrationMemoryStore:
 
     def load_runtime_config(self):
         self.ensure_initialized()
+        cached = getattr(self, "_runtime_config_cache", None)
+        if isinstance(cached, dict) and cached:
+            return dict(cached)
         try:
             with open(self.runtime_config_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -529,17 +565,37 @@ class CalibrationMemoryStore:
         normalized = self._normalize_runtime_config(payload)
         if payload != normalized:
             self._write_json_atomic(self.runtime_config_path, normalized)
-        return normalized
+        self._runtime_config_cache = dict(normalized)
+        return dict(normalized)
 
     def save_runtime_config(self, payload):
         self.ensure_initialized()
         normalized = self._normalize_runtime_config(payload)
         self._write_json_atomic(self.runtime_config_path, normalized)
-        return normalized
+        self._runtime_config_cache = dict(normalized)
+        return dict(normalized)
 
     def get_prior_application_mode(self):
         config = self.load_runtime_config()
         return self._normalize_prior_application_mode(config.get("prior_application_mode"))
+
+    def get_memory_enabled(self):
+        config = self.load_runtime_config()
+        return bool(config.get("memory_enabled", True))
+
+    def set_memory_enabled(self, enabled):
+        config = self.load_runtime_config()
+        config["memory_enabled"] = bool(enabled)
+        return self.save_runtime_config(config)
+
+    def get_observation_capture_level(self):
+        config = self.load_runtime_config()
+        return self._normalize_observation_capture_level(config.get("observation_capture_level"))
+
+    def set_observation_capture_level(self, level):
+        config = self.load_runtime_config()
+        config["observation_capture_level"] = self._normalize_observation_capture_level(level)
+        return self.save_runtime_config(config)
 
     def set_prior_application_mode(self, mode):
         config = self.load_runtime_config()
@@ -757,6 +813,22 @@ class CalibrationMemoryStore:
             "camera_active_save_dir": camera_active_dir,
         }
 
+    def _mark_derived_memory_dirty(self):
+        self.ensure_initialized()
+        with open(self.derived_dirty_path, "w", encoding="utf-8") as handle:
+            handle.write(self._now_utc() + "\n")
+
+    def _clear_derived_memory_dirty(self):
+        try:
+            os.unlink(self.derived_dirty_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            raise
+
+    def is_derived_memory_dirty(self):
+        return os.path.exists(self.derived_dirty_path)
+
     def create_run(
         self,
         run_id,
@@ -821,6 +893,8 @@ class CalibrationMemoryStore:
             "manager_meta": dict(manager_meta or {}),
             "advisory_prior": dict(advisory_prior or {}) if advisory_prior else None,
             "prior_application_mode": prior_runtime.get("mode", self.get_prior_application_mode()),
+            "memory_enabled": self.get_memory_enabled(),
+            "observation_capture_level": self.get_observation_capture_level(),
             "prior_lookup_performed": bool(prior_runtime.get("looked_up")),
             "prior_candidate_found": bool(prior_runtime.get("candidate_found")) or bool(advisory_prior),
             "prior_candidate": dict(prior_runtime.get("candidate") or advisory_prior or {}),
@@ -880,10 +954,43 @@ class CalibrationMemoryStore:
         self._write_json_atomic(self._get_run_summary_path(run_id), record)
         if self._summary_is_completed(record):
             try:
-                self.refresh_derived_memory()
+                self._mark_derived_memory_dirty()
             except Exception as e:
-                self._warn("refresh_derived_memory", e)
+                self._warn("mark_derived_memory_dirty", e)
         return record
+
+    @staticmethod
+    def _compact_context(context):
+        context = dict(context or {})
+        identity_quality = dict(context.get("identity_quality") or {})
+        identity_sources = dict(context.get("identity_sources") or {})
+        return {
+            "stock_id": context.get("stock_id"),
+            "stock_display_name": context.get("stock_display_name"),
+            "reagent_id": context.get("reagent_id"),
+            "reagent_display_name": context.get("reagent_display_name"),
+            "reagent_family": context.get("reagent_family"),
+            "printer_head_id": context.get("printer_head_id"),
+            "printer_head_display_name": context.get("printer_head_display_name"),
+            "head_type_id": context.get("head_type_id"),
+            "nominal_nozzle_diameter_um": context.get("nominal_nozzle_diameter_um"),
+            "identity_quality": identity_quality,
+            "identity_sources": identity_sources,
+        }
+
+    @staticmethod
+    def _compact_settings(settings):
+        settings = dict(settings or {})
+        return {
+            "print_width": settings.get("print_width"),
+            "print_pressure": settings.get("print_pressure"),
+            "refuel_pressure": settings.get("refuel_pressure"),
+            "flash_delay": settings.get("flash_delay"),
+            "flash_duration": settings.get("flash_duration"),
+            "num_droplets": settings.get("num_droplets"),
+            "exposure_time": settings.get("exposure_time"),
+            "current_position": settings.get("current_position"),
+        }
 
     def append_observation(self, run_id, payload):
         self.ensure_initialized()
@@ -1008,6 +1115,10 @@ class CalibrationMemoryStore:
             self._warn("get_ui_recommendation_summary", e)
             ui_recommendation_summary = {}
         summary["prior_application_mode"] = prior_runtime_summary.get("mode")
+        summary["memory_enabled"] = bool(prior_runtime_summary.get("memory_enabled", self.get_memory_enabled()))
+        summary["observation_capture_level"] = str(
+            prior_runtime_summary.get("capture_level", self.get_observation_capture_level())
+        )
         summary["prior_lookup_performed"] = bool(prior_runtime_summary.get("looked_up"))
         summary["prior_candidate_found"] = bool(prior_runtime_summary.get("candidate_found"))
         summary["prior_qualified"] = bool(prior_runtime_summary.get("qualified"))
@@ -1050,10 +1161,17 @@ class CalibrationMemoryStore:
             settings = calibration_manager.get_current_settings()
         except Exception:
             settings = {}
+        capture_level = self.get_observation_capture_level()
+        if capture_level == self.OBSERVATION_CAPTURE_VERBOSE:
+            context_payload = context
+            settings_payload = settings or {}
+        else:
+            context_payload = self._compact_context(context)
+            settings_payload = self._compact_settings(settings)
 
         machine_pos = None
-        if isinstance(settings, dict):
-            machine_pos = settings.get("current_position")
+        if isinstance(settings_payload, dict):
+            machine_pos = settings_payload.get("current_position")
 
         phase = phase_name
         if phase is None:
@@ -1070,8 +1188,8 @@ class CalibrationMemoryStore:
             "ts_utc": self._now_utc(),
             "phase": self._clean_str(phase),
             "observation_type": str(observation_type),
-            "context": context,
-            "settings": settings or {},
+            "context": context_payload,
+            "settings": settings_payload,
             "machine": {
                 "position": machine_pos,
             },

@@ -195,6 +195,33 @@ def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
     assert runtime_model.preview_requests[0]["target_volume_nl"] == pytest.approx(10.0)
 
 
+def test_experiment_designer_prior_indicator_shows_memory_disabled(qapp):
+    runtime_model = _RuntimeModelStub(
+        preview={
+            "status": "memory_disabled",
+            "status_label": "Memory disabled",
+            "prior": None,
+        }
+    )
+    dialog = _build_dialog_stub(runtime_model)
+    dialog._add_reagent_row(
+        name="Water stock",
+        targets="0, 1",
+        units="mM",
+        droplet_nL=10.0,
+        reagent_id="water",
+        reagent_display_name="Water",
+        intended_head_type_id="nozzle_100um",
+    )
+
+    preview = dialog._refresh_prior_availability_for_row(0)
+    label: QLabel = dialog.reagent_table.cellWidget(0, ExperimentDesignDialog.COL_PRIOR)
+
+    assert preview["status"] == "memory_disabled"
+    assert label.text() == "Memory disabled"
+    assert "disabled" in label.toolTip().lower()
+
+
 def test_load_reactions_from_model_applies_design_identity(experiment_model_factory, tmp_path):
     model = experiment_model_factory()
     model.calibration_memory_store = CalibrationMemoryStore(model=model, root_dir=tmp_path / "CalibrationMemory")
@@ -245,3 +272,21 @@ def test_runtime_printer_head_identity_is_generated_from_intended_head_type(tmp_
     assert printer_head.head_type_id == "nozzle_100um"
     assert printer_head.nominal_nozzle_diameter_um == pytest.approx(100.0)
     assert printer_head.printer_head_id.startswith("nozzle_100um__screening_run__")
+
+
+def test_preview_experiment_design_prior_returns_memory_disabled(experiment_model_factory, tmp_path):
+    model = experiment_model_factory()
+    model.calibration_memory_store = CalibrationMemoryStore(model=model, root_dir=tmp_path / "CalibrationMemory")
+    model.calibration_memory_store.ensure_initialized()
+    model.calibration_memory_store.set_memory_enabled(False)
+
+    preview = Model.preview_experiment_design_prior(
+        model,
+        reagent_name="Water",
+        reagent_id="water",
+        head_type_id="nozzle_100um",
+        target_volume_nl=10.0,
+    )
+
+    assert preview["status"] == "memory_disabled"
+    assert preview["prior"] is None

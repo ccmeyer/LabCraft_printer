@@ -154,19 +154,25 @@ def test_calibration_manager_writes_sidecar_summary_and_observations(tmp_path):
     )
 
     run_id = manager._run_id
+    manager.end_session()
     run_dir = Path(model.calibration_memory_store.get_run_paths(run_id)["run_dir"])
     observations = [
         json.loads(line)
         for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert {row["observation_type"] for row in observations} >= {"process_event", "process_analysis"}
+    observation_types = {row["observation_type"] for row in observations}
+    assert "process_analysis" in observation_types
+    assert "process_event" not in observation_types
     assert all(row["context"]["stock_id"] == "Water_0.00_--" for row in observations)
+    assert all("current_position" in (row.get("settings") or {}) for row in observations)
 
     summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
     assert summary["run_id"] == run_id
     assert summary["context"]["stock_id"] == "Water_0.00_--"
     assert summary["process_results"]["droplet_search"]["latest_result"]["mean_volume"] == 9.91
+    assert summary["memory_enabled"] is True
+    assert summary["observation_capture_level"] == "compact"
 
 
 def test_calibration_memory_failures_do_not_break_calibration(tmp_path, capsys, monkeypatch):
@@ -272,6 +278,73 @@ def test_begin_session_records_advisory_prior_without_changing_behavior(tmp_path
     assert summary["advisory_prior"]["advisory_only"] is True
     assert manager._calibration_memory_prior_candidate["recommended_pressure_psi"] == pytest.approx(1.61)
     assert any(row["observation_type"] == "advisory_prior_lookup" for row in observations)
+
+
+def test_memory_disabled_skips_sidecar_run_lookup_and_observations(tmp_path):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    store.set_memory_enabled(False)
+    store.set_prior_application_mode("seed_start")
+    manager = CalibrationManager(model)
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="memory disabled")
+    manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
+    process = BaseCalibrationProcess(manager, model)
+    process.phase_name = "droplet_search"
+    process._record_event("candidate_found", {"flash_delay_us": 4300})
+    process._record_analysis({"kind": "characterization_frame", "volume_nL": 9.91})
+    manager.onCalibrationDataUpdated({"result": {"mean_volume": 9.91}})
+
+    runtime = manager.get_calibration_memory_prior_runtime_summary()
+    assert runtime["memory_enabled"] is False
+    assert runtime["lookup_skipped_reason"] in {None, "memory_disabled"}
+    assert list(Path(store.runs_dir).glob("*")) == []
+    manager.end_session()
+
+
+def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    store.set_observation_capture_level("verbose")
+    manager = CalibrationManager(model)
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="verbose")
+    manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
+    process = BaseCalibrationProcess(manager, model)
+    process.phase_name = "droplet_search"
+    process._record_event("candidate_found", {"flash_delay_us": 4300})
+    process._record_analysis({"kind": "characterization_frame", "volume_nL": 9.91})
+    manager.end_session()
+
+    run_dir = Path(store.get_run_paths(manager.data["runs"][-1]["run_id"])["run_dir"])
+    observations = [
+        json.loads(line)
+        for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    observation_types = {row["observation_type"] for row in observations}
+    assert "process_event" in observation_types
+    assert "process_analysis" in observation_types
+
+
+def test_on_calibration_data_updated_does_not_rewrite_sidecar_summary_each_step(tmp_path, monkeypatch):
+    model = _make_model(tmp_path)
+    manager = CalibrationManager(model)
+    store = model.calibration_memory_store
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="summary cadence")
+    manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
+
+    calls = []
+
+    def _counting_write(run_id, payload):
+        calls.append((run_id, payload))
+        return payload
+
+    monkeypatch.setattr(store, "write_run_summary", _counting_write)
+    manager.onCalibrationDataUpdated({"result": {"mean_volume": 10.01}})
+
+    assert calls == []
 
 
 def test_ui_recommendation_events_are_flushed_into_sidecar_run(tmp_path):

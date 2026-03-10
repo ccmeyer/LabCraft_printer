@@ -336,6 +336,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.record_calibration_checkbox.setChecked(rec_enabled)
         calib_grid.addWidget(self.record_calibration_checkbox, crow, 0, 1, 2); crow += 1
 
+        self.enable_calibration_memory_checkbox = QtWidgets.QCheckBox("Enable Calibration Memory")
+        self.enable_calibration_memory_checkbox.setToolTip(
+            "When disabled, prior lookup and calibration-memory sidecar writes are skipped."
+        )
+        try:
+            memory_enabled = bool(self.model.calibration_manager.get_calibration_memory_enabled())
+        except Exception:
+            memory_enabled = True
+        self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
+        calib_grid.addWidget(self.enable_calibration_memory_checkbox, crow, 0, 1, 2); crow += 1
+
         # Calibration buttons
 
         self.prime_head_button = QtWidgets.QPushButton("Prime Printer Head")
@@ -665,6 +676,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
+        self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
         self.summary_table.itemSelectionChanged.connect(self._update_load_button_state)
         # Double-click on any cell loads that row immediately
         self.summary_table.itemDoubleClicked.connect(self._handle_summary_double_click)
@@ -887,6 +899,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             mgr.set_record_mode_enabled(bool(enabled))
         except Exception:
             mgr.record_mode_enabled = bool(enabled)
+
+    def set_calibration_memory_enabled(self, enabled: bool):
+        mgr = self.model.calibration_manager
+        try:
+            applied = mgr.set_calibration_memory_enabled(bool(enabled))
+        except Exception:
+            applied = False
+        if not applied:
+            self.enable_calibration_memory_checkbox.blockSignals(True)
+            try:
+                self.enable_calibration_memory_checkbox.setChecked(
+                    bool(getattr(mgr, "get_calibration_memory_enabled", lambda: False)())
+                )
+            finally:
+                self.enable_calibration_memory_checkbox.blockSignals(False)
+            return
+        self.refresh_calibration_memory_recommendation(force_log=False)
 
     def update_flash_info(self):
         """
@@ -1441,9 +1470,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         preview = dict(preview or {})
         prior = dict(preview.get("prior") or {})
         mode = str(preview.get("mode") or "advisory")
+        memory_enabled = bool(preview.get("memory_enabled", True))
+        if hasattr(self, "enable_calibration_memory_checkbox"):
+            self.enable_calibration_memory_checkbox.blockSignals(True)
+            try:
+                self.enable_calibration_memory_checkbox.setChecked(memory_enabled)
+            finally:
+                self.enable_calibration_memory_checkbox.blockSignals(False)
         self.memory_recommendation_mode_label.setText(
-            self._calibration_memory_mode_description(mode)
+            "Mode: disabled. Calibration memory writes and prior lookup are off."
+            if not memory_enabled
+            else self._calibration_memory_mode_description(mode)
         )
+
+        if not memory_enabled:
+            self.memory_recommendation_status_label.setText(
+                "Calibration memory is disabled. Calibration uses the legacy startup path."
+            )
+            self.memory_recommendation_seed_label.setText("Seed: -")
+            self.memory_recommendation_expected_label.setText("Expected: -")
+            self.memory_recommendation_refresh_btn.setEnabled(True)
+            self.memory_recommendation_apply_btn.setEnabled(False)
+            self.memory_recommendation_apply_btn.setToolTip("Calibration memory is disabled.")
+            self.memory_recommendation_ignore_btn.setEnabled(False)
+            self.memory_recommendation_ignore_btn.setToolTip("")
+            return
 
         if not prior:
             self.memory_recommendation_status_label.setText(

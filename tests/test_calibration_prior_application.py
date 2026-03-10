@@ -214,6 +214,8 @@ def test_runtime_config_defaults_to_advisory_and_off_skips_lookup(tmp_path):
     store = model.calibration_memory_store
     config = store.load_runtime_config()
     assert config["prior_application_mode"] == "advisory"
+    assert config["memory_enabled"] is True
+    assert config["observation_capture_level"] == "compact"
 
     store.set_prior_application_mode("off")
     manager = CalibrationManager(model)
@@ -223,6 +225,23 @@ def test_runtime_config_defaults_to_advisory_and_off_skips_lookup(tmp_path):
     assert runtime["mode"] == "off"
     assert runtime["looked_up"] is False
     assert runtime["lookup_skipped_reason"] == "mode_off"
+
+
+def test_memory_disabled_overrides_seed_start_and_skips_lookup(tmp_path):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    store.set_prior_application_mode("seed_start")
+    store.set_memory_enabled(False)
+    manager = CalibrationManager(model)
+
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="memory disabled")
+    kwargs = manager._prepare_calibration_memory_prior_application(PressureBandCalibrationProcess, {})
+
+    runtime = manager.get_calibration_memory_prior_runtime_summary()
+    assert kwargs == {}
+    assert runtime["memory_enabled"] is False
+    assert runtime["lookup_skipped_reason"] == "memory_disabled"
+    assert runtime["rejected_reason"] == "memory_disabled"
 
 
 def test_exact_pair_prior_qualifies_and_seeds_pressure_scan_start_only(tmp_path, monkeypatch):

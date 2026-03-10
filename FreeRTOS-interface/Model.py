@@ -5747,6 +5747,27 @@ class Model(QObject):
         store = getattr(self, "calibration_memory_store", None)
         return getattr(store, "identity_registry", None) if store is not None else None
 
+    def get_calibration_memory_enabled(self):
+        store = getattr(self, "calibration_memory_store", None)
+        if store is None:
+            return False
+        try:
+            return bool(store.get_memory_enabled())
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to load memory_enabled: {e}")
+            return False
+
+    def set_calibration_memory_enabled(self, enabled: bool):
+        store = getattr(self, "calibration_memory_store", None)
+        if store is None:
+            return False
+        try:
+            store.set_memory_enabled(bool(enabled))
+            return True
+        except Exception as e:
+            print(f"[CalibrationMemory] Failed to set memory_enabled: {e}")
+            return False
+
     def list_known_reagent_identities(self):
         registry = self._get_calibration_identity_registry()
         if registry is None:
@@ -5905,6 +5926,17 @@ class Model(QObject):
             return {
                 "status": "memory_unavailable",
                 "status_label": "Memory unavailable",
+                "prior": None,
+                "resolved_reagent": resolved_reagent,
+                "head_type": head_type.to_dict() if head_type is not None else {
+                    "head_type_id": clean_head_type_id,
+                    "display_name": clean_head_type_id,
+                },
+            }
+        if not self.get_calibration_memory_enabled():
+            return {
+                "status": "memory_disabled",
+                "status_label": "Memory disabled",
                 "prior": None,
                 "resolved_reagent": resolved_reagent,
                 "head_type": head_type.to_dict() if head_type is not None else {

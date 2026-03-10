@@ -4247,6 +4247,8 @@ class ExperimentDesignDialog(QDialog):
         prior = dict(preview.get("prior") or {})
         if status == "head_type_missing":
             return "Head type not set", "color:#996515;", "Choose an intended head type to check calibration memory."
+        if status == "memory_disabled":
+            return "Memory disabled", "color:#666;", "Calibration memory is disabled, so no prior lookup is performed."
         if status == "memory_unavailable":
             return "Memory unavailable", "color:#666;", "Calibration memory could not be queried."
         if status == "none":
