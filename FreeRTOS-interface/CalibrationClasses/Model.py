@@ -2395,7 +2395,7 @@ class CalibrationManager(QObject):
         self,
         *,
         sphere_delay_us=10000,
-        imaging_z_offset_steps=-2500,
+        imaging_z_offset_steps=-3500,
         replicates_per_pressure=20,
         order="desc",
     ):
@@ -11059,7 +11059,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  model,
                  *,
                  sphere_delay_us: int = 10000,
-                 imaging_z_offset_steps: int = -2500,
+                 imaging_z_offset_steps: int = -3500,
                  replicates_per_pressure: int = 20,
                  order: str = "desc",            # "desc" = high -> low (safer)
                  edge_guard_px: int = 200,
