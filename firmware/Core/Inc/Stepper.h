@@ -9,6 +9,7 @@
 #define INC_STEPPER_H_
 
 #include "BoardConfig.h"
+#include "StepperLimitPolicy.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
@@ -116,7 +117,10 @@ public:
   void attachLimitSwitch(GPIO_TypeDef* port,
                          uint16_t      pin,
                          TickType_t    debounceMs = 10,
-						 bool          activeHigh = true);
+						 bool          activeHigh = true,
+                         StepperLimitPolicy::PullMode pullMode = StepperLimitPolicy::PullMode::Auto);
+
+  void setHomeHardStopOnLimit(bool enabled) { _homeHardStopOnLimit = enabled; }
 
   /// Called once we’ve confirmed the switch really is closed
   void onLimitTriggered();
@@ -226,13 +230,20 @@ private:
   GPIO_TypeDef*   _limPort    = nullptr;
   uint16_t        _limPin     = 0;
   TimerHandle_t   _debounceTimer = nullptr;
+  uint32_t        _limitPull = GPIO_NOPULL;
 
   IRQn_Type   _extiIRQn   = (IRQn_Type)0;
   uint8_t     _extiLine   = 0;          // 0..15
   bool        _limitActiveHigh = true; // pressed = HIGH? (else LOW)
+  volatile bool _limitSeenThisMove = false;
+  volatile bool _limitHandledThisMove = false;
+  volatile bool _limitDroppedAfterLatch = false;
+  volatile uint32_t _limitHitCount = 0u;
+  volatile uint32_t _limitDropCount = 0u;
 
   bool     _homeTowardLimitDir = false;     // default; set per-axis in init
   uint32_t _homeGuardSteps     = 300000;    // large but finite
+  bool     _homeHardStopOnLimit = false;
 
   // ISR entrypoint
   void _onRawLimitInterruptFromIsr();
@@ -240,6 +251,8 @@ private:
   void _unmaskExtiLineFromIsr();
   void _unmaskExtiLine();
   void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
+  void _resetMoveLimitState();
+  void _logLimitDebug(const char* reason) const;
 
   // software‐timer callback (runs in task context)
   static void _debounceTimerCb(TimerHandle_t timer);

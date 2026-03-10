@@ -106,6 +106,7 @@ void Stepper::begin(
   _enPort   = enPort;    _enPin   = enPin;
   _doneBit  = doneBit;   _prescaler = prescaler;
   _invertDirection = invertDirection;
+  _homeTowardLimitDir = homeDirection;
 
   // mark in the static axis array
   _axis = axis;
@@ -150,6 +151,8 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
 
 void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*accelSteps ignored*/) {
   if (!_htim || _togglesRemaining != 0) return;
+
+  _resetMoveLimitState();
 
   if (steps == 0u) {
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -298,31 +301,49 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
     _softStopOnLimit = false;
   };
 
-  auto runMoveAndWait = [&](bool direction, uint32_t steps, uint32_t freqHz) -> bool {
+  struct MoveResult {
+    bool completed = false;
+    bool limitSeen = false;
+    bool limitAsserted = false;
+    bool limitDroppedAfterLatch = false;
+  };
+
+  auto runMoveAndWait = [&](bool direction, uint32_t steps, uint32_t freqHz) -> MoveResult {
+    MoveResult result{};
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
     move(direction, steps, freqHz, 0u);
     if (steps == 0u) {
-      return true;
+      result.completed = true;
+      result.limitAsserted = _isLimitAsserted();
+      return result;
     }
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
     if (waitUntilDone(timeoutMs)) {
-      return true;
+      result.completed = true;
+      result.limitSeen = _limitSeenThisMove;
+      result.limitAsserted = _isLimitAsserted();
+      result.limitDroppedAfterLatch = _limitDroppedAfterLatch;
+      return result;
     }
     Logger::instance()->log("[Home %d] move timeout steps=%lu hz=%lu\r\n",
                             (int)_axis,
                             (unsigned long)steps,
                             (unsigned long)freqHz);
+    _logLimitDebug("move timeout");
     restoreHomeState();
-    return false;
+    result.limitSeen = _limitSeenThisMove;
+    result.limitAsserted = _isLimitAsserted();
+    result.limitDroppedAfterLatch = _limitDroppedAfterLatch;
+    return result;
   };
 
 	// Replace the raw HAL_GPIO_ReadPin(...) comparisons with _isLimitAsserted():
 	if (_isLimitAsserted()) {
-	  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz)) {
+	  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz).completed) {
         return false;
       }
 	  while (_isLimitAsserted()) {
-	    if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz)) {
+	    if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps * 2u, slowHz).completed) {
           return false;
         }
 	  }
@@ -343,21 +364,24 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   // Coarse approach with finite guard
   _softStopOnLimit = true;
-  if (!runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz)) {
+  const MoveResult coarse = runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz);
+  if (!coarse.completed) {
     return false;
   }
   _softStopOnLimit = false;
 
 
-  if (!_isLimitAsserted()) {
+  if (!StepperLimitPolicy::homeLimitDetected(coarse.limitSeen, coarse.limitAsserted)) {
     _softStopOnLimit = true;
-    if (!runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz)) {
+    const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
+    if (!probe.completed) {
       return false;
     }
     _softStopOnLimit = false;
 
-    if (!_isLimitAsserted()) {
+    if (!StepperLimitPolicy::homeLimitDetected(probe.limitSeen, probe.limitAsserted)) {
       Logger::instance()->log("[Home] Limit not detected on %d — abort\r\n", (int)_axis);
+      _logLimitDebug("limit not detected after probe");
       restoreHomeState();
       return false;
     }
@@ -381,22 +405,29 @@ bool Stepper::home(uint32_t fastHz, uint32_t slowHz, uint32_t backoffSteps) {
 
   // Back off a bit
   _softstop_accel_override_sps2 = 0.f;
-  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps, slowHz)) {
+  if (!runMoveAndWait(!_homeTowardLimitDir, backoffSteps, slowHz).completed) {
     return false;
   }
 
   // Fine approach (short)
   _softstop_accel_override_sps2 = home_brake_accel;
   _softStopOnLimit = true;
-  if (!runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz)) {
+  const MoveResult fine = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz);
+  if (!fine.completed) {
     return false;
   }
   _softStopOnLimit = false;
+  if (!StepperLimitPolicy::homeLimitDetected(fine.limitSeen, fine.limitAsserted)) {
+    Logger::instance()->log("[Home %d] Fine limit not detected abort\r\n", (int)_axis);
+    _logLimitDebug("fine limit not detected");
+    restoreHomeState();
+    return false;
+  }
 
   // Zero & move off switch slightly
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
-  if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz)) {
+  if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz).completed) {
     return false;
   }
 
@@ -454,6 +485,49 @@ void Stepper::stop() {
 
   _togglesRemaining = _togglesDone = 0;
   _inSoftStop = false;
+}
+
+void Stepper::_resetMoveLimitState()
+{
+  _limitSeenThisMove = false;
+  _limitHandledThisMove = false;
+  _limitDroppedAfterLatch = false;
+}
+
+void Stepper::_logLimitDebug(const char* reason) const
+{
+  if (_limPort == nullptr || _limPin == 0u) {
+    return;
+  }
+
+  const int line = pin_number_from_mask(_limPin);
+  const uint32_t lineMask = ExtiDebounce::lineMask((line >= 0) ? static_cast<uint8_t>(line) : 0u);
+  const uint32_t bitShift = static_cast<uint32_t>(line * 2);
+  const uint32_t moder = (_limPort->MODER >> bitShift) & 0x3u;
+  const uint32_t idr = (_limPort->IDR & _limPin) ? 1u : 0u;
+  const uint32_t exticr = (SYSCFG->EXTICR[line / 4] >> ((line % 4) * 4)) & 0xFu;
+  const uint32_t imr  = (EXTI->IMR  & lineMask) ? 1u : 0u;
+  const uint32_t rtsr = (EXTI->RTSR & lineMask) ? 1u : 0u;
+  const uint32_t ftsr = (EXTI->FTSR & lineMask) ? 1u : 0u;
+  const uint32_t pr   = (EXTI->PR   & lineMask) ? 1u : 0u;
+
+  Logger::instance()->log(
+      "[Stepper %d] %s lim=%u idr=%lu pull=%lu mode=%lu latched=%u dropped=%u hits=%lu drops=%lu exti(map=%lu imr=%lu rtsr=%lu ftsr=%lu pr=%lu)\r\n",
+      (int)_axis,
+      (reason != nullptr) ? reason : "limit diag",
+      (unsigned)_limPin,
+      (unsigned long)idr,
+      (unsigned long)_limitPull,
+      (unsigned long)moder,
+      (unsigned)_limitSeenThisMove,
+      (unsigned)_limitDroppedAfterLatch,
+      (unsigned long)_limitHitCount,
+      (unsigned long)_limitDropCount,
+      (unsigned long)exticr,
+      (unsigned long)imr,
+      (unsigned long)rtsr,
+      (unsigned long)ftsr,
+      (unsigned long)pr);
 }
 
 void Stepper::enableMotor() {
@@ -589,11 +663,13 @@ void Stepper::configureLimitPin(GPIO_TypeDef* port, uint16_t pin) {
 void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
                                 uint16_t      pin,
                                 TickType_t    debounceMs,
-                                bool          activeHigh)
+                                bool          activeHigh,
+                                StepperLimitPolicy::PullMode pullMode)
 {
   _limPort = port;
   _limPin  = pin;
   _limitActiveHigh = activeHigh;
+  _limitPull = static_cast<uint32_t>(StepperLimitPolicy::resolvePullMode(pullMode, activeHigh));
 
   auto enable_gpio_clock = [](GPIO_TypeDef* p){
     if (p==GPIOA) __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -612,7 +688,7 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   GPIO_InitTypeDef gi{};
   gi.Pin   = pin;
   gi.Mode  = activeHigh ? GPIO_MODE_IT_RISING : GPIO_MODE_IT_FALLING;
-  gi.Pull  = activeHigh ? GPIO_PULLDOWN : GPIO_PULLUP;
+  gi.Pull  = _limitPull;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(port, &gi);
 
@@ -657,6 +733,21 @@ void Stepper::_onRawLimitInterruptFromIsr()
   _maskExtiLineFromIsr();
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
 
+  const bool pressed = _isLimitAsserted();
+  if (pressed) {
+    _limitSeenThisMove = true;
+    ++_limitHitCount;
+  }
+
+  const auto latchedAction = StepperLimitPolicy::decideLatchedLimitAction(
+      _togglesRemaining != 0u,
+      _softStopOnLimit,
+      _homeHardStopOnLimit);
+  if (pressed && latchedAction != StepperLimitPolicy::LatchedLimitAction::ConfirmLater) {
+    _limitHandledThisMove = true;
+    _onLimitTriggeredFromIsr(&woken);
+  }
+
   BaseType_t timerRc = pdFAIL;
   if (_debounceTimer != nullptr) {
     timerRc = xTimerStartFromISR(_debounceTimer, &woken);
@@ -671,10 +762,10 @@ void Stepper::_onRawLimitInterruptFromIsr()
     return;
   }
 
-  const bool pressed = _isLimitAsserted();
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
   _unmaskExtiLineFromIsr();
-  if (pressed) {
+  if (pressed && !_limitHandledThisMove) {
+    _limitHandledThisMove = true;
     _onLimitTriggeredFromIsr(&woken);
   }
   portYIELD_FROM_ISR(woken);
@@ -685,7 +776,16 @@ void Stepper::onLimitTriggered()
 {
 //  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
+  if (_togglesRemaining == 0u) {
+    return;
+  }
+
   if (_softStopOnLimit && _togglesRemaining != 0) {
+    if (_homeHardStopOnLimit) {
+      stop();
+      xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+      return;
+    }
     // Gentle stop: reshape the current move into a decel tail and let the ISR finish it
     _requestSoftStop();
     return;  // do not signal "done" yet; _stepTick() will when the tail ends
@@ -735,7 +835,19 @@ void Stepper::_unmaskExtiLine()
 
 void Stepper::_onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken)
 {
+  if (_togglesRemaining == 0u) {
+    return;
+  }
+
   if (_softStopOnLimit && _togglesRemaining != 0) {
+    if (_homeHardStopOnLimit) {
+      stop();
+      xEventGroupSetBitsFromISR(
+          Orchestrator::getDoneEvents(),
+          _doneBit,
+          pxHigherPriorityTaskWoken);
+      return;
+    }
     _requestSoftStop();
     return;
   }
@@ -756,7 +868,16 @@ void Stepper::_debounceTimerCb(TimerHandle_t timer)
 
   __HAL_GPIO_EXTI_CLEAR_FLAG(self->_limPin);
   self->_unmaskExtiLine();
-  if (self->_isLimitAsserted()) {
+  const bool pressed = self->_isLimitAsserted();
+  if (!pressed && self->_limitSeenThisMove) {
+    self->_limitDroppedAfterLatch = true;
+    ++self->_limitDropCount;
+    if (self->_softStopOnLimit || self->_axis == Stepper::Z_AXIS) {
+      self->_logLimitDebug("limit released after latch");
+    }
+  }
+  if (pressed && !self->_limitHandledThisMove) {
+    self->_limitHandledThisMove = true;
     self->onLimitTriggered();
   }
 }
@@ -832,7 +953,12 @@ extern "C" void MX_STEPPERZ_Init(void) {
 		   1,					// Prescaler - TIM10 uses APB2 which is twice as fast as APB1
 		   true,				// Invert direction
 		   false);				// Home direction
-  s3.attachLimitSwitch(GPIOG,GPIO_PIN_10,pdMS_TO_TICKS(15));
+  s3.setHomeHardStopOnLimit(true);
+  s3.attachLimitSwitch(GPIOG,
+                       GPIO_PIN_10,
+                       pdMS_TO_TICKS(3),
+                       true,
+                       StepperLimitPolicy::PullMode::None);
   s3.setMaxSpeedHz(60000);
 }
 
