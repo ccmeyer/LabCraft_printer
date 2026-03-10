@@ -6203,6 +6203,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         Semantics:
         - TOO_LOW:   0 droplets
         - ACCEPTABLE: 1 droplet with nozzle_area <= low band
+                      or no attached-area signal at all
         - BORDERLINE: 1 droplet with nozzle_area in [low, high] (still okay)
         - NEAR:      1 droplet with nozzle_area > high (close but a bit “wet”)
         - TOO_HIGH:  >= 2 droplets
@@ -6214,8 +6215,8 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
 
         # droplet_count == 1
         if nozzle_area is None:
-            # be tolerant: still a one-drop condition, just treat as NEAR
-            return "NEAR"
+            # A clean detached droplet may have no attached-area signal at all.
+            return "ACCEPTABLE"
 
         low  = threshold * (1.0 - self.hysteresis_frac)
         high = threshold * (1.0 + self.hysteresis_frac)
@@ -6907,8 +6908,28 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # Classify first so safety-stop logic can depend on class
         cls = self._classify_from_detection(droplets)
         free_blob_details = []
+        nozzle_contact = bool(nozzle_area and int(nozzle_area) > 0)
+        near_nozzle_residue = False
+        near_nozzle_residue_area = 0
+        near_nozzle_residue_components = 0
         if isinstance(droplet_details, dict):
             free_blob_details = list(droplet_details.get("free_droplets", []) or [])
+            nozzle_contact = bool(droplet_details.get("nozzle_contact_detected", nozzle_contact))
+            near_nozzle_residue = bool(
+                droplet_details.get("near_nozzle_residue_detected", False)
+            )
+            try:
+                near_nozzle_residue_area = int(
+                    droplet_details.get("near_nozzle_residue_area", 0) or 0
+                )
+            except Exception:
+                near_nozzle_residue_area = 0
+            try:
+                near_nozzle_residue_components = int(
+                    droplet_details.get("near_nozzle_residue_components", 0) or 0
+                )
+            except Exception:
+                near_nozzle_residue_components = 0
 
         stream_like_count = 0
         max_aspect_h_over_w = None
@@ -7062,7 +7083,13 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             "center_px": (None if not droplets else droplets[0]),
             "dy_min_px": (None if dy_min is None else int(dy_min)),
             "nozzle_attached_area": int(nozzle_area or 0),
-            "nozzle_wet": bool(nozzle_area and nozzle_area > self.nozzle_area_threshold),
+            "nozzle_contact": bool(nozzle_contact),
+            "near_nozzle_residue": bool(near_nozzle_residue),
+            "near_nozzle_residue_area": int(near_nozzle_residue_area),
+            "near_nozzle_residue_components": int(near_nozzle_residue_components),
+            "nozzle_wet": bool(
+                nozzle_contact and nozzle_area and nozzle_area > self.nozzle_area_threshold
+            ),
             "frame_height_px": int(self.droplet_image.shape[0]) if getattr(self, "droplet_image", None) is not None else None,
             "stream_like_count": int(stream_like_count),
             "max_aspect_h_over_w": (
@@ -7615,7 +7642,11 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             cls = str(r.get("cls", ""))
             area = int(r.get("nozzle_attached_area") or 0)
             wet = bool(r.get("nozzle_wet"))
-            attached = wet or (area >= threshold_px)
+            if "nozzle_contact" in r:
+                contact = bool(r.get("nozzle_contact"))
+            else:
+                contact = bool(wet or area > 0)
+            attached = bool(contact and (wet or (area >= threshold_px)))
             if not attached:
                 continue
             attached_hits += 1
@@ -14640,11 +14671,11 @@ class DropletCameraModel(QObject):
           - works on diff = |image - background|
           - restricts to ROI below the nozzle row (+margin)
           - morphology to clean noise
-          - classifies "nozzle-attached" area (area below nozzle within any bbox that contains the nozzle center)
+          - distinguishes true nozzle-contact from near-nozzle residue
           - counts free droplets entirely below the nozzle
         Returns: 
           droplets: list[(cx, cy)] or None
-          nozzle_attached_area: int or None   # includes band satellites + area below nozzle within nozzle bbox
+          nozzle_attached_area: int or None   # only for components that physically contact the nozzle
           overlay_bgr: np.ndarray
           details: dict (optional, when return_details=True)
         """
@@ -14654,6 +14685,10 @@ class DropletCameraModel(QObject):
             "status": "init",
             "free_droplets": [],
             "attached_components": 0,
+            "nozzle_contact_detected": False,
+            "near_nozzle_residue_detected": False,
+            "near_nozzle_residue_components": 0,
+            "near_nozzle_residue_area": 0,
             "component_count": 0,
             "roi_top": None,
             "free_min_y": None,
@@ -14716,6 +14751,16 @@ class DropletCameraModel(QObject):
         stream_aspect_soft = float(max(1.0, getattr(self, "stream_aspect_soft", 1.6)))
         stream_circularity_max = float(max(0.0, getattr(self, "stream_circularity_max", 0.55)))
         stream_min_area_px = int(max(1, getattr(self, "stream_min_area_px", 1200)))
+        contact_half_width_px = int(max(4, getattr(self, "nozzle_contact_half_width_px", min(12, satellite_band_px))))
+        contact_up_px = int(max(1, getattr(self, "nozzle_contact_up_px", max(1, int(round(margin_up_px * 0.5))))))
+        contact_down_px = int(
+            max(2, getattr(self, "nozzle_contact_down_px", max(2, min(6, satellite_band_px // 2))))
+        )
+        contact_x0 = max(0, nzx - contact_half_width_px)
+        contact_x1 = min(w, nzx + contact_half_width_px + 1)
+        contact_y0 = max(roi_top, nzy - contact_up_px)
+        contact_y1 = min(h, nzy + contact_down_px + 1)
+        details["contact_window"] = [int(contact_x0), int(contact_y0), int(contact_x1), int(contact_y1)]
 
         for lab in range(1, nlab):
             x, y, ww, hh, area = stats[lab]
@@ -14732,19 +14777,37 @@ class DropletCameraModel(QObject):
             if y1 <= nzy:
                 continue
 
-            # Does bbox contain nozzle center?
-            bbox_contains_nozzle = (x0 <= nzx <= x1) and (y0 <= nzy <= y1)
+            comp_mask = np.uint8(labels[y:y + hh, x:x + ww] == lab)
 
-            # If bbox contains the nozzle OR overlaps the horizontal "satellite" band → treat as attached
+            nozzle_contact = False
+            cx0 = max(x0, contact_x0)
+            cy0 = max(y0, contact_y0)
+            cx1 = min(x1, contact_x1)
+            cy1 = min(y1, contact_y1)
+            if cx1 > cx0 and cy1 > cy0:
+                comp_view = comp_mask[(cy0 - y0):(cy1 - y0), (cx0 - x0):(cx1 - x0)]
+                nozzle_contact = bool(np.any(comp_view))
+
+            # Components that overlap the near-nozzle band but do not touch the nozzle
+            # are residue. Only true contact is treated as attached.
             overlaps_band = not (y1 < band_top or y0 > band_bot)
-            if bbox_contains_nozzle or overlaps_band:
+            if nozzle_contact:
                 # Accumulate "attached" area as an *approximation* of the portion below the nozzle
                 # Fast approximation: area below nozzle row within bbox footprint
                 below_h = max(0, y1 - max(y0, nzy))
                 if below_h > 0:
                     nozzle_attached_area += int(below_h * ww)
                 details["attached_components"] = int(details["attached_components"]) + 1
+                details["nozzle_contact_detected"] = True
                 cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 200, 255), 2)  # amber: attached
+                continue
+            if overlaps_band:
+                details["near_nozzle_residue_detected"] = True
+                details["near_nozzle_residue_components"] = (
+                    int(details["near_nozzle_residue_components"]) + 1
+                )
+                details["near_nozzle_residue_area"] = int(details["near_nozzle_residue_area"]) + int(area)
+                cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 255, 255), 2)  # yellow: residue
                 continue
 
             # Else: candidate free droplet (must be sufficiently below the band and large enough)
@@ -14755,7 +14818,7 @@ class DropletCameraModel(QObject):
                 bbox_area = max(1, int(ww * hh))
                 aspect_h_over_w = float(hh) / float(max(1, ww))
                 fill_ratio = float(area) / float(bbox_area)
-                mask = np.uint8(labels[y:y + hh, x:x + ww] == lab) * 255
+                mask = comp_mask * 255
                 contour_mask, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 perimeter = 0.0
                 if contour_mask:

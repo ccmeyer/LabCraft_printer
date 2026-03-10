@@ -261,6 +261,36 @@ def test_pressure_band_on_decide_attached_stream_triggers_later_delay_retest():
     assert proc._advance_calls == []
 
 
+def test_pressure_band_on_decide_ignores_residue_only_attached_area_for_timing():
+    proc = _build_decide_proc(
+        [
+            {
+                **_rep("single"),
+                "nozzle_attached_area": 20000,
+                "nozzle_contact": False,
+                "nozzle_wet": False,
+                "near_nozzle_residue": True,
+            }
+            for _ in range(5)
+        ]
+    )
+    proc._active_classify_delay_us = 5350
+    proc._base_classify_delay_us = 5850
+
+    calls = []
+    proc._start_delay_retest = (
+        lambda reason, verdict, counts, decision, confidence, **kwargs: calls.append(str(reason)) or True
+    )
+
+    proc.onDecide()
+
+    assert calls == []
+    assert proc._store_calls
+    assert proc._store_calls[0]["verdict"] == "single"
+    assert proc._choose_calls == ["single"]
+    assert len(proc._advance_calls) == 1
+
+
 def test_pressure_band_on_decide_uses_retest_replicate_target_without_escalation():
     proc = _build_decide_proc(
         [

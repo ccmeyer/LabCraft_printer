@@ -676,6 +676,64 @@ def test_pressure_band_analyze_reclassifies_stream_like_single_as_multiple():
     )
 
 
+def test_pressure_band_analyze_residue_near_nozzle_does_not_mark_nozzle_wet():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._discard_next = False
+    proc._phase = "scan"
+    proc._prev_verdict = "single"
+    proc._current_pressure = 1.55
+    proc.safety_clearance_px = 350
+    proc.nozzle_center_px = (100, 100)
+    proc.nozzle_area_threshold = 8000
+    proc.background_image = np.zeros((900, 220), dtype=np.uint8)
+    proc.droplet_image = np.zeros((900, 220), dtype=np.uint8)
+    proc.reps = []
+    proc._invalid_skip_count = 0
+    proc._invalid_skip_cap = 6
+    proc._active_classify_delay_us = 5850
+    proc.classify_delay_us = 5850
+    proc.stageChanged = Recorder()
+    proc.replicateReady = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationError = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            identify_droplets=lambda *args, **kwargs: (
+                [(110, 620)],
+                12000,
+                np.zeros((900, 220), dtype=np.uint8),
+                {
+                    "free_droplets": [
+                        {
+                            "area_px": 1800,
+                            "aspect_h_over_w": 1.2,
+                            "circularity": 0.9,
+                            "is_stream_like": False,
+                        }
+                    ],
+                    "nozzle_contact_detected": False,
+                    "near_nozzle_residue_detected": True,
+                    "near_nozzle_residue_area": 12000,
+                    "near_nozzle_residue_components": 1,
+                },
+            )
+        )
+    )
+
+    proc.onAnalyzeReplicate()
+
+    assert proc.finalize.calls == []
+    assert proc.replicateReady.calls
+    assert len(proc.reps) == 1
+    rep = proc.reps[0]
+    assert rep["cls"] == "single"
+    assert rep["nozzle_contact"] is False
+    assert rep["near_nozzle_residue"] is True
+    assert rep["nozzle_wet"] is False
+
+
 def test_pressure_band_completion_reports_conservative_primary_band_for_wide_band():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc.samples = [
