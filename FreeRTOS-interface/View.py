@@ -1366,7 +1366,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_name))
             self.update_well_colors()            
     
-    def update_well_colors(self):
+    def update_well_colors(self, *_args):
         """Update the colors of the wells based on the selected reagent's concentration."""
         stock_id = None
         if not self.model.reaction_collection.is_empty():
@@ -3457,7 +3457,7 @@ class RackBox(QGroupBox):
                             return
         return swap_printer_head
     
-    def update_all_slots(self):
+    def update_all_slots(self, *_args):
         """Update all slots in the rack."""
         for slot_number in range(len(self.rack_model.slots)):
             self.update_slot(slot_number)

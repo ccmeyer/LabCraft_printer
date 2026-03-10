@@ -43,7 +43,7 @@ def test_update_well_colors_sets_tooltip_with_droplets_and_concentration():
         get_well_stock_final_concentration=lambda wid, sid: 0.1234,
     )
 
-    WellPlateWidget.update_well_colors(widget)
+    WellPlateWidget.update_well_colors(widget, "A1")
 
     tip = widget.well_labels[0][0].tooltip
     assert "Target droplets: 7" in tip

@@ -1034,17 +1034,22 @@ class Controller(QObject):
     def last_well_complete_handler(self,well_id=None,stock_id=None,target_droplets=None,update_volume=False):
         # Reset acceleration and move to pause after the queue is processed
         def finalize_printing():
-            if update_volume:
-                self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
-            # self.machine.reset_acceleration()
-            # self.exit_print_mode()
-            self.disable_print_profile()
-            self.move_to_location('pause')
-            self.move_to_location('pause',z_offset=-5000)
-            self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
-            self.model.experiment_model.update_progress(well_id)
-            self.array_complete.emit()
-            print('---Printing complete---')
+            try:
+                if update_volume:
+                    self.model.rack_model.get_gripper_printer_head().record_droplet_volume_lost(target_droplets)
+                # self.machine.reset_acceleration()
+                # self.exit_print_mode()
+                self.disable_print_profile()
+                self.move_to_location('pause')
+                self.move_to_location('pause',z_offset=-5000)
+                self.model.well_plate.get_well(well_id).record_stock_print(stock_id, target_droplets)
+                self.model.experiment_model.create_progress_file()
+                self.array_complete.emit()
+                print('---Printing complete---')
+            except Exception as exc:
+                msg = f'Failed to finalize array printing for well {well_id}: {exc}'
+                print(msg)
+                self.error_occurred_signal.emit('Print Array Error', msg)
         
         # Ensure that this is done after the command queue has been fully processed
         QtCore.QTimer.singleShot(0, finalize_printing)
