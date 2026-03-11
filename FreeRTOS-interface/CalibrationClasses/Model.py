@@ -11198,6 +11198,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     delayApplied    = Signal()
     timepointReady  = Signal()
     continueCap     = Signal()
+    discardRecapture = Signal()
     continueSearch  = Signal()
     dropletFound    = Signal()
     dropletCentered = Signal()
@@ -11481,6 +11482,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._search_candidate_seen_since_sweep = False
         self._search_candidate_seen_ever = False
         self._search_started_at_monotonic = time.monotonic()
+        self._discard_post_move_pending = False
+        self._discard_post_move_reason = ""
+        self._discard_post_move_target_xyz = None
         self._center_last_center = None
         self._center_stable_hits = 0
         self._center_jump_reject_streak = 0
@@ -11557,6 +11561,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.state_capture.addTransition(self.calibration_manager.captureCompleted, self.state_analyze)
 
         # search: loop until found or retries exhausted
+        self.state_analyze.addTransition(self.discardRecapture, self.state_capture)
         self.state_analyze.addTransition(self.continueSearch, self.state_setDelay)  # keep sweeping delay
         self.state_analyze.addTransition(self.dropletFound,  self.state_center)
         self.state_analyze.addTransition(self.readyToCharacterize, self.state_char)
@@ -11737,6 +11742,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if (int(cur['X']) == X) and (int(cur['Y']) == Y) and (int(cur['Z']) == Z):
             self.moveDone.emit()
             return
+        self._discard_post_move_pending = True
+        self._discard_post_move_reason = "stage_move"
+        self._discard_post_move_target_xyz = [int(X), int(Y), int(Z)]
         self._request_move_absolute_with_timeout(
             (X, Y, Z),
             on_done=self.moveDone.emit,
@@ -12072,6 +12080,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
         self._forced_delay_us = None
+        self._discard_post_move_pending = False
+        self._discard_post_move_reason = ""
+        self._discard_post_move_target_xyz = None
         self.current_delay_us = None
         self.num_images = self.repl_target
         self.image_counter = 0
@@ -12769,6 +12780,38 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onAnalyzeDroplet(self):
+        if bool(getattr(self, "_discard_post_move_pending", False)):
+            reason = str(getattr(self, "_discard_post_move_reason", "") or "stage_move")
+            target_xyz = getattr(self, "_discard_post_move_target_xyz", None)
+            self._discard_post_move_pending = False
+            self._discard_post_move_reason = ""
+            self._discard_post_move_target_xyz = None
+            self.stageChanged.emit("Discarding first post-move frame; re-capturing")
+            self._record_pressure_sweep_analysis(
+                "pressure_sweep_post_move_discard",
+                {
+                    "status": "discarded",
+                    "reason": str(reason),
+                    "target_xyz": (
+                        None if target_xyz is None else [int(v) for v in list(target_xyz)]
+                    ),
+                },
+            )
+            self._record_decision(
+                "discard_post_move_frame",
+                {
+                    "reason": str(reason),
+                    "target_xyz": (
+                        None if target_xyz is None else [int(v) for v in list(target_xyz)]
+                    ),
+                    "flash_delay_us": int(
+                        getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0
+                    ),
+                },
+            )
+            self.discardRecapture.emit()
+            return
+
         contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
             self.droplet_image, self.background_image, return_details=True
         )

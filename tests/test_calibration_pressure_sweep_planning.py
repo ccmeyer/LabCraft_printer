@@ -663,6 +663,9 @@ def test_pressure_sweep_safe_move_abs_clamps_to_imaging_envelope():
     proc._record_event = lambda *args, **kwargs: None
     proc._record_pressure_result = lambda *args, **kwargs: None
     proc.nextPressure = Recorder()
+    proc._discard_post_move_pending = False
+    proc._discard_post_move_reason = ""
+    proc._discard_post_move_target_xyz = None
     proc.model = SimpleNamespace(
         machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1000, "Y": 2000, "Z": 3000})
     )
@@ -679,6 +682,41 @@ def test_pressure_sweep_safe_move_abs_clamps_to_imaging_envelope():
     proc._safe_move_abs((4000, 2000, 12000))
 
     assert captured["target"] == (1200, 2000, 3400)
+    assert proc._discard_post_move_pending is True
+    assert proc._discard_post_move_reason == "stage_move"
+    assert proc._discard_post_move_target_xyz == [1200, 2000, 3400]
+    assert proc.moveDone.calls
+
+
+def test_pressure_sweep_safe_move_abs_noop_move_does_not_arm_post_move_discard():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.x_lo, proc.x_hi = 0, 50000
+    proc.y_lo, proc.y_hi = 0, 50000
+    proc.z_lo, proc.z_hi = 0, 200000
+    proc._search_anchor_xyz = (1000, 2000, 3000)
+    proc.max_anchor_dx_steps = 500
+    proc.max_anchor_dz_steps = 500
+    proc.imaging_guard_hit_cap = 5
+    proc._imaging_guard_hit_count = 0
+    proc.stageChanged = Recorder()
+    proc._record_event = lambda *args, **kwargs: None
+    proc._record_pressure_result = lambda *args, **kwargs: None
+    proc.nextPressure = Recorder()
+    proc._discard_post_move_pending = False
+    proc._discard_post_move_reason = ""
+    proc._discard_post_move_target_xyz = None
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: {"X": 1200, "Y": 2000, "Z": 3400})
+    )
+    proc.moveDone = Recorder()
+    proc._request_move_absolute_with_timeout = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("no-op move should not issue a move request")
+    )
+
+    proc._safe_move_abs((1200, 2000, 3400))
+
+    assert proc._discard_post_move_pending is False
+    assert proc._discard_post_move_target_xyz is None
     assert proc.moveDone.calls
 
 
@@ -812,6 +850,47 @@ def test_pressure_sweep_analyze_droplet_quantification_requires_confirmation():
     assert proc.readyToCharacterize.calls
     assert not proc.dropletFound.calls
     assert len(proc.measurements) == 1
+
+
+def test_pressure_sweep_analyze_droplet_discards_first_post_move_frame():
+    overlay = np.zeros((80, 80, 3), dtype=np.uint8)
+    called = {"identify": 0}
+
+    def _identify(*_args, **_kwargs):
+        called["identify"] += 1
+        raise AssertionError("post-move discard should happen before contour analysis")
+
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(identify_droplet_contour=_identify)
+    )
+    proc.droplet_image = overlay.copy()
+    proc.background_image = overlay.copy()
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.discardRecapture = Recorder()
+    proc.continueSearch = Recorder()
+    proc.dropletFound = Recorder()
+    proc.readyToCharacterize = Recorder()
+    proc.current_delay_us = 7200
+    proc.target_delay_us = 7200
+    proc.cur_pressure = 1.1
+    proc._discard_post_move_pending = True
+    proc._discard_post_move_reason = "stage_move"
+    proc._discard_post_move_target_xyz = [100, 200, 300]
+    proc._record_pressure_sweep_analysis = lambda *args, **kwargs: None
+    proc._record_decision = lambda *args, **kwargs: None
+
+    proc.onAnalyzeDroplet()
+
+    assert called["identify"] == 0
+    assert proc._discard_post_move_pending is False
+    assert proc._discard_post_move_reason == ""
+    assert proc._discard_post_move_target_xyz is None
+    assert proc.discardRecapture.calls
+    assert not proc.continueSearch.calls
+    assert not proc.dropletFound.calls
+    assert not proc.readyToCharacterize.calls
 
 
 def test_pressure_sweep_set_delay_uses_same_delay_for_confirmation():
