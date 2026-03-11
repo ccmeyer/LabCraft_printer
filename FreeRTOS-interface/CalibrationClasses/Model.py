@@ -5388,6 +5388,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
         self._phase = "seek_visible"   # seek_visible -> scan_down -> fine_adjust
         self._prev_area = None
+        self._above_band_candidate = None
+        self._below_band_candidate = None
+        self._best_candidate = None
+        self._recent_delay_history = []
 
         self._rep_areas = []
         self._replicate_details = []
@@ -5458,6 +5462,10 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self._phase = "seek_visible"
         self._trend_noise_events = 0
         self._last_agg_details = {}
+        self._above_band_candidate = None
+        self._below_band_candidate = None
+        self._best_candidate = None
+        self._recent_delay_history = []
         self.nozzle_center_px = self.calibration_manager.get_nozzle_center_image_position()
         self.selected_area = None
         self.selected_center_px = None
@@ -5552,6 +5560,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self._replicate_details.clear()
         self.measurements.append((self.candidate_delay, agg_area))
         self._last_agg_details = dict(agg)
+        self._update_refinement_state(self.candidate_delay, agg_area, agg)
 
         self._record_analysis(
             {
@@ -5562,10 +5571,11 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 "candidate_delay_us": int(self.candidate_delay),
                 "aggregate_area": int(agg_area),
                 "aggregate": dict(agg),
+                "bracket": self._bracket_snapshot(),
             }
         )
 
-        if self._phase in ("scan_down", "fine_adjust") and self._prev_area is not None:
+        if self._phase == "scan_down" and self._prev_area is not None:
             if agg_area > (1.0 + self.MONO_TOL_FRAC) * float(self._prev_area):
                 self._trend_noise_events += 1
                 self._record_decision(
@@ -5634,20 +5644,41 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 return
 
             self._phase = "fine_adjust"
-            self._set_next_delay(self.candidate_delay + self.FINE_STEP)
+            next_delay = self._choose_bracket_refinement_delay(default_direction=+1)
+            if next_delay is None:
+                if self._finish_best_candidate("scan_down_bracket_collapse"):
+                    return
+                self._fail("Emergence search could not refine after coarse overshoot")
+                return
+            self._set_next_delay(next_delay)
             self.continueSearch.emit()
             return
 
         if self._phase == "fine_adjust":
-            if agg_area < self.MIN_AREA:
-                self._set_next_delay(self.candidate_delay + self.FINE_STEP)
-            elif agg_area > self.MAX_AREA:
-                self._set_next_delay(self.candidate_delay - self.FINE_STEP)
-            else:
+            if agg_area >= self.MIN_AREA and agg_area <= self.MAX_AREA:
                 self._finish_success(agg_area, agg)
                 return
 
+            next_delay = self._choose_bracket_refinement_delay(
+                default_direction=(+1 if agg_area < self.MIN_AREA else -1)
+            )
+            if next_delay is None:
+                if self._finish_best_candidate("fine_adjust_no_progress"):
+                    return
+                self._fail("Emergence fine-adjust could not select a better delay")
+                return
+
+            if self._last_delay is not None and int(next_delay) == int(self._last_delay):
+                if self._finish_best_candidate("fine_adjust_oscillation"):
+                    return
+                self._fail("Emergence fine-adjust oscillated without convergence")
+                return
+
+            self._set_next_delay(next_delay)
+
             if self._eval_count >= self.MAX_EVALS:
+                if self._finish_best_candidate("fine_adjust_max_evals"):
+                    return
                 self._fail("Emergence fine-adjust did not converge (max evaluations)")
                 return
             self.continueSearch.emit()
@@ -5763,8 +5794,8 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         }
         return agg_area, summary
 
-    def _finish_success(self, agg_area: int, agg: dict):
-        self.stageChanged.emit("Target area window reached")
+    def _finish_success(self, agg_area: int, agg: dict, *, decision_type: str = "emergence_target_reached", stage_message: str = "Target area window reached"):
+        self.stageChanged.emit(str(stage_message))
         machine_pos = self.model.machine_model.get_current_position_dict()
         # Keep nozzle image center from nozzle-position calibration; publish emergence-refined
         # center separately for pressure-band classification.
@@ -5781,7 +5812,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
                 pass
 
         self._record_decision(
-            "emergence_target_reached",
+            str(decision_type),
             {
                 "flash_delay": int(self.candidate_delay),
                 "aggregate_area": int(agg_area),
@@ -5822,6 +5853,124 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
 
     def _clamp_delay(self, d: int) -> int:
         return max(self.DELAY_MIN, min(self.DELAY_MAX, int(d)))
+
+    def _candidate_payload(self, delay: int, area: int, agg: dict | None):
+        return {
+            "delay": int(delay),
+            "area": int(area),
+            "agg": dict(agg or {}),
+        }
+
+    def _band_distance(self, area: int) -> int:
+        a = int(area)
+        if self.MIN_AREA <= a <= self.MAX_AREA:
+            return 0
+        if a < self.MIN_AREA:
+            return int(self.MIN_AREA - a)
+        return int(a - self.MAX_AREA)
+
+    def _candidate_sort_key(self, candidate: dict):
+        agg = candidate.get("agg") or {}
+        try:
+            cv = float(agg.get("replicate_cv", 9999.0))
+        except Exception:
+            cv = 9999.0
+        return (
+            int(self._band_distance(candidate.get("area", 0))),
+            cv,
+            abs(int(candidate.get("delay", 0)) - int(self.candidate_delay)),
+        )
+
+    def _update_refinement_state(self, delay: int, area: int, agg: dict | None):
+        candidate = self._candidate_payload(delay, area, agg)
+
+        history = list(getattr(self, "_recent_delay_history", []))
+        history.append(int(delay))
+        self._recent_delay_history = history[-8:]
+
+        best = getattr(self, "_best_candidate", None)
+        if best is None or self._candidate_sort_key(candidate) < self._candidate_sort_key(best):
+            self._best_candidate = candidate
+
+        if int(area) > int(self.MAX_AREA):
+            current = getattr(self, "_above_band_candidate", None)
+            if (
+                current is None
+                or (int(area) - int(self.MAX_AREA), int(delay))
+                < (int(current["area"]) - int(self.MAX_AREA), int(current["delay"]))
+            ):
+                self._above_band_candidate = candidate
+        elif int(area) < int(self.MIN_AREA):
+            current = getattr(self, "_below_band_candidate", None)
+            if (
+                current is None
+                or (int(self.MIN_AREA) - int(area), -int(delay))
+                < (int(self.MIN_AREA) - int(current["area"]), -int(current["delay"]))
+            ):
+                self._below_band_candidate = candidate
+
+    def _bracket_snapshot(self):
+        def _snap(candidate):
+            if not isinstance(candidate, dict):
+                return None
+            return {
+                "delay": int(candidate.get("delay", 0)),
+                "area": int(candidate.get("area", 0)),
+            }
+        return {
+            "above_band": _snap(getattr(self, "_above_band_candidate", None)),
+            "below_band": _snap(getattr(self, "_below_band_candidate", None)),
+            "best": _snap(getattr(self, "_best_candidate", None)),
+        }
+
+    def _snap_delay_to_grid(self, delay_us: float) -> int:
+        step = max(1, int(self.FINE_STEP))
+        snapped = int(math.floor((float(delay_us) / float(step)) + 0.5) * step)
+        return int(self._clamp_delay(snapped))
+
+    def _choose_bracket_refinement_delay(self, *, default_direction: int) -> int | None:
+        above = getattr(self, "_above_band_candidate", None)
+        below = getattr(self, "_below_band_candidate", None)
+        if isinstance(above, dict) and isinstance(below, dict):
+            lo = min(int(above["delay"]), int(below["delay"]))
+            hi = max(int(above["delay"]), int(below["delay"]))
+            if (hi - lo) <= int(self.FINE_STEP):
+                return None
+
+            midpoint = 0.5 * (float(lo) + float(hi))
+            next_delay = self._snap_delay_to_grid(midpoint)
+            if next_delay <= lo:
+                next_delay = int(self._clamp_delay(lo + int(self.FINE_STEP)))
+            elif next_delay >= hi:
+                next_delay = int(self._clamp_delay(hi - int(self.FINE_STEP)))
+            if next_delay <= lo or next_delay >= hi:
+                return None
+            if next_delay == int(self.candidate_delay):
+                return None
+            return int(next_delay)
+
+        direction = 1 if int(default_direction) >= 0 else -1
+        next_delay = int(self._clamp_delay(self.candidate_delay + direction * int(self.FINE_STEP)))
+        if next_delay == int(self.candidate_delay):
+            return None
+        return int(next_delay)
+
+    def _finish_best_candidate(self, reason: str) -> bool:
+        candidate = getattr(self, "_best_candidate", None)
+        if not isinstance(candidate, dict):
+            return False
+
+        self.candidate_delay = int(candidate["delay"])
+        quality = dict(candidate.get("agg") or {})
+        quality["selection_reason"] = str(reason)
+        quality["selected_from_best_measured"] = True
+        self._finish_success(
+            int(candidate["area"]),
+            quality,
+            decision_type="emergence_best_candidate_selected",
+            stage_message=f"Selecting best measured emergence candidate ({reason})",
+        )
+        return True
 
     def _compute_start_delay_for_pw(self):
         try:

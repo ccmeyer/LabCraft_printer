@@ -213,3 +213,220 @@ def test_set_next_delay_does_not_apply_extra_nudge():
     proc._set_next_delay(3000)
 
     assert proc.candidate_delay == 3000
+
+
+def test_emergence_scan_down_overshoot_uses_bracket_midpoint():
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.replicateContinue = Recorder()
+    proc.background_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.droplet_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.nozzle_center_px = (12, 6)
+    proc._eval_count = 1
+    proc._phase = "scan_down"
+    proc._prev_area = 9100
+    proc._rep_areas = []
+    proc._replicate_details = []
+    proc._last_agg_details = {}
+    proc._trend_noise_events = 0
+    proc.measurements = []
+    proc.candidate_delay = 3000
+    proc.phase_name = "droplet_emergence"
+    proc.MIN_AREA = 3000
+    proc.MAX_AREA = 8000
+    proc.FINE_STEP = 100
+    proc.COARSE_STEP = 500
+    proc.MONO_TOL_FRAC = 0.10
+    proc.MAX_EVALS = 50
+    proc._above_band_candidate = {"delay": 3500, "area": 9100, "agg": {"replicate_cv": 0.02}}
+    proc._below_band_candidate = None
+    proc._best_candidate = {"delay": 3500, "area": 9100, "agg": {"replicate_cv": 0.02}}
+    proc._recent_delay_history = [3500]
+    proc._last_delay = 3500
+
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            calc_emergence_area=lambda *args, **kwargs: (
+                2500,
+                (13, 11),
+                np.zeros((24, 24, 3), dtype=np.uint8),
+                {"contour_class": "detached"},
+            )
+        )
+    )
+    proc._required_replicates_for_phase = lambda: 1
+    proc._can_accept_replicates_early = lambda: True
+    proc._aggregate_replicates = lambda: (
+        2500,
+        {
+            "contour_class": "detached",
+            "center": (13, 11),
+            "replicate_count": 1,
+            "replicate_cv": 0.03,
+            "replicate_range": 0.0,
+        },
+    )
+    proc._record_analysis = lambda payload: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._fail = lambda msg: (_ for _ in ()).throw(AssertionError(f"unexpected fail: {msg}"))
+    chosen = {"delay": None}
+    proc._set_next_delay = lambda d: chosen.__setitem__("delay", int(d))
+    proc._finish_success = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected finish"))
+
+    proc.onAnalyze()
+
+    assert proc._phase == "fine_adjust"
+    assert chosen["delay"] == 3300
+    assert proc.continueSearch.calls
+
+
+def test_emergence_fine_adjust_bracket_collapse_selects_best_candidate():
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.replicateContinue = Recorder()
+    proc.background_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.droplet_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.nozzle_center_px = (12, 6)
+    proc._eval_count = 3
+    proc._phase = "fine_adjust"
+    proc._prev_area = None
+    proc._rep_areas = []
+    proc._replicate_details = []
+    proc._last_agg_details = {}
+    proc._trend_noise_events = 0
+    proc.measurements = []
+    proc.candidate_delay = 3200
+    proc.phase_name = "droplet_emergence"
+    proc.MIN_AREA = 3000
+    proc.MAX_AREA = 8000
+    proc.FINE_STEP = 100
+    proc.MONO_TOL_FRAC = 0.10
+    proc.MAX_EVALS = 50
+    proc._above_band_candidate = None
+    proc._below_band_candidate = {"delay": 3100, "area": 2975, "agg": {"replicate_cv": 0.02}}
+    proc._best_candidate = {"delay": 3100, "area": 2975, "agg": {"replicate_cv": 0.02}}
+    proc._recent_delay_history = [3500, 3000, 3100, 3200]
+    proc._last_delay = 3100
+
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            calc_emergence_area=lambda *args, **kwargs: (
+                8100,
+                (13, 11),
+                np.zeros((24, 24, 3), dtype=np.uint8),
+                {"contour_class": "attached"},
+            )
+        )
+    )
+    proc._required_replicates_for_phase = lambda: 1
+    proc._can_accept_replicates_early = lambda: True
+    proc._aggregate_replicates = lambda: (
+        8100,
+        {
+            "contour_class": "attached",
+            "center": (13, 11),
+            "replicate_count": 1,
+            "replicate_cv": 0.04,
+            "replicate_range": 0.0,
+        },
+    )
+    proc._record_analysis = lambda payload: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._set_next_delay = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected next delay"))
+    proc._fail = lambda msg: (_ for _ in ()).throw(AssertionError(f"unexpected fail: {msg}"))
+
+    finished = {"area": None, "delay": None, "decision_type": None, "stage_message": None}
+
+    def _finish(area, agg, *, decision_type="emergence_target_reached", stage_message="Target area window reached"):
+        finished["area"] = int(area)
+        finished["delay"] = int(proc.candidate_delay)
+        finished["decision_type"] = str(decision_type)
+        finished["stage_message"] = str(stage_message)
+
+    proc._finish_success = _finish
+
+    proc.onAnalyze()
+
+    assert finished["area"] == 2975
+    assert finished["delay"] == 3100
+    assert finished["decision_type"] == "emergence_best_candidate_selected"
+    assert "best measured emergence candidate" in finished["stage_message"].lower()
+    assert proc.continueSearch.calls == []
+
+
+def test_emergence_bracket_midpoint_equal_current_uses_best_candidate():
+    proc = DropletEmergenceCalibrationProcess.__new__(DropletEmergenceCalibrationProcess)
+    proc.stageChanged = Recorder()
+    proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.replicateContinue = Recorder()
+    proc.background_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.droplet_image = np.zeros((24, 24, 3), dtype=np.uint8)
+    proc.nozzle_center_px = (12, 6)
+    proc._eval_count = 4
+    proc._phase = "fine_adjust"
+    proc._prev_area = None
+    proc._rep_areas = []
+    proc._replicate_details = []
+    proc._last_agg_details = {}
+    proc._trend_noise_events = 0
+    proc.measurements = []
+    proc.candidate_delay = 3200
+    proc.phase_name = "droplet_emergence"
+    proc.MIN_AREA = 3000
+    proc.MAX_AREA = 8000
+    proc.FINE_STEP = 100
+    proc.MONO_TOL_FRAC = 0.10
+    proc.MAX_EVALS = 50
+    proc._above_band_candidate = {"delay": 3400, "area": 8400, "agg": {"replicate_cv": 0.03}}
+    proc._below_band_candidate = {"delay": 3000, "area": 2950, "agg": {"replicate_cv": 0.02}}
+    proc._best_candidate = {"delay": 3000, "area": 2950, "agg": {"replicate_cv": 0.02}}
+    proc._recent_delay_history = [3400, 3000, 3200]
+    proc._last_delay = 3000
+
+    proc.model = SimpleNamespace(
+        droplet_camera_model=SimpleNamespace(
+            calc_emergence_area=lambda *args, **kwargs: (
+                8450,
+                (13, 11),
+                np.zeros((24, 24, 3), dtype=np.uint8),
+                {"contour_class": "attached"},
+            )
+        )
+    )
+    proc._required_replicates_for_phase = lambda: 1
+    proc._can_accept_replicates_early = lambda: True
+    proc._aggregate_replicates = lambda: (
+        8450,
+        {
+            "contour_class": "attached",
+            "center": (13, 11),
+            "replicate_count": 1,
+            "replicate_cv": 0.05,
+            "replicate_range": 0.0,
+        },
+    )
+    proc._record_analysis = lambda payload: None
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._set_next_delay = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected next delay"))
+    proc._fail = lambda msg: (_ for _ in ()).throw(AssertionError(f"unexpected fail: {msg}"))
+
+    finished = {"area": None, "delay": None, "decision_type": None}
+
+    def _finish(area, agg, *, decision_type="emergence_target_reached", stage_message="Target area window reached"):
+        finished["area"] = int(area)
+        finished["delay"] = int(proc.candidate_delay)
+        finished["decision_type"] = str(decision_type)
+
+    proc._finish_success = _finish
+
+    proc.onAnalyze()
+
+    assert finished["area"] == 2950
+    assert finished["delay"] == 3000
+    assert finished["decision_type"] == "emergence_best_candidate_selected"
+    assert proc.continueSearch.calls == []
