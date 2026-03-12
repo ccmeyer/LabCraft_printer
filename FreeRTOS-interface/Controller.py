@@ -1407,12 +1407,16 @@ class Controller(QObject):
         start_pressure: float | None = None,
         pressure_step_psi: float = 0.03,
         prebreakup_lead_us: int = 600,
+        fixed_prebreakup_delay_us: int | None = None,
+        auto_scout_delay: bool = True,
         replicates_per_pressure: int = 3,
     ):
         self.model.calibration_manager.start_prebreakup_morphology_calibration(
             start_pressure=start_pressure,
             pressure_step_psi=pressure_step_psi,
             prebreakup_lead_us=prebreakup_lead_us,
+            fixed_prebreakup_delay_us=fixed_prebreakup_delay_us,
+            auto_scout_delay=auto_scout_delay,
             replicates_per_pressure=replicates_per_pressure,
         )
 

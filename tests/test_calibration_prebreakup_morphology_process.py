@@ -42,6 +42,7 @@ def _proc_stub():
     proc.nozzle_side_area_ratio_risk_threshold = 0.48
     proc.long_ligament_px = 36
     proc.max_secondary_lobes_for_clean = 0
+    proc.delay_scout_min_protrusion_px = 14
     return proc
 
 
@@ -76,6 +77,8 @@ def test_start_prebreakup_uses_try_start_process_and_kwargs():
         start_pressure=0.82,
         pressure_step_psi=0.025,
         prebreakup_lead_us=700,
+        fixed_prebreakup_delay_us=4300,
+        auto_scout_delay=False,
         replicates_per_pressure=4,
     )
 
@@ -83,6 +86,8 @@ def test_start_prebreakup_uses_try_start_process_and_kwargs():
     assert called["kwargs"]["start_pressure"] == 0.82
     assert called["kwargs"]["pressure_step_psi"] == 0.025
     assert called["kwargs"]["prebreakup_lead_us"] == 700
+    assert called["kwargs"]["fixed_prebreakup_delay_us"] == 4300
+    assert called["kwargs"]["auto_scout_delay"] is False
     assert called["kwargs"]["replicates_per_pressure"] == 4
 
 
@@ -178,3 +183,37 @@ def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
     assert summary["feature_summary"]["protrusion_length_px"] == 48
     assert round(summary["feature_summary"]["neck_to_bulb_ratio"], 2) == 0.32
     assert summary["feature_summary"]["bulb_present"] is True
+
+
+def test_delay_scout_selects_turning_point_before_retraction():
+    proc = _proc_stub()
+    proc._delay_scout_samples = [
+        {"delay_us": 3400, "feature_summary": {"attached_visible": True, "protrusion_length_px": 20}},
+        {"delay_us": 3500, "feature_summary": {"attached_visible": True, "protrusion_length_px": 31}},
+        {"delay_us": 3600, "feature_summary": {"attached_visible": True, "protrusion_length_px": 42}},
+        {"delay_us": 3700, "feature_summary": {"attached_visible": True, "protrusion_length_px": 44}},
+        {"delay_us": 3800, "feature_summary": {"attached_visible": True, "protrusion_length_px": 33}},
+        {"delay_us": 3900, "feature_summary": {"attached_visible": True, "protrusion_length_px": 29}},
+    ]
+
+    selected, reason, meta = proc._select_delay_scout_candidate()
+
+    assert selected["delay_us"] == 3700
+    assert reason == "retraction_turning_point"
+    assert meta["peak_protrusion_px"] == 44
+
+
+def test_delay_scout_requires_retraction_after_peak():
+    proc = _proc_stub()
+    proc._delay_scout_samples = [
+        {"delay_us": 3400, "feature_summary": {"attached_visible": True, "protrusion_length_px": 18}},
+        {"delay_us": 3500, "feature_summary": {"attached_visible": True, "protrusion_length_px": 26}},
+        {"delay_us": 3600, "feature_summary": {"attached_visible": True, "protrusion_length_px": 31}},
+        {"delay_us": 3700, "feature_summary": {"attached_visible": True, "protrusion_length_px": 33}},
+    ]
+
+    selected, reason, meta = proc._select_delay_scout_candidate()
+
+    assert selected is None
+    assert reason == "no_retraction_observed"
+    assert meta["peak_delay_us"] == 3700

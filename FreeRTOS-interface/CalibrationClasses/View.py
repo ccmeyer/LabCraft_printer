@@ -334,11 +334,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.prebreakup_step_label, crow, 0)
         calib_grid.addWidget(self.prebreakup_step_spin,  crow, 1); crow += 1
 
-        self.prebreakup_lead_label = QtWidgets.QLabel("Pre-breakup Lead (µs):")
+        self.prebreakup_lead_label = QtWidgets.QLabel("Pre-breakup Delay Override (µs):")
         self.prebreakup_lead_spin = QtWidgets.QSpinBox()
-        self.prebreakup_lead_spin.setRange(100, 5000)
-        self.prebreakup_lead_spin.setSingleStep(50)
-        self.prebreakup_lead_spin.setValue(600)
+        self.prebreakup_lead_spin.setRange(0, 12000)
+        self.prebreakup_lead_spin.setSingleStep(100)
+        self.prebreakup_lead_spin.setValue(0)
+        self.prebreakup_lead_spin.setSpecialValueText("Auto Scout")
+        self.prebreakup_lead_spin.setToolTip(
+            "Set an absolute flash delay to skip auto-scouting. Use 0 to auto-select the delay."
+        )
         calib_grid.addWidget(self.prebreakup_lead_label, crow, 0)
         calib_grid.addWidget(self.prebreakup_lead_spin,  crow, 1); crow += 1
 
@@ -1121,10 +1125,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         self.calibrate_prebreakup_button.setText("Stop Calibration")
+        fixed_delay = int(self.prebreakup_lead_spin.value())
         self.controller.start_prebreakup_morphology_calibration(
             start_pressure=float(self.start_pressure_spin.value()),
             pressure_step_psi=float(self.prebreakup_step_spin.value()),
-            prebreakup_lead_us=int(self.prebreakup_lead_spin.value()),
+            fixed_prebreakup_delay_us=(None if fixed_delay <= 0 else fixed_delay),
+            auto_scout_delay=bool(fixed_delay <= 0),
             replicates_per_pressure=int(self.prebreakup_reps_spin.value()),
         )
 
