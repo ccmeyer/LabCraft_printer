@@ -89,6 +89,57 @@ Outputs in `hil_reports/`:
 - `selftest_<timestamp>.json`
 - `selftest_<timestamp>_camera_benchmark.json` (when benchmark enabled)
 
+## Pull Calibration Records From The Pi
+
+Use the Windows PowerShell helper to copy calibration artifacts from a Pi experiment into local `tmp/` for replay and analysis:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -Latest
+```
+
+Prerequisites:
+
+- Windows OpenSSH client available in `PATH` (`ssh` and `scp`)
+- Pi repo available at `/home/labcraft/LabCraft_printer` unless overridden with `-RemoteRepo`
+
+Common examples:
+
+```powershell
+# Copy one exact experiment directory
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -ExperimentName Untitled-20260304_111121
+
+# Copy only calibration artifacts for the newest experiment
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -Latest `
+  -CopyMode CalibrationOnly
+
+# Copy an experiment, then materialize a filtered local subset of runs
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -ExperimentMatch 20260304 `
+  -ProcessName NozzlePositionCalibrationProcess `
+  -RunId run_20260304_111716_24e5f347
+
+# Preview the resolved remote/local paths without copying
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -Latest `
+  -DryRun
+```
+
+After a copy, the script writes `pull_summary.json` into the pulled experiment directory, prints a recording inventory, and suggests local replay commands such as:
+
+```powershell
+.\env\Scripts\python.exe tools\replay_calibration_run.py --root "tmp\pi_calibration\<timestamp>_<experiment>\calibration_recordings"
+```
+
+If you pass `-Replay`, the script will try to run `tools/replay_calibration_run.py` locally after copying. If no preferred local interpreter is found, it will print the replay command instead.
+
 ## Getting Started - PlatformIO
 
 To get started with PlatformIO, follow these steps:
