@@ -1401,6 +1401,21 @@ class Controller(QObject):
     def start_pressure_scan_calibration(self):
         self.model.calibration_manager.start_pressure_scan_calibration()
 
+    def start_prebreakup_morphology_calibration(
+        self,
+        *,
+        start_pressure: float | None = None,
+        pressure_step_psi: float = 0.03,
+        prebreakup_lead_us: int = 600,
+        replicates_per_pressure: int = 3,
+    ):
+        self.model.calibration_manager.start_prebreakup_morphology_calibration(
+            start_pressure=start_pressure,
+            pressure_step_psi=pressure_step_psi,
+            prebreakup_lead_us=prebreakup_lead_us,
+            replicates_per_pressure=replicates_per_pressure,
+        )
+
     def start_pressure_sweep_characterization(self):
         self.model.calibration_manager.start_pressure_sweep_characterization()
     

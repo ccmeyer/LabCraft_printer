@@ -696,6 +696,7 @@ class CalibrationManager(QObject):
         "pressure": "pressure_calibration",
         "pressure_calibration": "pressure_calibration",
         "pressure_scan": "pressure_scan",
+        "pre_breakup_morphology": "pre_breakup_morphology",
         "nozzle": "nozzle_position",
         "nozzle_position": "nozzle_position",
         "nozzle_focus": "nozzle_focus",
@@ -2379,6 +2380,25 @@ class CalibrationManager(QObject):
             kwargs["start_pressure"] = float(start_pressure)
         self._try_start_process(PressureBandCalibrationProcess, **kwargs)
 
+    def start_prebreakup_morphology_calibration(
+        self,
+        *,
+        start_pressure: float | None = None,
+        pressure_step_psi: float = 0.03,
+        prebreakup_lead_us: int = 600,
+        replicates_per_pressure: int = 3,
+        max_pressures: int = 24,
+    ):
+        kwargs = {
+            "pressure_step_psi": float(pressure_step_psi),
+            "prebreakup_lead_us": int(prebreakup_lead_us),
+            "replicates_per_pressure": int(replicates_per_pressure),
+            "max_pressures": int(max_pressures),
+        }
+        if start_pressure is not None:
+            kwargs["start_pressure"] = float(start_pressure)
+        self._try_start_process(PreBreakupMorphologyCalibrationProcess, **kwargs)
+
     def start_trajectory_calibration(self):
         self._try_start_process(TrajectoryCalibrationProcess)
 
@@ -2931,6 +2951,7 @@ class CalibrationManager(QObject):
         readiness = {
             "pressure_calibration":           pack(PressureCalibrationProcess),
             "pressure_scan":                  pack(PressureBandCalibrationProcess),
+            "pre_breakup_morphology":        pack(PreBreakupMorphologyCalibrationProcess),
             "droplet_trajectory":             pack(TrajectoryCalibrationProcess),
             # "trajectory":                     pack(TrajectoryCalibrationProcess),
             "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
@@ -6649,6 +6670,557 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self.calibration_manager.set_nozzle_center_image_position(self.nozzle_center)
         self.calibration_manager.set_min_start_delay(self.start_delay + self.start_delay_offset)
         self.dropletDetected.emit()
+
+class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
+    phase_name = "pre_breakup_morphology"
+
+    pressureApplied = Signal()
+    replicateReady = Signal()
+    continueScan = Signal()
+    continueReplicate = Signal()
+    finalize = Signal()
+
+    MIN_PREBREAKUP_DELAY_US = 1500
+    MAX_PREBREAKUP_DELAY_US = 12000
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        missing = []
+        try:
+            if cm.get_nozzle_center() is None:
+                missing.append("Nozzle center (machine coords)")
+        except Exception:
+            missing.append("Nozzle center (machine coords)")
+        try:
+            if cm.get_pressure_scan_nozzle_center_image_position() is None:
+                missing.append("Real nozzle center (image coords, from emergence)")
+        except Exception:
+            missing.append("Real nozzle center (image coords, from emergence)")
+        try:
+            if cm.get_emergence_time() is None:
+                missing.append("Emergence time")
+        except Exception:
+            missing.append("Emergence time")
+        try:
+            _ = cm.model.droplet_camera_model.get_image_size()
+        except Exception:
+            missing.append("Droplet camera")
+        return missing
+
+    def __init__(
+        self,
+        calibration_manager,
+        model,
+        *,
+        start_pressure: float | None = None,
+        pressure_step_psi: float = 0.03,
+        prebreakup_lead_us: int = 600,
+        replicates_per_pressure: int = 3,
+        max_pressures: int = 24,
+        parent=None,
+    ):
+        super().__init__(calibration_manager, model, parent)
+
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError(
+                f"PreBreakupMorphologyCalibrationProcess requires: {', '.join(missing_requirements)}."
+            )
+
+        self.phase_name = "pre_breakup_morphology"
+        self.start_pressure = (
+            float(start_pressure)
+            if start_pressure is not None
+            else float(self.calibration_manager.get_start_pressure())
+        )
+        self.pressure_step_psi = float(max(0.005, pressure_step_psi))
+        self.replicates_target = int(max(1, replicates_per_pressure))
+        self.max_pressures = int(max(1, max_pressures))
+        self.prebreakup_lead_us = int(max(100, prebreakup_lead_us))
+
+        try:
+            hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            hw_lo, hw_hi = 0.3, 5.0
+        self.P_MIN = float(hw_lo)
+        self.P_MAX = float(hw_hi)
+        self.start_pressure = float(max(self.P_MIN, min(self.P_MAX, self.start_pressure)))
+
+        self.emergence_time_us = int(self.calibration_manager.get_emergence_time())
+        self.prebreakup_delay_us = int(
+            max(
+                self.MIN_PREBREAKUP_DELAY_US,
+                min(
+                    self.MAX_PREBREAKUP_DELAY_US,
+                    int(self.emergence_time_us) - int(self.prebreakup_lead_us),
+                ),
+            )
+        )
+        self.nozzle_center_px = self.calibration_manager.get_pressure_scan_nozzle_center_image_position()
+        self.nozzle_center_source = str(
+            getattr(self.calibration_manager, "get_pressure_scan_nozzle_center_source", lambda: "unknown")()
+        )
+
+        try:
+            self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
+        except Exception:
+            self._pulse_width_us = None
+
+        self.min_signal_p95 = 10.0
+        self.min_protrusion_length_px = 14
+        self.min_candidate_protrusion_px = 28
+        self.min_candidate_bulb_width_px = 14
+        self.neck_ratio_risk_threshold = 0.42
+        self.nozzle_side_area_ratio_risk_threshold = 0.48
+        self.long_ligament_px = 36
+        self.max_secondary_lobes_for_clean = 0
+
+        self.background_image = None
+        self.droplet_image = None
+        self.samples = []
+        self.measurements = []
+        self.reps = []
+        self._current_pressure = None
+        self._next_pressure = float(self.start_pressure)
+        self._orig_settings = None
+        self._terminated_early = False
+        self._stop_reason = None
+        self._risk_onset_pressure = None
+        self._first_candidate_pressure = None
+        self._last_candidate_pressure = None
+
+        self.state_prepare_bg = QState()
+        self.state_capture_bg = QState()
+        self.state_apply = QState()
+        self.state_capture = QState()
+        self.state_analyze = QState()
+        self.state_decide = QState()
+        self.state_restore = QState()
+        self.state_final = QFinalState()
+
+        self.state_prepare_bg.entered.connect(self.onPrepareBackground)
+        self.state_capture_bg.entered.connect(self.onCaptureBackground)
+        self.state_apply.entered.connect(self.onApplyPressure)
+        self.state_capture.entered.connect(self.onCaptureReplicate)
+        self.state_analyze.entered.connect(self.onAnalyzeReplicate)
+        self.state_decide.entered.connect(self.onDecide)
+        self.state_restore.entered.connect(self.onRestoreSettings)
+        self.state_final.entered.connect(self.onCalibrationCompleted)
+
+        self.state_prepare_bg.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_capture_bg
+        )
+        self.state_capture_bg.addTransition(
+            self.calibration_manager.captureCompleted, self.state_apply
+        )
+        self.state_apply.addTransition(self.pressureApplied, self.state_capture)
+        self.state_capture.addTransition(
+            self.calibration_manager.captureCompleted, self.state_analyze
+        )
+        self.state_analyze.addTransition(self.replicateReady, self.state_decide)
+        self.state_decide.addTransition(self.continueReplicate, self.state_capture)
+        self.state_decide.addTransition(self.continueScan, self.state_apply)
+        self.state_restore.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_final
+        )
+
+        for st in (
+            self.state_prepare_bg,
+            self.state_capture_bg,
+            self.state_apply,
+            self.state_capture,
+            self.state_analyze,
+            self.state_decide,
+        ):
+            st.addTransition(self.finalize, self.state_restore)
+
+        for st in (
+            self.state_prepare_bg,
+            self.state_capture_bg,
+            self.state_apply,
+            self.state_capture,
+            self.state_analyze,
+            self.state_decide,
+            self.state_restore,
+            self.state_final,
+        ):
+            self.state_machine.addState(st)
+        self.state_machine.setInitialState(self.state_prepare_bg)
+
+    @Slot()
+    def requestGracefulStop(self, reason: str = "User requested stop"):
+        self._terminated_early = True
+        self._stop_reason = str(reason)
+        self.stageChanged.emit("Pre-breakup morphology: graceful stop requested")
+        self.finalize.emit()
+
+    @Slot()
+    def onPrepareBackground(self):
+        self.samples = []
+        self.measurements = []
+        self.reps = []
+        self._current_pressure = None
+        self._next_pressure = float(self.start_pressure)
+        self._risk_onset_pressure = None
+        self._first_candidate_pressure = None
+        self._last_candidate_pressure = None
+        self.background_image = None
+        try:
+            self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
+        except Exception:
+            self._orig_settings = None
+        self.stageChanged.emit(
+            f"Pre-breakup morphology: capture background (delay={self.prebreakup_delay_us} us, source={self.nozzle_center_source})"
+        )
+        self._request_settings_with_recording(
+            {"num_droplets": 0},
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="prebreakup_prepare_background",
+        )
+
+    @Slot()
+    def onCaptureBackground(self):
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing pre-breakup morphology background",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture pre-breakup morphology background image.",
+        )
+
+    @Slot()
+    def onApplyPressure(self):
+        if self._next_pressure is None:
+            self.finalize.emit()
+            return
+
+        if self._next_pressure > (self.P_MAX + 1e-9):
+            self._stop_reason = self._stop_reason or "reached_upper_pressure_bound"
+            self.finalize.emit()
+            return
+
+        if len(self.samples) >= self.max_pressures:
+            self._stop_reason = self._stop_reason or "max_pressures_reached"
+            self.finalize.emit()
+            return
+
+        self._current_pressure = float(max(self.P_MIN, min(self.P_MAX, self._next_pressure)))
+        self._next_pressure = None
+        self.reps = []
+
+        settings = {
+            "print_pressure": float(self._current_pressure),
+            "flash_delay": int(self.prebreakup_delay_us),
+            "num_droplets": 1,
+        }
+        self.stageChanged.emit(
+            f"Pre-breakup morphology: set pressure={self._current_pressure:.3f} psi, delay={self.prebreakup_delay_us} us"
+        )
+        self._request_settings_with_recording(
+            settings,
+            lambda *args, **kwargs: self.pressureApplied.emit(),
+            context=f"prebreakup_apply_pressure_{self._current_pressure:.3f}",
+        )
+
+    @Slot()
+    def onCaptureReplicate(self):
+        self._capture_with_policy(
+            set_attr="droplet_image",
+            stage_text=(
+                f"Capturing pre-breakup morphology @ {self._current_pressure:.3f} psi "
+                f"(rep {len(self.reps)+1}/{self.replicates_target})"
+            ),
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=f"Failed to capture pre-breakup morphology image @ {self._current_pressure:.3f} psi.",
+        )
+
+    @Slot()
+    def onAnalyzeReplicate(self):
+        metrics, overlay, details = self.model.droplet_camera_model.analyze_prebreakup_morphology(
+            self.background_image,
+            self.droplet_image,
+            nozzle_center=self.nozzle_center_px,
+            return_details=True,
+        )
+        self.presentImageSignal.emit(overlay)
+
+        state = self._classify_morphology(details)
+        rep = {
+            "state": str(state),
+            "metrics": dict(metrics or {}),
+            "details": dict(details or {}),
+        }
+        self.reps.append(rep)
+        self._record_analysis(
+            {
+                "process_name": "PreBreakupMorphologyCalibrationProcess",
+                "phase_name": str(self.phase_name or ""),
+                "pressure_psi": float(self._current_pressure),
+                "replicate_index": int(len(self.reps)),
+                "state": str(state),
+                "metrics": dict(metrics or {}),
+                "details": dict(details or {}),
+            }
+        )
+
+        protrusion = int((metrics or {}).get("protrusion_length_px", 0))
+        neck = int((metrics or {}).get("neck_width_px", 0))
+        ratio = float((metrics or {}).get("neck_to_bulb_ratio", 0.0))
+        self.stageChanged.emit(
+            f"Pre-breakup morphology @ {self._current_pressure:.3f} psi -> {state} "
+            f"(protrusion={protrusion}px, neck={neck}px, ratio={ratio:.2f})"
+        )
+        self.replicateReady.emit()
+
+    @Slot()
+    def onDecide(self):
+        if len(self.reps) < self.replicates_target:
+            self.continueReplicate.emit()
+            return
+
+        verdict, summary = self._aggregate_replicates()
+        pressure = float(self._current_pressure)
+
+        if verdict == "candidate_clean":
+            if self._first_candidate_pressure is None:
+                self._first_candidate_pressure = pressure
+            self._last_candidate_pressure = pressure
+        elif verdict == "approaching_risk" and self._risk_onset_pressure is None:
+            self._risk_onset_pressure = pressure
+
+        record = {
+            "pressure": float(pressure),
+            "state": str(verdict),
+            "replicate_count": int(len(self.reps)),
+            "class_counts": dict(summary.get("class_counts", {})),
+            "feature_summary": dict(summary.get("feature_summary", {})),
+            "flash_delay_us": int(self.prebreakup_delay_us),
+            "replicates": list(self.reps),
+        }
+        self.samples.append(record)
+        self.measurements.append(
+            (
+                float(pressure),
+                str(verdict),
+                int(summary.get("feature_summary", {}).get("protrusion_length_px", 0)),
+                float(summary.get("feature_summary", {}).get("neck_to_bulb_ratio", 0.0)),
+            )
+        )
+        self._record_decision(
+            "prebreakup_pressure_state",
+            {
+                "pressure_psi": float(pressure),
+                "state": str(verdict),
+                "summary": dict(summary),
+            },
+        )
+
+        if verdict == "approaching_risk":
+            self._stop_reason = self._stop_reason or "approaching_risk_detected"
+            self.finalize.emit()
+            return
+
+        next_pressure = float(round(pressure + self.pressure_step_psi, 5))
+        if next_pressure > (self.P_MAX + 1e-9):
+            self._stop_reason = self._stop_reason or "reached_upper_pressure_bound"
+            self.finalize.emit()
+            return
+        if len(self.samples) >= self.max_pressures:
+            self._stop_reason = self._stop_reason or "max_pressures_reached"
+            self.finalize.emit()
+            return
+
+        self._next_pressure = next_pressure
+        self.continueScan.emit()
+
+    @Slot()
+    def onRestoreSettings(self):
+        restore = {}
+        orig = dict(self._orig_settings or {})
+        final_pressure = self._select_final_pressure_target()
+        if orig.get("num_droplets") is not None:
+            restore["num_droplets"] = int(orig.get("num_droplets"))
+        else:
+            restore["num_droplets"] = 0
+        if orig.get("flash_delay") is not None:
+            restore["flash_delay"] = int(orig.get("flash_delay"))
+        if final_pressure is not None:
+            restore["print_pressure"] = float(final_pressure)
+        elif orig.get("print_pressure") is not None:
+            restore["print_pressure"] = float(orig.get("print_pressure"))
+
+        self.stageChanged.emit("Pre-breakup morphology: restoring imaging settings")
+        self._request_settings_with_recording(
+            restore,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="prebreakup_restore_settings",
+        )
+
+    @Slot()
+    def onCalibrationCompleted(self):
+        recommended = self._select_recommended_pressure()
+        safe_window = None
+        if self._first_candidate_pressure is not None and self._last_candidate_pressure is not None:
+            safe_window = [
+                float(min(self._first_candidate_pressure, self._last_candidate_pressure)),
+                float(max(self._first_candidate_pressure, self._last_candidate_pressure)),
+            ]
+
+        result = {
+            "pulse_width_us": self._pulse_width_us,
+            "emergence_time_us": int(self.emergence_time_us),
+            "prebreakup_delay_us": int(self.prebreakup_delay_us),
+            "prebreakup_lead_us": int(self.prebreakup_lead_us),
+            "pressure_bounds": [float(self.P_MIN), float(self.P_MAX)],
+            "start_pressure": float(self.start_pressure),
+            "pressure_step_psi": float(self.pressure_step_psi),
+            "replicates_per_pressure": int(self.replicates_target),
+            "pressures": list(self.samples),
+            "recommended_pressure_psi": (
+                None if recommended is None else float(recommended)
+            ),
+            "safe_window_psi": safe_window,
+            "risk_onset_pressure_psi": (
+                None if self._risk_onset_pressure is None else float(self._risk_onset_pressure)
+            ),
+            "terminated_early": bool(self._terminated_early),
+            "stop_reason": self._stop_reason,
+            "heuristic_params": {
+                "min_signal_p95": float(self.min_signal_p95),
+                "min_protrusion_length_px": int(self.min_protrusion_length_px),
+                "min_candidate_protrusion_px": int(self.min_candidate_protrusion_px),
+                "min_candidate_bulb_width_px": int(self.min_candidate_bulb_width_px),
+                "neck_ratio_risk_threshold": float(self.neck_ratio_risk_threshold),
+                "nozzle_side_area_ratio_risk_threshold": float(self.nozzle_side_area_ratio_risk_threshold),
+                "long_ligament_px": int(self.long_ligament_px),
+                "max_secondary_lobes_for_clean": int(self.max_secondary_lobes_for_clean),
+            },
+        }
+        self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": result})
+
+        if recommended is not None:
+            self.stageChanged.emit(
+                f"Pre-breakup morphology complete: recommended pressure {float(recommended):.3f} psi"
+            )
+        else:
+            self.stageChanged.emit("Pre-breakup morphology complete: no safe pressure recommendation")
+        self.calibrationCompleted.emit()
+
+    def _select_recommended_pressure(self):
+        if self._last_candidate_pressure is not None:
+            return float(self._last_candidate_pressure)
+        return None
+
+    def _select_final_pressure_target(self):
+        recommended = self._select_recommended_pressure()
+        if recommended is not None:
+            return float(recommended)
+        orig = dict(self._orig_settings or {})
+        if orig.get("print_pressure") is not None:
+            return float(orig.get("print_pressure"))
+        return None
+
+    def _classify_morphology(self, details: dict | None):
+        d = dict(details or {})
+        if str(d.get("status", "none")) != "ok":
+            return "too_low"
+
+        contour_class = str(d.get("contour_class", "none"))
+        protrusion = int(d.get("protrusion_length_px", 0) or 0)
+        max_width = int(d.get("max_width_px", 0) or 0)
+        neck_ratio = float(d.get("neck_to_bulb_ratio", 1.0) or 1.0)
+        p95 = float(d.get("p95", 0.0) or 0.0)
+        nozzle_side_ratio = float(d.get("nozzle_side_area_ratio", 0.0) or 0.0)
+        neck_distance = int(d.get("distance_nozzle_to_neck_px", 0) or 0)
+        secondary_lobes = int(d.get("secondary_lobe_count", 0) or 0)
+        bulb_present = bool(d.get("bulb_present", False))
+
+        if contour_class == "detached":
+            return "approaching_risk"
+        if p95 < self.min_signal_p95 or protrusion < self.min_protrusion_length_px:
+            return "too_low"
+
+        risk_hits = 0
+        if contour_class == "ambiguous":
+            risk_hits += 1
+        if secondary_lobes > self.max_secondary_lobes_for_clean:
+            risk_hits += 1
+        if (
+            protrusion >= self.min_candidate_protrusion_px
+            and neck_ratio <= self.neck_ratio_risk_threshold
+        ):
+            risk_hits += 1
+        if (
+            protrusion >= self.min_candidate_protrusion_px
+            and nozzle_side_ratio >= self.nozzle_side_area_ratio_risk_threshold
+        ):
+            risk_hits += 1
+        if neck_distance >= self.long_ligament_px:
+            risk_hits += 1
+
+        if risk_hits >= 2:
+            return "approaching_risk"
+
+        if (
+            contour_class == "attached"
+            and bulb_present
+            and protrusion >= self.min_candidate_protrusion_px
+            and max_width >= self.min_candidate_bulb_width_px
+        ):
+            return "candidate_clean"
+        return "too_low"
+
+    def _aggregate_replicates(self):
+        counts = Counter(str((r or {}).get("state", "")) for r in list(self.reps or []))
+        priority = {"approaching_risk": 2, "too_low": 1, "candidate_clean": 0}
+        verdict = sorted(
+            ((k, v) for k, v in counts.items() if k in priority),
+            key=lambda kv: (-int(kv[1]), -int(priority.get(kv[0], -1))),
+        )[0][0]
+
+        feature_keys = [
+            "protrusion_length_px",
+            "max_width_px",
+            "neck_width_px",
+            "neck_to_bulb_ratio",
+            "distance_nozzle_to_neck_px",
+            "nozzle_side_area_px",
+            "nozzle_side_area_ratio",
+            "distal_area_px",
+            "secondary_lobe_count",
+            "p95",
+        ]
+        feature_summary = {}
+        for key in feature_keys:
+            vals = []
+            for rep in list(self.reps or []):
+                v = (rep.get("details") or {}).get(key)
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    vals.append(float(v))
+            if not vals:
+                continue
+            med = float(median(vals))
+            if key.endswith("_count") or key.endswith("_px"):
+                feature_summary[key] = int(round(med))
+            else:
+                feature_summary[key] = med
+
+        feature_summary["bulb_present"] = bool(
+            sum(1 for rep in list(self.reps or []) if bool((rep.get("details") or {}).get("bulb_present", False)))
+            >= max(1, int(len(self.reps) / 2.0))
+        )
+        summary = {
+            "class_counts": {
+                "too_low": int(counts.get("too_low", 0)),
+                "candidate_clean": int(counts.get("candidate_clean", 0)),
+                "approaching_risk": int(counts.get("approaching_risk", 0)),
+            },
+            "feature_summary": feature_summary,
+        }
+        return str(verdict), summary
 
 def make_pressure_grid(p0, p1, step, hw_lo, hw_hi):
     import math
@@ -15310,6 +15882,252 @@ class DropletCameraModel(QObject):
         if return_details:
             return metric_area, center, overlay, details
         return metric_area, center, overlay
+
+    def analyze_prebreakup_morphology(
+        self,
+        background,
+        image,
+        *,
+        nozzle_center=None,
+        roi_x_half_frac: float = 0.16,
+        roi_above_px: int = 24,
+        roi_below_px: int = 220,
+        min_contour_area: int = 40,
+        min_fg_pix: int = 60,
+        min_peak_delta: float = 10.0,
+        min_protrusion_length_px: int = 8,
+        return_details: bool = False,
+    ):
+        metrics = {
+            "protrusion_length_px": 0,
+            "max_width_px": 0,
+            "neck_width_px": 0,
+            "neck_y_px": None,
+            "distance_nozzle_to_neck_px": 0,
+            "nozzle_side_area_px": 0,
+            "distal_area_px": 0,
+            "nozzle_side_area_ratio": 0.0,
+            "neck_to_bulb_ratio": 1.0,
+            "secondary_lobe_count": 0,
+            "bulb_present": False,
+        }
+        details = {
+            "status": "init",
+            "reason": "",
+            "roi": None,
+            "contour_class": "none",
+            "candidate_count": 0,
+            "contour_area": 0.0,
+            "bbox_area": 0,
+            "p95": 0.0,
+        }
+        overlay = image.copy() if isinstance(image, np.ndarray) and image.ndim == 3 else image
+
+        if background is None or image is None:
+            details.update({"status": "none", "reason": "missing_image_or_background"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        _img_gray, dark = self.calc_neg_diff_image(image, background)
+        if dark is None:
+            details.update({"status": "none", "reason": "dark_diff_failed"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        h, w = dark.shape[:2]
+        if overlay is None:
+            overlay = cv2.cvtColor(dark, cv2.COLOR_GRAY2BGR)
+        elif overlay.ndim != 3:
+            overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
+
+        try:
+            nzx = int(max(0, min(w - 1, int(nozzle_center[0]))))
+            nzy = int(max(0, min(h - 1, int(nozzle_center[1]))))
+        except Exception:
+            details.update({"status": "none", "reason": "invalid_nozzle_center"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        x_half = int(max(12, round(float(roi_x_half_frac) * float(w))))
+        x0 = max(0, nzx - x_half)
+        x1 = min(w, nzx + x_half)
+        y0 = max(0, nzy - int(max(0, roi_above_px)))
+        y1 = min(h, nzy + int(max(20, roi_below_px)))
+        details["roi"] = [int(x0), int(y0), int(x1), int(y1)]
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
+        cv2.circle(overlay, (nzx, nzy), 4, (255, 0, 0), -1)
+
+        if y1 <= y0 or x1 <= x0:
+            details.update({"status": "none", "reason": "invalid_roi"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        roi = dark[y0:y1, x0:x1].copy()
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        mu, sd = float(np.mean(blur)), float(np.std(blur))
+        t_hard = max(8, int(mu + 2.5 * sd))
+        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(th) < int(min_fg_pix):
+            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, self._k3, iterations=1)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, self._k3, iterations=1)
+
+        if np.count_nonzero(th) < int(min_fg_pix):
+            details.update({"status": "none", "reason": "insufficient_fg"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        keep = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < float(min_contour_area):
+                continue
+            rx, ry, rw, rh = cv2.boundingRect(contour)
+            fx = int(rx + x0)
+            fy = int(ry + y0)
+            bottom = int(fy + rh)
+            contour_class = "ambiguous"
+            if fy <= (nzy + 6) and bottom >= (nzy + 2):
+                contour_class = "attached"
+            elif fy > (nzy + 6):
+                contour_class = "detached"
+            pri = 0 if contour_class == "attached" else (2 if contour_class == "detached" else 1)
+            keep.append(
+                {
+                    "contour": contour,
+                    "contour_area": float(area),
+                    "bbox": [int(fx), int(fy), int(rw), int(rh)],
+                    "pri": int(pri),
+                    "x_pen": float(abs((fx + rw / 2.0) - nzx)),
+                    "bottom": int(bottom),
+                    "contour_class": str(contour_class),
+                }
+            )
+
+        details["candidate_count"] = int(len(keep))
+        if not keep:
+            details.update({"status": "none", "reason": "no_contours_after_filters"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        keep.sort(key=lambda item: (int(item["pri"]), float(item["x_pen"]), -float(item["contour_area"]), -int(item["bottom"])))
+        chosen = keep[0]
+        x, y, ww, hh = [int(v) for v in chosen["bbox"]]
+        patch = dark[y:y + hh, x:x + ww]
+        p95 = float(np.percentile(patch, 95)) if patch.size > 0 else 0.0
+
+        details.update(
+            {
+                "p95": float(p95),
+                "contour_class": str(chosen["contour_class"]),
+                "contour_area": float(chosen["contour_area"]),
+                "bbox_area": int(ww * hh),
+            }
+        )
+        if p95 < float(min_peak_delta):
+            details.update({"status": "none", "reason": "weak_signal"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        contour_full = chosen["contour"] + np.array([[[x0, y0]]], dtype=chosen["contour"].dtype)
+        cv2.drawContours(overlay, [contour_full], -1, (0, 255, 0), 2)
+        cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (255, 0, 0), 1)
+
+        mask = np.zeros((hh, ww), dtype=np.uint8)
+        local_contour = contour_full - np.array([[[x, y]]], dtype=contour_full.dtype)
+        cv2.drawContours(mask, [local_contour], -1, 255, -1)
+
+        row_start = int(max(0, nzy - y))
+        row_end = int(min(hh - 1, max(0, chosen["bottom"] - 1 - y)))
+        widths = []
+        row_positions = []
+        if row_end >= row_start:
+            for row_idx in range(row_start, row_end + 1):
+                xs = np.where(mask[row_idx] > 0)[0]
+                widths.append(int(xs[-1] - xs[0] + 1) if xs.size else 0)
+                row_positions.append(int(y + row_idx))
+
+        if not widths:
+            details.update({"status": "none", "reason": "no_row_profile"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        protrusion_length = int(max(0, row_positions[-1] - nzy))
+        if protrusion_length < int(min_protrusion_length_px):
+            details.update({"status": "none", "reason": "short_protrusion"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        widths_arr = np.asarray(widths, dtype=float)
+        if widths_arr.size >= 3:
+            kernel = np.asarray([1.0, 2.0, 1.0], dtype=float)
+            kernel /= float(kernel.sum())
+            smoothed = np.convolve(widths_arr, kernel, mode="same")
+        else:
+            smoothed = widths_arr
+
+        search_start = int(min(max(1, 4), max(1, len(smoothed) - 1)))
+        neck_idx = int(np.argmin(smoothed[search_start:]) + search_start) if len(smoothed) > search_start else int(np.argmin(smoothed))
+        neck_width = int(max(0, round(smoothed[neck_idx])))
+        max_width = int(max(widths))
+        neck_y = int(row_positions[neck_idx])
+        nozzle_side_area = int(np.count_nonzero(mask[max(0, row_start): min(hh, neck_idx + 1), :]))
+        distal_area = int(np.count_nonzero(mask[min(hh, neck_idx + 1):, :]))
+        contour_area = int(np.count_nonzero(mask))
+        nozzle_side_area_ratio = float(nozzle_side_area) / float(max(contour_area, 1))
+        neck_ratio = float(neck_width) / float(max(max_width, 1))
+
+        peak_count = 0
+        for idx in range(1, len(smoothed) - 1):
+            if smoothed[idx] >= smoothed[idx - 1] and smoothed[idx] > smoothed[idx + 1]:
+                if smoothed[idx] >= max(6.0, 0.55 * float(max_width)):
+                    peak_count += 1
+        secondary_lobe_count = int(max(0, peak_count - 1))
+        bulb_present = bool(max_width >= max(10, int(round(neck_width * 1.35))) and distal_area > 0)
+
+        cv2.line(overlay, (x, neck_y), (x + ww, neck_y), (0, 200, 255), 1)
+        cv2.putText(
+            overlay,
+            f"L:{protrusion_length}px neck:{neck_width}px ratio:{neck_ratio:.2f}",
+            (x + ww + 6, max(18, y + 14)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (40, 220, 40),
+            1,
+        )
+
+        metrics.update(
+            {
+                "protrusion_length_px": int(protrusion_length),
+                "max_width_px": int(max_width),
+                "neck_width_px": int(neck_width),
+                "neck_y_px": int(neck_y),
+                "distance_nozzle_to_neck_px": int(max(0, neck_y - nzy)),
+                "nozzle_side_area_px": int(nozzle_side_area),
+                "distal_area_px": int(distal_area),
+                "nozzle_side_area_ratio": float(nozzle_side_area_ratio),
+                "neck_to_bulb_ratio": float(neck_ratio),
+                "secondary_lobe_count": int(secondary_lobe_count),
+                "bulb_present": bool(bulb_present),
+            }
+        )
+        details.update(metrics)
+        details["status"] = "ok"
+        details["reason"] = "ok"
+
+        if return_details:
+            return metrics, overlay, details
+        return metrics, overlay
 
     def identify_droplets(self, image, background, nozzle_center, min_area=1000,
                           margin_up_px: int=8, satellite_band_px: int=12, min_free_offset_px: int=18,

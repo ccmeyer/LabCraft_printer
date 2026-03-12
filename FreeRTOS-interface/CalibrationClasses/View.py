@@ -325,6 +325,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.num_pressure_tests_label, crow, 0)
         calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
+        self.prebreakup_step_label = QtWidgets.QLabel("Pre-breakup Step (psi):")
+        self.prebreakup_step_spin = QtWidgets.QDoubleSpinBox()
+        self.prebreakup_step_spin.setDecimals(3)
+        self.prebreakup_step_spin.setRange(0.005, 1.0)
+        self.prebreakup_step_spin.setSingleStep(0.005)
+        self.prebreakup_step_spin.setValue(0.03)
+        calib_grid.addWidget(self.prebreakup_step_label, crow, 0)
+        calib_grid.addWidget(self.prebreakup_step_spin,  crow, 1); crow += 1
+
+        self.prebreakup_lead_label = QtWidgets.QLabel("Pre-breakup Lead (µs):")
+        self.prebreakup_lead_spin = QtWidgets.QSpinBox()
+        self.prebreakup_lead_spin.setRange(100, 5000)
+        self.prebreakup_lead_spin.setSingleStep(50)
+        self.prebreakup_lead_spin.setValue(600)
+        calib_grid.addWidget(self.prebreakup_lead_label, crow, 0)
+        calib_grid.addWidget(self.prebreakup_lead_spin,  crow, 1); crow += 1
+
+        self.prebreakup_reps_label = QtWidgets.QLabel("Pre-breakup Replicates:")
+        self.prebreakup_reps_spin = QtWidgets.QSpinBox()
+        self.prebreakup_reps_spin.setRange(1, 9)
+        self.prebreakup_reps_spin.setSingleStep(1)
+        self.prebreakup_reps_spin.setValue(3)
+        calib_grid.addWidget(self.prebreakup_reps_label, crow, 0)
+        calib_grid.addWidget(self.prebreakup_reps_spin,  crow, 1); crow += 1
+
         self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
         self.record_calibration_checkbox.setToolTip(
             "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
@@ -364,6 +389,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
         self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
         calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
+
+        self.calibrate_prebreakup_button = QtWidgets.QPushButton("Estimate Safe Upper Pressure")
+        self.calibrate_prebreakup_button.clicked.connect(self.toggle_start_prebreakup_morphology_calibration)
+        calib_grid.addWidget(self.calibrate_prebreakup_button, crow, 0, 1, 2); crow += 1
 
         # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
@@ -443,6 +472,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_nozzle_button,
             self.calibrate_focus_button,
             self.calibrate_emergence_button,
+            self.calibrate_prebreakup_button,
             self.calibrate_pressure_scan_button,
             self.scan_trajectory_button,
             self.calibrate_pressure_sweep_button,
@@ -1023,6 +1053,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
+        self.calibrate_prebreakup_button.setText("Estimate Safe Upper Pressure")
         # self.calibrate_pressure_button.setText("Calibrate Pressure")
         # self.calibrate_droplet_search_button.setText("Search for Droplets")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
@@ -1082,6 +1113,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
+
+    def toggle_start_prebreakup_morphology_calibration(self):
+        if self.model.calibration_manager.activeCalibration is not None:
+            self.calibrate_prebreakup_button.setText("Estimate Safe Upper Pressure")
+            self.controller.stop_calibration()
+            return
+
+        self.calibrate_prebreakup_button.setText("Stop Calibration")
+        self.controller.start_prebreakup_morphology_calibration(
+            start_pressure=float(self.start_pressure_spin.value()),
+            pressure_step_psi=float(self.prebreakup_step_spin.value()),
+            prebreakup_lead_us=int(self.prebreakup_lead_spin.value()),
+            replicates_per_pressure=int(self.prebreakup_reps_spin.value()),
+        )
 
     # def toggle_start_pressure_calibration(self):
     #     """
@@ -1236,6 +1281,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         mapping = {
             # 'pressure_calibration':            self.calibrate_pressure_button,
             'pressure_scan':                   self.calibrate_pressure_scan_button,
+            'pre_breakup_morphology':         self.calibrate_prebreakup_button,
             # 'droplet_trajectory':              self.calibrate_trajectory_button,
             'trajectory_pressure_scan':        self.scan_trajectory_button,
             # 'droplet_search':                  self.calibrate_search_button,
