@@ -6787,6 +6787,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.long_ligament_px = 36
         self.max_secondary_lobes_for_clean = 0
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
+        self.prebreakup_roi_below_px = 440
 
         fixed_delay = None
         try:
@@ -7256,6 +7257,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.background_image,
             self.droplet_image,
             nozzle_center=self.nozzle_center_px,
+            roi_below_px=int(self.prebreakup_roi_below_px),
             return_details=True,
         )
         self.presentImageSignal.emit(overlay)
@@ -7424,6 +7426,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.background_image,
             self.droplet_image,
             nozzle_center=self.nozzle_center_px,
+            roi_below_px=int(self.prebreakup_roi_below_px),
             return_details=True,
         )
         self.presentImageSignal.emit(overlay)
