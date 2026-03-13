@@ -29,6 +29,20 @@ def test_pressure_trajectory_missing_requirements_primary_band_optional_with_exp
     assert req_explicit == []
 
 
+def test_pressure_trajectory_missing_requirements_accepts_prebreakup_published_band():
+    cm = SimpleNamespace(
+        get_nozzle_center=lambda: {"X": 0, "Y": 0, "Z": 0},
+        get_real_nozzle_center_image_position=lambda: (100, 100),
+        get_background_image=lambda: np.zeros((64, 64), dtype=np.uint8),
+        get_emergence_time=lambda: 4500,
+        get_primary_pressure_band=lambda: (0.41, 0.47),
+    )
+
+    req_default = PressureTrajectoryCalibrationProcess.missing_requirements(cm)
+
+    assert req_default == []
+
+
 def test_pressure_trajectory_settings_timeout_emits_error_and_finalizes():
     proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
     proc.settings_timeout_ms = 12000

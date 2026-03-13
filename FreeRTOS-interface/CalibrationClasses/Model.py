@@ -6758,6 +6758,10 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.delay_scan_step_us = int(max(25, delay_scan_step_us))
         self.delay_scan_window_us = int(max(self.delay_scan_step_us, delay_scan_window_us))
         self.delay_scan_replicates = int(max(1, delay_scan_replicates))
+        self.delay_scan_pulse_width_margin_us = 1000
+        self.delay_scan_extension_span_us = 1200
+        self.max_delay_scout_extensions = 4
+        self.max_delay_scout_pressure_retries = 2
 
         try:
             hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
@@ -6792,6 +6796,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
+        self.delay_scout_pressure_retry_step_psi = float(max(self.pressure_step_psi, 0.03))
 
         fixed_delay = None
         try:
@@ -6842,6 +6847,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selection = None
         self._delay_scout_selection_meta = {}
         self._delay_scout_selected_summary = {}
+        self._delay_scout_extension_count = 0
+        self._delay_scout_pressure_retry_count = 0
 
         self.state_prepare_bg = QState()
         self.state_capture_bg = QState()
@@ -6954,12 +6961,34 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
     def _should_run_delay_scout(self) -> bool:
         return bool(self.auto_scout_delay and self.fixed_prebreakup_delay_us is None)
 
+    def _recommended_delay_scan_window_us(self) -> int:
+        try:
+            pw = int(self._pulse_width_us or 0)
+        except Exception:
+            pw = 0
+        pulse_width_window = int(max(0, pw) + int(self.delay_scan_pulse_width_margin_us))
+        return int(max(int(self.delay_scan_window_us), int(pulse_width_window)))
+
+    def _delay_scout_extension_span(self) -> int:
+        try:
+            pw = int(self._pulse_width_us or 0)
+        except Exception:
+            pw = 0
+        base = int(max(self.delay_scan_extension_span_us, self.delay_scan_step_us * 4))
+        if pw > 0:
+            base = int(max(base, round(float(pw) * 0.5)))
+        span = int(max(self.delay_scan_step_us, base))
+        step = int(max(1, self.delay_scan_step_us))
+        if span % step:
+            span += int(step - (span % step))
+        return int(span)
+
     def _build_delay_scan_schedule(self):
         start_us = self._clamp_prebreakup_delay(
             int(self.emergence_time_us) + int(self.delay_scan_start_offset_us)
         )
         stop_us = self._clamp_prebreakup_delay(
-            int(self.emergence_time_us) + int(self.delay_scan_window_us)
+            int(self.emergence_time_us) + int(self._recommended_delay_scan_window_us())
         )
         stop_us = int(max(start_us, stop_us))
         delays = list(range(int(start_us), int(stop_us) + 1, int(self.delay_scan_step_us)))
@@ -6976,6 +7005,53 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             seen.add(key)
             deduped.append(key)
         return deduped
+
+    def _extend_delay_scan_schedule(self, *, reason: str, meta: dict | None) -> bool:
+        if str(reason) != "no_retraction_observed":
+            return False
+        delays = list(self._delay_scout_delays or [])
+        if not delays:
+            return False
+        if int(self._delay_scout_extension_count) >= int(self.max_delay_scout_extensions):
+            return False
+        last_delay = int(delays[-1])
+        peak_delay = int((meta or {}).get("peak_delay_us", 0) or 0)
+        if peak_delay < int(last_delay - int(self.delay_scan_step_us)):
+            return False
+        next_start = int(last_delay + int(self.delay_scan_step_us))
+        if next_start > int(self.MAX_PREBREAKUP_DELAY_US):
+            return False
+        next_stop = self._clamp_prebreakup_delay(
+            int(last_delay + int(self._delay_scout_extension_span()))
+        )
+        if next_stop <= last_delay:
+            return False
+
+        new_delays = list(range(next_start, int(next_stop) + 1, int(self.delay_scan_step_us)))
+        if not new_delays:
+            new_delays = [int(next_start)]
+        if new_delays[-1] != int(next_stop):
+            new_delays.append(int(next_stop))
+
+        seen = {int(v) for v in delays}
+        appended = []
+        for delay_us in new_delays:
+            key = int(delay_us)
+            if key in seen:
+                continue
+            seen.add(key)
+            appended.append(key)
+        if not appended:
+            return False
+
+        self._delay_scout_delays.extend(appended)
+        self._delay_scout_extension_count += 1
+        self.stageChanged.emit(
+            "Pre-breakup delay scout: extending schedule to "
+            f"{int(self._delay_scout_delays[-1])} us "
+            f"(extension {int(self._delay_scout_extension_count)}/{int(self.max_delay_scout_extensions)})"
+        )
+        return True
 
     def _timing_plan_text(self) -> str:
         if self.fixed_prebreakup_delay_us is not None:
@@ -7074,6 +7150,89 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "feature_summary": feature_summary,
         }
 
+    def _delay_scout_majority_state(self, sample: dict | None) -> str:
+        counts = dict((sample or {}).get("state_counts", {}) or {})
+        if not counts:
+            return "none"
+        ordered = sorted(
+            counts.items(),
+            key=lambda item: (-int(item[1]), str(item[0])),
+        )
+        return str(ordered[0][0]) if ordered else "none"
+
+    def _should_retry_delay_scout_at_lower_pressure(self) -> tuple[bool, str, dict]:
+        samples = list(self._delay_scout_samples or [])
+        if len(samples) < 2:
+            return False, "", {}
+        if int(self._delay_scout_pressure_retry_count) >= int(self.max_delay_scout_pressure_retries):
+            return False, "", {}
+
+        attached_visible_delays = 0
+        detached_like_delays = 0
+        recent = samples[-min(3, len(samples)) :]
+        for sample in recent:
+            feature_summary = dict((sample or {}).get("feature_summary", {}) or {})
+            if bool(feature_summary.get("attached_visible", False)):
+                attached_visible_delays += 1
+                continue
+            majority_state = self._delay_scout_majority_state(sample)
+            if majority_state in {"not_attached", "clipped"}:
+                detached_like_delays += 1
+
+        if attached_visible_delays > 1 or detached_like_delays < min(2, len(recent)):
+            return False, "", {}
+
+        new_pressure = float(
+            max(
+                self.P_MIN,
+                round(
+                    float(self._delay_scout_pressure)
+                    - float(self.delay_scout_pressure_retry_step_psi),
+                    5,
+                ),
+            )
+        )
+        if new_pressure >= float(self._delay_scout_pressure) - 1e-9:
+            return False, "", {}
+        return True, "scout_pressure_too_high", {
+            "prior_pressure_psi": float(self._delay_scout_pressure),
+            "retry_pressure_psi": float(new_pressure),
+            "retry_index": int(self._delay_scout_pressure_retry_count) + 1,
+            "recent_states": [
+                self._delay_scout_majority_state(sample) for sample in recent
+            ],
+        }
+
+    def _restart_delay_scout_at_lower_pressure(self, reason: str, meta: dict | None):
+        payload = dict(meta or {})
+        new_pressure = float(payload.get("retry_pressure_psi", self._delay_scout_pressure))
+        self._delay_scout_pressure = float(new_pressure)
+        self._delay_scout_pressure_retry_count += 1
+        self._delay_scout_delays = list(self._build_delay_scan_schedule())
+        self._delay_scout_index = 0
+        self._delay_scout_current_delay = (
+            int(self._delay_scout_delays[0]) if self._delay_scout_delays else None
+        )
+        self._delay_scout_reps = []
+        self._delay_scout_samples = []
+        self._delay_scout_selection = None
+        self._delay_scout_selection_meta = dict(payload)
+        self._delay_scout_selected_summary = {}
+        self._delay_scout_extension_count = 0
+        self._record_decision(
+            "prebreakup_delay_scout_retry",
+            {
+                "reason": str(reason),
+                "meta": dict(payload),
+            },
+        )
+        self.stageChanged.emit(
+            "Pre-breakup delay scout: lowering scout pressure to "
+            f"{float(self._delay_scout_pressure):.3f} psi "
+            f"(retry {int(self._delay_scout_pressure_retry_count)}/{int(self.max_delay_scout_pressure_retries)})"
+        )
+        self.continueScoutDelay.emit()
+
     def _select_delay_scout_candidate(self):
         samples = [
             sample
@@ -7099,21 +7258,29 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             idx for idx, protrusion in enumerate(protrusions)
             if int(protrusion) >= int(peak_protrusion - plateau_tol)
         ]
-        peak_index = plateau_indices[-1] if plateau_indices else int(protrusions.index(peak_protrusion))
-        selected = dict(samples[peak_index] or {})
-        selected_protrusion = int(
-            (selected.get("feature_summary") or {}).get("protrusion_length_px", 0) or 0
-        )
-        retraction_seen = any(
-            int(protrusions[idx]) <= int(selected_protrusion - retraction_drop)
-            for idx in range(int(peak_index + 1), len(protrusions))
-        )
-        if not retraction_seen:
+        candidate_indices = list(plateau_indices or [int(protrusions.index(peak_protrusion))])
+        peak_index = None
+        selected_protrusion = None
+        for idx in candidate_indices:
+            candidate_protrusion = int(protrusions[idx])
+            if int(idx + 1) < len(protrusions) and int(protrusions[idx + 1]) > int(candidate_protrusion):
+                continue
+            if any(
+                int(protrusions[later_idx]) <= int(candidate_protrusion - retraction_drop)
+                for later_idx in range(int(idx + 1), len(protrusions))
+            ):
+                peak_index = int(idx)
+                selected_protrusion = int(candidate_protrusion)
+                break
+        if peak_index is None:
+            peak_index = int(candidate_indices[-1])
+            selected_protrusion = int(protrusions[peak_index])
             return None, "no_retraction_observed", {
-                "peak_delay_us": int(selected.get("delay_us", 0)),
+                "peak_delay_us": int((samples[peak_index] or {}).get("delay_us", 0)),
                 "peak_protrusion_px": int(selected_protrusion),
                 "retraction_drop_px": int(retraction_drop),
             }
+        selected = dict(samples[peak_index] or {})
 
         pressure_scan_index = int(max(0, peak_index - int(max(0, self.pressure_scan_delay_step_back))))
         pressure_scan_sample = dict(samples[pressure_scan_index] or {})
@@ -7213,11 +7380,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "selected_summary": dict(self._delay_scout_selected_summary or {}),
             "pressure_psi": float(self._delay_scout_pressure),
             "start_offset_us": int(self.delay_scan_start_offset_us),
-            "window_us": int(self.delay_scan_window_us),
+            "window_us": int(self._recommended_delay_scan_window_us()),
+            "configured_window_us": int(self.delay_scan_window_us),
             "step_us": int(self.delay_scan_step_us),
             "replicates_per_delay": int(self.delay_scan_replicates),
             "start_delay_us": (None if not delays else int(delays[0])),
             "stop_delay_us": (None if not delays else int(delays[-1])),
+            "extensions_applied": int(self._delay_scout_extension_count),
+            "pressure_retries_applied": int(self._delay_scout_pressure_retry_count),
             "delays": list(self._delay_scout_samples),
         }
         if self._delay_scout_selection:
@@ -7290,6 +7460,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selection = None
         self._delay_scout_selection_meta = {}
         self._delay_scout_selected_summary = {}
+        self._delay_scout_extension_count = 0
+        self._delay_scout_pressure_retry_count = 0
+        self._delay_scout_pressure = float(self.start_pressure)
         if self.fixed_prebreakup_delay_us is not None:
             self.prebreakup_delay_us = int(self.fixed_prebreakup_delay_us)
             self._reversal_delay_us = int(self.fixed_prebreakup_delay_us)
@@ -7473,8 +7646,20 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self._apply_delay_scout_selection(selection, reason, meta)
             return
 
-        self._delay_scout_index += 1
-        if self._delay_scout_index < len(self._delay_scout_delays):
+        should_retry, retry_reason, retry_meta = self._should_retry_delay_scout_at_lower_pressure()
+        if should_retry:
+            self._restart_delay_scout_at_lower_pressure(retry_reason, retry_meta)
+            return
+
+        next_index = int(self._delay_scout_index + 1)
+        if next_index < len(self._delay_scout_delays):
+            self._delay_scout_index = int(next_index)
+            self._delay_scout_current_delay = int(self._delay_scout_delays[self._delay_scout_index])
+            self.continueScoutDelay.emit()
+            return
+
+        if self._extend_delay_scan_schedule(reason=str(reason), meta=dict(meta or {})):
+            self._delay_scout_index = int(next_index)
             self._delay_scout_current_delay = int(self._delay_scout_delays[self._delay_scout_index])
             self.continueScoutDelay.emit()
             return
@@ -7743,6 +7928,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             },
         }
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": result})
+        self._publish_safe_window_primary_band(safe_window, recommended)
 
         if recommended is not None:
             if isinstance(safe_window, list) and len(safe_window) == 2:
@@ -7788,6 +7974,32 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         if orig.get("print_pressure") is not None:
             return float(orig.get("print_pressure"))
         return None
+
+    def _publish_safe_window_primary_band(self, safe_window, recommended):
+        if not (isinstance(safe_window, list) and len(safe_window) == 2):
+            return False
+        lo = float(min(safe_window[0], safe_window[1]))
+        hi = float(max(safe_window[0], safe_window[1]))
+        payload = {
+            "primary_band": [float(lo), float(hi)],
+            "raw_primary_band": [float(lo), float(hi)],
+            "single_bands": [[float(lo), float(hi)]],
+            "safe_window_psi": [float(lo), float(hi)],
+            "recommended_pressure_psi": (
+                None if recommended is None else float(recommended)
+            ),
+            "source_phase": str(self.phase_name or ""),
+            "source_process": "PreBreakupMorphologyCalibrationProcess",
+            "pressure_scan_delay_us": (
+                None if self.prebreakup_delay_us is None else int(self.prebreakup_delay_us)
+            ),
+            "pulse_width_us": self._pulse_width_us,
+        }
+        try:
+            self.calibration_manager.set_primary_pressure_band(payload)
+        except Exception:
+            return False
+        return True
 
     def _classify_morphology(self, details: dict | None):
         d = dict(details or {})

@@ -58,12 +58,24 @@ def _proc_stub():
     proc.delay_scan_window_us = 2000
     proc.delay_scan_step_us = 100
     proc.delay_scan_replicates = 2
+    proc.delay_scan_pulse_width_margin_us = 1000
+    proc.delay_scan_extension_span_us = 1200
+    proc.max_delay_scout_extensions = 4
+    proc.max_delay_scout_pressure_retries = 2
     proc._delay_scout_selection = None
     proc._delay_scout_selection_meta = {}
     proc._delay_scout_selected_summary = {
         "protrusion_length_px": 286,
         "distance_nozzle_to_neck_px": 214,
     }
+    proc._delay_scout_extension_count = 0
+    proc._delay_scout_pressure_retry_count = 0
+    proc._delay_scout_pressure = 0.42
+    proc.delay_scout_pressure_retry_step_psi = 0.03
+    proc.P_MIN = 0.30
+    proc.P_MAX = 5.0
+    proc.MAX_PREBREAKUP_DELAY_US = 12000
+    proc._pulse_width_us = 1300
     return proc
 
 
@@ -455,6 +467,25 @@ def test_delay_scout_selects_turning_point_before_retraction():
     assert meta["pressure_scan_delay_reason"] == "pre_reversal_monitor_delay"
 
 
+def test_delay_scout_prefers_earliest_plateau_sample_with_confirmed_retraction():
+    proc = _proc_stub()
+    proc._delay_scout_samples = [
+        {"delay_us": 3400, "feature_summary": {"attached_visible": True, "protrusion_length_px": 26}},
+        {"delay_us": 3500, "feature_summary": {"attached_visible": True, "protrusion_length_px": 34}},
+        {"delay_us": 3600, "feature_summary": {"attached_visible": True, "protrusion_length_px": 43}},
+        {"delay_us": 3700, "feature_summary": {"attached_visible": True, "protrusion_length_px": 44}},
+        {"delay_us": 3800, "feature_summary": {"attached_visible": True, "protrusion_length_px": 44}},
+        {"delay_us": 3900, "feature_summary": {"attached_visible": True, "protrusion_length_px": 39}},
+        {"delay_us": 4000, "feature_summary": {"attached_visible": True, "protrusion_length_px": 31}},
+    ]
+
+    selected, reason, meta = proc._select_delay_scout_candidate()
+
+    assert selected["delay_us"] == 3700
+    assert reason == "retraction_turning_point"
+    assert meta["pressure_scan_delay_us"] == 3600
+
+
 def test_delay_scout_requires_retraction_after_peak():
     proc = _proc_stub()
     proc._delay_scout_samples = [
@@ -469,6 +500,69 @@ def test_delay_scout_requires_retraction_after_peak():
     assert selected is None
     assert reason == "no_retraction_observed"
     assert meta["peak_delay_us"] == 3700
+
+
+def test_build_delay_scan_schedule_expands_for_longer_pulse_widths():
+    proc = _proc_stub()
+    proc.emergence_time_us = 3600
+    proc._pulse_width_us = 1800
+
+    delays = proc._build_delay_scan_schedule()
+
+    assert delays[0] == 3800
+    assert delays[-1] == 6400
+
+
+def test_delay_scout_extends_schedule_when_retraction_not_yet_seen_near_end():
+    proc = _proc_stub()
+    proc._pulse_width_us = 1800
+    proc._delay_scout_delays = [3800, 3900, 4000, 4100, 4200, 4300, 4400]
+    proc._delay_scout_extension_count = 0
+    proc.stageChanged = _SignalRecorder()
+
+    extended = proc._extend_delay_scan_schedule(
+        reason="no_retraction_observed",
+        meta={"peak_delay_us": 4400},
+    )
+
+    assert extended is True
+    assert proc._delay_scout_delays[-1] > 4400
+    assert proc._delay_scout_extension_count == 1
+    assert proc.stageChanged.calls
+
+
+def test_delay_scout_retries_at_lower_pressure_when_recent_frames_are_detached():
+    proc = _proc_stub()
+    proc._delay_scout_samples = [
+        {
+            "delay_us": 3400,
+            "state_counts": {"not_attached": 2, "attached_visible": 0},
+            "feature_summary": {"attached_visible": False},
+        },
+        {
+            "delay_us": 3500,
+            "state_counts": {"clipped": 2, "attached_visible": 0},
+            "feature_summary": {"attached_visible": False},
+        },
+    ]
+    proc._delay_scout_delays = [3400, 3500, 3600]
+    proc._record_decision = lambda *args, **kwargs: None
+    proc.stageChanged = _SignalRecorder()
+    proc.continueScoutDelay = _SignalRecorder()
+
+    should_retry, reason, meta = proc._should_retry_delay_scout_at_lower_pressure()
+
+    assert should_retry is True
+    assert reason == "scout_pressure_too_high"
+    assert meta["retry_pressure_psi"] == pytest.approx(0.39)
+
+    proc._restart_delay_scout_at_lower_pressure(reason, meta)
+
+    assert proc._delay_scout_pressure == pytest.approx(0.39)
+    assert proc._delay_scout_pressure_retry_count == 1
+    assert proc._delay_scout_samples == []
+    assert proc._delay_scout_index == 0
+    assert proc.continueScoutDelay.calls
 
 
 def test_delay_scout_stops_as_soon_as_retraction_is_confirmed():
@@ -558,3 +652,22 @@ def test_build_delay_scout_result_keeps_reversal_and_scan_delay():
     assert result["reversal_delay_us"] == 4300
     assert result["pressure_scan_delay_us"] == 4200
     assert result["pressure_scan_delay_reason"] == "pre_reversal_monitor_delay"
+
+
+def test_publish_safe_window_primary_band_makes_trajectory_handoff_available():
+    proc = _proc_stub()
+    published = []
+    proc.phase_name = "pre_breakup_morphology"
+    proc.calibration_manager = SimpleNamespace(
+        set_primary_pressure_band=lambda payload: published.append(dict(payload)),
+    )
+
+    ok = proc._publish_safe_window_primary_band([0.41, 0.47], 0.44)
+
+    assert ok is True
+    assert published
+    payload = published[-1]
+    assert payload["primary_band"] == [0.41, 0.47]
+    assert payload["single_bands"] == [[0.41, 0.47]]
+    assert payload["recommended_pressure_psi"] == pytest.approx(0.44)
+    assert payload["source_phase"] == "pre_breakup_morphology"
