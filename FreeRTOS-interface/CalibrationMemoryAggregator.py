@@ -139,7 +139,7 @@ class CalibrationMemoryAggregator:
     AGGREGATION_LEVEL_REAGENT_ONLY = "reagent_only"
     AGGREGATION_LEVEL_HEAD_TYPE_ONLY = "head_type_only"
 
-    FEATURE_EXTRACTION_VERSION = 1
+    FEATURE_EXTRACTION_VERSION = 2
 
     def __init__(self, root_dir):
         self.root_dir = os.path.abspath(root_dir)
@@ -331,18 +331,22 @@ class CalibrationMemoryAggregator:
         pressure_scan = cls._latest_phase_result(summary, authoritative_run, ("pressure_scan",))
         pressure_trajectory = cls._latest_phase_result(summary, authoritative_run, ("pressure_trajectory", "trajectory"))
         droplet_search = cls._latest_phase_result(summary, authoritative_run, ("droplet_search",))
+        pre_breakup = cls._latest_phase_result(summary, authoritative_run, ("pre_breakup_morphology",))
         pressure_sweep_rows = cls._extract_pressure_sweep_rows(summary, authoritative_run)
         preferred_sweep_row = cls._preferred_sweep_row(pressure_sweep_rows)
 
         droplet_search_settings = cls._latest_phase_settings(summary, authoritative_run, ("droplet_search",))
         pressure_scan_settings = cls._latest_phase_settings(summary, authoritative_run, ("pressure_scan",))
         pressure_sweep_settings = cls._latest_phase_settings(summary, authoritative_run, ("pressure_sweep_characterization",))
+        pre_breakup_settings = cls._latest_phase_settings(summary, authoritative_run, ("pre_breakup_morphology",))
 
         pulse_width_us = _coalesce(
             _int_or_none(droplet_search.get("print_pulse_width_us")),
             _int_or_none(droplet_search_settings.get("print_width")),
             _int_or_none(pressure_scan.get("pulse_width_us")),
             _int_or_none(pressure_scan_settings.get("print_width")),
+            _int_or_none(pre_breakup.get("pulse_width_us")),
+            _int_or_none(pre_breakup_settings.get("print_width")),
             _int_or_none((preferred_sweep_row or {}).get("pulse_width_us")),
             _int_or_none(pressure_sweep_settings.get("print_width")),
             _int_or_none(
@@ -352,6 +356,7 @@ class CalibrationMemoryAggregator:
         )
 
         primary_band = _normalize_band(_coalesce(pressure_scan.get("primary_band"), pressure_scan.get("raw_primary_band")))
+        pre_breakup_band = _normalize_band(pre_breakup.get("safe_window_psi"))
         sweep_band = cls._valid_pressure_band_from_rows(pressure_sweep_rows)
         trajectory_band = _normalize_band(
             _coalesce(
@@ -377,6 +382,9 @@ class CalibrationMemoryAggregator:
         elif _float_or_none(pressure_calibration.get("pressure")) is not None:
             recommended_pressure_psi = _float_or_none(pressure_calibration.get("pressure"))
             recommended_pressure_source = "pressure_calibration"
+        elif _float_or_none(pre_breakup.get("recommended_pressure_psi")) is not None:
+            recommended_pressure_psi = _float_or_none(pre_breakup.get("recommended_pressure_psi"))
+            recommended_pressure_source = "pre_breakup_morphology"
         elif preferred_sweep_row is not None and preferred_sweep_row.get("pressure") is not None:
             recommended_pressure_psi = _float_or_none(preferred_sweep_row.get("pressure"))
             recommended_pressure_source = "pressure_sweep_characterization"
@@ -404,6 +412,7 @@ class CalibrationMemoryAggregator:
 
         emergence_time_us = _coalesce(
             _int_or_none(pressure_trajectory.get("emergence_time_us")),
+            _int_or_none(pre_breakup.get("emergence_time_us")),
             _int_or_none((preferred_sweep_row or {}).get("emergence_time_us")),
             _int_or_none(droplet_emergence.get("flash_delay")),
             _int_or_none(pressure_scan.get("delay_us")),
@@ -413,6 +422,8 @@ class CalibrationMemoryAggregator:
         if emergence_time_us is not None:
             if _int_or_none(pressure_trajectory.get("emergence_time_us")) is not None:
                 emergence_time_source = "pressure_trajectory"
+            elif _int_or_none(pre_breakup.get("emergence_time_us")) is not None:
+                emergence_time_source = "pre_breakup_morphology"
             elif _int_or_none((preferred_sweep_row or {}).get("emergence_time_us")) is not None:
                 emergence_time_source = "pressure_sweep_characterization"
             elif _int_or_none(droplet_emergence.get("flash_delay")) is not None:
@@ -474,11 +485,15 @@ class CalibrationMemoryAggregator:
             "pulse_width_us": pulse_width_us,
             "recommended_pressure_psi": recommended_pressure_psi,
             "recommended_pressure_source": recommended_pressure_source,
-            "single_droplet_band_psi": _coalesce(primary_band, sweep_band),
+            "single_droplet_band_psi": _coalesce(primary_band, pre_breakup_band, sweep_band),
             "single_droplet_band_source": (
                 "pressure_scan_primary_band"
                 if primary_band is not None
-                else ("pressure_sweep_valid_band" if sweep_band is not None else None)
+                else (
+                    "pre_breakup_morphology_safe_window"
+                    if pre_breakup_band is not None
+                    else ("pressure_sweep_valid_band" if sweep_band is not None else None)
+                )
             ),
             "trajectory_pressure_band_psi": trajectory_band,
             "trajectory_pressure_band_source": "pressure_trajectory" if trajectory_band is not None else None,
@@ -714,9 +729,12 @@ class CalibrationMemoryAggregator:
             "pulse_width_us": int(pulse_width_us),
             "recommended_pressure_psi": _median_or_none(pressure_values),
             "recommended_pressure_band_psi": (
-                [float(min(pressure_values)), float(max(pressure_values))]
-                if pressure_values
-                else None
+                [
+                    _median_or_none([band[0] for band in single_bands]),
+                    _median_or_none([band[1] for band in single_bands]),
+                ]
+                if single_bands
+                else ([float(min(pressure_values)), float(max(pressure_values))] if pressure_values else None)
             ),
             "emergence_time_us": _median_or_none(emergence_values),
             "stable_single_droplet_band_psi": (

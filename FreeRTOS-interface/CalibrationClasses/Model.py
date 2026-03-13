@@ -6787,8 +6787,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.long_ligament_px = 36
         self.max_secondary_lobes_for_clean = 0
         self.late_stage_max_secondary_lobes_for_clean = 1
-        self.late_stage_min_protrusion_gain_ratio = 1.40
-        self.late_stage_risk_protrusion_gain_ratio = 1.80
+        self.late_stage_min_protrusion_gain_ratio = 1.38
+        self.late_stage_risk_protrusion_gain_ratio = 1.75
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
@@ -7233,21 +7233,42 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             value = 0
         return int(value) if value > 0 else None
 
+    def _get_late_stage_reference_neck_distance_px(self):
+        try:
+            value = int(
+                (self._delay_scout_selected_summary or {}).get("distance_nozzle_to_neck_px", 0) or 0
+            )
+        except Exception:
+            value = 0
+        return int(value) if value > 0 else None
+
     def _annotate_pressure_scan_details(self, details: dict | None):
         d = dict(details or {})
         ref_px = self._get_late_stage_reference_protrusion_px()
+        ref_neck_px = self._get_late_stage_reference_neck_distance_px()
         d["reference_protrusion_length_px"] = None if ref_px is None else int(ref_px)
+        d["reference_neck_distance_px"] = None if ref_neck_px is None else int(ref_neck_px)
         if ref_px is None:
             d["protrusion_gain_ratio"] = None
-            return d
+        else:
+            try:
+                protrusion = int(d.get("protrusion_length_px", 0) or 0)
+            except Exception:
+                protrusion = 0
+            d["protrusion_gain_ratio"] = (
+                None if protrusion <= 0 else float(protrusion) / float(ref_px)
+            )
 
-        try:
-            protrusion = int(d.get("protrusion_length_px", 0) or 0)
-        except Exception:
-            protrusion = 0
-        d["protrusion_gain_ratio"] = (
-            None if protrusion <= 0 else float(protrusion) / float(ref_px)
-        )
+        if ref_neck_px is None:
+            d["neck_distance_gain_ratio"] = None
+        else:
+            try:
+                neck_distance = int(d.get("distance_nozzle_to_neck_px", 0) or 0)
+            except Exception:
+                neck_distance = 0
+            d["neck_distance_gain_ratio"] = (
+                None if neck_distance <= 0 else float(neck_distance) / float(ref_neck_px)
+            )
         return d
 
     @Slot()
@@ -7532,8 +7553,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             metrics["reference_protrusion_length_px"] = int(
                 details.get("reference_protrusion_length_px")
             )
+        if details.get("reference_neck_distance_px") is not None:
+            metrics["reference_neck_distance_px"] = int(
+                details.get("reference_neck_distance_px")
+            )
         if details.get("protrusion_gain_ratio") is not None:
             metrics["protrusion_gain_ratio"] = float(details.get("protrusion_gain_ratio"))
+        if details.get("neck_distance_gain_ratio") is not None:
+            metrics["neck_distance_gain_ratio"] = float(details.get("neck_distance_gain_ratio"))
         self.presentImageSignal.emit(overlay)
 
         state = self._classify_morphology(details)
@@ -7653,12 +7680,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         recommended = self._select_recommended_pressure()
-        safe_window = None
-        if self._first_candidate_pressure is not None and self._last_candidate_pressure is not None:
-            safe_window = [
-                float(min(self._first_candidate_pressure, self._last_candidate_pressure)),
-                float(max(self._first_candidate_pressure, self._last_candidate_pressure)),
-            ]
+        safe_window = self._get_safe_window()
 
         result = {
             "pulse_width_us": self._pulse_width_us,
@@ -7690,6 +7712,11 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "recommended_pressure_psi": (
                 None if recommended is None else float(recommended)
             ),
+            "recommended_pressure_strategy": (
+                "safe_window_midpoint"
+                if isinstance(safe_window, list) and len(safe_window) == 2
+                else ("last_candidate_pressure" if self._last_candidate_pressure is not None else None)
+            ),
             "safe_window_psi": safe_window,
             "risk_onset_pressure_psi": (
                 None if self._risk_onset_pressure is None else float(self._risk_onset_pressure)
@@ -7697,6 +7724,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "terminated_early": bool(self._terminated_early),
             "stop_reason": self._stop_reason,
             "late_stage_reference_protrusion_px": self._get_late_stage_reference_protrusion_px(),
+            "late_stage_reference_neck_distance_px": self._get_late_stage_reference_neck_distance_px(),
             "heuristic_params": {
                 "min_signal_p95": float(self.min_signal_p95),
                 "min_protrusion_length_px": int(self.min_protrusion_length_px),
@@ -7717,11 +7745,19 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": result})
 
         if recommended is not None:
-            self.stageChanged.emit(
-                "Pre-breakup morphology complete: "
-                f"delay={int(self.prebreakup_delay_us)} us, "
-                f"recommended pressure {float(recommended):.3f} psi"
-            )
+            if isinstance(safe_window, list) and len(safe_window) == 2:
+                self.stageChanged.emit(
+                    "Pre-breakup morphology complete: "
+                    f"delay={int(self.prebreakup_delay_us)} us, "
+                    f"safe window {float(safe_window[0]):.3f}-{float(safe_window[1]):.3f} psi, "
+                    f"recommended pressure {float(recommended):.3f} psi"
+                )
+            else:
+                self.stageChanged.emit(
+                    "Pre-breakup morphology complete: "
+                    f"delay={int(self.prebreakup_delay_us)} us, "
+                    f"recommended pressure {float(recommended):.3f} psi"
+                )
         else:
             self.stageChanged.emit(
                 "Pre-breakup morphology complete: "
@@ -7729,7 +7765,17 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             )
         self.calibrationCompleted.emit()
 
+    def _get_safe_window(self):
+        if self._first_candidate_pressure is None or self._last_candidate_pressure is None:
+            return None
+        lo = float(min(self._first_candidate_pressure, self._last_candidate_pressure))
+        hi = float(max(self._first_candidate_pressure, self._last_candidate_pressure))
+        return [lo, hi]
+
     def _select_recommended_pressure(self):
+        safe_window = self._get_safe_window()
+        if isinstance(safe_window, list) and len(safe_window) == 2:
+            return float(round((float(safe_window[0]) + float(safe_window[1])) / 2.0, 5))
         if self._last_candidate_pressure is not None:
             return float(self._last_candidate_pressure)
         return None
@@ -7888,9 +7934,13 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "protrusion_length_px",
             "reference_protrusion_length_px",
             "protrusion_gain_ratio",
+            "reference_neck_distance_px",
+            "neck_distance_gain_ratio",
             "max_width_px",
             "neck_width_px",
             "neck_to_bulb_ratio",
+            "neck_y_px",
+            "tip_y_px",
             "distance_nozzle_to_neck_px",
             "nozzle_side_area_px",
             "nozzle_side_area_ratio",
@@ -16915,9 +16965,52 @@ class DropletCameraModel(QObject):
             smoothed = widths_arr
 
         search_start = int(min(max(1, 4), max(1, len(smoothed) - 1)))
-        neck_idx = int(np.argmin(smoothed[search_start:]) + search_start) if len(smoothed) > search_start else int(np.argmin(smoothed))
-        neck_width = int(max(0, round(smoothed[neck_idx])))
         max_width = int(max(widths))
+        tip_idx = int(max(0, len(smoothed) - 1))
+        tip_y = int(row_positions[tip_idx])
+        tip_width = int(max(0, round(smoothed[tip_idx]))) if len(smoothed) else 0
+
+        tail_guard = int(max(8, round(0.10 * float(len(smoothed))))) if len(smoothed) > 0 else 0
+        if len(smoothed) > (search_start + 2):
+            tail_guard = int(min(max(2, tail_guard), max(2, len(smoothed) - search_start - 1)))
+        candidate_stop = int(max(search_start + 1, len(smoothed) - tail_guard))
+        min_distal_widening = float(max(6.0, 0.12 * float(max_width)))
+        neck_candidates = []
+        for idx in range(search_start, max(search_start, candidate_stop)):
+            if idx <= 0 or idx >= (len(smoothed) - 1):
+                continue
+            cur = float(smoothed[idx])
+            prev_val = float(smoothed[idx - 1])
+            next_val = float(smoothed[idx + 1])
+            if cur > prev_val or cur > next_val:
+                continue
+            distal_profile = smoothed[idx + 1:]
+            if len(distal_profile) < 2:
+                continue
+            distal_max = float(np.max(distal_profile))
+            distal_widening = float(distal_max - cur)
+            if distal_widening < min_distal_widening:
+                continue
+            neck_candidates.append(
+                (
+                    -float(distal_widening),
+                    float(cur),
+                    -int(idx),
+                    int(idx),
+                )
+            )
+
+        if neck_candidates:
+            neck_idx = int(sorted(neck_candidates)[0][3])
+            neck_selection_reason = "local_min_before_distal_widening"
+        elif candidate_stop > search_start:
+            neck_idx = int(np.argmin(smoothed[search_start:candidate_stop]) + search_start)
+            neck_selection_reason = "fallback_min_before_tail_guard"
+        else:
+            neck_idx = int(np.argmin(smoothed))
+            neck_selection_reason = "fallback_global_min"
+
+        neck_width = int(max(0, round(smoothed[neck_idx])))
         neck_y = int(row_positions[neck_idx])
         nozzle_side_area = int(np.count_nonzero(mask[max(0, row_start): min(hh, neck_idx + 1), :]))
         distal_area = int(np.count_nonzero(mask[min(hh, neck_idx + 1):, :]))
@@ -16952,7 +17045,10 @@ class DropletCameraModel(QObject):
         secondary_lobe_count = int(max(0, len(peak_positions) - 1))
         bulb_present = bool(max_width >= max(10, int(round(neck_width * 1.35))) and distal_area > 0)
 
-        cv2.line(overlay, (x, neck_y), (x + ww, neck_y), (0, 200, 255), 1)
+        neck_center_x = int(x + max(0, min(ww - 1, ww // 2)))
+        cv2.line(overlay, (x, neck_y), (x + ww, neck_y), (0, 200, 255), 2)
+        cv2.circle(overlay, (neck_center_x, neck_y), 4, (0, 200, 255), -1)
+        cv2.circle(overlay, (neck_center_x, tip_y), 3, (255, 120, 0), -1)
         cv2.putText(
             overlay,
             f"L:{protrusion_length}px neck:{neck_width}px ratio:{neck_ratio:.2f}",
@@ -16969,6 +17065,7 @@ class DropletCameraModel(QObject):
                 "max_width_px": int(max_width),
                 "neck_width_px": int(neck_width),
                 "neck_y_px": int(neck_y),
+                "tip_y_px": int(tip_y),
                 "distance_nozzle_to_neck_px": int(max(0, neck_y - nzy)),
                 "nozzle_side_area_px": int(nozzle_side_area),
                 "distal_area_px": int(distal_area),
@@ -16979,6 +17076,10 @@ class DropletCameraModel(QObject):
             }
         )
         details.update(metrics)
+        details["tip_width_px"] = int(tip_width)
+        details["neck_selection_reason"] = str(neck_selection_reason)
+        details["neck_candidate_count"] = int(len(neck_candidates))
+        details["tail_guard_rows"] = int(tail_guard)
         details["status"] = "ok"
         details["reason"] = "ok"
 

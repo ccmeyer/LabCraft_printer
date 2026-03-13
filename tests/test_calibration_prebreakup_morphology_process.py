@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 from tests.calibration_test_utils import ensure_calibration_import_stubs
 
@@ -43,8 +44,8 @@ def _proc_stub():
     proc.long_ligament_px = 36
     proc.max_secondary_lobes_for_clean = 0
     proc.late_stage_max_secondary_lobes_for_clean = 1
-    proc.late_stage_min_protrusion_gain_ratio = 1.40
-    proc.late_stage_risk_protrusion_gain_ratio = 1.80
+    proc.late_stage_min_protrusion_gain_ratio = 1.38
+    proc.late_stage_risk_protrusion_gain_ratio = 1.75
     proc.delay_scout_min_protrusion_px = 14
     proc.pressure_scan_delay_step_back = 1
     proc._timing_mode = "auto_scout"
@@ -59,7 +60,10 @@ def _proc_stub():
     proc.delay_scan_replicates = 2
     proc._delay_scout_selection = None
     proc._delay_scout_selection_meta = {}
-    proc._delay_scout_selected_summary = {"protrusion_length_px": 286}
+    proc._delay_scout_selected_summary = {
+        "protrusion_length_px": 286,
+        "distance_nozzle_to_neck_px": 214,
+    }
     return proc
 
 
@@ -136,6 +140,12 @@ def test_analyze_prebreakup_morphology_extracts_attached_bulb_metrics():
     assert metrics["protrusion_length_px"] >= 50
     assert metrics["max_width_px"] > metrics["neck_width_px"]
     assert metrics["bulb_present"] is True
+    assert metrics["distance_nozzle_to_neck_px"] < metrics["protrusion_length_px"]
+    assert details["tip_y_px"] > details["neck_y_px"]
+    assert details["neck_selection_reason"] in {
+        "local_min_before_distal_widening",
+        "fallback_min_before_tail_guard",
+    }
 
 
 def test_analyze_prebreakup_morphology_recovers_weak_attachment_above_dark_bulb():
@@ -342,6 +352,22 @@ def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
     assert risk == "approaching_risk"
 
 
+def test_annotate_pressure_scan_details_adds_neck_and_protrusion_gain_ratios():
+    proc = _proc_stub()
+
+    details = proc._annotate_pressure_scan_details(
+        {
+            "protrusion_length_px": 464,
+            "distance_nozzle_to_neck_px": 321,
+        }
+    )
+
+    assert details["reference_protrusion_length_px"] == 286
+    assert details["reference_neck_distance_px"] == 214
+    assert round(details["protrusion_gain_ratio"], 3) == round(464.0 / 286.0, 3)
+    assert round(details["neck_distance_gain_ratio"], 3) == round(321.0 / 214.0, 3)
+
+
 def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
     proc = _proc_stub()
     proc.reps = [
@@ -396,6 +422,16 @@ def test_prebreakup_aggregate_replicates_tracks_protrusion_gain_ratio():
     assert verdict == "candidate_clean"
     assert summary["feature_summary"]["reference_protrusion_length_px"] == 286
     assert round(summary["feature_summary"]["protrusion_gain_ratio"], 3) == round(464.0 / 286.0, 3)
+
+
+def test_select_recommended_pressure_prefers_safe_window_midpoint():
+    proc = _proc_stub()
+    proc._first_candidate_pressure = 0.54
+    proc._last_candidate_pressure = 0.60
+
+    recommended = proc._select_recommended_pressure()
+
+    assert recommended == pytest.approx(0.57)
 
 
 def test_delay_scout_selects_turning_point_before_retraction():

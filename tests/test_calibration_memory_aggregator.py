@@ -277,6 +277,44 @@ def test_exact_pair_requires_explicit_identity_and_grouped_fallback_works(tmp_pa
     assert prior["recommended_pressure_psi"] == pytest.approx(1.58)
 
 
+def test_prebreakup_safe_window_feeds_recommended_pressure_and_band(tmp_path):
+    store = CalibrationMemoryStore(root_dir=str(tmp_path / "CalibrationMemory"))
+    context = _make_context()
+
+    authoritative_steps = {
+        "pre_breakup_morphology": [
+            {
+                "timestamp": "2026-03-13T19:24:31Z",
+                "settings": {"print_width": 1500},
+                "result": {
+                    "pulse_width_us": 1500,
+                    "emergence_time_us": 4300,
+                    "recommended_pressure_psi": 1.57,
+                    "safe_window_psi": [1.48, 1.66],
+                },
+            }
+        ]
+    }
+
+    _seed_completed_run(
+        store,
+        tmp_path,
+        "prebreakup_run",
+        context,
+        authoritative_steps=authoritative_steps,
+        ended_at="2026-03-13T19:25:00Z",
+    )
+
+    result = store.refresh_derived_memory()
+    assert result["entry_counts"]["pair_memory"] == 1
+
+    prior = store.get_best_prior(context, target_pulse_width_us=1500)
+    assert prior["aggregation_level"] == CalibrationMemoryAggregator.AGGREGATION_LEVEL_EXACT_PAIR
+    assert prior["recommended_pressure_psi"] == pytest.approx(1.57)
+    assert prior["recommended_pressure_band_psi"] == pytest.approx([1.48, 1.66])
+    assert prior["stable_single_droplet_band_psi"] == pytest.approx([1.48, 1.66])
+
+
 def test_backward_compatible_legacy_identity_can_feed_lower_confidence_grouping(tmp_path):
     store = CalibrationMemoryStore(root_dir=str(tmp_path / "CalibrationMemory"))
     legacy_context = {
