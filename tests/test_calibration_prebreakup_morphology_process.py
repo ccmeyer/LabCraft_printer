@@ -128,6 +128,51 @@ def test_analyze_prebreakup_morphology_extracts_attached_bulb_metrics():
     assert metrics["bulb_present"] is True
 
 
+def test_analyze_prebreakup_morphology_recovers_weak_attachment_above_dark_bulb():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (154, 80), (166, 136), (130, 130, 130), -1)
+    cv2.circle(img, (160, 156), 28, (20, 20, 20), -1)
+
+    metrics, _overlay, details = cam.analyze_prebreakup_morphology(
+        bg,
+        img,
+        nozzle_center=(160, 80),
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert details["mask_strategy"] == "nozzle_connected_dual_threshold"
+    assert details["contour_class"] == "attached"
+    assert details["seed_contact_detected"] is True
+    assert details["threshold_weak"] <= details["threshold_strong"] <= details["threshold_hard"]
+    assert metrics["protrusion_length_px"] >= 70
+
+
+def test_analyze_prebreakup_morphology_handles_bright_attachment_segment():
+    cam = _camera_stub()
+    bg = np.full((320, 320, 3), 160, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (154, 80), (166, 136), (255, 255, 255), -1)
+    cv2.circle(img, (160, 156), 28, (20, 20, 20), -1)
+
+    metrics, _overlay, details = cam.analyze_prebreakup_morphology(
+        bg,
+        img,
+        nozzle_center=(160, 80),
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert details["signal_mode"] == "absdiff"
+    assert details["contour_class"] == "attached"
+    assert details["seed_contact_detected"] is True
+    assert metrics["protrusion_length_px"] >= 70
+
+
 def test_analyze_prebreakup_morphology_marks_detached_contour():
     cam = _camera_stub()
     bg = np.full((320, 320, 3), 220, dtype=np.uint8)

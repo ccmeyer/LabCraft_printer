@@ -16488,6 +16488,18 @@ class DropletCameraModel(QObject):
             return metric_area, center, overlay, details
         return metric_area, center, overlay
 
+    def _fill_binary_holes(self, mask):
+        work = np.uint8(mask > 0) * 255
+        if work.size == 0:
+            return work
+        padded = cv2.copyMakeBorder(work, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+        flood = padded.copy()
+        flood_mask = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), dtype=np.uint8)
+        cv2.floodFill(flood, flood_mask, (0, 0), 255)
+        holes = cv2.bitwise_not(flood)
+        filled = cv2.bitwise_or(padded, holes)
+        return filled[1:-1, 1:-1]
+
     def analyze_prebreakup_morphology(
         self,
         background,
@@ -16541,6 +16553,9 @@ class DropletCameraModel(QObject):
                 return metrics, overlay, details
             return metrics, overlay
 
+        bg_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
+        signal = cv2.absdiff(bg_gray, _img_gray)
+
         h, w = dark.shape[:2]
         if overlay is None:
             overlay = cv2.cvtColor(dark, cv2.COLOR_GRAY2BGR)
@@ -16571,69 +16586,173 @@ class DropletCameraModel(QObject):
                 return metrics, overlay, details
             return metrics, overlay
 
-        roi = dark[y0:y1, x0:x1].copy()
+        roi = signal[y0:y1, x0:x1].copy()
         blur = cv2.GaussianBlur(roi, (5, 5), 0)
         mu, sd = float(np.mean(blur)), float(np.std(blur))
         t_hard = max(8, int(mu + 2.5 * sd))
-        _, th = cv2.threshold(blur, t_hard, 255, cv2.THRESH_BINARY)
-        if np.count_nonzero(th) < int(min_fg_pix):
-            _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, self._k3, iterations=1)
-        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, self._k3, iterations=1)
+        otsu_t, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        t_weak = int(
+            max(
+                8,
+                min(
+                    t_hard,
+                    max(
+                        int(round(mu + 0.8 * sd)),
+                        int(round(0.82 * float(otsu_t))),
+                    ),
+                ),
+            )
+        )
+        t_strong = int(max(t_weak, min(t_hard, t_weak + 24)))
 
-        if np.count_nonzero(th) < int(min_fg_pix):
+        _, weak_mask = cv2.threshold(blur, t_weak, 255, cv2.THRESH_BINARY)
+        _, strong_mask = cv2.threshold(blur, t_strong, 255, cv2.THRESH_BINARY)
+
+        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 11))
+        fill_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        strong_mask = cv2.morphologyEx(strong_mask, cv2.MORPH_OPEN, self._k3, iterations=1)
+        strong_mask = cv2.morphologyEx(strong_mask, cv2.MORPH_CLOSE, self._k3, iterations=1)
+        weak_mask = cv2.morphologyEx(weak_mask, cv2.MORPH_OPEN, self._k3, iterations=1)
+        weak_mask = cv2.morphologyEx(weak_mask, cv2.MORPH_CLOSE, self._k3, iterations=1)
+        weak_mask = cv2.morphologyEx(weak_mask, cv2.MORPH_CLOSE, bridge_kernel, iterations=1)
+        weak_mask = cv2.morphologyEx(weak_mask, cv2.MORPH_CLOSE, fill_kernel, iterations=1)
+        weak_mask = cv2.bitwise_or(weak_mask, strong_mask)
+
+        if np.count_nonzero(weak_mask) < int(min_fg_pix):
             details.update({"status": "none", "reason": "insufficient_fg"})
             if return_details:
                 return metrics, overlay, details
             return metrics, overlay
 
-        contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        keep = []
-        for contour in contours:
-            area = float(cv2.contourArea(contour))
-            if area < float(min_contour_area):
+        roi_h, roi_w = weak_mask.shape[:2]
+        contact_half_width_px = int(max(6, min(18, round(0.04 * float(roi_w)))))
+        contact_up_px = 2
+        contact_down_px = 14
+        roi_nzx = int(max(0, min(roi_w - 1, nzx - x0)))
+        roi_nzy = int(max(0, min(roi_h - 1, nzy - y0)))
+        contact_x0 = max(0, roi_nzx - contact_half_width_px)
+        contact_x1 = min(roi_w, roi_nzx + contact_half_width_px + 1)
+        contact_y0 = max(0, roi_nzy - contact_up_px)
+        contact_y1 = min(roi_h, roi_nzy + contact_down_px + 1)
+        cv2.rectangle(
+            overlay,
+            (x0 + contact_x0, y0 + contact_y0),
+            (x0 + contact_x1, y0 + contact_y1),
+            (0, 180, 255),
+            1,
+        )
+
+        nlab, labels, stats, _ = cv2.connectedComponentsWithStats(
+            np.uint8(weak_mask > 0),
+            connectivity=8,
+        )
+        candidates = []
+        for lab in range(1, nlab):
+            rx, ry, rw, rh, area = [int(v) for v in stats[lab]]
+            if area < int(min_contour_area):
                 continue
-            rx, ry, rw, rh = cv2.boundingRect(contour)
+            comp_mask = np.uint8(labels[ry:ry + rh, rx:rx + rw] == lab) * 255
+            strong_view = strong_mask[ry:ry + rh, rx:rx + rw]
+            strong_overlap_px = int(np.count_nonzero((comp_mask > 0) & (strong_view > 0)))
             fx = int(rx + x0)
             fy = int(ry + y0)
             bottom = int(fy + rh)
+            nozzle_contact = False
+            cx0 = max(rx, contact_x0)
+            cy0 = max(ry, contact_y0)
+            cx1 = min(rx + rw, contact_x1)
+            cy1 = min(ry + rh, contact_y1)
+            if cx1 > cx0 and cy1 > cy0:
+                comp_view = comp_mask[(cy0 - ry):(cy1 - ry), (cx0 - rx):(cx1 - rx)]
+                nozzle_contact = bool(np.any(comp_view > 0))
             contour_class = "ambiguous"
-            if fy <= (nzy + 6) and bottom >= (nzy + 2):
+            if nozzle_contact or (fy <= (nzy + 6) and bottom >= (nzy + 2)):
                 contour_class = "attached"
             elif fy > (nzy + 6):
                 contour_class = "detached"
-            pri = 0 if contour_class == "attached" else (2 if contour_class == "detached" else 1)
-            keep.append(
+            pri = 0 if nozzle_contact else (1 if contour_class == "attached" else (2 if contour_class == "ambiguous" else 3))
+            candidates.append(
                 {
-                    "contour": contour,
-                    "contour_area": float(area),
                     "bbox": [int(fx), int(fy), int(rw), int(rh)],
+                    "contour_class": str(contour_class),
                     "pri": int(pri),
                     "x_pen": float(abs((fx + rw / 2.0) - nzx)),
                     "bottom": int(bottom),
-                    "contour_class": str(contour_class),
+                    "component_mask": comp_mask,
+                    "component_area_px": int(area),
+                    "strong_overlap_px": int(strong_overlap_px),
+                    "seed_contact_detected": bool(nozzle_contact),
+                    "attachment_gap_px": int(max(0, fy - nzy)),
                 }
             )
 
-        details["candidate_count"] = int(len(keep))
-        if not keep:
+        details.update(
+            {
+                "mask_strategy": "nozzle_connected_dual_threshold",
+                "signal_mode": "absdiff",
+                "threshold_otsu": float(otsu_t),
+                "threshold_hard": int(t_hard),
+                "threshold_weak": int(t_weak),
+                "threshold_strong": int(t_strong),
+                "contact_window": [
+                    int(x0 + contact_x0),
+                    int(y0 + contact_y0),
+                    int(x0 + contact_x1),
+                    int(y0 + contact_y1),
+                ],
+            }
+        )
+        details["candidate_count"] = int(len(candidates))
+        if not candidates:
             details.update({"status": "none", "reason": "no_contours_after_filters"})
             if return_details:
                 return metrics, overlay, details
             return metrics, overlay
 
-        keep.sort(key=lambda item: (int(item["pri"]), float(item["x_pen"]), -float(item["contour_area"]), -int(item["bottom"])))
-        chosen = keep[0]
-        x, y, ww, hh = [int(v) for v in chosen["bbox"]]
-        patch = dark[y:y + hh, x:x + ww]
+        candidates.sort(
+            key=lambda item: (
+                int(item["pri"]),
+                int(item["attachment_gap_px"]),
+                float(item["x_pen"]),
+                -int(item["strong_overlap_px"]),
+                -int(item["component_area_px"]),
+                -int(item["bottom"]),
+            )
+        )
+        chosen = dict(candidates[0])
+        comp_mask = np.uint8(chosen["component_mask"])
+        comp_mask = self._fill_binary_holes(comp_mask)
+        comp_mask = cv2.morphologyEx(comp_mask, cv2.MORPH_CLOSE, fill_kernel, iterations=1)
+        contours_local, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours_local:
+            details.update({"status": "none", "reason": "no_contour_from_component"})
+            if return_details:
+                return metrics, overlay, details
+            return metrics, overlay
+
+        local_contour = sorted(contours_local, key=cv2.contourArea, reverse=True)[0]
+        bbox_x, bbox_y, _bbox_w, _bbox_h = [int(v) for v in chosen["bbox"]]
+        contour_full = local_contour + np.array([[[bbox_x, bbox_y]]], dtype=local_contour.dtype)
+        x, y, ww, hh = [int(v) for v in cv2.boundingRect(contour_full)]
+        patch = signal[y:y + hh, x:x + ww]
         p95 = float(np.percentile(patch, 95)) if patch.size > 0 else 0.0
+        patch_dark = dark[y:y + hh, x:x + ww]
+        p95_dark = float(np.percentile(patch_dark, 95)) if patch_dark.size > 0 else 0.0
 
         details.update(
             {
                 "p95": float(p95),
+                "p95_dark": float(p95_dark),
                 "contour_class": str(chosen["contour_class"]),
-                "contour_area": float(chosen["contour_area"]),
+                "contour_area": float(cv2.contourArea(contour_full)),
                 "bbox_area": int(ww * hh),
+                "chosen_bbox": [int(x), int(y), int(ww), int(hh)],
+                "component_bbox": list(chosen["bbox"]),
+                "component_area_px": int(chosen["component_area_px"]),
+                "strong_overlap_px": int(chosen["strong_overlap_px"]),
+                "seed_contact_detected": bool(chosen["seed_contact_detected"]),
+                "attachment_gap_px": int(chosen["attachment_gap_px"]),
+                "component_top_y": int(chosen["bbox"][1]),
             }
         )
         if p95 < float(min_peak_delta):
@@ -16642,16 +16761,18 @@ class DropletCameraModel(QObject):
                 return metrics, overlay, details
             return metrics, overlay
 
-        contour_full = chosen["contour"] + np.array([[[x0, y0]]], dtype=chosen["contour"].dtype)
         cv2.drawContours(overlay, [contour_full], -1, (0, 255, 0), 2)
         cv2.rectangle(overlay, (x, y), (x + ww, y + hh), (255, 0, 0), 1)
 
         mask = np.zeros((hh, ww), dtype=np.uint8)
-        local_contour = contour_full - np.array([[[x, y]]], dtype=contour_full.dtype)
-        cv2.drawContours(mask, [local_contour], -1, 255, -1)
+        contour_local_to_bbox = contour_full - np.array([[[x, y]]], dtype=contour_full.dtype)
+        cv2.drawContours(mask, [contour_local_to_bbox], -1, 255, -1)
+        mask = self._fill_binary_holes(mask)
 
         row_start = int(max(0, nzy - y))
         row_end = int(min(hh - 1, max(0, chosen["bottom"] - 1 - y)))
+        while row_start <= row_end and not np.any(mask[row_start] > 0):
+            row_start += 1
         widths = []
         row_positions = []
         if row_end >= row_start:
