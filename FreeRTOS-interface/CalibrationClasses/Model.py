@@ -6750,6 +6750,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             if start_pressure is not None
             else float(self.calibration_manager.get_start_pressure())
         )
+        self.requested_start_pressure = float(self.start_pressure)
         self.pressure_step_psi = float(max(0.005, pressure_step_psi))
         self.replicates_target = int(max(1, replicates_per_pressure))
         self.max_pressures = int(max(1, max_pressures))
@@ -6782,6 +6783,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             self._pulse_width_us = None
 
+        self.effective_start_pressure = float(self._resolve_baseline_anchor_pressure())
+
         self.min_signal_p95 = 10.0
         self.min_protrusion_length_px = 14
         self.min_candidate_protrusion_px = 28
@@ -6793,6 +6796,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.late_stage_max_secondary_lobes_for_clean = 1
         self.late_stage_min_protrusion_gain_ratio = 1.38
         self.late_stage_risk_protrusion_gain_ratio = 1.75
+        self.detached_secondary_area_risk_px = 180
+        self.detached_secondary_area_ratio_risk = 0.08
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
@@ -6838,7 +6843,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._risk_onset_pressure = None
         self._first_candidate_pressure = None
         self._last_candidate_pressure = None
-        self._delay_scout_pressure = float(self.start_pressure)
+        self._delay_scout_pressure = float(self.effective_start_pressure)
         self._delay_scout_delays = []
         self._delay_scout_index = 0
         self._delay_scout_current_delay = None
@@ -6849,6 +6854,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selected_summary = {}
         self._delay_scout_extension_count = 0
         self._delay_scout_pressure_retry_count = 0
+        self._pressure_scan_reference_summary = {}
+        self._pressure_scan_reference_pressure = None
 
         self.state_prepare_bg = QState()
         self.state_capture_bg = QState()
@@ -6960,6 +6967,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
     def _should_run_delay_scout(self) -> bool:
         return bool(self.auto_scout_delay and self.fixed_prebreakup_delay_us is None)
+
+    def _resolve_baseline_anchor_pressure(self) -> float:
+        try:
+            pw = int(self._pulse_width_us or 0)
+        except Exception:
+            pw = 0
+        target = 0.40 if 0 < pw <= 1450 else 0.35
+        return float(max(self.P_MIN, min(self.P_MAX, float(target))))
 
     def _recommended_delay_scan_window_us(self) -> int:
         try:
@@ -7396,6 +7411,10 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
     def _get_late_stage_reference_protrusion_px(self):
         try:
+            scan_ref = dict(getattr(self, "_pressure_scan_reference_summary", {}) or {})
+            value = int(scan_ref.get("protrusion_length_px", 0) or 0)
+            if value > 0:
+                return int(value)
             value = int(
                 (self._delay_scout_selected_summary or {}).get("protrusion_length_px", 0) or 0
             )
@@ -7405,6 +7424,10 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
     def _get_late_stage_reference_neck_distance_px(self):
         try:
+            scan_ref = dict(getattr(self, "_pressure_scan_reference_summary", {}) or {})
+            value = int(scan_ref.get("distance_nozzle_to_neck_px", 0) or 0)
+            if value > 0:
+                return int(value)
             value = int(
                 (self._delay_scout_selected_summary or {}).get("distance_nozzle_to_neck_px", 0) or 0
             )
@@ -7441,13 +7464,26 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             )
         return d
 
+    def _capture_pressure_scan_reference(self, pressure: float, summary: dict | None, verdict: str):
+        if dict(getattr(self, "_pressure_scan_reference_summary", {}) or {}):
+            return
+        feature_summary = dict((summary or {}).get("feature_summary", {}) or {})
+        protrusion = int(feature_summary.get("protrusion_length_px", 0) or 0)
+        if protrusion <= 0:
+            return
+        if str(verdict) not in {"too_low", "candidate_clean"}:
+            return
+        self._pressure_scan_reference_summary = dict(feature_summary)
+        self._pressure_scan_reference_pressure = float(pressure)
+
     @Slot()
     def onPrepareBackground(self):
         self.samples = []
         self.measurements = []
         self.reps = []
         self._current_pressure = None
-        self._next_pressure = float(self.start_pressure)
+        self.effective_start_pressure = float(self._resolve_baseline_anchor_pressure())
+        self._next_pressure = float(self.effective_start_pressure)
         self._risk_onset_pressure = None
         self._first_candidate_pressure = None
         self._last_candidate_pressure = None
@@ -7462,7 +7498,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selected_summary = {}
         self._delay_scout_extension_count = 0
         self._delay_scout_pressure_retry_count = 0
-        self._delay_scout_pressure = float(self.start_pressure)
+        self._delay_scout_pressure = float(self.effective_start_pressure)
+        self._pressure_scan_reference_summary = {}
+        self._pressure_scan_reference_pressure = None
         if self.fixed_prebreakup_delay_us is not None:
             self.prebreakup_delay_us = int(self.fixed_prebreakup_delay_us)
             self._reversal_delay_us = int(self.fixed_prebreakup_delay_us)
@@ -7481,7 +7519,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self._orig_settings = None
         self.stageChanged.emit(
             "Pre-breakup morphology: capture background "
-            f"({self._timing_plan_text()}, source={self.nozzle_center_source})"
+            f"({self._timing_plan_text()}, source={self.nozzle_center_source}, "
+            f"requested start={self.requested_start_pressure:.3f} psi, "
+            f"effective start={self.effective_start_pressure:.3f} psi)"
         )
         self._request_settings_with_recording(
             {"num_droplets": 0},
@@ -7786,6 +7826,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
         verdict, summary = self._aggregate_replicates()
         pressure = float(self._current_pressure)
+        self._capture_pressure_scan_reference(pressure, summary, verdict)
 
         if verdict == "candidate_clean":
             if self._first_candidate_pressure is None:
@@ -7890,7 +7931,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             ),
             "delay_scout": self._build_delay_scout_result(),
             "pressure_bounds": [float(self.P_MIN), float(self.P_MAX)],
-            "start_pressure": float(self.start_pressure),
+            "start_pressure": float(self.requested_start_pressure),
+            "effective_start_pressure": float(self.effective_start_pressure),
+            "delay_scout_pressure_psi": float(self._delay_scout_pressure),
             "pressure_step_psi": float(self.pressure_step_psi),
             "replicates_per_pressure": int(self.replicates_target),
             "pressures": list(self.samples),
@@ -7910,6 +7953,12 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "stop_reason": self._stop_reason,
             "late_stage_reference_protrusion_px": self._get_late_stage_reference_protrusion_px(),
             "late_stage_reference_neck_distance_px": self._get_late_stage_reference_neck_distance_px(),
+            "pressure_scan_reference_pressure_psi": (
+                None
+                if self._pressure_scan_reference_pressure is None
+                else float(self._pressure_scan_reference_pressure)
+            ),
+            "pressure_scan_reference_summary": dict(self._pressure_scan_reference_summary or {}),
             "heuristic_params": {
                 "min_signal_p95": float(self.min_signal_p95),
                 "min_protrusion_length_px": int(self.min_protrusion_length_px),
@@ -7922,8 +7971,11 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 "late_stage_max_secondary_lobes_for_clean": int(self.late_stage_max_secondary_lobes_for_clean),
                 "late_stage_min_protrusion_gain_ratio": float(self.late_stage_min_protrusion_gain_ratio),
                 "late_stage_risk_protrusion_gain_ratio": float(self.late_stage_risk_protrusion_gain_ratio),
+                "detached_secondary_area_risk_px": int(self.detached_secondary_area_risk_px),
+                "detached_secondary_area_ratio_risk": float(self.detached_secondary_area_ratio_risk),
                 "delay_scout_min_protrusion_px": int(self.delay_scout_min_protrusion_px),
                 "pressure_scan_delay_step_back": int(self.pressure_scan_delay_step_back),
+                "requested_start_pressure_respected": False,
                 "late_stage_risk_requires_lobe_confirmation": False,
             },
         }
@@ -8014,6 +8066,13 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         nozzle_side_ratio = float(d.get("nozzle_side_area_ratio", 0.0) or 0.0)
         neck_distance = int(d.get("distance_nozzle_to_neck_px", 0) or 0)
         secondary_lobes = int(d.get("secondary_lobe_count", 0) or 0)
+        detached_secondary_count = int(d.get("detached_secondary_count", 0) or 0)
+        largest_detached_secondary_area_px = int(
+            d.get("largest_detached_secondary_area_px", 0) or 0
+        )
+        largest_detached_secondary_area_ratio = float(
+            d.get("largest_detached_secondary_area_ratio", 0.0) or 0.0
+        )
         bulb_present = bool(d.get("bulb_present", False))
         bottom_clipped = bool(d.get("bottom_clipped", False) or d.get("fov_bottom_clipped", False))
         reference_protrusion_px = d.get("reference_protrusion_length_px")
@@ -8032,6 +8091,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             protrusion_gain_ratio = None
 
         if contour_class == "detached":
+            return "approaching_risk"
+        if (
+            detached_secondary_count > 0
+            and (
+                largest_detached_secondary_area_px >= int(self.detached_secondary_area_risk_px)
+                or largest_detached_secondary_area_ratio >= float(self.detached_secondary_area_ratio_risk)
+            )
+        ):
             return "approaching_risk"
         if bottom_clipped:
             return "approaching_risk"
@@ -8158,6 +8225,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "nozzle_side_area_ratio",
             "distal_area_px",
             "secondary_lobe_count",
+            "detached_secondary_count",
+            "largest_detached_secondary_area_px",
+            "largest_detached_secondary_area_ratio",
             "p95",
         ]
         feature_summary = {}
@@ -16896,6 +16966,10 @@ class DropletCameraModel(QObject):
             "roi": None,
             "contour_class": "none",
             "candidate_count": 0,
+            "detached_secondary_count": 0,
+            "largest_detached_secondary_area_px": 0,
+            "largest_detached_secondary_area_ratio": 0.0,
+            "largest_detached_secondary_bbox": None,
             "contour_area": 0.0,
             "bbox_area": 0,
             "p95": 0.0,
@@ -17084,7 +17158,13 @@ class DropletCameraModel(QObject):
                 -int(item["bottom"]),
             )
         )
-        chosen = dict(candidates[0])
+        chosen_candidate = candidates[0]
+        chosen = dict(chosen_candidate)
+        detached_secondary_candidates = [
+            dict(item)
+            for item in list(candidates[1:])
+            if str(item.get("contour_class", "")) == "detached"
+        ]
         comp_mask = np.uint8(chosen["component_mask"])
         comp_mask = self._fill_binary_holes(comp_mask)
         comp_mask = cv2.morphologyEx(comp_mask, cv2.MORPH_CLOSE, fill_kernel, iterations=1)
@@ -17129,6 +17209,35 @@ class DropletCameraModel(QObject):
                 "fov_bottom_clipped": bool(bbox_bottom >= h),
             }
         )
+        if detached_secondary_candidates:
+            detached_secondary_candidates.sort(
+                key=lambda item: (-int(item.get("component_area_px", 0)), -int(item.get("bottom", 0)))
+            )
+            largest_detached_secondary = dict(detached_secondary_candidates[0])
+            largest_detached_area_px = int(largest_detached_secondary.get("component_area_px", 0) or 0)
+            detached_secondary_area_ratio = float(largest_detached_area_px) / float(
+                max(int(chosen.get("component_area_px", 0) or 0), 1)
+            )
+            details.update(
+                {
+                    "detached_secondary_count": int(len(detached_secondary_candidates)),
+                    "largest_detached_secondary_area_px": int(largest_detached_area_px),
+                    "largest_detached_secondary_area_ratio": float(detached_secondary_area_ratio),
+                    "largest_detached_secondary_bbox": list(largest_detached_secondary.get("bbox") or []),
+                }
+            )
+            dsx, dsy, dsw, dsh = [int(v) for v in (largest_detached_secondary.get("bbox") or [0, 0, 0, 0])]
+            if dsw > 0 and dsh > 0:
+                cv2.rectangle(overlay, (dsx, dsy), (dsx + dsw, dsy + dsh), (0, 90, 255), 1)
+                cv2.putText(
+                    overlay,
+                    f"detached:{int(largest_detached_area_px)}",
+                    (dsx, max(12, dsy - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (0, 90, 255),
+                    1,
+                )
         if p95 < float(min_peak_delta):
             details.update({"status": "none", "reason": "weak_signal"})
             if return_details:

@@ -46,6 +46,8 @@ def _proc_stub():
     proc.late_stage_max_secondary_lobes_for_clean = 1
     proc.late_stage_min_protrusion_gain_ratio = 1.38
     proc.late_stage_risk_protrusion_gain_ratio = 1.75
+    proc.detached_secondary_area_risk_px = 180
+    proc.detached_secondary_area_ratio_risk = 0.08
     proc.delay_scout_min_protrusion_px = 14
     proc.pressure_scan_delay_step_back = 1
     proc._timing_mode = "auto_scout"
@@ -76,6 +78,10 @@ def _proc_stub():
     proc.P_MAX = 5.0
     proc.MAX_PREBREAKUP_DELAY_US = 12000
     proc._pulse_width_us = 1300
+    proc.requested_start_pressure = 0.42
+    proc.effective_start_pressure = 0.40
+    proc._pressure_scan_reference_summary = {}
+    proc._pressure_scan_reference_pressure = None
     return proc
 
 
@@ -205,6 +211,31 @@ def test_analyze_prebreakup_morphology_handles_bright_attachment_segment():
     assert metrics["protrusion_length_px"] >= 70
 
 
+def test_analyze_prebreakup_morphology_records_detached_secondary_component():
+    cam = _camera_stub()
+    bg = np.full((420, 320, 3), 220, dtype=np.uint8)
+    img = bg.copy()
+
+    cv2.rectangle(img, (154, 80), (166, 210), (20, 20, 20), -1)
+    cv2.circle(img, (160, 228), 24, (20, 20, 20), -1)
+    cv2.circle(img, (160, 310), 28, (20, 20, 20), -1)
+
+    _metrics, _overlay, details = cam.analyze_prebreakup_morphology(
+        bg,
+        img,
+        nozzle_center=(160, 80),
+        roi_below_px=None,
+        return_details=True,
+    )
+
+    assert details["status"] == "ok"
+    assert details["contour_class"] == "attached"
+    assert details["candidate_count"] >= 2
+    assert details["detached_secondary_count"] >= 1
+    assert details["largest_detached_secondary_area_px"] > 0
+    assert details["largest_detached_secondary_bbox"] is not None
+
+
 def test_analyze_prebreakup_morphology_marks_detached_contour():
     cam = _camera_stub()
     bg = np.full((320, 320, 3), 220, dtype=np.uint8)
@@ -307,6 +338,30 @@ def test_prebreakup_classify_morphology_treats_bottom_clipped_stream_as_risk():
     assert state == "approaching_risk"
 
 
+def test_prebreakup_classify_morphology_treats_large_detached_secondary_as_risk():
+    proc = _proc_stub()
+
+    state = proc._classify_morphology(
+        {
+            "status": "ok",
+            "contour_class": "attached",
+            "protrusion_length_px": 220,
+            "max_width_px": 88,
+            "neck_to_bulb_ratio": 0.52,
+            "p95": 48.0,
+            "nozzle_side_area_ratio": 0.31,
+            "distance_nozzle_to_neck_px": 102,
+            "secondary_lobe_count": 0,
+            "detached_secondary_count": 1,
+            "largest_detached_secondary_area_px": 260,
+            "largest_detached_secondary_area_ratio": 0.12,
+            "bulb_present": True,
+        }
+    )
+
+    assert state == "approaching_risk"
+
+
 def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
     proc = _proc_stub()
 
@@ -380,6 +435,27 @@ def test_annotate_pressure_scan_details_adds_neck_and_protrusion_gain_ratios():
     assert round(details["neck_distance_gain_ratio"], 3) == round(321.0 / 214.0, 3)
 
 
+def test_pressure_scan_reference_overrides_scout_reference_once_available():
+    proc = _proc_stub()
+    proc._pressure_scan_reference_summary = {
+        "protrusion_length_px": 300,
+        "distance_nozzle_to_neck_px": 120,
+    }
+    proc._pressure_scan_reference_pressure = 0.40
+
+    details = proc._annotate_pressure_scan_details(
+        {
+            "protrusion_length_px": 450,
+            "distance_nozzle_to_neck_px": 240,
+        }
+    )
+
+    assert details["reference_protrusion_length_px"] == 300
+    assert details["reference_neck_distance_px"] == 120
+    assert round(details["protrusion_gain_ratio"], 3) == 1.5
+    assert round(details["neck_distance_gain_ratio"], 3) == 2.0
+
+
 def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
     proc = _proc_stub()
     proc.reps = [
@@ -444,6 +520,15 @@ def test_select_recommended_pressure_prefers_safe_window_midpoint():
     recommended = proc._select_recommended_pressure()
 
     assert recommended == pytest.approx(0.57)
+
+
+def test_resolve_baseline_anchor_pressure_tracks_pulse_width_family():
+    proc = _proc_stub()
+    proc._pulse_width_us = 1300
+    assert proc._resolve_baseline_anchor_pressure() == pytest.approx(0.40)
+
+    proc._pulse_width_us = 1800
+    assert proc._resolve_baseline_anchor_pressure() == pytest.approx(0.35)
 
 
 def test_delay_scout_selects_turning_point_before_retraction():
