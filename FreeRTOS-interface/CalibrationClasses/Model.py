@@ -6788,7 +6788,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.max_secondary_lobes_for_clean = 0
         self.late_stage_max_secondary_lobes_for_clean = 1
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
-        self.prebreakup_roi_below_px = 440
+        self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
 
         fixed_delay = None
@@ -6996,6 +6996,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         contour_class = str(d.get("contour_class", "none"))
         protrusion = int(d.get("protrusion_length_px", 0) or 0)
         p95 = float(d.get("p95", 0.0) or 0.0)
+        if bool(d.get("bottom_clipped", False)) or bool(d.get("fov_bottom_clipped", False)):
+            return "clipped"
 
         if contour_class != "attached":
             return "not_attached"
@@ -7063,6 +7065,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "early_attached": int(counts.get("early_attached", 0)),
             "attached_visible": int(counts.get("attached_visible", 0)),
             "not_attached": int(counts.get("not_attached", 0)),
+            "clipped": int(counts.get("clipped", 0)),
         }
         return {
             "state_counts": state_counts,
@@ -7132,6 +7135,62 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 int(selected.get("delay_us", 0)) - int(pressure_scan_delay_us)
             ),
         }
+
+    def _apply_delay_scout_selection(self, selection: dict, reason: str, meta: dict | None):
+        self._reversal_delay_us = int(selection.get("delay_us"))
+        self.prebreakup_delay_us = int(
+            (meta or {}).get("pressure_scan_delay_us", self._reversal_delay_us)
+        )
+        self._delay_selection_reason = str(reason)
+        self._pressure_scan_delay_reason = str(
+            (meta or {}).get("pressure_scan_delay_reason", "reversal_delay")
+        )
+        self._delay_scout_selection = {
+            "delay_us": int(selection.get("delay_us")),
+            "reversal_delay_us": int(self._reversal_delay_us),
+            "pressure_scan_delay_us": int(self.prebreakup_delay_us),
+            "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
+            "pressure_psi": float(selection.get("pressure_psi", self._delay_scout_pressure)),
+        }
+        self._delay_scout_selection_meta = dict(meta or {})
+        self._delay_scout_selected_summary = dict(selection.get("feature_summary", {}))
+        self._record_decision(
+            "prebreakup_delay_selected",
+            {
+                "delay_us": int(self.prebreakup_delay_us),
+                "reversal_delay_us": int(self._reversal_delay_us),
+                "pressure_scan_delay_us": int(self.prebreakup_delay_us),
+                "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
+                "reason": str(reason),
+                "selection_meta": dict(meta or {}),
+                "feature_summary": dict(self._delay_scout_selected_summary),
+            },
+        )
+        self.stageChanged.emit(
+            "Pre-breakup delay selected: "
+            f"reversal={int(self._reversal_delay_us)} us, "
+            f"scan={int(self.prebreakup_delay_us)} us "
+            f"({self._delay_selection_reason}, {self._pressure_scan_delay_reason})"
+        )
+        self.startPressureSweep.emit()
+
+    def _fail_delay_scout(self, reason: str, meta: dict | None):
+        self._delay_selection_reason = str(reason)
+        self._delay_scout_selection = None
+        self._delay_scout_selection_meta = dict(meta or {})
+        msg = (
+            "Pre-breakup delay scout did not find a stable retraction turning point. "
+            "Increase the low-pressure stream visibility or set a fixed delay override."
+        )
+        self._record_error(
+            msg,
+            {
+                "reason": str(reason),
+                "selection_meta": dict(meta or {}),
+                "samples": int(len(self._delay_scout_samples)),
+            },
+        )
+        self.calibrationError.emit(msg)
 
     def _build_delay_scout_result(self):
         delays = list(self._delay_scout_delays or [])
@@ -7300,7 +7359,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.background_image,
             self.droplet_image,
             nozzle_center=self.nozzle_center_px,
-            roi_below_px=int(self.prebreakup_roi_below_px),
+            roi_below_px=self.prebreakup_roi_below_px,
             return_details=True,
         )
         self.presentImageSignal.emit(overlay)
@@ -7360,68 +7419,21 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             },
         )
 
+        selection, reason, meta = self._select_delay_scout_candidate()
+        if selection is not None:
+            self._apply_delay_scout_selection(selection, reason, meta)
+            return
+
         self._delay_scout_index += 1
         if self._delay_scout_index < len(self._delay_scout_delays):
             self._delay_scout_current_delay = int(self._delay_scout_delays[self._delay_scout_index])
             self.continueScoutDelay.emit()
             return
 
-        selection, reason, meta = self._select_delay_scout_candidate()
         if selection is None:
-            self._delay_selection_reason = str(reason)
-            self._delay_scout_selection = None
-            self._delay_scout_selection_meta = dict(meta or {})
-            msg = (
-                "Pre-breakup delay scout did not find a stable retraction turning point. "
-                "Increase the low-pressure stream visibility or set a fixed delay override."
-            )
-            self._record_error(
-                msg,
-                {
-                    "reason": str(reason),
-                    "selection_meta": dict(meta or {}),
-                    "samples": int(len(self._delay_scout_samples)),
-                },
-            )
-            self.calibrationError.emit(msg)
+            self._fail_delay_scout(reason, meta)
             return
-
-        self._reversal_delay_us = int(selection.get("delay_us"))
-        self.prebreakup_delay_us = int(
-            (meta or {}).get("pressure_scan_delay_us", self._reversal_delay_us)
-        )
-        self._delay_selection_reason = str(reason)
-        self._pressure_scan_delay_reason = str(
-            (meta or {}).get("pressure_scan_delay_reason", "reversal_delay")
-        )
-        self._delay_scout_selection = {
-            "delay_us": int(selection.get("delay_us")),
-            "reversal_delay_us": int(self._reversal_delay_us),
-            "pressure_scan_delay_us": int(self.prebreakup_delay_us),
-            "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
-            "pressure_psi": float(selection.get("pressure_psi", self._delay_scout_pressure)),
-        }
-        self._delay_scout_selection_meta = dict(meta or {})
-        self._delay_scout_selected_summary = dict(selection.get("feature_summary", {}))
-        self._record_decision(
-            "prebreakup_delay_selected",
-            {
-                "delay_us": int(self.prebreakup_delay_us),
-                "reversal_delay_us": int(self._reversal_delay_us),
-                "pressure_scan_delay_us": int(self.prebreakup_delay_us),
-                "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
-                "reason": str(reason),
-                "selection_meta": dict(meta or {}),
-                "feature_summary": dict(self._delay_scout_selected_summary),
-            },
-        )
-        self.stageChanged.emit(
-            "Pre-breakup delay selected: "
-            f"reversal={int(self._reversal_delay_us)} us, "
-            f"scan={int(self.prebreakup_delay_us)} us "
-            f"({self._delay_selection_reason}, {self._pressure_scan_delay_reason})"
-        )
-        self.startPressureSweep.emit()
+        self._apply_delay_scout_selection(selection, reason, meta)
 
     @Slot()
     def onApplyPressure(self):
@@ -7483,7 +7495,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.background_image,
             self.droplet_image,
             nozzle_center=self.nozzle_center_px,
-            roi_below_px=int(self.prebreakup_roi_below_px),
+            roi_below_px=self.prebreakup_roi_below_px,
             return_details=True,
         )
         self.presentImageSignal.emit(overlay)
@@ -7706,8 +7718,11 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         neck_distance = int(d.get("distance_nozzle_to_neck_px", 0) or 0)
         secondary_lobes = int(d.get("secondary_lobe_count", 0) or 0)
         bulb_present = bool(d.get("bulb_present", False))
+        bottom_clipped = bool(d.get("bottom_clipped", False) or d.get("fov_bottom_clipped", False))
 
         if contour_class == "detached":
+            return "approaching_risk"
+        if bottom_clipped:
             return "approaching_risk"
         if p95 < self.min_signal_p95 or protrusion < self.min_protrusion_length_px:
             return "too_low"
@@ -16508,7 +16523,7 @@ class DropletCameraModel(QObject):
         nozzle_center=None,
         roi_x_half_frac: float = 0.16,
         roi_above_px: int = 24,
-        roi_below_px: int = 220,
+        roi_below_px: int | None = 220,
         min_contour_area: int = 40,
         min_fg_pix: int = 60,
         min_peak_delta: float = 10.0,
@@ -16575,7 +16590,10 @@ class DropletCameraModel(QObject):
         x0 = max(0, nzx - x_half)
         x1 = min(w, nzx + x_half)
         y0 = max(0, nzy - int(max(0, roi_above_px)))
-        y1 = min(h, nzy + int(max(20, roi_below_px)))
+        if roi_below_px is None:
+            y1 = int(h)
+        else:
+            y1 = min(h, nzy + int(max(20, roi_below_px)))
         details["roi"] = [int(x0), int(y0), int(x1), int(y1)]
         cv2.rectangle(overlay, (x0, y0), (x1, y1), (128, 128, 255), 1)
         cv2.circle(overlay, (nzx, nzy), 4, (255, 0, 0), -1)
@@ -16738,6 +16756,9 @@ class DropletCameraModel(QObject):
         p95 = float(np.percentile(patch, 95)) if patch.size > 0 else 0.0
         patch_dark = dark[y:y + hh, x:x + ww]
         p95_dark = float(np.percentile(patch_dark, 95)) if patch_dark.size > 0 else 0.0
+        bbox_bottom = int(y + hh)
+        roi_bottom_gap_px = int(max(0, y1 - bbox_bottom))
+        fov_bottom_gap_px = int(max(0, h - bbox_bottom))
 
         details.update(
             {
@@ -16753,6 +16774,12 @@ class DropletCameraModel(QObject):
                 "seed_contact_detected": bool(chosen["seed_contact_detected"]),
                 "attachment_gap_px": int(chosen["attachment_gap_px"]),
                 "component_top_y": int(chosen["bbox"][1]),
+                "roi_bottom_y": int(y1),
+                "image_bottom_y": int(h),
+                "roi_bottom_gap_px": int(roi_bottom_gap_px),
+                "bottom_clipped": bool(bbox_bottom >= y1),
+                "fov_bottom_gap_px": int(fov_bottom_gap_px),
+                "fov_bottom_clipped": bool(bbox_bottom >= h),
             }
         )
         if p95 < float(min_peak_delta):
