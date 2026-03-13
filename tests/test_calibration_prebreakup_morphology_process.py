@@ -42,7 +42,22 @@ def _proc_stub():
     proc.nozzle_side_area_ratio_risk_threshold = 0.48
     proc.long_ligament_px = 36
     proc.max_secondary_lobes_for_clean = 0
+    proc.late_stage_max_secondary_lobes_for_clean = 1
     proc.delay_scout_min_protrusion_px = 14
+    proc.pressure_scan_delay_step_back = 1
+    proc._timing_mode = "auto_scout"
+    proc.emergence_time_us = 3200
+    proc.prebreakup_delay_us = 4200
+    proc.fixed_prebreakup_delay_us = None
+    proc._reversal_delay_us = 4300
+    proc._pressure_scan_delay_reason = "pre_reversal_monitor_delay"
+    proc.delay_scan_start_offset_us = 200
+    proc.delay_scan_window_us = 2000
+    proc.delay_scan_step_us = 100
+    proc.delay_scan_replicates = 2
+    proc._delay_scout_selection = None
+    proc._delay_scout_selection_meta = {}
+    proc._delay_scout_selected_summary = {}
     return proc
 
 
@@ -159,13 +174,34 @@ def test_prebreakup_classify_morphology_distinguishes_candidate_and_risk():
             "p95": 24.0,
             "nozzle_side_area_ratio": 0.62,
             "distance_nozzle_to_neck_px": 42,
-            "secondary_lobe_count": 1,
+            "secondary_lobe_count": 2,
             "bulb_present": True,
         }
     )
 
     assert candidate == "candidate_clean"
     assert risk == "approaching_risk"
+
+
+def test_prebreakup_classify_morphology_late_stage_ignores_long_attached_stream_without_lobes():
+    proc = _proc_stub()
+
+    state = proc._classify_morphology(
+        {
+            "status": "ok",
+            "contour_class": "attached",
+            "protrusion_length_px": 301,
+            "max_width_px": 142,
+            "neck_to_bulb_ratio": 0.08,
+            "p95": 226.0,
+            "nozzle_side_area_ratio": 0.90,
+            "distance_nozzle_to_neck_px": 301,
+            "secondary_lobe_count": 0,
+            "bulb_present": True,
+        }
+    )
+
+    assert state == "candidate_clean"
 
 
 def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
@@ -201,6 +237,9 @@ def test_delay_scout_selects_turning_point_before_retraction():
     assert selected["delay_us"] == 3700
     assert reason == "retraction_turning_point"
     assert meta["peak_protrusion_px"] == 44
+    assert meta["reversal_delay_us"] == 3700
+    assert meta["pressure_scan_delay_us"] == 3600
+    assert meta["pressure_scan_delay_reason"] == "pre_reversal_monitor_delay"
 
 
 def test_delay_scout_requires_retraction_after_peak():
@@ -217,3 +256,23 @@ def test_delay_scout_requires_retraction_after_peak():
     assert selected is None
     assert reason == "no_retraction_observed"
     assert meta["peak_delay_us"] == 3700
+
+
+def test_build_delay_scout_result_keeps_reversal_and_scan_delay():
+    proc = _proc_stub()
+    proc._delay_scout_delays = [3400, 3500, 3600, 3700]
+    proc._delay_selection_reason = "retraction_turning_point"
+    proc._delay_scout_selection_meta = {
+        "reversal_delay_us": 3700,
+        "pressure_scan_delay_us": 3600,
+    }
+    proc._delay_scout_selected_summary = {"protrusion_length_px": 44}
+    proc._delay_scout_pressure = 0.42
+    proc._delay_scout_samples = [{"delay_us": 3600}, {"delay_us": 3700}]
+
+    result = proc._build_delay_scout_result()
+
+    assert result["selected_delay_us"] == 4300
+    assert result["reversal_delay_us"] == 4300
+    assert result["pressure_scan_delay_us"] == 4200
+    assert result["pressure_scan_delay_reason"] == "pre_reversal_monitor_delay"

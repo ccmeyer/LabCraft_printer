@@ -6786,8 +6786,10 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.nozzle_side_area_ratio_risk_threshold = 0.48
         self.long_ligament_px = 36
         self.max_secondary_lobes_for_clean = 0
+        self.late_stage_max_secondary_lobes_for_clean = 1
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = 440
+        self.pressure_scan_delay_step_back = 1
 
         fixed_delay = None
         try:
@@ -6801,14 +6803,20 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.prebreakup_delay_us = int(self.fixed_prebreakup_delay_us)
             self._timing_mode = "fixed_override"
             self._delay_selection_reason = "fixed_override"
+            self._reversal_delay_us = int(self.fixed_prebreakup_delay_us)
+            self._pressure_scan_delay_reason = "fixed_override"
         elif not self.auto_scout_delay:
             self.prebreakup_delay_us = int(self._legacy_prebreakup_delay())
             self._timing_mode = "legacy_lead"
             self._delay_selection_reason = "legacy_emergence_minus_lead"
+            self._reversal_delay_us = int(self.prebreakup_delay_us)
+            self._pressure_scan_delay_reason = "legacy_emergence_minus_lead"
         else:
             self.prebreakup_delay_us = None
             self._timing_mode = "auto_scout_pending"
             self._delay_selection_reason = None
+            self._reversal_delay_us = None
+            self._pressure_scan_delay_reason = None
 
         self.background_image = None
         self.droplet_image = None
@@ -7102,11 +7110,27 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 "retraction_drop_px": int(retraction_drop),
             }
 
+        pressure_scan_index = int(max(0, peak_index - int(max(0, self.pressure_scan_delay_step_back))))
+        pressure_scan_sample = dict(samples[pressure_scan_index] or {})
+        pressure_scan_delay_us = self._clamp_prebreakup_delay(
+            int(pressure_scan_sample.get("delay_us", selected.get("delay_us", 0)) or 0)
+        )
+        pressure_scan_reason = (
+            "pre_reversal_monitor_delay"
+            if pressure_scan_index < peak_index
+            else "reversal_delay"
+        )
         return selected, "retraction_turning_point", {
             "peak_delay_us": int(selected.get("delay_us", 0)),
             "peak_protrusion_px": int(selected_protrusion),
             "plateau_tol_px": int(plateau_tol),
             "retraction_drop_px": int(retraction_drop),
+            "reversal_delay_us": int(selected.get("delay_us", 0)),
+            "pressure_scan_delay_us": int(pressure_scan_delay_us),
+            "pressure_scan_delay_reason": str(pressure_scan_reason),
+            "pressure_scan_delay_offset_us": int(
+                int(selected.get("delay_us", 0)) - int(pressure_scan_delay_us)
+            ),
         }
 
     def _build_delay_scout_result(self):
@@ -7114,8 +7138,15 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         result = {
             "mode": str(self._timing_mode),
             "selected_delay_us": (
+                None if self._reversal_delay_us is None else int(self._reversal_delay_us)
+            ),
+            "reversal_delay_us": (
+                None if self._reversal_delay_us is None else int(self._reversal_delay_us)
+            ),
+            "pressure_scan_delay_us": (
                 None if self.prebreakup_delay_us is None else int(self.prebreakup_delay_us)
             ),
+            "pressure_scan_delay_reason": self._pressure_scan_delay_reason,
             "selection_reason": self._delay_selection_reason,
             "selection_meta": dict(self._delay_scout_selection_meta or {}),
             "selected_summary": dict(self._delay_scout_selected_summary or {}),
@@ -7151,6 +7182,18 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selection = None
         self._delay_scout_selection_meta = {}
         self._delay_scout_selected_summary = {}
+        if self.fixed_prebreakup_delay_us is not None:
+            self.prebreakup_delay_us = int(self.fixed_prebreakup_delay_us)
+            self._reversal_delay_us = int(self.fixed_prebreakup_delay_us)
+            self._pressure_scan_delay_reason = "fixed_override"
+        elif not self._should_run_delay_scout():
+            self.prebreakup_delay_us = int(self._legacy_prebreakup_delay())
+            self._reversal_delay_us = int(self.prebreakup_delay_us)
+            self._pressure_scan_delay_reason = "legacy_emergence_minus_lead"
+        else:
+            self.prebreakup_delay_us = None
+            self._reversal_delay_us = None
+            self._pressure_scan_delay_reason = None
         try:
             self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
         except Exception:
@@ -7343,10 +7386,19 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit(msg)
             return
 
-        self.prebreakup_delay_us = int(selection.get("delay_us"))
+        self._reversal_delay_us = int(selection.get("delay_us"))
+        self.prebreakup_delay_us = int(
+            (meta or {}).get("pressure_scan_delay_us", self._reversal_delay_us)
+        )
         self._delay_selection_reason = str(reason)
+        self._pressure_scan_delay_reason = str(
+            (meta or {}).get("pressure_scan_delay_reason", "reversal_delay")
+        )
         self._delay_scout_selection = {
             "delay_us": int(selection.get("delay_us")),
+            "reversal_delay_us": int(self._reversal_delay_us),
+            "pressure_scan_delay_us": int(self.prebreakup_delay_us),
+            "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
             "pressure_psi": float(selection.get("pressure_psi", self._delay_scout_pressure)),
         }
         self._delay_scout_selection_meta = dict(meta or {})
@@ -7355,14 +7407,19 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "prebreakup_delay_selected",
             {
                 "delay_us": int(self.prebreakup_delay_us),
+                "reversal_delay_us": int(self._reversal_delay_us),
+                "pressure_scan_delay_us": int(self.prebreakup_delay_us),
+                "pressure_scan_delay_reason": str(self._pressure_scan_delay_reason),
                 "reason": str(reason),
                 "selection_meta": dict(meta or {}),
                 "feature_summary": dict(self._delay_scout_selected_summary),
             },
         )
         self.stageChanged.emit(
-            f"Pre-breakup delay selected: {int(self.prebreakup_delay_us)} us "
-            f"({self._delay_selection_reason})"
+            "Pre-breakup delay selected: "
+            f"reversal={int(self._reversal_delay_us)} us, "
+            f"scan={int(self.prebreakup_delay_us)} us "
+            f"({self._delay_selection_reason}, {self._pressure_scan_delay_reason})"
         )
         self.startPressureSweep.emit()
 
@@ -7561,6 +7618,13 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "prebreakup_delay_us": (
                 None if self.prebreakup_delay_us is None else int(self.prebreakup_delay_us)
             ),
+            "reversal_delay_us": (
+                None if self._reversal_delay_us is None else int(self._reversal_delay_us)
+            ),
+            "pressure_scan_delay_us": (
+                None if self.prebreakup_delay_us is None else int(self.prebreakup_delay_us)
+            ),
+            "pressure_scan_delay_reason": self._pressure_scan_delay_reason,
             "prebreakup_lead_us": int(self.prebreakup_lead_us),
             "timing_mode": str(self._timing_mode),
             "timing_selection_reason": self._delay_selection_reason,
@@ -7593,7 +7657,10 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 "nozzle_side_area_ratio_risk_threshold": float(self.nozzle_side_area_ratio_risk_threshold),
                 "long_ligament_px": int(self.long_ligament_px),
                 "max_secondary_lobes_for_clean": int(self.max_secondary_lobes_for_clean),
+                "late_stage_max_secondary_lobes_for_clean": int(self.late_stage_max_secondary_lobes_for_clean),
                 "delay_scout_min_protrusion_px": int(self.delay_scout_min_protrusion_px),
+                "pressure_scan_delay_step_back": int(self.pressure_scan_delay_step_back),
+                "late_stage_risk_requires_lobe_confirmation": True,
             },
         }
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": result})
@@ -7643,6 +7710,42 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         if contour_class == "detached":
             return "approaching_risk"
         if p95 < self.min_signal_p95 or protrusion < self.min_protrusion_length_px:
+            return "too_low"
+
+        mode = str(getattr(self, "_timing_mode", "") or "")
+        emergence_time_us = getattr(self, "emergence_time_us", None)
+        fixed_delay_us = getattr(self, "fixed_prebreakup_delay_us", None)
+        current_delay_us = getattr(self, "prebreakup_delay_us", None)
+        late_stage_mode = mode.startswith("auto_scout")
+        if (
+            not late_stage_mode
+            and fixed_delay_us is not None
+            and current_delay_us is not None
+            and emergence_time_us is not None
+        ):
+            late_stage_mode = int(current_delay_us) >= int(emergence_time_us)
+
+        if late_stage_mode:
+            lobe_evidence = secondary_lobes > self.late_stage_max_secondary_lobes_for_clean
+            risk_hits = 0
+            if contour_class == "ambiguous":
+                risk_hits += 1
+            if lobe_evidence:
+                risk_hits += 1
+            if lobe_evidence and neck_ratio <= self.neck_ratio_risk_threshold:
+                risk_hits += 1
+            if lobe_evidence and nozzle_side_ratio >= self.nozzle_side_area_ratio_risk_threshold:
+                risk_hits += 1
+            if risk_hits >= 2:
+                return "approaching_risk"
+            if (
+                contour_class == "attached"
+                and not lobe_evidence
+                and bulb_present
+                and protrusion >= self.min_candidate_protrusion_px
+                and max_width >= self.min_candidate_bulb_width_px
+            ):
+                return "candidate_clean"
             return "too_low"
 
         risk_hits = 0
@@ -16589,12 +16692,31 @@ class DropletCameraModel(QObject):
         nozzle_side_area_ratio = float(nozzle_side_area) / float(max(contour_area, 1))
         neck_ratio = float(neck_width) / float(max(max_width, 1))
 
-        peak_count = 0
-        for idx in range(1, len(smoothed) - 1):
-            if smoothed[idx] >= smoothed[idx - 1] and smoothed[idx] > smoothed[idx + 1]:
-                if smoothed[idx] >= max(6.0, 0.55 * float(max_width)):
-                    peak_count += 1
-        secondary_lobe_count = int(max(0, peak_count - 1))
+        if widths_arr.size >= 5:
+            lobe_kernel = np.asarray([1.0, 2.0, 3.0, 2.0, 1.0], dtype=float)
+            lobe_kernel /= float(lobe_kernel.sum())
+            lobe_profile = np.convolve(widths_arr, lobe_kernel, mode="same")
+        else:
+            lobe_profile = smoothed
+
+        distal_start = int(min(max(1, round(0.55 * float(len(lobe_profile)))), max(1, len(lobe_profile) - 1)))
+        distal_profile = lobe_profile[distal_start:] if len(lobe_profile) > distal_start else lobe_profile
+        distal_max_width = float(np.max(distal_profile)) if len(distal_profile) else float(max_width)
+        min_peak_separation = int(max(4, round(0.08 * float(len(lobe_profile)))))
+        peak_positions = []
+        if len(distal_profile) >= 3:
+            for idx in range(1, len(distal_profile) - 1):
+                if distal_profile[idx] >= distal_profile[idx - 1] and distal_profile[idx] > distal_profile[idx + 1]:
+                    if distal_profile[idx] < max(8.0, 0.72 * float(distal_max_width)):
+                        continue
+                    global_idx = int(idx + distal_start)
+                    if peak_positions and (global_idx - peak_positions[-1]) < min_peak_separation:
+                        prev_idx = int(peak_positions[-1])
+                        if float(lobe_profile[global_idx]) > float(lobe_profile[prev_idx]):
+                            peak_positions[-1] = int(global_idx)
+                        continue
+                    peak_positions.append(int(global_idx))
+        secondary_lobe_count = int(max(0, len(peak_positions) - 1))
         bulb_present = bool(max_width >= max(10, int(round(neck_width * 1.35))) and distal_area > 0)
 
         cv2.line(overlay, (x, neck_y), (x + ww, neck_y), (0, 200, 255), 1)
