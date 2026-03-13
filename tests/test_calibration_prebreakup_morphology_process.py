@@ -43,6 +43,8 @@ def _proc_stub():
     proc.long_ligament_px = 36
     proc.max_secondary_lobes_for_clean = 0
     proc.late_stage_max_secondary_lobes_for_clean = 1
+    proc.late_stage_min_protrusion_gain_ratio = 1.40
+    proc.late_stage_risk_protrusion_gain_ratio = 1.80
     proc.delay_scout_min_protrusion_px = 14
     proc.pressure_scan_delay_step_back = 1
     proc._timing_mode = "auto_scout"
@@ -57,7 +59,7 @@ def _proc_stub():
     proc.delay_scan_replicates = 2
     proc._delay_scout_selection = None
     proc._delay_scout_selection_meta = {}
-    proc._delay_scout_selected_summary = {}
+    proc._delay_scout_selected_summary = {"protrusion_length_px": 286}
     return proc
 
 
@@ -226,6 +228,7 @@ def test_analyze_prebreakup_morphology_extends_roi_to_fov_bottom_and_flags_clipp
 
 def test_prebreakup_classify_morphology_distinguishes_candidate_and_risk():
     proc = _proc_stub()
+    proc._timing_mode = "legacy_lead"
 
     candidate = proc._classify_morphology(
         {
@@ -282,25 +285,61 @@ def test_prebreakup_classify_morphology_treats_bottom_clipped_stream_as_risk():
     assert state == "approaching_risk"
 
 
-def test_prebreakup_classify_morphology_late_stage_ignores_long_attached_stream_without_lobes():
+def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
     proc = _proc_stub()
 
-    state = proc._classify_morphology(
+    too_low = proc._classify_morphology(
         {
             "status": "ok",
             "contour_class": "attached",
-            "protrusion_length_px": 301,
-            "max_width_px": 142,
-            "neck_to_bulb_ratio": 0.08,
-            "p95": 226.0,
-            "nozzle_side_area_ratio": 0.90,
-            "distance_nozzle_to_neck_px": 301,
+            "protrusion_length_px": 386,
+            "reference_protrusion_length_px": 286,
+            "protrusion_gain_ratio": 386.0 / 286.0,
+            "max_width_px": 148,
+            "neck_to_bulb_ratio": 0.142,
+            "p95": 221.0,
+            "nozzle_side_area_ratio": 0.908,
+            "distance_nozzle_to_neck_px": 386,
+            "secondary_lobe_count": 0,
+            "bulb_present": True,
+        }
+    )
+    candidate = proc._classify_morphology(
+        {
+            "status": "ok",
+            "contour_class": "attached",
+            "protrusion_length_px": 464,
+            "reference_protrusion_length_px": 286,
+            "protrusion_gain_ratio": 464.0 / 286.0,
+            "max_width_px": 156,
+            "neck_to_bulb_ratio": 0.132,
+            "p95": 221.0,
+            "nozzle_side_area_ratio": 0.918,
+            "distance_nozzle_to_neck_px": 464,
+            "secondary_lobe_count": 0,
+            "bulb_present": True,
+        }
+    )
+    risk = proc._classify_morphology(
+        {
+            "status": "ok",
+            "contour_class": "attached",
+            "protrusion_length_px": 538,
+            "reference_protrusion_length_px": 286,
+            "protrusion_gain_ratio": 538.0 / 286.0,
+            "max_width_px": 159,
+            "neck_to_bulb_ratio": 0.127,
+            "p95": 221.0,
+            "nozzle_side_area_ratio": 0.924,
+            "distance_nozzle_to_neck_px": 538,
             "secondary_lobe_count": 0,
             "bulb_present": True,
         }
     )
 
-    assert state == "candidate_clean"
+    assert too_low == "too_low"
+    assert candidate == "candidate_clean"
+    assert risk == "approaching_risk"
 
 
 def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
@@ -318,6 +357,45 @@ def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
     assert summary["feature_summary"]["protrusion_length_px"] == 48
     assert round(summary["feature_summary"]["neck_to_bulb_ratio"], 2) == 0.32
     assert summary["feature_summary"]["bulb_present"] is True
+
+
+def test_prebreakup_aggregate_replicates_tracks_protrusion_gain_ratio():
+    proc = _proc_stub()
+    proc.reps = [
+        {
+            "state": "candidate_clean",
+            "details": {
+                "protrusion_length_px": 419,
+                "reference_protrusion_length_px": 286,
+                "protrusion_gain_ratio": 419.0 / 286.0,
+                "bulb_present": True,
+            },
+        },
+        {
+            "state": "candidate_clean",
+            "details": {
+                "protrusion_length_px": 464,
+                "reference_protrusion_length_px": 286,
+                "protrusion_gain_ratio": 464.0 / 286.0,
+                "bulb_present": True,
+            },
+        },
+        {
+            "state": "candidate_clean",
+            "details": {
+                "protrusion_length_px": 499,
+                "reference_protrusion_length_px": 286,
+                "protrusion_gain_ratio": 499.0 / 286.0,
+                "bulb_present": True,
+            },
+        },
+    ]
+
+    verdict, summary = proc._aggregate_replicates()
+
+    assert verdict == "candidate_clean"
+    assert summary["feature_summary"]["reference_protrusion_length_px"] == 286
+    assert round(summary["feature_summary"]["protrusion_gain_ratio"], 3) == round(464.0 / 286.0, 3)
 
 
 def test_delay_scout_selects_turning_point_before_retraction():

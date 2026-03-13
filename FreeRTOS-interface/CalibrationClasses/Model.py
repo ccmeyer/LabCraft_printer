@@ -6787,6 +6787,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.long_ligament_px = 36
         self.max_secondary_lobes_for_clean = 0
         self.late_stage_max_secondary_lobes_for_clean = 1
+        self.late_stage_min_protrusion_gain_ratio = 1.40
+        self.late_stage_risk_protrusion_gain_ratio = 1.80
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
@@ -7222,6 +7224,32 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             result["selection"] = dict(self._delay_scout_selection)
         return result
 
+    def _get_late_stage_reference_protrusion_px(self):
+        try:
+            value = int(
+                (self._delay_scout_selected_summary or {}).get("protrusion_length_px", 0) or 0
+            )
+        except Exception:
+            value = 0
+        return int(value) if value > 0 else None
+
+    def _annotate_pressure_scan_details(self, details: dict | None):
+        d = dict(details or {})
+        ref_px = self._get_late_stage_reference_protrusion_px()
+        d["reference_protrusion_length_px"] = None if ref_px is None else int(ref_px)
+        if ref_px is None:
+            d["protrusion_gain_ratio"] = None
+            return d
+
+        try:
+            protrusion = int(d.get("protrusion_length_px", 0) or 0)
+        except Exception:
+            protrusion = 0
+        d["protrusion_gain_ratio"] = (
+            None if protrusion <= 0 else float(protrusion) / float(ref_px)
+        )
+        return d
+
     @Slot()
     def onPrepareBackground(self):
         self.samples = []
@@ -7498,6 +7526,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             roi_below_px=self.prebreakup_roi_below_px,
             return_details=True,
         )
+        details = self._annotate_pressure_scan_details(details)
+        metrics = dict(metrics or {})
+        if details.get("reference_protrusion_length_px") is not None:
+            metrics["reference_protrusion_length_px"] = int(
+                details.get("reference_protrusion_length_px")
+            )
+        if details.get("protrusion_gain_ratio") is not None:
+            metrics["protrusion_gain_ratio"] = float(details.get("protrusion_gain_ratio"))
         self.presentImageSignal.emit(overlay)
 
         state = self._classify_morphology(details)
@@ -7660,6 +7696,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             ),
             "terminated_early": bool(self._terminated_early),
             "stop_reason": self._stop_reason,
+            "late_stage_reference_protrusion_px": self._get_late_stage_reference_protrusion_px(),
             "heuristic_params": {
                 "min_signal_p95": float(self.min_signal_p95),
                 "min_protrusion_length_px": int(self.min_protrusion_length_px),
@@ -7670,9 +7707,11 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 "long_ligament_px": int(self.long_ligament_px),
                 "max_secondary_lobes_for_clean": int(self.max_secondary_lobes_for_clean),
                 "late_stage_max_secondary_lobes_for_clean": int(self.late_stage_max_secondary_lobes_for_clean),
+                "late_stage_min_protrusion_gain_ratio": float(self.late_stage_min_protrusion_gain_ratio),
+                "late_stage_risk_protrusion_gain_ratio": float(self.late_stage_risk_protrusion_gain_ratio),
                 "delay_scout_min_protrusion_px": int(self.delay_scout_min_protrusion_px),
                 "pressure_scan_delay_step_back": int(self.pressure_scan_delay_step_back),
-                "late_stage_risk_requires_lobe_confirmation": True,
+                "late_stage_risk_requires_lobe_confirmation": False,
             },
         }
         self.calibrationDataUpdated.emit({"measurements": self.measurements, "result": result})
@@ -7719,6 +7758,20 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         secondary_lobes = int(d.get("secondary_lobe_count", 0) or 0)
         bulb_present = bool(d.get("bulb_present", False))
         bottom_clipped = bool(d.get("bottom_clipped", False) or d.get("fov_bottom_clipped", False))
+        reference_protrusion_px = d.get("reference_protrusion_length_px")
+        try:
+            reference_protrusion_px = (
+                None if reference_protrusion_px in (None, "") else int(reference_protrusion_px)
+            )
+        except Exception:
+            reference_protrusion_px = None
+        protrusion_gain_ratio = d.get("protrusion_gain_ratio")
+        try:
+            protrusion_gain_ratio = (
+                None if protrusion_gain_ratio in (None, "") else float(protrusion_gain_ratio)
+            )
+        except Exception:
+            protrusion_gain_ratio = None
 
         if contour_class == "detached":
             return "approaching_risk"
@@ -7739,6 +7792,36 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             and emergence_time_us is not None
         ):
             late_stage_mode = int(current_delay_us) >= int(emergence_time_us)
+
+        if late_stage_mode and reference_protrusion_px is not None and reference_protrusion_px > 0:
+            if protrusion_gain_ratio is None and protrusion > 0:
+                protrusion_gain_ratio = float(protrusion) / float(reference_protrusion_px)
+            lobe_evidence = secondary_lobes > self.late_stage_max_secondary_lobes_for_clean
+            if contour_class == "ambiguous" and (
+                protrusion_gain_ratio is not None
+                and protrusion_gain_ratio >= self.late_stage_risk_protrusion_gain_ratio
+            ):
+                return "approaching_risk"
+            if lobe_evidence:
+                return "approaching_risk"
+            if (
+                protrusion_gain_ratio is not None
+                and protrusion_gain_ratio >= self.late_stage_risk_protrusion_gain_ratio
+            ):
+                return "approaching_risk"
+            if (
+                protrusion_gain_ratio is not None
+                and protrusion_gain_ratio < self.late_stage_min_protrusion_gain_ratio
+            ):
+                return "too_low"
+            if (
+                contour_class == "attached"
+                and bulb_present
+                and protrusion >= self.min_candidate_protrusion_px
+                and max_width >= self.min_candidate_bulb_width_px
+            ):
+                return "candidate_clean"
+            return "too_low"
 
         if late_stage_mode:
             lobe_evidence = secondary_lobes > self.late_stage_max_secondary_lobes_for_clean
@@ -7803,6 +7886,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
         feature_keys = [
             "protrusion_length_px",
+            "reference_protrusion_length_px",
+            "protrusion_gain_ratio",
             "max_width_px",
             "neck_width_px",
             "neck_to_bulb_ratio",
