@@ -6796,12 +6796,16 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self.late_stage_max_secondary_lobes_for_clean = 1
         self.late_stage_min_protrusion_gain_ratio = 1.38
         self.late_stage_risk_protrusion_gain_ratio = 1.75
+        self.late_stage_min_neck_gain_ratio = 1.45
+        self.late_stage_risk_neck_gain_ratio = 2.45
         self.detached_secondary_area_risk_px = 180
         self.detached_secondary_area_ratio_risk = 0.08
         self.delay_scout_min_protrusion_px = int(max(10, self.min_protrusion_length_px))
         self.prebreakup_roi_below_px = None
         self.pressure_scan_delay_step_back = 1
+        self.delay_confirmation_step_us = 50
         self.delay_scout_pressure_retry_step_psi = float(max(self.pressure_step_psi, 0.03))
+        self.max_pressure_scan_delay_retests = 1
 
         fixed_delay = None
         try:
@@ -6854,8 +6858,17 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selected_summary = {}
         self._delay_scout_extension_count = 0
         self._delay_scout_pressure_retry_count = 0
+        self._delay_confirm_active = False
+        self._delay_confirm_delays = []
+        self._delay_confirm_index = 0
+        self._delay_confirm_samples = []
+        self._delay_confirm_base_selection = {}
+        self._delay_confirm_base_meta = {}
+        self._delay_confirm_result = {}
         self._pressure_scan_reference_summary = {}
         self._pressure_scan_reference_pressure = None
+        self._pressure_scan_delay_retest_count = 0
+        self._pressure_scan_retests = []
 
         self.state_prepare_bg = QState()
         self.state_capture_bg = QState()
@@ -7080,6 +7093,90 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 )
             return "delay scout pending"
         return f"legacy delay={int(self._legacy_prebreakup_delay())} us"
+
+    def _build_delay_confirmation_schedule(self, base_delay_us: int):
+        step = int(max(1, self.delay_confirmation_step_us))
+        delays = []
+        for delta_us in (-step, 0, step):
+            delay_us = self._clamp_prebreakup_delay(int(base_delay_us) + int(delta_us))
+            if delay_us not in delays:
+                delays.append(int(delay_us))
+        return delays
+
+    def _begin_delay_confirmation(self, selection: dict, reason: str, meta: dict | None):
+        base_delay_us = int((meta or {}).get("pressure_scan_delay_us", selection.get("delay_us", 0)) or 0)
+        schedule = list(self._build_delay_confirmation_schedule(base_delay_us))
+        if len(schedule) <= 1:
+            self._apply_delay_scout_selection(selection, reason, meta)
+            return
+
+        self._delay_confirm_active = True
+        self._delay_confirm_delays = list(schedule)
+        self._delay_confirm_index = 0
+        self._delay_confirm_samples = []
+        self._delay_confirm_base_selection = dict(selection or {})
+        self._delay_confirm_base_meta = dict(meta or {})
+        self._delay_scout_reps = []
+        self._delay_scout_current_delay = int(self._delay_confirm_delays[0])
+        self.stageChanged.emit(
+            "Pre-breakup delay confirmation: "
+            f"testing {self._delay_confirm_delays} us "
+            f"@ {self._delay_scout_pressure:.3f} psi"
+        )
+        self.continueScoutDelay.emit()
+
+    def _select_delay_confirmation_candidate(self):
+        samples = [
+            dict(sample or {})
+            for sample in list(self._delay_confirm_samples or [])
+            if bool((sample.get("feature_summary") or {}).get("attached_visible", False))
+        ]
+        if not samples:
+            return None, "delay_confirmation_no_attached_stream", {}
+
+        base_meta = dict(self._delay_confirm_base_meta or {})
+        base_delay_us = int(
+            base_meta.get(
+                "pressure_scan_delay_us",
+                (self._delay_confirm_base_selection or {}).get("delay_us", 0),
+            )
+            or 0
+        )
+
+        def _score(sample: dict):
+            feature_summary = dict(sample.get("feature_summary", {}) or {})
+            state_counts = dict(sample.get("state_counts", {}) or {})
+            return (
+                float(feature_summary.get("attached_visible_ratio", 0.0) or 0.0),
+                int(bool(feature_summary.get("bulb_present", False))),
+                -int(state_counts.get("not_attached", 0) or 0),
+                -int(state_counts.get("clipped", 0) or 0),
+                int(feature_summary.get("distance_nozzle_to_neck_px", 0) or 0),
+                int(feature_summary.get("protrusion_length_px", 0) or 0),
+                float(feature_summary.get("p95", 0.0) or 0.0),
+                -abs(int(sample.get("delay_us", 0) or 0) - int(base_delay_us)),
+            )
+
+        selected = max(samples, key=_score)
+        meta = dict(base_meta)
+        meta.update(
+            {
+                "reversal_delay_us": int(
+                    base_meta.get(
+                        "reversal_delay_us",
+                        (self._delay_confirm_base_selection or {}).get("delay_us", 0),
+                    )
+                    or 0
+                ),
+                "pressure_scan_delay_us": int(selected.get("delay_us", base_delay_us) or 0),
+                "pressure_scan_delay_reason": "delay_confirmation_attached_stream",
+                "delay_confirmation_delays_us": list(self._delay_confirm_delays or []),
+                "delay_confirmation_selected_delay_us": int(
+                    selected.get("delay_us", base_delay_us) or 0
+                ),
+            }
+        )
+        return selected, "delay_confirmation_attached_stream", meta
 
     def _classify_delay_scout_replicate(self, details: dict | None):
         d = dict(details or {})
@@ -7321,7 +7418,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         }
 
     def _apply_delay_scout_selection(self, selection: dict, reason: str, meta: dict | None):
-        self._reversal_delay_us = int(selection.get("delay_us"))
+        self._reversal_delay_us = int((meta or {}).get("reversal_delay_us", selection.get("delay_us", 0)) or 0)
         self.prebreakup_delay_us = int(
             (meta or {}).get("pressure_scan_delay_us", self._reversal_delay_us)
         )
@@ -7338,6 +7435,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         }
         self._delay_scout_selection_meta = dict(meta or {})
         self._delay_scout_selected_summary = dict(selection.get("feature_summary", {}))
+        self._delay_confirm_active = False
         self._record_decision(
             "prebreakup_delay_selected",
             {
@@ -7407,6 +7505,8 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         }
         if self._delay_scout_selection:
             result["selection"] = dict(self._delay_scout_selection)
+        if self._delay_confirm_result:
+            result["delay_confirmation"] = dict(self._delay_confirm_result)
         return result
 
     def _get_late_stage_reference_protrusion_px(self):
@@ -7469,12 +7569,97 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             return
         feature_summary = dict((summary or {}).get("feature_summary", {}) or {})
         protrusion = int(feature_summary.get("protrusion_length_px", 0) or 0)
+        neck_distance = int(feature_summary.get("distance_nozzle_to_neck_px", 0) or 0)
         if protrusion <= 0:
+            return
+        if neck_distance <= 0:
+            return
+        if len(self.samples) <= 0:
             return
         if str(verdict) not in {"too_low", "candidate_clean"}:
             return
         self._pressure_scan_reference_summary = dict(feature_summary)
         self._pressure_scan_reference_pressure = float(pressure)
+
+    def _should_retry_pressure_scan_with_later_delay(self, verdict: str, summary: dict | None):
+        if int(self._pressure_scan_delay_retest_count) >= int(self.max_pressure_scan_delay_retests):
+            return False, None, {}
+        if self.prebreakup_delay_us is None:
+            return False, None, {}
+        if self._first_candidate_pressure is not None:
+            return False, None, {}
+
+        completed_pressures = int(len(self.samples) + 1)
+        next_delay_us = self._clamp_prebreakup_delay(
+            int(self.prebreakup_delay_us) + int(max(25, self.delay_confirmation_step_us))
+        )
+        if next_delay_us <= int(self.prebreakup_delay_us):
+            return False, None, {}
+
+        feature_summary = dict((summary or {}).get("feature_summary", {}) or {})
+        neck_gain_ratio = feature_summary.get("neck_distance_gain_ratio")
+        try:
+            neck_gain_ratio = (
+                None if neck_gain_ratio in (None, "") else float(neck_gain_ratio)
+            )
+        except Exception:
+            neck_gain_ratio = None
+
+        if str(verdict) == "approaching_risk" and completed_pressures >= 4:
+            return True, "no_clean_band_retry_later_delay", {
+                "completed_pressures": int(completed_pressures),
+                "new_delay_us": int(next_delay_us),
+                "trigger_state": str(verdict),
+                "trigger_neck_distance_gain_ratio": neck_gain_ratio,
+            }
+
+        if (
+            str(verdict) == "too_low"
+            and completed_pressures >= 5
+            and neck_gain_ratio is not None
+            and neck_gain_ratio < float(max(1.0, self.late_stage_min_neck_gain_ratio * 0.85))
+        ):
+            return True, "no_clean_band_retry_later_delay", {
+                "completed_pressures": int(completed_pressures),
+                "new_delay_us": int(next_delay_us),
+                "trigger_state": str(verdict),
+                "trigger_neck_distance_gain_ratio": float(neck_gain_ratio),
+            }
+
+        return False, None, {}
+
+    def _restart_pressure_scan_with_later_delay(self, reason: str, meta: dict | None):
+        new_delay_us = int((meta or {}).get("new_delay_us", self.prebreakup_delay_us) or 0)
+        prior_samples = list(self.samples or [])
+        self._pressure_scan_retests.append(
+            {
+                "reason": str(reason),
+                "prior_delay_us": int(self.prebreakup_delay_us or 0),
+                "new_delay_us": int(new_delay_us),
+                "pressure_count": int(len(prior_samples)),
+                "pressures": prior_samples,
+                "meta": dict(meta or {}),
+            }
+        )
+        self._pressure_scan_delay_retest_count += 1
+        self.prebreakup_delay_us = int(new_delay_us)
+        self._pressure_scan_delay_reason = str(reason)
+        self.samples = []
+        self.measurements = []
+        self.reps = []
+        self._current_pressure = None
+        self._next_pressure = float(self.effective_start_pressure)
+        self._risk_onset_pressure = None
+        self._first_candidate_pressure = None
+        self._last_candidate_pressure = None
+        self._pressure_scan_reference_summary = {}
+        self._pressure_scan_reference_pressure = None
+        self.stageChanged.emit(
+            "Pre-breakup morphology: retrying pressure scan with later delay "
+            f"{int(self.prebreakup_delay_us)} us "
+            f"(retry {int(self._pressure_scan_delay_retest_count)}/{int(self.max_pressure_scan_delay_retests)})"
+        )
+        self.continueScan.emit()
 
     @Slot()
     def onPrepareBackground(self):
@@ -7498,9 +7683,18 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._delay_scout_selected_summary = {}
         self._delay_scout_extension_count = 0
         self._delay_scout_pressure_retry_count = 0
+        self._delay_confirm_active = False
+        self._delay_confirm_delays = []
+        self._delay_confirm_index = 0
+        self._delay_confirm_samples = []
+        self._delay_confirm_base_selection = {}
+        self._delay_confirm_base_meta = {}
+        self._delay_confirm_result = {}
         self._delay_scout_pressure = float(self.effective_start_pressure)
         self._pressure_scan_reference_summary = {}
         self._pressure_scan_reference_pressure = None
+        self._pressure_scan_delay_retest_count = 0
+        self._pressure_scan_retests = []
         if self.fixed_prebreakup_delay_us is not None:
             self.prebreakup_delay_us = int(self.fixed_prebreakup_delay_us)
             self._reversal_delay_us = int(self.fixed_prebreakup_delay_us)
@@ -7587,8 +7781,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "flash_delay": int(self._delay_scout_current_delay),
             "num_droplets": 1,
         }
+        stage_label = "Pre-breakup delay confirmation" if self._delay_confirm_active else "Pre-breakup delay scout"
         self.stageChanged.emit(
-            "Pre-breakup delay scout: "
+            f"{stage_label}: "
             f"pressure={self._delay_scout_pressure:.3f} psi, "
             f"delay={int(self._delay_scout_current_delay)} us"
         )
@@ -7600,17 +7795,18 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
     @Slot()
     def onCaptureDelayScoutReplicate(self):
+        capture_label = "delay confirmation" if self._delay_confirm_active else "delay scout"
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text=(
-                f"Capturing delay scout @ {int(self._delay_scout_current_delay)} us "
+                f"Capturing {capture_label} @ {int(self._delay_scout_current_delay)} us "
                 f"(rep {len(self._delay_scout_reps)+1}/{self.delay_scan_replicates})"
             ),
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
             final_error_msg=(
-                f"Failed to capture pre-breakup delay scout image @ "
+                f"Failed to capture pre-breakup {capture_label} image @ "
                 f"{int(self._delay_scout_current_delay)} us."
             ),
         )
@@ -7633,11 +7829,12 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "details": dict(details or {}),
         }
         self._delay_scout_reps.append(rep)
+        analysis_stage = "delay_confirm" if self._delay_confirm_active else "delay_scout"
         self._record_analysis(
             {
                 "process_name": "PreBreakupMorphologyCalibrationProcess",
                 "phase_name": str(self.phase_name or ""),
-                "stage": "delay_scout",
+                "stage": str(analysis_stage),
                 "pressure_psi": float(self._delay_scout_pressure),
                 "delay_us": int(self._delay_scout_current_delay),
                 "replicate_index": int(len(self._delay_scout_reps)),
@@ -7649,8 +7846,9 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
         protrusion = int((metrics or {}).get("protrusion_length_px", 0))
         p95 = float((details or {}).get("p95", 0.0) or 0.0)
+        stage_label = "Delay confirmation" if self._delay_confirm_active else "Delay scout"
         self.stageChanged.emit(
-            f"Delay scout @ {int(self._delay_scout_current_delay)} us -> {scout_state} "
+            f"{stage_label} @ {int(self._delay_scout_current_delay)} us -> {scout_state} "
             f"(protrusion={protrusion}px, p95={p95:.1f})"
         )
         self.scoutReplicateReady.emit()
@@ -7671,6 +7869,48 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "feature_summary": dict(summary.get("feature_summary", {})),
             "replicates": list(self._delay_scout_reps),
         }
+        if self._delay_confirm_active:
+            self._delay_confirm_samples.append(record)
+            self._record_decision(
+                "prebreakup_delay_confirmation_state",
+                {
+                    "delay_us": int(delay_us),
+                    "pressure_psi": float(self._delay_scout_pressure),
+                    "summary": dict(summary),
+                },
+            )
+            next_index = int(self._delay_confirm_index + 1)
+            if next_index < len(self._delay_confirm_delays):
+                self._delay_confirm_index = int(next_index)
+                self._delay_scout_current_delay = int(self._delay_confirm_delays[self._delay_confirm_index])
+                self.continueScoutDelay.emit()
+                return
+
+            selection, reason, meta = self._select_delay_confirmation_candidate()
+            if selection is None:
+                selection = dict(self._delay_confirm_base_selection or {})
+                reason = "delay_confirmation_fallback_base_selection"
+                meta = dict(self._delay_confirm_base_meta or {})
+                meta.update(
+                    {
+                        "reversal_delay_us": int(
+                            meta.get("reversal_delay_us", selection.get("delay_us", 0)) or 0
+                        ),
+                        "pressure_scan_delay_us": int(
+                            meta.get("pressure_scan_delay_us", selection.get("delay_us", 0)) or 0
+                        ),
+                        "pressure_scan_delay_reason": "delay_confirmation_fallback_base_selection",
+                    }
+                )
+            self._delay_confirm_result = {
+                "tested_delays_us": list(self._delay_confirm_delays or []),
+                "selection_reason": str(reason),
+                "selected_delay_us": int((meta or {}).get("pressure_scan_delay_us", 0) or 0),
+                "samples": list(self._delay_confirm_samples or []),
+            }
+            self._apply_delay_scout_selection(selection, reason, meta)
+            return
+
         self._delay_scout_samples.append(record)
         self._record_decision(
             "prebreakup_delay_scout_state",
@@ -7683,7 +7923,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
 
         selection, reason, meta = self._select_delay_scout_candidate()
         if selection is not None:
-            self._apply_delay_scout_selection(selection, reason, meta)
+            self._begin_delay_confirmation(selection, reason, meta)
             return
 
         should_retry, retry_reason, retry_meta = self._should_retry_delay_scout_at_lower_pressure()
@@ -7862,6 +8102,14 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             },
         )
 
+        should_retry_scan, retry_reason, retry_meta = self._should_retry_pressure_scan_with_later_delay(
+            verdict,
+            summary,
+        )
+        if should_retry_scan:
+            self._restart_pressure_scan_with_later_delay(retry_reason, retry_meta)
+            return
+
         if verdict == "approaching_risk":
             self._stop_reason = self._stop_reason or "approaching_risk_detected"
             self.finalize.emit()
@@ -7959,6 +8207,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 else float(self._pressure_scan_reference_pressure)
             ),
             "pressure_scan_reference_summary": dict(self._pressure_scan_reference_summary or {}),
+            "pressure_scan_retests": list(self._pressure_scan_retests or []),
             "heuristic_params": {
                 "min_signal_p95": float(self.min_signal_p95),
                 "min_protrusion_length_px": int(self.min_protrusion_length_px),
@@ -7969,12 +8218,16 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
                 "long_ligament_px": int(self.long_ligament_px),
                 "max_secondary_lobes_for_clean": int(self.max_secondary_lobes_for_clean),
                 "late_stage_max_secondary_lobes_for_clean": int(self.late_stage_max_secondary_lobes_for_clean),
+                "late_stage_min_neck_gain_ratio": float(self.late_stage_min_neck_gain_ratio),
+                "late_stage_risk_neck_gain_ratio": float(self.late_stage_risk_neck_gain_ratio),
                 "late_stage_min_protrusion_gain_ratio": float(self.late_stage_min_protrusion_gain_ratio),
                 "late_stage_risk_protrusion_gain_ratio": float(self.late_stage_risk_protrusion_gain_ratio),
                 "detached_secondary_area_risk_px": int(self.detached_secondary_area_risk_px),
                 "detached_secondary_area_ratio_risk": float(self.detached_secondary_area_ratio_risk),
                 "delay_scout_min_protrusion_px": int(self.delay_scout_min_protrusion_px),
                 "pressure_scan_delay_step_back": int(self.pressure_scan_delay_step_back),
+                "delay_confirmation_step_us": int(self.delay_confirmation_step_us),
+                "max_pressure_scan_delay_retests": int(self.max_pressure_scan_delay_retests),
                 "requested_start_pressure_respected": False,
                 "late_stage_risk_requires_lobe_confirmation": False,
             },
@@ -8082,6 +8335,13 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             )
         except Exception:
             reference_protrusion_px = None
+        reference_neck_px = d.get("reference_neck_distance_px")
+        try:
+            reference_neck_px = (
+                None if reference_neck_px in (None, "") else int(reference_neck_px)
+            )
+        except Exception:
+            reference_neck_px = None
         protrusion_gain_ratio = d.get("protrusion_gain_ratio")
         try:
             protrusion_gain_ratio = (
@@ -8089,6 +8349,13 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             )
         except Exception:
             protrusion_gain_ratio = None
+        neck_distance_gain_ratio = d.get("neck_distance_gain_ratio")
+        try:
+            neck_distance_gain_ratio = (
+                None if neck_distance_gain_ratio in (None, "") else float(neck_distance_gain_ratio)
+            )
+        except Exception:
+            neck_distance_gain_ratio = None
 
         if contour_class == "detached":
             return "approaching_risk"
@@ -8117,6 +8384,47 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             and emergence_time_us is not None
         ):
             late_stage_mode = int(current_delay_us) >= int(emergence_time_us)
+
+        if (
+            late_stage_mode
+            and reference_neck_px is not None
+            and reference_neck_px > 0
+        ):
+            if neck_distance_gain_ratio is None and neck_distance > 0:
+                neck_distance_gain_ratio = float(neck_distance) / float(reference_neck_px)
+            if (
+                protrusion_gain_ratio is None
+                and protrusion > 0
+                and reference_protrusion_px is not None
+                and reference_protrusion_px > 0
+            ):
+                protrusion_gain_ratio = float(protrusion) / float(reference_protrusion_px)
+            lobe_evidence = secondary_lobes > self.late_stage_max_secondary_lobes_for_clean
+            if contour_class == "ambiguous" and (
+                neck_distance_gain_ratio is not None
+                and neck_distance_gain_ratio >= self.late_stage_risk_neck_gain_ratio
+            ):
+                return "approaching_risk"
+            if lobe_evidence:
+                return "approaching_risk"
+            if (
+                neck_distance_gain_ratio is not None
+                and neck_distance_gain_ratio >= self.late_stage_risk_neck_gain_ratio
+            ):
+                return "approaching_risk"
+            if (
+                neck_distance_gain_ratio is not None
+                and neck_distance_gain_ratio < self.late_stage_min_neck_gain_ratio
+            ):
+                return "too_low"
+            if (
+                contour_class == "attached"
+                and bulb_present
+                and protrusion >= self.min_candidate_protrusion_px
+                and max_width >= self.min_candidate_bulb_width_px
+            ):
+                return "candidate_clean"
+            return "too_low"
 
         if late_stage_mode and reference_protrusion_px is not None and reference_protrusion_px > 0:
             if protrusion_gain_ratio is None and protrusion > 0:

@@ -46,10 +46,13 @@ def _proc_stub():
     proc.late_stage_max_secondary_lobes_for_clean = 1
     proc.late_stage_min_protrusion_gain_ratio = 1.38
     proc.late_stage_risk_protrusion_gain_ratio = 1.75
+    proc.late_stage_min_neck_gain_ratio = 1.45
+    proc.late_stage_risk_neck_gain_ratio = 2.45
     proc.detached_secondary_area_risk_px = 180
     proc.detached_secondary_area_ratio_risk = 0.08
     proc.delay_scout_min_protrusion_px = 14
     proc.pressure_scan_delay_step_back = 1
+    proc.delay_confirmation_step_us = 50
     proc._timing_mode = "auto_scout"
     proc.emergence_time_us = 3200
     proc.prebreakup_delay_us = 4200
@@ -64,6 +67,7 @@ def _proc_stub():
     proc.delay_scan_extension_span_us = 1200
     proc.max_delay_scout_extensions = 4
     proc.max_delay_scout_pressure_retries = 2
+    proc.max_pressure_scan_delay_retests = 1
     proc._delay_scout_selection = None
     proc._delay_scout_selection_meta = {}
     proc._delay_scout_selected_summary = {
@@ -73,6 +77,13 @@ def _proc_stub():
     proc._delay_scout_extension_count = 0
     proc._delay_scout_pressure_retry_count = 0
     proc._delay_scout_pressure = 0.42
+    proc._delay_confirm_active = False
+    proc._delay_confirm_delays = []
+    proc._delay_confirm_index = 0
+    proc._delay_confirm_samples = []
+    proc._delay_confirm_base_selection = {}
+    proc._delay_confirm_base_meta = {}
+    proc._delay_confirm_result = {}
     proc.delay_scout_pressure_retry_step_psi = 0.03
     proc.P_MIN = 0.30
     proc.P_MAX = 5.0
@@ -82,6 +93,16 @@ def _proc_stub():
     proc.effective_start_pressure = 0.40
     proc._pressure_scan_reference_summary = {}
     proc._pressure_scan_reference_pressure = None
+    proc._pressure_scan_delay_retest_count = 0
+    proc._pressure_scan_retests = []
+    proc.samples = []
+    proc.measurements = []
+    proc.reps = []
+    proc._first_candidate_pressure = None
+    proc._last_candidate_pressure = None
+    proc._risk_onset_pressure = None
+    proc._current_pressure = None
+    proc._next_pressure = None
     return proc
 
 
@@ -362,21 +383,23 @@ def test_prebreakup_classify_morphology_treats_large_detached_secondary_as_risk(
     assert state == "approaching_risk"
 
 
-def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
+def test_prebreakup_classify_morphology_late_stage_prefers_neck_distance_gain():
     proc = _proc_stub()
 
     too_low = proc._classify_morphology(
         {
             "status": "ok",
             "contour_class": "attached",
-            "protrusion_length_px": 386,
-            "reference_protrusion_length_px": 286,
-            "protrusion_gain_ratio": 386.0 / 286.0,
+            "protrusion_length_px": 354,
+            "reference_protrusion_length_px": 233,
+            "protrusion_gain_ratio": 354.0 / 233.0,
+            "reference_neck_distance_px": 71,
+            "neck_distance_gain_ratio": 84.0 / 71.0,
             "max_width_px": 148,
             "neck_to_bulb_ratio": 0.142,
             "p95": 221.0,
             "nozzle_side_area_ratio": 0.908,
-            "distance_nozzle_to_neck_px": 386,
+            "distance_nozzle_to_neck_px": 84,
             "secondary_lobe_count": 0,
             "bulb_present": True,
         }
@@ -385,14 +408,16 @@ def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
         {
             "status": "ok",
             "contour_class": "attached",
-            "protrusion_length_px": 464,
-            "reference_protrusion_length_px": 286,
-            "protrusion_gain_ratio": 464.0 / 286.0,
+            "protrusion_length_px": 388,
+            "reference_protrusion_length_px": 233,
+            "protrusion_gain_ratio": 388.0 / 233.0,
+            "reference_neck_distance_px": 71,
+            "neck_distance_gain_ratio": 103.0 / 71.0,
             "max_width_px": 156,
             "neck_to_bulb_ratio": 0.132,
             "p95": 221.0,
             "nozzle_side_area_ratio": 0.918,
-            "distance_nozzle_to_neck_px": 464,
+            "distance_nozzle_to_neck_px": 103,
             "secondary_lobe_count": 0,
             "bulb_present": True,
         }
@@ -401,14 +426,16 @@ def test_prebreakup_classify_morphology_late_stage_uses_scout_relative_band():
         {
             "status": "ok",
             "contour_class": "attached",
-            "protrusion_length_px": 538,
-            "reference_protrusion_length_px": 286,
-            "protrusion_gain_ratio": 538.0 / 286.0,
+            "protrusion_length_px": 429,
+            "reference_protrusion_length_px": 233,
+            "protrusion_gain_ratio": 429.0 / 233.0,
+            "reference_neck_distance_px": 71,
+            "neck_distance_gain_ratio": 175.0 / 71.0,
             "max_width_px": 159,
             "neck_to_bulb_ratio": 0.127,
             "p95": 221.0,
             "nozzle_side_area_ratio": 0.924,
-            "distance_nozzle_to_neck_px": 538,
+            "distance_nozzle_to_neck_px": 175,
             "secondary_lobe_count": 0,
             "bulb_present": True,
         }
@@ -454,6 +481,38 @@ def test_pressure_scan_reference_overrides_scout_reference_once_available():
     assert details["reference_neck_distance_px"] == 120
     assert round(details["protrusion_gain_ratio"], 3) == 1.5
     assert round(details["neck_distance_gain_ratio"], 3) == 2.0
+
+
+def test_pressure_scan_reference_skips_initial_pressure_and_uses_first_followup_too_low():
+    proc = _proc_stub()
+
+    proc.samples = []
+    proc._capture_pressure_scan_reference(
+        0.40,
+        {
+            "feature_summary": {
+                "protrusion_length_px": 283,
+                "distance_nozzle_to_neck_px": 255,
+            }
+        },
+        "too_low",
+    )
+    assert proc._pressure_scan_reference_summary == {}
+
+    proc.samples = [{"pressure": 0.40, "state": "too_low"}]
+    proc._capture_pressure_scan_reference(
+        0.43,
+        {
+            "feature_summary": {
+                "protrusion_length_px": 326,
+                "distance_nozzle_to_neck_px": 71,
+            }
+        },
+        "too_low",
+    )
+
+    assert proc._pressure_scan_reference_pressure == pytest.approx(0.43)
+    assert proc._pressure_scan_reference_summary["distance_nozzle_to_neck_px"] == 71
 
 
 def test_prebreakup_aggregate_replicates_prefers_risk_state_and_medians():
@@ -510,6 +569,99 @@ def test_prebreakup_aggregate_replicates_tracks_protrusion_gain_ratio():
     assert verdict == "candidate_clean"
     assert summary["feature_summary"]["reference_protrusion_length_px"] == 286
     assert round(summary["feature_summary"]["protrusion_gain_ratio"], 3) == round(464.0 / 286.0, 3)
+
+
+def test_delay_confirmation_prefers_best_attached_later_delay():
+    proc = _proc_stub()
+    proc._delay_confirm_delays = [3850, 3900, 3950]
+    proc._delay_confirm_base_selection = {"delay_us": 4000}
+    proc._delay_confirm_base_meta = {
+        "reversal_delay_us": 4000,
+        "pressure_scan_delay_us": 3900,
+    }
+    proc._delay_confirm_samples = [
+        {
+            "delay_us": 3850,
+            "state_counts": {"attached_visible": 2},
+            "feature_summary": {
+                "attached_visible": True,
+                "attached_visible_ratio": 1.0,
+                "distance_nozzle_to_neck_px": 82,
+                "protrusion_length_px": 220,
+                "bulb_present": True,
+                "p95": 24.0,
+            },
+        },
+        {
+            "delay_us": 3900,
+            "state_counts": {"attached_visible": 2},
+            "feature_summary": {
+                "attached_visible": True,
+                "attached_visible_ratio": 1.0,
+                "distance_nozzle_to_neck_px": 96,
+                "protrusion_length_px": 244,
+                "bulb_present": True,
+                "p95": 25.0,
+            },
+        },
+        {
+            "delay_us": 3950,
+            "state_counts": {"attached_visible": 2},
+            "feature_summary": {
+                "attached_visible": True,
+                "attached_visible_ratio": 1.0,
+                "distance_nozzle_to_neck_px": 108,
+                "protrusion_length_px": 258,
+                "bulb_present": True,
+                "p95": 26.0,
+            },
+        },
+    ]
+
+    selected, reason, meta = proc._select_delay_confirmation_candidate()
+
+    assert selected["delay_us"] == 3950
+    assert reason == "delay_confirmation_attached_stream"
+    assert meta["reversal_delay_us"] == 4000
+    assert meta["pressure_scan_delay_us"] == 3950
+
+
+def test_pressure_scan_retry_with_later_delay_when_no_clean_band_found():
+    proc = _proc_stub()
+    proc.samples = [
+        {"pressure": 0.40, "state": "too_low"},
+        {"pressure": 0.43, "state": "too_low"},
+        {"pressure": 0.46, "state": "too_low"},
+        {"pressure": 0.49, "state": "too_low"},
+    ]
+
+    should_retry, reason, meta = proc._should_retry_pressure_scan_with_later_delay(
+        "approaching_risk",
+        {"feature_summary": {"neck_distance_gain_ratio": 0.39}},
+    )
+
+    assert should_retry is True
+    assert reason == "no_clean_band_retry_later_delay"
+    assert meta["new_delay_us"] == 4250
+
+    proc.stageChanged = _SignalRecorder()
+    proc.continueScan = _SignalRecorder()
+    proc.measurements = [(0.4, "too_low", 233, 0.6)]
+    proc.reps = [{"state": "too_low"}]
+    proc._pressure_scan_reference_summary = {"distance_nozzle_to_neck_px": 210}
+    proc._pressure_scan_reference_pressure = 0.43
+    proc._first_candidate_pressure = None
+    proc._last_candidate_pressure = None
+    proc._risk_onset_pressure = 0.61
+
+    proc._restart_pressure_scan_with_later_delay(reason, meta)
+
+    assert proc.prebreakup_delay_us == 4250
+    assert proc.samples == []
+    assert proc.measurements == []
+    assert proc._pressure_scan_reference_summary == {}
+    assert proc._pressure_scan_delay_retest_count == 1
+    assert proc.continueScan.calls
 
 
 def test_select_recommended_pressure_prefers_safe_window_midpoint():
@@ -707,6 +859,8 @@ def test_delay_scout_stops_as_soon_as_retraction_is_confirmed():
     proc.continueScoutDelay = _SignalRecorder()
     proc.continueScoutReplicate = _SignalRecorder()
     proc.calibrationError = _SignalRecorder()
+    proc.delay_confirmation_step_us = 0
+    proc._begin_delay_confirmation = lambda selection, reason, meta: proc._apply_delay_scout_selection(selection, reason, meta)
 
     proc.onDecideDelayScout()
 
