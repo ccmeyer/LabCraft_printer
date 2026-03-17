@@ -118,3 +118,60 @@ def test_droplet_search_on_analyze_centered_reacquire_emits_ready_to_characteriz
     assert any(row.get("kind") == "ready" for row in analysis_rows)
     assert not any(row.get("kind") == "found" for row in analysis_rows)
     assert proc.measurements and proc.measurements[0]["center"] == (70, 60)
+
+
+def test_droplet_search_prepare_background_refreshes_motion_anchor_after_regular_search_move():
+    proc = DropletSearchCalibrationProcess.__new__(DropletSearchCalibrationProcess)
+    proc._aborted = False
+    proc._finished = False
+    proc._save_enabled = False
+    proc.manual_start = False
+    proc.predicted_target = (1000, 2000, 3000)
+    proc.x_lo, proc.x_hi = 0, 50_000
+    proc.y_lo, proc.y_hi = 0, 50_000
+    proc.z_lo, proc.z_hi = 0, 50_000
+    proc.max_anchor_dx_steps = 350
+    proc.max_anchor_dy_steps = 500
+    proc.max_anchor_dz_steps = 5000
+    proc.imaging_guard_hit_cap = 6
+    proc._imaging_guard_hit_count = 0
+    proc._motion_anchor_xyz = None
+    proc._last_safe_xyz = None
+    proc._last_observed_live_xyz = None
+    proc._discard_post_move_pending = False
+    proc._discard_post_move_reason = ""
+    proc._discard_post_move_target_xyz = None
+    proc._is_dead = lambda: False
+    proc.stageChanged = Recorder()
+    proc.state_machine = SimpleNamespace(stop=lambda: None)
+
+    live_position = {"X": 1000, "Y": 2000, "Z": 3000}
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_current_position_dict=lambda: dict(live_position))
+    )
+
+    move_done = []
+    proc.calibration_manager = SimpleNamespace(
+        changeSettingsRequested=Recorder(),
+        emitSettingsChangeCompleted=lambda: None,
+        emitMoveCompleted=lambda: move_done.append(True),
+    )
+    proc._ensure_saving = lambda: None
+
+    def _request_move_absolute_with_timeout(target, *, on_done=None, **_kwargs):
+        tgt = tuple(map(int, target))
+        live_position.update({"X": tgt[0], "Y": tgt[1], "Z": tgt[2]})
+        if callable(on_done):
+            on_done()
+
+    proc._request_move_absolute_with_timeout = _request_move_absolute_with_timeout
+
+    proc.onPrepareBackground()
+    assert proc._motion_anchor_xyz == (1000, 2000, 3000)
+    assert proc._last_safe_xyz == (1000, 2000, 3000)
+
+    proc._safe_move_relative((50, 20, -40))
+    assert proc._last_safe_xyz == (1050, 2020, 2960)
+
+    proc.onPrepareBackground()
+    assert proc._motion_anchor_xyz == (1050, 2020, 2960)

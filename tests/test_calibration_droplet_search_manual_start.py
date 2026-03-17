@@ -116,6 +116,17 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc._char_attempts = 0
     proc._char_attempt_limit = 20
     proc._final_invalid_reason = None
+    proc.x_lo, proc.x_hi = 0, 50_000
+    proc.y_lo, proc.y_hi = 0, 50_000
+    proc.z_lo, proc.z_hi = 0, 50_000
+    proc.max_anchor_dx_steps = 350
+    proc.max_anchor_dy_steps = 500
+    proc.max_anchor_dz_steps = 5_000
+    proc.imaging_guard_hit_cap = 6
+    proc._imaging_guard_hit_count = 0
+    proc._motion_anchor_xyz = (1000, 2000, 3000)
+    proc._last_safe_xyz = (1000, 2000, 3000)
+    proc._last_observed_live_xyz = None
 
     proc.stageChanged = Recorder()
     proc.presentImageSignal = Recorder()
@@ -132,16 +143,18 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.changePressure = Recorder()
 
     proc.state_machine = SimpleNamespace(stop=lambda: None)
+    move_done = []
     proc.calibration_manager = SimpleNamespace(
         changeSettingsRequested=Recorder(),
         emitSettingsChangeCompleted=lambda: None,
-        emitMoveCompleted=lambda: None,
+        emitMoveCompleted=lambda: move_done.append(True),
     )
 
     analysis_rows = []
-    moves = []
+    move_targets = []
     xz_updates = []
     tracker_resets = []
+    live_position = {"X": 1000, "Y": 2000, "Z": 3000}
 
     proc._save_capture = lambda *_args, **_kwargs: {"index": 1}
     proc._save_overlay = lambda *_args, **_kwargs: None
@@ -149,9 +162,17 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc._ensure_saving = lambda: None
     proc._stop_saving_if_started = lambda: None
     proc._annotate_final = lambda *_args, **_kwargs: np.ones_like(proc.droplet_image)
-    proc._safe_move_relative = lambda delta: moves.append(tuple(map(int, delta)))
     proc._update_xz_track_offset = lambda: xz_updates.append("updated")
     proc._reset_contour_tracker = lambda: tracker_resets.append(True)
+
+    def _request_move_absolute_with_timeout(target, *, on_done=None, **_kwargs):
+        tgt = tuple(map(int, target))
+        move_targets.append(tgt)
+        live_position.update({"X": tgt[0], "Y": tgt[1], "Z": tgt[2]})
+        if callable(on_done):
+            on_done()
+
+    proc._request_move_absolute_with_timeout = _request_move_absolute_with_timeout
 
     if contour_fn is None:
         contour = contour_from_rect(60, 45, 20, 20)
@@ -176,7 +197,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
 
     proc.model = SimpleNamespace(
         machine_model=SimpleNamespace(
-            get_current_position_dict=lambda: {"X": 1000, "Y": 2000, "Z": 3000},
+            get_current_position_dict=lambda: dict(live_position),
             get_current_print_pressure=lambda: 1.61,
             get_print_pulse_width=lambda: 1500,
         ),
@@ -200,7 +221,9 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
 
     return proc, {
         "analysis_rows": analysis_rows,
-        "moves": moves,
+        "move_targets": move_targets,
+        "live_position": live_position,
+        "move_done": move_done,
         "tracker_resets": tracker_resets,
         "xz_updates": xz_updates,
     }
@@ -407,6 +430,47 @@ def test_droplet_search_invalid_characterization_payload_includes_reason_and_dia
     assert payload["focus_moves_done"] == 5
     assert payload["focus_dir_switches"] == 2
     assert payload["best_focus_y_offset_steps"] == 14
+
+
+def test_droplet_search_manual_move_guard_clamps_target_inside_anchor_envelope():
+    proc, ctx = _build_proc(manual_start=True)
+
+    proc._safe_move_relative((4000, 0, 12000))
+
+    assert ctx["move_targets"] == [(1350, 2000, 8000)]
+    assert proc._last_safe_xyz == (1350, 2000, 8000)
+    assert any("Imaging guard clamped target" in text for text in _recorder_texts(proc.stageChanged))
+
+
+def test_droplet_search_manual_focus_move_stays_inside_y_guard_window():
+    proc, ctx = _build_proc(manual_start=True)
+
+    proc._safe_move_relative((0, 700, 0))
+
+    assert ctx["move_targets"] == [(1000, 2500, 3000)]
+    assert proc._last_safe_xyz == (1000, 2500, 3000)
+
+
+def test_droplet_search_manual_guard_limit_aborts_before_dangerous_move():
+    proc, ctx = _build_proc(manual_start=True)
+    proc.imaging_guard_hit_cap = 1
+
+    proc._safe_move_relative((4000, 0, 12000))
+
+    assert ctx["move_targets"] == []
+    assert proc._final_invalid_reason == "imaging_guard_limit"
+    assert len(proc.calibrationError.calls) == 1
+    assert "imaging_guard_limit" in proc.calibrationError.calls[0][0][0]
+
+
+def test_droplet_search_manual_safe_move_uses_last_safe_xyz_not_stale_live_position():
+    proc, ctx = _build_proc(manual_start=True)
+    ctx["live_position"].update({"X": 11125, "Y": 10000, "Z": 20000})
+
+    proc._safe_move_relative((100, 0, 200))
+
+    assert ctx["move_targets"] == [(1100, 2000, 3200)]
+    assert proc._last_safe_xyz == (1100, 2000, 3200)
 
 
 def test_characterize_droplet_return_details_reports_no_large_contours():

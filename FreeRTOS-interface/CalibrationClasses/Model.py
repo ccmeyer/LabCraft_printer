@@ -13290,6 +13290,14 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.x_lo, self.x_hi = self._get_axis_bounds_safe('X', default_span=20000)
         self.y_lo, self.y_hi = self._get_axis_bounds_safe('Y', default_span=10000)
         self.z_lo, self.z_hi = self._get_axis_bounds_safe('Z', default_span=20000)
+        self.max_anchor_dx_steps = 350
+        self.max_anchor_dy_steps = 500
+        self.max_anchor_dz_steps = 5000
+        self.imaging_guard_hit_cap = 6
+        self._imaging_guard_hit_count = 0
+        self._motion_anchor_xyz = None
+        self._last_safe_xyz = None
+        self._last_observed_live_xyz = None
         self._x_track_offset_steps = 0
         self._z_track_offset_steps = 0
         self._xz_offset_ema_alpha = 0.35
@@ -13602,19 +13610,158 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         Zc = max(self.z_lo, min(self.z_hi, int(Z)))
         return Xc, Yc, Zc
 
+    @staticmethod
+    def _coerce_xyz_tuple(xyz) -> tuple[int, int, int] | None:
+        if xyz is None:
+            return None
+        if isinstance(xyz, dict):
+            raw = (xyz.get("X"), xyz.get("Y"), xyz.get("Z"))
+        else:
+            try:
+                raw = tuple(xyz)
+            except Exception:
+                return None
+        if len(raw) < 3:
+            return None
+        vals = []
+        for v in raw[:3]:
+            try:
+                fv = float(v)
+            except Exception:
+                return None
+            if not math.isfinite(fv):
+                return None
+            vals.append(int(round(fv)))
+        return (int(vals[0]), int(vals[1]), int(vals[2]))
+
+    def _get_live_position_xyz(self) -> tuple[int, int, int] | None:
+        try:
+            cur = self.model.machine_model.get_current_position_dict()
+        except Exception:
+            return None
+        xyz = self._coerce_xyz_tuple(cur)
+        if xyz is None:
+            return None
+        return tuple(self._clamp_abs(*xyz))
+
+    def _is_within_motion_envelope(self, xyz) -> bool:
+        anchor = getattr(self, "_motion_anchor_xyz", None)
+        xyz_t = self._coerce_xyz_tuple(xyz)
+        if anchor is None or xyz_t is None:
+            return xyz_t is not None
+        ax, ay, az = [int(v) for v in anchor]
+        tx, ty, tz = [int(v) for v in xyz_t]
+        return bool(
+            abs(tx - ax) <= int(getattr(self, "max_anchor_dx_steps", 350))
+            and abs(ty - ay) <= int(getattr(self, "max_anchor_dy_steps", 500))
+            and abs(tz - az) <= int(getattr(self, "max_anchor_dz_steps", 5000))
+        )
+
+    def _capture_motion_reference(self, *, set_anchor: bool, preferred_xyz=None) -> tuple[int, int, int] | None:
+        live_xyz = self._get_live_position_xyz()
+        ref_xyz = live_xyz if live_xyz is not None else self._coerce_xyz_tuple(preferred_xyz)
+        if ref_xyz is None:
+            return None
+        ref_xyz = tuple(self._clamp_abs(*ref_xyz))
+        self._last_safe_xyz = tuple(ref_xyz)
+        self._last_observed_live_xyz = tuple(ref_xyz)
+        if bool(set_anchor) or getattr(self, "_motion_anchor_xyz", None) is None:
+            self._motion_anchor_xyz = tuple(ref_xyz)
+            self._imaging_guard_hit_count = 0
+        return tuple(ref_xyz)
+
+    def _apply_motion_envelope(self, xyz):
+        xyz_t = self._coerce_xyz_tuple(xyz)
+        if xyz_t is None:
+            return None, False
+        anchor = getattr(self, "_motion_anchor_xyz", None)
+        if anchor is None:
+            return tuple(xyz_t), False
+        ax, ay, az = [int(v) for v in anchor]
+        tx, ty, tz = [int(v) for v in xyz_t]
+        cx = max(ax - int(getattr(self, "max_anchor_dx_steps", 350)), min(ax + int(getattr(self, "max_anchor_dx_steps", 350)), tx))
+        cy = max(ay - int(getattr(self, "max_anchor_dy_steps", 500)), min(ay + int(getattr(self, "max_anchor_dy_steps", 500)), ty))
+        cz = max(az - int(getattr(self, "max_anchor_dz_steps", 5000)), min(az + int(getattr(self, "max_anchor_dz_steps", 5000)), tz))
+        clamped = (int(cx), int(cy), int(cz))
+        return clamped, bool(clamped != tuple(xyz_t))
+
+    def _plausible_live_position_xyz(self) -> tuple[int, int, int] | None:
+        live_xyz = self._get_live_position_xyz()
+        self._last_observed_live_xyz = live_xyz
+        if live_xyz is None:
+            return None
+        if getattr(self, "_motion_anchor_xyz", None) is None:
+            return tuple(live_xyz)
+        if self._is_within_motion_envelope(live_xyz):
+            return tuple(live_xyz)
+        return None
+
+    def _get_safe_move_base_xyz(self) -> tuple[int, int, int]:
+        last_safe = self._coerce_xyz_tuple(getattr(self, "_last_safe_xyz", None))
+        if last_safe is not None:
+            return tuple(last_safe)
+        plausible_live = self._plausible_live_position_xyz()
+        if plausible_live is not None:
+            self._last_safe_xyz = tuple(plausible_live)
+            return tuple(plausible_live)
+        anchor = self._coerce_xyz_tuple(getattr(self, "_motion_anchor_xyz", None))
+        if anchor is not None:
+            self._last_safe_xyz = tuple(anchor)
+            return tuple(anchor)
+        fallback_live = self._get_live_position_xyz()
+        if fallback_live is not None:
+            self._last_safe_xyz = tuple(fallback_live)
+            return tuple(fallback_live)
+        return (0, 0, 0)
+
+    def _record_motion_guard_clamp(self, requested_xyz, clamped_xyz) -> bool:
+        self._imaging_guard_hit_count += 1
+        req = tuple(map(int, requested_xyz))
+        tgt = tuple(map(int, clamped_xyz))
+        self.stageChanged.emit(
+            f"Imaging guard clamped target from {req} to {tgt} "
+            f"[hit {self._imaging_guard_hit_count}/{self.imaging_guard_hit_cap}]"
+        )
+        if self._imaging_guard_hit_count >= int(getattr(self, "imaging_guard_hit_cap", 6)):
+            self._final_invalid_reason = "imaging_guard_limit"
+            self._abort("Imaging guard limit reached (imaging_guard_limit).")
+            return True
+        return False
+
+    def _complete_safe_move(self, target_xyz):
+        target = tuple(map(int, target_xyz))
+        self._last_safe_xyz = tuple(target)
+        self.calibration_manager.emitMoveCompleted()
+
     def _safe_move_absolute(self, XYZ_tuple):
         if self._is_dead():
             return
-        X, Y, Z = self._clamp_abs(*map(int, XYZ_tuple))
-        cur = self.model.machine_model.get_current_position_dict()
-        if (X == int(cur['X'])) and (Y == int(cur['Y'])) and (Z == int(cur['Z'])):
+        req_xyz = self._coerce_xyz_tuple(XYZ_tuple)
+        if req_xyz is None:
+            self._final_invalid_reason = "invalid_stage_target"
+            self._abort("Droplet search generated an invalid move target.")
+            return
+        X, Y, Z = self._clamp_abs(*req_xyz)
+        target_xyz, envelope_changed = self._apply_motion_envelope((X, Y, Z))
+        if target_xyz is None:
+            self._final_invalid_reason = "invalid_stage_target"
+            self._abort("Droplet search generated an invalid move target.")
+            return
+        if envelope_changed and self._record_motion_guard_clamp((X, Y, Z), target_xyz):
+            return
+        compare_xyz = self._plausible_live_position_xyz()
+        if compare_xyz is None:
+            compare_xyz = self._coerce_xyz_tuple(getattr(self, "_last_safe_xyz", None))
+        if compare_xyz is not None and tuple(compare_xyz) == tuple(target_xyz):
+            self._last_safe_xyz = tuple(target_xyz)
             self.calibration_manager.emitMoveCompleted()
             return
         self._discard_post_move_pending = True
         self._discard_post_move_reason = "stage_move"
-        self._discard_post_move_target_xyz = [int(X), int(Y), int(Z)]
+        self._discard_post_move_target_xyz = [int(target_xyz[0]), int(target_xyz[1]), int(target_xyz[2])]
         self._request_move_absolute_with_timeout(
-            (X, Y, Z),
+            tuple(target_xyz),
+            on_done=lambda: self._complete_safe_move(target_xyz),
             timeout_ms=15_000,
             err_msg="Droplet search move timed out."
         )
@@ -13622,10 +13769,17 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def _safe_move_relative(self, dXYZ_tuple):
         if self._is_dead():
             return
-        cur = self.model.machine_model.get_current_position_dict()
-        tgt = (cur['X'] + int(dXYZ_tuple[0]),
-               cur['Y'] + int(dXYZ_tuple[1]),
-               cur['Z'] + int(dXYZ_tuple[2]))
+        delta_xyz = self._coerce_xyz_tuple(dXYZ_tuple)
+        if delta_xyz is None:
+            self._final_invalid_reason = "invalid_stage_delta"
+            self._abort("Droplet search generated an invalid move delta.")
+            return
+        base_xyz = self._get_safe_move_base_xyz()
+        tgt = (
+            int(base_xyz[0]) + int(delta_xyz[0]),
+            int(base_xyz[1]) + int(delta_xyz[1]),
+            int(base_xyz[2]) + int(delta_xyz[2]),
+        )
         self._safe_move_absolute(tgt)
 
     def _predict_stage_target(self, delay_us:int):
@@ -13724,6 +13878,24 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         sx = int(max(-max_step, min(max_step, sx)))
         sz = int(max(-max_step, min(max_step, sz)))
         return int(sx), int(sz)
+
+    def _compute_damped_recenter_delta(self, center_px, target_px, *, tracking_mode: bool, context: str) -> tuple[int, int] | None:
+        try:
+            move = self.model.droplet_camera_model.calculate_move_to_target(
+                (int(center_px[0]), int(center_px[1])),
+                (int(target_px[0]), int(target_px[1])),
+            )
+        except Exception as e:
+            self._final_invalid_reason = "recenter_move_calc_failed"
+            self._abort(f"Could not calculate {context} move: {e}")
+            return None
+        move_xyz = self._coerce_xyz_tuple(move)
+        if move_xyz is None:
+            self._final_invalid_reason = "invalid_stage_delta"
+            self._abort(f"Invalid {context} move from droplet camera model.")
+            return None
+        dX_raw, _dY_unused, dZ_raw = move_xyz
+        return self._damped_recenter_move(int(dX_raw), int(dZ_raw), tracking_mode=tracking_mode)
 
     def _current_focus_delta_steps(self):
         try:
@@ -13932,10 +14104,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def _recenter_immediate(self, center_px) -> None:
         H, W = self.droplet_image.shape[:2]
         target = (W // 2, H // 2)
-        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(
-            (int(center_px[0]), int(center_px[1])), target
+        move_delta = self._compute_damped_recenter_delta(
+            center_px,
+            target,
+            tracking_mode=True,
+            context="center-first recenter",
         )
-        dX, dZ = self._damped_recenter_move(int(dX_raw), int(dZ_raw), tracking_mode=True)
+        if move_delta is None:
+            return
+        dX, dZ = move_delta
         self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
         self._char_need_capture = True
         self._set_startup_centering_mode("center_first_recenter")
@@ -13965,8 +14142,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         avgy = int(round(sum(p[1] for p in self._oob_positions) / len(self._oob_positions)))
         H, W = self.droplet_image.shape[:2]
         target = (W // 2, H // 2)
-        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target((avgx, avgy), target)
-        dX, dZ = self._damped_recenter_move(int(dX_raw), int(dZ_raw), tracking_mode=True)
+        move_delta = self._compute_damped_recenter_delta(
+            (avgx, avgy),
+            target,
+            tracking_mode=True,
+            context="averaged boundary recenter",
+        )
+        if move_delta is None:
+            return True
+        dX, dZ = move_delta
 
         self._oob_streak = 0
         self._oob_positions.clear()
@@ -14027,6 +14211,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def onPrepareBackground(self):
         if self._is_dead():
             return
+        preferred_xyz = None if self.manual_start else getattr(self, "predicted_target", None)
+        self._capture_motion_reference(set_anchor=True, preferred_xyz=preferred_xyz)
         if self._save_enabled:
             self._ensure_saving()
         self.stageChanged.emit("Capturing background at target")
@@ -14318,12 +14504,15 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitDropletCentered()
             return
 
-        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
-        dX, dZ = self._damped_recenter_move(
-            int(dX_raw),
-            int(dZ_raw),
+        move_delta = self._compute_damped_recenter_delta(
+            cxy,
+            target,
             tracking_mode=bool(getattr(self, "_centered", False)),
+            context="centering recenter",
         )
+        if move_delta is None:
+            return
+        dX, dZ = move_delta
         self._recenter_moves += 1
         if self._recenter_moves >= self.max_recenter_moves:
             return self._abort("Too many recenter moves while centering.")
