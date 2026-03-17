@@ -1,9 +1,8 @@
 from types import SimpleNamespace
 
-import cv2
 import numpy as np
 
-from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
@@ -11,23 +10,31 @@ ensure_calibration_import_stubs()
 from CalibrationClasses.Model import DropletSearchCalibrationProcess
 
 
-def _make_rect_contour():
-    img = np.zeros((120, 160), dtype=np.uint8)
-    cv2.rectangle(img, (50, 40), (90, 80), 255, -1)
-    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return contours[0]
-
-
 def test_droplet_search_on_analyze_saved_path_records_center_without_runtime_error():
     proc = DropletSearchCalibrationProcess.__new__(DropletSearchCalibrationProcess)
     proc._is_dead = lambda: False
     proc.stageChanged = Recorder()
     proc.presentImageSignal = Recorder()
+    proc.continueSearch = Recorder()
+    proc.dropletFound = Recorder()
     proc.measurements = []
     proc._lost_count = 3
     proc.current_delay_us = 1234
     proc.droplet_image = np.zeros((120, 160, 3), dtype=np.uint8)
     proc.background_image = np.zeros((120, 160, 3), dtype=np.uint8)
+    proc.manual_start = False
+    proc._discard_post_move_pending = False
+    proc._discard_post_move_reason = ""
+    proc._discard_post_move_target_xyz = None
+    proc._search_last_center = None
+    proc._search_last_delay_us = None
+    proc._search_stable_hits = 0
+    proc._search_confirm_same_settings_pending = False
+    proc.search_center_jump_max_px = 280.0
+    proc.search_cross_delay_jump_scale = 1.8
+    proc.search_min_signal_p95 = 10.0
+    proc.search_stable_hits_required = 2
+    proc._centered = False
 
     analysis_rows = []
     proc._save_capture = lambda *_args, **_kwargs: {"index": 7}
@@ -35,11 +42,16 @@ def test_droplet_search_on_analyze_saved_path_records_center_without_runtime_err
     proc._append_analysis = lambda row: analysis_rows.append(row)
     proc.emitContinueSearch = lambda: None
     proc.emitDropletFound = lambda: analysis_rows.append({"kind": "found"})
+    proc._handle_no_droplet_retry = lambda *_args, **_kwargs: analysis_rows.append({"kind": "retry"})
 
-    contour = _make_rect_contour()
+    contour = contour_from_rect(50, 40, 40, 40)
     proc.model = SimpleNamespace(
         droplet_camera_model=SimpleNamespace(
-            identify_droplet_contour=lambda image, bg: (contour, image.copy())
+            identify_droplet_contour=lambda image, bg, return_details=False: (
+                (contour, image.copy(), {"center": (70, 60), "p95": 15.0, "reason": "ok"})
+                if return_details
+                else (contour, image.copy())
+            )
         )
     )
 

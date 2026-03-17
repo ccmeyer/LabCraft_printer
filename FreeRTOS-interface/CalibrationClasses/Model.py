@@ -3095,7 +3095,9 @@ class CalibrationManager(QObject):
                         "mean_nL": mean_nL,
                         "cv_pct": cv_pct,
                         "valid": bool(res.get("valid", True)),
-                        "invalid_reason": None if res.get("valid", True) else "invalid",
+                        "invalid_reason": (
+                            None if res.get("valid", True) else (res.get("invalid_reason") or "invalid")
+                        ),
                         "timestamp": ts,
                         "phase": "search",
                     })
@@ -13204,7 +13206,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def __init__(self, calibration_manager, model, parent=None,
                  *, manual_start: bool = False, start_delay_us: int | None = None):
         super().__init__(calibration_manager, model, parent)
-        missing_requirements = self.missing_requirements(calibration_manager)
+        missing_requirements = self.missing_requirements(
+            calibration_manager,
+            manual_start=manual_start,
+        )
         if missing_requirements:
             raise ValueError("Cannot start DropletSearchCalibrationProcess; missing prerequisites: "
                                + ", ".join(missing_requirements))
@@ -13216,7 +13221,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
         self.num_images = 100
         self.image_counter = 0
-        self.circularity_threshold = 1.15
+        self.circularity_threshold = 1.18
         self.droplet_positions, self.droplet_focus = [], []
         self.circularity_values, self.droplet_volumes = [], []
         self.measurements = []
@@ -13224,6 +13229,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.early_stop_window = 6
         self.early_stop_mean_drift_pct = 1.5
         self.early_stop_cv_drift_pct = 1.0
+        self._early_stop_satisfied = False
 
         # --- lifecycle/guards ---
         self._aborted = False
@@ -13275,6 +13281,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._delay_try_index = 0
         self.min_delay_us, self.max_delay_us = 0, 40000
         self.target_delay_us = self._clamp_delay(seed_delay)
+        self.current_delay_us = None
+        self._manual_fixed_delay_us = int(self.target_delay_us)
 
         # Movement safety
         self.max_center_step, self.max_focus_step = 1200, 16
@@ -13284,6 +13292,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._x_track_offset_steps = 0
         self._z_track_offset_steps = 0
         self._xz_offset_ema_alpha = 0.35
+        self.center_recenter_gain_startup = 0.60
+        self.center_recenter_gain_tracking = 0.70
+        self.center_recenter_max_step_startup = 900
+        self.center_recenter_max_step_tracking = 1100
 
         # Target position (only used if we actually move there)
         self.predicted_target = self._predict_stage_target(self.target_delay_us)
@@ -13300,10 +13312,57 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._focus_moves_done = 0
         self._focus_move_budget = 60
         self._min_focus_gain = 0.01
+        self._focus_best_y_offset_steps = None
+        self._focus_best_source = ""
+        self._y_focus_offset_steps = 0
+        self._y_focus_ema_alpha = 0.35
 
         # Retry counters
         self._not_found_count, self._not_found_limit = 0, 10
         self._lost_count, self._lost_limit = 0, 5
+        self._manual_search_miss_count = 0
+        self._manual_search_miss_limit = 10
+
+        # Shared search / centering state
+        self.search_stable_hits_required = 2
+        self.search_center_jump_max_px = 280.0
+        self.search_cross_delay_jump_scale = 1.8
+        self.search_min_signal_p95 = 10.0
+        self.center_jump_reject_px = 320.0
+        self.center_stable_hits_for_bias_update = 3
+        self.boundary_tol_px = 250
+        self.center_first_tol_px = 140
+        self.max_recenter_moves = 10
+        self.max_oob_total = 12
+        self.char_stream_circularity_max = 0.58
+        self.char_max_invalid_ratio = 0.45
+        self.char_max_multiple_ratio = 0.20
+        self.char_max_stream_ratio = 0.20
+
+        self._centered = False
+        self._char_need_capture = False
+        self._search_last_center = None
+        self._search_last_delay_us = None
+        self._search_stable_hits = 0
+        self._search_confirm_same_settings_pending = False
+        self._center_last_center = None
+        self._center_stable_hits = 0
+        self._center_jump_reject_streak = 0
+        self._recenter_moves = 0
+        self._oob_total = 0
+        self._oob_streak = 0
+        self._oob_positions = []
+        self._xz_offset_updated_this_pressure = False
+        self._discard_post_move_pending = False
+        self._discard_post_move_reason = ""
+        self._discard_post_move_target_xyz = None
+        self._char_invalid_hits = 0
+        self._char_stream_hits = 0
+        self.multiple_droplet_hits = 0
+        self._char_frames_evaluated = 0
+        self._char_attempts = 0
+        self._char_attempt_limit = max(3 * self.num_images, self.num_images + 20)
+        self._final_invalid_reason = None
 
         # ----- states -----
         self.state_move_to_target = QState()
@@ -13347,6 +13406,10 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t2 = QSignalTransition(); t2.setSenderObject(self.calibration_manager)
         t2.setSignal(b"2settingsChangeCompleted()"); t2.setTargetState(self.state_capture_droplet)
         self.state_set_delay.addTransition(t2)
+
+        t2m = QSignalTransition(); t2m.setSenderObject(self.calibration_manager)
+        t2m.setSignal(b"2moveCompleted()"); t2m.setTargetState(self.state_prepare_background)
+        self.state_set_delay.addTransition(t2m)
 
         t3 = QSignalTransition(); t3.setSenderObject(self.calibration_manager)
         t3.setSignal(b"2captureCompleted()"); t3.setTargetState(self.state_analyze)
@@ -13417,17 +13480,17 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         # <<<
 
     @staticmethod
-    def missing_requirements(cm) -> list[str]:
+    def missing_requirements(cm, *, manual_start: bool = False) -> list[str]:
         """Return a list of human-readable missing prerequisites."""
         missing = []
+        if manual_start:
+            return missing
         if cm.get_nozzle_center() is None:
             missing.append("Nozzle center (machine coords)")
-        if cm.get_nozzle_center_image_position() is None:
-            missing.append("Nozzle center (image coords)")
-        if cm.get_background_image() is None:
-            missing.append("Background image")
         if cm.get_emergence_time() is None:
             missing.append("Emergence time")
+        if cm.get_trajectory_vector() is None:
+            missing.append("Trajectory vector")
         return missing
 
     # ----- utils -----
@@ -13540,6 +13603,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if (X == int(cur['X'])) and (Y == int(cur['Y'])) and (Z == int(cur['Z'])):
             self.calibration_manager.emitMoveCompleted()
             return
+        self._discard_post_move_pending = True
+        self._discard_post_move_reason = "stage_move"
+        self._discard_post_move_target_xyz = [int(X), int(Y), int(Z)]
         self._request_move_absolute_with_timeout(
             (X, Y, Z),
             timeout_ms=15_000,
@@ -13572,6 +13638,312 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         dX = int(max(-self.max_center_step, min(self.max_center_step, dX)))
         dZ = int(max(-self.max_center_step, min(self.max_center_step, dZ)))
         return (dX, 0, dZ)
+
+    def _reset_contour_tracker(self):
+        cam = getattr(self.model, "droplet_camera_model", None)
+        if cam is None:
+            return
+        try:
+            if hasattr(cam, "reset_droplet_contour_tracker"):
+                cam.reset_droplet_contour_tracker()
+            else:
+                cam._last_droplet_center_px = None
+        except Exception:
+            pass
+
+    @staticmethod
+    def _normalize_center(center) -> tuple[int, int] | None:
+        if center is None:
+            return None
+        try:
+            return (int(center[0]), int(center[1]))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _center_distance_px(a, b) -> float:
+        if a is None or b is None:
+            return 0.0
+        try:
+            dx = float(a[0]) - float(b[0])
+            dy = float(a[1]) - float(b[1])
+            return float(math.hypot(dx, dy))
+        except Exception:
+            return 0.0
+
+    def _search_jump_thresholds_px(self) -> tuple[float, float, bool]:
+        base_jump = float(getattr(self, "search_center_jump_max_px", 280.0))
+        cross_scale = float(max(1.0, getattr(self, "search_cross_delay_jump_scale", 1.8)))
+        last_delay = getattr(self, "_search_last_delay_us", None)
+        cur_delay = getattr(self, "current_delay_us", None)
+        same_delay = bool(
+            last_delay is not None
+            and cur_delay is not None
+            and int(last_delay) == int(cur_delay)
+        )
+        jump_limit = float(base_jump if same_delay else (base_jump * cross_scale))
+        stable_jump = float(base_jump * (0.5 if same_delay else 0.85))
+        return float(jump_limit), float(max(8.0, stable_jump)), bool(same_delay)
+
+    def _set_startup_centering_mode(self, _reason: str):
+        self._centered = False
+        self._center_last_center = None
+        self._center_stable_hits = 0
+        self._center_jump_reject_streak = 0
+
+    def _reset_search_consistency_after_motion(self):
+        self._search_last_center = None
+        self._search_last_delay_us = None
+        self._search_stable_hits = 0
+        self._search_confirm_same_settings_pending = False
+        self._reset_contour_tracker()
+
+    def _damped_recenter_move(self, dX: int, dZ: int, *, tracking_mode: bool) -> tuple[int, int]:
+        if bool(tracking_mode):
+            gain = float(getattr(self, "center_recenter_gain_tracking", 0.70))
+            max_step = int(getattr(self, "center_recenter_max_step_tracking", 1100))
+        else:
+            gain = float(getattr(self, "center_recenter_gain_startup", 0.60))
+            max_step = int(getattr(self, "center_recenter_max_step_startup", 900))
+
+        sx = int(round(float(dX) * float(gain)))
+        sz = int(round(float(dZ) * float(gain)))
+        if int(dX) != 0 and sx == 0:
+            sx = 1 if int(dX) > 0 else -1
+        if int(dZ) != 0 and sz == 0:
+            sz = 1 if int(dZ) > 0 else -1
+
+        max_step = int(max(100, max_step))
+        sx = int(max(-max_step, min(max_step, sx)))
+        sz = int(max(-max_step, min(max_step, sz)))
+        return int(sx), int(sz)
+
+    def _current_focus_delta_steps(self):
+        try:
+            cur = self.model.machine_model.get_current_position_dict()
+            base_y = int((self.nozzle_center_machine or {}).get('Y', cur.get('Y', 0)))
+            cur_y = int(cur.get('Y', base_y))
+            return int(cur_y - base_y)
+        except Exception:
+            return None
+
+    def _focus_improvement_abs_epsilon(self) -> float:
+        threshold = float(getattr(self, "focus_ok_threshold", 0.0) or 0.0)
+        return float(max(10_000.0, threshold * 0.002))
+
+    def _focus_is_improved(self, focus_val: float) -> bool:
+        best = float(getattr(self, "_focus_best", 0.0) or 0.0)
+        if best <= 0.0:
+            return True
+        rel_gain = float(max(0.0, getattr(self, "_min_focus_gain", 0.0)))
+        abs_eps = float(self._focus_improvement_abs_epsilon())
+        return bool(
+            float(focus_val) >= ((1.0 + rel_gain) * best)
+            or float(focus_val) >= (best + abs_eps)
+        )
+
+    def _register_focus_progress(self, focus_val: float, *, source: str):
+        self._focus_best = float(max(float(getattr(self, "_focus_best", 0.0) or 0.0), float(focus_val)))
+        delta_steps = self._current_focus_delta_steps()
+        if delta_steps is not None:
+            self._focus_best_y_offset_steps = int(delta_steps)
+            self._focus_best_source = str(source or "")
+        self._update_y_focus_offset()
+
+    def _char_ratio_snapshot(self) -> dict:
+        total = int(max(0, int(getattr(self, "_char_frames_evaluated", 0))))
+        if total <= 0:
+            return {
+                "evaluated_frames": 0,
+                "invalid_hits": int(getattr(self, "_char_invalid_hits", 0)),
+                "multiple_hits": int(getattr(self, "multiple_droplet_hits", 0)),
+                "stream_hits": int(getattr(self, "_char_stream_hits", 0)),
+                "invalid_ratio": 0.0,
+                "multiple_ratio": 0.0,
+                "stream_ratio": 0.0,
+            }
+        invalid_hits = int(getattr(self, "_char_invalid_hits", 0))
+        multiple_hits = int(getattr(self, "multiple_droplet_hits", 0))
+        stream_hits = int(getattr(self, "_char_stream_hits", 0))
+        denom = float(max(1, total))
+        return {
+            "evaluated_frames": int(total),
+            "invalid_hits": int(invalid_hits),
+            "multiple_hits": int(multiple_hits),
+            "stream_hits": int(stream_hits),
+            "invalid_ratio": float(invalid_hits / denom),
+            "multiple_ratio": float(multiple_hits / denom),
+            "stream_ratio": float(stream_hits / denom),
+        }
+
+    def _characterization_ratio_abort_reason(self) -> str | None:
+        ratios = self._char_ratio_snapshot()
+        min_frames = int(max(6, min(int(self.num_images), 10)))
+        if int(ratios.get("evaluated_frames", 0)) < min_frames:
+            return None
+        if float(ratios.get("invalid_ratio", 0.0)) > float(getattr(self, "char_max_invalid_ratio", 0.45)):
+            return "char_invalid_ratio_exceeded"
+        if float(ratios.get("multiple_ratio", 0.0)) > float(getattr(self, "char_max_multiple_ratio", 0.20)):
+            return "char_multiple_ratio_exceeded"
+        if float(ratios.get("stream_ratio", 0.0)) > float(getattr(self, "char_max_stream_ratio", 0.20)):
+            return "char_stream_ratio_exceeded"
+        return None
+
+    def _handle_no_droplet_retry(self, reason: str, *, stage_message: str) -> None:
+        reason = str(reason or "no_contour")
+        self._set_startup_centering_mode(reason)
+        self._reset_search_consistency_after_motion()
+        if self.manual_start:
+            self._manual_search_miss_count += 1
+            if self._manual_search_miss_count >= self._manual_search_miss_limit:
+                self._abort(
+                    f"Droplet not visible at fixed manual settings ({self._manual_search_miss_count}/"
+                    f"{self._manual_search_miss_limit})."
+                )
+                return
+            self.stageChanged.emit(
+                f"{stage_message} ({self._manual_search_miss_count}/{self._manual_search_miss_limit})"
+            )
+            self._search_confirm_same_settings_pending = True
+        else:
+            self.stageChanged.emit(stage_message)
+        self.emitContinueSearch()
+
+    def _count_good_replicates(self) -> int:
+        threshold = float(getattr(self, "circularity_threshold", 1.18))
+        return int(sum(1 for c in list(self.circularity_values or []) if float(c) < threshold))
+
+    def _build_result_payload(self, *, valid: bool, invalid_reason: str | None = None) -> dict:
+        cur_pressure = None
+        cur_pw_us = None
+        try:
+            cur_pressure = float(self.model.machine_model.get_current_print_pressure())
+        except Exception:
+            cur_pressure = None
+        try:
+            cur_pw_us = int(self.model.machine_model.get_print_pulse_width() or 0)
+        except Exception:
+            cur_pw_us = None
+
+        ratios = self._char_ratio_snapshot()
+        payload = {
+            "pressure": cur_pressure,
+            "delay_us": (
+                None if getattr(self, "current_delay_us", None) is None else int(self.current_delay_us)
+            ),
+            "mean_center_px": None,
+            "mean_volume": None,
+            "cv_volume_percent": None,
+            "mean_position_machine": None,
+            "valid": bool(valid),
+            "invalid_reason": (None if valid else str(invalid_reason or "invalid")),
+            "droplet_positions": [tuple(map(int, p)) for p in list(self.droplet_positions or [])],
+            "positions_px": [tuple(map(int, p)) for p in list(self.droplet_positions or [])],
+            "droplet_volumes": [float(v) for v in list(self.droplet_volumes or [])],
+            "circularity_values": [float(c) for c in list(self.circularity_values or [])],
+            "droplet_focus": [float(f) for f in list(self.droplet_focus or [])],
+            "print_pulse_width_us": cur_pw_us,
+            "accepted_replicates": int(self._count_good_replicates()),
+            "captured_replicates": int(len(list(self.droplet_volumes or []))),
+            "multiple_detections": int(getattr(self, "multiple_droplet_hits", 0)),
+            "stream_like_detections": int(getattr(self, "_char_stream_hits", 0)),
+            "invalid_frame_hits": int(getattr(self, "_char_invalid_hits", 0)),
+            "characterization_frames": int(getattr(self, "_char_frames_evaluated", 0)),
+            "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
+            "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
+            "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
+            "y_focus_offset_steps": int(getattr(self, "_y_focus_offset_steps", 0) or 0),
+            "best_focus_seen": float(getattr(self, "_focus_best", 0.0) or 0.0),
+            "focus_moves_done": int(getattr(self, "_focus_moves_done", 0)),
+            "focus_dir_switches": int(getattr(self, "focus_dir_switches", 0)),
+            "best_focus_y_offset_steps": getattr(self, "_focus_best_y_offset_steps", None),
+        }
+        if valid and self.droplet_volumes:
+            mean_vol = float(np.mean(self.droplet_volumes))
+            cv_vol = float(np.std(self.droplet_volumes) / (mean_vol + 1e-9) * 100.0)
+            mean_center = tuple(np.mean(np.array(self.droplet_positions), axis=0).astype(int))
+            payload["mean_center_px"] = mean_center
+            payload["mean_volume"] = mean_vol
+            payload["cv_volume_percent"] = cv_vol
+            try:
+                machine_position = self.model.machine_model.get_current_position_dict()
+                payload["mean_position_machine"] = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
+                    mean_center, machine_position
+                )
+            except Exception:
+                payload["mean_position_machine"] = None
+        return payload
+
+    def _is_within(self, center_px, tol_px: int) -> bool:
+        H, W = self.droplet_image.shape[:2]
+        cx, cy = int(center_px[0]), int(center_px[1])
+        tx, ty = W // 2, H // 2
+        return (abs(cx - tx) <= int(tol_px)) and (abs(cy - ty) <= int(tol_px))
+
+    def _recenter_immediate(self, center_px) -> None:
+        H, W = self.droplet_image.shape[:2]
+        target = (W // 2, H // 2)
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(
+            (int(center_px[0]), int(center_px[1])), target
+        )
+        dX, dZ = self._damped_recenter_move(int(dX_raw), int(dZ_raw), tracking_mode=True)
+        self.stageChanged.emit(f"Center-first policy: recenter before focusing (move XZ=({dX},{dZ}))")
+        self._char_need_capture = True
+        self._set_startup_centering_mode("center_first_recenter")
+        self._reset_search_consistency_after_motion()
+        self._safe_move_relative((int(dX), 0, int(dZ)))
+
+    def _check_boundary_and_maybe_recenter(self, center_px) -> bool:
+        if self._is_within(center_px, self.boundary_tol_px):
+            self._oob_streak = 0
+            self._oob_positions.clear()
+            return False
+
+        self._oob_streak += 1
+        self._oob_total += 1
+        self._oob_positions.append(tuple(map(int, center_px)))
+
+        if self._oob_total >= self.max_oob_total:
+            self._final_invalid_reason = "oob_total_limit"
+            self.emitInitiateAnalyzeCharacterization()
+            return True
+
+        if self._oob_streak < 2:
+            self.stageChanged.emit("Out-of-bound droplet (1st) → holding position")
+            return False
+
+        avgx = int(round(sum(p[0] for p in self._oob_positions) / len(self._oob_positions)))
+        avgy = int(round(sum(p[1] for p in self._oob_positions) / len(self._oob_positions)))
+        H, W = self.droplet_image.shape[:2]
+        target = (W // 2, H // 2)
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target((avgx, avgy), target)
+        dX, dZ = self._damped_recenter_move(int(dX_raw), int(dZ_raw), tracking_mode=True)
+
+        self._oob_streak = 0
+        self._oob_positions.clear()
+        self._recenter_moves += 1
+        if self._recenter_moves >= self.max_recenter_moves:
+            self._final_invalid_reason = "recentre_limit"
+            self.emitInitiateAnalyzeCharacterization()
+            return True
+
+        self.stageChanged.emit(f"2x out-of-bound → recenter to averaged offset: move XZ=({dX},{dZ})")
+        self._char_need_capture = True
+        self._set_startup_centering_mode("boundary_recenter")
+        self._reset_search_consistency_after_motion()
+        self._safe_move_relative((int(dX), 0, int(dZ)))
+        return True
+
+    def _update_y_focus_offset(self):
+        try:
+            cur = self.model.machine_model.get_current_position_dict()
+            base_y = int((self.nozzle_center_machine or {}).get('Y', cur.get('Y', 0)))
+            cur_y = int(cur.get('Y', base_y))
+            delta = cur_y - base_y
+            a = float(self._y_focus_ema_alpha)
+            self._y_focus_offset_steps = int(round((1.0 - a) * self._y_focus_offset_steps + a * delta))
+        except Exception as e:
+            self.stageChanged.emit(f"Could not update Y-offset (using previous): {e}")
 
     def _is_dead(self) -> bool:
         return self._aborted or self._finished
@@ -13622,6 +13994,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             set_attr="background_image",
             stage_text="Capturing background image",
             attempts_total=3, retry_delay_ms=100, guard_timeout_ms=10_000,
+            on_success=lambda _frame: self._reset_contour_tracker(),
             final_error_msg="Failed to capture background image."
         )
 
@@ -13633,28 +14006,53 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         
         if self._is_dead():
             return
-        
+
+        if self._search_confirm_same_settings_pending and self.current_delay_us is not None:
+            self._search_confirm_same_settings_pending = False
+            self.stageChanged.emit(f"Re-capturing at {self.current_delay_us} μs")
+            self.calibration_manager.changeSettingsRequested.emit(
+                {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                self.calibration_manager.emitSettingsChangeCompleted
+            )
+            return
+
+        if self.manual_start:
+            self.current_delay_us = int(self._manual_fixed_delay_us)
+            self.stageChanged.emit(f"Using fixed manual delay {self.current_delay_us} μs")
+            self.calibration_manager.changeSettingsRequested.emit(
+                {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                self.calibration_manager.emitSettingsChangeCompleted
+            )
+            return
+
         if self._delay_try_index < len(self.delay_offsets_us):
             d_us = self.target_delay_us + self.delay_offsets_us[self._delay_try_index]
             self._delay_try_index += 1
-        else:
-            self._not_found_count += 1
-            if self._not_found_count > self._not_found_limit:
-                return self._abort("Droplet not found (max retries).")
-            # Retry strategy differs for manual mode:
-            if not self.manual_start and self.vel_steps_per_s:
-                self.stageChanged.emit("Droplet not found yet → nudging along velocity and retrying")
-                vX, vY, vZ = map(float, self.vel_steps_per_s)
-                nudge = 0.02
-                self._safe_move_relative((int(vX * nudge), int(vY * nudge), int((-vZ) * nudge)))
-            else:
-                self.stageChanged.emit("Droplet not found yet → skipping stage nudge (manual start); retrying delay sweep")
-            self._delay_try_index = 0
-            d_us = self.target_delay_us + self.delay_offsets_us[self._delay_try_index]
-            self._delay_try_index += 1
+            self.current_delay_us = self._clamp_delay(d_us)
+            self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} μs")
+            self.calibration_manager.changeSettingsRequested.emit(
+                {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
+                self.calibration_manager.emitSettingsChangeCompleted
+            )
+            return
 
-        self.current_delay_us = self._clamp_delay(d_us)
-        self.stageChanged.emit(f"Setting flash delay to {self.current_delay_us} μs")
+        self._not_found_count += 1
+        if self._not_found_count > self._not_found_limit:
+            return self._abort("Droplet not found (max retries).")
+
+        if self.vel_steps_per_s:
+            self.stageChanged.emit("Droplet not found yet → nudging along velocity and retrying")
+            vX, vY, vZ = map(float, self.vel_steps_per_s)
+            nudge = 0.02
+            self._delay_try_index = 0
+            self._set_startup_centering_mode("delay_sweep_exhausted_nudge")
+            self._reset_search_consistency_after_motion()
+            self._safe_move_relative((int(vX * nudge), int(vY * nudge), int((-vZ) * nudge)))
+            return
+
+        self._delay_try_index = 0
+        self.current_delay_us = self._clamp_delay(self.target_delay_us)
+        self.stageChanged.emit(f"Reusing flash delay {self.current_delay_us} μs")
         self.calibration_manager.changeSettingsRequested.emit(
             {"flash_delay": int(self.current_delay_us), "num_droplets": 1},
             self.calibration_manager.emitSettingsChangeCompleted
@@ -13680,11 +14078,14 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         saved = self._save_capture(self.droplet_image, stage="search_capture")
         frame_idx = saved["index"] if saved else None
 
-        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
-            self.droplet_image, self.background_image
+        contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image,
+            self.background_image,
+            return_details=True,
         )
-        center_px = None
-        if contour is not None:
+        details = dict(details or {})
+        center_px = self._normalize_center(details.get("center"))
+        if center_px is None and contour is not None:
             x, y, w, h = cv2.boundingRect(contour)
             center_px = (int(x + w // 2), int(y + h // 2))
 
@@ -13693,7 +14094,11 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 overlay,
                 role="search_overlay",
                 frame_index=frame_idx,
-                meta_extra={"stage": "search_overlay", "had_contour": bool(contour is not None)}
+                meta_extra={
+                    "stage": "search_overlay",
+                    "had_contour": bool(contour is not None),
+                    "reason": str(details.get("reason", "")),
+                }
             )
 
             self._append_analysis({
@@ -13702,17 +14107,84 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 "flash_delay_us": int(self.current_delay_us),
                 "found": bool(contour is not None),
                 "center_px": center_px,
+                "reason": str(details.get("reason", "")),
+                "p95": float(details.get("p95", 0.0) or 0.0),
                 "timestamp": datetime.now().isoformat(),
             })
 
-        if contour is None:
-            self.stageChanged.emit("No droplet: trying next delay/position")
+        if self._discard_post_move_pending:
+            self._discard_post_move_pending = False
+            self._discard_post_move_reason = ""
+            self._discard_post_move_target_xyz = None
+            self.stageChanged.emit("Discarding first post-move frame → recapturing")
+            self._search_confirm_same_settings_pending = True
             self.presentImageSignal.emit(overlay)
             self.emitContinueSearch()
             return
 
+        if contour is None:
+            self.presentImageSignal.emit(overlay)
+            self._handle_no_droplet_retry(
+                str(details.get("reason", "no_contour")),
+                stage_message="No droplet visible → recapturing at fixed settings"
+                if self.manual_start
+                else "No droplet: trying next delay/position",
+            )
+            return
+
+        p95 = float(details.get("p95", 0.0) or 0.0)
+        jump_dist = self._center_distance_px(center_px, self._search_last_center)
+        jump_limit_px, stable_jump_px, same_delay_as_last = self._search_jump_thresholds_px()
+        signal_ok = float(p95) >= float(getattr(self, "search_min_signal_p95", 10.0))
+        jump_rejected = (
+            self._search_last_center is not None
+            and float(jump_dist) > float(jump_limit_px)
+        )
+
+        if (not signal_ok) or jump_rejected:
+            self._search_stable_hits = 0
+            self._search_last_center = None
+            self._search_last_delay_us = None
+            self.presentImageSignal.emit(overlay)
+            if self.manual_start:
+                self._search_confirm_same_settings_pending = True
+                self.stageChanged.emit(
+                    "Contour rejected at fixed settings → recapturing"
+                )
+            else:
+                self.stageChanged.emit(
+                    f"{'Unstable center jump' if jump_rejected else 'Contour signal too weak'} → continuing search"
+                )
+            self.emitContinueSearch()
+            return
+
+        if self.manual_start:
+            self._manual_search_miss_count = 0
+
         cxy = center_px
         self.presentImageSignal.emit(overlay)
+        stable_hits_required = 1 if not bool(getattr(self, "_centered", False)) else int(
+            getattr(self, "search_stable_hits_required", 2)
+        )
+        if self._search_last_center is None:
+            self._search_stable_hits = 1
+        else:
+            if bool(same_delay_as_last) and float(jump_dist) <= float(stable_jump_px):
+                self._search_stable_hits += 1
+            else:
+                self._search_stable_hits = 1
+        self._search_last_center = tuple(cxy)
+        if self.current_delay_us is not None:
+            self._search_last_delay_us = int(self.current_delay_us)
+
+        if int(self._search_stable_hits) < int(stable_hits_required):
+            self._search_confirm_same_settings_pending = True
+            self.stageChanged.emit(
+                f"Droplet candidate hit {self._search_stable_hits}/{stable_hits_required} → requesting confirmation frame"
+            )
+            self.emitContinueSearch()
+            return
+
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
         self.emitDropletFound()
@@ -13722,26 +14194,70 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if self._is_dead():
             return
         self.stageChanged.emit("Centering droplet in frame")
-        contour, overlay = self.model.droplet_camera_model.identify_droplet_contour(
-            self.droplet_image, self.background_image
+        contour, overlay, details = self.model.droplet_camera_model.identify_droplet_contour(
+            self.droplet_image,
+            self.background_image,
+            return_details=True,
         )
+        details = dict(details or {})
         if contour is None:
             self._lost_count += 1
             if self._lost_count > self._lost_limit:
-                return self._abort("Droplet repeatedly lost during centering.")
-            self.stageChanged.emit("Droplet lost while centering → retrying")
+                self._handle_no_droplet_retry(
+                    str(details.get("reason", "no_contour")),
+                    stage_message="Droplet repeatedly lost during centering → restarting fixed-setting search"
+                    if self.manual_start
+                    else "Droplet repeatedly lost during centering → retrying search",
+                )
+                return
+            self.stageChanged.emit(
+                "Droplet lost while centering → retrying at fixed settings"
+                if self.manual_start
+                else "Droplet lost while centering → retrying"
+            )
             self.presentImageSignal.emit(overlay)
+            self._set_startup_centering_mode("center_lost")
+            self._reset_search_consistency_after_motion()
+            if self.manual_start:
+                self._search_confirm_same_settings_pending = True
             self.emitContinueSearch()
             return
 
-        x, y, w, h = cv2.boundingRect(contour)
-        cxy = (x + w//2, y + h//2)
+        cxy = self._normalize_center(details.get("center"))
+        if cxy is None:
+            x, y, w, h = cv2.boundingRect(contour)
+            cxy = (x + w//2, y + h//2)
+        center_jump = self._center_distance_px(cxy, self._center_last_center)
+        if self._center_last_center is not None and float(center_jump) > float(self.center_jump_reject_px):
+            if bool(getattr(self, "_centered", False)):
+                self._center_jump_reject_streak += 1
+                if self._center_jump_reject_streak >= 4:
+                    return self._abort("Centering unstable across frames.")
+                self.stageChanged.emit("Center jump rejected → restarting search")
+                self._set_startup_centering_mode("center_jump_rejected")
+                self._reset_search_consistency_after_motion()
+                if self.manual_start:
+                    self._search_confirm_same_settings_pending = True
+                self.emitContinueSearch()
+                return
+        self._center_jump_reject_streak = 0
+        if self._center_last_center is None:
+            self._center_stable_hits = 1
+        else:
+            if float(center_jump) <= float(max(8.0, self.center_jump_reject_px * 0.35)):
+                self._center_stable_hits += 1
+            else:
+                self._center_stable_hits = 1
+        self._center_last_center = tuple(cxy)
         H, W = overlay.shape[:2]
         target = (W//2, H//2)
         tol = 150
         if abs(cxy[0]-target[0]) <= tol and abs(cxy[1]-target[1]) <= tol:
             self.stageChanged.emit("Droplet centered")
-            if not getattr(self, "_xz_offset_updated_this_pressure", False):
+            if (
+                int(self._center_stable_hits) >= int(getattr(self, "center_stable_hits_for_bias_update", 3))
+                and not getattr(self, "_xz_offset_updated_this_pressure", False)
+            ):
                 self._update_xz_track_offset()
                 self._xz_offset_updated_this_pressure = True
             self._centered = True
@@ -13749,13 +14265,27 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitDropletCentered()
             return
 
-        dX, dY, dZ = self._bounded_center_move(cxy, target)
-        self.stageChanged.emit(f"Recenter move (clamped): {dX},{dY},{dZ}")
-        self._safe_move_relative((dX, dY, dZ))
+        dX_raw, _dY_unused, dZ_raw = self.model.droplet_camera_model.calculate_move_to_target(cxy, target)
+        dX, dZ = self._damped_recenter_move(
+            int(dX_raw),
+            int(dZ_raw),
+            tracking_mode=bool(getattr(self, "_centered", False)),
+        )
+        self._recenter_moves += 1
+        if self._recenter_moves >= self.max_recenter_moves:
+            return self._abort("Too many recenter moves while centering.")
+        self.stageChanged.emit(f"Recenter move (damped): {dX},0,{dZ}")
+        self._set_startup_centering_mode("center_recenter_move")
+        self._reset_search_consistency_after_motion()
+        self._safe_move_relative((dX, 0, dZ))
 
     @Slot()
     def onCharacterization(self):
         if self._is_dead():
+            return
+        if self._char_need_capture:
+            self._char_need_capture = False
+            self.emitContinueCharacterization()
             return
         self.stageChanged.emit("Characterizing droplet")
         result, annotated = self.model.droplet_camera_model.characterize_droplet(
@@ -13793,49 +14323,125 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                     "timestamp": datetime.now().isoformat(),
                 })
 
+        self._char_attempts += 1
+        self._char_frames_evaluated += 1
+
         if result is None:
+            self._char_invalid_hits += 1
             self.stageChanged.emit("Capture failed → recapturing")
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self._final_invalid_reason = str(ratio_reason)
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            if self._char_attempts >= self._char_attempt_limit:
+                self._final_invalid_reason = "characterization_attempt_limit"
+                self.emitInitiateAnalyzeCharacterization()
+                return
             self.emitContinueCharacterization()
             return
         if result == 'Multiple':
-            cur_p = float(self.model.machine_model.get_current_print_pressure())
-            self.new_pressure = max(self.min_pressure, cur_p - self.pressure_step)
-            if self.new_pressure >= cur_p and cur_p <= self.min_pressure:
-                return self._abort("Minimum pressure reached (multiple droplets persist).")
-            self.stageChanged.emit(f"Multiple droplets → decreasing pressure to {self.new_pressure:.3f} psi")
-            self.droplet_positions.clear(); self.droplet_focus.clear()
-            self.circularity_values.clear(); self.droplet_volumes.clear()
-            self.image_counter = 0
-            self.emitChangePressure()
+            self.multiple_droplet_hits += 1
+            self._char_invalid_hits += 1
+            self.stageChanged.emit("Multiple droplets in frame → skipping (replicate not counted)")
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self._final_invalid_reason = str(ratio_reason)
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            if self._char_attempts >= self._char_attempt_limit:
+                self._final_invalid_reason = "characterization_attempt_limit"
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            self.emitContinueCharacterization()
             return
 
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
+        center_px = tuple(map(int, result.get("center", (0, 0))))
+        circularity_ellipse = float(result.get("circularity_ellipse", 99.0))
+
+        if float(circularity_ellipse) <= float(getattr(self, "char_stream_circularity_max", 0.58)):
+            self._char_stream_hits += 1
+            self._char_invalid_hits += 1
+            self.stageChanged.emit(
+                f"Stream-like frame rejected (circularity={circularity_ellipse:.2f}) → recapturing"
+            )
+            ratio_reason = self._characterization_ratio_abort_reason()
+            if ratio_reason is not None:
+                self._final_invalid_reason = str(ratio_reason)
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            if self._char_attempts >= self._char_attempt_limit:
+                self._final_invalid_reason = "characterization_attempt_limit"
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            self.emitContinueCharacterization()
+            return
+
+        center_jump = self._center_distance_px(center_px, self._center_last_center)
+        if self._center_last_center is None:
+            self._center_stable_hits = 1
+        else:
+            if float(center_jump) <= float(max(8.0, self.center_jump_reject_px * 0.35)):
+                self._center_stable_hits += 1
+            else:
+                self._center_stable_hits = 1
+        self._center_last_center = tuple(center_px)
+
+        if (
+            self._is_within(center_px, self.center_first_tol_px)
+            and int(self._center_stable_hits) >= int(getattr(self, "center_stable_hits_for_bias_update", 3))
+            and not getattr(self, "_xz_offset_updated_this_pressure", False)
+        ):
+            self._update_xz_track_offset()
+            self._xz_offset_updated_this_pressure = True
+
+        if not self._is_within(center_px, self.center_first_tol_px):
+            self._recenter_moves += 1
+            if not self._is_within(center_px, self.boundary_tol_px):
+                self._oob_total += 1
+                if self._oob_total >= self.max_oob_total:
+                    self._final_invalid_reason = "oob_total_limit_centerfirst"
+                    self.emitInitiateAnalyzeCharacterization()
+                    return
+            if self._recenter_moves >= self.max_recenter_moves:
+                self._final_invalid_reason = "recentre_limit_centerfirst"
+                self.emitInitiateAnalyzeCharacterization()
+                return
+            self._recenter_immediate(center_px)
+            return
 
         # -------- focus control with 2-step probe per direction --------
+        if focus_val >= self.focus_ok_threshold:
+            if self._focus_is_improved(focus_val):
+                self._register_focus_progress(focus_val, source="focus_threshold_met")
+            else:
+                self._update_y_focus_offset()
+
         if focus_val < self.focus_ok_threshold:
-            if self._focus_best <= 0.0:
-                self._focus_best = focus_val
-
-            improved = (focus_val >= (1.0 + self._min_focus_gain) * self._focus_best)
-
+            improved = self._focus_is_improved(focus_val)
             if improved:
-                self._focus_best = focus_val
+                self._register_focus_progress(focus_val, source="focus_below_threshold")
                 self._focus_same_dir_tries = 0
                 self.focus_step = max(self.focus_min_step, self.focus_step // 2)
             else:
                 self._focus_same_dir_tries += 1
-                if self._focus_same_dir_tries >= 3:
+                if self._focus_same_dir_tries >= 4:
                     self._focus_same_dir_tries = 0
                     self.focus_dir *= -1
                     self.focus_dir_switches += 1
-                    self.focus_step = min(self.max_focus_step, max(self.focus_min_step, self.focus_step * 2))
+                    self.focus_step = min(16, max(self.focus_min_step, self.focus_step * 2))
                     if self.focus_dir_switches > self.focus_switch_limit:
-                        return self._abort("Focus oscillation limit reached.")
+                        self._final_invalid_reason = "focus_oscillation_limit"
+                        self.emitInitiateAnalyzeCharacterization()
+                        return
 
             self._focus_moves_done += 1
             if self._focus_moves_done > self._focus_move_budget:
-                return self._abort("Focus move budget exceeded.")
+                self._final_invalid_reason = "focus_move_budget_exceeded"
+                self.emitInitiateAnalyzeCharacterization()
+                return
 
             dY = int(self.focus_dir * self.focus_step)
             self.stageChanged.emit(f"Focus low ({focus_val:.0f}) → Y move {dY} steps")
@@ -13845,13 +14451,17 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
         # Accept replicate
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
-        self.circularity_values.append(float(result.get("circularity_ellipse", 99.0)))
-        self.droplet_positions.append(tuple(map(int, result.get("center", (0,0)))))
+        self.circularity_values.append(float(circularity_ellipse))
+        self.droplet_positions.append(tuple(center_px))
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
 
+        if self._check_boundary_and_maybe_recenter(center_px):
+            return
+
         if self._should_early_stop_characterization():
+            self._early_stop_satisfied = True
             self.stageChanged.emit(
                 f"Characterization converged early at {self.image_counter} replicates."
             )
@@ -13878,46 +14488,30 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if self._is_dead():
             return
         self.stageChanged.emit("Analyzing droplet characterization")
-        if not self.droplet_volumes:
-            return self._abort("No droplet volumes captured.")
-        if not all(c < self.circularity_threshold for c in self.circularity_values):
-            return self._abort("Droplets not circular enough — consider a later delay.")
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
+        invalid_reasons = []
+        if not good:
+            invalid_reasons.append(str(self._final_invalid_reason or "no_good_replicates"))
+        elif not self._early_stop_satisfied and len(good) < int(self.num_images):
+            invalid_reasons.append("insufficient_good_replicates")
+        ratio_reason = self._characterization_ratio_abort_reason()
+        if ratio_reason is not None:
+            invalid_reasons.append(str(ratio_reason))
+        if self._final_invalid_reason:
+            invalid_reasons.append(str(self._final_invalid_reason))
 
-        mean_vol = float(np.mean(self.droplet_volumes))
-        cv_vol   = float(np.std(self.droplet_volumes) / (mean_vol + 1e-9) * 100.0)
-        mean_center = tuple(np.mean(np.array(self.droplet_positions), axis=0).astype(int))
-        final_img = self._annotate_final(mean_center, mean_vol, cv_vol)
-        self.presentImageSignal.emit(final_img)
+        invalid_reason = str(invalid_reasons[0]) if invalid_reasons else None
+        results = self._build_result_payload(valid=(invalid_reason is None), invalid_reason=invalid_reason)
 
-        machine_position = self.model.machine_model.get_current_position_dict()
-        drop_machine = self.model.droplet_camera_model.convert_pixel_position_to_motor_steps(
-            mean_center, machine_position
-        )
-
-        # NEW: include current pressure & pulse width for easy summarization
-        cur_pressure = float(self.model.machine_model.get_current_print_pressure())
-        cur_pw_us    = int(self.model.machine_model.get_print_pulse_width() or 0)
-
-        results = {
-            # harmonize with sweep fields
-            "pressure": cur_pressure,                       # convenience field
-            "delay_us": int(self.current_delay_us),
-            "mean_center_px": mean_center,
-            "mean_volume": mean_vol,
-            "cv_volume_percent": cv_vol,
-            "mean_position_machine": drop_machine,
-            "valid": True,
-
-            # keep detailed arrays as before
-            "droplet_positions": self.droplet_positions,
-            "positions_px": self.droplet_positions,         # alias retained
-            "droplet_volumes": [float(v) for v in self.droplet_volumes],
-            "circularity_values": [float(c) for c in self.circularity_values],
-            "droplet_focus": [float(f) for f in self.droplet_focus],
-
-            # pulse width convenience for downstream use
-            "print_pulse_width_us": cur_pw_us,
-        }
+        if bool(results.get("valid")):
+            final_img = self._annotate_final(
+                tuple(results.get("mean_center_px")),
+                float(results.get("mean_volume")),
+                float(results.get("cv_volume_percent")),
+            )
+            self.presentImageSignal.emit(final_img)
+        else:
+            self.stageChanged.emit(f"Droplet characterization invalid ({results.get('invalid_reason')})")
 
         # Persist the full result payload for later plotting without re-running
         if self._save_enabled:
@@ -13935,6 +14529,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 "delay_us": results.get("delay_us"),
                 "pressure": results.get("pressure"),
                 "print_pulse_width_us": results.get("print_pulse_width_us"),
+                "accepted_replicates": results.get("accepted_replicates"),
+                "captured_replicates": results.get("captured_replicates"),
+                "invalid_reason": results.get("invalid_reason"),
                 "timestamp": datetime.now().isoformat(),
             })
 

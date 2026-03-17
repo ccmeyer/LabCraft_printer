@@ -302,6 +302,44 @@ def test_memory_disabled_skips_sidecar_run_lookup_and_observations(tmp_path):
     manager.end_session()
 
 
+def test_pressure_sweep_summary_rows_preserve_droplet_search_invalid_reason(tmp_path):
+    model = _make_model(tmp_path)
+    manager = CalibrationManager(model)
+    manager.ensure_loaded = lambda: None
+    manager._safe_get_stock_solution = lambda: "Water"
+    manager.data = {
+        "runs": [
+            {
+                "run_id": "run_invalid_search",
+                "stock_solution": "Water",
+                "steps": {
+                    "droplet_search": [
+                        {
+                            "timestamp": "2026-03-17T11:00:00Z",
+                            "settings": {"print_width": 1500, "print_pressure": 1.62},
+                            "result": {
+                                "pressure": 1.62,
+                                "mean_volume": 9.87,
+                                "cv_volume_percent": 6.4,
+                                "valid": False,
+                                "invalid_reason": "char_invalid_ratio_exceeded",
+                                "print_pulse_width_us": 1500,
+                                "delay_us": 4300,
+                            },
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+
+    rows = manager.get_pressure_sweep_summary_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "search"
+    assert rows[0]["invalid_reason"] == "char_invalid_ratio_exceeded"
+
+
 def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
