@@ -2979,8 +2979,8 @@ class CalibrationManager(QObject):
 
     def _emit_readiness(self):
         # Helper to pack readiness + missing list for each process class
-        def pack(proc_cls):
-            missing = proc_cls.missing_requirements(self)
+        def pack(proc_cls, *args, **kwargs):
+            missing = self._process_missing(proc_cls, *args, **kwargs)
             return {"ready": len(missing) == 0, "missing": missing}
 
         readiness = {
@@ -2992,7 +2992,7 @@ class CalibrationManager(QObject):
             # "trajectory":                     pack(TrajectoryCalibrationProcess),
             "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
             # "droplet_search":                 pack(DropletSearchCalibrationProcess),
-            "droplet_characterization":       pack(DropletSearchCalibrationProcess),
+            "droplet_characterization":       pack(DropletSearchCalibrationProcess, manual_start=True),
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
         }
         self.readinessChanged.emit(readiness)

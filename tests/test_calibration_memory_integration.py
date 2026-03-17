@@ -340,6 +340,20 @@ def test_pressure_sweep_summary_rows_preserve_droplet_search_invalid_reason(tmp_
     assert rows[0]["invalid_reason"] == "char_invalid_ratio_exceeded"
 
 
+def test_emit_readiness_treats_manual_droplet_characterization_as_ready_without_trajectory_data(tmp_path):
+    model = _make_model(tmp_path)
+    manager = CalibrationManager(model)
+    captured = []
+    manager.readinessChanged.connect(lambda readiness: captured.append(readiness))
+
+    manager._emit_readiness()
+
+    assert captured
+    droplet_characterization = captured[-1]["droplet_characterization"]
+    assert droplet_characterization["ready"] is True
+    assert droplet_characterization["missing"] == []
+
+
 def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
