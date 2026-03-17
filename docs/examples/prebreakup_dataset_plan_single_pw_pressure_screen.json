@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "notes": "Starter single-pulse-width pressure screen for one reagent/nozzle pair. Edit the reagent/head/nozzle metadata and pressure range before use.",
+  "default_background_policy": "per_condition",
+  "defaults": {
+    "delay_mode": "emergence_relative",
+    "delay_start_offset_us": 100,
+    "delay_stop_offset_us": 2200,
+    "delay_step_us": 50,
+    "replicates_per_delay": 2,
+    "stock_solution": "EDIT_ME_REAGENT",
+    "printer_head_id": "EDIT_ME_HEAD",
+    "nozzle_id": "EDIT_ME_NOZZLE",
+    "label_key": "EDIT_ME_LABEL_KEY"
+  },
+  "conditions": [
+    {
+      "condition_id": "pw1300_pressure_screen",
+      "pulse_width_us": 1300,
+      "pressure_start_psi": 0.40,
+      "pressure_stop_psi": 0.64,
+      "pressure_step_psi": 0.03,
+      "notes": "Starter pressure screen at one pulse width."
+    }
+  ]
+}

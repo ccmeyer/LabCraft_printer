@@ -74,7 +74,7 @@ class Controller(QObject):
         self._dfu_script = (self._ui_dir / "dfu_update.py").resolve()
         self._cwd = self._repo_root                                 # IMPORTANT: run child from repo root
 
-        self._bin_path_current = (self._repo_root / "firmware" / "freeRTOS_LabCraft.bin").resolve()
+        self._bin_path_current = (self._repo_root / "firmware" / "artifacts"/ "LabCraft_firmware.bin").resolve()
         self._bin_path_legacy  = (self._repo_root / "firmware" / "freeRTOS_LabCraft_legacy.bin").resolve()
 
         # This variable will temporarily hold the callback for the next capture.
@@ -329,7 +329,8 @@ class Controller(QObject):
         if self._dfu_thread and self._dfu_thread.isRunning():
             return  # already running
 
-        bin_path = self._bin_path_legacy if manual else self._bin_path_current
+        # bin_path = self._bin_path_legacy if manual else self._bin_path_current
+        bin_path = self._bin_path_current
 
         self._dfu_thread = DfuUpdateWorker(
             dfu_script=self._dfu_script,
@@ -1418,6 +1419,31 @@ class Controller(QObject):
             fixed_prebreakup_delay_us=fixed_prebreakup_delay_us,
             auto_scout_delay=auto_scout_delay,
             replicates_per_pressure=replicates_per_pressure,
+        )
+
+    def start_prebreakup_dataset_acquisition(
+        self,
+        *,
+        plan_path: str | None = None,
+        pressure_psi: float | None = None,
+        pulse_width_us: int | None = None,
+        delay_start_offset_us: int = 100,
+        delay_stop_offset_us: int = 2200,
+        delay_step_us: int = 50,
+        replicates_per_delay: int = 2,
+        analyze_frames: bool = False,
+        save_overlays: bool = False,
+    ):
+        self.model.calibration_manager.start_prebreakup_dataset_acquisition(
+            plan_path=plan_path,
+            pressure_psi=pressure_psi,
+            pulse_width_us=pulse_width_us,
+            delay_start_offset_us=delay_start_offset_us,
+            delay_stop_offset_us=delay_stop_offset_us,
+            delay_step_us=delay_step_us,
+            replicates_per_delay=replicates_per_delay,
+            analyze_frames=analyze_frames,
+            save_overlays=save_overlays,
         )
 
     def start_pressure_sweep_characterization(self):

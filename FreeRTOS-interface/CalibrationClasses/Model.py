@@ -2405,6 +2405,35 @@ class CalibrationManager(QObject):
             kwargs["start_pressure"] = float(start_pressure)
         self._try_start_process(PreBreakupMorphologyCalibrationProcess, **kwargs)
 
+    def start_prebreakup_dataset_acquisition(
+        self,
+        *,
+        plan_path: str | None = None,
+        pressure_psi: float | None = None,
+        pulse_width_us: int | None = None,
+        delay_start_offset_us: int = 100,
+        delay_stop_offset_us: int = 2200,
+        delay_step_us: int = 50,
+        replicates_per_delay: int = 2,
+        analyze_frames: bool = False,
+        save_overlays: bool = False,
+    ):
+        kwargs = {
+            "delay_start_offset_us": int(delay_start_offset_us),
+            "delay_stop_offset_us": int(delay_stop_offset_us),
+            "delay_step_us": int(delay_step_us),
+            "replicates_per_delay": int(replicates_per_delay),
+            "analyze_frames": bool(analyze_frames),
+            "save_overlays": bool(save_overlays),
+        }
+        if plan_path:
+            kwargs["plan_path"] = str(plan_path)
+        if pressure_psi is not None:
+            kwargs["pressure_psi"] = float(pressure_psi)
+        if pulse_width_us is not None:
+            kwargs["pulse_width_us"] = int(pulse_width_us)
+        self._try_start_process(PreBreakupDatasetAcquisitionProcess, **kwargs)
+
     def start_trajectory_calibration(self):
         self._try_start_process(TrajectoryCalibrationProcess)
 
@@ -2958,6 +2987,7 @@ class CalibrationManager(QObject):
             "pressure_calibration":           pack(PressureCalibrationProcess),
             "pressure_scan":                  pack(PressureBandCalibrationProcess),
             "pre_breakup_morphology":        pack(PreBreakupMorphologyCalibrationProcess),
+            "pre_breakup_dataset_acquisition": pack(PreBreakupDatasetAcquisitionProcess),
             "droplet_trajectory":             pack(TrajectoryCalibrationProcess),
             # "trajectory":                     pack(TrajectoryCalibrationProcess),
             "trajectory_pressure_scan":       pack(PressureTrajectoryCalibrationProcess),
@@ -8566,6 +8596,893 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
             "feature_summary": feature_summary,
         }
         return str(verdict), summary
+
+class PreBreakupDatasetAcquisitionProcess(BaseCalibrationProcess):
+    phase_name = "pre_breakup_dataset_acquisition"
+    supports_operator_verdict = False
+
+    conditionPrepared = Signal()
+    delayApplied = Signal()
+    frameStored = Signal()
+    advanceSweep = Signal()
+    finalize = Signal()
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        missing = []
+        try:
+            if not bool(cm.get_record_mode_enabled()):
+                missing.append("Record Calibration Runs enabled")
+        except Exception:
+            missing.append("Record Calibration Runs enabled")
+        try:
+            if cm.get_pressure_scan_nozzle_center_image_position() is None:
+                missing.append("Real nozzle center (image coords, from emergence)")
+        except Exception:
+            missing.append("Real nozzle center (image coords, from emergence)")
+        try:
+            if cm.get_emergence_time() is None:
+                missing.append("Emergence time")
+        except Exception:
+            missing.append("Emergence time")
+        try:
+            _ = cm.model.droplet_camera_model.get_image_size()
+        except Exception:
+            missing.append("Droplet camera")
+        return missing
+
+    def __init__(
+        self,
+        calibration_manager,
+        model,
+        *,
+        plan_path: str | None = None,
+        pressure_psi: float | None = None,
+        pulse_width_us: int | None = None,
+        delay_start_offset_us: int = 100,
+        delay_stop_offset_us: int = 2200,
+        delay_step_us: int = 50,
+        replicates_per_delay: int = 2,
+        analyze_frames: bool = False,
+        save_overlays: bool = False,
+        parent=None,
+    ):
+        super().__init__(calibration_manager, model, parent)
+
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError(
+                "PreBreakupDatasetAcquisitionProcess requires: "
+                + ", ".join(missing_requirements)
+                + "."
+            )
+
+        self.phase_name = "pre_breakup_dataset_acquisition"
+        self.analyze_frames = bool(analyze_frames)
+        self.save_overlays = bool(save_overlays and analyze_frames)
+        self.delay_mode = "emergence_relative"
+        self.delay_start_offset_us = int(delay_start_offset_us)
+        self.delay_stop_offset_us = int(max(delay_stop_offset_us, delay_start_offset_us))
+        self.delay_step_us = int(max(1, delay_step_us))
+        self.replicates_per_delay = int(max(1, replicates_per_delay))
+        self.emergence_time_us = int(self.calibration_manager.get_emergence_time())
+        self.nozzle_center_px = self.calibration_manager.get_pressure_scan_nozzle_center_image_position()
+        self._requested_plan_path = os.path.abspath(str(plan_path)) if plan_path else None
+
+        try:
+            self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
+        except Exception:
+            self._orig_settings = {}
+
+        try:
+            self._pulse_width_us = int(
+                pulse_width_us
+                if pulse_width_us is not None
+                else self._orig_settings.get("print_width")
+            )
+        except Exception:
+            self._pulse_width_us = None
+        if self._pulse_width_us is None:
+            try:
+                self._pulse_width_us = int(self.model.machine_model.get_print_pulse_width())
+            except Exception:
+                self._pulse_width_us = 1300
+
+        try:
+            self._pressure_psi = float(
+                pressure_psi
+                if pressure_psi is not None
+                else self._orig_settings.get("print_pressure")
+            )
+        except Exception:
+            self._pressure_psi = None
+        if self._pressure_psi is None:
+            try:
+                self._pressure_psi = float(self.model.machine_model.get_current_print_pressure())
+            except Exception:
+                self._pressure_psi = 0.40
+
+        try:
+            hw_lo, hw_hi = self.model.machine_model.get_print_pressure_bounds()
+        except Exception:
+            hw_lo, hw_hi = 0.3, 5.0
+        self.P_MIN = float(hw_lo)
+        self.P_MAX = float(hw_hi)
+        self._pressure_psi = float(max(self.P_MIN, min(self.P_MAX, float(self._pressure_psi))))
+        self._default_pressure_psi = float(self._pressure_psi)
+        self._default_pulse_width_us = int(self._pulse_width_us)
+        self._default_delay_start_offset_us = int(self.delay_start_offset_us)
+        self._default_delay_stop_offset_us = int(self.delay_stop_offset_us)
+        self._default_delay_step_us = int(self.delay_step_us)
+        self._default_replicates_per_delay = int(self.replicates_per_delay)
+        self._default_stock_solution = str(
+            getattr(self.calibration_manager, "_safe_get_stock_solution", lambda: "")() or ""
+        )
+        self._default_printer_head_id = str(
+            getattr(self.calibration_manager, "_safe_get_printer_head_id", lambda: "")() or ""
+        )
+
+        self.background_image = None
+        self.frame_image = None
+        self._delay_index = 0
+        self._replicate_index = 0
+        self._current_delay_us = None
+        self._condition_id = "cond_0001"
+        self._condition_record = {}
+        self._condition_written = False
+        self._conditions_path = None
+        self._frames_path = None
+        self._plan_snapshot_path = None
+        self._frame_count = 0
+        self._background_count = 0
+        self._measurements = []
+        self._condition_summaries = []
+        self._analysis_count = 0
+        self._overlay_count = 0
+        self._run_dir = None
+        self._plan_snapshot_written = False
+
+        self._plan_definition = self._load_or_build_plan_definition()
+        self._conditions = self._normalize_plan_conditions(self._plan_definition)
+        if not self._conditions:
+            raise ValueError("PreBreakupDatasetAcquisitionProcess requires at least one acquisition condition.")
+        self._current_condition_index = 0
+        self._active_condition = {}
+        self._activate_condition(self._current_condition_index)
+
+        self.state_prepare = QState()
+        self.state_capture_bg = QState()
+        self.state_apply_delay = QState()
+        self.state_capture_frame = QState()
+        self.state_record_frame = QState()
+        self.state_restore = QState()
+        self.state_final = QFinalState()
+
+        self.state_prepare.entered.connect(self.onPrepareCondition)
+        self.state_capture_bg.entered.connect(self.onCaptureBackground)
+        self.state_apply_delay.entered.connect(self.onApplyDelay)
+        self.state_capture_frame.entered.connect(self.onCaptureFrame)
+        self.state_record_frame.entered.connect(self.onRecordFrame)
+        self.state_restore.entered.connect(self.onRestoreSettings)
+        self.state_final.entered.connect(self.onCompleted)
+
+        self.state_prepare.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_capture_bg
+        )
+        self.state_capture_bg.addTransition(
+            self.calibration_manager.captureCompleted, self.state_apply_delay
+        )
+        self.state_apply_delay.addTransition(self.conditionPrepared, self.state_prepare)
+        self.state_apply_delay.addTransition(self.delayApplied, self.state_capture_frame)
+        self.state_capture_frame.addTransition(
+            self.calibration_manager.captureCompleted, self.state_record_frame
+        )
+        self.state_record_frame.addTransition(self.frameStored, self.state_apply_delay)
+        self.state_restore.addTransition(
+            self.calibration_manager.settingsChangeCompleted, self.state_final
+        )
+
+        for st in (
+            self.state_prepare,
+            self.state_capture_bg,
+            self.state_apply_delay,
+            self.state_capture_frame,
+            self.state_record_frame,
+        ):
+            st.addTransition(self.finalize, self.state_restore)
+
+        for st in (
+            self.state_prepare,
+            self.state_capture_bg,
+            self.state_apply_delay,
+            self.state_capture_frame,
+            self.state_record_frame,
+            self.state_restore,
+            self.state_final,
+        ):
+            self.state_machine.addState(st)
+        self.state_machine.setInitialState(self.state_prepare)
+
+    def _build_delay_schedule(self):
+        return self._build_delay_schedule_for_condition(
+            {
+                "delay_mode": str(self.delay_mode),
+                "delay_start_offset_us": int(self.delay_start_offset_us),
+                "delay_stop_offset_us": int(self.delay_stop_offset_us),
+                "delay_step_us": int(self.delay_step_us),
+            }
+        )
+
+    def _expand_range_values(self, start_value, stop_value, step_value, *, cast):
+        start_value = cast(start_value)
+        stop_value = cast(stop_value)
+        step_value = cast(step_value)
+        if step_value == 0:
+            raise ValueError("Plan range step cannot be zero.")
+
+        values = []
+        current = start_value
+        if stop_value >= start_value and step_value < 0:
+            step_value = -step_value
+        if stop_value < start_value and step_value > 0:
+            step_value = -step_value
+
+        if isinstance(start_value, float):
+            cmp = (lambda a, b: a <= b + 1e-9) if step_value > 0 else (lambda a, b: a >= b - 1e-9)
+            while cmp(current, stop_value):
+                values.append(round(float(current), 5))
+                current = round(float(current + step_value), 5)
+        else:
+            cmp = (lambda a, b: a <= b) if step_value > 0 else (lambda a, b: a >= b)
+            while cmp(current, stop_value):
+                values.append(int(current))
+                current = int(current + step_value)
+        return values
+
+    def _expand_condition_axis(
+        self,
+        payload: dict,
+        *,
+        singular_key: str,
+        plural_key: str,
+        start_key: str,
+        stop_key: str,
+        step_key: str,
+        default_value,
+        cast,
+    ):
+        if payload.get(plural_key) is not None:
+            return [cast(v) for v in list(payload.get(plural_key) or [])]
+
+        if payload.get(start_key) is not None or payload.get(stop_key) is not None:
+            start_value = payload.get(start_key, default_value)
+            stop_value = payload.get(stop_key, start_value)
+            step_value = payload.get(step_key)
+            if step_value is None:
+                step_value = 1 if cast is int else 0.01
+            return self._expand_range_values(start_value, stop_value, step_value, cast=cast)
+
+        if payload.get(singular_key) is not None:
+            return [cast(payload.get(singular_key))]
+
+        return [cast(default_value)]
+
+    def _load_or_build_plan_definition(self):
+        if self._requested_plan_path:
+            with open(self._requested_plan_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                raise ValueError("Pre-breakup dataset plan JSON must be an object.")
+            return payload
+
+        return {
+            "schema_version": 1,
+            "notes": "Auto-generated single-condition acquisition plan.",
+            "default_background_policy": "per_condition",
+            "conditions": [
+                {
+                    "condition_id": "cond_0001",
+                    "pulse_width_us": int(self._default_pulse_width_us),
+                    "pressure_psi": float(self._default_pressure_psi),
+                    "delay_mode": "emergence_relative",
+                    "delay_start_offset_us": int(self._default_delay_start_offset_us),
+                    "delay_stop_offset_us": int(self._default_delay_stop_offset_us),
+                    "delay_step_us": int(self._default_delay_step_us),
+                    "replicates_per_delay": int(self._default_replicates_per_delay),
+                    "stock_solution": str(self._default_stock_solution),
+                    "printer_head_id": str(self._default_printer_head_id),
+                    "nozzle_id": None,
+                    "label_key": None,
+                    "notes": "",
+                }
+            ],
+        }
+
+    def _normalize_plan_conditions(self, plan_definition: dict):
+        raw_conditions = list(plan_definition.get("conditions") or [])
+        if not raw_conditions:
+            return []
+
+        defaults = dict(plan_definition.get("defaults") or {})
+        if defaults.get("background_policy") is None:
+            defaults["background_policy"] = plan_definition.get("default_background_policy", "per_condition")
+        defaults.setdefault("delay_mode", "emergence_relative")
+        defaults.setdefault("delay_start_offset_us", int(self._default_delay_start_offset_us))
+        defaults.setdefault("delay_stop_offset_us", int(self._default_delay_stop_offset_us))
+        defaults.setdefault("delay_step_us", int(self._default_delay_step_us))
+        defaults.setdefault("replicates_per_delay", int(self._default_replicates_per_delay))
+        defaults.setdefault("stock_solution", str(self._default_stock_solution))
+        defaults.setdefault("printer_head_id", str(self._default_printer_head_id))
+        defaults.setdefault("pulse_width_us", int(self._default_pulse_width_us))
+        defaults.setdefault("pressure_psi", float(self._default_pressure_psi))
+
+        normalized = []
+        auto_index = 1
+        for block_index, block in enumerate(raw_conditions, start=1):
+            if not isinstance(block, dict):
+                raise ValueError(f"Condition block {block_index} in the plan must be an object.")
+            merged = dict(defaults)
+            merged.update(block)
+
+            pulse_widths = self._expand_condition_axis(
+                merged,
+                singular_key="pulse_width_us",
+                plural_key="pulse_widths_us",
+                start_key="pulse_width_start_us",
+                stop_key="pulse_width_stop_us",
+                step_key="pulse_width_step_us",
+                default_value=self._default_pulse_width_us,
+                cast=int,
+            )
+            pressures = self._expand_condition_axis(
+                merged,
+                singular_key="pressure_psi",
+                plural_key="pressures_psi",
+                start_key="pressure_start_psi",
+                stop_key="pressure_stop_psi",
+                step_key="pressure_step_psi",
+                default_value=self._default_pressure_psi,
+                cast=float,
+            )
+
+            base_condition_id = str(merged.get("condition_id") or f"cond_{block_index:04d}")
+            expanded_count = len(pulse_widths) * len(pressures)
+            local_index = 0
+            for pulse_width in pulse_widths:
+                for pressure in pressures:
+                    local_index += 1
+                    condition_id = base_condition_id
+                    if expanded_count > 1:
+                        condition_id = f"{base_condition_id}_{local_index:03d}"
+                    background_policy = str(merged.get("background_policy") or "per_condition")
+                    if background_policy != "per_condition":
+                        raise ValueError(
+                            "Pre-breakup dataset acquisition currently supports only "
+                            "'per_condition' background_policy."
+                        )
+                    delay_mode = str(merged.get("delay_mode") or "emergence_relative")
+                    if delay_mode not in {"emergence_relative", "absolute"}:
+                        raise ValueError(
+                            f"Unsupported delay_mode '{delay_mode}' for condition '{condition_id}'."
+                        )
+
+                    if delay_mode == "absolute":
+                        delay_start_us = int(merged.get("delay_start_us"))
+                        delay_stop_us = int(merged.get("delay_stop_us", delay_start_us))
+                        delay_step_us = int(max(1, merged.get("delay_step_us", self._default_delay_step_us)))
+                        delay_start_offset_us = int(delay_start_us - int(self.emergence_time_us))
+                        delay_stop_offset_us = int(delay_stop_us - int(self.emergence_time_us))
+                    else:
+                        delay_start_offset_us = int(
+                            merged.get("delay_start_offset_us", self._default_delay_start_offset_us)
+                        )
+                        delay_stop_offset_us = int(
+                            max(
+                                merged.get("delay_stop_offset_us", self._default_delay_stop_offset_us),
+                                delay_start_offset_us,
+                            )
+                        )
+                        delay_step_us = int(max(1, merged.get("delay_step_us", self._default_delay_step_us)))
+                        delay_start_us = int(self.emergence_time_us + delay_start_offset_us)
+                        delay_stop_us = int(self.emergence_time_us + delay_stop_offset_us)
+
+                    pressure = float(max(self.P_MIN, min(self.P_MAX, float(pressure))))
+                    normalized.append(
+                        {
+                            "condition_id": str(condition_id),
+                            "condition_index": int(auto_index),
+                            "pulse_width_us": int(pulse_width),
+                            "pressure_psi": float(pressure),
+                            "delay_mode": str(delay_mode),
+                            "delay_start_us": int(delay_start_us),
+                            "delay_stop_us": int(max(delay_stop_us, delay_start_us)),
+                            "delay_step_us": int(delay_step_us),
+                            "delay_start_offset_us": int(delay_start_offset_us),
+                            "delay_stop_offset_us": int(max(delay_stop_offset_us, delay_start_offset_us)),
+                            "replicates_per_delay": int(max(1, merged.get("replicates_per_delay", self._default_replicates_per_delay))),
+                            "background_policy": str(background_policy),
+                            "stock_solution": str(merged.get("stock_solution") or self._default_stock_solution),
+                            "printer_head_id": str(merged.get("printer_head_id") or self._default_printer_head_id),
+                            "nozzle_id": merged.get("nozzle_id"),
+                            "label_key": merged.get("label_key"),
+                            "notes": str(merged.get("notes") or ""),
+                        }
+                    )
+                    auto_index += 1
+        return normalized
+
+    def _build_delay_schedule_for_condition(self, condition: dict):
+        delay_mode = str(condition.get("delay_mode") or "emergence_relative")
+        step_us = int(max(1, condition.get("delay_step_us", self.delay_step_us)))
+        if delay_mode == "absolute":
+            start_us = int(max(0, int(condition.get("delay_start_us", self.emergence_time_us))))
+            stop_us = int(max(start_us, int(condition.get("delay_stop_us", start_us))))
+        else:
+            start_us = int(
+                max(0, int(self.emergence_time_us) + int(condition.get("delay_start_offset_us", self.delay_start_offset_us)))
+            )
+            stop_us = int(
+                max(start_us, int(self.emergence_time_us) + int(condition.get("delay_stop_offset_us", self.delay_stop_offset_us)))
+            )
+        delays = list(range(int(start_us), int(stop_us) + 1, int(step_us)))
+        if not delays:
+            delays = [int(start_us)]
+        if delays[-1] != int(stop_us):
+            delays.append(int(stop_us))
+        return [int(v) for v in delays]
+
+    def _activate_condition(self, condition_index: int):
+        condition = dict(self._conditions[int(condition_index)])
+        self._active_condition = dict(condition)
+        self._current_condition_index = int(condition_index)
+        self._condition_id = str(condition.get("condition_id"))
+        self._pulse_width_us = int(condition.get("pulse_width_us", self._default_pulse_width_us))
+        self._pressure_psi = float(condition.get("pressure_psi", self._default_pressure_psi))
+        self.delay_mode = str(condition.get("delay_mode", "emergence_relative"))
+        self.delay_start_offset_us = int(condition.get("delay_start_offset_us", self._default_delay_start_offset_us))
+        self.delay_stop_offset_us = int(condition.get("delay_stop_offset_us", self._default_delay_stop_offset_us))
+        self.delay_step_us = int(condition.get("delay_step_us", self._default_delay_step_us))
+        self.replicates_per_delay = int(condition.get("replicates_per_delay", self._default_replicates_per_delay))
+        self.delays = self._build_delay_schedule_for_condition(condition)
+        self._delay_index = 0
+        self._replicate_index = 0
+        self._current_delay_us = None
+        self._condition_record = {}
+        self._condition_written = False
+        self.background_image = None
+        self.frame_image = None
+
+    def _advance_to_next_condition(self):
+        next_index = int(self._current_condition_index) + 1
+        if next_index >= len(self._conditions):
+            return False
+        self._activate_condition(next_index)
+        return True
+
+    def _write_plan_snapshot(self):
+        if self._plan_snapshot_written or not self._plan_snapshot_path:
+            return
+        snapshot = {
+            "schema_version": 1,
+            "source_plan_path": self._requested_plan_path,
+            "conditions": list(self._conditions),
+            "notes": self._plan_definition.get("notes"),
+        }
+        with open(self._plan_snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, default=numpy_encoder)
+        self._plan_snapshot_written = True
+
+    def _ensure_dataset_paths(self):
+        run_dir = getattr(self, "_recorder_run_dir", None)
+        if not run_dir:
+            raise RuntimeError("Dataset acquisition requires an active process recorder directory.")
+        self._run_dir = str(run_dir)
+        self._conditions_path = os.path.join(self._run_dir, "conditions.jsonl")
+        self._frames_path = os.path.join(self._run_dir, "frames.jsonl")
+        self._plan_snapshot_path = os.path.join(self._run_dir, "plan_snapshot.json")
+
+    def _append_dataset_jsonl(self, path: str, payload: dict):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=numpy_encoder) + "\n")
+
+    def _get_capture_ref(self, attr_name: str) -> dict:
+        try:
+            return dict(self._last_capture_refs.get(str(attr_name), {}) or {})
+        except Exception:
+            return {}
+
+    def _build_condition_record(self):
+        bg_ref = self._get_capture_ref("background_image")
+        condition = dict(self._active_condition or {})
+        record = {
+            "condition_id": str(self._condition_id),
+            "condition_index": int(condition.get("condition_index", int(self._current_condition_index) + 1)),
+            "run_id": getattr(self, "_recorder_run_id", None),
+            "stock_solution": str(condition.get("stock_solution") or self._default_stock_solution),
+            "printer_head_id": str(condition.get("printer_head_id") or self._default_printer_head_id),
+            "nozzle_id": condition.get("nozzle_id"),
+            "pulse_width_us": int(self._pulse_width_us),
+            "pressure_psi": float(self._pressure_psi),
+            "delay_mode": str(self.delay_mode),
+            "delay_start_us": int(self.delays[0]) if self.delays else None,
+            "delay_stop_us": int(self.delays[-1]) if self.delays else None,
+            "delay_step_us": int(self.delay_step_us),
+            "delay_start_offset_us": int(self.delay_start_offset_us),
+            "delay_stop_offset_us": int(self.delay_stop_offset_us),
+            "replicates_per_delay": int(self.replicates_per_delay),
+            "background_policy": str(condition.get("background_policy") or "per_condition"),
+            "background_capture_id": bg_ref.get("capture_id"),
+            "background_image_relpath": bg_ref.get("image_relpath"),
+            "emergence_time_us": int(self.emergence_time_us),
+            "nozzle_center_px": (
+                None if self.nozzle_center_px is None else [int(v) for v in list(self.nozzle_center_px)]
+            ),
+            "label_key": condition.get("label_key"),
+            "notes": str(condition.get("notes") or ""),
+        }
+        return record
+
+    def _write_condition_record(self):
+        if self._condition_written:
+            return
+        self._condition_record = self._build_condition_record()
+        self._append_dataset_jsonl(self._conditions_path, self._condition_record)
+        self._condition_written = True
+        self._condition_summaries.append(
+            {
+                "condition_id": str(self._condition_record.get("condition_id", "")),
+                "condition_index": int(self._condition_record.get("condition_index", 0) or 0),
+                "pulse_width_us": int(self._condition_record.get("pulse_width_us", 0) or 0),
+                "pressure_psi": float(self._condition_record.get("pressure_psi", 0.0) or 0.0),
+                "delay_start_us": self._condition_record.get("delay_start_us"),
+                "delay_stop_us": self._condition_record.get("delay_stop_us"),
+                "delay_step_us": int(self._condition_record.get("delay_step_us", 0) or 0),
+                "replicates_per_delay": int(self._condition_record.get("replicates_per_delay", 0) or 0),
+                "label_key": self._condition_record.get("label_key"),
+            }
+        )
+
+    def _build_frame_record(self, capture_ref: dict, analysis_record: dict | None = None):
+        bg_ref = self._get_capture_ref("background_image")
+        delay_us = int(self._current_delay_us or 0)
+        condition = dict(self._active_condition or {})
+        record = {
+            "frame_id": str(uuid.uuid4()),
+            "condition_id": str(self._condition_id),
+            "condition_index": int(condition.get("condition_index", int(self._current_condition_index) + 1)),
+            "capture_id": capture_ref.get("capture_id"),
+            "capture_index": capture_ref.get("capture_index"),
+            "replicate_index": int(self._replicate_index + 1),
+            "capture_role": str(capture_ref.get("capture_role", "frame")),
+            "image_relpath": capture_ref.get("image_relpath"),
+            "background_image_relpath": bg_ref.get("image_relpath"),
+            "flash_delay_us": int(delay_us),
+            "delay_from_emergence_us": int(delay_us - int(self.emergence_time_us)),
+            "pulse_width_us": int(self._pulse_width_us),
+            "pressure_psi": float(self._pressure_psi),
+            "emergence_time_us": int(self.emergence_time_us),
+            "nozzle_center_px": (
+                None if self.nozzle_center_px is None else [int(v) for v in list(self.nozzle_center_px)]
+            ),
+            "stock_solution": str(condition.get("stock_solution") or self._default_stock_solution),
+            "printer_head_id": str(condition.get("printer_head_id") or self._default_printer_head_id),
+            "label_key": condition.get("label_key"),
+        }
+        if isinstance(analysis_record, dict):
+            record["analysis"] = dict(analysis_record)
+        return record
+
+    def _save_analysis_overlay(self, overlay, *, frame_id: str, capture_ref: dict):
+        if not self.save_overlays or overlay is None:
+            return None
+        metadata = {
+            "stage": "dataset_frame_overlay",
+            "condition_id": str(self._condition_id),
+            "condition_index": int(self._current_condition_index + 1),
+            "frame_id": str(frame_id),
+            "source_capture_id": capture_ref.get("capture_id"),
+            "flash_delay_us": int(self._current_delay_us or 0),
+            "replicate_index": int(self._replicate_index + 1),
+            "pressure_psi": float(self._pressure_psi),
+            "pulse_width_us": int(self._pulse_width_us),
+        }
+        overlay_ref = self._record_capture(overlay, role="analysis_overlay", metadata=metadata)
+        if overlay_ref:
+            self._overlay_count += 1
+        return overlay_ref
+
+    def _build_analysis_record(
+        self,
+        *,
+        frame_id: str,
+        capture_ref: dict,
+        metrics: dict | None,
+        details: dict | None,
+        overlay_ref: dict | None = None,
+    ):
+        bg_ref = self._get_capture_ref("background_image")
+        condition = dict(self._active_condition or {})
+        return {
+            "process_name": "PreBreakupDatasetAcquisitionProcess",
+            "phase_name": str(self.phase_name or ""),
+            "stage": "dataset_frame_analysis",
+            "condition_id": str(self._condition_id),
+            "condition_index": int(condition.get("condition_index", int(self._current_condition_index) + 1)),
+            "frame_id": str(frame_id),
+            "capture_id": capture_ref.get("capture_id"),
+            "capture_index": capture_ref.get("capture_index"),
+            "image_relpath": capture_ref.get("image_relpath"),
+            "background_capture_id": bg_ref.get("capture_id"),
+            "background_image_relpath": bg_ref.get("image_relpath"),
+            "overlay_capture_id": None if not overlay_ref else overlay_ref.get("capture_id"),
+            "overlay_image_relpath": None if not overlay_ref else overlay_ref.get("image_relpath"),
+            "delay_us": int(self._current_delay_us or 0),
+            "delay_from_emergence_us": int(int(self._current_delay_us or 0) - int(self.emergence_time_us)),
+            "replicate_index": int(self._replicate_index + 1),
+            "pressure_psi": float(self._pressure_psi),
+            "pulse_width_us": int(self._pulse_width_us),
+            "stock_solution": str(condition.get("stock_solution") or self._default_stock_solution),
+            "printer_head_id": str(condition.get("printer_head_id") or self._default_printer_head_id),
+            "nozzle_id": condition.get("nozzle_id"),
+            "label_key": condition.get("label_key"),
+            "emergence_time_us": int(self.emergence_time_us),
+            "nozzle_center_px": (
+                None if self.nozzle_center_px is None else [int(v) for v in list(self.nozzle_center_px)]
+            ),
+            "metrics": dict(metrics or {}),
+            "details": dict(details or {}),
+        }
+
+    def _build_result_summary(self):
+        pulse_widths = sorted({int(c.get("pulse_width_us", 0) or 0) for c in self._conditions})
+        pressures = sorted({round(float(c.get("pressure_psi", 0.0) or 0.0), 5) for c in self._conditions})
+        return {
+            "plan_path": self._requested_plan_path,
+            "condition_count": int(len(self._condition_summaries)),
+            "planned_condition_count": int(len(self._conditions)),
+            "frame_count": int(self._frame_count),
+            "background_count": int(self._background_count),
+            "analysis_enabled": bool(self.analyze_frames),
+            "analysis_count": int(self._analysis_count),
+            "overlay_saving_enabled": bool(self.save_overlays),
+            "overlay_count": int(self._overlay_count),
+            "run_dir": self._run_dir,
+            "conditions_path": self._conditions_path,
+            "frames_path": self._frames_path,
+            "plan_snapshot_path": self._plan_snapshot_path,
+            "conditions": list(self._condition_summaries),
+            "pulse_width_us": int(pulse_widths[0]) if len(pulse_widths) == 1 else None,
+            "pressure_psi": float(pressures[0]) if len(pressures) == 1 else None,
+            "pulse_widths_us": pulse_widths,
+            "pressures_psi": pressures,
+            "emergence_time_us": int(self.emergence_time_us),
+            "nozzle_center_px": (
+                None if self.nozzle_center_px is None else [int(v) for v in list(self.nozzle_center_px)]
+            ),
+        }
+
+    @Slot()
+    def onPrepareCondition(self):
+        try:
+            self._ensure_dataset_paths()
+            self._write_plan_snapshot()
+        except Exception as e:
+            msg = f"Dataset acquisition recorder setup failed: {e}"
+            self._record_error(msg, {})
+            self.calibrationError.emit(msg)
+            return
+
+        self._condition_written = False
+        self._condition_record = {}
+        self._delay_index = 0
+        self._replicate_index = 0
+        self.background_image = None
+        self.frame_image = None
+
+        settings = {
+            "print_pressure": float(self._pressure_psi),
+            "num_droplets": 0,
+        }
+        if self._pulse_width_us is not None:
+            settings["print_width"] = int(self._pulse_width_us)
+
+        self.stageChanged.emit(
+            "Pre-breakup dataset acquisition: "
+            f"condition {int(self._current_condition_index + 1)}/{int(len(self._conditions))}, "
+            f"pw={int(self._pulse_width_us)} us, "
+            f"pressure={float(self._pressure_psi):.3f} psi, "
+            f"delays {int(self.delays[0]) if self.delays else 0}-{int(self.delays[-1]) if self.delays else 0} us "
+            f"step {int(self.delay_step_us)} us x {int(self.replicates_per_delay)} reps"
+        )
+        self._record_decision(
+            "dataset_condition_prepare",
+            {
+                "condition_id": str(self._condition_id),
+                "condition_index": int(self._current_condition_index + 1),
+                "pulse_width_us": int(self._pulse_width_us),
+                "pressure_psi": float(self._pressure_psi),
+                "delay_count": int(len(self.delays)),
+                "replicates_per_delay": int(self.replicates_per_delay),
+            },
+        )
+        self._request_settings_with_recording(
+            settings,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="prebreakup_dataset_prepare_condition",
+        )
+
+    @Slot()
+    def onCaptureBackground(self):
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing pre-breakup dataset background",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            final_error_msg="Failed to capture pre-breakup dataset background image.",
+        )
+
+    @Slot()
+    def onApplyDelay(self):
+        if self.background_image is None:
+            msg = "Pre-breakup dataset acquisition is missing a background image."
+            self._record_error(msg, {})
+            self.calibrationError.emit(msg)
+            return
+
+        if not self._condition_written:
+            if self._get_capture_ref("background_image"):
+                self._background_count += 1
+            self._write_condition_record()
+
+        if self._delay_index >= len(self.delays):
+            self._record_decision(
+                "dataset_condition_complete",
+                {
+                    "condition_id": str(self._condition_id),
+                    "condition_index": int(self._current_condition_index + 1),
+                    "frame_count_total": int(self._frame_count),
+                },
+            )
+            if self._advance_to_next_condition():
+                self.conditionPrepared.emit()
+            else:
+                self.finalize.emit()
+            return
+
+        self._current_delay_us = int(self.delays[self._delay_index])
+        settings = {
+            "flash_delay": int(self._current_delay_us),
+            "num_droplets": 1,
+            "print_pressure": float(self._pressure_psi),
+        }
+        if self._pulse_width_us is not None:
+            settings["print_width"] = int(self._pulse_width_us)
+
+        self.stageChanged.emit(
+            "Pre-breakup dataset acquisition: "
+            f"condition {int(self._current_condition_index + 1)}/{int(len(self._conditions))}, "
+            f"delay={int(self._current_delay_us)} us, "
+            f"rep {int(self._replicate_index + 1)}/{int(self.replicates_per_delay)}"
+        )
+        self._request_settings_with_recording(
+            settings,
+            self.delayApplied.emit,
+            context=f"prebreakup_dataset_apply_delay_{int(self._current_delay_us)}",
+        )
+
+    @Slot()
+    def onCaptureFrame(self):
+        self._capture_with_policy(
+            set_attr="frame_image",
+            stage_text=(
+                f"Capturing dataset frame @ {int(self._current_delay_us)} us "
+                f"(rep {int(self._replicate_index + 1)}/{int(self.replicates_per_delay)})"
+            ),
+            attempts_total=5,
+            retry_delay_ms=75,
+            guard_timeout_ms=10_000,
+            final_error_msg=(
+                f"Failed to capture pre-breakup dataset frame @ {int(self._current_delay_us)} us."
+            ),
+        )
+
+    @Slot()
+    def onRecordFrame(self):
+        capture_ref = self._get_capture_ref("frame_image")
+        analysis_record = None
+        frame_id = str(uuid.uuid4())
+
+        if self.analyze_frames:
+            metrics, overlay, details = self.model.droplet_camera_model.analyze_prebreakup_morphology(
+                self.background_image,
+                self.frame_image,
+                nozzle_center=self.nozzle_center_px,
+                roi_below_px=None,
+                return_details=True,
+            )
+            overlay_ref = self._save_analysis_overlay(overlay, frame_id=frame_id, capture_ref=capture_ref)
+            analysis_record = self._build_analysis_record(
+                frame_id=frame_id,
+                capture_ref=capture_ref,
+                metrics=metrics,
+                details=details,
+                overlay_ref=overlay_ref,
+            )
+            self._record_analysis(analysis_record)
+            self._analysis_count += 1
+            try:
+                self.presentImageSignal.emit(overlay)
+            except Exception:
+                pass
+        else:
+            try:
+                self.presentImageSignal.emit(self.frame_image)
+            except Exception:
+                pass
+
+        frame_record = self._build_frame_record(capture_ref, analysis_record=analysis_record)
+        frame_record["frame_id"] = str(frame_id)
+        if analysis_record:
+            frame_record["overlay_image_relpath"] = analysis_record.get("overlay_image_relpath")
+            frame_record["overlay_capture_id"] = analysis_record.get("overlay_capture_id")
+        self._append_dataset_jsonl(self._frames_path, frame_record)
+        self._frame_count += 1
+        self._measurements.append(
+            (
+                str(self._condition_id),
+                int(self._current_delay_us),
+                int(self._replicate_index + 1),
+                float(self._pressure_psi),
+            )
+        )
+        self._record_decision(
+            "dataset_frame_recorded",
+            {
+                "condition_id": str(self._condition_id),
+                "condition_index": int(self._current_condition_index + 1),
+                "flash_delay_us": int(self._current_delay_us),
+                "replicate_index": int(self._replicate_index + 1),
+                "capture_ref": dict(capture_ref or {}),
+            },
+        )
+
+        self._replicate_index += 1
+        if self._replicate_index >= int(self.replicates_per_delay):
+            self._replicate_index = 0
+            self._delay_index += 1
+
+        self.frameStored.emit()
+
+    @Slot()
+    def onRestoreSettings(self):
+        restore = {}
+        orig = dict(self._orig_settings or {})
+        for key in ("num_droplets", "flash_delay", "print_pressure", "print_width"):
+            if orig.get(key) is not None:
+                restore[key] = orig.get(key)
+        if not restore:
+            restore = {"num_droplets": 0}
+
+        self.stageChanged.emit("Pre-breakup dataset acquisition: restoring imaging settings")
+        self._request_settings_with_recording(
+            restore,
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="prebreakup_dataset_restore_settings",
+        )
+
+    @Slot()
+    def onCompleted(self):
+        result = self._build_result_summary()
+        self.calibrationDataUpdated.emit({"measurements": list(self._measurements), "result": result})
+        self.stageChanged.emit(
+            "Pre-breakup dataset acquisition complete: "
+            f"{int(result.get('frame_count', 0))} frames across "
+            f"{int(result.get('condition_count', 0))} completed condition"
+            f"{'' if int(result.get('condition_count', 0)) == 1 else 's'}"
+        )
+        self.calibrationCompleted.emit()
 
 def make_pressure_grid(p0, p1, step, hw_lo, hw_hi):
     import math

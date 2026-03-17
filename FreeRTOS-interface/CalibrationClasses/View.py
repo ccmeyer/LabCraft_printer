@@ -354,6 +354,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.prebreakup_reps_label, crow, 0)
         calib_grid.addWidget(self.prebreakup_reps_spin,  crow, 1); crow += 1
 
+        self.prebreakup_dataset_plan_label = QtWidgets.QLabel("Dataset Plan (JSON):")
+        self.prebreakup_dataset_plan_edit = QtWidgets.QLineEdit()
+        self.prebreakup_dataset_plan_edit.setPlaceholderText(
+            "Optional: plan file for multi-condition acquisition"
+        )
+        self.prebreakup_dataset_plan_browse_button = QtWidgets.QPushButton("Browse Dataset Plan")
+        self.prebreakup_dataset_plan_browse_button.clicked.connect(self.browse_prebreakup_dataset_plan)
+        calib_grid.addWidget(self.prebreakup_dataset_plan_label, crow, 0)
+        calib_grid.addWidget(self.prebreakup_dataset_plan_edit, crow, 1); crow += 1
+        calib_grid.addWidget(self.prebreakup_dataset_plan_browse_button, crow, 0, 1, 2); crow += 1
+
+        self.prebreakup_dataset_analyze_checkbox = QtWidgets.QCheckBox("Analyze dataset frames during acquisition")
+        self.prebreakup_dataset_analyze_checkbox.setChecked(False)
+        self.prebreakup_dataset_analyze_checkbox.setToolTip(
+            "When enabled, each captured frame runs pre-breakup morphology analysis and writes metrics to analysis.jsonl."
+        )
+        calib_grid.addWidget(self.prebreakup_dataset_analyze_checkbox, crow, 0, 1, 2); crow += 1
+
+        self.prebreakup_dataset_overlay_checkbox = QtWidgets.QCheckBox("Save dataset analysis overlays")
+        self.prebreakup_dataset_overlay_checkbox.setChecked(False)
+        self.prebreakup_dataset_overlay_checkbox.setToolTip(
+            "When enabled, analyzed dataset frames also save the annotated overlay image into the recorder captures."
+        )
+        calib_grid.addWidget(self.prebreakup_dataset_overlay_checkbox, crow, 0, 1, 2); crow += 1
+
         self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
         self.record_calibration_checkbox.setToolTip(
             "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
@@ -397,6 +422,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_prebreakup_button = QtWidgets.QPushButton("Estimate Safe Upper Pressure")
         self.calibrate_prebreakup_button.clicked.connect(self.toggle_start_prebreakup_morphology_calibration)
         calib_grid.addWidget(self.calibrate_prebreakup_button, crow, 0, 1, 2); crow += 1
+
+        self.acquire_prebreakup_dataset_button = QtWidgets.QPushButton("Acquire Pre-Breakup Dataset")
+        self.acquire_prebreakup_dataset_button.clicked.connect(self.toggle_start_prebreakup_dataset_acquisition)
+        calib_grid.addWidget(self.acquire_prebreakup_dataset_button, crow, 0, 1, 2); crow += 1
 
         # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
@@ -477,6 +506,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_focus_button,
             self.calibrate_emergence_button,
             self.calibrate_prebreakup_button,
+            self.acquire_prebreakup_dataset_button,
+            self.prebreakup_dataset_plan_browse_button,
             self.calibrate_pressure_scan_button,
             self.scan_trajectory_button,
             self.calibrate_pressure_sweep_button,
@@ -1058,6 +1089,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
         self.calibrate_prebreakup_button.setText("Estimate Safe Upper Pressure")
+        self.acquire_prebreakup_dataset_button.setText("Acquire Pre-Breakup Dataset")
+        self.prebreakup_dataset_plan_browse_button.setText("Browse Dataset Plan")
         # self.calibrate_pressure_button.setText("Calibrate Pressure")
         # self.calibrate_droplet_search_button.setText("Search for Droplets")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
@@ -1133,6 +1166,33 @@ class DropletImagingDialog(QtWidgets.QDialog):
             auto_scout_delay=bool(fixed_delay <= 0),
             replicates_per_pressure=int(self.prebreakup_reps_spin.value()),
         )
+
+    def toggle_start_prebreakup_dataset_acquisition(self):
+        if self.model.calibration_manager.activeCalibration is not None:
+            self.acquire_prebreakup_dataset_button.setText("Acquire Pre-Breakup Dataset")
+            self.controller.stop_calibration()
+            return
+
+        plan_path = self.prebreakup_dataset_plan_edit.text().strip()
+        analyze_frames = bool(self.prebreakup_dataset_analyze_checkbox.isChecked())
+        self.acquire_prebreakup_dataset_button.setText("Stop Calibration")
+        self.controller.start_prebreakup_dataset_acquisition(
+            plan_path=(plan_path or None),
+            pressure_psi=float(self.start_pressure_spin.value()),
+            replicates_per_delay=int(self.prebreakup_reps_spin.value()),
+            analyze_frames=analyze_frames,
+            save_overlays=bool(analyze_frames and self.prebreakup_dataset_overlay_checkbox.isChecked()),
+        )
+
+    def browse_prebreakup_dataset_plan(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Pre-Breakup Dataset Plan",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if path:
+            self.prebreakup_dataset_plan_edit.setText(path)
 
     # def toggle_start_pressure_calibration(self):
     #     """
@@ -1288,6 +1348,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             # 'pressure_calibration':            self.calibrate_pressure_button,
             'pressure_scan':                   self.calibrate_pressure_scan_button,
             'pre_breakup_morphology':         self.calibrate_prebreakup_button,
+            'pre_breakup_dataset_acquisition': self.acquire_prebreakup_dataset_button,
             # 'droplet_trajectory':              self.calibrate_trajectory_button,
             'trajectory_pressure_scan':        self.scan_trajectory_button,
             # 'droplet_search':                  self.calibrate_search_button,

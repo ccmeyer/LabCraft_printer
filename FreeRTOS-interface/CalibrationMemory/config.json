@@ -1,0 +1,23 @@
+{
+  "schema_name": "labcraft.calibration_memory.runtime_config",
+  "schema_version": 1,
+  "updated_at_utc": "2026-03-17T02:47:39Z",
+  "memory_enabled": true,
+  "observation_capture_level": "compact",
+  "prior_application_mode": "advisory",
+  "prior_application_policy": {
+    "allowed_aggregation_levels_for_seed_start": [
+      "exact_pair",
+      "exact_reagent_head_type"
+    ],
+    "min_confidence_by_aggregation_level": {
+      "exact_pair": 0.8,
+      "exact_reagent_head_type": 0.78
+    },
+    "max_pulse_distance_us_for_seed_start": 100,
+    "max_age_days_for_seed_start": 365,
+    "max_target_volume_relative_error": 0.25,
+    "allow_grouped_seed_start": false,
+    "allow_inferred_identity_seed_start": false
+  }
+}
