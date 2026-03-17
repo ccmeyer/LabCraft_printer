@@ -13198,6 +13198,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     restartSearch = Signal()
     changePressure = Signal()
     dropletFound = Signal()
+    readyToCharacterize = Signal()
     dropletCentered = Signal()
     continueCharacterization = Signal()
     initiateCharacterizationAnalysis = Signal()
@@ -13363,6 +13364,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._char_attempts = 0
         self._char_attempt_limit = max(3 * self.num_images, self.num_images + 20)
         self._final_invalid_reason = None
+        self._char_failure_reason_counts = Counter()
 
         # ----- states -----
         self.state_move_to_target = QState()
@@ -13424,6 +13426,11 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         t5 = QSignalTransition(); t5.setSenderObject(self); t5.setSignal(b"2dropletFound()")
         t5.setTargetState(self.state_center)
         self.state_analyze.addTransition(t5)
+
+        # analyze → characterization when a centered droplet is re-acquired
+        t5b = QSignalTransition(); t5b.setSenderObject(self); t5b.setSignal(b"2readyToCharacterize()")
+        t5b.setTargetState(self.state_characterization)
+        self.state_analyze.addTransition(t5b)
 
         # center → set_delay when droplet lost
         t4c = QSignalTransition(); t4c.setSenderObject(self); t4c.setSignal(b"2continueSearch()")
@@ -13788,6 +13795,48 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if float(ratios.get("stream_ratio", 0.0)) > float(getattr(self, "char_max_stream_ratio", 0.20)):
             return "char_stream_ratio_exceeded"
         return None
+
+    @staticmethod
+    def _normalize_char_failure_reason(reason: str | None, *, result_marker=None) -> str:
+        text = str(reason or "").strip()
+        if text:
+            return text
+        if result_marker == "Multiple":
+            return "multiple_large_contours"
+        if result_marker is None:
+            return "no_result"
+        return "characterization_rejected"
+
+    @staticmethod
+    def _describe_char_failure_reason(reason: str | None) -> str:
+        reason = str(reason or "").strip()
+        labels = {
+            "difference_none": "difference image unavailable",
+            "no_contours": "no contours detected",
+            "no_large_contours": "no large contours detected",
+            "multiple_large_contours": "multiple large contours detected",
+            "not_enough_ellipse_points": "not enough points to fit ellipse",
+            "no_result": "no characterization result",
+            "stream_like": "stream-like droplet shape",
+        }
+        if reason in labels:
+            return labels[reason]
+        if not reason:
+            return "characterization rejected"
+        return reason.replace("_", " ")
+
+    def _record_char_failure_reason(self, reason: str | None, *, result_marker=None) -> str:
+        normalized = self._normalize_char_failure_reason(reason, result_marker=result_marker)
+        if not isinstance(getattr(self, "_char_failure_reason_counts", None), Counter):
+            self._char_failure_reason_counts = Counter()
+        self._char_failure_reason_counts[normalized] += 1
+        return normalized
+
+    def _dominant_char_failure_reason(self, default: str = "characterization_attempt_limit") -> str:
+        counts = getattr(self, "_char_failure_reason_counts", None)
+        if isinstance(counts, Counter) and counts:
+            return str(counts.most_common(1)[0][0])
+        return str(default)
 
     def _handle_no_droplet_retry(self, reason: str, *, stage_message: str) -> None:
         reason = str(reason or "no_contour")
@@ -14187,7 +14236,11 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
         self.measurements.append({"flash_delay": int(self.current_delay_us), "center": cxy})
         self._lost_count = 0
-        self.emitDropletFound()
+        if bool(getattr(self, "_centered", False)):
+            self.stageChanged.emit("Centered droplet reacquired → characterizing")
+            self.emitReadyToCharacterize()
+        else:
+            self.emitDropletFound()
 
     @Slot()
     def onCenter(self):
@@ -14288,9 +14341,18 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             self.emitContinueCharacterization()
             return
         self.stageChanged.emit("Characterizing droplet")
-        result, annotated = self.model.droplet_camera_model.characterize_droplet(
-            self.droplet_image, self.background_image
-        )
+        try:
+            result, annotated, char_details = self.model.droplet_camera_model.characterize_droplet(
+                self.droplet_image,
+                self.background_image,
+                return_details=True,
+            )
+        except TypeError:
+            result, annotated = self.model.droplet_camera_model.characterize_droplet(
+                self.droplet_image, self.background_image
+            )
+            char_details = {}
+        char_details = dict(char_details or {})
 
         # Save the *raw* frame that produced this characterization result
         saved = self._save_capture(self.droplet_image, stage="characterization_capture", extra={
@@ -14308,34 +14370,51 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                     meta_extra={"stage": "characterization_annotated"}
                 )
 
-            # record result (even if focus is low; you can filter later)
-            if isinstance(result, dict):
-                self._append_analysis({
-                    "kind": "characterization_result",
-                    "frame_index": int(frame_idx),
-                    "replicate_index": int(self.image_counter),
-                    "flash_delay_us": int(getattr(self, "current_delay_us", -1)),
-                    "center_px": result.get("center"),
-                    "volume_nL": result.get("volume"),
-                    "circularity": result.get("circularity"),
-                    "circularity_ellipse": result.get("circularity_ellipse"),
-                    "focus": result.get("focus"),
-                    "timestamp": datetime.now().isoformat(),
-                })
+            analysis_status = "ok" if isinstance(result, dict) else ("multiple" if result == "Multiple" else "invalid")
+            analysis_reason = (
+                str(char_details.get("reason", "ok"))
+                if isinstance(result, dict)
+                else self._normalize_char_failure_reason(char_details.get("reason"), result_marker=result)
+            )
+            self._append_analysis({
+                "kind": "characterization_result",
+                "frame_index": int(frame_idx),
+                "replicate_index": int(self.image_counter),
+                "flash_delay_us": int(getattr(self, "current_delay_us", -1)),
+                "status": analysis_status,
+                "reason": analysis_reason,
+                "center_px": (
+                    result.get("center")
+                    if isinstance(result, dict)
+                    else char_details.get("center")
+                ),
+                "volume_nL": (result.get("volume") if isinstance(result, dict) else None),
+                "circularity": (result.get("circularity") if isinstance(result, dict) else None),
+                "circularity_ellipse": (
+                    result.get("circularity_ellipse") if isinstance(result, dict) else None
+                ),
+                "focus": (result.get("focus") if isinstance(result, dict) else None),
+                "bbox": char_details.get("bbox"),
+                "contour_area": char_details.get("contour_area"),
+                "timestamp": datetime.now().isoformat(),
+            })
 
         self._char_attempts += 1
         self._char_frames_evaluated += 1
 
         if result is None:
             self._char_invalid_hits += 1
-            self.stageChanged.emit("Capture failed → recapturing")
+            failure_reason = self._record_char_failure_reason(char_details.get("reason"), result_marker=result)
+            self.stageChanged.emit(
+                f"Characterization rejected ({self._describe_char_failure_reason(failure_reason)}) → recapturing"
+            )
             ratio_reason = self._characterization_ratio_abort_reason()
             if ratio_reason is not None:
                 self._final_invalid_reason = str(ratio_reason)
                 self.emitInitiateAnalyzeCharacterization()
                 return
             if self._char_attempts >= self._char_attempt_limit:
-                self._final_invalid_reason = "characterization_attempt_limit"
+                self._final_invalid_reason = self._dominant_char_failure_reason(default=failure_reason)
                 self.emitInitiateAnalyzeCharacterization()
                 return
             self.emitContinueCharacterization()
@@ -14343,6 +14422,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if result == 'Multiple':
             self.multiple_droplet_hits += 1
             self._char_invalid_hits += 1
+            failure_reason = self._record_char_failure_reason(char_details.get("reason"), result_marker=result)
             self.stageChanged.emit("Multiple droplets in frame → skipping (replicate not counted)")
             ratio_reason = self._characterization_ratio_abort_reason()
             if ratio_reason is not None:
@@ -14350,7 +14430,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 self.emitInitiateAnalyzeCharacterization()
                 return
             if self._char_attempts >= self._char_attempt_limit:
-                self._final_invalid_reason = "characterization_attempt_limit"
+                self._final_invalid_reason = self._dominant_char_failure_reason(default=failure_reason)
                 self.emitInitiateAnalyzeCharacterization()
                 return
             self.emitContinueCharacterization()
@@ -14364,6 +14444,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if float(circularity_ellipse) <= float(getattr(self, "char_stream_circularity_max", 0.58)):
             self._char_stream_hits += 1
             self._char_invalid_hits += 1
+            failure_reason = self._record_char_failure_reason("stream_like")
             self.stageChanged.emit(
                 f"Stream-like frame rejected (circularity={circularity_ellipse:.2f}) → recapturing"
             )
@@ -14373,7 +14454,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 self.emitInitiateAnalyzeCharacterization()
                 return
             if self._char_attempts >= self._char_attempt_limit:
-                self._final_invalid_reason = "characterization_attempt_limit"
+                self._final_invalid_reason = self._dominant_char_failure_reason(default=failure_reason)
                 self.emitInitiateAnalyzeCharacterization()
                 return
             self.emitContinueCharacterization()
@@ -14456,6 +14537,12 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
         self.image_counter += 1
+        self.stageChanged.emit(
+            f"Accepted replicate {self.image_counter}/{self.num_images}: "
+            f"vol={float(result.get('volume', 0.0)):.2f} nL, "
+            f"focus={float(focus_val) / 1e6:.2f}e6, "
+            f"circ={float(circularity_ellipse):.2f}"
+        )
 
         if self._check_boundary_and_maybe_recenter(center_px):
             return
@@ -14489,18 +14576,16 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             return
         self.stageChanged.emit("Analyzing droplet characterization")
         good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
-        invalid_reasons = []
-        if not good:
-            invalid_reasons.append(str(self._final_invalid_reason or "no_good_replicates"))
-        elif not self._early_stop_satisfied and len(good) < int(self.num_images):
-            invalid_reasons.append("insufficient_good_replicates")
         ratio_reason = self._characterization_ratio_abort_reason()
-        if ratio_reason is not None:
-            invalid_reasons.append(str(ratio_reason))
+        invalid_reason = None
         if self._final_invalid_reason:
-            invalid_reasons.append(str(self._final_invalid_reason))
-
-        invalid_reason = str(invalid_reasons[0]) if invalid_reasons else None
+            invalid_reason = str(self._final_invalid_reason)
+        elif ratio_reason is not None:
+            invalid_reason = str(ratio_reason)
+        elif not good:
+            invalid_reason = "no_good_replicates"
+        elif not self._early_stop_satisfied and len(good) < int(self.num_images):
+            invalid_reason = "insufficient_good_replicates"
         results = self._build_result_payload(valid=(invalid_reason is None), invalid_reason=invalid_reason)
 
         if bool(results.get("valid")):
@@ -14607,6 +14692,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     # emitters
     def emitContinueSearch(self): self.continueSearch.emit()
     def emitDropletFound(self): self.dropletFound.emit()
+    def emitReadyToCharacterize(self): self.readyToCharacterize.emit()
     def emitDropletCentered(self): self.dropletCentered.emit()
     def emitContinueCharacterization(self): self.continueCharacterization.emit()
     def emitInitiateAnalyzeCharacterization(self): self.initiateCharacterizationAnalysis.emit()
@@ -19693,7 +19779,7 @@ class DropletCameraModel(QObject):
     def reset_droplet_contour_tracker(self):
         self._last_droplet_center_px = None
 
-    def characterize_droplet(self, image, background,um_per_pixel=1.5696):
+    def characterize_droplet(self, image, background, um_per_pixel=1.5696, *, return_details: bool = False):
         """
         Characterizes the droplet in the image.
         - Uses the background image to compute the difference image.
@@ -19703,10 +19789,24 @@ class DropletCameraModel(QObject):
         - Fits an ellipse to the contour and computes the circularity of the ellipse.
         - Returns the circularity of the droplet and the ellipse.
         """
+        annotated = None if image is None else image.copy()
+        details = {
+            "status": "init",
+            "reason": "",
+            "center": None,
+            "bbox": None,
+            "contour_area": 0.0,
+            "bbox_area": 0,
+            "p95": 0.0,
+        }
+
         image_gray, diff = self.calc_diff_image(image, background)
         if diff is None:
             print('Difference image is None')
-            return None, None
+            details.update({"status": "none", "reason": "difference_none"})
+            if return_details:
+                return None, annotated, details
+            return None, annotated
 
         blur = cv2.GaussianBlur(diff, (5, 5), 0)
         mu, sd = float(np.mean(blur)), float(np.std(blur))
@@ -19722,23 +19822,36 @@ class DropletCameraModel(QObject):
 
         # Check if there are any contours
         if len(contours) == 0:
-            cv2.putText(image, 'No contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(annotated, 'No contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             print('No contours detected')
-            return None, image
+            details.update({"status": "none", "reason": "no_contours"})
+            if return_details:
+                return None, annotated, details
+            return None, annotated
 
         # Determine if there are mutliple large contours
-        large_contours = [contour for contour in contours if cv2.contourArea(contour) > 1000 and cv2.contourArea(contour) < 100000]
-        large_contours = [contour for contour in large_contours if cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3] < 3]
+        large_contours = [
+            contour for contour in contours
+            if 800 < cv2.contourArea(contour) < 120000
+        ]
+        large_contours = [
+            contour for contour in large_contours
+            if cv2.boundingRect(contour)[3] > 0
+            and (cv2.boundingRect(contour)[2] / cv2.boundingRect(contour)[3]) < 3.2
+        ]
 
         if len(large_contours) == 0:
             print('No large contours detected')
             # Draw all contours and write their areas on the image
-            annotated_image = image.copy()
+            annotated_image = annotated.copy()
             cv2.drawContours(annotated_image, contours, -1, (0, 255, 0), 2)
             for i, contour in enumerate(contours):
                 area = cv2.contourArea(contour)
                 x, y, w, h = cv2.boundingRect(contour)
                 cv2.putText(annotated_image, f'{area:.0f}', (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            details.update({"status": "none", "reason": "no_large_contours"})
+            if return_details:
+                return None, annotated_image, details
             return None, annotated_image
 
         # Deterministic ranking for multi-candidate frames.
@@ -19748,9 +19861,12 @@ class DropletCameraModel(QObject):
             a1 = cv2.contourArea(ranked[1])
             if (a1 / a0) >= 0.65:
                 print('Multiple large contours detected')
-                cv2.drawContours(image, ranked[:2], -1, (0, 255, 0), 2)
-                cv2.putText(image, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                return "Multiple", image
+                cv2.drawContours(annotated, ranked[:2], -1, (0, 255, 0), 2)
+                cv2.putText(annotated, 'Multiple large contours detected', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                details.update({"status": "invalid", "reason": "multiple_large_contours"})
+                if return_details:
+                    return "Multiple", annotated, details
+                return "Multiple", annotated
 
         largest_contour = ranked[0]
 
@@ -19758,11 +19874,24 @@ class DropletCameraModel(QObject):
         area = cv2.contourArea(largest_contour)
         perimeter = cv2.arcLength(largest_contour, True)
         circularity = (4 * math.pi * area) / (perimeter ** 2)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        patch = diff[y:y + h, x:x + w]
+        p95 = float(np.percentile(patch, 95)) if patch.size > 0 else 0.0
+        details.update({
+            "center": (int(x + w // 2), int(y + h // 2)),
+            "bbox": [int(x), int(y), int(w), int(h)],
+            "contour_area": float(area),
+            "bbox_area": int(w * h),
+            "p95": float(p95),
+        })
 
         if len(largest_contour) < 5:
             print('Not enough points to fit an ellipse')
-            cv2.putText(image, 'Not enough points to fit an ellipse', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            return None, image
+            cv2.putText(annotated, 'Not enough points to fit an ellipse', (image.shape[1]//2, image.shape[0]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            details.update({"status": "none", "reason": "not_enough_ellipse_points"})
+            if return_details:
+                return None, annotated, details
+            return None, annotated
 
         # Fit an ellipse to the contour
         ellipse = cv2.fitEllipse(largest_contour)
@@ -19777,11 +19906,9 @@ class DropletCameraModel(QObject):
 
         focus = self.compute_tenengrad_variance(diff)
 
-        annotated = image.copy()
         cv2.drawContours(annotated, [largest_contour], -1, (0, 255, 0), 2)
         cv2.ellipse(annotated, ellipse, (255, 0, 255), 2)
 
-        x, y, w, h = cv2.boundingRect(largest_contour)
         cv2.putText(annotated, f"{ellipse_volume_nL:.2f} nL", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         cv2.putText(annotated, f"{ellipse_circularity:.2f}", (x, y-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         cv2.putText(annotated, f"{focus / 1e6:.2f}*10^6", (x, y-55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -19794,7 +19921,18 @@ class DropletCameraModel(QObject):
             "focus": focus
         }
         self._last_droplet_center_px = center_ellipse
+        details.update({
+            "status": "ok",
+            "reason": "ok",
+            "center": center_ellipse,
+            "volume": float(ellipse_volume_nL),
+            "focus": float(focus),
+            "circularity": float(circularity),
+            "circularity_ellipse": float(ellipse_circularity),
+        })
 
+        if return_details:
+            return results, annotated, details
         return results, annotated
     
     def save_frame(self):

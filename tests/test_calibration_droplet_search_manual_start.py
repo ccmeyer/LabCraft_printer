@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 
 from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_calibration_import_stubs
@@ -7,11 +8,18 @@ from tests.calibration_test_utils import Recorder, contour_from_rect, ensure_cal
 
 ensure_calibration_import_stubs()
 
-from CalibrationClasses.Model import DropletSearchCalibrationProcess
+from CalibrationClasses.Model import DropletCameraModel, DropletSearchCalibrationProcess
 
 
 def _recorder_texts(recorder):
     return [args[0] for args, _kwargs in recorder.calls if args]
+
+
+def _camera_stub():
+    cam = DropletCameraModel.__new__(DropletCameraModel)
+    cam._k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    cam._last_droplet_center_px = None
+    return cam
 
 
 def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
@@ -113,6 +121,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.presentImageSignal = Recorder()
     proc.continueSearch = Recorder()
     proc.dropletFound = Recorder()
+    proc.readyToCharacterize = Recorder()
     proc.dropletCentered = Recorder()
     proc.continueCharacterization = Recorder()
     proc.initiateCharacterizationAnalysis = Recorder()
@@ -253,6 +262,20 @@ def test_droplet_search_manual_mode_retries_and_aborts_when_no_droplet_visible()
     assert "fixed manual settings" in proc.calibrationError.calls[0][0][0]
 
 
+def test_droplet_search_centered_reacquire_goes_directly_to_characterization():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc._centered = True
+    proc._search_last_center = (70, 55)
+    proc._search_last_delay_us = 4300
+    proc._search_stable_hits = 1
+
+    proc.onAnalyze()
+
+    assert len(proc.readyToCharacterize.calls) == 1
+    assert proc.dropletFound.calls == []
+    assert any("reacquired" in text for text in _recorder_texts(proc.stageChanged))
+
+
 def test_droplet_search_discards_first_post_move_frame_and_requests_same_settings_retry():
     proc, _ctx = _build_proc(manual_start=True)
     proc._discard_post_move_pending = True
@@ -285,6 +308,30 @@ def test_droplet_search_multiple_detection_does_not_change_pressure():
     assert proc.image_counter == 0
 
 
+def test_droplet_search_characterization_accepts_replicate_and_reports_progress():
+    def characterize_fn(image, _bg, return_details=False):
+        result = {
+            "center": (80, 60),
+            "focus": 800_000.0,
+            "circularity": 0.95,
+            "circularity_ellipse": 0.95,
+            "volume": 10.25,
+        }
+        details = {"reason": "ok", "center": (80, 60), "bbox": [60, 40, 40, 40], "contour_area": 1200.0}
+        if return_details:
+            return result, image.copy(), details
+        return result, image.copy()
+
+    proc, _ctx = _build_proc(manual_start=True, characterize_fn=characterize_fn)
+
+    proc.onCharacterization()
+
+    assert proc.image_counter == 1
+    assert proc.droplet_volumes == [10.25]
+    assert len(proc.continueCharacterization.calls) == 1
+    assert any("Accepted replicate 1/3" in text for text in _recorder_texts(proc.stageChanged))
+
+
 def test_droplet_search_characterization_recenters_before_focus_work():
     def characterize_fn(image, _bg):
         return {
@@ -306,6 +353,29 @@ def test_droplet_search_characterization_recenters_before_focus_work():
     assert proc.droplet_volumes == []
     assert proc.continueCharacterization.calls == []
     assert proc.initiateCharacterizationAnalysis.calls == []
+
+
+def test_droplet_search_characterization_preserves_specific_failure_reason_at_attempt_limit():
+    def characterize_fn(image, _bg, return_details=False):
+        details = {"reason": "no_large_contours", "bbox": None, "contour_area": 0.0}
+        if return_details:
+            return None, image.copy(), details
+        return None, image.copy()
+
+    proc, _ctx = _build_proc(manual_start=True, characterize_fn=characterize_fn)
+    proc._char_attempt_limit = 2
+
+    proc.onCharacterization()
+    assert len(proc.continueCharacterization.calls) == 1
+    assert proc._final_invalid_reason is None
+
+    proc.onCharacterization()
+    assert proc._final_invalid_reason == "no_large_contours"
+    assert len(proc.initiateCharacterizationAnalysis.calls) == 1
+
+    proc.onAnalyzeCharacterization()
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["invalid_reason"] == "no_large_contours"
 
 
 def test_droplet_search_invalid_characterization_payload_includes_reason_and_diagnostics():
@@ -337,3 +407,43 @@ def test_droplet_search_invalid_characterization_payload_includes_reason_and_dia
     assert payload["focus_moves_done"] == 5
     assert payload["focus_dir_switches"] == 2
     assert payload["best_focus_y_offset_steps"] == 14
+
+
+def test_characterize_droplet_return_details_reports_no_large_contours():
+    cam = _camera_stub()
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    cv2.circle(img, (210, 220), 8, (255, 255, 255), -1)
+
+    result, _annotated, details = cam.characterize_droplet(img, bg, return_details=True)
+
+    assert result is None
+    assert details["reason"] == "no_large_contours"
+
+
+def test_characterize_droplet_return_details_reports_multiple_large_contours():
+    cam = _camera_stub()
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    cv2.circle(img, (130, 210), 30, (255, 255, 255), -1)
+    cv2.circle(img, (300, 220), 28, (255, 255, 255), -1)
+
+    result, _annotated, details = cam.characterize_droplet(img, bg, return_details=True)
+
+    assert result == "Multiple"
+    assert details["reason"] == "multiple_large_contours"
+
+
+def test_characterize_droplet_accepts_contour_that_matches_search_filter_window():
+    cam = _camera_stub()
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    cv2.ellipse(img, (210, 220), (40, 13), 0, 0, 360, (255, 255, 255), -1)
+
+    contour, _overlay, search_details = cam.identify_droplet_contour(img, bg, return_details=True)
+    result, _annotated, char_details = cam.characterize_droplet(img, bg, return_details=True)
+
+    assert contour is not None
+    assert search_details["reason"] == "ok"
+    assert isinstance(result, dict)
+    assert char_details["reason"] == "ok"
