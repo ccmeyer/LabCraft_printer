@@ -405,6 +405,9 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.calib_group.parentWidget() is dialog.control_panel
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.control_panel.maximumWidth() == dialog.analysis_panel.maximumWidth()
+    assert dialog.analysis_panel.maximumWidth() == dialog.info_panel.maximumWidth()
     assert dialog.flash_button.minimumHeight() >= 32
     assert dialog.calibrate_all_button.minimumHeight() >= 32
     assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32

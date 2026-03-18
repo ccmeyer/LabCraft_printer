@@ -601,8 +601,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.info_panel.adjustSize()
         self.control_panel.adjustSize()
-        self.info_panel.setFixedWidth(max(520, self.info_panel.sizeHint().width()))
-        self.control_panel.setFixedWidth(max(520, self.control_panel.sizeHint().width()))
 
         # ---------- MIDDLE PANEL (image + motor positions): expands ----------
         self.analysis_layout = QtWidgets.QVBoxLayout()
@@ -650,13 +648,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add panels to the main layout: left controls, middle image, right results.
         self.analysis_panel = QtWidgets.QWidget()
         self.analysis_panel.setLayout(self.analysis_layout)
-        self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.layout.addWidget(self.control_panel, 0)
         self.layout.setStretchFactor(self.control_panel, 0)
         self.layout.addWidget(self.analysis_panel, 1)
         self.layout.setStretchFactor(self.analysis_panel, 1)
         self.layout.addWidget(self.info_panel, 0)
         self.layout.setStretchFactor(self.info_panel, 0)
+        self._set_equal_panel_widths()
 
         # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
@@ -741,6 +740,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         dX, dY, dZ = self.model.droplet_camera_model.compute_move_by_fraction(x_fraction, y_fraction)
         self.controller.set_relative_coordinates(dX, dY, dZ, manual=False)
+
+    def _set_equal_panel_widths(self):
+        if not all(hasattr(self, name) for name in ("control_panel", "analysis_panel", "info_panel")):
+            return
+
+        margins = self.layout.contentsMargins()
+        spacing = max(0, self.layout.spacing())
+        available_width = max(
+            0,
+            self.width() - margins.left() - margins.right() - (2 * spacing),
+        )
+        panel_width = max(int(self.image_label.width()), available_width // 3)
+
+        for panel in (self.control_panel, self.analysis_panel, self.info_panel):
+            panel.setFixedWidth(panel_width)
     
     def numpy_to_qimage(self,image):
         """
@@ -1461,6 +1475,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # populate the labels when the dialog appears
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation(force_log=True)
+        self._set_equal_panel_widths()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._set_equal_panel_widths()
 
     def _render_calibration_memory_recommendation(self, preview: dict | None):
         preview = dict(preview or {})
