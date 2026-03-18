@@ -941,6 +941,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model = model
         self.controller = controller
         self._pressure_spinbox_focus_targets = {}
+        self._pressure_spinboxes = []
+        self._active_spinbox_highlight = None
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -971,49 +973,53 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Configure a pressure control spinbox for guarded edits."""
         spinbox.setKeyboardTracking(False)
         spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
-        spinbox.setProperty("editHighlightActive", False)
-        spinbox.setStyleSheet(
-            "QAbstractSpinBox {"
-            " border: 1px solid transparent;"
-            " border-radius: 2px;"
-            "}"
-            "QAbstractSpinBox[editHighlightActive='true'] {"
-            f" border: 1px solid {self.color_dict.get('light_blue', '#3b82f6')};"
-            "}"
-        )
         spinbox.editingFinished.connect(handler)
         spinbox.installEventFilter(self)
         self._pressure_spinbox_focus_targets[spinbox] = spinbox
+        self._pressure_spinboxes.append(spinbox)
 
         line_edit = spinbox.lineEdit() if hasattr(spinbox, "lineEdit") else None
         if line_edit is not None:
             line_edit.installEventFilter(self)
             self._pressure_spinbox_focus_targets[line_edit] = spinbox
 
-    def _set_spinbox_edit_highlight(self, spinbox, is_active):
-        """Show a thin border while a guarded spinbox is actively being edited."""
-        if spinbox.property("editHighlightActive") == is_active:
+    def _refresh_spinbox_edit_highlight(self):
+        """Show a thin focus frame only around the actively edited spinbox."""
+        active_spinbox = next(
+            (spinbox for spinbox in self._pressure_spinboxes if self._spinbox_is_being_edited(spinbox)),
+            None,
+        )
+
+        if active_spinbox is None:
+            self._active_spinbox_highlight = None
+            self.edit_focus_frame.hide()
             return
 
-        spinbox.setProperty("editHighlightActive", is_active)
-        spinbox.style().unpolish(spinbox)
-        spinbox.style().polish(spinbox)
-        spinbox.update()
+        self._active_spinbox_highlight = active_spinbox
+        self.edit_focus_frame.setWidget(active_spinbox)
+        self.edit_focus_frame.show()
+        self.edit_focus_frame.raise_()
 
     def eventFilter(self, watched, event):
         spinbox = self._pressure_spinbox_focus_targets.get(watched)
         if spinbox is not None and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut):
-            QTimer.singleShot(
-                0,
-                lambda sb=spinbox: self._set_spinbox_edit_highlight(
-                    sb, self._spinbox_is_being_edited(sb)
-                ),
-            )
+            QTimer.singleShot(0, self._refresh_spinbox_edit_highlight)
         return super().eventFilter(watched, event)
 
     def init_ui(self):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QGridLayout(self)
+        self.edit_focus_frame = QtWidgets.QFocusFrame(self)
+        self.edit_focus_frame.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.edit_focus_frame.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.edit_focus_frame.setStyleSheet(
+            "QFocusFrame {"
+            f" border: 1px solid {self.color_dict.get('light_blue', '#3b82f6')};"
+            " border-radius: 2px;"
+            " background: transparent;"
+            "}"
+        )
+        self.edit_focus_frame.hide()
 
         self.current_print_pressure_label = QtWidgets.QLabel("Print Pressure:")  # Create a new QLabel for the current pressure label
         self.current_print_pressure_value = QtWidgets.QLabel()  # Create a new QLabel for the current pressure value
