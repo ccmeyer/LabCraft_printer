@@ -37,6 +37,7 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     dialog.final_v_spin = QDoubleSpinBox()
     dialog.fill_name_edit = QLineEdit()
     dialog.fill_dv_spin = QDoubleSpinBox()
+    dialog.allow_two_chk = QCheckBox()
     dialog.randomize_chk = QCheckBox()
     dialog.random_seed_spin = QSpinBox()
     dialog.subset_chk = QCheckBox()
@@ -46,7 +47,7 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     dialog.plate_format_combo = QComboBox()
     dialog.plate_format_combo.addItem("shallow-384_well_plate")
 
-    dialog.reagent_table = QTableWidget(1, 11)
+    dialog.reagent_table = QTableWidget(1, 12)
     dialog.reagent_table.setCellWidget(0, 0, QLineEdit())
     dialog.reagent_table.setCellWidget(0, 1, QComboBox())
     dialog.reagent_table.setCellWidget(0, 2, QComboBox())
@@ -56,8 +57,9 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     dialog.reagent_table.setCellWidget(0, 6, QLineEdit())
     dialog.reagent_table.setCellWidget(0, 7, QLineEdit())
     dialog.reagent_table.setCellWidget(0, 8, QLineEdit())
-    dialog.reagent_table.setCellWidget(0, 9, QDoubleSpinBox())
-    dialog.reagent_table.setCellWidget(0, 10, QPushButton())
+    dialog.reagent_table.setCellWidget(0, 9, QLineEdit())
+    dialog.reagent_table.setCellWidget(0, 10, QDoubleSpinBox())
+    dialog.reagent_table.setCellWidget(0, 11, QPushButton())
 
     rack_model = SimpleNamespace(get_gripper_printer_head=lambda: object() if gripper_loaded else None)
     dialog.main_window = SimpleNamespace(
@@ -79,6 +81,7 @@ def _assert_mutating_controls_disabled(dialog):
         dialog.upload_design_btn,
         dialog.reset_upload_btn,
         dialog.rep_spin,
+        dialog.allow_two_chk,
         dialog.randomize_chk,
         dialog.random_seed_spin,
         dialog.start_col_spin,

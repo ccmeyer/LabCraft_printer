@@ -73,7 +73,7 @@ def _build_dialog_stub(runtime_model):
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.model = ExperimentModel(prof=CURRENT_PROFILE)
     dialog.choice_groups = set()
-    dialog.reagent_table = QTableWidget(0, 11)
+    dialog.reagent_table = QTableWidget(0, 12)
     dialog._auto_timer = SimpleNamespace(start=lambda: None)
     dialog.default_droplet_volume_nL = 10.0
     dialog.color_dict = {"dark_red": "#8a0303"}

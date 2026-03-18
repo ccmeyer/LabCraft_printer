@@ -29,6 +29,8 @@ def test_update_metadata_syncs_plate_dimensions_with_selected_plate(qapp):
     dialog.fill_dv_spin.setValue(10.0)
     dialog.final_v_spin = QDoubleSpinBox()
     dialog.final_v_spin.setValue(500.0)
+    dialog.allow_two_chk = QCheckBox()
+    dialog.allow_two_chk.setChecked(True)
     dialog.randomize_chk = QCheckBox()
     dialog.random_seed_spin = QSpinBox()
     dialog.subset_chk = QCheckBox()
@@ -53,6 +55,7 @@ def test_update_metadata_syncs_plate_dimensions_with_selected_plate(qapp):
     )
 
     ExperimentDesignDialog._update_metadata_from_controls(dialog)
+    assert dialog.model.metadata["allow_two_stock_solutions"] is True
     assert dialog.model.metadata["plate_name"] == "96well-8x12"
     assert dialog.model.metadata["plate_rows"] == 8
     assert dialog.model.metadata["plate_columns"] == 12

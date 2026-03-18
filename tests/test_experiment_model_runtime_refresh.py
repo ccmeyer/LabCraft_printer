@@ -66,10 +66,14 @@ def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
         metadata={"final_reaction_volume_nL": 500.0},
         _stock_rows_cache=[stock_row],
         _normalize_target_key=lambda value: round(float(value), 6),
+        _refresh_plan_preview_maps=lambda: None,
         generate_experiment=lambda: None,
         _refresh_runtime_after_plan_change=lambda **kwargs: refresh_calls.append(kwargs) or True,
         _last_worst_nonfill_volume_nL=0.0,
         unsaved_changes=False,
+    )
+    em._evaluate_single_forced_target = (
+        ExperimentModel._evaluate_single_forced_target.__get__(em, ExperimentModel)
     )
     em.apply_droplet_volume_for_option = (
         ExperimentModel.apply_droplet_volume_for_option.__get__(em, ExperimentModel)

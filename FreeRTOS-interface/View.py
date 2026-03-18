@@ -3831,8 +3831,9 @@ class ExperimentDesignDialog(QDialog):
     COL_TARGETS      = 6
     COL_UNITS        = 7
     COL_SET_STOCK    = 8
-    COL_DROPLET      = 9
-    COL_DELETE       = 10
+    COL_MAX_STOCK    = 9
+    COL_DROPLET      = 10
+    COL_DELETE       = 11
 
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
@@ -3885,10 +3886,10 @@ class ExperimentDesignDialog(QDialog):
         self.root.addLayout(right, stretch=3) # make right wider
 
         # ---------- Reagents table (top-right) ----------
-        self.reagent_table = QTableWidget(0, 11, self)
+        self.reagent_table = QTableWidget(0, 12, self)
         self.reagent_table.setHorizontalHeaderLabels([
             "Stock / Label", "Reagent", "Group", "Head Type", "Prior", "Starting",
-            "Targets", "Units", "Set Stock Conc", "Droplet Vol (nL)", "Delete"
+            "Targets", "Units", "Fixed Stock Conc", "Max Stock Conc", "Droplet Vol (nL)", "Delete"
         ])
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -3900,13 +3901,20 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setColumnWidth(5, 90)    # Starting
         self.reagent_table.setColumnWidth(6, 220)   # Targets
         self.reagent_table.setColumnWidth(7, 90)    # Units
-        self.reagent_table.setColumnWidth(8, 120)   # Set Stock Conc
-        self.reagent_table.setColumnWidth(9, 95)    # Droplet vol
-        self.reagent_table.setColumnWidth(10, 90)   # Delete
+        self.reagent_table.setColumnWidth(8, 120)   # Fixed stock conc
+        self.reagent_table.setColumnWidth(9, 120)   # Max stock conc
+        self.reagent_table.setColumnWidth(10, 95)   # Droplet vol
+        self.reagent_table.setColumnWidth(11, 90)   # Delete
         right.addWidget(self.reagent_table)
 
         # ---------- Stock table (bottom-right) ----------
         # Add "Max / Rxn (nL)" column
+        self.stock_table_status_lbl = QLabel("")
+        self.stock_table_status_lbl.setWordWrap(True)
+        self.stock_table_status_lbl.setStyleSheet("color:#666; font-style: italic;")
+        self.stock_table_status_lbl.setVisible(False)
+        right.addWidget(self.stock_table_status_lbl)
+
         self.stock_table = QTableWidget(0, 9, self)
         self.stock_table.setHorizontalHeaderLabels([
             "Factor/Group", "Option", "Stock Conc", "Δ per drop",
@@ -3954,6 +3962,11 @@ class ExperimentDesignDialog(QDialog):
         )))
         self.final_v_spin.setSingleStep(50.0)
         form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
+
+        self.allow_two_chk = QCheckBox()
+        self.allow_two_chk.setChecked(bool(self.model.metadata.get("allow_two_stock_solutions", False)))
+        self.allow_two_chk.setToolTip("Enable two-stock fallback when a single stock cannot satisfy the targets under the current bounds.")
+        form.addRow(QLabel("Allow Two Stock Solutions"), self.allow_two_chk)
 
         # Fill reagent name
         self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
@@ -4084,6 +4097,7 @@ class ExperimentDesignDialog(QDialog):
         self.reduction_spin.valueChanged.connect(_auto_update)
         self.start_col_spin.valueChanged.connect(_auto_update)
         self.start_row_spin.valueChanged.connect(_auto_update)
+        self.allow_two_chk.stateChanged.connect(_auto_update)
 
         self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
         self.rep_spin.valueChanged.connect(self._schedule_auto_update)
@@ -4444,6 +4458,7 @@ class ExperimentDesignDialog(QDialog):
                         targets: str = "0, 1, 2", units: str = "mM",
                         droplet_nL: float = 10.0, starting_conc: float = 0.0,
                         forced_stock_conc: float | None = None,
+                        max_stock_conc: float | None = None,
                         reagent_id: str | None = None,
                         reagent_display_name: str | None = None,
                         intended_head_type_id: str | None = None,
@@ -4504,14 +4519,21 @@ class ExperimentDesignDialog(QDialog):
         units_edit.textEdited.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, self.COL_UNITS, units_edit)
 
-        # 8 Set Stock Conc (blank => optimize)
+        # 8 Fixed Stock Conc (blank => optimize)
         stock_edit = QLineEdit("" if forced_stock_conc in (None, 0.0) else str(forced_stock_conc))
         stock_edit.setPlaceholderText("auto")
-        stock_edit.setToolTip("Leave blank to auto-optimize. Enter a positive number to force the stock concentration.")
+        stock_edit.setToolTip(self._default_fixed_stock_tooltip())
         stock_edit.textEdited.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, self.COL_SET_STOCK, stock_edit)
 
-        # 9 Droplet vol
+        # 9 Max Stock Conc (blank => unbounded)
+        max_stock_edit = QLineEdit("" if max_stock_conc in (None, 0.0) else str(max_stock_conc))
+        max_stock_edit.setPlaceholderText("unbounded")
+        max_stock_edit.setToolTip(self._default_max_stock_tooltip())
+        max_stock_edit.textEdited.connect(self._schedule_auto_update)
+        self.reagent_table.setCellWidget(row, self.COL_MAX_STOCK, max_stock_edit)
+
+        # 10 Droplet vol
         dv_spin = QDoubleSpinBox()
         dv_spin.setDecimals(1)
         dv_spin.setRange(0.1, 100_000.0)
@@ -4520,7 +4542,7 @@ class ExperimentDesignDialog(QDialog):
         dv_spin.valueChanged.connect(self._schedule_auto_update)
         self.reagent_table.setCellWidget(row, self.COL_DROPLET, dv_spin)
 
-        # 10 Delete
+        # 11 Delete
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
         self.reagent_table.setCellWidget(row, self.COL_DELETE, del_btn)
@@ -4545,24 +4567,7 @@ class ExperimentDesignDialog(QDialog):
         self._auto_timer.start()
 
     def _recompute_silent(self):
-        # push UI -> model
-        self._rebuild_model_from_table()
-        self._refresh_all_prior_availability()
-        self._update_metadata_from_controls()
-
-        # Try optimize/generate without popping dialogs on failure (user may be mid-edit)
-        res = self.model.optimize_stock_solutions(
-            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
-        )
-        if not res.get("best"):
-            # keep the stock table as-is; summary shows last successful run
-            return
-
-        self.model.generate_experiment()
-        self._validate_plate_capacity(show_dialog=False)
-        self._refresh_stock_table()
-        self._update_summary_labels()
-        self._apply_target_color_state()
+        self._run_design_optimization_flow(show_failure_dialog=False, show_capacity_dialog=False)
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
@@ -4579,6 +4584,7 @@ class ExperimentDesignDialog(QDialog):
                     droplet_nL=o.droplet_nL,
                     starting_conc=getattr(o, "starting_conc", 0.0),
                     forced_stock_conc=getattr(o, "forced_stock_conc", None),
+                    max_stock_conc=getattr(o, "max_stock_conc", None),
                     reagent_id=getattr(o, "reagent_id", None),
                     reagent_display_name=getattr(o, "reagent_display_name", None),
                     intended_head_type_id=getattr(o, "intended_head_type_id", None),
@@ -4597,6 +4603,7 @@ class ExperimentDesignDialog(QDialog):
                         droplet_nL=o.droplet_nL,
                         starting_conc=getattr(o, "starting_conc", 0.0),
                         forced_stock_conc=getattr(o, "forced_stock_conc", None),
+                        max_stock_conc=getattr(o, "max_stock_conc", None),
                         reagent_id=getattr(o, "reagent_id", None),
                         reagent_display_name=getattr(o, "reagent_display_name", None),
                         intended_head_type_id=getattr(o, "intended_head_type_id", None),
@@ -4727,26 +4734,16 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
+        self._update_metadata_from_controls()
 
         # Immediately optimize & generate using the uploaded design
-        res = self.model.optimize_stock_solutions(
-            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
+        self._run_design_optimization_flow(
+            show_failure_dialog=True,
+            failure_title="Optimization failed",
+            failure_prefix="Could not find feasible stock solutions for the uploaded design:\n",
+            show_capacity_dialog=False,
+            refresh_lock_states=True,
         )
-        if not res.get("best"):
-            QMessageBox.warning(
-                self,
-                "Optimization failed",
-                f"Could not find feasible stock solutions for the uploaded design:\n{res.get('reason','Unknown')}"
-            )
-            # Keep the design for inspection, but stock table may be empty.
-        else:
-            self.model.generate_experiment()
-
-        self._refresh_stock_table()
-        self._update_summary_labels()
-        self._apply_target_color_state()
-        self._refresh_all_prior_availability()
-        self._refresh_all_lock_states()
 
     def _on_reset_uploaded_design(self):
         if not self._uploaded_design_active and not self.model.has_uploaded_design():
@@ -4775,19 +4772,11 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
-
-        # Re-optimize and generate in standard mode
-        res = self.model.optimize_stock_solutions(
-            quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True
+        self._run_design_optimization_flow(
+            show_failure_dialog=False,
+            show_capacity_dialog=False,
+            refresh_lock_states=True,
         )
-        if res.get("best"):
-            self.model.generate_experiment()
-
-        self._refresh_stock_table()
-        self._update_summary_labels()
-        self._apply_target_color_state()
-        self._refresh_all_prior_availability()
-        self._refresh_all_lock_states()
 
     def _manual_assignments_active(self) -> bool:
         """
@@ -4869,6 +4858,7 @@ class ExperimentDesignDialog(QDialog):
             "final_v_spin",
             "fill_name_edit",
             "fill_dv_spin",
+            "allow_two_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -4915,6 +4905,7 @@ class ExperimentDesignDialog(QDialog):
             "final_v_spin",
             "fill_name_edit",
             "fill_dv_spin",
+            "allow_two_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -4961,6 +4952,176 @@ class ExperimentDesignDialog(QDialog):
             return v if v > 0 else None
         except ValueError:
             return None
+
+    def _validation_key_for_row(self, row: int) -> tuple[str, Optional[str]]:
+        name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
+        group_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
+        reagent_name = (name_edit.text() or "").strip() if name_edit is not None else ""
+        group_name = group_combo.currentText() if group_combo is not None else self.GROUP_ADDITIVE
+        if not reagent_name:
+            return (f"__row_{row}__", None)
+        if group_name == self.GROUP_ADDITIVE:
+            return (reagent_name, None)
+        return (group_name, reagent_name)
+
+    @staticmethod
+    def _default_fixed_stock_tooltip() -> str:
+        return "Leave blank to auto-optimize. Enter a positive number to force the stock concentration."
+
+    @staticmethod
+    def _default_max_stock_tooltip() -> str:
+        return "Optional upper bound for auto-selected stock concentrations. Leave blank for no limit."
+
+    def _parse_positive_float_issue(
+        self,
+        raw_text: str,
+        *,
+        key: tuple[str, Optional[str]],
+        field: str,
+        row_label: str,
+    ) -> dict | None:
+        text = (raw_text or "").strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return {
+                "field": field,
+                "severity": "error",
+                "code": "invalid_number",
+                "message": f"{row_label}: {field.replace('_', ' ')} must be a positive number.",
+                "raw_text": text,
+            }
+        if value <= 0:
+            return {
+                "field": field,
+                "severity": "error",
+                "code": "nonpositive_value",
+                "message": f"{row_label}: {field.replace('_', ' ')} must be greater than zero.",
+                "raw_text": text,
+                "value": value,
+            }
+        return None
+
+    def _collect_raw_stock_input_issues(self) -> Dict[tuple[str, Optional[str]], List[Dict[str, Any]]]:
+        issues: Dict[tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+        for row in range(self.reagent_table.rowCount()):
+            key = self._validation_key_for_row(row)
+            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
+            label = self._key_label(key) if not key[0].startswith("__row_") else f"Row {row + 1}"
+
+            for field_name, widget in (("fixed_stock", stock_edit), ("max_stock", max_stock_edit)):
+                if widget is None:
+                    continue
+                issue = self._parse_positive_float_issue(
+                    widget.text(),
+                    key=key,
+                    field=field_name,
+                    row_label=label,
+                )
+                if issue is not None:
+                    issues.setdefault(key, []).append(issue)
+        return issues
+
+    @staticmethod
+    def _merge_issue_maps(*issue_maps: Mapping[tuple[str, Optional[str]], Sequence[Mapping[str, Any]]]) -> Dict[tuple[str, Optional[str]], List[Dict[str, Any]]]:
+        merged: Dict[tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+        for issue_map in issue_maps:
+            for key, rows in (issue_map or {}).items():
+                merged.setdefault(key, [])
+                merged[key].extend(dict(row) for row in rows)
+        return merged
+
+    def _summarize_issue_map(
+        self,
+        issue_map: Mapping[tuple[str, Optional[str]], Sequence[Mapping[str, Any]]],
+        *,
+        fallback_reason: str | None = None,
+        stale: bool = False,
+        stale_message: str | None = None,
+    ) -> str:
+        messages: list[str] = []
+        seen: set[str] = set()
+        for rows in (issue_map or {}).values():
+            for issue in rows:
+                msg = str(issue.get("message") or "").strip()
+                if msg and msg not in seen:
+                    messages.append(msg)
+                    seen.add(msg)
+        if not messages and fallback_reason:
+            messages.append(str(fallback_reason))
+        if not messages and stale:
+            messages.append(stale_message or "Showing last valid stock plan; current stock inputs are invalid.")
+        if not messages:
+            return ""
+        summary = messages[0]
+        if len(messages) > 1:
+            summary += f" (+{len(messages) - 1} more issue(s))"
+        if stale and "Showing last valid stock plan" not in summary:
+            prefix = stale_message or "Showing last valid stock plan; current stock inputs are invalid."
+            summary = f"{prefix} {summary}"
+        return summary
+
+    def _style_stock_input_widget(
+        self,
+        widget: QLineEdit,
+        *,
+        issues: Sequence[Mapping[str, Any]],
+        default_tooltip: str,
+    ):
+        if widget is None:
+            return
+        if not issues:
+            widget.setStyleSheet("")
+            widget.setToolTip(default_tooltip)
+            return
+        severity_rank = {"error": 2, "warning": 1}
+        top_severity = max((severity_rank.get(str(issue.get("severity")), 0) for issue in issues), default=0)
+        if top_severity >= 2:
+            widget.setStyleSheet("border:1px solid #8a0303;")
+        else:
+            widget.setStyleSheet("border:1px solid #996515;")
+        tooltip_lines = [str(issue.get("message") or "").strip() for issue in issues if str(issue.get("message") or "").strip()]
+        widget.setToolTip("\n".join(tooltip_lines) if tooltip_lines else default_tooltip)
+
+    def _apply_stock_input_issue_state(self, issue_map: Mapping[tuple[str, Optional[str]], Sequence[Mapping[str, Any]]]):
+        for row in range(self.reagent_table.rowCount()):
+            key = self._validation_key_for_row(row)
+            key_issues = list((issue_map or {}).get(key, []))
+            stock_issues = [issue for issue in key_issues if str(issue.get("field")) == "fixed_stock"]
+            max_issues = [issue for issue in key_issues if str(issue.get("field")) == "max_stock"]
+
+            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
+            self._style_stock_input_widget(
+                stock_edit,
+                issues=stock_issues,
+                default_tooltip=self._default_fixed_stock_tooltip(),
+            )
+            self._style_stock_input_widget(
+                max_stock_edit,
+                issues=max_issues,
+                default_tooltip=self._default_max_stock_tooltip(),
+            )
+
+    def _clear_target_color_state(self):
+        for row in range(self.reagent_table.rowCount()):
+            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
+            if tgt_edit is not None:
+                tgt_edit.setStyleSheet("")
+                tgt_edit.setToolTip("")
+
+    def _set_stock_table_stale(self, stale: bool, message: str = ""):
+        if hasattr(self, "stock_table_status_lbl") and self.stock_table_status_lbl is not None:
+            self.stock_table_status_lbl.setText(message if stale else "")
+            self.stock_table_status_lbl.setVisible(bool(stale and message))
+        if hasattr(self, "stock_table") and self.stock_table is not None:
+            self.stock_table.setStyleSheet(
+                "QTableWidget { border:1px solid #8a0303; }"
+                if stale else ""
+            )
         
     def _rebuild_model_from_table(self):
         """Clear and rebuild factors in the model based on the table."""
@@ -4976,6 +5137,7 @@ class ExperimentDesignDialog(QDialog):
             tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
             units_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_UNITS)
             stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
             dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, self.COL_DROPLET)
 
             r_name = (name_edit.text() or "").strip()
@@ -4991,6 +5153,7 @@ class ExperimentDesignDialog(QDialog):
             r_targets = self._parse_targets(tgt_edit.text())
             r_units = (units_edit.text() or "mM").strip()
             r_forced = self._parse_float_or_none(stock_edit.text())
+            r_max_stock = self._parse_float_or_none(max_stock_edit.text()) if max_stock_edit is not None else None
             r_dv = float(dv_spin.value())
             r_reagent_id = resolved_reagent.get("reagent_id")
             r_reagent_display = resolved_reagent.get("display_name") or self._combo_current_text(reagent_combo) or r_name
@@ -5005,6 +5168,7 @@ class ExperimentDesignDialog(QDialog):
                                         units=r_units, droplet_nL=r_dv,
                                         starting_conc=r_start,
                                         forced_stock_conc=r_forced,
+                                        max_stock_conc=r_max_stock,
                                         reagent_id=r_reagent_id,
                                         reagent_display_name=r_reagent_display,
                                         intended_head_type_id=r_head_type_id,
@@ -5017,6 +5181,7 @@ class ExperimentDesignDialog(QDialog):
                                             targets=r_targets, units=r_units, droplet_nL=r_dv,
                                             starting_conc=r_start,
                                             forced_stock_conc=r_forced,
+                                            max_stock_conc=r_max_stock,
                                             reagent_id=r_reagent_id,
                                             reagent_display_name=r_reagent_display,
                                             intended_head_type_id=r_head_type_id,
@@ -5048,6 +5213,7 @@ class ExperimentDesignDialog(QDialog):
             fill_reagent_name=self.fill_name_edit.text().strip() or "Water",
             fill_droplet_volume_nL=float(self.fill_dv_spin.value()),
             final_reaction_volume_nL=float(self.final_v_spin.value()),
+            allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
             randomize_assignments=randomize,
             random_seed=(seed if randomize else None),
             use_subset_design=bool(self.subset_chk.isChecked()),
@@ -5069,6 +5235,146 @@ class ExperimentDesignDialog(QDialog):
             except Exception as e:
                 print(f"[ExperimentDesignDialog] WARNING: could not persist reagent identities: {e}")
 
+    def _allow_two_setting(self) -> bool:
+        if hasattr(self, "allow_two_chk") and self.allow_two_chk is not None:
+            return bool(self.allow_two_chk.isChecked())
+        return bool(self.model.metadata.get("allow_two_stock_solutions", False))
+
+    def _key_label(self, key: tuple[str, Optional[str]]) -> str:
+        factor_name, option_name = key
+        return factor_name if option_name in (None, "") else f"{factor_name}/{option_name}"
+
+    def _update_optimization_status(self, res: dict | None):
+        if not res:
+            return
+        if not res.get("best"):
+            self._set_status(str(res.get("reason", "Optimization failed")))
+            return
+
+        preview = {}
+        try:
+            preview = self.model.get_target_preview_map() or {}
+        except Exception:
+            preview = {}
+
+        two_stock = [
+            self._key_label(key)
+            for key, plan in getattr(self.model, "plans_per_option", {}).items()
+            if plan.get("n_stocks", 1) == 2
+        ]
+        bounded_search = [
+            self._key_label(key)
+            for key in (res.get("two_stock_search_limited_keys") or [])
+        ]
+        unreachable = []
+        approximate = []
+        for key, rows in preview.items():
+            if any(not bool(row.get("reachable")) for row in rows):
+                unreachable.append(self._key_label(key))
+            elif any(abs(float(row.get("abs_error", 0.0))) > 1e-12 for row in rows):
+                approximate.append(self._key_label(key))
+
+        parts = []
+        if unreachable:
+            parts.append(
+                "Some targets remain unreachable under the selected stock settings: "
+                + ", ".join(unreachable[:4])
+                + ("..." if len(unreachable) > 4 else "")
+                + "."
+            )
+        if two_stock:
+            parts.append(
+                "Two-stock plans are required for: "
+                + ", ".join(two_stock[:4])
+                + ("..." if len(two_stock) > 4 else "")
+                + "."
+            )
+        if bounded_search:
+            parts.append(
+                "Two-stock search was capped for: "
+                + ", ".join(bounded_search[:4])
+                + ("..." if len(bounded_search) > 4 else "")
+                + "."
+            )
+        if approximate or preview:
+            parts.append("Hover a Targets field to inspect the actual achieved concentrations.")
+        if not parts:
+            parts.append("Optimization complete.")
+        self._set_status(" ".join(parts))
+
+    def _run_design_optimization_flow(
+        self,
+        *,
+        show_failure_dialog: bool = False,
+        failure_title: str = "Optimization failed",
+        failure_prefix: str = "",
+        show_capacity_dialog: bool = False,
+        refresh_lock_states: bool = False,
+    ) -> tuple[bool, dict | None]:
+        self._rebuild_model_from_table()
+        self._refresh_all_prior_availability()
+        self._update_metadata_from_controls()
+
+        raw_issues = self._collect_raw_stock_input_issues()
+        if raw_issues:
+            self._apply_stock_input_issue_state(raw_issues)
+            self._clear_target_color_state()
+            stale_msg = "Showing last valid stock plan; current stock inputs are invalid."
+            self._set_stock_table_stale(True, stale_msg)
+            summary = self._summarize_issue_map(raw_issues, stale=True, stale_message=stale_msg)
+            self._set_status(summary)
+            if refresh_lock_states:
+                self._refresh_all_lock_states()
+            if show_failure_dialog:
+                QMessageBox.warning(self, failure_title, f"{failure_prefix}{summary}")
+            return False, {
+                "best": None,
+                "reason": summary,
+                "issues_by_key": raw_issues,
+            }
+
+        res = self.model.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=self._allow_two_setting(),
+        )
+        merged_issues = self._merge_issue_maps(res.get("issues_by_key") or {})
+        self._apply_stock_input_issue_state(merged_issues)
+
+        if not res.get("best"):
+            self._clear_target_color_state()
+            stale_msg = "Showing last valid stock plan; current stock inputs are not feasible."
+            self._set_stock_table_stale(True, stale_msg)
+            summary = self._summarize_issue_map(
+                merged_issues,
+                fallback_reason=res.get("reason"),
+                stale=True,
+                stale_message=stale_msg,
+            )
+            self._set_status(summary)
+            if refresh_lock_states:
+                self._refresh_all_lock_states()
+            if show_failure_dialog:
+                QMessageBox.warning(
+                    self,
+                    failure_title,
+                    f"{failure_prefix}{res.get('reason', 'Unknown error')}",
+                )
+            return False, res
+
+        self.model.generate_experiment()
+        capacity_ok = self._validate_plate_capacity(show_dialog=show_capacity_dialog)
+        self._refresh_stock_table()
+        self._update_summary_labels()
+        self._apply_target_color_state()
+        self._refresh_all_prior_availability()
+        self._set_stock_table_stale(False, "")
+        self._update_optimization_status(res)
+        if refresh_lock_states:
+            self._refresh_all_lock_states()
+        return bool(capacity_ok), res
+
     # -----------------------------
     # Actions
     # -----------------------------
@@ -5078,31 +5384,12 @@ class ExperimentDesignDialog(QDialog):
         self._add_reagent_row(group=self.GROUP_ADDITIVE, droplet_nL=self.default_droplet_volume_nL)
 
     def _on_optimize_and_generate(self, show_capacity_dialog: bool = False):
-        # push UI -> model
-        self._rebuild_model_from_table()
-        self._update_metadata_from_controls()
-
-        # Optimize (prefers fewest stocks, then min conc, then min volume)
-        res = self.model.optimize_stock_solutions(
-            quantum=0.1,      # supports fractional step sizes like 0.2, 0.5, etc.
-            max_refine=60,    # search more single-stock steps if you wish
-            two_max_refine=40,
-            allow_two=True    # enable two-stock fallback where needed
+        ok, _res = self._run_design_optimization_flow(
+            show_failure_dialog=True,
+            failure_title="Optimization failed",
+            show_capacity_dialog=show_capacity_dialog,
         )
-        if not res.get("best"):
-            QMessageBox.warning(self, "Optimization failed", res.get("reason", "Unknown error"))
-            return False
-
-        # Generate reactions, totals, and fill usage
-        self.model.generate_experiment()
-        if not self._validate_plate_capacity(show_dialog=show_capacity_dialog):
-            return False
-        # UI updates come from signals; but we also force a local refresh
-        self._refresh_stock_table()
-        self._update_summary_labels()
-        self._apply_target_color_state()
-        self._refresh_all_prior_availability()
-        return True
+        return ok
 
     def _available_wells_for_selected_plate(self) -> tuple[int, str]:
         """
@@ -5174,17 +5461,10 @@ class ExperimentDesignDialog(QDialog):
         for row in range(self.reagent_table.rowCount()):
             name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
             group_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
-            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
             tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
 
             reagent_name = (name_edit.text() or "").strip()
             group_name = group_combo.currentText()
-
-            # If no forced stock, clear any styling
-            if not (stock_edit.text() or "").strip():
-                tgt_edit.setStyleSheet("")
-                tgt_edit.setToolTip("")
-                continue
 
             # Map to key used by the model
             key = (reagent_name, None) if group_name == self.GROUP_ADDITIVE else (group_name, reagent_name)
@@ -5241,19 +5521,37 @@ class ExperimentDesignDialog(QDialog):
             return ""
 
         first = rows[0]
-        stock_text = cls._fmt_target_preview_num(first.get("stock_concentration", ""))
         units = str(first.get("units", "") or "").strip()
-        stock_label = f"{stock_text} {units}".strip()
-        header = "Achievable with forced stock:"
-        if stock_label:
-            header = f"Achievable with forced stock {stock_label}:"
+        plan_mode = str(first.get("plan_mode", "auto") or "auto")
+        stock_info = first.get("stock_concentration", "")
+        if isinstance(stock_info, tuple):
+            stock_bits = [
+                f"{cls._fmt_target_preview_num(val)} {units}".strip()
+                for val in stock_info
+            ]
+            header = f"Achievable with 2 stocks {' + '.join(stock_bits)}:"
+        else:
+            stock_text = cls._fmt_target_preview_num(stock_info)
+            stock_label = f"{stock_text} {units}".strip()
+            header = "Achievable with stock:"
+            if plan_mode == "fixed":
+                header = "Achievable with fixed stock:"
+            if stock_label:
+                header = f"{header[:-1]} {stock_label}:"
 
         lines = [header]
         for row in rows:
             requested = cls._fmt_target_preview_num(row.get("requested_final", 0.0))
             achieved = cls._fmt_target_preview_num(row.get("achieved_final", 0.0))
-            drops = int(row.get("droplets", 0) or 0)
-            drop_word = "drop" if drops == 1 else "drops"
+            drops_value = row.get("droplets", 0)
+            if isinstance(drops_value, tuple):
+                drops = " + ".join(str(int(v)) for v in drops_value)
+                total = sum(int(v) for v in drops_value)
+                drop_word = "drop" if total == 1 else "drops"
+            else:
+                total = int(drops_value or 0)
+                drops = str(total)
+                drop_word = "drop" if total == 1 else "drops"
             err = cls._fmt_target_preview_signed(row.get("signed_error", 0.0))
             line = f"{requested} -> {achieved} ({drops} {drop_word}, {err})"
             if not bool(row.get("reachable")):
@@ -5326,6 +5624,7 @@ class ExperimentDesignDialog(QDialog):
         blk(self.exp_name_edit); blk(self.rep_spin); blk(self.v_spin)
         blk(self.final_v_spin)
         blk(self.fill_name_edit); blk(self.fill_dv_spin)
+        blk(self.allow_two_chk)
         blk(self.randomize_chk); blk(self.random_seed_spin)
         blk(self.subset_chk); blk(self.reduction_spin)
         blk(self.start_col_spin); blk(self.start_row_spin)
@@ -5340,6 +5639,7 @@ class ExperimentDesignDialog(QDialog):
             "final_reaction_volume_nL",
             md.get("target_reaction_volume_nL", 500.0)
         )))
+        self.allow_two_chk.setChecked(bool(md.get("allow_two_stock_solutions", False)))
 
         if hasattr(self, "randomize_chk"):
             self.randomize_chk.setChecked(bool(md.get("randomize_assignments", False)))
@@ -5415,8 +5715,10 @@ class ExperimentDesignDialog(QDialog):
                     "name": temp_name,
                     "replicates": 1,
                     "target_reaction_volume_nL": 500.0,
+                    "final_reaction_volume_nL": 500.0,
                     "fill_reagent_name": "Water",
                     "fill_droplet_volume_nL": 10.0,
+                    "allow_two_stock_solutions": False,
                     "randomize_assignments": False,
                     "random_seed": None,
                     "use_subset_design": False,
@@ -5444,7 +5746,8 @@ class ExperimentDesignDialog(QDialog):
         blockers = [
             QSignalBlocker(self.exp_name_edit), QSignalBlocker(self.rep_spin),
             QSignalBlocker(self.v_spin), QSignalBlocker(self.fill_name_edit),
-            QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.randomize_chk),
+            QSignalBlocker(self.fill_dv_spin), QSignalBlocker(self.allow_two_chk),
+            QSignalBlocker(self.randomize_chk),
             QSignalBlocker(self.random_seed_spin), QSignalBlocker(self.subset_chk),
             QSignalBlocker(self.reduction_spin), QSignalBlocker(self.start_col_spin),
             QSignalBlocker(self.start_row_spin)
@@ -5464,19 +5767,13 @@ class ExperimentDesignDialog(QDialog):
         Save the current design (factors + metadata) to Experiments/<name>/experiment_design.json.
         If needed, optimize/generate so stock table is fresh in the preview.
         """
-        # Push UI -> model
-        self._rebuild_model_from_table()
-        self._update_metadata_from_controls()
-
-        # Keep tables in sync locally
-        res = self.model.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
-        if not res.get("best"):
-            QMessageBox.warning(self, "Optimization failed", res.get("reason", "Unknown error"))
+        ok, res = self._run_design_optimization_flow(
+            show_failure_dialog=True,
+            failure_title="Optimization failed",
+            show_capacity_dialog=False,
+        )
+        if not ok:
             return
-        self.model.generate_experiment()
-        self._refresh_stock_table()
-        self._update_summary_labels()
-        self._refresh_all_prior_availability()
         self._persist_design_identity_registry_entries()
 
         # Ensure folder exists / name is current, then save

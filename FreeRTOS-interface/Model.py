@@ -138,6 +138,8 @@ class OptionSpec:
     units: str                     # e.g. 'mM'
     droplet_nL: float              # droplet volume for this reagent
     starting_conc: float = 0.0     # starting concentration for this reagent
+    forced_stock_conc: float | None = None
+    max_stock_conc: float | None = None
     reagent_id: str | None = None
     reagent_display_name: str | None = None
     intended_head_type_id: str | None = None
@@ -252,6 +254,7 @@ class ExperimentModel(QObject):
             "name": temp_name,
             "replicates": 1,
             "use_subset_design": False,
+            "allow_two_stock_solutions": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
             "target_reaction_volume_nL": 500.0, # PRINTED volume budget
             "final_reaction_volume_nL": 500.0, # includes non-printed (fill) volume
@@ -314,6 +317,7 @@ class ExperimentModel(QObject):
         droplet_nL: float,
         starting_conc: float = 0.0,
         forced_stock_conc: float | None = None,
+        max_stock_conc: float | None = None,
         reagent_id: str | None = None,
         reagent_display_name: str | None = None,
         intended_head_type_id: str | None = None,
@@ -323,15 +327,12 @@ class ExperimentModel(QObject):
                     targets=list(targets), units=units,
                     droplet_nL=float(droplet_nL),
                     starting_conc=float(starting_conc or 0.0),
+                    forced_stock_conc=float(forced_stock_conc) if forced_stock_conc is not None else None,
+                    max_stock_conc=float(max_stock_conc) if max_stock_conc is not None else None,
                     reagent_id=reagent_id,
                     reagent_display_name=reagent_display_name,
                     intended_head_type_id=intended_head_type_id,
                     intended_head_type_display_name=intended_head_type_display_name)
-        if forced_stock_conc is not None:
-            try:
-                setattr(o, "forced_stock_conc", float(forced_stock_conc))
-            except Exception:
-                setattr(o, "forced_stock_conc", None)
         self.factors.append(FactorSpec(
             name=name, kind="additive", options=[o]
         ))
@@ -348,6 +349,7 @@ class ExperimentModel(QObject):
         droplet_nL: float,
         starting_conc: float = 0.0,
         forced_stock_conc: float | None = None,
+        max_stock_conc: float | None = None,
         reagent_id: str | None = None,
         reagent_display_name: str | None = None,
         intended_head_type_id: str | None = None,
@@ -357,15 +359,12 @@ class ExperimentModel(QObject):
             if f.name == group_name and f.kind == "choice":
                 o = OptionSpec(option_name, list(targets), units,
                             float(droplet_nL), float(starting_conc or 0.0),
+                            float(forced_stock_conc) if forced_stock_conc is not None else None,
+                            float(max_stock_conc) if max_stock_conc is not None else None,
                             reagent_id=reagent_id,
                             reagent_display_name=reagent_display_name,
                             intended_head_type_id=intended_head_type_id,
                             intended_head_type_display_name=intended_head_type_display_name)
-                if forced_stock_conc is not None:
-                    try:
-                        setattr(o, "forced_stock_conc", float(forced_stock_conc))
-                    except Exception:
-                        setattr(o, "forced_stock_conc", None)
                 f.options.append(o)
                 return
         self.add_choice_group(group_name)
@@ -377,6 +376,7 @@ class ExperimentModel(QObject):
             droplet_nL,
             starting_conc,
             forced_stock_conc,
+            max_stock_conc,
             reagent_id,
             reagent_display_name,
             intended_head_type_id,
@@ -384,6 +384,9 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _allow_two_from_metadata(self) -> bool:
+        return bool(self.metadata.get("allow_two_stock_solutions", False))
 
     def _normalize_target_key(self, value: float) -> float:
         value = float(value)
@@ -450,7 +453,162 @@ class ExperimentModel(QObject):
             "stock_concentration": float(forced_stock_conc),
             "starting_conc": starting,
             "units": units,
+            "n_stocks": 1,
         }
+
+    def _evaluate_two_stock_target(
+        self,
+        t_final: float,
+        starting_conc: float,
+        stock_concentrations: Tuple[float, float],
+        droplet_nL: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> Dict[str, Any]:
+        requested_final = float(t_final)
+        starting = float(starting_conc or 0.0)
+        requested_adjusted = max(0.0, requested_final - starting)
+        if requested_adjusted <= 1e-12:
+            requested_adjusted = 0.0
+
+        c1, c2 = float(stock_concentrations[0]), float(stock_concentrations[1])
+        if float(final_volume_nL) > 0.0:
+            d1 = c1 * float(droplet_nL) / float(final_volume_nL)
+            d2 = c2 * float(droplet_nL) / float(final_volume_nL)
+        else:
+            d1 = d2 = 0.0
+
+        droplets = (0, 0)
+        achieved_adjusted = 0.0
+        reachable = False
+        reason = "nonpositive_delta"
+
+        if requested_adjusted <= 1e-12:
+            reachable = True
+            reason = "nearest_achievable"
+        elif d1 > 0.0 and d2 > 0.0:
+            a, b, err = self._nearest_two_stock(requested_adjusted, d1, d2)
+            droplets = (int(a), int(b))
+            achieved_adjusted = float(a * d1 + b * d2)
+            tol = 0.5 * min(d1, d2) + 1e-12
+            if (a + b) == 0:
+                reason = "rounds_to_zero_drops"
+            elif err <= tol:
+                reachable = True
+                reason = "nearest_achievable"
+            else:
+                reason = "outside_half_step"
+
+        achieved_final = starting + achieved_adjusted
+        signed_error = achieved_adjusted - requested_adjusted
+        abs_error = abs(signed_error)
+
+        return {
+            "requested_final": requested_final,
+            "requested_adjusted": requested_adjusted,
+            "achieved_final": achieved_final,
+            "achieved_adjusted": achieved_adjusted,
+            "droplets": droplets,
+            "delta_per_drop": (float(d1), float(d2)),
+            "abs_error": float(abs_error),
+            "signed_error": float(signed_error),
+            "reachable": bool(reachable),
+            "reason": reason,
+            "stock_concentration": (c1, c2),
+            "starting_conc": starting,
+            "units": units,
+            "n_stocks": 2,
+        }
+
+    def _candidate_single_stock_deltas(
+        self,
+        targets: List[float],
+        *,
+        max_refine: int,
+        min_delta: float = 1e-6,
+    ) -> List[float]:
+        xs = sorted({self._normalize_target_key(t) for t in targets if float(t) > 1e-12})
+        if not xs:
+            return [float(max(min_delta, 1e-6))]
+
+        deltas: Set[float] = set()
+        for t in xs:
+            for k in range(1, max_refine + 1):
+                delta = float(t) / float(k)
+                if delta >= min_delta:
+                    deltas.add(self._normalize_target_key(delta))
+        return sorted(deltas)
+
+    def _get_option_for_key(self, key: Tuple[str, Optional[str]]) -> Optional[OptionSpec]:
+        factor_name, option_name = key
+        for factor in self.factors:
+            if factor.name != factor_name:
+                continue
+            if factor.kind == "additive":
+                return factor.options[0] if factor.options else None
+            for option in factor.options:
+                if option.name == option_name:
+                    return option
+        return None
+
+    def _refresh_plan_preview_maps(self):
+        self._target_preview_map = {}
+        self._unreachable_preview_map = {}
+        V_final = float(
+            self.metadata.get(
+                "final_reaction_volume_nL",
+                self.metadata.get("target_reaction_volume_nL", 500.0),
+            )
+        )
+
+        for key, plan in self.plans_per_option.items():
+            opt = self._get_option_for_key(key)
+            if opt is None:
+                continue
+
+            rows: List[Dict[str, Any]] = []
+            if plan.get("n_stocks", 1) == 1:
+                stock = plan["stocks"][0]
+                plan_mode = "fixed" if getattr(opt, "forced_stock_conc", None) not in (None, 0.0) else "auto"
+                for t_final in opt.targets:
+                    row = self._evaluate_single_forced_target(
+                        t_final=t_final,
+                        starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                        forced_stock_conc=float(stock["stock_concentration"]),
+                        droplet_nL=float(stock["droplet_volume_nL"]),
+                        final_volume_nL=V_final,
+                        units=stock.get("units", opt.units),
+                    )
+                    row["plan_mode"] = plan_mode
+                    rows.append(row)
+            else:
+                st1, st2 = plan["stocks"]
+                for t_final in opt.targets:
+                    row = self._evaluate_two_stock_target(
+                        t_final=t_final,
+                        starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                        stock_concentrations=(
+                            float(st1["stock_concentration"]),
+                            float(st2["stock_concentration"]),
+                        ),
+                        droplet_nL=float(st1["droplet_volume_nL"]),
+                        final_volume_nL=V_final,
+                        units=st1.get("units", opt.units),
+                    )
+                    row["plan_mode"] = "auto"
+                    rows.append(row)
+
+            if not rows:
+                continue
+
+            self._target_preview_map[key] = rows
+            unreachable = [
+                float(row["requested_final"])
+                for row in rows
+                if not bool(row.get("reachable"))
+            ]
+            if unreachable:
+                self._unreachable_preview_map[key] = unreachable
 
     def _iter_factor_options(self):
         for factor in self.factors:
@@ -514,34 +672,48 @@ class ExperimentModel(QObject):
         final_volume_nL: float,
         quantum: float = 0.1,
         max_refine: int = 50,
-        min_delta: float = 1e-6
+        min_delta: float = 1e-6,
+        max_stock_conc: float | None = None,
     ) -> List[SingleStockPlan]:
-        xs = sorted(set(_quantize(t, quantum) for t in targets))
-        base = _base_step_for_targets(xs, quantum)
+        xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
         cands: List[SingleStockPlan] = []
-        for m in range(1, max_refine + 1):
-            delta = base / m
-            if delta < min_delta:
-                break
-            if any(not _is_multiple_of(delta, t, tol=1e-9) for t in xs):
+        for delta in self._candidate_single_stock_deltas(xs, max_refine=max_refine, min_delta=min_delta):
+            stock_c = (float(delta) * final_volume_nL) / droplet_nL
+            if max_stock_conc is not None and stock_c > (float(max_stock_conc) + 1e-12):
                 continue
-            drops = {t: _int_ratio(delta, t) for t in xs}
+            drops: Dict[float, int] = {}
+            feasible = True
+            for t in xs:
+                row = self._evaluate_single_forced_target(
+                    t_final=float(t),
+                    starting_conc=0.0,
+                    forced_stock_conc=stock_c,
+                    droplet_nL=droplet_nL,
+                    final_volume_nL=final_volume_nL,
+                    units=units,
+                )
+                if not row["reachable"]:
+                    feasible = False
+                    break
+                drops[self._normalize_target_key(float(t))] = int(row["droplets"])
+            if not feasible:
+                continue
             max_vol = max(d * droplet_nL for d in drops.values()) if drops else 0.0
-            stock_c = (delta * final_volume_nL) / droplet_nL
             cands.append(SingleStockPlan(
-                delta_per_drop=delta,
+                delta_per_drop=float(delta),
                 stock_concentration=stock_c,
                 droplet_nL=droplet_nL,
                 units=units,
                 droplets_per_target=drops,
                 max_volume_nL=max_vol,
+                lookup_quantum=1e-6,
                 n_stocks=1
             ))
         # Lowest concentration first (smallest delta)
         cands.sort(key=lambda p: (p.stock_concentration, p.max_volume_nL))
         return cands
 
-    def _enumerate_two_stock_candidates(
+    def _enumerate_two_stock_candidates_with_meta(
         self,
         targets: List[float],
         droplet_nL: float,
@@ -552,107 +724,75 @@ class ExperimentModel(QObject):
         quantum: float = 0.1,
         max_refine: int = 30,
         kmax_multiples: int = 12,
-        max_pairs: int = 300
-    ) -> List[TwoStockPlan]:
-        """
-        Enumerate feasible 2-stock pairs. We consider a broad set of deltas:
-        - fractions of the base (base / m)
-        - multiples of the base (k * base), k=1..kmax_multiples
-        - per-target divisors t / k up to a hard drop cap
+        max_pairs: int = 12000,
+        max_stock_conc: float | None = None,
+    ) -> Tuple[List[TwoStockPlan], bool]:
+        xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
+        xs_pos = [t for t in xs if t > 1e-12]
+        if not xs_pos:
+            return [], False
 
-        Then solve two-coin change on the integer grid (quantum) and
-        keep non-dominated pairs by (conc_sum, max_volume_nL).
-        """
-        xs = sorted(set(_quantize(t, quantum) for t in targets))
-        if not xs:
-            return []
-
-        base = _base_step_for_targets(xs, quantum)
-
-        # Cap on drops if this reagent alone filled the volume.
-        max_drops_cap = max(1, int(math.floor(volume_budget_nL / max(droplet_nL, 1e-9))))
-
-        # Build delta set on the quantum grid
-        delta_set: Set[float] = set()
-
-        # (a) Fractions of base
-        for m in range(1, max_refine + 1):
-            d = _quantize(base / m, quantum)
-            if d > 0:
-                delta_set.add(d)
-
-        # (b) Multiples of base
-        for k in range(1, kmax_multiples + 1):
-            d = _quantize(base * k, quantum)
-            if d > 0:
-                delta_set.add(d)
-
-        # (c) Per-target divisors
-        for t in xs:
-            if t <= 0:
-                continue
-            for k in range(1, max_drops_cap + 1):
-                d = _quantize(t / k, quantum)
-                if d > 0:
-                    delta_set.add(d)
-
-        deltas = sorted(delta_set)
+        deltas = self._candidate_single_stock_deltas(xs_pos, max_refine=max_refine, min_delta=1e-6)
+        if max_stock_conc is not None:
+            max_delta = float(max_stock_conc) * float(droplet_nL) / float(final_volume_nL)
+            deltas = [d for d in deltas if d <= max_delta + 1e-12]
         if not deltas:
-            return []
+            return [], False
 
-        # Integerize
-        s = int(round(1.0 / quantum))
-        int_targets = [int(round(t * s)) for t in xs]
-        int_deltas = [int(round(d * s)) for d in deltas]
+        # Search larger deltas first. Two-stock exploration is only used as a fallback
+        # when single-stock planning cannot meet the printed-volume budget.
+        deltas = sorted((float(d) for d in deltas), reverse=True)
 
         pairs: List[TwoStockPlan] = []
+        pairs_scanned = 0
+        pair_limit_hit = False
+        for i in range(len(deltas)):
+            for j in range(i + 1, len(deltas)):
+                if max_pairs and pairs_scanned >= int(max_pairs):
+                    pair_limit_hit = True
+                    break
+                pairs_scanned += 1
 
-        for i in range(len(int_deltas)):
-            for j in range(i + 1, len(int_deltas)):
-                di, dj = int_deltas[i], int_deltas[j]
-                if di <= 0 or dj <= 0:
+                d1 = float(deltas[i])
+                d2 = float(deltas[j])
+                if d1 <= 0.0 or d2 <= 0.0:
                     continue
 
-                # gcd feasibility: each target must be multiple of gcd(di, dj)
-                g = math.gcd(di, dj)
-                if any((t % g) != 0 for t in int_targets):
+                c1 = (d1 * final_volume_nL) / droplet_nL
+                c2 = (d2 * final_volume_nL) / droplet_nL
+                if max_stock_conc is not None and (c1 > float(max_stock_conc) + 1e-12 or c2 > float(max_stock_conc) + 1e-12):
                     continue
 
-                # Two-coin change per target: minimize a+b
                 drops_map: Dict[float, Tuple[int, int]] = {}
                 max_drops = 0
                 feasible = True
-                for t_int, t_real in zip(int_targets, xs):
-                    best_ab = None
-                    a_max = t_int // di
-                    for a in range(a_max + 1):
-                        rem = t_int - a * di
-                        if rem < 0:
-                            break
-                        if rem % dj == 0:
-                            b = rem // dj
-                            if best_ab is None or (a + b) < (best_ab[0] + best_ab[1]):
-                                best_ab = (a, b)
-                    if best_ab is None:
+                for t_real in xs:
+                    row = self._evaluate_two_stock_target(
+                        t_final=float(t_real),
+                        starting_conc=0.0,
+                        stock_concentrations=(c1, c2),
+                        droplet_nL=droplet_nL,
+                        final_volume_nL=final_volume_nL,
+                        units=units,
+                    )
+                    if not row["reachable"]:
                         feasible = False
                         break
-                    drops_map[t_real] = best_ab
-                    max_drops = max(max_drops, best_ab[0] + best_ab[1])
+                    a, b = row["droplets"]
+                    drops_map[self._normalize_target_key(float(t_real))] = (int(a), int(b))
+                    max_drops = max(max_drops, int(a) + int(b))
 
                 if not feasible:
                     continue
 
-                # ---- NEW: skip degenerate pairs (one stock never used across all targets)
+                if max_drops * float(droplet_nL) > float(volume_budget_nL) + 1e-6:
+                    continue
+
                 all_a_zero = all(ab[0] == 0 for ab in drops_map.values())
                 all_b_zero = all(ab[1] == 0 for ab in drops_map.values())
                 if all_a_zero or all_b_zero:
                     continue
-                # ---- end NEW
 
-                d1 = deltas[i]
-                d2 = deltas[j]
-                c1 = (d1 * final_volume_nL) / droplet_nL
-                c2 = (d2 * final_volume_nL) / droplet_nL
                 conc_sum = c1 + c2
                 max_vol = max_drops * droplet_nL
 
@@ -666,9 +806,11 @@ class ExperimentModel(QObject):
                     conc_sum=conc_sum,
                     n_stocks=2
                 ))
+            if pair_limit_hit:
+                break
 
         if not pairs:
-            return []
+            return [], pair_limit_hit
 
         # Pareto-prune by (conc_sum, max_volume_nL)
         pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
@@ -679,7 +821,35 @@ class ExperimentModel(QObject):
                 pruned.append(p)
                 best_vol = p.max_volume_nL
 
-        return pruned[:max_pairs]
+        return pruned[:max_pairs], pair_limit_hit
+
+    def _enumerate_two_stock_candidates(
+        self,
+        targets: List[float],
+        droplet_nL: float,
+        units: str,
+        *,
+        final_volume_nL: float,
+        volume_budget_nL: float,
+        quantum: float = 0.1,
+        max_refine: int = 30,
+        kmax_multiples: int = 12,
+        max_pairs: int = 12000,
+        max_stock_conc: float | None = None,
+    ) -> List[TwoStockPlan]:
+        pairs, _pair_limit_hit = self._enumerate_two_stock_candidates_with_meta(
+            targets,
+            droplet_nL,
+            units,
+            final_volume_nL=final_volume_nL,
+            volume_budget_nL=volume_budget_nL,
+            quantum=quantum,
+            max_refine=max_refine,
+            kmax_multiples=kmax_multiples,
+            max_pairs=max_pairs,
+            max_stock_conc=max_stock_conc,
+        )
+        return pairs
 
     # ------------- Optimization -------------
 
@@ -710,12 +880,69 @@ class ExperimentModel(QObject):
         self._unreachable_preview_map = {}
         self._target_preview_map = {}
 
-        additives: List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]] = []
-        choice_groups: Dict[str, List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]]] = {}
+        additives: List[Tuple[str, List[SingleStockPlan], Optional[List[TwoStockPlan]]]] = []
+        choice_groups: Dict[str, List[Tuple[str, List[SingleStockPlan], Optional[List[TwoStockPlan]]]]] = {}
+        additive_option_map: Dict[str, OptionSpec] = {}
+        choice_option_map: Dict[Tuple[str, str], OptionSpec] = {}
+        two_stock_search_limited_keys: List[Tuple[str, Optional[str]]] = []
+        issues_by_key: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
 
         def _adj_targets_for_opt(opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
             return sorted(set(max(0.0, float(t) - s) for t in opt.targets))
+
+        def _bound_text(opt) -> str:
+            max_stock = getattr(opt, "max_stock_conc", None)
+            if max_stock is None:
+                return ""
+            units = getattr(opt, "units", "") or ""
+            suffix = f" {units}".rstrip()
+            return f" within max stock {float(max_stock):.6g}{suffix}"
+
+        def _mark_two_stock_search_limited(key: Tuple[str, Optional[str]]):
+            if key not in two_stock_search_limited_keys:
+                two_stock_search_limited_keys.append(key)
+
+        def _copy_issues() -> Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]]:
+            return {
+                key: [dict(issue) for issue in issues]
+                for key, issues in issues_by_key.items()
+            }
+
+        def _add_issue(
+            key: Tuple[str, Optional[str]],
+            *,
+            field: str,
+            severity: str,
+            code: str,
+            message: str,
+            **context,
+        ) -> Dict[str, Any]:
+            issue = {
+                "field": field,
+                "severity": severity,
+                "code": code,
+                "message": message,
+            }
+            issue.update(context)
+            issues_by_key.setdefault(key, []).append(issue)
+            return issue
+
+        def _failure(reason: str) -> Dict[str, Any]:
+            return {
+                "best": None,
+                "reason": reason,
+                "issues_by_key": _copy_issues(),
+                "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
+            }
+
+        def _no_feasible_reason(label: str, opt, *, search_limited: bool = False) -> str:
+            bound = _bound_text(opt)
+            if not allow_two:
+                return f"No feasible single-stock plan for {label}{bound}. Enable two-stock mode or increase the max stock concentration."
+            if search_limited:
+                return f"No feasible stock plan for {label}{bound}. Two-stock search reached its scan limit."
+            return f"No feasible stock plan for {label}{bound}."
 
         def _build_forced_single_plan(opt, key: Tuple[str, Optional[str]]) -> SingleStockPlan:
             forced = float(getattr(opt, "forced_stock_conc"))
@@ -761,47 +988,263 @@ class ExperimentModel(QObject):
         for f in self.factors:
             if f.kind == "additive":
                 o = f.options[0]
+                additive_option_map[f.name] = o
                 t_adj = _adj_targets_for_opt(o)
                 forced = getattr(o, "forced_stock_conc", None)
+                max_stock = getattr(o, "max_stock_conc", None)
                 if forced is not None and forced > 0:
+                    if max_stock is not None and float(forced) > float(max_stock) + 1e-12:
+                        key = (f.name, None)
+                        msg = (
+                            f"Fixed stock {float(forced):.6g} {o.units} exceeds max stock "
+                            f"{float(max_stock):.6g} {o.units} for additive '{f.name}'."
+                        )
+                        _add_issue(
+                            key,
+                            field="fixed_stock",
+                            severity="error",
+                            code="fixed_exceeds_max",
+                            message=msg,
+                            fixed_stock_conc=float(forced),
+                            max_stock_conc=float(max_stock),
+                        )
+                        _add_issue(
+                            key,
+                            field="max_stock",
+                            severity="error",
+                            code="fixed_exceeds_max",
+                            message=msg,
+                            fixed_stock_conc=float(forced),
+                            max_stock_conc=float(max_stock),
+                        )
+                        return _failure(msg)
                     singles = [_build_forced_single_plan(o, (f.name, None))]
                     additives.append((f.name, singles, []))  # no two-stock for forced
                 else:
-                    # Normal enumeration path
                     singles = self._enumerate_single_stock_candidates(
                         t_adj, o.droplet_nL, o.units,
-                        final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
+                        final_volume_nL=V_final, quantum=quantum, max_refine=max_refine,
+                        max_stock_conc=max_stock,
                     )
-                    twos = self._enumerate_two_stock_candidates(
-                        t_adj, o.droplet_nL, o.units,
-                        final_volume_nL=V_final, volume_budget_nL=V_print,
-                        quantum=quantum, max_refine=two_max_refine
-                    ) if allow_two else []
-                    if not singles and not twos:
-                        return {"best": None, "reason": f"No feasible plan (single or two-stock) for additive '{f.name}'."}
+                    twos: Optional[List[TwoStockPlan]] = None if allow_two else []
+                    if not singles:
+                        if not allow_two:
+                            reason = _no_feasible_reason(f"additive '{f.name}'", o)
+                            if max_stock is not None:
+                                _add_issue(
+                                    (f.name, None),
+                                    field="max_stock",
+                                    severity="error",
+                                    code="max_stock_no_single_plan",
+                                    message=(
+                                        f"Max stock {float(max_stock):.6g} {o.units} cannot support a "
+                                        f"single-stock plan for additive '{f.name}' at the current reaction volume."
+                                    ),
+                                    max_stock_conc=float(max_stock),
+                                )
+                            return _failure(reason)
+                        twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                            t_adj, o.droplet_nL, o.units,
+                            final_volume_nL=V_final, volume_budget_nL=V_print,
+                            quantum=quantum, max_refine=two_max_refine,
+                            max_stock_conc=max_stock,
+                        )
+                        if search_limited:
+                            _mark_two_stock_search_limited((f.name, None))
+                        if not twos:
+                            reason = _no_feasible_reason(
+                                f"additive '{f.name}'",
+                                o,
+                                search_limited=search_limited,
+                            )
+                            if max_stock is not None:
+                                _add_issue(
+                                    (f.name, None),
+                                    field="max_stock",
+                                    severity="error",
+                                    code="max_stock_no_plan",
+                                    message=(
+                                        f"Max stock {float(max_stock):.6g} {o.units} cannot support any feasible "
+                                        f"stock plan for additive '{f.name}' at the current reaction volume."
+                                    ),
+                                    max_stock_conc=float(max_stock),
+                                )
+                            return _failure(reason)
                     additives.append((f.name, singles, twos))
             else:
                 bucket = []
                 for opt in f.options:
+                    choice_option_map[(f.name, opt.name)] = opt
                     t_adj = _adj_targets_for_opt(opt)
                     forced = getattr(opt, "forced_stock_conc", None)
+                    max_stock = getattr(opt, "max_stock_conc", None)
                     if forced is not None and forced > 0:
+                        if max_stock is not None and float(forced) > float(max_stock) + 1e-12:
+                            key = (f.name, opt.name)
+                            msg = (
+                                f"Fixed stock {float(forced):.6g} {opt.units} exceeds max stock "
+                                f"{float(max_stock):.6g} {opt.units} for option '{f.name}/{opt.name}'."
+                            )
+                            _add_issue(
+                                key,
+                                field="fixed_stock",
+                                severity="error",
+                                code="fixed_exceeds_max",
+                                message=msg,
+                                fixed_stock_conc=float(forced),
+                                max_stock_conc=float(max_stock),
+                            )
+                            _add_issue(
+                                key,
+                                field="max_stock",
+                                severity="error",
+                                code="fixed_exceeds_max",
+                                message=msg,
+                                fixed_stock_conc=float(forced),
+                                max_stock_conc=float(max_stock),
+                            )
+                            return _failure(msg)
                         singles = [_build_forced_single_plan(opt, (f.name, opt.name))]
                         bucket.append((opt.name, singles, []))
                     else:
                         singles = self._enumerate_single_stock_candidates(
                             t_adj, opt.droplet_nL, opt.units,
-                            final_volume_nL=V_final, quantum=quantum, max_refine=max_refine
+                            final_volume_nL=V_final, quantum=quantum, max_refine=max_refine,
+                            max_stock_conc=max_stock,
                         )
-                        twos = self._enumerate_two_stock_candidates(
-                            t_adj, opt.droplet_nL, opt.units,
-                            final_volume_nL=V_final, volume_budget_nL=V_print,
-                            quantum=quantum, max_refine=two_max_refine
-                        ) if allow_two else []
-                        if not singles and not twos:
-                            return {"best": None, "reason": f"No feasible plan (single or two-stock) for option '{f.name}/{opt.name}'."}
+                        twos: Optional[List[TwoStockPlan]] = None if allow_two else []
+                        if not singles:
+                            if not allow_two:
+                                reason = _no_feasible_reason(f"option '{f.name}/{opt.name}'", opt)
+                                if max_stock is not None:
+                                    _add_issue(
+                                        (f.name, opt.name),
+                                        field="max_stock",
+                                        severity="error",
+                                        code="max_stock_no_single_plan",
+                                        message=(
+                                            f"Max stock {float(max_stock):.6g} {opt.units} cannot support a "
+                                            f"single-stock plan for option '{f.name}/{opt.name}' at the current reaction volume."
+                                        ),
+                                        max_stock_conc=float(max_stock),
+                                    )
+                                return _failure(reason)
+                            twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                                t_adj, opt.droplet_nL, opt.units,
+                                final_volume_nL=V_final, volume_budget_nL=V_print,
+                                quantum=quantum, max_refine=two_max_refine,
+                                max_stock_conc=max_stock,
+                            )
+                            if search_limited:
+                                _mark_two_stock_search_limited((f.name, opt.name))
+                            if not twos:
+                                reason = _no_feasible_reason(
+                                    f"option '{f.name}/{opt.name}'",
+                                    opt,
+                                    search_limited=search_limited,
+                                )
+                                if max_stock is not None:
+                                    _add_issue(
+                                        (f.name, opt.name),
+                                        field="max_stock",
+                                        severity="error",
+                                        code="max_stock_no_plan",
+                                        message=(
+                                            f"Max stock {float(max_stock):.6g} {opt.units} cannot support any feasible "
+                                            f"stock plan for option '{f.name}/{opt.name}' at the current reaction volume."
+                                        ),
+                                        max_stock_conc=float(max_stock),
+                                    )
+                                return _failure(reason)
                         bucket.append((opt.name, singles, twos))
                 choice_groups[f.name] = bucket
+
+        def _ensure_additive_twos(name: str) -> List[TwoStockPlan]:
+            for idx, (entry_name, singles, twos) in enumerate(additives):
+                if entry_name != name:
+                    continue
+                if twos is not None:
+                    return twos
+                opt = additive_option_map[name]
+                t_adj = _adj_targets_for_opt(opt)
+                resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                    t_adj,
+                    opt.droplet_nL,
+                    opt.units,
+                    final_volume_nL=V_final,
+                    volume_budget_nL=V_print,
+                    quantum=quantum,
+                    max_refine=two_max_refine,
+                    max_stock_conc=getattr(opt, "max_stock_conc", None),
+                )
+                if search_limited:
+                    _mark_two_stock_search_limited((name, None))
+                additives[idx] = (entry_name, singles, resolved)
+                return resolved
+            return []
+
+        def _ensure_choice_twos(gname: str, oname: str) -> List[TwoStockPlan]:
+            bucket = choice_groups.get(gname, [])
+            for idx, (entry_name, singles, twos) in enumerate(bucket):
+                if entry_name != oname:
+                    continue
+                if twos is not None:
+                    return twos
+                opt = choice_option_map[(gname, oname)]
+                t_adj = _adj_targets_for_opt(opt)
+                resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                    t_adj,
+                    opt.droplet_nL,
+                    opt.units,
+                    final_volume_nL=V_final,
+                    volume_budget_nL=V_print,
+                    quantum=quantum,
+                    max_refine=two_max_refine,
+                    max_stock_conc=getattr(opt, "max_stock_conc", None),
+                )
+                if search_limited:
+                    _mark_two_stock_search_limited((gname, oname))
+                bucket[idx] = (entry_name, singles, resolved)
+                choice_groups[gname] = bucket
+                return resolved
+            return []
+
+        def _record_volume_budget_issue(
+            key: Tuple[str, Optional[str]],
+            opt: OptionSpec,
+            *,
+            required_volume_nL: float,
+            code: str,
+        ):
+            field = "fixed_stock" if getattr(opt, "forced_stock_conc", None) not in (None, 0.0) else "stock_plan"
+            if field == "stock_plan" and getattr(opt, "max_stock_conc", None) is not None:
+                field = "max_stock"
+            units = getattr(opt, "units", "") or ""
+            label = key[0] if key[1] in (None, "") else f"{key[0]}/{key[1]}"
+            message = (
+                f"{label} requires up to {float(required_volume_nL):.6g} nL per reaction, "
+                f"but the printed-volume budget is {float(V_print):.6g} nL."
+            )
+            _add_issue(
+                key,
+                field=field,
+                severity="error",
+                code=code,
+                message=message,
+                required_volume_nL=float(required_volume_nL),
+                allowed_volume_nL=float(V_print),
+                units=units,
+                fixed_stock_conc=(
+                    float(getattr(opt, "forced_stock_conc"))
+                    if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                    else None
+                ),
+                max_stock_conc=(
+                    float(getattr(opt, "max_stock_conc"))
+                    if getattr(opt, "max_stock_conc", None) is not None
+                    else None
+                ),
+            )
 
         # Selection indices (single-stock arrays)
         add_idx = {name: 0 for name, singles, _ in additives if singles}
@@ -814,12 +1257,20 @@ class ExperimentModel(QObject):
         # Two-stock selections (index into twos), None means single-stock
         add_two_idx: Dict[str, Optional[int]] = {}
         for name, singles, twos in additives:
-            add_two_idx[name] = 0 if (not singles and twos) else None
+            if not singles:
+                resolved = twos if twos is not None else _ensure_additive_twos(name)
+                add_two_idx[name] = 0 if resolved else None
+            else:
+                add_two_idx[name] = None
 
         ch_two_idx: Dict[Tuple[str, str], Optional[int]] = {}
         for gname, bucket in choice_groups.items():
             for oname, singles, twos in bucket:
-                ch_two_idx[(gname, oname)] = 0 if (not singles and twos) else None
+                if not singles:
+                    resolved = twos if twos is not None else _ensure_choice_twos(gname, oname)
+                    ch_two_idx[(gname, oname)] = 0 if resolved else None
+                else:
+                    ch_two_idx[(gname, oname)] = None
 
         # Helpers
         def selection_counts() -> Tuple[int, float]:
@@ -827,7 +1278,8 @@ class ExperimentModel(QObject):
             sum_conc = 0.0
             for name, singles, twos in additives:
                 if add_two_idx[name] is not None:
-                    p2 = twos[add_two_idx[name]]
+                    resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
+                    p2 = resolved_twos[add_two_idx[name]]
                     tot_stocks += 2
                     sum_conc += p2.conc_sum
                 else:
@@ -837,7 +1289,8 @@ class ExperimentModel(QObject):
             for gname, bucket in choice_groups.items():
                 for oname, singles, twos in bucket:
                     if ch_two_idx[(gname, oname)] is not None:
-                        p2 = twos[ch_two_idx[(gname, oname)]]
+                        resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
+                        p2 = resolved_twos[ch_two_idx[(gname, oname)]]
                         tot_stocks += 2
                         sum_conc += p2.conc_sum
                     else:
@@ -849,15 +1302,19 @@ class ExperimentModel(QObject):
         def worst_case_nonfill_volume() -> float:
             total = 0.0
             for name, singles, twos in additives:
-                total += (twos[add_two_idx[name]].max_volume_nL
-                        if add_two_idx[name] is not None
-                        else singles[add_idx[name]].max_volume_nL)
+                if add_two_idx[name] is not None:
+                    resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
+                    total += resolved_twos[add_two_idx[name]].max_volume_nL
+                else:
+                    total += singles[add_idx[name]].max_volume_nL
             for gname, bucket in choice_groups.items():
                 m = 0.0
                 for oname, singles, twos in bucket:
-                    v = (twos[ch_two_idx[(gname, oname)]].max_volume_nL
-                        if ch_two_idx[(gname, oname)] is not None
-                        else singles[ch_idx[(gname, oname)]].max_volume_nL)
+                    if ch_two_idx[(gname, oname)] is not None:
+                        resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
+                        v = resolved_twos[ch_two_idx[(gname, oname)]].max_volume_nL
+                    else:
+                        v = singles[ch_idx[(gname, oname)]].max_volume_nL
                     if v > m:
                         m = v
                 total += m
@@ -1034,6 +1491,7 @@ class ExperimentModel(QObject):
 
                 # Additives
                 for name, singles, twos in additives:
+                    twos = twos if twos is not None else _ensure_additive_twos(name)
                     if not twos:
                         continue
                     cur_v = singles[add_idx[name]].max_volume_nL if add_two_idx[name] is None else twos[add_two_idx[name]].max_volume_nL
@@ -1056,6 +1514,7 @@ class ExperimentModel(QObject):
                 for gname, bucket in choice_groups.items():
                     vols = []
                     for oname, singles, twos in bucket:
+                        twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
                         vols.append((oname, v))
                     cur_group_max = max(v for _, v in vols)
@@ -1063,6 +1522,7 @@ class ExperimentModel(QObject):
                     others_max = {oname: (max(x for n, x in vols if n != oname) if len(vols) > 1 else 0.0) for oname, _ in vols}
 
                     for oname, singles, twos in bucket:
+                        twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         if not twos:
                             continue
                         cur_v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
@@ -1090,7 +1550,36 @@ class ExperimentModel(QObject):
                 if best_switch is None and tie_switch is not None:
                     best_switch = tie_switch
                 if best_switch is None:
-                    return {"best": None, "reason": "Volume budget too tight even after two-stock exploration."}
+                    for name, singles, twos in additives:
+                        if add_two_idx[name] is not None:
+                            continue
+                        opt = additive_option_map[name]
+                        selected = singles[add_idx[name]]
+                        if selected.max_volume_nL > V_print + 1e-6:
+                            code = (
+                                "fixed_volume_budget_exceeded"
+                                if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                                else "single_stock_volume_budget_exceeded"
+                            )
+                            _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
+                    for gname, bucket in choice_groups.items():
+                        for oname, singles, twos in bucket:
+                            key = (gname, oname)
+                            if ch_two_idx[key] is not None:
+                                continue
+                            opt = choice_option_map[key]
+                            selected = singles[ch_idx[key]]
+                            if selected.max_volume_nL > V_print + 1e-6:
+                                code = (
+                                    "fixed_volume_budget_exceeded"
+                                    if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                                    else "single_stock_volume_budget_exceeded"
+                                )
+                                _record_volume_budget_issue(key, opt, required_volume_nL=selected.max_volume_nL, code=code)
+                    reason = "Volume budget too tight even after two-stock exploration."
+                    if two_stock_search_limited_keys:
+                        reason = "Volume budget too tight even after bounded two-stock exploration."
+                    return _failure(reason)
 
                 if best_switch[0] == "add":
                     _, name, i2 = best_switch
@@ -1117,6 +1606,7 @@ class ExperimentModel(QObject):
         for idx, (name, singles, twos) in enumerate(additives):
             if add_two_idx.get(name) is None:
                 continue
+            twos = twos if twos is not None else _ensure_additive_twos(name)
             p2 = twos[add_two_idx[name]]
             if is_two_plan_degenerate(p2):
                 use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
@@ -1129,6 +1619,7 @@ class ExperimentModel(QObject):
                     units=p2.units,
                     droplets_per_target=drops,
                     max_volume_nL=max_vol,
+                    lookup_quantum=1e-6,
                     n_stocks=1,
                 )
                 saved_two = add_two_idx[name]
@@ -1160,6 +1651,7 @@ class ExperimentModel(QObject):
                 if ch_two_idx.get(key) is None:
                     new_bucket.append((oname, singles, twos))
                     continue
+                twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                 p2 = twos[ch_two_idx[key]]
                 if is_two_plan_degenerate(p2):
                     use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
@@ -1172,6 +1664,7 @@ class ExperimentModel(QObject):
                         units=p2.units,
                         droplets_per_target=drops,
                         max_volume_nL=max_vol,
+                        lookup_quantum=1e-6,
                         n_stocks=1,
                     )
                     saved_two = ch_two_idx[key]
@@ -1229,12 +1722,48 @@ class ExperimentModel(QObject):
                                 ch_idx[key] = i
                                 break
 
+        final_worst = worst_case_nonfill_volume()
+        if final_worst > V_print + 1e-6:
+            for name, singles, twos in additives:
+                if add_two_idx[name] is not None:
+                    continue
+                opt = additive_option_map[name]
+                selected = singles[add_idx[name]]
+                if selected.max_volume_nL > V_print + 1e-6:
+                    code = (
+                        "fixed_volume_budget_exceeded"
+                        if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                        else "single_stock_volume_budget_exceeded"
+                    )
+                    _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
+            for gname, bucket in choice_groups.items():
+                for oname, singles, twos in bucket:
+                    key = (gname, oname)
+                    if ch_two_idx[key] is not None:
+                        continue
+                    opt = choice_option_map[key]
+                    selected = singles[ch_idx[key]]
+                    if selected.max_volume_nL > V_print + 1e-6:
+                        code = (
+                            "fixed_volume_budget_exceeded"
+                            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                            else "single_stock_volume_budget_exceeded"
+                        )
+                        _record_volume_budget_issue(key, opt, required_volume_nL=selected.max_volume_nL, code=code)
+            if allow_two:
+                reason = "Volume budget too tight even with the available stock solutions."
+                if two_stock_search_limited_keys:
+                    reason = "Volume budget too tight even with the bounded two-stock search."
+                return _failure(reason)
+            return _failure("No feasible single-stock plan fits within the printed-volume budget. Enable two-stock mode or increase the target reaction volume.")
+
         # Materialize plans
         self.plans_per_option.clear()
         stock_rows = []
 
         for name, singles, twos in additives:
             if add_two_idx[name] is not None:
+                twos = twos if twos is not None else _ensure_additive_twos(name)
                 p2 = twos[add_two_idx[name]]
                 self.plans_per_option[(name, None)] = {
                     "n_stocks": 2,
@@ -1302,6 +1831,7 @@ class ExperimentModel(QObject):
             for oname, singles, twos in bucket:
                 key = (gname, oname)
                 if ch_two_idx[key] is not None:
+                    twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                     p2 = twos[ch_two_idx[key]]
                     self.plans_per_option[key] = {
                         "n_stocks": 2,
@@ -1367,14 +1897,72 @@ class ExperimentModel(QObject):
 
         self._stock_rows_cache = stock_rows
         self._fill_row_cache = None
+        self._refresh_plan_preview_maps()
         self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
 
+        for key in two_stock_search_limited_keys:
+            opt = self._get_option_for_key(key)
+            if opt is None:
+                continue
+            preferred_field = "max_stock" if getattr(opt, "max_stock_conc", None) is not None else "stock_plan"
+            _add_issue(
+                key,
+                field=preferred_field,
+                severity="warning",
+                code="bounded_two_stock_search",
+                message=(
+                    f"Two-stock search was capped for {key[0] if key[1] in (None, '') else f'{key[0]}/{key[1]}'}; "
+                    "the chosen plan may not be globally optimal."
+                ),
+                max_stock_conc=(
+                    float(getattr(opt, "max_stock_conc"))
+                    if getattr(opt, "max_stock_conc", None) is not None
+                    else None
+                ),
+            )
+
+        for key, rows in self._target_preview_map.items():
+            opt = self._get_option_for_key(key)
+            if opt is None or getattr(opt, "forced_stock_conc", None) in (None, 0.0):
+                continue
+            unreachable_rows = [row for row in rows if not bool(row.get("reachable"))]
+            if not unreachable_rows:
+                continue
+            _add_issue(
+                key,
+                field="fixed_stock",
+                severity="error",
+                code="fixed_unreachable_targets",
+                message=(
+                    f"Fixed stock {float(getattr(opt, 'forced_stock_conc')):.6g} {opt.units} cannot reach "
+                    f"{len(unreachable_rows)} target(s) for {key[0] if key[1] in (None, '') else f'{key[0]}/{key[1]}'}."
+                ),
+                fixed_stock_conc=float(getattr(opt, "forced_stock_conc")),
+                unreachable_targets=[float(row.get("requested_final", 0.0)) for row in unreachable_rows],
+            )
+
         self.stock_updated.emit()
+        preview_rows = [row for rows in self._target_preview_map.values() for row in rows]
+        two_stock_keys = [
+            key for key, plan in self.plans_per_option.items()
+            if plan.get("n_stocks", 1) == 2
+        ]
         return {
             "best": True,
             "stocks": selection_counts()[0],
             "sum_conc": selection_counts()[1],
-            "worst_nonfill_nL": self._last_worst_nonfill_volume_nL
+            "worst_nonfill_nL": self._last_worst_nonfill_volume_nL,
+            "two_stock_keys": list(two_stock_keys),
+            "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
+            "issues_by_key": _copy_issues(),
+            "approximate_targets": sum(
+                1
+                for row in preview_rows
+                if bool(row.get("reachable")) and abs(float(row.get("abs_error", 0.0))) > 1e-12
+            ),
+            "unreachable_targets": sum(
+                1 for row in preview_rows if not bool(row.get("reachable"))
+            ),
         }
 
     # ------------- Generation & summaries -------------
@@ -1964,7 +2552,12 @@ class ExperimentModel(QObject):
         """Ensure plans exist and return plans_per_option[key]."""
         if not self.plans_per_option:
             # Safe: compute plans if caller came in early
-            self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+            self.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=self._allow_two_from_metadata(),
+            )
         return self.plans_per_option.get(key)
 
 
@@ -2189,11 +2782,17 @@ class ExperimentModel(QObject):
         # Use rounding to nearest integer; guarantees ≤ 0.5 drop volume deviation.
         dp: dict[float, int] = {}
         for t_add in t_add_list:
-            k = 0 if delta <= 0 else int(round(t_add / delta))
-            k = max(0, k)
-            # normalize key to avoid float dust and to match resolve path
-            key_t = self._normalize_target_key(t_add)
-            dp[key_t] = k
+            row = self._evaluate_single_forced_target(
+                t_final=float(t_add),
+                starting_conc=0.0,
+                forced_stock_conc=c_stock,
+                droplet_nL=new_dv,
+                final_volume_nL=V_final,
+                units=units,
+            )
+            if row["reachable"]:
+                key_t = self._normalize_target_key(t_add)
+                dp[key_t] = int(row["droplets"])
 
         # ---- Patch the live plan & stock table cache ----
         st["droplet_volume_nL"] = new_dv
@@ -2221,6 +2820,7 @@ class ExperimentModel(QObject):
 
         # ---- Recompute the experiment so droplet counts and fill update everywhere ----
         self.generate_experiment()
+        self._refresh_plan_preview_maps()
         self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
 
         # mark unsaved since design object changed
@@ -2339,8 +2939,13 @@ class ExperimentModel(QObject):
                             "intended_head_type_id": getattr(o, "intended_head_type_id", None),
                             "intended_head_type_display_name": getattr(o, "intended_head_type_display_name", None),
                             "forced_stock_conc": (
-                                float(getattr(o, "forced_stock_conc"))
-                                if getattr(o, "forced_stock_conc", None) is not None
+                                float(o.forced_stock_conc)
+                                if o.forced_stock_conc is not None
+                                else None
+                            ),
+                            "max_stock_conc": (
+                                float(o.max_stock_conc)
+                                if o.max_stock_conc is not None
                                 else None
                             ),
                         }
@@ -2410,16 +3015,21 @@ class ExperimentModel(QObject):
                     units=o.get("units", ""),
                     droplet_nL=float(o.get("droplet_nL", 10.0)),
                     starting_conc=float(o.get("starting_conc", 0.0)),
+                    forced_stock_conc=(
+                        float(o["forced_stock_conc"])
+                        if o.get("forced_stock_conc") is not None
+                        else None
+                    ),
+                    max_stock_conc=(
+                        float(o["max_stock_conc"])
+                        if o.get("max_stock_conc") is not None
+                        else None
+                    ),
                     reagent_id=o.get("reagent_id"),
                     reagent_display_name=o.get("reagent_display_name"),
                     intended_head_type_id=o.get("intended_head_type_id"),
                     intended_head_type_display_name=o.get("intended_head_type_display_name"),
                 )
-                if "forced_stock_conc" in o and o["forced_stock_conc"] is not None:
-                    try:
-                        setattr(opt, "forced_stock_conc", float(o["forced_stock_conc"]))
-                    except Exception:
-                        setattr(opt, "forced_stock_conc", None)
                 fs.options.append(opt)
             self.factors.append(fs)
 
@@ -2657,7 +3267,12 @@ class ExperimentModel(QObject):
                 self._materialize_uploaded_design_csv()
 
         # Recompute plans & grid
-        res = self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+        res = self.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=self._allow_two_from_metadata(),
+        )
         if not res.get("best"):
             # surface an error in your UI as you prefer
             print("Optimization on load failed:", res.get("reason", "Unknown"))
@@ -3044,7 +3659,12 @@ class ExperimentModel(QObject):
         Safe to call multiple times.
         """
         if not self.plans_per_option:
-            res = self.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+            res = self.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=60,
+                two_max_refine=40,
+                allow_two=self._allow_two_from_metadata(),
+            )
             if not res.get("best"):
                 raise RuntimeError(f"Optimization failed: {res.get('reason', 'Unknown')}")
         if self._reactions_df.empty:
@@ -3375,6 +3995,7 @@ class ExperimentModel(QObject):
             "name": temp_name,
             "replicates": 1,
             "use_subset_design": False,   # <-- keep key consistent
+            "allow_two_stock_solutions": False,
             "reduction_factor": 1,
             "target_reaction_volume_nL": 500.0,
             "final_reaction_volume_nL": 500.0,
@@ -3403,6 +4024,7 @@ class ExperimentModel(QObject):
         # clear any uploaded/manual reaction list state
         self._uploaded_reactions = None
         self._uploaded_design_source = None
+        self._uploaded_well_ids = None
 
 
         self.unsaved_changes = False

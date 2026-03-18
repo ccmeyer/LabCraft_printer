@@ -1,7 +1,7 @@
 {
   "schema_name": "labcraft.calibration_memory.reagents_registry",
   "schema_version": 1,
-  "updated_at_utc": "2026-03-06T00:00:00Z",
+  "updated_at_utc": "2026-03-18T22:19:11Z",
   "items": [
     {
       "reagent_id": "water",
@@ -48,6 +48,54 @@
       "tags": [
         "baseline_study"
       ],
+      "notes": ""
+    },
+    {
+      "reagent_id": "pmix",
+      "display_name": "pmix",
+      "stock_ids": [],
+      "aliases": [
+        "pmix"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "ribosome",
+      "display_name": "ribosome",
+      "stock_ids": [],
+      "aliases": [
+        "ribosome"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "trna",
+      "display_name": "trna",
+      "stock_ids": [],
+      "aliases": [
+        "trna"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
+      "notes": ""
+    },
+    {
+      "reagent_id": "magnesium_acetate",
+      "display_name": "magnesium_acetate",
+      "stock_ids": [],
+      "aliases": [
+        "magnesium_acetate"
+      ],
+      "reagent_family": null,
+      "glycerol_percent": null,
+      "tags": [],
       "notes": ""
     }
   ]
