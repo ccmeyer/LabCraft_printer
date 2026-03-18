@@ -6037,9 +6037,7 @@ class MachineModel(QObject):
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
         self.motor_state_changed.emit(self.motors_enabled)
-        self.regulating_print_pressure = False
-        self.regulating_refuel_pressure = False
-        self.regulation_state_changed.emit(self.regulating_print_pressure)
+        self.update_regulation_state(False, False)
         self.reset_home_status()
         self.home_status_signal.emit()
         self.clear_last_reset_report()
@@ -6049,9 +6047,7 @@ class MachineModel(QObject):
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
         self.motor_state_changed.emit(self.motors_enabled)
-        self.regulating_print_pressure = False
-        self.regulating_refuel_pressure = False
-        self.regulation_state_changed.emit(self.regulating_print_pressure)
+        self.update_regulation_state(False, False)
         self.paused = False
         self.machine_paused.emit()
         self.machine_free = True
@@ -6164,18 +6160,27 @@ class MachineModel(QObject):
         """Toggle the motor state and emit a signal."""
         self.motors_enabled = not self.motors_enabled
         if not self.motors_enabled:
-            self.regulating_print_pressure = False
-            self.regulating_refuel_pressure = False
-            self.regulation_state_changed.emit(self.regulating_print_pressure)
+            self.update_regulation_state(False, False)
         self.motor_state_changed.emit(self.motors_enabled)
         #print(f"Motors {'enabled' if self.motors_enabled else 'disabled'}")
 
     def toggle_regulation_state(self):
         """Toggle the motor state and emit a signal."""
-        self.regulating_print_pressure = not self.regulating_print_pressure
-        self.regulating_refuel_pressure = not self.regulating_refuel_pressure
-        self.regulation_state_changed.emit(self.regulating_print_pressure)
+        next_state = not self.regulating_print_pressure
+        self.update_regulation_state(next_state, next_state)
         #print(f"Pressure regulation {'enabled' if self.regulating_pressure else 'disabled'}")
+
+    def update_regulation_state(self, print_active, refuel_active):
+        print_active = bool(print_active)
+        refuel_active = bool(refuel_active)
+        changed = (
+            self.regulating_print_pressure != print_active
+            or self.regulating_refuel_pressure != refuel_active
+        )
+        self.regulating_print_pressure = print_active
+        self.regulating_refuel_pressure = refuel_active
+        if changed:
+            self.regulation_state_changed.emit(self.regulating_print_pressure)
 
     def update_command_numbers(self, current_command_num, last_completed_command_num):
         self.current_command_num = current_command_num
@@ -6907,6 +6912,11 @@ class Model(QObject):
             self.machine_model.update_target_print_pressure(status_dict['Tar_print'])
         if 'Tar_refuel' in status_keys:
             self.machine_model.update_target_refuel_pressure(status_dict['Tar_refuel'])
+        if 'print_active' in status_keys or 'refuel_active' in status_keys:
+            self.machine_model.update_regulation_state(
+                status_dict.get('print_active', self.machine_model.regulating_print_pressure),
+                status_dict.get('refuel_active', self.machine_model.regulating_refuel_pressure),
+            )
         if 'Cycle_count' in status_keys:
             self.machine_model.update_cycle_count(status_dict['Cycle_count'])
         if 'Max_cycle' in status_keys:

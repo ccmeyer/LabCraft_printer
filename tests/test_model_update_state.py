@@ -51,3 +51,25 @@ def test_model_update_state_maps_status_fields(qapp):
     assert mm.x_max_hz == 1000 and mm.y_max_hz == 1100 and mm.z_max_hz == 1200
     assert mm.x_accel == 10 and mm.y_accel == 11 and mm.z_accel == 12
     assert len(emitted) == 1
+
+
+def test_model_update_state_applies_regulator_activity_flags(qapp):
+    model = Model.__new__(Model)
+    model.machine_model = MachineModel()
+    model.droplet_camera_model = SimpleNamespace(
+        update_num_flashes=lambda *_: None,
+        update_flash_duration=lambda *_: None,
+        update_flash_delay=lambda *_: None,
+        update_num_droplets=lambda *_: None,
+        update_trigger_counter=lambda *_: None,
+    )
+    model.machine_state_updated = SimpleNamespace(emit=lambda: None)
+
+    emissions = []
+    model.machine_model.regulation_state_changed.connect(lambda active: emissions.append(active))
+
+    model.update_state({"print_active": 1, "refuel_active": 0})
+
+    assert model.machine_model.regulating_print_pressure is True
+    assert model.machine_model.regulating_refuel_pressure is False
+    assert emissions == [True]

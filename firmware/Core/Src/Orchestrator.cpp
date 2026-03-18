@@ -13,6 +13,7 @@
 #include "Printer.h"
 #include "PressureRegulator.h"
 #include "PressureRegulatorMath.h"
+#include "PressureTargetPolicy.h"
 #include "PressureSensor.h"
 #include "Logger.h"
 #include "Gantry.h"
@@ -655,19 +656,25 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
         }
         case CMD_PR_PRINT: {
+        	PressureRegulator& reg = PressureRegulator::regP();
         	int32_t  target = (int32_t)cmd.p1u();
-        	PressureRegulator::regP().setTargetSafe(target);
+        	reg.setTargetSafe(target);
             // ensure we re-wait even if already in band
             xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
-            waitForBit(BIT_PRESSURE_P_READY);
+            if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
+              waitForBit(BIT_PRESSURE_P_READY);
+            }
         	break;
         }
         case CMD_PR_REFUEL: {
 			#if (LC_PRESSURE_PORTS > 1)
+        	  PressureRegulator& reg = PressureRegulator::regR();
         	  int32_t  target = (int32_t)cmd.p1u();
-			  PressureRegulator::regR().setTargetSafe(target);
+			  reg.setTargetSafe(target);
 			  xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
-			  waitForBit(BIT_PRESSURE_R_READY);
+			  if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
+			    waitForBit(BIT_PRESSURE_R_READY);
+			  }
 			#else
 			  // Legacy: single channel → log message
 			  Logger::instance()->log("Legacy has no refuel channel");
@@ -678,10 +685,13 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			bool  sign   = cmd.p1b();
 			int32_t  delta  = (int32_t)cmd.p2u();
 			  if (delta == 0) { Logger::instance()->log("[PReg] REL P delta=0\n"); break; }
-			PressureRegulator::regP().setRelativeTargetSafe(sign, delta);
+			PressureRegulator& reg = PressureRegulator::regP();
+			reg.setRelativeTargetSafe(sign, delta);
             // ensure we re-wait even if already in band
             xEventGroupClearBits(_doneEvents, BIT_PRESSURE_P_READY);
-            waitForBit(BIT_PRESSURE_P_READY);
+            if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
+              waitForBit(BIT_PRESSURE_P_READY);
+            }
 			break;
 		}
         case CMD_PR_REFUEL_REL: {
@@ -689,9 +699,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			bool  sign   = cmd.p1b();
 			int32_t  delta  = (int32_t)cmd.p2u();
 			  if (delta == 0) { Logger::instance()->log("[PReg] REL R delta=0\n"); break; }
-			PressureRegulator::regR().setRelativeTargetSafe(sign, delta);
+			PressureRegulator& reg = PressureRegulator::regR();
+			reg.setRelativeTargetSafe(sign, delta);
 			xEventGroupClearBits(_doneEvents, BIT_PRESSURE_R_READY);
-			waitForBit(BIT_PRESSURE_R_READY);
+			if (PressureTargetPolicy::shouldWaitForReadyAfterTargetChange(reg.isActive())) {
+			  waitForBit(BIT_PRESSURE_R_READY);
+			}
 			#else
 			Logger::instance()->log("Legacy has no refuel channel");
 			#endif

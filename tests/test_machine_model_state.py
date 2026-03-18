@@ -77,3 +77,18 @@ def test_pressure_conversion_and_rolling_buffers(qapp):
     machine_model.update_refuel_pressure(machine_model.psi_offset + machine_model.fss)
     assert machine_model.current_refuel_pressure == machine_model.psi_max
     assert machine_model.refuel_pressure_readings[-1] == machine_model.psi_max
+
+
+def test_update_regulation_state_tracks_both_channels_and_emits_once(qapp):
+    machine_model = MachineModel()
+    emissions = []
+    machine_model.regulation_state_changed.connect(lambda active: emissions.append(active))
+
+    machine_model.update_regulation_state(1, 0)
+
+    assert machine_model.regulating_print_pressure is True
+    assert machine_model.regulating_refuel_pressure is False
+    assert emissions == [True]
+
+    machine_model.update_regulation_state(True, False)
+    assert emissions == [True]

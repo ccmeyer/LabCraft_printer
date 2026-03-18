@@ -15,6 +15,7 @@ add_executable(fw_tests
     tests/test_orchestrator_decode.cpp
     tests/test_nvm_codec.cpp
     tests/test_pressure_regulator_math.cpp
+    tests/test_pressure_target_policy.cpp
     tests/test_pressure_trace_math.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_stepper_limit_policy.cpp

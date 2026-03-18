@@ -694,8 +694,7 @@ class Controller(QObject):
         else:
             success = self.machine.regulate_print_pressure()  # Assuming method exists
             success_2 = self.machine.regulate_refuel_pressure()
-        if success and success_2:
-            self.model.machine_model.toggle_regulation_state()  # Update the model state
+        return success and success_2
 
     def add_reagent_to_slot(self, slot):
         """Add a reagent to a slot."""
