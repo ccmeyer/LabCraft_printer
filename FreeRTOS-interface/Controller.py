@@ -913,7 +913,7 @@ class Controller(QObject):
             self.open_gripper()
             coords = self.model.rack_model.get_slot_coordinates(slot)
             name = 'Slot-'+str(slot+1)
-            self.move_to_location(name,x_offset=8000,coords=coords)
+            self.move_to_location(name,x_offset=9000,coords=coords)
 
             self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper(handler=lambda: self.pick_up_handler(slot))
@@ -946,7 +946,7 @@ class Controller(QObject):
             self.move_to_location(name,x_offset=3000,coords=coords)
             self.move_to_location(name,coords=coords,override=True,ignore_safe_height=True)
             self.open_gripper(handler=lambda: self.drop_off_handler(slot))
-            self.move_to_location(name,x_offset=8000,coords=coords,override=True,ignore_safe_height=True)
+            self.move_to_location(name,x_offset=9000,coords=coords,override=True,ignore_safe_height=True)
             self.close_gripper()
         else:
             print(f'Error: {error_msg}')
