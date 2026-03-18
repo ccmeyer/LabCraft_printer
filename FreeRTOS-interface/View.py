@@ -932,6 +932,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+        self._pressure_spinbox_focus_targets = {}
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -958,6 +959,47 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """End active editing so global keyboard shortcuts become active again."""
         spinbox.clearFocus()
 
+    def _configure_editable_spinbox(self, spinbox, handler):
+        """Configure a pressure control spinbox for guarded edits."""
+        spinbox.setKeyboardTracking(False)
+        spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+        spinbox.editingFinished.connect(handler)
+        spinbox.installEventFilter(self)
+        self._pressure_spinbox_focus_targets[spinbox] = spinbox
+
+        line_edit = spinbox.lineEdit() if hasattr(spinbox, "lineEdit") else None
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+            self._pressure_spinbox_focus_targets[line_edit] = spinbox
+
+    def _set_spinbox_edit_highlight(self, spinbox, is_active):
+        """Show a thin border while a guarded spinbox is actively being edited."""
+        if spinbox.property("editHighlightActive") == is_active:
+            return
+
+        spinbox.setProperty("editHighlightActive", is_active)
+        if is_active:
+            highlight_color = self.color_dict.get("light_blue", "#3b82f6")
+            spinbox.setStyleSheet(
+                "QAbstractSpinBox {"
+                f" border: 1px solid {highlight_color};"
+                " border-radius: 2px;"
+                "}"
+            )
+        else:
+            spinbox.setStyleSheet("")
+
+    def eventFilter(self, watched, event):
+        spinbox = self._pressure_spinbox_focus_targets.get(watched)
+        if spinbox is not None and event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut):
+            QTimer.singleShot(
+                0,
+                lambda sb=spinbox: self._set_spinbox_edit_highlight(
+                    sb, self._spinbox_is_being_edited(sb)
+                ),
+            )
+        return super().eventFilter(watched, event)
+
     def init_ui(self):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QGridLayout(self)
@@ -969,9 +1011,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_print_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
         self.target_print_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
         self.target_print_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-        self.target_print_pressure_spinbox.setKeyboardTracking(False)
-        self.target_print_pressure_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.target_print_pressure_spinbox.editingFinished.connect(self.handle_target_print_pressure_change)
+        self._configure_editable_spinbox(
+            self.target_print_pressure_spinbox,
+            self.handle_target_print_pressure_change,
+        )
 
         self.layout.addWidget(self.current_print_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
         self.layout.addWidget(self.current_print_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
@@ -986,9 +1029,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.target_refuel_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
             self.target_refuel_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
             self.target_refuel_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-            self.target_refuel_pressure_spinbox.setKeyboardTracking(False)
-            self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
-            self.target_refuel_pressure_spinbox.editingFinished.connect(self.handle_target_refuel_pressure_change)
+            self._configure_editable_spinbox(
+                self.target_refuel_pressure_spinbox,
+                self.handle_target_refuel_pressure_change,
+            )
 
             self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
             self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
@@ -1073,9 +1117,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.print_pulse_width_spinbox.setRange(0, 10000)
         self.print_pulse_width_spinbox.setSingleStep(50)
         self.print_pulse_width_spinbox.setValue(3000)
-        self.print_pulse_width_spinbox.setKeyboardTracking(False)
-        self.print_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
-        self.print_pulse_width_spinbox.editingFinished.connect(self.handle_print_pulse_width_change)
+        self._configure_editable_spinbox(
+            self.print_pulse_width_spinbox,
+            self.handle_print_pulse_width_change,
+        )
         self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
         self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
 
@@ -1086,9 +1131,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.refuel_pulse_width_spinbox.setRange(0, 10000)
             self.refuel_pulse_width_spinbox.setSingleStep(50)
             self.refuel_pulse_width_spinbox.setValue(3000)
-            self.refuel_pulse_width_spinbox.setKeyboardTracking(False)
-            self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
-            self.refuel_pulse_width_spinbox.editingFinished.connect(self.handle_refuel_pulse_width_change)
+            self._configure_editable_spinbox(
+                self.refuel_pulse_width_spinbox,
+                self.handle_refuel_pulse_width_change,
+            )
             self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
             self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
 
