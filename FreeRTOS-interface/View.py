@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.color_dict_path = os.path.join(self.script_dir, 'Presets','Colors.json')
         self.color_dict = self.load_colors(self.color_dict_path)
+        self._startup_focus_initialized = False
 
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the main user interface."""
         self.central_widget = QWidget()
+        self.central_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setCentralWidget(self.central_widget)
         transparent_icon = self.make_transparent_icon()
         self.setWindowIcon(transparent_icon)
@@ -207,6 +209,12 @@ class MainWindow(QMainWindow):
         width = int(screen_geometry.width() * 0.9)
         height = int(screen_geometry.height() * 0.9)
         self.resize(width, height)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._startup_focus_initialized:
+            self._startup_focus_initialized = True
+            QTimer.singleShot(0, lambda: self.central_widget.setFocus(QtCore.Qt.OtherFocusReason))
         
 
     def setup_shortcuts(self):
@@ -963,6 +971,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Configure a pressure control spinbox for guarded edits."""
         spinbox.setKeyboardTracking(False)
         spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+        spinbox.setProperty("editHighlightActive", False)
+        spinbox.setStyleSheet(
+            "QAbstractSpinBox {"
+            " border: 1px solid transparent;"
+            " border-radius: 2px;"
+            "}"
+            "QAbstractSpinBox[editHighlightActive='true'] {"
+            f" border: 1px solid {self.color_dict.get('light_blue', '#3b82f6')};"
+            "}"
+        )
         spinbox.editingFinished.connect(handler)
         spinbox.installEventFilter(self)
         self._pressure_spinbox_focus_targets[spinbox] = spinbox
@@ -978,16 +996,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             return
 
         spinbox.setProperty("editHighlightActive", is_active)
-        if is_active:
-            highlight_color = self.color_dict.get("light_blue", "#3b82f6")
-            spinbox.setStyleSheet(
-                "QAbstractSpinBox {"
-                f" border: 1px solid {highlight_color};"
-                " border-radius: 2px;"
-                "}"
-            )
-        else:
-            spinbox.setStyleSheet("")
+        spinbox.style().unpolish(spinbox)
+        spinbox.style().polish(spinbox)
+        spinbox.update()
 
     def eventFilter(self, watched, event):
         spinbox = self._pressure_spinbox_focus_targets.get(watched)
