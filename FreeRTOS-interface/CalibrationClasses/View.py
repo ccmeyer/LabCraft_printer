@@ -2,7 +2,7 @@ from PySide6 import QtCore, QtWidgets, QtGui, QtCharts
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QHBoxLayout, QVBoxLayout, QWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QLabel, QGridLayout, QGroupBox, QPushButton, QComboBox, QSpinBox, QSizePolicy,
-    QSpacerItem, QFileDialog, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox,QGraphicsOpacityEffect
+    QSpacerItem, QInputDialog, QMessageBox, QAbstractItemView, QDialog,QLineEdit,QDoubleSpinBox,QGraphicsOpacityEffect
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
@@ -215,7 +215,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.layout.setContentsMargins(8, 8, 8, 8)
         self.layout.setSpacing(10)
 
-        # ---------- FAR-LEFT INFO PANEL (fixed width): memory + summary ----------
+        # ---------- RIGHT RESULTS PANEL (fixed width): memory + summary ----------
         self.info_panel = QtWidgets.QWidget()
         info_panel_v = QtWidgets.QVBoxLayout(self.info_panel)
         info_panel_v.setContentsMargins(6, 6, 6, 6)
@@ -325,60 +325,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.num_pressure_tests_label, crow, 0)
         calib_grid.addWidget(self.num_pressure_tests_spin,  crow, 1); crow += 1
 
-        self.prebreakup_step_label = QtWidgets.QLabel("Pre-breakup Step (psi):")
-        self.prebreakup_step_spin = QtWidgets.QDoubleSpinBox()
-        self.prebreakup_step_spin.setDecimals(3)
-        self.prebreakup_step_spin.setRange(0.005, 1.0)
-        self.prebreakup_step_spin.setSingleStep(0.005)
-        self.prebreakup_step_spin.setValue(0.03)
-        calib_grid.addWidget(self.prebreakup_step_label, crow, 0)
-        calib_grid.addWidget(self.prebreakup_step_spin,  crow, 1); crow += 1
-
-        self.prebreakup_lead_label = QtWidgets.QLabel("Pre-breakup Delay Override (µs):")
-        self.prebreakup_lead_spin = QtWidgets.QSpinBox()
-        self.prebreakup_lead_spin.setRange(0, 12000)
-        self.prebreakup_lead_spin.setSingleStep(100)
-        self.prebreakup_lead_spin.setValue(0)
-        self.prebreakup_lead_spin.setSpecialValueText("Auto Scout")
-        self.prebreakup_lead_spin.setToolTip(
-            "Set an absolute flash delay to skip auto-scouting. Use 0 to auto-select the delay."
-        )
-        calib_grid.addWidget(self.prebreakup_lead_label, crow, 0)
-        calib_grid.addWidget(self.prebreakup_lead_spin,  crow, 1); crow += 1
-
-        self.prebreakup_reps_label = QtWidgets.QLabel("Pre-breakup Replicates:")
-        self.prebreakup_reps_spin = QtWidgets.QSpinBox()
-        self.prebreakup_reps_spin.setRange(1, 9)
-        self.prebreakup_reps_spin.setSingleStep(1)
-        self.prebreakup_reps_spin.setValue(3)
-        calib_grid.addWidget(self.prebreakup_reps_label, crow, 0)
-        calib_grid.addWidget(self.prebreakup_reps_spin,  crow, 1); crow += 1
-
-        self.prebreakup_dataset_plan_label = QtWidgets.QLabel("Dataset Plan (JSON):")
-        self.prebreakup_dataset_plan_edit = QtWidgets.QLineEdit()
-        self.prebreakup_dataset_plan_edit.setPlaceholderText(
-            "Optional: plan file for multi-condition acquisition"
-        )
-        self.prebreakup_dataset_plan_browse_button = QtWidgets.QPushButton("Browse Dataset Plan")
-        self.prebreakup_dataset_plan_browse_button.clicked.connect(self.browse_prebreakup_dataset_plan)
-        calib_grid.addWidget(self.prebreakup_dataset_plan_label, crow, 0)
-        calib_grid.addWidget(self.prebreakup_dataset_plan_edit, crow, 1); crow += 1
-        calib_grid.addWidget(self.prebreakup_dataset_plan_browse_button, crow, 0, 1, 2); crow += 1
-
-        self.prebreakup_dataset_analyze_checkbox = QtWidgets.QCheckBox("Analyze dataset frames during acquisition")
-        self.prebreakup_dataset_analyze_checkbox.setChecked(False)
-        self.prebreakup_dataset_analyze_checkbox.setToolTip(
-            "When enabled, each captured frame runs pre-breakup morphology analysis and writes metrics to analysis.jsonl."
-        )
-        calib_grid.addWidget(self.prebreakup_dataset_analyze_checkbox, crow, 0, 1, 2); crow += 1
-
-        self.prebreakup_dataset_overlay_checkbox = QtWidgets.QCheckBox("Save dataset analysis overlays")
-        self.prebreakup_dataset_overlay_checkbox.setChecked(False)
-        self.prebreakup_dataset_overlay_checkbox.setToolTip(
-            "When enabled, analyzed dataset frames also save the annotated overlay image into the recorder captures."
-        )
-        calib_grid.addWidget(self.prebreakup_dataset_overlay_checkbox, crow, 0, 1, 2); crow += 1
-
         self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
         self.record_calibration_checkbox.setToolTip(
             "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
@@ -418,14 +364,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_emergence_button = QtWidgets.QPushButton("Calibrate Droplet Emergence")
         self.calibrate_emergence_button.clicked.connect(self.toggle_start_emergence_calibration)
         calib_grid.addWidget(self.calibrate_emergence_button, crow, 0, 1, 2); crow += 1
-
-        self.calibrate_prebreakup_button = QtWidgets.QPushButton("Estimate Safe Upper Pressure")
-        self.calibrate_prebreakup_button.clicked.connect(self.toggle_start_prebreakup_morphology_calibration)
-        calib_grid.addWidget(self.calibrate_prebreakup_button, crow, 0, 1, 2); crow += 1
-
-        self.acquire_prebreakup_dataset_button = QtWidgets.QPushButton("Acquire Pre-Breakup Dataset")
-        self.acquire_prebreakup_dataset_button.clicked.connect(self.toggle_start_prebreakup_dataset_acquisition)
-        calib_grid.addWidget(self.acquire_prebreakup_dataset_button, crow, 0, 1, 2); crow += 1
 
         # self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
         # self.calibrate_pressure_button.clicked.connect(self.toggle_start_pressure_calibration)
@@ -494,10 +432,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_all_pw_button.clicked.connect(self.toggle_start_pw_sweep)
         calib_grid.addWidget(self.calibrate_all_pw_button, crow, 0, 1, 2); crow += 1
 
-        # Status
-        self.stageLabel = QtWidgets.QLabel("Status: Idle")
-        calib_grid.addWidget(self.stageLabel, crow, 0, 1, 2); crow += 1
-
         for button in (
             self.flash_button,
             self.benchmark_profile_button,
@@ -505,9 +439,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_nozzle_button,
             self.calibrate_focus_button,
             self.calibrate_emergence_button,
-            self.calibrate_prebreakup_button,
-            self.acquire_prebreakup_dataset_button,
-            self.prebreakup_dataset_plan_browse_button,
             self.calibrate_pressure_scan_button,
             self.scan_trajectory_button,
             self.calibrate_pressure_sweep_button,
@@ -566,7 +497,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         summary_v = QtWidgets.QVBoxLayout(self.summary_group)
 
         self.summary_table = QtWidgets.QTableWidget()
-        self.summary_table = QtWidgets.QTableWidget()
         self.summary_table.setColumnCount(6)
         self.summary_table.setHorizontalHeaderLabels(
             ["Run #", "PW (µs)", "Pressure (psi)", "Mean (nL)", "CV (%)", "Valid"]
@@ -604,9 +534,69 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         info_panel_v.addWidget(self.summary_group, 1)
 
+        # --- Group 4: Design ↔ Calibration Bridge ---
+        self.bridge_group = QtWidgets.QGroupBox("Design ↔ Calibration Bridge")
+        self.bridge_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        bridge_v = QtWidgets.QVBoxLayout(self.bridge_group)
+
+        self.bridge_reagent_label = QtWidgets.QLabel("Reagent: —")
+        self.bridge_design_dv_label = QtWidgets.QLabel("Design droplet volume (nL): —")
+        self.bridge_design_targets_label = QtWidgets.QLabel("Design targets: —")
+        self.bridge_design_stock_label = QtWidgets.QLabel("Stock concentration(s): —")
+
+        preview_h = QtWidgets.QHBoxLayout()
+        self.bridge_preview_btn = QtWidgets.QPushButton("Preview from last characterization")
+        self.bridge_preview_btn.clicked.connect(self._bridge_preview_from_last_char)
+        preview_h.addWidget(self.bridge_preview_btn)
+
+        self.bridge_table = QtWidgets.QTableWidget(0, 7, self.bridge_group)
+        self.bridge_table.setHorizontalHeaderLabels([
+            "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
+        ])
+        self.bridge_table.horizontalHeader().setStretchLastSection(True)
+        self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
+
+        self.bridge_apply_btn = QtWidgets.QPushButton("Apply new droplet volume to design")
+        self.bridge_apply_btn.setEnabled(False)
+        self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
+        self.bridge_apply_btn.setToolTip("Update droplet counts & concentration key using this droplet size")
+
+        bridge_v.addWidget(self.bridge_reagent_label)
+        bridge_v.addWidget(self.bridge_design_dv_label)
+        bridge_v.addWidget(self.bridge_design_targets_label)
+        bridge_v.addWidget(self.bridge_design_stock_label)
+        bridge_v.addLayout(preview_h)
+        bridge_v.addWidget(self.bridge_table, 1)
+        bridge_v.addWidget(self.bridge_apply_btn)
+
+        info_panel_v.addWidget(self.bridge_group, 1)
+
+        # --- Group 5: Calibration Status ---
+        self.status_group = QtWidgets.QGroupBox("Calibration Status")
+        self.status_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
+        status_v = QtWidgets.QVBoxLayout(self.status_group)
+
+        self.stageLabel = QtWidgets.QLabel("Status: Idle")
+        status_v.addWidget(self.stageLabel)
+
+        self.stage_table = QtWidgets.QTableWidget()
+        self.stage_table.setColumnCount(2)
+        self.stage_table.setHorizontalHeaderLabels(["Time", "Stage"])
+        self.stage_table.verticalHeader().setVisible(False)
+        self.stage_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.stage_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.stage_table.setWordWrap(True)
+        self.stage_table.setAlternatingRowColors(True)
+        self.stage_table.horizontalHeader().setStretchLastSection(True)
+        self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        self.stage_table.setMinimumHeight(100)
+        status_v.addWidget(self.stage_table, 1)
+
+        info_panel_v.addWidget(self.status_group, 1)
+
         control_panel_v.addStretch(1)
 
-        # Keep the left-side panels stable so buttons and labels remain readable.
+        # Keep the side panels stable so buttons and labels remain readable.
         self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.info_panel.adjustSize()
@@ -614,13 +604,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.info_panel.setFixedWidth(max(520, self.info_panel.sizeHint().width()))
         self.control_panel.setFixedWidth(max(520, self.control_panel.sizeHint().width()))
 
-        # Add left-side panels to main layout.
-        self.layout.addWidget(self.info_panel, 0)
-        self.layout.setStretchFactor(self.info_panel, 0)
-        self.layout.addWidget(self.control_panel, 0)
-        self.layout.setStretchFactor(self.control_panel, 0)
-
-        # ---------- RIGHT PANEL (image + analysis/logs): expands ----------
+        # ---------- MIDDLE PANEL (image + motor positions): expands ----------
         self.analysis_layout = QtWidgets.QVBoxLayout()
 
         self.image_label = QLabel("No image captured yet.")
@@ -661,71 +645,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
 
-        # --- Group 3: Design ↔ Calibration Bridge (preview only in Step 1) ---
-        bridge_group = QtWidgets.QGroupBox("Design ↔ Calibration Bridge")
-        bridge_v = QtWidgets.QVBoxLayout(bridge_group)
+        self.analysis_layout.addStretch(1)
 
-        # Top labels (design targets & droplet nL)
-        self.bridge_reagent_label = QtWidgets.QLabel("Reagent: —")
-        self.bridge_design_dv_label = QtWidgets.QLabel("Design droplet volume (nL): —")
-        self.bridge_design_targets_label = QtWidgets.QLabel("Design targets: —")
-        self.bridge_design_stock_label = QtWidgets.QLabel("Stock concentration(s): —")
-
-        # Preview controls
-        preview_h = QtWidgets.QHBoxLayout()
-        self.bridge_preview_btn = QtWidgets.QPushButton("Preview from last characterization")
-        self.bridge_preview_btn.clicked.connect(self._bridge_preview_from_last_char)
-        preview_h.addWidget(self.bridge_preview_btn)
-
-        # Table for preview results
-        self.bridge_table = QtWidgets.QTableWidget(0, 7, bridge_group)
-        self.bridge_table.setHorizontalHeaderLabels([
-            "Target (final)", "Achievable (final)", "Error", "Drops", "Δ/drop", "Printed nL (new)", "Δ printed nL"
-        ])
-        self.bridge_table.horizontalHeader().setStretchLastSection(True)
-        self.bridge_table.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
-
-        # Apply button (disabled in Step 1)
-        self.bridge_apply_btn = QtWidgets.QPushButton("Apply new droplet volume to design")
-        self.bridge_apply_btn.setEnabled(False)  # Step 1: preview only
-        self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
-        self.bridge_apply_btn.setToolTip("Update droplet counts & concentration key using this droplet size")
-
-        # assemble
-        bridge_v.addWidget(self.bridge_reagent_label)
-        bridge_v.addWidget(self.bridge_design_dv_label)
-        bridge_v.addWidget(self.bridge_design_targets_label)
-        bridge_v.addWidget(self.bridge_design_stock_label)
-        bridge_v.addLayout(preview_h)
-        bridge_v.addWidget(self.bridge_table)
-        bridge_v.addWidget(self.bridge_apply_btn)
-
-        self.analysis_layout.addWidget(bridge_group)
-
-
-        self.log_label = QtWidgets.QLabel("Calibration Log")
-        self.log_label.setStyleSheet("font-weight: bold;")
-        self.analysis_layout.addWidget(self.log_label)
-
-        self.stage_table = QtWidgets.QTableWidget()
-        self.stage_table.setColumnCount(2)
-        self.stage_table.setHorizontalHeaderLabels(["Time", "Stage"])
-        self.stage_table.verticalHeader().setVisible(False)
-        self.stage_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.stage_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.stage_table.setWordWrap(True)
-        self.stage_table.setAlternatingRowColors(True)
-        self.stage_table.horizontalHeader().setStretchLastSection(True)
-        self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.stage_table.setMinimumHeight(100)
-        self.analysis_layout.addWidget(self.stage_table)
-
-        # Add RIGHT to main layout; give it stretch to expand
+        # Add panels to the main layout: left controls, middle image, right results.
         self.analysis_panel = QtWidgets.QWidget()
         self.analysis_panel.setLayout(self.analysis_layout)
         self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.layout.addWidget(self.control_panel, 0)
+        self.layout.setStretchFactor(self.control_panel, 0)
         self.layout.addWidget(self.analysis_panel, 1)
         self.layout.setStretchFactor(self.analysis_panel, 1)
+        self.layout.addWidget(self.info_panel, 0)
+        self.layout.setStretchFactor(self.info_panel, 0)
 
         # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
@@ -1088,9 +1019,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_nozzle_button.setText("Calibrate Nozzle Position")
         self.calibrate_focus_button.setText("Calibrate Nozzle Focus")
         self.calibrate_emergence_button.setText("Calibrate Droplet Emergence")
-        self.calibrate_prebreakup_button.setText("Estimate Safe Upper Pressure")
-        self.acquire_prebreakup_dataset_button.setText("Acquire Pre-Breakup Dataset")
-        self.prebreakup_dataset_plan_browse_button.setText("Browse Dataset Plan")
         # self.calibrate_pressure_button.setText("Calibrate Pressure")
         # self.calibrate_droplet_search_button.setText("Search for Droplets")
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
@@ -1150,49 +1078,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
-
-    def toggle_start_prebreakup_morphology_calibration(self):
-        if self.model.calibration_manager.activeCalibration is not None:
-            self.calibrate_prebreakup_button.setText("Estimate Safe Upper Pressure")
-            self.controller.stop_calibration()
-            return
-
-        self.calibrate_prebreakup_button.setText("Stop Calibration")
-        fixed_delay = int(self.prebreakup_lead_spin.value())
-        self.controller.start_prebreakup_morphology_calibration(
-            start_pressure=float(self.start_pressure_spin.value()),
-            pressure_step_psi=float(self.prebreakup_step_spin.value()),
-            fixed_prebreakup_delay_us=(None if fixed_delay <= 0 else fixed_delay),
-            auto_scout_delay=bool(fixed_delay <= 0),
-            replicates_per_pressure=int(self.prebreakup_reps_spin.value()),
-        )
-
-    def toggle_start_prebreakup_dataset_acquisition(self):
-        if self.model.calibration_manager.activeCalibration is not None:
-            self.acquire_prebreakup_dataset_button.setText("Acquire Pre-Breakup Dataset")
-            self.controller.stop_calibration()
-            return
-
-        plan_path = self.prebreakup_dataset_plan_edit.text().strip()
-        analyze_frames = bool(self.prebreakup_dataset_analyze_checkbox.isChecked())
-        self.acquire_prebreakup_dataset_button.setText("Stop Calibration")
-        self.controller.start_prebreakup_dataset_acquisition(
-            plan_path=(plan_path or None),
-            pressure_psi=float(self.start_pressure_spin.value()),
-            replicates_per_delay=int(self.prebreakup_reps_spin.value()),
-            analyze_frames=analyze_frames,
-            save_overlays=bool(analyze_frames and self.prebreakup_dataset_overlay_checkbox.isChecked()),
-        )
-
-    def browse_prebreakup_dataset_plan(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Pre-Breakup Dataset Plan",
-            "",
-            "JSON Files (*.json);;All Files (*)",
-        )
-        if path:
-            self.prebreakup_dataset_plan_edit.setText(path)
 
     # def toggle_start_pressure_calibration(self):
     #     """
@@ -1347,8 +1232,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         mapping = {
             # 'pressure_calibration':            self.calibrate_pressure_button,
             'pressure_scan':                   self.calibrate_pressure_scan_button,
-            'pre_breakup_morphology':         self.calibrate_prebreakup_button,
-            'pre_breakup_dataset_acquisition': self.acquire_prebreakup_dataset_button,
             # 'droplet_trajectory':              self.calibrate_trajectory_button,
             'trajectory_pressure_scan':        self.scan_trajectory_button,
             # 'droplet_search':                  self.calibrate_search_button,

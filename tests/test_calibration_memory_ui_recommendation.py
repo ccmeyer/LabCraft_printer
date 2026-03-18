@@ -389,16 +389,18 @@ def _build_real_dialog_for_layout(monkeypatch, qapp):
     return dialog
 
 
-def test_real_dialog_uses_three_column_layout_with_separate_info_panel(monkeypatch, qapp):
+def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_right(monkeypatch, qapp):
     dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
 
     assert dialog.width() == 1600
     assert dialog.layout.count() == 3
-    assert dialog.layout.itemAt(0).widget() is dialog.info_panel
-    assert dialog.layout.itemAt(1).widget() is dialog.control_panel
-    assert dialog.layout.itemAt(2).widget() is dialog.analysis_panel
+    assert dialog.layout.itemAt(0).widget() is dialog.control_panel
+    assert dialog.layout.itemAt(1).widget() is dialog.analysis_panel
+    assert dialog.layout.itemAt(2).widget() is dialog.info_panel
     assert dialog.recommendation_group.parentWidget() is dialog.info_panel
     assert dialog.summary_group.parentWidget() is dialog.info_panel
+    assert dialog.bridge_group.parentWidget() is dialog.info_panel
+    assert dialog.status_group.parentWidget() is dialog.info_panel
     assert dialog.manual_group.parentWidget() is dialog.control_panel
     assert dialog.calib_group.parentWidget() is dialog.control_panel
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
@@ -407,5 +409,9 @@ def test_real_dialog_uses_three_column_layout_with_separate_info_panel(monkeypat
     assert dialog.calibrate_all_button.minimumHeight() >= 32
     assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32
     assert dialog.load_selected_button.minimumHeight() >= 32
+    assert not hasattr(dialog, "calibrate_prebreakup_button")
+    assert not hasattr(dialog, "acquire_prebreakup_dataset_button")
+    assert not hasattr(dialog, "prebreakup_step_spin")
+    assert not hasattr(dialog, "prebreakup_dataset_plan_edit")
 
     dialog.deleteLater()
