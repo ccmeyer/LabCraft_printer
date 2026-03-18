@@ -2221,14 +2221,7 @@ class ExperimentModel(QObject):
 
         # ---- Recompute the experiment so droplet counts and fill update everywhere ----
         self.generate_experiment()
-
-        # ---- Rebind per-well droplet counts to match the new mapping ----
-        if self._has_runtime_assignments():
-            self._rebind_runtime_assignments_to_current_plans()
-
-        # Optionally rewrite keys immediately if wells are assigned (so conc_key reflects new final concs)
-        if write_keys_if_assigned and self._has_runtime_assignments():
-            self.write_keys_now()
+        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
 
         # mark unsaved since design object changed
         self.unsaved_changes = True
@@ -3132,6 +3125,30 @@ class ExperimentModel(QObject):
 
         return False
 
+    def _refresh_runtime_after_plan_change(self, *, write_keys_if_assigned: bool = True) -> bool:
+        """
+        Push updated plan counts into the live reaction collection, rewrite key files
+        if requested, and notify any dependent UIs that well targets changed.
+        """
+        had_runtime_assignments = bool(self._has_runtime_assignments())
+        runtime_rebound = False
+
+        if had_runtime_assignments:
+            runtime_rebound = bool(self._rebind_runtime_assignments_to_current_plans())
+            if write_keys_if_assigned:
+                self.write_keys_now()
+
+        # Design/stock tables and other ExperimentModel listeners refresh from here.
+        self.stock_updated.emit()
+
+        if had_runtime_assignments:
+            wp = getattr(self, "_runtime_well_plate", None)
+            signal = getattr(wp, "well_state_changed_signal", None)
+            if signal is not None and hasattr(signal, "emit"):
+                signal.emit("all")
+
+        return runtime_rebound
+
     def get_fill_reagent_name(self) -> str:
         return str(self.metadata.get("fill_reagent_name", "Water"))
 
@@ -3209,9 +3226,7 @@ class ExperimentModel(QObject):
         self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
         self.generate_experiment()
 
-        # If wells are already assigned and you want the CSVs to reflect the new totals immediately:
-        if write_keys_if_assigned and self._has_runtime_assignments():
-            self.write_keys_now()
+        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
 
         self.unsaved_changes = True
         return {
