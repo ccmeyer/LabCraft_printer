@@ -947,6 +947,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.update_regulation_button_state(self.model.machine_model.is_connected())
         self.popup_message_signal.connect(self.main_window.popup_message)
 
+    @staticmethod
+    def _spinbox_is_being_edited(spinbox):
+        """Return True while a spinbox has keyboard focus for an in-progress edit."""
+        line_edit = spinbox.lineEdit() if hasattr(spinbox, "lineEdit") else None
+        return spinbox.hasFocus() or (line_edit is not None and line_edit.hasFocus())
+
+    @staticmethod
+    def _finish_spinbox_edit(spinbox):
+        """End active editing so global keyboard shortcuts become active again."""
+        spinbox.clearFocus()
+
     def init_ui(self):
         self.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout = QtWidgets.QGridLayout(self)
@@ -958,8 +969,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_print_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
         self.target_print_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
         self.target_print_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-        self.target_print_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.target_print_pressure_spinbox.valueChanged.connect(self.handle_target_print_pressure_change)  # Connect value changes to the update_pressure function
+        self.target_print_pressure_spinbox.setKeyboardTracking(False)
+        self.target_print_pressure_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.target_print_pressure_spinbox.editingFinished.connect(self.handle_target_print_pressure_change)
 
         self.layout.addWidget(self.current_print_pressure_label, 0, 0)  # Add the QLabel to the layout at position (0, 0)
         self.layout.addWidget(self.current_print_pressure_value, 0, 1)  # Add the QLabel to the layout at position (0, 1)
@@ -974,8 +986,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.target_refuel_pressure_spinbox.setDecimals(2)  # Set the number of decimal places to 3
             self.target_refuel_pressure_spinbox.setSingleStep(0.1)  # Set the step size to 0.001
             self.target_refuel_pressure_spinbox.setRange(0, 5)  # Set the range of the spinbox to 0-10
-            self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-            self.target_refuel_pressure_spinbox.valueChanged.connect(self.handle_target_refuel_pressure_change)  # Connect value changes to the update_pressure function
+            self.target_refuel_pressure_spinbox.setKeyboardTracking(False)
+            self.target_refuel_pressure_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+            self.target_refuel_pressure_spinbox.editingFinished.connect(self.handle_target_refuel_pressure_change)
 
             self.layout.addWidget(self.current_refuel_pressure_label, 1, 0)  # Add the QLabel to the layout at position (0, 0)
             self.layout.addWidget(self.current_refuel_pressure_value, 1, 1)  # Add the QLabel to the layout at position (0, 1)
@@ -1060,8 +1073,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.print_pulse_width_spinbox.setRange(0, 10000)
         self.print_pulse_width_spinbox.setSingleStep(50)
         self.print_pulse_width_spinbox.setValue(3000)
-        self.print_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
+        self.print_pulse_width_spinbox.setKeyboardTracking(False)
+        self.print_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.print_pulse_width_spinbox.editingFinished.connect(self.handle_print_pulse_width_change)
         self.layout.addWidget(self.print_pulse_width_label,4,2,1,1)
         self.layout.addWidget(self.print_pulse_width_spinbox,4,3,1,1)
 
@@ -1072,33 +1086,38 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.refuel_pulse_width_spinbox.setRange(0, 10000)
             self.refuel_pulse_width_spinbox.setSingleStep(50)
             self.refuel_pulse_width_spinbox.setValue(3000)
-            self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.NoFocus)
-            self.refuel_pulse_width_spinbox.valueChanged.connect(self.handle_refuel_pulse_width_change)
+            self.refuel_pulse_width_spinbox.setKeyboardTracking(False)
+            self.refuel_pulse_width_spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+            self.refuel_pulse_width_spinbox.editingFinished.connect(self.handle_refuel_pulse_width_change)
             self.layout.addWidget(self.refuel_pulse_width_label,5,2,1,1)
             self.layout.addWidget(self.refuel_pulse_width_spinbox,5,3,1,1)
 
 
         self.model.machine_model.pressure_updated.connect(self.update_pressure)
 
-    def handle_target_print_pressure_change(self, value):
+    def handle_target_print_pressure_change(self):
         """Handle changes to the target pressure value."""
-        # self.update_target_pressure_input.emit(value)
+        value = self.target_print_pressure_spinbox.value()
         self.controller.set_absolute_print_pressure(value,manual=True)
+        self._finish_spinbox_edit(self.target_print_pressure_spinbox)
 
-    def handle_target_refuel_pressure_change(self, value):
+    def handle_target_refuel_pressure_change(self):
         """Handle changes to the target pressure value."""
-        # self.update_target_pressure_input.emit(value)
+        value = self.target_refuel_pressure_spinbox.value()
         self.controller.set_absolute_refuel_pressure(value,manual=True)
+        self._finish_spinbox_edit(self.target_refuel_pressure_spinbox)
 
-    def handle_print_pulse_width_change(self, value):
+    def handle_print_pulse_width_change(self):
         """Handle changes to the pulse width value."""
-        # self.update_pulse_width_input.emit(value)
+        value = self.print_pulse_width_spinbox.value()
         self.controller.set_print_pulse_width(value,manual=True)
+        self._finish_spinbox_edit(self.print_pulse_width_spinbox)
     
-    def handle_refuel_pulse_width_change(self, value):
+    def handle_refuel_pulse_width_change(self):
         """Handle changes to the pulse width value."""
-        # self.update_pulse_width_input.emit(value)
+        value = self.refuel_pulse_width_spinbox.value()
         self.controller.set_refuel_pulse_width(value,manual=True)
+        self._finish_spinbox_edit(self.refuel_pulse_width_spinbox)
 
     def update_pressure(self):
         """Update the current pressure label and plot with the new pressure values."""
@@ -1141,18 +1160,26 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if not self.legacy_mode:
             self.current_refuel_pressure_value.setText(f"{refuel_log[-1]:.3f}")
 
-        self.target_print_pressure_spinbox.blockSignals(True)  # Block signals temporarily
-        self.target_print_pressure_spinbox.setValue(target_print_pressure)
-        self.target_print_pressure_spinbox.blockSignals(False)  # Unblock signals
+        if not self._spinbox_is_being_edited(self.target_print_pressure_spinbox):
+            self.target_print_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+            self.target_print_pressure_spinbox.setValue(target_print_pressure)
+            self.target_print_pressure_spinbox.blockSignals(False)  # Unblock signals
 
         if not self.legacy_mode:
-            self.target_refuel_pressure_spinbox.blockSignals(True)  # Block signals temporarily
-            self.target_refuel_pressure_spinbox.setValue(self.model.machine_model.get_target_refuel_pressure())
-            self.target_refuel_pressure_spinbox.blockSignals(False)  # Unblock signals
+            if not self._spinbox_is_being_edited(self.target_refuel_pressure_spinbox):
+                self.target_refuel_pressure_spinbox.blockSignals(True)  # Block signals temporarily
+                self.target_refuel_pressure_spinbox.setValue(self.model.machine_model.get_target_refuel_pressure())
+                self.target_refuel_pressure_spinbox.blockSignals(False)  # Unblock signals
 
-        self.print_pulse_width_spinbox.blockSignals(True)
-        self.print_pulse_width_spinbox.setValue(self.model.machine_model.print_pulse_width)
-        self.print_pulse_width_spinbox.blockSignals(False)
+        if not self._spinbox_is_being_edited(self.print_pulse_width_spinbox):
+            self.print_pulse_width_spinbox.blockSignals(True)
+            self.print_pulse_width_spinbox.setValue(self.model.machine_model.print_pulse_width)
+            self.print_pulse_width_spinbox.blockSignals(False)
+
+        if not self.legacy_mode and not self._spinbox_is_being_edited(self.refuel_pulse_width_spinbox):
+            self.refuel_pulse_width_spinbox.blockSignals(True)
+            self.refuel_pulse_width_spinbox.setValue(self.model.machine_model.refuel_pulse_width)
+            self.refuel_pulse_width_spinbox.blockSignals(False)
 
     def request_toggle_regulation(self):
         """Emit a signal to request toggling the motors."""
