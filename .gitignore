@@ -59,3 +59,5 @@ firmware/.metadata/
 **/*.map
 **/*.elf
 **/*.axf
+
+tmp/
