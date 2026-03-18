@@ -206,6 +206,7 @@ class SingleStockPlan:
     units: str
     droplets_per_target: Dict[float, int]    # target -> drops
     max_volume_nL: float             # worst-case (drops*drop_nL)
+    lookup_quantum: Optional[float] = None
     n_stocks: int = 1
 
 @dataclass
@@ -267,6 +268,7 @@ class ExperimentModel(QObject):
         # key for options in groups: (group_name, option_name)
         self.plans_per_option: Dict[Tuple[str, Optional[str]], Dict] = {}
         self._unreachable_preview_map: Dict[Tuple[str, Optional[str]], List[float]] = {}
+        self._target_preview_map: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
 
         # Cached stock rows for the UI stock table
         self._stock_rows_cache: List[Dict] = []
@@ -382,6 +384,73 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _normalize_target_key(self, value: float) -> float:
+        value = float(value)
+        if abs(value) <= 1e-12:
+            return 0.0
+        return float(f"{value:.12g}")
+
+    def _evaluate_single_forced_target(
+        self,
+        t_final: float,
+        starting_conc: float,
+        forced_stock_conc: float,
+        droplet_nL: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> Dict[str, Any]:
+        requested_final = float(t_final)
+        starting = float(starting_conc or 0.0)
+        requested_adjusted = max(0.0, requested_final - starting)
+        if requested_adjusted <= 1e-12:
+            requested_adjusted = 0.0
+
+        delta = (
+            (float(forced_stock_conc) * float(droplet_nL)) / float(final_volume_nL)
+            if float(final_volume_nL) > 0.0
+            else 0.0
+        )
+
+        droplets = 0
+        achieved_adjusted = 0.0
+        reachable = False
+        reason = "nonpositive_delta"
+
+        if requested_adjusted <= 1e-12:
+            reachable = True
+            reason = "nearest_achievable"
+        elif delta > 0.0:
+            droplets = max(0, int(round(requested_adjusted / delta)))
+            achieved_adjusted = float(droplets) * delta
+            abs_error = abs(achieved_adjusted - requested_adjusted)
+            if droplets == 0:
+                reason = "rounds_to_zero_drops"
+            elif abs_error <= (0.5 * delta + 1e-12):
+                reachable = True
+                reason = "nearest_achievable"
+            else:
+                reason = "outside_half_step"
+
+        achieved_final = starting + achieved_adjusted
+        signed_error = achieved_adjusted - requested_adjusted
+        abs_error = abs(signed_error)
+
+        return {
+            "requested_final": requested_final,
+            "requested_adjusted": requested_adjusted,
+            "achieved_final": achieved_final,
+            "achieved_adjusted": achieved_adjusted,
+            "droplets": int(droplets),
+            "delta_per_drop": float(delta),
+            "abs_error": float(abs_error),
+            "signed_error": float(signed_error),
+            "reachable": bool(reachable),
+            "reason": reason,
+            "stock_concentration": float(forced_stock_conc),
+            "starting_conc": starting,
+            "units": units,
+        }
 
     def _iter_factor_options(self):
         for factor in self.factors:
@@ -639,6 +708,7 @@ class ExperimentModel(QObject):
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
+        self._target_preview_map = {}
 
         additives: List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]] = []
         choice_groups: Dict[str, List[Tuple[str, List[SingleStockPlan], List[TwoStockPlan]]]] = {}
@@ -647,42 +717,54 @@ class ExperimentModel(QObject):
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
             return sorted(set(max(0.0, float(t) - s) for t in opt.targets))
 
+        def _build_forced_single_plan(opt, key: Tuple[str, Optional[str]]) -> SingleStockPlan:
+            forced = float(getattr(opt, "forced_stock_conc"))
+            dv = float(opt.droplet_nL)
+            delta = (forced * dv) / V_final if V_final > 0 else 0.0
+            preview_rows: List[Dict[str, Any]] = []
+            dp: Dict[float, int] = {}
+
+            for t_final in opt.targets:
+                row = self._evaluate_single_forced_target(
+                    t_final=t_final,
+                    starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                    forced_stock_conc=forced,
+                    droplet_nL=dv,
+                    final_volume_nL=V_final,
+                    units=opt.units,
+                )
+                preview_rows.append(row)
+                if row["reachable"]:
+                    dp[self._normalize_target_key(row["requested_adjusted"])] = int(row["droplets"])
+
+            self._target_preview_map[key] = preview_rows
+            unreachable_final = [
+                float(row["requested_final"])
+                for row in preview_rows
+                if not row["reachable"]
+            ]
+            if unreachable_final:
+                self._unreachable_preview_map[key] = unreachable_final
+
+            max_vol = max((k * dv for k in dp.values()), default=0.0)
+            return SingleStockPlan(
+                delta_per_drop=delta,
+                stock_concentration=forced,
+                droplet_nL=dv,
+                units=opt.units,
+                droplets_per_target=dp,
+                max_volume_nL=max_vol,
+                lookup_quantum=1e-6,
+                n_stocks=1,
+            )
+
         for f in self.factors:
             if f.kind == "additive":
                 o = f.options[0]
                 t_adj = _adj_targets_for_opt(o)
                 forced = getattr(o, "forced_stock_conc", None)
                 if forced is not None and forced > 0:
-                    # Forced single stock plan
-                    dv = float(o.droplet_nL)
-                    delta = (float(forced) * dv) / V_final if V_final > 0 else 0.0
-                    dp: Dict[float, int] = {}
-                    unreachable_final: List[float] = []
-                    # Build mapping strictly for integer multiples of delta (on the quantum grid)
-                    for t_final in o.targets:
-                        t_add = max(0.0, float(t_final) - float(getattr(o, "starting_conc", 0.0) or 0.0))
-                        t_add_q = _quantize(t_add, quantum)
-                        if delta > 0 and _is_multiple_of(delta, t_add_q, tol=1e-9):
-                            k = _int_ratio(delta, t_add_q)
-                            dp[t_add_q] = int(k)
-                        else:
-                            # zero is always reachable as 0 drops
-                            if t_add_q > 0:
-                                unreachable_final.append(float(t_final))
-                    # Record preview
-                    if unreachable_final:
-                        self._unreachable_preview_map[(f.name, None)] = unreachable_final
-
-                    max_vol = max((k * dv for k in dp.values()), default=0.0)
-                    singles = [SingleStockPlan(
-                        delta_per_drop=delta,
-                        stock_concentration=float(forced),
-                        droplet_nL=dv,
-                        units=o.units,
-                        droplets_per_target=dp,
-                        max_volume_nL=max_vol,
-                        n_stocks=1
-                    )]
+                    singles = [_build_forced_single_plan(o, (f.name, None))]
                     additives.append((f.name, singles, []))  # no two-stock for forced
                 else:
                     # Normal enumeration path
@@ -704,32 +786,7 @@ class ExperimentModel(QObject):
                     t_adj = _adj_targets_for_opt(opt)
                     forced = getattr(opt, "forced_stock_conc", None)
                     if forced is not None and forced > 0:
-                        dv = float(opt.droplet_nL)
-                        delta = (float(forced) * dv) / V_final if V_final > 0 else 0.0
-                        dp: Dict[float, int] = {}
-                        unreachable_final: List[float] = []
-                        for t_final in opt.targets:
-                            t_add = max(0.0, float(t_final) - float(getattr(opt, "starting_conc", 0.0) or 0.0))
-                            t_add_q = _quantize(t_add, quantum)
-                            if delta > 0 and _is_multiple_of(delta, t_add_q, tol=1e-9):
-                                k = _int_ratio(delta, t_add_q)
-                                dp[t_add_q] = int(k)
-                            else:
-                                if t_add_q > 0:
-                                    unreachable_final.append(float(t_final))
-                        if unreachable_final:
-                            self._unreachable_preview_map[(f.name, opt.name)] = unreachable_final
-
-                        max_vol = max((k * dv for k in dp.values()), default=0.0)
-                        singles = [SingleStockPlan(
-                            delta_per_drop=delta,
-                            stock_concentration=float(forced),
-                            droplet_nL=dv,
-                            units=opt.units,
-                            droplets_per_target=dp,
-                            max_volume_nL=max_vol,
-                            n_stocks=1
-                        )]
+                        singles = [_build_forced_single_plan(opt, (f.name, opt.name))]
                         bucket.append((opt.name, singles, []))
                     else:
                         singles = self._enumerate_single_stock_candidates(
@@ -1218,6 +1275,7 @@ class ExperimentModel(QObject):
                 ))
             else:
                 p1 = singles[add_idx[name]]
+                lookup_quantum = p1.lookup_quantum if p1.lookup_quantum is not None else quantum
                 self.plans_per_option[(name, None)] = {
                     "n_stocks": 1,
                     "stocks": [
@@ -1227,7 +1285,7 @@ class ExperimentModel(QObject):
                             "droplet_volume_nL": p1.droplet_nL,
                             "units": p1.units,
                             "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
-                            "quantum": quantum,
+                            "quantum": lookup_quantum,
                         }
                     ]
                 }
@@ -1284,6 +1342,7 @@ class ExperimentModel(QObject):
                     ))
                 else:
                     p1 = singles[ch_idx[key]]
+                    lookup_quantum = p1.lookup_quantum if p1.lookup_quantum is not None else quantum
                     self.plans_per_option[key] = {
                         "n_stocks": 1,
                         "stocks": [
@@ -1293,7 +1352,7 @@ class ExperimentModel(QObject):
                                 "droplet_volume_nL": p1.droplet_nL,
                                 "units": p1.units,
                                 "droplets_per_target": {float(t): int(d) for t, d in p1.droplets_per_target.items()},
-                                "quantum": quantum
+                                "quantum": lookup_quantum
                             },
                         ]
                     }
@@ -1514,6 +1573,8 @@ class ExperimentModel(QObject):
         # Keep factors; UI will rebuild them as usual.
         # Recompute plans/grid on next optimize/generate.
         self.plans_per_option.clear()
+        self._unreachable_preview_map = {}
+        self._target_preview_map = {}
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
@@ -1669,6 +1730,8 @@ class ExperimentModel(QObject):
         self._uploaded_design_source = source_path
 
         self.plans_per_option.clear()
+        self._unreachable_preview_map = {}
+        self._target_preview_map = {}
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
@@ -2129,7 +2192,7 @@ class ExperimentModel(QObject):
             k = 0 if delta <= 0 else int(round(t_add / delta))
             k = max(0, k)
             # normalize key to avoid float dust and to match resolve path
-            key_t = float(f"{t_add:.12g}")
+            key_t = self._normalize_target_key(t_add)
             dp[key_t] = k
 
         # ---- Patch the live plan & stock table cache ----
@@ -2369,6 +2432,8 @@ class ExperimentModel(QObject):
 
         # --- clear derived caches ---
         self.plans_per_option.clear()
+        self._unreachable_preview_map = {}
+        self._target_preview_map = {}
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()
@@ -2474,6 +2539,12 @@ class ExperimentModel(QObject):
 
     def get_unreachable_preview_map(self) -> Dict[Tuple[str, Optional[str]], List[float]]:
         return dict(self._unreachable_preview_map)
+
+    def get_target_preview_map(self) -> Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]]:
+        return {
+            key: [dict(row) for row in rows]
+            for key, rows in self._target_preview_map.items()
+        }
 
     # -----------------------------
     # JSON helpers
@@ -3300,6 +3371,8 @@ class ExperimentModel(QObject):
             "start_col": 0,
         }
         self.plans_per_option.clear()
+        self._unreachable_preview_map = {}
+        self._target_preview_map = {}
         self._stock_rows_cache.clear()
         self._fill_row_cache = None
         self._reactions_df = pd.DataFrame()

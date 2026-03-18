@@ -5167,7 +5167,7 @@ class ExperimentDesignDialog(QDialog):
         """
         preview = {}
         try:
-            preview = self.model.get_unreachable_preview_map() or {}
+            preview = self.model.get_target_preview_map() or {}
         except Exception:
             preview = {}
 
@@ -5188,16 +5188,80 @@ class ExperimentDesignDialog(QDialog):
 
             # Map to key used by the model
             key = (reagent_name, None) if group_name == self.GROUP_ADDITIVE else (group_name, reagent_name)
-            unreachable = preview.get(key, [])
+            rows = preview.get(key, [])
 
-            if unreachable:
-                tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("dark_red", "#8a0303"))
-                # Pretty tooltip list
-                msg = "Unreachable with forced stock:\n" + ", ".join(str(x) for x in unreachable)
-                tgt_edit.setToolTip(msg)
-            else:
+            if not rows:
                 tgt_edit.setStyleSheet("")
                 tgt_edit.setToolTip("")
+                continue
+
+            tooltip = self._build_target_preview_tooltip(rows)
+            has_unreachable = any(not bool(r.get("reachable")) for r in rows)
+
+            if has_unreachable:
+                tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("dark_red", "#8a0303"))
+                tgt_edit.setToolTip(tooltip)
+            else:
+                tgt_edit.setStyleSheet("")
+                tgt_edit.setToolTip(tooltip)
+
+    @staticmethod
+    def _fmt_target_preview_num(x) -> str:
+        try:
+            xv = float(x)
+        except Exception:
+            return str(x)
+        if abs(xv) <= 1e-12:
+            return "0"
+        ax = abs(xv)
+        if 1e-3 <= ax < 1000:
+            return f"{xv:.3f}".rstrip("0").rstrip(".")
+        return f"{xv:.6g}"
+
+    @staticmethod
+    def _fmt_target_preview_signed(x) -> str:
+        try:
+            xv = float(x)
+        except Exception:
+            return str(x)
+        sign = "+" if xv >= -1e-12 else "-"
+        return f"{sign}{ExperimentDesignDialog._fmt_target_preview_num(abs(xv))}"
+
+    @staticmethod
+    def _target_preview_reason_text(reason: str) -> str:
+        return {
+            "rounds_to_zero_drops": "0 drops; positive targets may not round to zero",
+            "outside_half_step": "outside half-step tolerance",
+            "nonpositive_delta": "no positive per-drop increase",
+        }.get(str(reason or ""), "")
+
+    @classmethod
+    def _build_target_preview_tooltip(cls, rows: Sequence[Mapping[str, Any]]) -> str:
+        if not rows:
+            return ""
+
+        first = rows[0]
+        stock_text = cls._fmt_target_preview_num(first.get("stock_concentration", ""))
+        units = str(first.get("units", "") or "").strip()
+        stock_label = f"{stock_text} {units}".strip()
+        header = "Achievable with forced stock:"
+        if stock_label:
+            header = f"Achievable with forced stock {stock_label}:"
+
+        lines = [header]
+        for row in rows:
+            requested = cls._fmt_target_preview_num(row.get("requested_final", 0.0))
+            achieved = cls._fmt_target_preview_num(row.get("achieved_final", 0.0))
+            drops = int(row.get("droplets", 0) or 0)
+            drop_word = "drop" if drops == 1 else "drops"
+            err = cls._fmt_target_preview_signed(row.get("signed_error", 0.0))
+            line = f"{requested} -> {achieved} ({drops} {drop_word}, {err})"
+            if not bool(row.get("reachable")):
+                reason = cls._target_preview_reason_text(str(row.get("reason", "")))
+                if reason:
+                    line = f"{line}; {reason}"
+            lines.append(line)
+        return "\n".join(lines)
 
     # -----------------------------
     # Stock table & summary updates
