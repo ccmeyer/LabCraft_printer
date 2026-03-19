@@ -1115,19 +1115,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.chart_view, 3, 0,1,4)
 
-        self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Pressure")
+        self.calibrate_pressure_button = QtWidgets.QPushButton("Calibrate Printer head")
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
         self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 1, 2)
-
-
-        if not self.legacy_mode:
-            self.droplet_imager_button = QtWidgets.QPushButton("Imager")
-            self.droplet_imager_button.clicked.connect(self.droplet_imager)
-            self.layout.addWidget(self.droplet_imager_button, 5, 0, 1, 2)
-
-            self.nozzle_dataset_button = QtWidgets.QPushButton("Nozzle Image Checklist")
-            self.nozzle_dataset_button.clicked.connect(self.nozzle_position_dataset_capture)
-            self.layout.addWidget(self.nozzle_dataset_button, 6, 0, 1, 2)
 
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
@@ -1282,12 +1272,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         # mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
         # mass_calibration_dialog.exec()
         if not self.legacy_mode:
-            importlib.reload(CalibrationClasses.View)
-            importlib.reload(CalibrationClasses)
-            self.model.reload_refuel_model()
-
-            camera_dialog = CalibrationClasses.RefuelCameraWindow(self.main_window,self.model,self.controller)
-            camera_dialog.exec()
+            self.droplet_imager()
         else:
             mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
             mass_calibration_dialog.exec()
