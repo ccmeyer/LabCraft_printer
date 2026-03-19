@@ -165,7 +165,389 @@ class CalibrationVerdictDialog(QtWidgets.QDialog):
             "notes": self.notes_edit.toPlainText().strip(),
         }
 
-        
+SUMMARY_RAW_ROW_ROLE = Qt.UserRole + 100
+SUMMARY_SORT_ROLE = Qt.UserRole + 101
+
+
+def _build_summary_muted_brush(color_dict):
+    muted_hex = (
+        (color_dict or {}).get("muted_text")
+        or (color_dict or {}).get("light_gray")
+        or (color_dict or {}).get("gray")
+        or None
+    )
+    if muted_hex:
+        return QBrush(QColor(muted_hex))
+    return QBrush(QColor(255, 255, 255, 150))
+
+
+def _characterization_table_stylesheet():
+    return (
+        "QTableView {"
+        " border: 1px solid rgba(255, 255, 255, 40);"
+        " alternate-background-color: transparent;"
+        "}"
+        "QTableView::item {"
+        " padding: 4px 6px;"
+        " border-bottom: 1px solid rgba(255, 255, 255, 22);"
+        "}"
+        "QHeaderView::section {"
+        " padding: 4px 6px;"
+        "}"
+    )
+
+
+def _configure_characterization_table_view(table, model):
+    table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+    table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+    table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+    table.setAlternatingRowColors(False)
+    table.setShowGrid(False)
+    table.setWordWrap(False)
+    table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+    table.setMinimumHeight(220)
+    table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+    table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+    table.setStyleSheet(_characterization_table_stylesheet())
+    table.verticalHeader().setVisible(False)
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionsClickable(True)
+    header.setSortIndicatorShown(False)
+    for idx, column in enumerate(model.columns()):
+        if column["key"] == "status_label":
+            header.setSectionResizeMode(idx, QtWidgets.QHeaderView.Stretch)
+        else:
+            header.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
+
+
+class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
+    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None):
+        super().__init__(parent)
+        self._include_recorded = bool(include_recorded)
+        self._muted_brush = muted_brush or QBrush(QColor(255, 255, 255, 150))
+        self._rows = []
+        self._columns = self._build_columns()
+
+    @staticmethod
+    def _format_float(value, ndigits):
+        if value is None:
+            return ""
+        try:
+            return f"{float(value):.{ndigits}f}"
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _display_status(row):
+        valid = row.get("valid")
+        if valid is True:
+            return "Valid"
+        if valid is False:
+            return "Flagged"
+        return ""
+
+    @staticmethod
+    def _status_sort_value(row):
+        valid = row.get("valid")
+        if valid is True:
+            return 0
+        if valid is False:
+            return 1
+        return 2
+
+    def _build_columns(self):
+        right = int(Qt.AlignRight | Qt.AlignVCenter)
+        left = int(Qt.AlignLeft | Qt.AlignVCenter)
+        columns = [
+            {
+                "key": "run_no",
+                "label": "Run",
+                "alignment": right,
+                "display": lambda row: "" if row.get("run_no") is None else str(row.get("run_no")),
+                "sort": lambda row: row.get("run_no"),
+            },
+            {
+                "key": "phase_label",
+                "label": "Source",
+                "alignment": left,
+                "display": lambda row: str(row.get("phase_label") or ""),
+                "sort": lambda row: str(row.get("phase_label") or "").lower(),
+            },
+        ]
+        if self._include_recorded:
+            columns.append(
+                {
+                    "key": "timestamp_display",
+                    "label": "Recorded",
+                    "alignment": left,
+                    "display": lambda row: str(row.get("timestamp_display") or ""),
+                    "sort": lambda row: row.get("timestamp") or "",
+                }
+            )
+        columns.extend(
+            [
+                {
+                    "key": "pw_us",
+                    "label": "PW (us)",
+                    "alignment": right,
+                    "display": lambda row: self._format_float(row.get("pw_us"), 0),
+                    "sort": lambda row: row.get("pw_us"),
+                },
+                {
+                    "key": "pressure_psi",
+                    "label": "Pressure (psi)",
+                    "alignment": right,
+                    "display": lambda row: self._format_float(row.get("pressure_psi"), 3),
+                    "sort": lambda row: row.get("pressure_psi"),
+                },
+                {
+                    "key": "mean_nL",
+                    "label": "Mean (nL)",
+                    "alignment": right,
+                    "display": lambda row: self._format_float(row.get("mean_nL"), 3),
+                    "sort": lambda row: row.get("mean_nL"),
+                },
+                {
+                    "key": "cv_pct",
+                    "label": "CV (%)",
+                    "alignment": right,
+                    "display": lambda row: self._format_float(row.get("cv_pct"), 2),
+                    "sort": lambda row: row.get("cv_pct"),
+                },
+                {
+                    "key": "status_label",
+                    "label": "Status",
+                    "alignment": left,
+                    "display": self._display_status,
+                    "sort": self._status_sort_value,
+                },
+            ]
+        )
+        return columns
+
+    def columns(self):
+        return self._columns
+
+    def column_index(self, key):
+        for idx, column in enumerate(self._columns):
+            if column["key"] == key:
+                return idx
+        raise KeyError(key)
+
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self._rows = [dict(row) for row in (rows or [])]
+        self.endResetModel()
+
+    def raw_row_at(self, row):
+        if row < 0 or row >= len(self._rows):
+            return None
+        return dict(self._rows[row])
+
+    def rowCount(self, parent=QtCore.QModelIndex()):
+        if parent.isValid():
+            return 0
+        return len(self._rows)
+
+    def columnCount(self, parent=QtCore.QModelIndex()):
+        if parent.isValid():
+            return 0
+        return len(self._columns)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal and 0 <= section < len(self._columns):
+            return self._columns[section]["label"]
+        return None
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        column = self._columns[index.column()]
+        key = column["key"]
+
+        if role in (Qt.DisplayRole, Qt.EditRole):
+            return column["display"](row)
+        if role == Qt.TextAlignmentRole:
+            return column["alignment"]
+        if role == SUMMARY_RAW_ROW_ROLE:
+            return dict(row)
+        if role == SUMMARY_SORT_ROLE:
+            return column["sort"](row)
+        if role == Qt.ToolTipRole:
+            invalid_reason = row.get("invalid_reason")
+            if row.get("valid") is False and invalid_reason:
+                return f"Invalid: {invalid_reason}"
+            if key == "timestamp_display":
+                return str(row.get("timestamp_display") or "")
+            return None
+        if role == Qt.ForegroundRole and row.get("valid") is False:
+            return self._muted_brush
+        if role == Qt.FontRole and row.get("valid") is False:
+            font = QtGui.QFont()
+            font.setItalic(True)
+            return font
+        return None
+
+
+class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_run_only = False
+        self._valid_only = False
+        self._source_filter = "all"
+
+    @staticmethod
+    def _normalize_sort_value(value):
+        if value is None:
+            return (1, "")
+        if isinstance(value, bool):
+            return (0, int(value))
+        if isinstance(value, (int, float)):
+            return (0, float(value))
+        return (0, str(value).lower())
+
+    def _raw_row(self, source_row):
+        model = self.sourceModel()
+        if model is None or not hasattr(model, "raw_row_at"):
+            return {}
+        return model.raw_row_at(source_row) or {}
+
+    def setCurrentRunOnly(self, enabled):
+        enabled = bool(enabled)
+        if self._current_run_only == enabled:
+            return
+        self._current_run_only = enabled
+        self.invalidateFilter()
+
+    def setValidOnly(self, enabled):
+        enabled = bool(enabled)
+        if self._valid_only == enabled:
+            return
+        self._valid_only = enabled
+        self.invalidateFilter()
+
+    def setSourceFilter(self, source_key):
+        normalized = str(source_key or "all").strip().lower()
+        if normalized not in ("all", "sweep", "search"):
+            normalized = "all"
+        if self._source_filter == normalized:
+            return
+        self._source_filter = normalized
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row, source_parent):
+        row = self._raw_row(source_row)
+        if not row:
+            return False
+        if self._current_run_only and not row.get("is_focus_run"):
+            return False
+        if self._valid_only and row.get("valid") is not True:
+            return False
+        if self._source_filter != "all":
+            if str(row.get("phase") or "").strip().lower() != self._source_filter:
+                return False
+        return True
+
+    def lessThan(self, left, right):
+        left_value = left.data(SUMMARY_SORT_ROLE)
+        right_value = right.data(SUMMARY_SORT_ROLE)
+        return self._normalize_sort_value(left_value) < self._normalize_sort_value(right_value)
+
+
+class CharacterizationHistoryDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, *, rows=None, muted_brush=None):
+        super().__init__(parent)
+        self.setWindowTitle("Characterization History")
+        self.resize(980, 560)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(8)
+        self.history_current_run_only_checkbox = QtWidgets.QCheckBox("Current run only")
+        self.history_current_run_only_checkbox.setChecked(False)
+        self.history_valid_only_checkbox = QtWidgets.QCheckBox("Valid only")
+        self.history_source_combo = QtWidgets.QComboBox()
+        self.history_source_combo.addItem("All", "all")
+        self.history_source_combo.addItem("Sweep", "sweep")
+        self.history_source_combo.addItem("Search", "search")
+        self.history_showing_label = QtWidgets.QLabel("")
+
+        toolbar.addWidget(self.history_current_run_only_checkbox)
+        toolbar.addWidget(self.history_valid_only_checkbox)
+        toolbar.addWidget(QtWidgets.QLabel("Source:"))
+        toolbar.addWidget(self.history_source_combo)
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.history_showing_label)
+        layout.addLayout(toolbar)
+
+        self.history_table = QtWidgets.QTableView()
+        self.history_table_model = CharacterizationSummaryTableModel(
+            self,
+            include_recorded=True,
+            muted_brush=muted_brush,
+        )
+        self.history_table_proxy_model = CharacterizationSummaryProxyModel(self)
+        self.history_table_proxy_model.setSourceModel(self.history_table_model)
+        self.history_table.setModel(self.history_table_proxy_model)
+        _configure_characterization_table_view(self.history_table, self.history_table_model)
+        layout.addWidget(self.history_table, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        close_btn = buttons.button(QtWidgets.QDialogButtonBox.Close)
+        if close_btn is not None:
+            close_btn.clicked.connect(self.close)
+        layout.addWidget(buttons)
+
+        self.history_current_run_only_checkbox.toggled.connect(self._refresh_filters)
+        self.history_valid_only_checkbox.toggled.connect(self._refresh_filters)
+        self.history_source_combo.currentIndexChanged.connect(self._refresh_filters)
+        self.history_table.horizontalHeader().sectionClicked.connect(self._handle_header_click)
+
+        self._sort_column = self.history_table_model.column_index("timestamp_display")
+        self._sort_order = Qt.DescendingOrder
+        self.history_table_model.set_rows(rows or [])
+        self._refresh_filters()
+        self._apply_sort(self._sort_column, self._sort_order)
+
+    def _update_count_label(self):
+        visible = self.history_table_proxy_model.rowCount()
+        total = self.history_table_model.rowCount()
+        noun = "result" if total == 1 else "results"
+        self.history_showing_label.setText(f"Showing {visible} of {total} {noun}")
+
+    def _refresh_filters(self):
+        self.history_table_proxy_model.setCurrentRunOnly(self.history_current_run_only_checkbox.isChecked())
+        self.history_table_proxy_model.setValidOnly(self.history_valid_only_checkbox.isChecked())
+        self.history_table_proxy_model.setSourceFilter(self.history_source_combo.currentData())
+        self._update_count_label()
+
+    def _apply_sort(self, column, order):
+        self._sort_column = column
+        self._sort_order = order
+        header = self.history_table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(column, order)
+        self.history_table_proxy_model.sort(column, order)
+
+    def _handle_header_click(self, section):
+        if self._sort_column == section:
+            order = Qt.DescendingOrder if self._sort_order == Qt.AscendingOrder else Qt.AscendingOrder
+        else:
+            order = Qt.AscendingOrder
+        self._apply_sort(section, order)
+
+
 class DropletImagingDialog(QtWidgets.QDialog):
     def __init__(self, main_window, model, controller):
         super().__init__()
@@ -517,14 +899,47 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         info_panel_v.addWidget(self.recommendation_group)
 
-        # --- Group 3: Characterization Summary ---
-        self.summary_group = QtWidgets.QGroupBox("Characterization Summary")
+        # --- Group 3: Characterization Results ---
+        self.summary_group = QtWidgets.QGroupBox("Characterization Results")
         self.summary_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
         summary_v = QtWidgets.QVBoxLayout(self.summary_group)
 
-        self.summary_table = QtWidgets.QTableWidget()
-        self.summary_table.setColumnCount(6)
-        self.summary_table.setHorizontalHeaderLabels(
+        self._summary_muted_brush = _build_summary_muted_brush(self.color_dict)
+        self.summary_toolbar = QtWidgets.QHBoxLayout()
+        self.summary_toolbar.setSpacing(8)
+        self.summary_current_run_checkbox = QtWidgets.QCheckBox("Current run only")
+        self.summary_current_run_checkbox.setChecked(True)
+        self.summary_valid_only_checkbox = QtWidgets.QCheckBox("Valid only")
+        self.summary_source_combo = QtWidgets.QComboBox()
+        self.summary_source_combo.addItem("All", "all")
+        self.summary_source_combo.addItem("Sweep", "sweep")
+        self.summary_source_combo.addItem("Search", "search")
+        self.summary_history_button = QtWidgets.QPushButton("History...")
+        self.summary_history_button.setMinimumHeight(28)
+        self.summary_count_label = QtWidgets.QLabel("Showing 0 of 0 results")
+        self.summary_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.summary_toolbar.addWidget(self.summary_current_run_checkbox)
+        self.summary_toolbar.addWidget(self.summary_valid_only_checkbox)
+        self.summary_toolbar.addWidget(QtWidgets.QLabel("Source:"))
+        self.summary_toolbar.addWidget(self.summary_source_combo)
+        self.summary_toolbar.addWidget(self.summary_history_button)
+        self.summary_toolbar.addStretch(1)
+        self.summary_toolbar.addWidget(self.summary_count_label)
+        summary_v.addLayout(self.summary_toolbar)
+
+        self.summary_table_model = CharacterizationSummaryTableModel(
+            self,
+            include_recorded=False,
+            muted_brush=self._summary_muted_brush,
+        )
+        self.summary_table_proxy_model = CharacterizationSummaryProxyModel(self)
+        self.summary_table_proxy_model.setSourceModel(self.summary_table_model)
+        self.summary_table = QtWidgets.QTableView()
+        self.summary_table.setModel(self.summary_table_proxy_model)
+        _configure_characterization_table_view(self.summary_table, self.summary_table_model)
+        self._unused_summary_columns = []
+        _ = (
             ["Run #", "PW (µs)", "Pressure (psi)", "Mean (nL)", "CV (%)", "Valid"]
         )
         self.summary_table.verticalHeader().setVisible(False)
@@ -548,13 +963,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
         self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
+        _configure_characterization_table_view(self.summary_table, self.summary_table_model)
         summary_v.addWidget(self.summary_table, 1)
+
+        self.summary_detail_widget = QtWidgets.QWidget()
+        detail_v = QtWidgets.QVBoxLayout(self.summary_detail_widget)
+        detail_v.setContentsMargins(0, 0, 0, 0)
+        detail_v.setSpacing(2)
+        self.summary_detail_meta_label = QtWidgets.QLabel("Select a result to see run details.")
+        self.summary_detail_meta_label.setWordWrap(True)
+        self.summary_detail_status_label = QtWidgets.QLabel("No result selected.")
+        self.summary_detail_status_label.setWordWrap(True)
+        detail_v.addWidget(self.summary_detail_meta_label)
+        detail_v.addWidget(self.summary_detail_status_label)
+        summary_v.addWidget(self.summary_detail_widget)
+        self._summary_sort_column = None
+        self._summary_sort_order = Qt.AscendingOrder
 
         # Load Selected button
         self.load_selected_button = QtWidgets.QPushButton("Load selected")
         self.load_selected_button.setMinimumHeight(32)
         self.load_selected_button.setEnabled(False)
-        self.load_selected_button.setToolTip("Select a row above, then click to apply its PW & pressure.")
+        self.load_selected_button.setToolTip("Select a row above, then click to apply its PW and pressure.")
         self.load_selected_button.clicked.connect(self.load_selected_summary_row)
         summary_v.addWidget(self.load_selected_button)
 
@@ -692,10 +1122,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
-        self.summary_table.itemSelectionChanged.connect(self._update_load_button_state)
-        # Double-click on any cell loads that row immediately
-        self.summary_table.itemDoubleClicked.connect(self._handle_summary_double_click)
-        self.summary_table.itemSelectionChanged.connect(self._on_summary_selection_changed)
+        self.summary_current_run_checkbox.toggled.connect(self._refresh_summary_filters)
+        self.summary_valid_only_checkbox.toggled.connect(self._refresh_summary_filters)
+        self.summary_source_combo.currentIndexChanged.connect(self._refresh_summary_filters)
+        self.summary_history_button.clicked.connect(self.open_characterization_history_dialog)
+        self.summary_table.doubleClicked.connect(self._handle_summary_double_click)
+        self.summary_table.horizontalHeader().sectionClicked.connect(self._handle_summary_header_click)
+        self.summary_table.selectionModel().selectionChanged.connect(self._on_summary_selection_changed)
 
         self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
         self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
@@ -2556,6 +2989,227 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.summary_table.setItem(i, 3, mean_item)
             self.summary_table.setItem(i, 4, cv_item)
             self.summary_table.setItem(i, 5, valid_item)
+        self.refresh_calibration_memory_recommendation()
+
+    def _update_summary_count_label(self):
+        visible = self.summary_table_proxy_model.rowCount()
+        total = self.summary_table_model.rowCount()
+        noun = "result" if total == 1 else "results"
+        self.summary_count_label.setText(f"Showing {visible} of {total} {noun}")
+
+    def _refresh_summary_detail_strip(self):
+        _, raw = self._selected_summary_row()
+        if not raw:
+            self.summary_detail_meta_label.setText("Select a result to see run details.")
+            self.summary_detail_status_label.setText("No result selected.")
+            return
+
+        run_text = raw.get("run_no")
+        source_text = raw.get("phase_label") or "Unknown"
+        recorded_text = raw.get("timestamp_display") or "Unknown"
+        self.summary_detail_meta_label.setText(
+            f"Run {run_text if run_text is not None else '-'} | Source {source_text} | Recorded {recorded_text}"
+        )
+        if raw.get("valid") is False:
+            reason = raw.get("invalid_reason") or "flagged"
+            self.summary_detail_status_label.setText(f"Invalid: {reason}")
+        else:
+            self.summary_detail_status_label.setText("Valid result")
+
+    def _refresh_summary_filters(self):
+        self.summary_table_proxy_model.setCurrentRunOnly(self.summary_current_run_checkbox.isChecked())
+        self.summary_table_proxy_model.setValidOnly(self.summary_valid_only_checkbox.isChecked())
+        self.summary_table_proxy_model.setSourceFilter(self.summary_source_combo.currentData())
+        self._update_summary_count_label()
+        self._update_load_button_state()
+        self._update_preview_button_label()
+        self._refresh_summary_detail_strip()
+
+    def _apply_summary_sort(self, column, order):
+        self._summary_sort_column = column
+        self._summary_sort_order = order
+        header = self.summary_table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(column, order)
+        self.summary_table_proxy_model.sort(column, order)
+
+    def _handle_summary_header_click(self, section):
+        if self._summary_sort_column == section:
+            order = Qt.DescendingOrder if self._summary_sort_order == Qt.AscendingOrder else Qt.AscendingOrder
+        else:
+            order = Qt.AscendingOrder
+        self._apply_summary_sort(section, order)
+
+    def open_characterization_history_dialog(self):
+        rows = self.model.calibration_manager.get_pressure_sweep_summary_rows()
+        dialog = CharacterizationHistoryDialog(
+            self,
+            rows=rows,
+            muted_brush=getattr(self, "_summary_muted_brush", None),
+        )
+        dialog.show()
+        try:
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            pass
+        self.summary_history_dialog = dialog
+        return dialog
+
+    def _selected_summary_row(self):
+        """Return (proxy_row_index, raw_row_dict) from the selected visible table row."""
+        selection_model = self.summary_table.selectionModel()
+        if selection_model is None:
+            return None, None
+        sel = selection_model.selectedRows()
+        if not sel:
+            return None, None
+        proxy_index = sel[0]
+        source_index = self.summary_table_proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return None, None
+        raw = self.summary_table_model.raw_row_at(source_index.row())
+        if raw is None:
+            return None, None
+        raw["_row"] = proxy_index.row()
+        raw["_source_row"] = source_index.row()
+        return proxy_index.row(), raw
+
+    def _update_load_button_state(self):
+        """Enable the Load button only when we have a usable selection."""
+        _, raw = self._selected_summary_row()
+        ok = bool(
+            raw
+            and raw.get("pw_us") is not None
+            and raw.get("pressure_psi") is not None
+            and not DropletImagingDialog._is_calibration_busy(self)
+        )
+        self.load_selected_button.setEnabled(ok)
+
+    def _handle_summary_double_click(self, _index):
+        """Double-click loads immediately (same as pressing the button)."""
+        self.load_selected_summary_row()
+
+    def _selected_summary_mean_nL(self) -> float | None:
+        _, raw = self._selected_summary_row()
+        if not raw:
+            return None
+        val = raw.get("mean_nL")
+        try:
+            v = float(val) if val is not None else None
+            return v if (v is not None and v > 0) else None
+        except Exception:
+            return None
+
+    def _preferred_char_mean_nL(self):
+        """
+        Returns (mean_nL, source) where source in {"selected", "latest"} or (None, None)
+        """
+        sel = self._selected_summary_mean_nL()
+        if sel is not None:
+            return sel, "selected"
+        cm = self._bridge_get_calibration_manager()
+        if cm is None:
+            return None, None
+        m = cm.get_last_characterization_mean_nL()
+        try:
+            return (float(m) if m is not None else None), "latest"
+        except Exception:
+            return None, None
+
+    def _update_preview_button_label(self):
+        if self._selected_summary_mean_nL() is not None:
+            self.bridge_preview_btn.setText("Preview from selected row")
+            self.bridge_preview_btn.setToolTip("Uses the selected table row's mean droplet volume.")
+        else:
+            self.bridge_preview_btn.setText("Preview from last characterization")
+            self.bridge_preview_btn.setToolTip("Uses the most recent valid characterization for this stock.")
+
+    def _on_summary_selection_changed(self, *_args):
+        self._update_load_button_state()
+        self._update_preview_button_label()
+        self._refresh_summary_detail_strip()
+
+    def load_selected_summary_row(self):
+        """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
+        _, raw = self._selected_summary_row()
+        if not raw:
+            return
+
+        pw = raw.get("pw_us")
+        pres = raw.get("pressure_psi")
+        valid = raw.get("valid")
+        run_no = raw.get("run_no")
+
+        if pw is None or pres is None:
+            QtWidgets.QMessageBox.information(self, "Nothing to load", "Selected row is missing PW or Pressure.")
+            return
+
+        try:
+            pres = float(pres)
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Invalid pressure", "Could not parse pressure value.")
+            return
+        pres = min(max(pres, self.hw_lo), self.hw_hi)
+
+        try:
+            pw = int(round(float(pw)))
+        except Exception:
+            QtWidgets.QMessageBox.warning(self, "Invalid pulse width", "Could not parse pulse width value.")
+            return
+
+        if valid is False:
+            reason = raw.get("invalid_reason") or "This condition was flagged invalid."
+            QtWidgets.QMessageBox.information(self, "Loading flagged condition", reason)
+
+        mgr = self.model.calibration_manager
+        self.stageLabel.setText(f"Status: Applying PW {pw} us, Pressure {pres:.3f} psi (Run {run_no or '-'})...")
+
+        def _after_apply(*_):
+            DropletImagingDialog._sync_manual_spinbox_value(
+                self,
+                self.print_pulse_width_spinbox,
+                pw,
+                force=True,
+            )
+            self.refresh_calibration_memory_recommendation()
+            self.update_stage_and_log(f"Loaded PW {pw} us and {pres:.3f} psi from Run {run_no or '-'}", "blue")
+
+        try:
+            mgr.changeSettingsRequested.emit({"print_pulse_width": pw, "print_pressure": pres}, _after_apply)
+        except Exception:
+            applied_ok = False
+            try:
+                if hasattr(self.controller, "set_print_pulse_width"):
+                    self.controller.set_print_pulse_width(pw, manual=True)
+                    applied_ok = True
+            except Exception:
+                pass
+            try:
+                if hasattr(self.controller, "set_print_pressure"):
+                    self.controller.set_print_pressure(pres, manual=True)
+                    applied_ok = True
+            except Exception:
+                pass
+
+            if applied_ok:
+                _after_apply()
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Apply failed",
+                    "Could not apply settings via manager or controller."
+                )
+
+    def populate_summary_table(self):
+        mgr = self.model.calibration_manager
+        rows = mgr.get_pressure_sweep_summary_rows()
+        self.summary_table_model.set_rows(rows)
+        self._refresh_summary_filters()
+        if self._summary_sort_column is not None:
+            self._apply_summary_sort(self._summary_sort_column, self._summary_sort_order)
         self.refresh_calibration_memory_recommendation()
 
     def center_nozzle(self):

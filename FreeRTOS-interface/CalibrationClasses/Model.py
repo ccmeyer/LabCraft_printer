@@ -3020,29 +3020,66 @@ class CalibrationManager(QObject):
         # take the last (newest) by our ordering
         return float(rows[-1]["mean_nL"])
 
-    def get_pressure_sweep_summary_rows(self):
-        # Ensure self.data is populated from disk on first use
+    @staticmethod
+    def _format_pressure_sweep_summary_timestamp(timestamp) -> str:
+        if timestamp in (None, ""):
+            return "Unknown"
+        try:
+            text = str(timestamp)
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(timestamp)
+
+    @staticmethod
+    def _pressure_sweep_phase_label(phase: str | None) -> str:
+        phase_key = str(phase or "").strip().lower()
+        if phase_key == "search":
+            return "Search"
+        if phase_key == "sweep":
+            return "Sweep"
+        if not phase_key:
+            return "Unknown"
+        return phase_key.replace("_", " ").title()
+
+    def _get_pressure_sweep_summary_matching_runs(self):
         self.ensure_loaded()
 
         runs = self.data.get("runs") or []
         if not runs:
-            return []
+            return None, []
 
-        # Prefer current stock; fallback to most recent known stock
         cur_stock = self._safe_get_stock_solution()
         if cur_stock is None:
             for run in reversed(runs):
-                s = run.get("stock_solution")
-                if s:
-                    cur_stock = s
+                stock_solution = run.get("stock_solution")
+                if stock_solution:
+                    cur_stock = stock_solution
                     break
         if cur_stock is None:
-            return []
+            return None, []
 
         matching = [(idx, run) for idx, run in enumerate(runs) if run.get("stock_solution") == cur_stock]
+        return cur_stock, matching
+
+    def get_pressure_sweep_summary_focus_run_id(self):
+        _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
+        if not matching:
+            return None
+
+        if self._run_id:
+            for _idx, run in matching:
+                if run.get("run_id") == self._run_id:
+                    return self._run_id
+
+        return matching[-1][1].get("run_id")
+
+    def get_pressure_sweep_summary_rows(self):
+        _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
         if not matching:
             return []
 
+        focus_run_id = self.get_pressure_sweep_summary_focus_run_id()
         run_ids_in_order = [run.get("run_id") for _, run in matching]
         id_to_run_no = {rid: i + 1 for i, rid in enumerate(run_ids_in_order)}
 
@@ -3057,16 +3094,21 @@ class CalibrationManager(QObject):
                 ts = step.get("timestamp")
                 pressures = (step.get("result") or {}).get("pressures") or []
                 for p in pressures:
+                    phase = "sweep"
                     rows.append({
+                        "run_id": rid,
                         "run_no": run_no,
+                        "phase": phase,
+                        "phase_label": self._pressure_sweep_phase_label(phase),
+                        "timestamp": ts,
+                        "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
                         "pw_us": pw,
                         "pressure_psi": p.get("pressure"),
                         "mean_nL": p.get("mean_volume"),
                         "cv_pct": p.get("cv_volume_percent"),
                         "valid": p.get("valid"),
                         "invalid_reason": p.get("invalid_reason"),
-                        "timestamp": ts,
-                        "phase": "sweep",
+                        "is_focus_run": rid == focus_run_id,
                     })
 
             # ---- (B) Droplet-search steps: single pressure at current PW/pressure
@@ -3088,8 +3130,14 @@ class CalibrationManager(QObject):
 
                 # Only add a row if we have something meaningful
                 if (pw is not None) and (pr is not None) and (mean_nL is not None):
+                    phase = "search"
                     rows.append({
+                        "run_id": rid,
                         "run_no": run_no,
+                        "phase": phase,
+                        "phase_label": self._pressure_sweep_phase_label(phase),
+                        "timestamp": ts,
+                        "timestamp_display": self._format_pressure_sweep_summary_timestamp(ts),
                         "pw_us": pw,
                         "pressure_psi": pr,
                         "mean_nL": mean_nL,
@@ -3098,8 +3146,7 @@ class CalibrationManager(QObject):
                         "invalid_reason": (
                             None if res.get("valid", True) else (res.get("invalid_reason") or "invalid")
                         ),
-                        "timestamp": ts,
-                        "phase": "search",
+                        "is_focus_run": rid == focus_run_id,
                     })
 
         # Sort: PW → Pressure → Run # → Timestamp
