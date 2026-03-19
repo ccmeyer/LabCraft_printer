@@ -183,6 +183,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.hw_lo, self.hw_hi = 0.10, 5.00
 
         self.shortcut_manager = ShortcutManager(self)
+        self.manual_flash_shortcut = None
         self.setup_shortcuts()
 
         self.flash_active = False
@@ -206,6 +207,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._manual_spinbox_syncing = set()
         self._manual_spinbox_typed_drafts = {}
         self._managed_manual_spinboxes = []
+        self._manual_controls_locked = False
         self._startup_focus_initialized = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
@@ -701,6 +703,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
         self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
         self.model.calibration_manager.characterizationSummaryUpdated.connect(self.populate_summary_table)
+        self.model.calibration_manager.calibrationStageChanged.connect(self._refresh_manual_control_lock_state)
+        self.model.calibration_manager.calibrationCompleted.connect(self._refresh_manual_control_lock_state)
+        self.model.calibration_manager.calibrationQueueCompleted.connect(self._refresh_manual_control_lock_state)
+        self.model.calibration_manager.calibrationError.connect(self._refresh_manual_control_lock_state)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
@@ -712,6 +718,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_start_pressure(self.start_pressure_spin.value())
         self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
         self.populate_summary_table()
+        self._refresh_manual_control_lock_state()
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -729,7 +736,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('Ctrl+k', 'Move forward', lambda: self.controller.set_relative_Y(25,manual=True))
         self.shortcut_manager.add_shortcut('Ctrl+j', 'Move backward', lambda: self.controller.set_relative_Y(-25,manual=True))
         
-        self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
+        self.manual_flash_shortcut = self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
         self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
         self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.01,manual=True))
@@ -804,6 +811,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_spinbox_focus_frame()
 
     def _dispatch_manual_spinbox_value(self, spinbox):
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
         handler = self._manual_spinbox_committers.get(spinbox)
         if handler is not None:
             handler(spinbox.value())
@@ -876,6 +885,99 @@ class DropletImagingDialog(QtWidgets.QDialog):
             syncing.discard(spinbox)
         if hasattr(self, "manual_edit_focus_frame"):
             QTimer.singleShot(0, lambda: DropletImagingDialog._refresh_manual_spinbox_focus_frame(self))
+
+    def _is_calibration_busy(self):
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        if manager is None:
+            return False
+
+        active = getattr(manager, "activeCalibration", None)
+        queue = getattr(manager, "calibration_queue", None) or []
+        sweep_active = False
+        if hasattr(manager, "is_pulsewidth_sweep_active"):
+            try:
+                sweep_active = bool(manager.is_pulsewidth_sweep_active())
+            except Exception:
+                sweep_active = False
+        return active is not None or bool(queue) or sweep_active
+
+    def _sync_manual_controls_from_model(self, force=False):
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.flash_duration_spinbox,
+            self.model.droplet_camera_model.get_flash_duration(),
+            force=force,
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.flash_delay_spinbox,
+            self.model.droplet_camera_model.get_flash_delay(),
+            force=force,
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.num_droplets_spinbox,
+            self.model.droplet_camera_model.get_num_droplets(),
+            force=force,
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.print_pulse_width_spinbox,
+            self.model.machine_model.get_print_pulse_width(),
+            force=force,
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.exposure_time_spinbox,
+            self.model.droplet_camera_model.get_exposure_time(),
+            force=force,
+        )
+
+    def _clear_manual_control_edit_state(self):
+        typed_drafts = getattr(self, "_manual_spinbox_typed_drafts", {})
+        for spinbox in getattr(self, "_managed_manual_spinboxes", []):
+            typed_drafts[spinbox] = False
+            spinbox.clearFocus()
+        self._manual_focus_frame_active_spinbox = None
+        if hasattr(self, "manual_edit_focus_frame"):
+            self.manual_edit_focus_frame.hide()
+
+    def _refresh_manual_control_lock_state(self, *_args):
+        busy = DropletImagingDialog._is_calibration_busy(self)
+        was_locked = getattr(self, "_manual_controls_locked", False)
+
+        if busy and not was_locked:
+            DropletImagingDialog._clear_manual_control_edit_state(self)
+            DropletImagingDialog._sync_manual_controls_from_model(self, force=True)
+
+        self._manual_controls_locked = busy
+        enabled = not busy
+
+        for widget_name in (
+            "flash_duration_spinbox",
+            "flash_delay_spinbox",
+            "num_droplets_spinbox",
+            "print_pulse_width_spinbox",
+            "exposure_time_spinbox",
+            "flash_button",
+            "benchmark_profile_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+        if getattr(self, "manual_flash_shortcut", None) is not None:
+            self.manual_flash_shortcut.setEnabled(enabled)
+
+        if hasattr(self, "memory_recommendation_apply_btn"):
+            if busy:
+                self.memory_recommendation_apply_btn.setEnabled(False)
+                self.memory_recommendation_apply_btn.setToolTip("Unavailable while calibration is running.")
+            elif getattr(self, "_memory_recommendation_preview", None) is not None:
+                self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
+
+        if hasattr(self, "load_selected_button"):
+            self._update_load_button_state()
 
     def eventFilter(self, watched, event):
         spinbox = self._manual_spinbox_focus_targets.get(watched)
@@ -977,6 +1079,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Apply a fixed, fast capture profile for throughput benchmarking.
         """
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
         self.controller.set_droplet_capture_profile("throughput")
         self.controller.set_command_dispatch_interval(20)
         DropletImagingDialog._sync_manual_spinbox_value(self, self.flash_delay_spinbox, 5000, force=True)
@@ -992,6 +1096,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Triggers a flash for the droplet imaging.
         """
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
         self.controller.capture_droplet_image()
 
     def toggle_saving(self):
@@ -1140,6 +1246,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.update_stage_and_log("Calibration Completed", "green")
         self.reset_calibration_buttons()
+        self._refresh_manual_control_lock_state()
         QTimer.singleShot(0, lambda: self._prompt_calibration_verdict(default_outcome="success"))
 
     def on_calibration_queue_completed(self):
@@ -1150,6 +1257,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
         self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
+        self._refresh_manual_control_lock_state()
 
     def on_calibration_error(self, error_message):
         """
@@ -1159,6 +1267,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.reset_calibration_buttons()
         self.calibrate_all_button.setText("Calibrate All")
         self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
+        self._refresh_manual_control_lock_state()
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
         QTimer.singleShot(
             0,
@@ -1230,6 +1339,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.prime_head_button.setText("Stop Calibration")
             self.controller.start_head_prime_calibration()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_nozzle_calibration(self):
         """
@@ -1243,6 +1353,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_nozzle_button.setText("Stop Calibration")
             self.controller.start_nozzle_calibration()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_focus_calibration(self):
         """
@@ -1256,6 +1367,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_focus_button.setText("Stop Calibration")
             self.controller.start_nozzle_focus_calibration()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_emergence_calibration(self):
         """
@@ -1269,6 +1381,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_emergence_button.setText("Stop Calibration")
             self.controller.start_droplet_emergence_calibration()
+        self._refresh_manual_control_lock_state()
 
     # def toggle_start_pressure_calibration(self):
     #     """
@@ -1291,12 +1404,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             # Stop any running calibration
             self.calibrate_pressure_scan_button.setText("Scan Pressures")
             self.controller.stop_calibration()
-            return
-
         else:
             # Launch
             self.calibrate_pressure_scan_button.setText("Stop Calibration")
             self.controller.start_pressure_scan_calibration()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_pressure_trajectory_calibration(self):
         """
@@ -1310,6 +1422,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.scan_trajectory_button.setText("Stop Calibration")
             self.controller.start_pressure_trajectory_calibration()
+        self._refresh_manual_control_lock_state()
 
     # def toggle_start_droplet_search_calibration(self):
     #     """
@@ -1336,6 +1449,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_characterization_button.setText("Stop Calibration")
             self.controller.start_droplet_characterization_calibration()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_pressure_sweep_calibration(self):
         """
@@ -1349,6 +1463,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_pressure_sweep_button.setText("Stop Calibration")
             self.controller.start_pressure_sweep_characterization()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_timecourse_calibration(self):
         """
@@ -1362,6 +1477,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_timecourse_button.setText("Stop Calibration")
             self.controller.start_droplet_timecourse_process()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_all_calibration(self):
         """
@@ -1375,6 +1491,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             print('Starting calibration')
             self.calibrate_all_button.setText("Stop Calibration")
             self.controller.start_all_calibrations()
+        self._refresh_manual_control_lock_state()
 
     def toggle_start_pw_sweep(self):
         """
@@ -1387,6 +1504,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if mgr.is_pulsewidth_sweep_active():
             self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
             mgr.stop_pulsewidth_sweep()
+            self._refresh_manual_control_lock_state()
             return
 
         # If a calibration is currently running (single or queue), stop it first
@@ -1414,6 +1532,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Update button and kick off sweep
         self.calibrate_all_pw_button.setText("Stop PW Range")
         mgr.start_pulsewidth_sweep(pw_start, pw_end, pw_step)
+        self._refresh_manual_control_lock_state()
 
     def on_readiness_changed(self, readiness: dict):
         """
@@ -1656,6 +1775,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation(force_log=True)
         self._set_equal_panel_widths()
+        self._refresh_manual_control_lock_state()
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -1784,6 +1904,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         self.memory_recommendation_ignore_btn.setEnabled(True)
         self.memory_recommendation_ignore_btn.setToolTip("Keep the current manual startup values and ignore this recommendation.")
+        if DropletImagingDialog._is_calibration_busy(self):
+            self.memory_recommendation_apply_btn.setEnabled(False)
+            self.memory_recommendation_apply_btn.setToolTip("Unavailable while calibration is running.")
 
     def refresh_calibration_memory_recommendation(self, *, force_log: bool = False):
         if getattr(self, "_memory_recommendation_refresh_active", False):
@@ -1845,6 +1968,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._memory_recommendation_refresh_active = False
 
     def apply_calibration_memory_recommendation(self):
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
         preview = dict(getattr(self, "_memory_recommendation_preview", None) or {})
         prior = dict(preview.get("prior") or {})
         if not prior:
@@ -2220,7 +2345,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
         _, raw = self._selected_summary_row()
-        ok = bool(raw and raw.get("pw_us") is not None and raw.get("pressure_psi") is not None)
+        ok = bool(
+            raw
+            and raw.get("pw_us") is not None
+            and raw.get("pressure_psi") is not None
+            and not DropletImagingDialog._is_calibration_busy(self)
+        )
         self.load_selected_button.setEnabled(ok)
 
     def _handle_summary_double_click(self, _item):
@@ -2272,6 +2402,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def load_selected_summary_row(self):
         """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
+        if DropletImagingDialog._is_calibration_busy(self):
+            return
         _, raw = self._selected_summary_row()
         if not raw:
             return
