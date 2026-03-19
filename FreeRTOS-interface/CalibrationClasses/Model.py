@@ -12293,6 +12293,9 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self.points = []
         self.samples = []
         self._disqualified_pressures = []
+        self._multiple_droplet_cutoff_pressure = None
+        self._observed_multiple_droplet_pressures = []
+        self._pruned_pressures = []
 
         # -------------- states --------------
         self.state_prepare_bg = QState()
@@ -12574,6 +12577,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             )
             if reason == "multiple_droplets":
                 self._append_disqualified_pressure_record(reason=reason, details=payload)
+                self._remember_pressure_value("_observed_multiple_droplet_pressures", self._current_pressure)
+                self._apply_multiple_droplet_cutoff(float(self._current_pressure))
             self._restart_current_pressure_with(
                 self._pending_pressure_adjustment,
                 reason=reason,
@@ -12794,7 +12799,11 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
     @Slot()
     def onCalibrationCompleted(self):
         valid_fit_count = int(
-            sum(1 for rec in list(self.samples or []) if isinstance(rec.get("fit"), dict))
+            sum(
+                1
+                for rec in list(self.samples or [])
+                if isinstance(rec.get("fit"), dict) and not bool(rec.get("disqualified", False))
+            )
         )
         if valid_fit_count <= 0:
             msg = "Trajectory scan produced no valid trajectory fits."
@@ -12812,6 +12821,10 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         _seen_valid = set()
         disqualified_pressures = []
         _seen_disq = set()
+        observed_multiple_droplet_pressures = []
+        _seen_observed = set()
+        pruned_pressures = []
+        _seen_pruned = set()
         for rec in list(self.samples or []):
             if not isinstance(rec, dict):
                 continue
@@ -12827,9 +12840,29 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 if p not in _seen_disq:
                     _seen_disq.add(p)
                     disqualified_pressures.append(float(p))
+            if str(rec.get("reason") or "") == "multiple_droplets":
+                if p not in _seen_observed:
+                    _seen_observed.add(p)
+                    observed_multiple_droplet_pressures.append(float(p))
+            if str(rec.get("reason") or "") == "pruned_after_multiple_droplets":
+                if p not in _seen_pruned:
+                    _seen_pruned.add(p)
+                    pruned_pressures.append(float(p))
 
         valid_fit_pressures.sort()
         disqualified_pressures.sort()
+        observed_multiple_droplet_pressures = sorted(
+            set(
+                observed_multiple_droplet_pressures
+                + [float(p) for p in list(getattr(self, "_observed_multiple_droplet_pressures", []) or [])]
+            )
+        )
+        pruned_pressures = sorted(
+            set(
+                pruned_pressures
+                + [float(p) for p in list(getattr(self, "_pruned_pressures", []) or [])]
+            )
+        )
         trajectory_pressure_band = None
         if valid_fit_pressures:
             trajectory_pressure_band = [
@@ -12844,6 +12877,8 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             "trajectory_pressure_band": trajectory_pressure_band,
             "valid_fit_pressures": valid_fit_pressures,
             "disqualified_pressures": disqualified_pressures,
+            "observed_multiple_droplet_pressures": observed_multiple_droplet_pressures,
+            "pruned_pressures": pruned_pressures,
             "nozzle_center_px": self.nozzle_center_px,
             "emergence_time_us": self.emergence_time_us,
             "valid_fit_count": int(valid_fit_count),
@@ -12930,6 +12965,22 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._pending_adjust_reason = str(reason or "pressure_adjustment")
         self._pending_adjust_payload = dict(payload or {})
 
+    def _clear_pending_adjustment(self):
+        self._pending_pressure_adjustment = None
+        self._pending_adjust_reason = None
+        self._pending_adjust_payload = {}
+
+    def _remember_pressure_value(self, attr_name: str, pressure):
+        try:
+            value = round(float(pressure), 3)
+        except Exception:
+            return None
+        current = list(getattr(self, attr_name, []) or [])
+        if value not in current:
+            current.append(float(value))
+            setattr(self, attr_name, current)
+        return float(value)
+
     def _append_disqualified_pressure_record(self, *, reason: str, details: dict | None = None):
         rec = {
             "pressure": float(self._current_pressure),
@@ -12940,7 +12991,89 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             "details": dict(details or {}),
         }
         self.samples.append(rec)
-        self._disqualified_pressures.append(float(self._current_pressure))
+        self._remember_pressure_value("_disqualified_pressures", self._current_pressure)
+
+    def _append_pruned_pressure_record(self, pressure: float, *, cutoff_pressure: float, source_pressure: float):
+        pressure = round(float(pressure), 3)
+        rec = {
+            "pressure": float(pressure),
+            "points": [],
+            "fit": None,
+            "reason": "pruned_after_multiple_droplets",
+            "disqualified": True,
+            "details": {
+                "cutoff_pressure": float(round(float(cutoff_pressure), 3)),
+                "source_pressure": float(round(float(source_pressure), 3)),
+                "direct_observation": False,
+            },
+        }
+        self.samples.append(rec)
+        self._remember_pressure_value("_disqualified_pressures", pressure)
+        self._remember_pressure_value("_pruned_pressures", pressure)
+
+    def _apply_multiple_droplet_cutoff(self, cutoff_pressure: float):
+        cutoff_pressure = round(float(cutoff_pressure), 3)
+        prev_cutoff = getattr(self, "_multiple_droplet_cutoff_pressure", None)
+        if prev_cutoff is None or cutoff_pressure < float(prev_cutoff):
+            self._multiple_droplet_cutoff_pressure = float(cutoff_pressure)
+        cutoff_pressure = float(self._multiple_droplet_cutoff_pressure)
+
+        source_pressure = cutoff_pressure
+        samples = list(getattr(self, "samples", []) or [])
+        observed = set(float(p) for p in list(getattr(self, "_observed_multiple_droplet_pressures", []) or []))
+
+        for rec in samples:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                p = round(float(rec.get("pressure")), 3)
+            except Exception:
+                continue
+            if p <= cutoff_pressure:
+                continue
+            if bool(rec.get("disqualified", False)):
+                continue
+            if p in observed:
+                continue
+            rec["disqualified"] = True
+            rec["reason"] = "pruned_after_multiple_droplets"
+            details = dict(rec.get("details") or {})
+            details.update(
+                {
+                    "cutoff_pressure": float(cutoff_pressure),
+                    "source_pressure": float(source_pressure),
+                    "direct_observation": False,
+                    "retroactive": True,
+                }
+            )
+            rec["details"] = details
+            self._remember_pressure_value("_disqualified_pressures", p)
+            self._remember_pressure_value("_pruned_pressures", p)
+
+        pressures = list(getattr(self, "pressures", []) or [])
+        if not pressures:
+            return
+        try:
+            p_index = int(getattr(self, "p_index", -1))
+        except Exception:
+            p_index = -1
+
+        kept_pressures = []
+        for idx, pressure in enumerate(pressures):
+            try:
+                pressure_value = round(float(pressure), 3)
+            except Exception:
+                kept_pressures.append(pressure)
+                continue
+            if idx > p_index and pressure_value > cutoff_pressure:
+                self._append_pruned_pressure_record(
+                    pressure_value,
+                    cutoff_pressure=cutoff_pressure,
+                    source_pressure=source_pressure,
+                )
+                continue
+            kept_pressures.append(float(pressure_value))
+        self.pressures = kept_pressures
 
     def _reset_delay_state(self):
         self._rep_count = 0
@@ -13249,6 +13382,24 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
             pass
         new_pressure = round(float(new_pressure), 3)
 
+        cutoff_pressure = getattr(self, "_multiple_droplet_cutoff_pressure", None)
+        if cutoff_pressure is not None and str(reason or "") != "multiple_droplets":
+            max_allowed = round(float(cutoff_pressure) - 0.01, 3)
+            if new_pressure >= float(cutoff_pressure):
+                current_pressure = None
+                try:
+                    current_pressure = round(float(self._current_pressure), 3)
+                except Exception:
+                    current_pressure = None
+                if current_pressure is None or max_allowed <= current_pressure:
+                    self.stageChanged.emit(
+                        f"Suppressing retry at/above unsafe cutoff {float(cutoff_pressure):.3f} psi"
+                    )
+                    self._clear_pending_adjustment()
+                    self._finish_pressure_and_advance()
+                    return
+                new_pressure = max_allowed
+
         # Guard against infinite loops
         self._adjust_attempts_at_pressure += 1
         if self._adjust_attempts_at_pressure > self._adjust_attempts_limit:
@@ -13262,9 +13413,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
                 "fit": None,
                 "reason": f"skipped_after_{str(reason)}",
             })
-            self._pending_pressure_adjustment = None
-            self._pending_adjust_reason = None
-            self._pending_adjust_payload = {}
+            self._clear_pending_adjustment()
             self._finish_pressure_and_advance()
             return
 
@@ -13281,9 +13430,7 @@ class PressureTrajectoryCalibrationProcess(BaseCalibrationProcess):
         self._miss_streak = 0
         self._stop_delays_after_this = False
         self._max_delay_allowed_us = None
-        self._pending_pressure_adjustment = None
-        self._pending_adjust_reason = None
-        self._pending_adjust_payload = {}
+        self._clear_pending_adjustment()
         self._discard_next = bool(self.discard_first_after_pressure)
         self._low_pressure_adjusted_this_pressure = False
 

@@ -123,6 +123,77 @@ def test_pressure_trajectory_multiple_on_single_replicate_disqualifies_and_retes
     assert proc.samples[-1]["reason"] == "multiple_droplets"
 
 
+def test_pressure_trajectory_multiple_droplets_prunes_future_higher_pressures_by_value():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc._pending_pressure_adjustment = 1.14
+    proc._pending_adjust_reason = "multiple_droplets"
+    proc._pending_adjust_payload = {"droplet_count": 2}
+    proc._current_pressure = 1.15
+    proc.p_index = 1
+    proc.pressures = [0.95, 1.15, 1.05, 1.20, 1.00]
+    proc.points = []
+    proc.samples = []
+    proc._disqualified_pressures = []
+    proc._observed_multiple_droplet_pressures = []
+    proc._pruned_pressures = []
+    proc.stageChanged = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    restart_calls = []
+    proc._restart_current_pressure_with = lambda new_p, reason: restart_calls.append((float(new_p), str(reason)))
+
+    proc.onDecide()
+
+    assert restart_calls == [(1.14, "multiple_droplets")]
+    assert proc.pressures == [0.95, 1.15, 1.05, 1.0]
+    assert proc._multiple_droplet_cutoff_pressure == 1.15
+    assert proc._observed_multiple_droplet_pressures == [1.15]
+    assert proc._pruned_pressures == [1.2]
+    assert [rec["pressure"] for rec in proc.samples] == [1.15, 1.2]
+    assert proc.samples[0]["reason"] == "multiple_droplets"
+    assert proc.samples[1]["reason"] == "pruned_after_multiple_droplets"
+
+
+def test_pressure_trajectory_multiple_droplets_retroactively_disqualifies_above_cutoff_fit():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc._pending_pressure_adjustment = 1.09
+    proc._pending_adjust_reason = "multiple_droplets"
+    proc._pending_adjust_payload = {"droplet_count": 2}
+    proc._current_pressure = 1.10
+    proc.p_index = 2
+    proc.pressures = [1.20, 1.00, 1.10]
+    proc.points = []
+    proc.samples = [
+        {
+            "pressure": 1.20,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": {"vx_px_per_us": 0.03, "vy_px_per_us": 0.04},
+        },
+        {
+            "pressure": 1.00,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": {"vx_px_per_us": 0.01, "vy_px_per_us": 0.02},
+        },
+    ]
+    proc._disqualified_pressures = []
+    proc._observed_multiple_droplet_pressures = []
+    proc._pruned_pressures = []
+    proc.stageChanged = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    restart_calls = []
+    proc._restart_current_pressure_with = lambda new_p, reason: restart_calls.append((float(new_p), str(reason)))
+
+    proc.onDecide()
+
+    assert restart_calls == [(1.09, "multiple_droplets")]
+    retro = proc.samples[0]
+    assert retro["pressure"] == 1.20
+    assert retro["fit"] == {"vx_px_per_us": 0.03, "vy_px_per_us": 0.04}
+    assert retro["disqualified"] is True
+    assert retro["reason"] == "pruned_after_multiple_droplets"
+    assert proc._pruned_pressures == [1.2]
+    assert proc._observed_multiple_droplet_pressures == [1.1]
+
+
 def test_pressure_trajectory_adjustment_limit_skips_slot():
     proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
     proc.model = SimpleNamespace(
@@ -181,6 +252,66 @@ def test_pressure_trajectory_restart_resets_working_delays_to_base():
     assert proc._completed == [False, False, False]
     assert proc.reapplyPressure.calls
     assert proc._adjust_attempts_at_pressure == 1
+
+
+def test_pressure_trajectory_restart_caps_upward_retry_below_multiple_droplet_cutoff():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_print_pressure_bounds=lambda: (0.3, 5.0))
+    )
+    proc._multiple_droplet_cutoff_pressure = 1.10
+    proc._adjust_attempts_at_pressure = 0
+    proc._adjust_attempts_limit = 5
+    proc.p_index = 0
+    proc.pressures = [1.05]
+    proc._current_pressure = 1.05
+    proc._base_delays_us = [5000, 5700, 6400]
+    proc.delays_us = [5000, 5700, 6400]
+    proc.points = [{"t_us": 5000, "center_px": (4.0, 12.0)}]
+    proc._completed = [True, False, False]
+    proc._reset_delay_state = lambda: None
+    proc._miss_streak = 0
+    proc._stop_delays_after_this = False
+    proc._max_delay_allowed_us = None
+    proc._pending_pressure_adjustment = 1.11
+    proc._pending_adjust_reason = "low_pressure_retraction"
+    proc._pending_adjust_payload = {"point_count": 1}
+    proc.discard_first_after_pressure = True
+    proc.stageChanged = Recorder()
+    proc.reapplyPressure = Recorder()
+
+    proc._restart_current_pressure_with(1.11, reason="low_pressure_retraction")
+
+    assert proc.pressures[0] == 1.09
+    assert proc.reapplyPressure.calls
+    assert proc._adjust_attempts_at_pressure == 1
+
+
+def test_pressure_trajectory_restart_suppresses_retry_that_would_reenter_cutoff():
+    proc = PressureTrajectoryCalibrationProcess.__new__(PressureTrajectoryCalibrationProcess)
+    proc.model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_print_pressure_bounds=lambda: (0.3, 5.0))
+    )
+    proc._multiple_droplet_cutoff_pressure = 1.10
+    proc._adjust_attempts_at_pressure = 0
+    proc._adjust_attempts_limit = 5
+    proc._current_pressure = 1.09
+    proc.points = [{"t_us": 5000, "center_px": (4.0, 12.0)}]
+    proc._pending_pressure_adjustment = 1.10
+    proc._pending_adjust_reason = "low_pressure_retraction"
+    proc._pending_adjust_payload = {"point_count": 1}
+    proc.stageChanged = Recorder()
+    proc.reapplyPressure = Recorder()
+    finish_calls = []
+    proc._finish_pressure_and_advance = lambda: finish_calls.append(True)
+
+    proc._restart_current_pressure_with(1.10, reason="low_pressure_retraction")
+
+    assert finish_calls
+    assert proc.reapplyPressure.calls == []
+    assert proc._adjust_attempts_at_pressure == 0
+    assert proc._pending_adjust_reason is None
+    assert proc._pending_adjust_payload == {}
 
 
 def test_pressure_trajectory_true_ejection_check_requires_downward_motion():
@@ -320,6 +451,13 @@ def test_pressure_trajectory_completion_publishes_valid_fit_band_fields():
             "disqualified": True,
         },
         {
+            "pressure": 1.20,
+            "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
+            "fit": {"vx_px_per_us": 0.04, "vy_px_per_us": 0.05},
+            "reason": "pruned_after_multiple_droplets",
+            "disqualified": True,
+        },
+        {
             "pressure": 0.95,
             "points": [{"t_us": 5000, "center_px": (1.0, 2.0)}],
             "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.03},
@@ -348,5 +486,7 @@ def test_pressure_trajectory_completion_publishes_valid_fit_band_fields():
     assert payload["valid_fit_count"] == 2
     assert payload["valid_fit_pressures"] == [0.95, 1.1]
     assert payload["trajectory_pressure_band"] == [0.95, 1.1]
-    assert payload["disqualified_pressures"] == [1.0]
+    assert payload["disqualified_pressures"] == [1.0, 1.2]
+    assert payload["observed_multiple_droplet_pressures"] == [1.0]
+    assert payload["pruned_pressures"] == [1.2]
     assert persisted
