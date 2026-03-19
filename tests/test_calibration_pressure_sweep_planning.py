@@ -13,19 +13,24 @@ from PySide6.QtCore import QObject, Signal  # noqa: E402
 from CalibrationClasses.Model import CalibrationManager, PressureSweepCharacterizationProcess  # noqa: E402
 
 
-def _build_pressure_sweep_focus_proc(focus_values):
+def _build_pressure_sweep_focus_proc(focus_values, *, roundness_values=None):
     overlay = np.zeros((400, 400, 3), dtype=np.uint8)
     state = {"pos": {"X": 500, "Y": 1000, "Z": 700}}
     values = list(focus_values)
+    roundness = list(roundness_values if roundness_values is not None else [0.95] * len(values))
 
     def _characterize(_img, _bg):
         if not values:
             raise AssertionError("No more focus values queued")
+        if not roundness:
+            raise AssertionError("No more roundness values queued")
+        ellipse_roundness = float(roundness.pop(0))
         return (
             {
                 "center": (200, 200),
                 "focus": float(values.pop(0)),
-                "circularity_ellipse": 0.9,
+                "circularity_ellipse": float(ellipse_roundness),
+                "ellipse_roundness": float(ellipse_roundness),
                 "volume": 1.0,
             },
             overlay.copy(),
@@ -64,6 +69,7 @@ def _build_pressure_sweep_focus_proc(focus_values):
     proc.max_oob_total = 12
     proc._recenter_moves = 0
     proc.max_recenter_moves = 10
+    proc.circularity_threshold = 0.91
     proc.circularity_values = []
     proc.droplet_positions = []
     proc.droplet_focus = []
@@ -80,8 +86,21 @@ def _build_pressure_sweep_focus_proc(focus_values):
     proc.char_max_invalid_ratio = 0.45
     proc.char_max_multiple_ratio = 0.20
     proc.char_max_stream_ratio = 0.20
+    proc.char_stream_circularity_max = 0.58
+    proc.char_delay_retarget_roundness_min = 0.91
+    proc.char_delay_retarget_bad_hits_required = 3
+    proc.char_delay_retarget_window_frames = 4
+    proc.char_delay_retarget_steps_us = [500, 1000]
+    proc.char_delay_retarget_cap = 2
+    proc._morphology_window_evaluable_count = 0
+    proc._morphology_window_nonround_hits = 0
+    proc._morphology_nonround_hits_total = 0
+    proc._morphology_retarget_count = 0
+    proc._morphology_retarget_history_us = []
     proc.current_delay_us = 7000
     proc.target_delay_us = 7000
+    proc.min_delay_us = 0
+    proc.max_delay_us = 50000
     proc.targeting_mode = "fixed_z_plane"
     proc.imaging_z_offset_steps = -2500
     proc.target_z_steps = -1800
@@ -89,6 +108,8 @@ def _build_pressure_sweep_focus_proc(focus_values):
     proc.nominal_target_xyz = None
     proc.nominal_target_delay_us = None
     proc.cur_pressure = 1.2
+    proc.measurements = []
+    proc.enable_early_stop = False
     proc.stageChanged = Recorder()
     proc.presentImageSignal = Recorder()
     proc.continueCap = Recorder()
@@ -101,6 +122,9 @@ def _build_pressure_sweep_focus_proc(focus_values):
     proc._check_boundary_and_maybe_recenter = lambda _center_px: False
     proc._should_early_stop_batch = lambda: False
     proc._annotate_char_summary_image = lambda *_args, **_kwargs: overlay.copy()
+    proc._search_anchor_xyz = (500, 1000, 700)
+    proc._background_stale = False
+    proc._mark_background_stale = lambda *_args, **_kwargs: setattr(proc, "_background_stale", True)
     proc.model = SimpleNamespace(
         machine_model=SimpleNamespace(
             get_current_position_dict=lambda: dict(state["pos"])
@@ -260,9 +284,9 @@ def test_pressure_sweep_resolve_planning_band_prefers_trajectory_band():
 def test_pressure_sweep_analyze_batch_requires_full_target_replicates():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 1.18
+    proc.circularity_threshold = 0.91
     proc.droplet_volumes = [1.0] * 20
-    proc.circularity_values = [1.0] * 19 + [1.5]
+    proc.circularity_values = [0.95] * 19 + [0.85]
     proc.stageChanged = Recorder()
     recorded = []
     proc._record_pressure_result = (
@@ -282,9 +306,9 @@ def test_pressure_sweep_analyze_batch_requires_full_target_replicates():
 def test_pressure_sweep_analyze_batch_marks_valid_with_20_good():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 1.18
+    proc.circularity_threshold = 0.91
     proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
-    proc.circularity_values = [1.0] * 20
+    proc.circularity_values = [0.95] * 20
     proc.droplet_positions = [(120, 230)] * 20
     proc.cur_pressure = 1.20
     proc.current_delay_us = 7000
@@ -322,6 +346,11 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     assert sig.parameters["max_nominal_delay_us"].default == 15000
     assert sig.parameters["min_nozzle_clearance_z_steps"].default == 1000
     assert sig.parameters["enable_early_stop"].default is False
+    assert sig.parameters["char_delay_retarget_roundness_min"].default == 0.91
+    assert sig.parameters["char_delay_retarget_bad_hits_required"].default == 3
+    assert sig.parameters["char_delay_retarget_window_frames"].default == 4
+    assert sig.parameters["char_delay_retarget_steps_us"].default == (500, 1000)
+    assert sig.parameters["char_delay_retarget_cap"].default == 2
 
 
 def test_pressure_sweep_constructor_initializes_bounds_before_nominal_target_planning():
@@ -1171,9 +1200,9 @@ def test_pressure_sweep_on_center_recenter_uses_damped_move_without_bg_refresh()
 def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 1.18
+    proc.circularity_threshold = 0.91
     proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
-    proc.circularity_values = [1.0] * 20
+    proc.circularity_values = [0.95] * 20
     proc.droplet_positions = [(120, 230)] * 20
     proc.cur_pressure = 1.20
     proc.current_delay_us = 7000
@@ -1208,6 +1237,157 @@ def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
     assert proc.samples
     assert proc.samples[-1]["valid"] is False
     assert proc.samples[-1]["invalid_reason"] == "char_invalid_ratio_exceeded"
+
+
+def test_pressure_sweep_nonround_characterization_retargets_same_pressure_and_updates_anchor():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000, 6_000_000, 6_000_000],
+        roundness_values=[0.85, 0.84, 0.83],
+    )
+    proc._target_xyz_for_delay = lambda delay_us, include_offsets=True: (int(delay_us), 1100, 2100)
+    proc.nextPressure = Recorder()
+
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+    proc.onCharacterizeLoop()
+
+    assert proc._morphology_retarget_count == 1
+    assert proc._morphology_retarget_history_us == [7500]
+    assert proc.target_delay_us == 7500
+    assert proc._forced_delay_us == 7500
+    assert proc.image_counter == 0
+    assert proc.circularity_values == []
+    assert proc.droplet_volumes == []
+    assert proc._search_anchor_xyz == (7500, 1100, 2100)
+    assert moves[-1] == (7500, 1100, 2100)
+    assert proc._background_stale is True
+    assert not proc.nextPressure.calls
+
+
+def test_pressure_sweep_second_morphology_retarget_uses_second_step():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.85],
+    )
+    proc.current_delay_us = 7500
+    proc.target_delay_us = 7500
+    proc._morphology_retarget_count = 1
+    proc._morphology_retarget_history_us = [7500]
+    proc._morphology_window_evaluable_count = 2
+    proc._morphology_window_nonround_hits = 2
+    proc._morphology_nonround_hits_total = 2
+    proc._target_xyz_for_delay = lambda delay_us, include_offsets=True: (int(delay_us), 1200, 2200)
+
+    handled = proc._maybe_retarget_for_morphology(
+        (200, 200),
+        0.85,
+        focus_val=6_000_000.0,
+        stream_like=False,
+    )
+
+    assert handled is True
+    assert proc._morphology_retarget_count == 2
+    assert proc._morphology_retarget_history_us == [7500, 8500]
+    assert proc.target_delay_us == 8500
+    assert proc._forced_delay_us == 8500
+    assert proc._search_anchor_xyz == (8500, 1200, 2200)
+    assert moves[-1] == (8500, 1200, 2200)
+
+
+def test_pressure_sweep_morphology_delay_over_limit_invalidates_pressure():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.85],
+    )
+    proc.current_delay_us = 14900
+    proc.target_delay_us = 14900
+    proc.max_nominal_delay_us = 15000
+    proc._morphology_window_evaluable_count = 2
+    proc._morphology_window_nonround_hits = 2
+    proc._morphology_nonround_hits_total = 2
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    handled = proc._maybe_retarget_for_morphology(
+        (200, 200),
+        0.85,
+        focus_val=6_000_000.0,
+        stream_like=False,
+    )
+
+    assert handled is True
+    assert invalidated
+    assert invalidated[-1][0] == "morphology_delay_over_limit"
+    assert moves == []
+
+
+def test_pressure_sweep_morphology_retarget_exhausted_invalidates_pressure():
+    proc, _state, moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.85],
+    )
+    proc._morphology_retarget_count = 2
+    proc.char_delay_retarget_cap = 2
+    proc._morphology_window_evaluable_count = 2
+    proc._morphology_window_nonround_hits = 2
+    proc._morphology_nonround_hits_total = 2
+    invalidated = []
+    proc._invalidate_current_pressure = lambda reason, stage_message=None: invalidated.append(
+        (str(reason), str(stage_message))
+    )
+
+    handled = proc._maybe_retarget_for_morphology(
+        (200, 200),
+        0.85,
+        focus_val=6_000_000.0,
+        stream_like=False,
+    )
+
+    assert handled is True
+    assert invalidated
+    assert invalidated[-1][0] == "morphology_retarget_exhausted"
+    assert moves == []
+
+
+def test_pressure_sweep_morphology_evidence_ignores_none_and_multiple_frames():
+    proc, _state, _moves = _build_pressure_sweep_focus_proc(
+        [6_000_000],
+        roundness_values=[0.85],
+    )
+    overlay = np.zeros((400, 400, 3), dtype=np.uint8)
+    sequence = [
+        (None, overlay.copy()),
+        ("Multiple", overlay.copy()),
+        (
+            {
+                "center": (200, 200),
+                "focus": 6_000_000.0,
+                "circularity_ellipse": 0.85,
+                "ellipse_roundness": 0.85,
+                "volume": 1.0,
+            },
+            overlay.copy(),
+        ),
+    ]
+    proc.model.droplet_camera_model = SimpleNamespace(
+        characterize_droplet=lambda *_args, **_kwargs: sequence.pop(0),
+        convert_pixel_position_to_motor_steps=lambda _center, pos: dict(pos),
+    )
+
+    proc.onCharacterizeLoop()
+    assert proc._morphology_window_evaluable_count == 0
+    assert proc._morphology_window_nonround_hits == 0
+
+    proc.onCharacterizeLoop()
+    assert proc._morphology_window_evaluable_count == 0
+    assert proc._morphology_window_nonround_hits == 0
+
+    proc.onCharacterizeLoop()
+    assert proc._morphology_window_evaluable_count == 1
+    assert proc._morphology_window_nonround_hits == 1
+    assert proc._morphology_nonround_hits_total == 1
 
 
 def test_pressure_sweep_focus_below_threshold_does_not_count_as_invalid_ratio_hit():

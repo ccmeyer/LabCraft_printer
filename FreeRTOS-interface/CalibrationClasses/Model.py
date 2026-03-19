@@ -13326,7 +13326,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
         self.num_images = 100
         self.image_counter = 0
-        self.circularity_threshold = 1.18
+        self.circularity_threshold = 0.91
         self.droplet_positions, self.droplet_focus = [], []
         self.circularity_values, self.droplet_volumes = [], []
         self.measurements = []
@@ -14135,8 +14135,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.emitContinueSearch()
 
     def _count_good_replicates(self) -> int:
-        threshold = float(getattr(self, "circularity_threshold", 1.18))
-        return int(sum(1 for c in list(self.circularity_values or []) if float(c) < threshold))
+        threshold = float(getattr(self, "circularity_threshold", 0.91))
+        return int(sum(1 for c in list(self.circularity_values or []) if float(c) >= threshold))
 
     def _build_result_payload(self, *, valid: bool, invalid_reason: str | None = None) -> dict:
         cur_pressure = None
@@ -14686,6 +14686,9 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
                 "circularity_ellipse": (
                     result.get("circularity_ellipse") if isinstance(result, dict) else None
                 ),
+                "ellipse_roundness": (
+                    result.get("ellipse_roundness") if isinstance(result, dict) else None
+                ),
                 "focus": (result.get("focus") if isinstance(result, dict) else None),
                 "bbox": char_details.get("bbox"),
                 "contour_area": char_details.get("contour_area"),
@@ -14732,14 +14735,14 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         focus_val = float(result.get('focus', 0.0))
         self.presentImageSignal.emit(annotated)
         center_px = tuple(map(int, result.get("center", (0, 0))))
-        circularity_ellipse = float(result.get("circularity_ellipse", 99.0))
+        ellipse_roundness = float(result.get("ellipse_roundness", result.get("circularity_ellipse", 99.0)))
 
-        if float(circularity_ellipse) <= float(getattr(self, "char_stream_circularity_max", 0.58)):
+        if float(ellipse_roundness) <= float(getattr(self, "char_stream_circularity_max", 0.58)):
             self._char_stream_hits += 1
             self._char_invalid_hits += 1
             failure_reason = self._record_char_failure_reason("stream_like")
             self.stageChanged.emit(
-                f"Stream-like frame rejected (circularity={circularity_ellipse:.2f}) → recapturing"
+                f"Stream-like frame rejected (circularity={ellipse_roundness:.2f}) → recapturing"
             )
             ratio_reason = self._characterization_ratio_abort_reason()
             if ratio_reason is not None:
@@ -14825,7 +14828,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
 
         # Accept replicate
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
-        self.circularity_values.append(float(circularity_ellipse))
+        self.circularity_values.append(float(ellipse_roundness))
         self.droplet_positions.append(tuple(center_px))
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
@@ -14834,7 +14837,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
             f"Accepted replicate {self.image_counter}/{self.num_images}: "
             f"vol={float(result.get('volume', 0.0)):.2f} nL, "
             f"focus={float(focus_val) / 1e6:.2f}e6, "
-            f"circ={float(circularity_ellipse):.2f}"
+            f"circ={float(ellipse_roundness):.2f}"
         )
 
         if self._check_boundary_and_maybe_recenter(center_px):
@@ -14868,7 +14871,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if self._is_dead():
             return
         self.stageChanged.emit("Analyzing droplet characterization")
-        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c >= self.circularity_threshold]
         ratio_reason = self._characterization_ratio_abort_reason()
         invalid_reason = None
         if self._final_invalid_reason:
@@ -15063,6 +15066,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  char_max_invalid_ratio: float = 0.45,
                  char_max_multiple_ratio: float = 0.20,
                  char_max_stream_ratio: float = 0.20,
+                 char_delay_retarget_roundness_min: float = 0.91,
+                 char_delay_retarget_bad_hits_required: int = 3,
+                 char_delay_retarget_window_frames: int = 4,
+                 char_delay_retarget_steps_us: tuple[int, ...] = (500, 1000),
+                 char_delay_retarget_cap: int = 2,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         missing_requirements = self.missing_requirements(calibration_manager)
@@ -15262,6 +15270,25 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.char_max_invalid_ratio = float(max(0.0, min(1.0, float(char_max_invalid_ratio))))
         self.char_max_multiple_ratio = float(max(0.0, min(1.0, float(char_max_multiple_ratio))))
         self.char_max_stream_ratio = float(max(0.0, min(1.0, float(char_max_stream_ratio))))
+        self.char_delay_retarget_roundness_min = float(
+            max(self.char_stream_circularity_max, min(1.0, float(char_delay_retarget_roundness_min)))
+        )
+        self.char_delay_retarget_bad_hits_required = int(max(1, int(char_delay_retarget_bad_hits_required)))
+        self.char_delay_retarget_window_frames = int(
+            max(self.char_delay_retarget_bad_hits_required, int(char_delay_retarget_window_frames))
+        )
+        retarget_steps = []
+        for step in list(char_delay_retarget_steps_us or (500, 1000)):
+            try:
+                step_us = int(step)
+            except Exception:
+                continue
+            if step_us > 0:
+                retarget_steps.append(int(step_us))
+        if not retarget_steps:
+            retarget_steps = [500, 1000]
+        self.char_delay_retarget_steps_us = [int(v) for v in retarget_steps]
+        self.char_delay_retarget_cap = int(max(0, int(char_delay_retarget_cap)))
 
         self.max_search_cycles   = int(max_search_cycles)
         self.max_recenter_moves  = int(max_recenter_moves)
@@ -15630,9 +15657,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _count_good_replicates(self) -> int:
         circularity_values = list(getattr(self, "circularity_values", []) or [])
-        threshold = float(getattr(self, "circularity_threshold", 1.18))
+        threshold = float(getattr(self, "circularity_threshold", 0.91))
         return int(
-            sum(1 for c in circularity_values if float(c) < threshold)
+            sum(1 for c in circularity_values if float(c) >= threshold)
         )
 
     def _pair_capture_context(self) -> dict:
@@ -15843,6 +15870,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
                 "search_streaks": self._search_streak_snapshot(),
                 "char_ratios": self._char_ratio_snapshot(),
+                "morphology": self._morphology_snapshot(),
             },
         )
         self._record_pressure_result(valid=False, reason=self._bad_reason)
@@ -15886,6 +15914,189 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             return "char_stream_ratio_exceeded"
         return None
 
+    def _morphology_snapshot(self) -> dict:
+        return {
+            "window_evaluable_frames": int(getattr(self, "_morphology_window_evaluable_count", 0)),
+            "window_nonround_hits": int(getattr(self, "_morphology_window_nonround_hits", 0)),
+            "nonround_hits": int(getattr(self, "_morphology_nonround_hits_total", 0)),
+            "retarget_count": int(getattr(self, "_morphology_retarget_count", 0)),
+            "retarget_history_us": [
+                int(v) for v in list(getattr(self, "_morphology_retarget_history_us", []) or [])
+            ],
+        }
+
+    @staticmethod
+    def _extract_ellipse_roundness(result) -> float:
+        if not isinstance(result, dict):
+            return 99.0
+        raw = result.get("ellipse_roundness", result.get("circularity_ellipse", 99.0))
+        try:
+            val = float(raw)
+        except Exception:
+            return 99.0
+        if not np.isfinite(val):
+            return 99.0
+        return float(val)
+
+    def _invalidate_current_pressure_for_morphology(
+        self,
+        reason: str,
+        *,
+        center_px,
+        ellipse_roundness: float,
+        focus_val: float,
+        stream_like: bool,
+        current_anchor_us: int,
+        stage_message: str,
+    ) -> bool:
+        payload = {
+            "status": "invalid",
+            "reason": str(reason),
+            "center_px": [int(center_px[0]), int(center_px[1])],
+            "ellipse_roundness": float(ellipse_roundness),
+            "focus": float(focus_val),
+            "stream_like": bool(stream_like),
+            "current_delay_us": int(current_anchor_us),
+            "morphology": self._morphology_snapshot(),
+        }
+        self._record_pressure_sweep_analysis("pressure_sweep_morphology", payload)
+        self._record_decision("morphology_delay_retarget_invalid", payload)
+        self._invalidate_current_pressure(str(reason), stage_message=stage_message)
+        return True
+
+    def _retarget_current_pressure_for_morphology(
+        self,
+        *,
+        center_px,
+        ellipse_roundness: float,
+        focus_val: float,
+        stream_like: bool,
+    ) -> bool:
+        current_anchor = getattr(self, "current_delay_us", None)
+        if current_anchor is None:
+            current_anchor = getattr(self, "target_delay_us", None)
+        current_anchor = int(current_anchor or 0)
+        retarget_count = int(getattr(self, "_morphology_retarget_count", 0))
+        retarget_cap = int(max(0, getattr(self, "char_delay_retarget_cap", 2)))
+        if retarget_count >= retarget_cap:
+            return self._invalidate_current_pressure_for_morphology(
+                "morphology_retarget_exhausted",
+                center_px=center_px,
+                ellipse_roundness=float(ellipse_roundness),
+                focus_val=float(focus_val),
+                stream_like=bool(stream_like),
+                current_anchor_us=int(current_anchor),
+                stage_message="Repeated non-round droplets after delay retargets → skip pressure",
+            )
+
+        steps = [int(v) for v in list(getattr(self, "char_delay_retarget_steps_us", []) or []) if int(v) > 0]
+        if not steps:
+            steps = [500, 1000]
+        step_us = int(steps[min(retarget_count, len(steps) - 1)])
+        proposed_delay_us = int(current_anchor + step_us)
+        max_nominal_delay_us = int(getattr(self, "max_nominal_delay_us", 0) or 0)
+        if max_nominal_delay_us > 0 and int(proposed_delay_us) > int(max_nominal_delay_us):
+            return self._invalidate_current_pressure_for_morphology(
+                "morphology_delay_over_limit",
+                center_px=center_px,
+                ellipse_roundness=float(ellipse_roundness),
+                focus_val=float(focus_val),
+                stream_like=bool(stream_like),
+                current_anchor_us=int(current_anchor),
+                stage_message="Morphology retarget exceeded delay limit → skip pressure",
+            )
+
+        new_delay_us = int(self._clamp_delay(proposed_delay_us))
+        if int(new_delay_us) <= int(current_anchor):
+            return self._invalidate_current_pressure_for_morphology(
+                "morphology_delay_over_limit",
+                center_px=center_px,
+                ellipse_roundness=float(ellipse_roundness),
+                focus_val=float(focus_val),
+                stream_like=bool(stream_like),
+                current_anchor_us=int(current_anchor),
+                stage_message="Morphology retarget could not increase delay → skip pressure",
+            )
+
+        new_anchor_xyz = tuple(
+            int(v) for v in self._target_xyz_for_delay(int(new_delay_us), include_offsets=True)
+        )
+        history = list(getattr(self, "_morphology_retarget_history_us", []) or [])
+        history.append(int(new_delay_us))
+        total_nonround_hits = int(getattr(self, "_morphology_nonround_hits_total", 0))
+        snapshot_before = self._morphology_snapshot()
+        self._reset_char_buffers()
+        self._morphology_nonround_hits_total = int(total_nonround_hits)
+        self._morphology_retarget_count = int(retarget_count + 1)
+        self._morphology_retarget_history_us = [int(v) for v in history]
+        self._forced_delay_us = int(new_delay_us)
+        self.target_delay_us = int(new_delay_us)
+        self._search_anchor_xyz = tuple(int(v) for v in new_anchor_xyz)
+        self._centered = False
+        self._char_need_capture = False
+        self._imaging_guard_hit_count = 0
+        payload = {
+            "status": "retarget",
+            "reason": "morphology_nonround_trigger",
+            "center_px": [int(center_px[0]), int(center_px[1])],
+            "ellipse_roundness": float(ellipse_roundness),
+            "focus": float(focus_val),
+            "stream_like": bool(stream_like),
+            "current_delay_us": int(current_anchor),
+            "new_delay_us": int(new_delay_us),
+            "step_us": int(step_us),
+            "target_xyz": [int(v) for v in new_anchor_xyz],
+            "morphology_before": dict(snapshot_before),
+            "morphology_after": self._morphology_snapshot(),
+        }
+        self.stageChanged.emit(
+            f"Non-round droplets {snapshot_before.get('window_nonround_hits', 0)}/"
+            f"{snapshot_before.get('window_evaluable_frames', 0)} → increasing flash delay to "
+            f"{new_delay_us} us and re-evaluating pressure"
+        )
+        self._record_pressure_sweep_analysis("pressure_sweep_morphology", payload)
+        self._record_decision("morphology_delay_retarget", payload)
+        self._mark_background_stale("morphology_delay_retarget")
+        self._set_startup_centering_mode("morphology_delay_retarget")
+        self._reset_search_consistency_after_motion()
+        self._safe_move_abs(self._search_anchor_xyz)
+        return True
+
+    def _maybe_retarget_for_morphology(
+        self,
+        center_px,
+        ellipse_roundness: float,
+        *,
+        focus_val: float,
+        stream_like: bool,
+    ) -> bool:
+        if not self._is_within(center_px, self.center_first_tol_px):
+            return False
+        window_frames = int(max(1, getattr(self, "char_delay_retarget_window_frames", 4)))
+        if int(getattr(self, "_morphology_window_evaluable_count", 0)) >= int(window_frames):
+            return False
+        roundness_min = float(getattr(self, "char_delay_retarget_roundness_min", 0.91))
+        is_nonround = bool(stream_like) or float(ellipse_roundness) < float(roundness_min)
+        self._morphology_window_evaluable_count = int(
+            getattr(self, "_morphology_window_evaluable_count", 0)
+        ) + 1
+        if bool(is_nonround):
+            self._morphology_window_nonround_hits = int(
+                getattr(self, "_morphology_window_nonround_hits", 0)
+            ) + 1
+            self._morphology_nonround_hits_total = int(
+                getattr(self, "_morphology_nonround_hits_total", 0)
+            ) + 1
+        bad_hits_required = int(max(1, getattr(self, "char_delay_retarget_bad_hits_required", 3)))
+        if int(getattr(self, "_morphology_window_nonround_hits", 0)) < int(bad_hits_required):
+            return False
+        return self._retarget_current_pressure_for_morphology(
+            center_px=center_px,
+            ellipse_roundness=float(ellipse_roundness),
+            focus_val=float(focus_val),
+            stream_like=bool(stream_like),
+        )
+
     def _reset_char_buffers(self):
         self._delay_offsets_us = [0, +500, -500, +1000, -1000, +1500, -1500]
         self._delay_try_index = 0
@@ -15896,12 +16107,17 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.current_delay_us = None
         self.num_images = self.repl_target
         self.image_counter = 0
-        self.circularity_threshold = 1.18
+        self.circularity_threshold = 0.91
         self.circularity_values = []
         self.droplet_volumes = []
         self.droplet_positions = []
         self.droplet_focus = []
         self.measurements = []
+        self._morphology_window_evaluable_count = 0
+        self._morphology_window_nonround_hits = 0
+        self._morphology_nonround_hits_total = 0
+        self._morphology_retarget_count = 0
+        self._morphology_retarget_history_us = []
 
         # track multiple-droplet frames & a guard to prevent hangs
         self.multiple_droplet_hits = 0
@@ -17118,6 +17334,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "char_attempts": int(self._char_attempts),
                     "char_attempt_limit": int(self._char_attempt_limit),
                     "ratios": self._char_ratio_snapshot(),
+                    "morphology": self._morphology_snapshot(),
                 },
             )
             self.stageChanged.emit("Replicate failed → recapturing")
@@ -17151,6 +17368,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "char_attempts": int(self._char_attempts),
                     "char_attempt_limit": int(self._char_attempt_limit),
                     "ratios": self._char_ratio_snapshot(),
+                    "morphology": self._morphology_snapshot(),
                 },
             )
             self.stageChanged.emit("Multiple droplets in frame → skipping (replicate not counted)")
@@ -17169,12 +17387,21 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         
         # ---------- CENTER FIRST ----------
         center_px = tuple(map(int, result.get("center", (0, 0))))
-        circularity_ellipse = float(result.get("circularity_ellipse", 99.0))
+        ellipse_roundness = self._extract_ellipse_roundness(result)
         focus_val = float(result.get('focus', 0.0))
+        stream_threshold = float(getattr(self, "char_stream_circularity_max", 0.58))
+        stream_like = bool(float(ellipse_roundness) <= float(stream_threshold))
+
+        if self._maybe_retarget_for_morphology(
+            center_px,
+            float(ellipse_roundness),
+            focus_val=float(focus_val),
+            stream_like=bool(stream_like),
+        ):
+            return
 
         # Reject stream-like elongated shapes before any focus / center acceptance.
-        stream_threshold = float(getattr(self, "char_stream_circularity_max", 0.58))
-        if float(circularity_ellipse) <= float(stream_threshold):
+        if bool(stream_like):
             self._char_stream_hits += 1
             self._char_invalid_hits += 1
             self._record_pressure_sweep_analysis(
@@ -17183,14 +17410,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "status": "invalid",
                     "reason": "stream_like",
                     "center_px": list(center_px),
-                    "circularity_ellipse": float(circularity_ellipse),
+                    "circularity_ellipse": float(ellipse_roundness),
+                    "ellipse_roundness": float(ellipse_roundness),
                     "stream_circularity_threshold": float(stream_threshold),
                     "focus": float(focus_val),
                     "ratios": self._char_ratio_snapshot(),
+                    "morphology": self._morphology_snapshot(),
                 },
             )
             self.stageChanged.emit(
-                f"Stream-like frame rejected (circularity={circularity_ellipse:.2f}) → recapturing"
+                f"Stream-like frame rejected (circularity={ellipse_roundness:.2f}) → recapturing"
             )
             ratio_reason = self._characterization_ratio_abort_reason()
             if ratio_reason is not None:
@@ -17281,9 +17510,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "center_px": list(center_px),
                     "focus": float(focus_val),
                     "focus_ok_threshold": float(self.focus_ok_threshold),
-                    "circularity_ellipse": float(circularity_ellipse),
+                    "circularity_ellipse": float(ellipse_roundness),
+                    "ellipse_roundness": float(ellipse_roundness),
                     "ratios": self._char_ratio_snapshot(),
                     "focus_best_so_far": float(getattr(self, "_focus_best", 0.0) or 0.0),
+                    "morphology": self._morphology_snapshot(),
                 },
             )
             ratio_reason = self._characterization_ratio_abort_reason()
@@ -17328,7 +17559,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         # Accept replicate
         self.focus_step = max(self.focus_min_step, self.focus_step // 2)
-        self.circularity_values.append(float(circularity_ellipse))
+        self.circularity_values.append(float(ellipse_roundness))
         self.droplet_positions.append(center_px)
         self.droplet_focus.append(focus_val)
         self.droplet_volumes.append(float(result.get("volume", 0.0)))
@@ -17340,9 +17571,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "center_px": list(center_px),
                 "focus": float(focus_val),
                 "volume": float(result.get("volume", 0.0)),
-                "circularity_ellipse": float(circularity_ellipse),
+                "circularity_ellipse": float(ellipse_roundness),
+                "ellipse_roundness": float(ellipse_roundness),
                 "accepted_replicates": int(self.image_counter),
                 "ratios": self._char_ratio_snapshot(),
+                "morphology": self._morphology_snapshot(),
             },
         )
 
@@ -17373,8 +17606,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
-        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c < self.circularity_threshold]
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c >= self.circularity_threshold]
         ratios = self._char_ratio_snapshot()
+        morphology = self._morphology_snapshot()
         max_invalid_ratio = float(getattr(self, "char_max_invalid_ratio", 0.45))
         max_multiple_ratio = float(getattr(self, "char_max_multiple_ratio", 0.20))
         max_stream_ratio = float(getattr(self, "char_max_stream_ratio", 0.20))
@@ -17399,6 +17633,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "accepted_replicates": int(len(good)),
                     "required_replicates": int(self.num_images),
                     "ratios": ratios,
+                    "morphology": morphology,
                 },
             )
             self.stageChanged.emit(
@@ -17415,6 +17650,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "accepted_replicates": int(len(good)),
                     "required_replicates": int(self.num_images),
                     "ratios": ratios,
+                    "morphology": morphology,
                 },
             )
             self._record_pressure_result(
@@ -17430,6 +17666,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
                     "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
                     "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
+                    "morphology_nonround_hits": int(morphology.get("nonround_hits", 0)),
+                    "morphology_retarget_count": int(morphology.get("retarget_count", 0)),
+                    "morphology_retarget_history_us": list(morphology.get("retarget_history_us", [])),
                 },
             )
         else:
@@ -17471,6 +17710,9 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "focus_moves_done": int(getattr(self, "_focus_moves_done", 0)),
                 "focus_dir_switches": int(getattr(self, "focus_dir_switches", 0)),
                 "best_focus_y_offset_steps": getattr(self, "_focus_best_y_offset_steps", None),
+                "morphology_nonround_hits": int(morphology.get("nonround_hits", 0)),
+                "morphology_retarget_count": int(morphology.get("retarget_count", 0)),
+                "morphology_retarget_history_us": list(morphology.get("retarget_history_us", [])),
                 "valid": True
             }
             rec.update(self._current_targeting_metadata())
@@ -17484,6 +17726,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "mean_volume": float(mean_vol),
                     "cv_volume_percent": float(cv_vol),
                     "ratios": ratios,
+                    "morphology": morphology,
                 },
             )
             self._record_decision(
@@ -17493,6 +17736,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "required_replicates": int(self.num_images),
                     "ratios": ratios,
                     "cv_volume_percent": float(cv_vol),
+                    "morphology": morphology,
                 },
             )
             self._emit_incremental_pressure_step(rec)      # <- NEW incremental emit
@@ -17548,6 +17792,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "invalid_ratio": float(ratios.get("invalid_ratio", 0.0)),
             "multiple_ratio": float(ratios.get("multiple_ratio", 0.0)),
             "stream_ratio": float(ratios.get("stream_ratio", 0.0)),
+            "morphology_nonround_hits": int(getattr(self, "_morphology_nonround_hits_total", 0)),
+            "morphology_retarget_count": int(getattr(self, "_morphology_retarget_count", 0)),
+            "morphology_retarget_history_us": [
+                int(v) for v in list(getattr(self, "_morphology_retarget_history_us", []) or [])
+            ],
             "mean_position_machine": None,
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
@@ -20189,10 +20438,11 @@ class DropletCameraModel(QObject):
         # Fit an ellipse to the contour
         ellipse = cv2.fitEllipse(largest_contour)
         (xc, yc), (MA, ma), angle = ellipse
-        major_axis_um = MA * um_per_pixel
-        minor_axis_um = ma * um_per_pixel
+        axis_um_a = float(MA * um_per_pixel)
+        axis_um_b = float(ma * um_per_pixel)
+        minor_axis_um, major_axis_um = sorted((axis_um_a, axis_um_b))
         center_ellipse = (int(xc), int(yc))
-        ellipse_circularity = minor_axis_um / major_axis_um
+        ellipse_roundness = (minor_axis_um / major_axis_um) if major_axis_um > 0 else 0.0
         ellipse_radius_um = ((major_axis_um / 2.0) + (minor_axis_um / 2.0)) / 2.0
         ellipse_volume_um3 = (4.0/3.0) * math.pi * (ellipse_radius_um ** 3)
         ellipse_volume_nL = ellipse_volume_um3 * 1e-6
@@ -20203,13 +20453,14 @@ class DropletCameraModel(QObject):
         cv2.ellipse(annotated, ellipse, (255, 0, 255), 2)
 
         cv2.putText(annotated, f"{ellipse_volume_nL:.2f} nL", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.putText(annotated, f"{ellipse_circularity:.2f}", (x, y-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(annotated, f"{ellipse_roundness:.2f}", (x, y-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         cv2.putText(annotated, f"{focus / 1e6:.2f}*10^6", (x, y-55), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         results = {
             "center": center_ellipse,
             "circularity": circularity,
-            "circularity_ellipse": ellipse_circularity,
+            "circularity_ellipse": ellipse_roundness,
+            "ellipse_roundness": ellipse_roundness,
             "volume": ellipse_volume_nL,
             "focus": focus
         }
@@ -20221,7 +20472,8 @@ class DropletCameraModel(QObject):
             "volume": float(ellipse_volume_nL),
             "focus": float(focus),
             "circularity": float(circularity),
-            "circularity_ellipse": float(ellipse_circularity),
+            "circularity_ellipse": float(ellipse_roundness),
+            "ellipse_roundness": float(ellipse_roundness),
         })
 
         if return_details:

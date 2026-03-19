@@ -101,6 +101,22 @@ def test_characterize_droplet_returns_multiple_for_similar_dual_blobs():
     assert result == "Multiple"
 
 
+def test_characterize_droplet_normalizes_ellipse_roundness_when_fit_axes_are_swapped(monkeypatch):
+    cam = _camera_stub()
+    bg = np.zeros((420, 420, 3), dtype=np.uint8)
+    img = bg.copy()
+    cv2.ellipse(img, (210, 220), (50, 16), 0, 0, 360, (255, 255, 255), -1)
+
+    monkeypatch.setattr(cv2, "fitEllipse", lambda _cnt: ((210.0, 220.0), (24.0, 72.0), 0.0))
+
+    result, _annotated, details = cam.characterize_droplet(img, bg, return_details=True)
+
+    assert isinstance(result, dict)
+    assert abs(float(result["ellipse_roundness"]) - (24.0 / 72.0)) < 1e-6
+    assert abs(float(result["circularity_ellipse"]) - float(result["ellipse_roundness"])) < 1e-9
+    assert abs(float(details["ellipse_roundness"]) - float(result["ellipse_roundness"])) < 1e-9
+
+
 def test_identify_nozzle_prefers_lowest_candidate_in_noisy_background():
     rng = np.random.default_rng(42)
     cam = _camera_stub()

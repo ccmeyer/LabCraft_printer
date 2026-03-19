@@ -34,7 +34,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.droplet_image = np.zeros((120, 160, 3), dtype=np.uint8)
     proc.num_images = 3
     proc.image_counter = 0
-    proc.circularity_threshold = 1.18
+    proc.circularity_threshold = 0.91
     proc.droplet_positions = []
     proc.droplet_focus = []
     proc.circularity_values = []
@@ -511,3 +511,5 @@ def test_characterize_droplet_accepts_contour_that_matches_search_filter_window(
     assert search_details["reason"] == "ok"
     assert isinstance(result, dict)
     assert char_details["reason"] == "ok"
+    assert abs(float(result["ellipse_roundness"]) - float(result["circularity_ellipse"])) < 1e-9
+    assert abs(float(char_details["ellipse_roundness"]) - float(char_details["circularity_ellipse"])) < 1e-9
