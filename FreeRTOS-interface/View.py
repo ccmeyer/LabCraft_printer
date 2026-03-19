@@ -1279,8 +1279,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         # droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
         # droplet_imaging_dialog.exec()
 
-    def droplet_imager(self):
-        """Open the droplet imager dialog."""
+    def _launch_droplet_imager_dialog(self):
+        """Open the droplet imager dialog after preflight checks have passed."""
         self.controller.disconnect_droplet_camera_signals()
         importlib.reload(CalibrationClasses.View)
         importlib.reload(CalibrationClasses)
@@ -1289,6 +1289,51 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.controller.enable_print_profile()
         droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
+
+    def droplet_imager(self):
+        """Open the droplet imager dialog after verifying prerequisites."""
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Commands Still Running",
+                "Please wait for the current commands to finish before starting the droplet imager.",
+            )
+            return
+
+        if self.model.rack_model.get_gripper_printer_head() is None:
+            self.popup_message_signal.emit(
+                "No Printer Head",
+                "Please load a printer head into the gripper before starting calibration.",
+            )
+            return
+
+        if not self.model.machine_model.regulating_print_pressure:
+            self.popup_message_signal.emit(
+                "Pressure Not Regulated",
+                "Please regulate pressure before starting calibration.",
+            )
+            return
+
+        current_location = str(self.model.machine_model.get_current_location() or "").strip().lower()
+        if current_location == "camera":
+            self._launch_droplet_imager_dialog()
+            return
+
+        response = self.main_window.popup_yes_no(
+            "Move To Camera",
+            "Droplet calibration must start at the camera position. Would you like to move to the camera position now?",
+        )
+        if not self.main_window._is_yes_response(response):
+            self.popup_message_signal.emit(
+                "Must Be At Camera",
+                "Please move the machine to the camera position before starting calibration.",
+            )
+            return
+
+        self.controller.move_to_location(
+            "camera",
+            manual=True,
+            on_complete=self._launch_droplet_imager_dialog,
+        )
 
     def nozzle_position_dataset_capture(self):
         """Open the NozzlePosition checklist-driven dataset capture dialog."""

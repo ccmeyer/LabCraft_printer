@@ -773,7 +773,7 @@ class Controller(QObject):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
 
-    def move_to_location(self, name, direct=True, safe_y=False, x_offset: int = 0,z_offset: int = 0,manual=False,coords=None,override=False,ignore_safe_height=False):
+    def move_to_location(self, name, direct=True, safe_y=False, x_offset: int = 0,z_offset: int = 0,manual=False,coords=None,override=False,ignore_safe_height=False,on_complete=None):
         """Move to the saved location."""
         if self.profile.name != "legacy":
             safe_z = 35000
@@ -859,11 +859,16 @@ class Controller(QObject):
         if z_offset != 0:
             target['Z'] += z_offset
 
+        def final_location_handler(name=name):
+            self.update_location_handler(name=name)
+            if on_complete is not None:
+                on_complete()
+
         if self.set_absolute_coordinates(
             target['X'], target['Y'], target['Z'],
             manual=manual,
             override=override,
-            handler=self.update_location_handler,
+            handler=final_location_handler,
             kwargs={'name': name}
         ) is False:
             self.error_occurred_signal.emit('Move Error', 'Failed to move to target coordinates')

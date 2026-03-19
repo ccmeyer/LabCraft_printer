@@ -215,3 +215,34 @@ def test_move_to_location_balance_respects_ignore_safe_height():
     assert ("z", 35000) not in calls
     assert ("y", 15000) in calls
     assert ("x", 1111) in calls
+
+
+def test_move_to_location_on_complete_runs_after_location_update():
+    events = []
+    target = {"X": 1000, "Y": 2000, "Z": 60000}
+    c = Controller.__new__(Controller)
+    c.profile = SimpleNamespace(name="current")
+    c.expected_position = {"X": 0, "Y": 0, "Z": 50000}
+    c.expected_location = "pause"
+    c.error_occurred_signal = SimpleNamespace(emit=lambda *args, **kwargs: None)
+    c.model = SimpleNamespace(
+        location_model=SimpleNamespace(
+            get_location_dict=lambda name: target.copy(),
+            update_current_location=lambda name: events.append(("location", name)),
+        )
+    )
+    c.set_absolute_Z = lambda z, **kwargs: events.append(("z", z))
+    c.set_absolute_Y = lambda y, **kwargs: events.append(("y", y))
+    c.set_absolute_X = lambda x, **kwargs: events.append(("x", x))
+
+    def _set_absolute_coordinates(x, y, z, **kwargs):
+        events.append(("xyz", x, y, z))
+        kwargs["handler"]()
+        return True
+
+    c.set_absolute_coordinates = _set_absolute_coordinates
+
+    Controller.move_to_location(c, "plate", on_complete=lambda: events.append("complete"))
+
+    assert ("location", "plate") in events
+    assert events.index(("location", "plate")) < events.index("complete")
