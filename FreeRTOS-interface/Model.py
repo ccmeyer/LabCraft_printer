@@ -4763,13 +4763,13 @@ class WellPlate(QObject):
 
     def assign_well_coordinates_by_row_col(self, row, col, x, y,z):
         """Assign coordinates to a well by its row and column."""
-        well_id = f"{chr(row + 65)}{col + 1}"
+        well_id = self._well_id_from_row_col(int(row), int(col))
         self.assign_well_coordinates(well_id, x, y,z)
 
     def assign_all_well_coordinates(self, well_coords_df):
         """Assign coordinates to all wells in the plate."""
         for i,row in well_coords_df.iterrows():
-            well_id = f"{chr(row['row'] + 65)}{row['column'] + 1}"
+            well_id = self._well_id_from_row_col(int(row['row']), int(row['column']))
             self.assign_well_coordinates(well_id, row['X'], row['Y'],row['Z'])
 
     def apply_calibration_data(self):

@@ -1458,6 +1458,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     
     def update_well_colors(self, *_args):
         """Update the colors of the wells based on the selected reagent's concentration."""
+        rows, cols = self.model.well_plate.get_plate_dimensions()
+        enable_tooltips = (rows * cols) <= 384
         stock_id = None
         if not self.model.reaction_collection.is_empty():
             # Get the current reagent selection
@@ -1506,12 +1508,18 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     except Exception:
                         units = ""
                     conc_text = f"{final_conc:.4f} {units}".strip()
-                self.well_labels[well.row_num][well.col-1].setToolTip(
-                    f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
-                )
+                if enable_tooltips:
+                    self.well_labels[well.row_num][well.col-1].setToolTip(
+                        f"Well {well.well_id}\nTarget droplets: {int(concentration or 0)}\nFinal concentration: {conc_text}"
+                    )
+                else:
+                    self.well_labels[well.row_num][well.col-1].setToolTip("")
             else:
                 self.well_labels[well.row_num][well.col-1].setStyleSheet(f"background-color: none; border: 1px solid black;")
-                self.well_labels[well.row_num][well.col-1].setToolTip(f"Well {well.well_id}\nNo reaction assigned")
+                if enable_tooltips:
+                    self.well_labels[well.row_num][well.col-1].setToolTip(f"Well {well.well_id}\nNo reaction assigned")
+                else:
+                    self.well_labels[well.row_num][well.col-1].setToolTip("")
 
 
     def clear_grid(self):
