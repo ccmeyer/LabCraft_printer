@@ -34,7 +34,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.droplet_image = np.zeros((120, 160, 3), dtype=np.uint8)
     proc.num_images = 3
     proc.image_counter = 0
-    proc.circularity_threshold = 0.91
+    proc.circularity_threshold = 0.95
     proc.droplet_positions = []
     proc.droplet_focus = []
     proc.circularity_values = []

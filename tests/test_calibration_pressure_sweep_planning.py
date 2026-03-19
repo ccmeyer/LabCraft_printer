@@ -69,7 +69,7 @@ def _build_pressure_sweep_focus_proc(focus_values, *, roundness_values=None):
     proc.max_oob_total = 12
     proc._recenter_moves = 0
     proc.max_recenter_moves = 10
-    proc.circularity_threshold = 0.91
+    proc.circularity_threshold = 0.95
     proc.circularity_values = []
     proc.droplet_positions = []
     proc.droplet_focus = []
@@ -87,10 +87,10 @@ def _build_pressure_sweep_focus_proc(focus_values, *, roundness_values=None):
     proc.char_max_multiple_ratio = 0.20
     proc.char_max_stream_ratio = 0.20
     proc.char_stream_circularity_max = 0.58
-    proc.char_delay_retarget_roundness_min = 0.91
+    proc.char_delay_retarget_roundness_min = 0.95
     proc.char_delay_retarget_bad_hits_required = 3
     proc.char_delay_retarget_window_frames = 4
-    proc.char_delay_retarget_steps_us = [500, 1000]
+    proc.char_delay_retarget_steps_us = [1000, 2000]
     proc.char_delay_retarget_cap = 2
     proc._morphology_window_evaluable_count = 0
     proc._morphology_window_nonround_hits = 0
@@ -284,7 +284,7 @@ def test_pressure_sweep_resolve_planning_band_prefers_trajectory_band():
 def test_pressure_sweep_analyze_batch_requires_full_target_replicates():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 0.91
+    proc.circularity_threshold = 0.95
     proc.droplet_volumes = [1.0] * 20
     proc.circularity_values = [0.95] * 19 + [0.85]
     proc.stageChanged = Recorder()
@@ -306,7 +306,7 @@ def test_pressure_sweep_analyze_batch_requires_full_target_replicates():
 def test_pressure_sweep_analyze_batch_marks_valid_with_20_good():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 0.91
+    proc.circularity_threshold = 0.95
     proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
     proc.circularity_values = [0.95] * 20
     proc.droplet_positions = [(120, 230)] * 20
@@ -346,10 +346,10 @@ def test_pressure_sweep_defaults_disable_early_stop_and_keep_20_replicates():
     assert sig.parameters["max_nominal_delay_us"].default == 15000
     assert sig.parameters["min_nozzle_clearance_z_steps"].default == 1000
     assert sig.parameters["enable_early_stop"].default is False
-    assert sig.parameters["char_delay_retarget_roundness_min"].default == 0.91
+    assert sig.parameters["char_delay_retarget_roundness_min"].default == 0.95
     assert sig.parameters["char_delay_retarget_bad_hits_required"].default == 3
     assert sig.parameters["char_delay_retarget_window_frames"].default == 4
-    assert sig.parameters["char_delay_retarget_steps_us"].default == (500, 1000)
+    assert sig.parameters["char_delay_retarget_steps_us"].default == (1000, 2000)
     assert sig.parameters["char_delay_retarget_cap"].default == 2
 
 
@@ -1200,7 +1200,7 @@ def test_pressure_sweep_on_center_recenter_uses_damped_move_without_bg_refresh()
 def test_pressure_sweep_analyze_batch_rejects_high_invalid_ratio():
     proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
     proc.num_images = 20
-    proc.circularity_threshold = 0.91
+    proc.circularity_threshold = 0.95
     proc.droplet_volumes = [1.0 + (i * 0.01) for i in range(20)]
     proc.circularity_values = [0.95] * 20
     proc.droplet_positions = [(120, 230)] * 20
@@ -1252,14 +1252,14 @@ def test_pressure_sweep_nonround_characterization_retargets_same_pressure_and_up
     proc.onCharacterizeLoop()
 
     assert proc._morphology_retarget_count == 1
-    assert proc._morphology_retarget_history_us == [7500]
-    assert proc.target_delay_us == 7500
-    assert proc._forced_delay_us == 7500
+    assert proc._morphology_retarget_history_us == [8000]
+    assert proc.target_delay_us == 8000
+    assert proc._forced_delay_us == 8000
     assert proc.image_counter == 0
     assert proc.circularity_values == []
     assert proc.droplet_volumes == []
-    assert proc._search_anchor_xyz == (7500, 1100, 2100)
-    assert moves[-1] == (7500, 1100, 2100)
+    assert proc._search_anchor_xyz == (8000, 1100, 2100)
+    assert moves[-1] == (8000, 1100, 2100)
     assert proc._background_stale is True
     assert not proc.nextPressure.calls
 
@@ -1287,11 +1287,11 @@ def test_pressure_sweep_second_morphology_retarget_uses_second_step():
 
     assert handled is True
     assert proc._morphology_retarget_count == 2
-    assert proc._morphology_retarget_history_us == [7500, 8500]
-    assert proc.target_delay_us == 8500
-    assert proc._forced_delay_us == 8500
-    assert proc._search_anchor_xyz == (8500, 1200, 2200)
-    assert moves[-1] == (8500, 1200, 2200)
+    assert proc._morphology_retarget_history_us == [7500, 9500]
+    assert proc.target_delay_us == 9500
+    assert proc._forced_delay_us == 9500
+    assert proc._search_anchor_xyz == (9500, 1200, 2200)
+    assert moves[-1] == (9500, 1200, 2200)
 
 
 def test_pressure_sweep_morphology_delay_over_limit_invalidates_pressure():

@@ -13326,7 +13326,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
         self.num_images = 100
         self.image_counter = 0
-        self.circularity_threshold = 0.91
+        self.circularity_threshold = 0.95
         self.droplet_positions, self.droplet_focus = [], []
         self.circularity_values, self.droplet_volumes = [], []
         self.measurements = []
@@ -14135,7 +14135,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.emitContinueSearch()
 
     def _count_good_replicates(self) -> int:
-        threshold = float(getattr(self, "circularity_threshold", 0.91))
+        threshold = float(getattr(self, "circularity_threshold", 0.95))
         return int(sum(1 for c in list(self.circularity_values or []) if float(c) >= threshold))
 
     def _build_result_payload(self, *, valid: bool, invalid_reason: str | None = None) -> dict:
@@ -15066,10 +15066,10 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                  char_max_invalid_ratio: float = 0.45,
                  char_max_multiple_ratio: float = 0.20,
                  char_max_stream_ratio: float = 0.20,
-                 char_delay_retarget_roundness_min: float = 0.91,
+                 char_delay_retarget_roundness_min: float = 0.95,
                  char_delay_retarget_bad_hits_required: int = 3,
                  char_delay_retarget_window_frames: int = 4,
-                 char_delay_retarget_steps_us: tuple[int, ...] = (500, 1000),
+                 char_delay_retarget_steps_us: tuple[int, ...] = (1000, 2000),
                  char_delay_retarget_cap: int = 2,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
@@ -15278,7 +15278,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             max(self.char_delay_retarget_bad_hits_required, int(char_delay_retarget_window_frames))
         )
         retarget_steps = []
-        for step in list(char_delay_retarget_steps_us or (500, 1000)):
+        for step in list(char_delay_retarget_steps_us or (1000, 2000)):
             try:
                 step_us = int(step)
             except Exception:
@@ -15286,7 +15286,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             if step_us > 0:
                 retarget_steps.append(int(step_us))
         if not retarget_steps:
-            retarget_steps = [500, 1000]
+            retarget_steps = [1000, 2000]
         self.char_delay_retarget_steps_us = [int(v) for v in retarget_steps]
         self.char_delay_retarget_cap = int(max(0, int(char_delay_retarget_cap)))
 
@@ -15657,7 +15657,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _count_good_replicates(self) -> int:
         circularity_values = list(getattr(self, "circularity_values", []) or [])
-        threshold = float(getattr(self, "circularity_threshold", 0.91))
+        threshold = float(getattr(self, "circularity_threshold", 0.95))
         return int(
             sum(1 for c in circularity_values if float(c) >= threshold)
         )
@@ -15991,7 +15991,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         steps = [int(v) for v in list(getattr(self, "char_delay_retarget_steps_us", []) or []) if int(v) > 0]
         if not steps:
-            steps = [500, 1000]
+            steps = [1000, 2000]
         step_us = int(steps[min(retarget_count, len(steps) - 1)])
         proposed_delay_us = int(current_anchor + step_us)
         max_nominal_delay_us = int(getattr(self, "max_nominal_delay_us", 0) or 0)
@@ -16075,7 +16075,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         window_frames = int(max(1, getattr(self, "char_delay_retarget_window_frames", 4)))
         if int(getattr(self, "_morphology_window_evaluable_count", 0)) >= int(window_frames):
             return False
-        roundness_min = float(getattr(self, "char_delay_retarget_roundness_min", 0.91))
+        roundness_min = float(getattr(self, "char_delay_retarget_roundness_min", 0.95))
         is_nonround = bool(stream_like) or float(ellipse_roundness) < float(roundness_min)
         self._morphology_window_evaluable_count = int(
             getattr(self, "_morphology_window_evaluable_count", 0)
@@ -16107,7 +16107,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self.current_delay_us = None
         self.num_images = self.repl_target
         self.image_counter = 0
-        self.circularity_threshold = 0.91
+        self.circularity_threshold = 0.95
         self.circularity_values = []
         self.droplet_volumes = []
         self.droplet_positions = []
