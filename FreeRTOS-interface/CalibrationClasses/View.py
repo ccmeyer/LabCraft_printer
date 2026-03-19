@@ -200,6 +200,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._memory_recommendation_preview = None
         self._memory_recommendation_logged_fingerprint = None
         self._memory_recommendation_refresh_active = False
+        self._manual_focus_frame_active_spinbox = None
+        self._manual_spinbox_committers = {}
+        self._manual_spinbox_focus_targets = {}
+        self._manual_spinbox_syncing = set()
+        self._manual_spinbox_typed_drafts = {}
+        self._managed_manual_spinboxes = []
+        self._startup_focus_initialized = False
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -207,6 +214,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.setWindowTitle("Droplet Imaging")
         self.resize(1600, 1000)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         # =========================
         # Main three-column layout
@@ -214,6 +222,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.layout = QtWidgets.QHBoxLayout(self)
         self.layout.setContentsMargins(8, 8, 8, 8)
         self.layout.setSpacing(10)
+        self.manual_edit_focus_frame = QtWidgets.QFocusFrame(self)
+        self.manual_edit_focus_frame.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.manual_edit_focus_frame.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self.manual_edit_focus_frame.setStyleSheet(
+            "QFocusFrame {"
+            f" border: 1px solid {self.color_dict.get('light_blue', '#3b82f6')};"
+            " border-radius: 2px;"
+            " background: transparent;"
+            "}"
+        )
+        self.manual_edit_focus_frame.hide()
 
         # ---------- RIGHT RESULTS PANEL (fixed width): memory + summary ----------
         self.info_panel = QtWidgets.QWidget()
@@ -284,6 +303,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.exposure_time_spinbox.setValue(self.droplet_camera_model.exposure_time)
         manual_grid.addWidget(self.exposure_time_label,  row, 0)
         manual_grid.addWidget(self.exposure_time_spinbox,row, 1); row += 1
+        self._register_manual_spinbox(self.flash_duration_spinbox, self.set_flash_duration)
+        self._register_manual_spinbox(self.flash_delay_spinbox, self.set_flash_delay)
+        self._register_manual_spinbox(self.num_droplets_spinbox, self.set_imaging_droplets)
+        self._register_manual_spinbox(self.print_pulse_width_spinbox, self.handle_print_pulse_width_change)
+        self._register_manual_spinbox(self.exposure_time_spinbox, self.set_exposure_time)
 
         # Trigger flash
         self.flash_button = QtWidgets.QPushButton("Trigger Flash")
@@ -662,12 +686,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
         self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
 
-        self.flash_duration_spinbox.valueChanged.connect(self.set_flash_duration)
-        self.flash_delay_spinbox.valueChanged.connect(self.set_flash_delay)
-        self.num_droplets_spinbox.valueChanged.connect(self.set_imaging_droplets)
-        self.print_pulse_width_spinbox.valueChanged.connect(self.handle_print_pulse_width_change)
-        self.exposure_time_spinbox.valueChanged.connect(self.set_exposure_time)
-
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
@@ -733,6 +751,150 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.main_window.pause_machine())
 
+    @staticmethod
+    def _manual_spinbox_line_edit(spinbox):
+        return spinbox.lineEdit() if hasattr(spinbox, "lineEdit") else None
+
+    def _manual_spinbox_is_being_edited(self, spinbox):
+        line_edit = self._manual_spinbox_line_edit(spinbox)
+        return spinbox.hasFocus() or (line_edit is not None and line_edit.hasFocus())
+
+    @staticmethod
+    def _manual_spinbox_step_subcontrol_hit(spinbox, event):
+        option = QtWidgets.QStyleOptionSpinBox()
+        spinbox.initStyleOption(option)
+        if hasattr(event, "position"):
+            point = event.position().toPoint()
+        else:
+            point = event.pos()
+        subcontrol = spinbox.style().hitTestComplexControl(
+            QtWidgets.QStyle.CC_SpinBox,
+            option,
+            point,
+            spinbox,
+        )
+        return subcontrol in (QtWidgets.QStyle.SC_SpinBoxUp, QtWidgets.QStyle.SC_SpinBoxDown)
+
+    def _register_manual_spinbox(self, spinbox, commit_handler):
+        spinbox.setKeyboardTracking(False)
+        spinbox.setFocusPolicy(QtCore.Qt.StrongFocus)
+        spinbox.installEventFilter(self)
+        spinbox.valueChanged.connect(
+            lambda value, sb=spinbox: self._handle_manual_spinbox_value_changed(sb, value)
+        )
+        spinbox.editingFinished.connect(
+            lambda sb=spinbox: self._handle_manual_spinbox_editing_finished(sb)
+        )
+
+        self._managed_manual_spinboxes.append(spinbox)
+        self._manual_spinbox_committers[spinbox] = commit_handler
+        self._manual_spinbox_focus_targets[spinbox] = spinbox
+        self._manual_spinbox_typed_drafts[spinbox] = False
+
+        line_edit = self._manual_spinbox_line_edit(spinbox)
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+            line_edit.textEdited.connect(
+                lambda _text, sb=spinbox: self._mark_manual_spinbox_typed_edit(sb)
+            )
+            self._manual_spinbox_focus_targets[line_edit] = spinbox
+
+    def _mark_manual_spinbox_typed_edit(self, spinbox):
+        self._manual_spinbox_typed_drafts[spinbox] = True
+        self._refresh_manual_spinbox_focus_frame()
+
+    def _dispatch_manual_spinbox_value(self, spinbox):
+        handler = self._manual_spinbox_committers.get(spinbox)
+        if handler is not None:
+            handler(spinbox.value())
+
+    def _finish_manual_spinbox_edit(self, spinbox):
+        self._manual_spinbox_typed_drafts[spinbox] = False
+        spinbox.clearFocus()
+        QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+
+    def _handle_manual_spinbox_value_changed(self, spinbox, _value):
+        if spinbox in self._manual_spinbox_syncing:
+            return
+        if self._manual_spinbox_typed_drafts.get(spinbox, False):
+            return
+        self._dispatch_manual_spinbox_value(spinbox)
+        self._finish_manual_spinbox_edit(spinbox)
+
+    def _handle_manual_spinbox_editing_finished(self, spinbox):
+        if spinbox in self._manual_spinbox_syncing:
+            return
+        if not self._manual_spinbox_typed_drafts.get(spinbox, False):
+            QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+            return
+        spinbox.interpretText()
+        self._manual_spinbox_typed_drafts[spinbox] = False
+        self._dispatch_manual_spinbox_value(spinbox)
+        self._finish_manual_spinbox_edit(spinbox)
+
+    def _refresh_manual_spinbox_focus_frame(self):
+        active_spinbox = next(
+            (
+                spinbox
+                for spinbox in self._managed_manual_spinboxes
+                if self._manual_spinbox_is_being_edited(spinbox)
+            ),
+            None,
+        )
+        if active_spinbox is None:
+            self._manual_focus_frame_active_spinbox = None
+            self.manual_edit_focus_frame.hide()
+            return
+        self._manual_focus_frame_active_spinbox = active_spinbox
+        self.manual_edit_focus_frame.setWidget(active_spinbox)
+        self.manual_edit_focus_frame.show()
+        self.manual_edit_focus_frame.raise_()
+
+    def _sync_manual_spinbox_value(self, spinbox, value, force=False):
+        typed_drafts = getattr(self, "_manual_spinbox_typed_drafts", None)
+        syncing = getattr(self, "_manual_spinbox_syncing", None)
+        if typed_drafts is None or syncing is None:
+            spinbox.blockSignals(True)
+            try:
+                spinbox.setValue(value)
+            finally:
+                spinbox.blockSignals(False)
+            return
+
+        if not force and (
+            typed_drafts.get(spinbox, False)
+            or DropletImagingDialog._manual_spinbox_is_being_edited(self, spinbox)
+        ):
+            return
+        typed_drafts[spinbox] = False
+        syncing.add(spinbox)
+        spinbox.blockSignals(True)
+        try:
+            spinbox.setValue(value)
+        finally:
+            spinbox.blockSignals(False)
+            syncing.discard(spinbox)
+        if hasattr(self, "manual_edit_focus_frame"):
+            QTimer.singleShot(0, lambda: DropletImagingDialog._refresh_manual_spinbox_focus_frame(self))
+
+    def eventFilter(self, watched, event):
+        spinbox = self._manual_spinbox_focus_targets.get(watched)
+        if spinbox is not None:
+            if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut):
+                QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+            elif watched is spinbox and event.type() == QtCore.QEvent.MouseButtonPress:
+                if self._manual_spinbox_step_subcontrol_hit(spinbox, event):
+                    self._manual_spinbox_typed_drafts[spinbox] = False
+            elif event.type() == QtCore.QEvent.Wheel:
+                self._manual_spinbox_typed_drafts[spinbox] = False
+            elif event.type() == QtCore.QEvent.KeyPress and event.key() in (
+                QtCore.Qt.Key_Up,
+                QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_PageUp,
+                QtCore.Qt.Key_PageDown,
+            ):
+                self._manual_spinbox_typed_drafts[spinbox] = False
+        return super().eventFilter(watched, event)
 
     def move_fraction_of_frame(self, x_fraction, y_fraction):
         """
@@ -806,8 +968,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Enters the repeat capture mode.
         """
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 20000, force=True)
         self.set_exposure_time(20000)
-        self.num_droplets_spinbox.setValue(0)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.num_droplets_spinbox, 0, force=True)
+        self.set_imaging_droplets(0)
 
     def apply_benchmark_capture_profile(self):
         """
@@ -815,10 +979,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         self.controller.set_droplet_capture_profile("throughput")
         self.controller.set_command_dispatch_interval(20)
-        self.flash_delay_spinbox.setValue(5000)
-        self.flash_duration_spinbox.setValue(1000)
-        self.exposure_time_spinbox.setValue(20000)
-        self.num_droplets_spinbox.setValue(1)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.flash_delay_spinbox, 5000, force=True)
+        self.set_flash_delay(5000)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.flash_duration_spinbox, 1000, force=True)
+        self.set_flash_duration(1000)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.exposure_time_spinbox, 20000, force=True)
+        self.set_exposure_time(20000)
+        DropletImagingDialog._sync_manual_spinbox_value(self, self.num_droplets_spinbox, 1, force=True)
+        self.set_imaging_droplets(1)
 
     def toggle_flash(self):
         """
@@ -935,17 +1103,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.flash_count_label.setText(f"Flashes: {count}")
         trigger_count = self.model.droplet_camera_model.get_trigger_counter()
         self.trigger_count_label.setText(f"Triggers: {trigger_count}")
-        self.flash_duration_spinbox.blockSignals(True)
-        self.flash_duration_spinbox.setValue(self.model.droplet_camera_model.get_flash_duration())
-        self.flash_duration_spinbox.blockSignals(False)
-
-        self.flash_delay_spinbox.blockSignals(True)
-        self.flash_delay_spinbox.setValue(self.model.droplet_camera_model.get_flash_delay())
-        self.flash_delay_spinbox.blockSignals(False)
-
-        self.exposure_time_spinbox.blockSignals(True)
-        self.exposure_time_spinbox.setValue(self.model.droplet_camera_model.get_exposure_time())
-        self.exposure_time_spinbox.blockSignals(False)
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.flash_duration_spinbox,
+            self.model.droplet_camera_model.get_flash_duration(),
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.flash_delay_spinbox,
+            self.model.droplet_camera_model.get_flash_delay(),
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.num_droplets_spinbox,
+            self.model.droplet_camera_model.get_num_droplets(),
+        )
+        DropletImagingDialog._sync_manual_spinbox_value(
+            self,
+            self.exposure_time_spinbox,
+            self.model.droplet_camera_model.get_exposure_time(),
+        )
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')
@@ -1472,6 +1649,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         
     def showEvent(self, ev):
         super().showEvent(ev)
+        if not self._startup_focus_initialized:
+            self._startup_focus_initialized = True
+            QTimer.singleShot(0, lambda: self.setFocus(QtCore.Qt.OtherFocusReason))
         # populate the labels when the dialog appears
         self._bridge_refresh_design_labels()
         self.refresh_calibration_memory_recommendation(force_log=True)
@@ -1697,9 +1877,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             recommended_pw = None
 
         if recommended_pw is not None:
-            self.print_pulse_width_spinbox.blockSignals(True)
-            self.print_pulse_width_spinbox.setValue(recommended_pw)
-            self.print_pulse_width_spinbox.blockSignals(False)
+            DropletImagingDialog._sync_manual_spinbox_value(
+                self,
+                self.print_pulse_width_spinbox,
+                recommended_pw,
+                force=True,
+            )
             self.handle_print_pulse_width_change(recommended_pw)
 
         self.start_pressure_spin.blockSignals(True)
@@ -2128,9 +2311,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         def _after_apply(*_):
             # Reflect values into UI spinboxes without re-triggering handlers
-            self.print_pulse_width_spinbox.blockSignals(True)
-            self.print_pulse_width_spinbox.setValue(pw)
-            self.print_pulse_width_spinbox.blockSignals(False)
+            DropletImagingDialog._sync_manual_spinbox_value(
+                self,
+                self.print_pulse_width_spinbox,
+                pw,
+                force=True,
+            )
             self.refresh_calibration_memory_recommendation()
 
             # We don't have a dedicated "live print pressure" spinbox in this panel;
