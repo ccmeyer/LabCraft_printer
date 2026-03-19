@@ -6,13 +6,18 @@ ensure_calibration_import_stubs()
 from CalibrationClasses.Model import PressureBandCalibrationProcess  # noqa: E402
 
 
-def _rep(cls_name: str):
+def _rep(cls_name: str, *, dy: int | None = None, cy: int | None = None, h: int = 1536):
+    center = None if cy is None else (550, int(cy))
     return {
         "cls": str(cls_name),
-        "center_px": None,
-        "dy_min_px": None,
+        "center_px": center,
+        "dy_min_px": dy,
         "nozzle_attached_area": 0,
         "nozzle_wet": False,
+        "frame_height_px": int(h),
+        "stream_like_count": 0,
+        "max_aspect_h_over_w": None,
+        "min_circularity": None,
     }
 
 
@@ -60,6 +65,10 @@ def _build_decide_proc(reps):
     proc.fast_single_risk_fraction = 0.60
     proc.fast_single_risk_min_count = 3
     proc.fast_single_dy_threshold_px = 1000
+    proc.large_move_px = 40
+    proc._carry_forward_classify_delay_us = None
+    proc._carry_forward_delay_anchor_pressure = None
+    proc._edge_retest_side_counts = {"upper": 0, "lower": 0}
     proc.stageChanged = Recorder()
     proc.continueReplicate = Recorder()
     proc._record_decision = lambda *args, **kwargs: None
@@ -194,6 +203,29 @@ def test_pressure_band_on_decide_triggers_delay_retest_for_edge_single():
     proc.onDecide()
 
     assert retest_reasons == ["edge_single_with_upper_multiple"]
+    assert proc._store_calls == []
+    assert proc._choose_calls == []
+    assert proc._advance_calls == []
+
+
+def test_pressure_band_on_decide_triggers_preemptive_delay_retest_for_bottom_edge_single():
+    proc = _build_decide_proc(
+        [
+            _rep("single", dy=1100, cy=1310),
+            _rep("single", dy=1090, cy=1300),
+            _rep("single", dy=1080, cy=1290),
+            _rep("single", dy=1070, cy=1285),
+            _rep("single", dy=1060, cy=1280),
+        ]
+    )
+    retest_reasons = []
+    proc._start_delay_retest = (
+        lambda reason, verdict, counts, decision, confidence: retest_reasons.append(str(reason)) or True
+    )
+
+    proc.onDecide()
+
+    assert retest_reasons == ["single_bottom_edge_preemptive"]
     assert proc._store_calls == []
     assert proc._choose_calls == []
     assert proc._advance_calls == []

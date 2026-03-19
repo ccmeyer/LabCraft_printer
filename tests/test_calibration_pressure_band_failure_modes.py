@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tests.calibration_test_utils import Recorder, ensure_calibration_import_stubs
+from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
 
 ensure_calibration_import_stubs()
@@ -139,6 +139,38 @@ def _build_choose_proc(*, verdict: str, min_single_pressure):
         r["nozzle_wet"] = True
     proc.finalize = Recorder()
     proc._record_decision = lambda *args, **kwargs: None
+    return proc
+
+
+def _build_apply_proc():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.start_pressure = 1.00
+    proc.P_MIN = 0.3
+    proc.P_MAX = 5.0
+    proc.dp = 0.05
+    proc.dp_min = 0.01
+    proc.min_reps = 5
+    proc.initial_reps_target = 3
+    proc.reps = []
+    proc._current_pressure = None
+    proc._next_pressure = 1.00
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc._carry_forward_classify_delay_us = None
+    proc._carry_forward_delay_anchor_pressure = None
+    proc._delay_retest_done_for_pressure = False
+    proc._delay_retest_steps_done_for_pressure = 0
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._delay_retest_later_steps_done_for_pressure = 0
+    proc._delay_retest_in_progress = False
+    proc._delay_retest_context = None
+    proc._retest_mode_active = False
+    proc._invalid_skip_count = 0
+    proc._initial_reps_target = lambda: 3
+    proc._should_discard_settling_shot = lambda *_args, **_kwargs: False
+    proc.stageChanged = Recorder()
+    proc.pressureApplied = SignalStub()
+    proc.calibration_manager = SimpleNamespace(changeSettingsRequested=Recorder())
     return proc
 
 
@@ -297,6 +329,29 @@ def test_pressure_band_reacquire_guard_resumes_scan_after_max_steps():
     assert decision_calls[0][0][0] == "reacquire_guard_resume_scan"
 
 
+def test_pressure_band_apply_pressure_uses_and_then_clears_carried_delay():
+    proc = _build_apply_proc()
+    proc._current_pressure = 1.00
+    proc._next_pressure = 1.05
+    proc._carry_forward_classify_delay_us = 5350
+    proc._carry_forward_delay_anchor_pressure = 1.00
+
+    proc.onApplyPressure()
+
+    assert proc._active_classify_delay_us == 5350
+    first_settings = proc.calibration_manager.changeSettingsRequested.calls[0][0][0]
+    assert first_settings["flash_delay"] == 5350
+
+    proc._next_pressure = 0.95
+    proc.onApplyPressure()
+
+    assert proc._active_classify_delay_us == 5850
+    assert proc._carry_forward_classify_delay_us is None
+    assert proc._carry_forward_delay_anchor_pressure is None
+    second_settings = proc.calibration_manager.changeSettingsRequested.calls[1][0][0]
+    assert second_settings["flash_delay"] == 5850
+
+
 def test_pressure_band_seek_upper_guard_resumes_scan_after_span_or_steps():
     proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
     proc._phase = "seek_upper"
@@ -373,6 +428,51 @@ def test_pressure_band_retest_merge_keeps_multiple_when_prior_multiple_evidence_
     assert verdict == "multiple"
     assert confidence >= 0.75
     assert merged["reason"] == "retest_conflict_keep_multiple"
+
+
+def test_pressure_band_position_regression_triggers_delay_retest():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc.fast_single_bottom_margin_px = 220
+    proc.fast_single_risk_fraction = 0.60
+    proc.fast_single_risk_min_count = 3
+    proc.fast_single_dy_threshold_px = 1000
+    proc.large_move_px = 40
+    proc._current_pressure = 0.55
+    proc.samples = [
+        {
+            "pressure": 0.50,
+            "verdict": "single",
+            "dy_min_px_med": 1080,
+            "replicates": [
+                _rep("single", dy=1100, cy=1310),
+                _rep("single", dy=1090, cy=1300),
+                _rep("single", dy=1080, cy=1290),
+                _rep("single", dy=1070, cy=1285),
+                _rep("single", dy=1060, cy=1280),
+            ],
+        }
+    ]
+    proc.reps = [
+        _rep("single", dy=760, cy=860),
+        _rep("single", dy=750, cy=850),
+        _rep("single", dy=740, cy=840),
+        _rep("single", dy=730, cy=830),
+        _rep("single", dy=720, cy=820),
+    ]
+
+    reason = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"has_upper_multiple_evidence": False},
+    )
+
+    assert reason == "pressure_upward_position_regression"
 
 
 def test_pressure_band_later_delay_candidate_moves_back_toward_base():
@@ -516,6 +616,8 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     proc._delay_retest_context = None
     proc._retest_mode_active = False
     proc._current_pressure = 1.20
+    proc._carry_forward_classify_delay_us = 5350
+    proc._carry_forward_delay_anchor_pressure = 1.20
     proc.min_reps = 5
     proc.retest_min_reps = 3
     proc.reps = []
@@ -547,6 +649,98 @@ def test_pressure_band_start_delay_retest_later_increments_later_counter():
     assert proc.replicates_target == 3
     assert proc._discard_next is False
     assert proc._retest_mode_active is True
+    assert proc._carry_forward_classify_delay_us is None
+    assert proc._carry_forward_delay_anchor_pressure is None
+
+
+def test_pressure_band_regression_retest_preserves_multiple_and_stores_carry_forward_delay():
+    proc = PressureBandCalibrationProcess.__new__(PressureBandCalibrationProcess)
+    proc.multiple_confidence_min = 0.40
+    proc.classify_delay_us = 5850
+    proc._base_classify_delay_us = 5850
+    proc._active_classify_delay_us = 5850
+    proc.delay_retest_step_us = 500
+    proc.delay_retest_min_us = 2000
+    proc.delay_retest_max_earlier_steps = 1
+    proc.delay_retest_timeout_ms = 15000
+    proc._delay_retest_done_for_pressure = False
+    proc._delay_retest_steps_done_for_pressure = 0
+    proc._delay_retest_earlier_steps_done_for_pressure = 0
+    proc._delay_retest_later_steps_done_for_pressure = 0
+    proc._delay_retest_in_progress = False
+    proc._delay_retest_context = None
+    proc._retest_mode_active = False
+    proc._carry_forward_classify_delay_us = None
+    proc._carry_forward_delay_anchor_pressure = None
+    proc.fast_single_bottom_margin_px = 220
+    proc.fast_single_risk_fraction = 0.60
+    proc.fast_single_risk_min_count = 3
+    proc.fast_single_dy_threshold_px = 1000
+    proc.large_move_px = 40
+    proc._current_pressure = 0.55
+    proc.min_reps = 5
+    proc.retest_min_reps = 3
+    proc.reps = [
+        _rep("single", dy=760, cy=860),
+        _rep("single", dy=750, cy=850),
+        _rep("single", dy=740, cy=840),
+        _rep("single", dy=730, cy=830),
+        _rep("single", dy=720, cy=820),
+    ]
+    proc.samples = [
+        {
+            "pressure": 0.50,
+            "verdict": "single",
+            "dy_min_px_med": 1080,
+            "replicates": [
+                _rep("single", dy=1100, cy=1310),
+                _rep("single", dy=1090, cy=1300),
+                _rep("single", dy=1080, cy=1290),
+                _rep("single", dy=1070, cy=1285),
+                _rep("single", dy=1060, cy=1280),
+            ],
+        }
+    ]
+    proc.stageChanged = Recorder()
+    proc.continueReplicate = Recorder()
+    proc.calibrationError = Recorder()
+    proc.finalize = Recorder()
+    proc._record_decision = lambda *args, **kwargs: None
+    proc._record_error = lambda *args, **kwargs: None
+    proc._cancel_timeout = lambda *_args, **_kwargs: None
+    proc._start_timeout = lambda *_args, **_kwargs: "timer-token"
+    proc._request_settings_with_recording = lambda _settings, cb, context=None: cb()
+
+    reason = proc._should_run_delay_retest(
+        "single",
+        {"none": 0, "single": 5, "multiple": 0},
+        {"reason": "single_confident", "has_upper_multiple_evidence": False},
+    )
+    assert reason == "pressure_upward_position_regression"
+
+    ok = proc._start_delay_retest(
+        reason,
+        "single",
+        {"single": 5, "none": 0, "multiple": 0},
+        {"reason": "single_confident"},
+        1.0,
+    )
+
+    assert ok is True
+    assert proc._carry_forward_classify_delay_us == 5350
+    assert proc._carry_forward_delay_anchor_pressure == 0.55
+
+    verdict, confidence, merged = proc._merge_delay_retest_decision(
+        "multiple",
+        0.80,
+        {"none": 0, "single": 0, "multiple": 3},
+        {"reason": "multiple_confident"},
+    )
+
+    assert verdict == "multiple"
+    assert confidence >= 0.80
+    assert merged["reason"] == "retest_conflict_multiple_wins"
+    assert merged["retest_trigger_reason"] == "pressure_upward_position_regression"
 
 
 def test_pressure_band_settling_discard_only_for_major_pressure_change():

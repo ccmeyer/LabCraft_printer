@@ -9595,6 +9595,8 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._delay_retest_in_progress = False
         self._delay_retest_context = None
         self._retest_mode_active = False
+        self._carry_forward_classify_delay_us = None
+        self._carry_forward_delay_anchor_pressure = None
         self._edge_retest_pressures = []
         self._edge_retest_count = 0
         self._edge_retest_side_counts = {"upper": 0, "lower": 0}
@@ -9849,7 +9851,15 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self.replicates_target = int(self._initial_reps_target())
         self._invalid_skip_count = 0
         self._discard_next = bool(self._should_discard_settling_shot(prev_pressure, target))
-        self._active_classify_delay_us = int(self._base_classify_delay_us)
+        active_delay_us = int(self._base_classify_delay_us)
+        carry_delay_us = getattr(self, "_carry_forward_classify_delay_us", None)
+        carry_anchor_pressure = getattr(self, "_carry_forward_delay_anchor_pressure", None)
+        if carry_delay_us is not None or carry_anchor_pressure is not None:
+            if self._carry_forward_delay_applies_to_pressure(target):
+                active_delay_us = int(carry_delay_us)
+            else:
+                self._clear_carry_forward_delay()
+        self._active_classify_delay_us = int(active_delay_us)
         self._delay_retest_done_for_pressure = False
         self._delay_retest_steps_done_for_pressure = 0
         self._delay_retest_earlier_steps_done_for_pressure = 0
@@ -10120,8 +10130,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
             decision["has_lower_none_evidence"] = bool(has_lower_none)
             if (
                 bool(has_upper_multi)
-                and int(risk.get("risky_single_count", 0)) >= int(self.fast_single_risk_min_count)
-                and float(risk.get("risky_single_fraction", 0.0)) >= float(self.fast_single_risk_fraction)
+                and self._meets_fast_single_risk_threshold(risk)
             ):
                 verdict = "multiple"
                 confidence = max(float(confidence), float(risk.get("risky_single_fraction", 0.0)))
@@ -10575,43 +10584,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         return True
 
     def _single_exit_risk_summary(self):
-        singles = [r for r in self.reps if str(r.get("cls", "")) == "single"]
-        if not singles:
-            return {
-                "single_count": 0,
-                "risky_single_count": 0,
-                "risky_single_fraction": 0.0,
-            }
-
-        risky = 0
-        for r in singles:
-            dy = r.get("dy_min_px")
-            c = r.get("center_px")
-            fh = r.get("frame_height_px")
-            by_dy = (dy is not None) and (int(dy) >= int(self.fast_single_dy_threshold_px))
-            by_bottom = False
-            if (
-                fh is not None
-                and c is not None
-                and isinstance(c, (tuple, list))
-                and len(c) >= 2
-            ):
-                try:
-                    cy = int(c[1])
-                    by_bottom = cy >= max(0, int(fh) - int(self.fast_single_bottom_margin_px))
-                except Exception:
-                    by_bottom = False
-            if by_dy or by_bottom:
-                risky += 1
-
-        n = len(singles)
-        return {
-            "single_count": int(n),
-            "risky_single_count": int(risky),
-            "risky_single_fraction": (float(risky) / float(n)) if n > 0 else 0.0,
-            "dy_threshold_px": int(self.fast_single_dy_threshold_px),
-            "bottom_margin_px": int(self.fast_single_bottom_margin_px),
-        }
+        return self._single_exit_risk_summary_for_reps(getattr(self, "reps", []) or [])
 
     def _attached_timing_summary(self):
         reps = list(getattr(self, "reps", []) or [])
@@ -10733,6 +10706,100 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
                 continue
         return False
 
+    def _clear_carry_forward_delay(self):
+        self._carry_forward_classify_delay_us = None
+        self._carry_forward_delay_anchor_pressure = None
+
+    def _carry_forward_delay_applies_to_pressure(self, pressure) -> bool:
+        carry_delay_us = getattr(self, "_carry_forward_classify_delay_us", None)
+        carry_anchor_pressure = getattr(self, "_carry_forward_delay_anchor_pressure", None)
+        if carry_delay_us is None or carry_anchor_pressure is None or pressure is None:
+            return False
+        try:
+            return bool(float(pressure) >= (float(carry_anchor_pressure) - 1e-9))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _carry_forward_delay_reasons():
+        return {
+            "edge_single_with_upper_multiple",
+            "pressure_upward_position_regression",
+            "single_bottom_edge_preemptive",
+        }
+
+    def _meets_fast_single_risk_threshold(self, risk: dict | None) -> bool:
+        risk = dict(risk or {})
+        return bool(
+            int(risk.get("risky_single_count", 0)) >= int(getattr(self, "fast_single_risk_min_count", 3))
+            and float(risk.get("risky_single_fraction", 0.0)) >= float(getattr(self, "fast_single_risk_fraction", 0.60))
+        )
+
+    def _single_exit_risk_summary_for_reps(self, reps):
+        singles = [r for r in list(reps or []) if str(r.get("cls", "")) == "single"]
+        if not singles:
+            return {
+                "single_count": 0,
+                "risky_single_count": 0,
+                "risky_single_fraction": 0.0,
+            }
+
+        risky = 0
+        for r in singles:
+            dy = r.get("dy_min_px")
+            c = r.get("center_px")
+            fh = r.get("frame_height_px")
+            by_dy = (dy is not None) and (int(dy) >= int(self.fast_single_dy_threshold_px))
+            by_bottom = False
+            if (
+                fh is not None
+                and c is not None
+                and isinstance(c, (tuple, list))
+                and len(c) >= 2
+            ):
+                try:
+                    cy = int(c[1])
+                    by_bottom = cy >= max(0, int(fh) - int(self.fast_single_bottom_margin_px))
+                except Exception:
+                    by_bottom = False
+            if by_dy or by_bottom:
+                risky += 1
+
+        n = len(singles)
+        return {
+            "single_count": int(n),
+            "risky_single_count": int(risky),
+            "risky_single_fraction": (float(risky) / float(n)) if n > 0 else 0.0,
+            "dy_threshold_px": int(self.fast_single_dy_threshold_px),
+            "bottom_margin_px": int(self.fast_single_bottom_margin_px),
+        }
+
+    def _last_accepted_risky_single_sample(self):
+        samples = list(getattr(self, "samples", []) or [])
+        if not samples:
+            return None
+        rec = dict(samples[-1] or {})
+        if str(rec.get("verdict", "")) != "single":
+            return None
+        risk = self._single_exit_risk_summary_for_reps(rec.get("replicates"))
+        if not self._meets_fast_single_risk_threshold(risk):
+            return None
+        try:
+            pressure = float(rec.get("pressure"))
+        except Exception:
+            return None
+        dy_med = rec.get("dy_min_px_med")
+        if dy_med is not None:
+            try:
+                dy_med = int(dy_med)
+            except Exception:
+                dy_med = None
+        return {
+            "pressure": float(pressure),
+            "dy_min_px_med": dy_med,
+            "risk": dict(risk),
+        }
+
     def _should_run_delay_retest(self, verdict: str, counts: dict, decision: dict):
         steps_done = int(max(0, getattr(self, "_delay_retest_earlier_steps_done_for_pressure", 0)))
         steps_max = int(max(0, getattr(self, "delay_retest_max_earlier_steps", 1)))
@@ -10745,25 +10812,53 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         n_multiple = int((counts or {}).get("multiple", 0))
         if n_single > 0 and n_multiple > 0:
             return "mixed_single_multiple"
-        if str(verdict) == "single" and bool((decision or {}).get("has_upper_multiple_evidence", False)):
-            if self._boundary_probe_budget_exhausted():
-                return None
-            nearest_upper_delta = self._nearest_upper_multiple_delta_psi()
-            if nearest_upper_delta is None:
-                return None
-            window = float(max(0.0, getattr(self, "edge_retest_proximity_window_psi", 0.03)))
-            if nearest_upper_delta > (window + 1e-9):
-                return None
-            max_per_side = int(max(0, getattr(self, "edge_retest_max_per_side", 1)))
-            if self._edge_retest_side_count("upper") >= max_per_side:
-                return None
-            if bool(getattr(self, "edge_retest_scan_only", True)) and str(getattr(self, "_phase", "scan")) != "scan":
-                return None
-            if int(max(0, getattr(self, "_edge_retest_count", 0))) >= int(max(0, getattr(self, "edge_retest_max_per_run", 3))):
-                return None
-            if self._edge_retest_recently_done():
-                return None
-            return "edge_single_with_upper_multiple"
+        if str(verdict) == "single":
+            prev_risky_single = self._last_accepted_risky_single_sample()
+            cur_dy_med = self._median_dy(getattr(self, "reps", []) or [])
+            cur_pressure = getattr(self, "_current_pressure", None)
+            if (
+                prev_risky_single is not None
+                and cur_dy_med is not None
+                and prev_risky_single.get("dy_min_px_med") is not None
+                and cur_pressure is not None
+            ):
+                try:
+                    cur_pressure = float(cur_pressure)
+                    prev_pressure = float(prev_risky_single.get("pressure"))
+                    prev_dy_med = int(prev_risky_single.get("dy_min_px_med"))
+                    cur_dy_med = int(cur_dy_med)
+                except Exception:
+                    cur_pressure = None
+                if (
+                    cur_pressure is not None
+                    and cur_pressure > (prev_pressure + 1e-9)
+                    and (prev_dy_med - cur_dy_med) > int(getattr(self, "large_move_px", 40))
+                ):
+                    return "pressure_upward_position_regression"
+
+            if bool((decision or {}).get("has_upper_multiple_evidence", False)):
+                if self._boundary_probe_budget_exhausted():
+                    return None
+                nearest_upper_delta = self._nearest_upper_multiple_delta_psi()
+                if nearest_upper_delta is None:
+                    return None
+                window = float(max(0.0, getattr(self, "edge_retest_proximity_window_psi", 0.03)))
+                if nearest_upper_delta > (window + 1e-9):
+                    return None
+                max_per_side = int(max(0, getattr(self, "edge_retest_max_per_side", 1)))
+                if self._edge_retest_side_count("upper") >= max_per_side:
+                    return None
+                if bool(getattr(self, "edge_retest_scan_only", True)) and str(getattr(self, "_phase", "scan")) != "scan":
+                    return None
+                if int(max(0, getattr(self, "_edge_retest_count", 0))) >= int(max(0, getattr(self, "edge_retest_max_per_run", 3))):
+                    return None
+                if self._edge_retest_recently_done():
+                    return None
+                return "edge_single_with_upper_multiple"
+
+            risk = dict((decision or {}).get("single_exit_risk") or self._single_exit_risk_summary())
+            if self._meets_fast_single_risk_threshold(risk):
+                return "single_bottom_edge_preemptive"
 
         return None
 
@@ -10829,6 +10924,9 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         if new_delay is None:
             return False
 
+        if direction == "later" and str(reason) == "attached_stream_requires_later_delay":
+            self._clear_carry_forward_delay()
+
         self._delay_retest_done_for_pressure = True
         self._delay_retest_steps_done_for_pressure = int(
             max(0, getattr(self, "_delay_retest_steps_done_for_pressure", 0)) + 1
@@ -10862,6 +10960,12 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         # Delay-only retests do not require pressure-settling discard.
         self._discard_next = False
         self._retest_mode_active = True
+        if direction == "earlier" and str(reason) in self._carry_forward_delay_reasons():
+            try:
+                self._carry_forward_classify_delay_us = int(new_delay)
+                self._carry_forward_delay_anchor_pressure = float(self._current_pressure)
+            except Exception:
+                self._clear_carry_forward_delay()
         if str(reason) == "edge_single_with_upper_multiple":
             try:
                 cur = float(self._current_pressure)
