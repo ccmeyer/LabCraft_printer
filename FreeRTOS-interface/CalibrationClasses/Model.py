@@ -18535,6 +18535,12 @@ class DropletCameraModel(QObject):
     droplet_image_updated = Signal()
     flash_signal = Signal()
     record_metadata_signal = Signal(str)
+    FLASH_FAULT_REASON_LABELS = {
+        "line_high_on_arm": "Trigger line high while arming",
+        "retrigger_while_high": "Repeated trigger while line was still high",
+        "line_stuck_high": "Trigger line stayed high for too long",
+    }
+
     def __init__(self,steps_conv_path):
         super().__init__()
         print("\n--- DropletCameraModel initialized ---\n")
@@ -18548,6 +18554,9 @@ class DropletCameraModel(QObject):
         self.flash_delay = 5000
         self.num_droplets = 1
         self.exposure_time = 30000
+        self.flash_session_armed = False
+        self.flash_fault_latched = False
+        self.flash_fault_reason = ""
         self.analysis_active = False
         self.saving_active = False
         self.image_width = 1088
@@ -18653,6 +18662,41 @@ class DropletCameraModel(QObject):
     def update_trigger_counter(self,counter):
         self.ext_counter = int(counter)
         self.flash_signal.emit()
+
+    def get_flash_session_armed(self):
+        return bool(self.flash_session_armed)
+
+    def get_flash_fault_latched(self):
+        return bool(self.flash_fault_latched)
+
+    def get_flash_fault_reason(self):
+        return str(self.flash_fault_reason or "")
+
+    def get_flash_fault_reason_display(self):
+        reason = self.get_flash_fault_reason()
+        if not reason:
+            return "None"
+        return self.FLASH_FAULT_REASON_LABELS.get(reason, reason.replace("_", " "))
+
+    def update_flash_session_state(self, *, armed=None, fault_latched=None, fault_reason=None):
+        changed = False
+        if armed is not None:
+            next_armed = bool(armed)
+            if self.flash_session_armed != next_armed:
+                self.flash_session_armed = next_armed
+                changed = True
+        if fault_latched is not None:
+            next_fault = bool(fault_latched)
+            if self.flash_fault_latched != next_fault:
+                self.flash_fault_latched = next_fault
+                changed = True
+        if fault_reason is not None:
+            next_reason = str(fault_reason or "")
+            if self.flash_fault_reason != next_reason:
+                self.flash_fault_reason = next_reason
+                changed = True
+        if changed:
+            self.flash_signal.emit()
 
     def get_image_metadata(self):
         return self.num_flashes, self.flash_duration, self.flash_delay, self.num_droplets, self.exposure_time

@@ -640,8 +640,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Counters
         self.flash_count_label = QtWidgets.QLabel("Flashes: 0")
         self.trigger_count_label = QtWidgets.QLabel("Triggers: 0")
+        self.flash_safety_label = QtWidgets.QLabel("Flash session disarmed.")
+        self.flash_safety_label.setWordWrap(True)
         manual_grid.addWidget(self.flash_count_label,   row, 0, 1, 2); row += 1
         manual_grid.addWidget(self.trigger_count_label, row, 0, 1, 2); row += 1
+        manual_grid.addWidget(self.flash_safety_label, row, 0, 1, 2); row += 1
 
         # Flash duration
         self.flash_duration_label = QtWidgets.QLabel("Flash Duration (µs):")
@@ -1152,6 +1155,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
         self.populate_summary_table()
         self._refresh_manual_control_lock_state()
+        self._apply_flash_safety_ui_state()
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -1375,16 +1379,84 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "manual_edit_focus_frame"):
             self.manual_edit_focus_frame.hide()
 
+    def _is_flash_fault_latched(self):
+        getter = getattr(self.model.droplet_camera_model, "get_flash_fault_latched", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(self.model.droplet_camera_model, "flash_fault_latched", False))
+
+    def _flash_fault_reason_text(self):
+        getter = getattr(self.model.droplet_camera_model, "get_flash_fault_reason_display", None)
+        if callable(getter):
+            try:
+                return str(getter())
+            except Exception:
+                pass
+        raw = str(getattr(self.model.droplet_camera_model, "flash_fault_reason", "") or "").strip()
+        return raw.replace("_", " ") if raw else "None"
+
+    def _apply_flash_safety_ui_state(self):
+        fault_latched = self._is_flash_fault_latched()
+        armed_getter = getattr(self.model.droplet_camera_model, "get_flash_session_armed", None)
+        session_armed = bool(armed_getter()) if callable(armed_getter) else bool(
+            getattr(self.model.droplet_camera_model, "flash_session_armed", False)
+        )
+
+        if fault_latched:
+            self.camera_timer.stop()
+            self.capturing = False
+            repeat_button = getattr(self, "repeat_capture_button", None)
+            if repeat_button is not None:
+                repeat_button.setText("Start Repeated Capture")
+            self.flash_safety_label.setText(
+                "Flash safety fault latched: "
+                f"{self._flash_fault_reason_text()}. Close and reopen the imager after PE8 is low."
+            )
+            self.flash_safety_label.setStyleSheet("color: darkred; font-weight: 600;")
+        elif session_armed:
+            self.flash_safety_label.setText("Flash session armed.")
+            self.flash_safety_label.setStyleSheet("color: darkgreen;")
+        else:
+            self.flash_safety_label.setText("Flash session disarmed.")
+            self.flash_safety_label.setStyleSheet("color: #555555;")
+
+        for widget_name in (
+            "flash_button",
+            "benchmark_profile_button",
+            "prime_head_button",
+            "calibrate_nozzle_button",
+            "calibrate_focus_button",
+            "calibrate_emergence_button",
+            "calibrate_pressure_scan_button",
+            "scan_trajectory_button",
+            "calibrate_pressure_sweep_button",
+            "calibrate_characterization_button",
+            "calibrate_timecourse_button",
+            "calibrate_all_button",
+            "calibrate_all_pw_button",
+            "repeat_capture_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None and fault_latched:
+                widget.setEnabled(False)
+
+        if not fault_latched:
+            self._refresh_manual_control_lock_state()
+
     def _refresh_manual_control_lock_state(self, *_args):
         busy = DropletImagingDialog._is_calibration_busy(self)
         was_locked = getattr(self, "_manual_controls_locked", False)
+        flash_fault_latched = self._is_flash_fault_latched()
 
         if busy and not was_locked:
             DropletImagingDialog._clear_manual_control_edit_state(self)
             DropletImagingDialog._sync_manual_controls_from_model(self, force=True)
 
         self._manual_controls_locked = busy
-        enabled = not busy
+        enabled = (not busy) and (not flash_fault_latched)
 
         for widget_name in (
             "flash_duration_spinbox",
@@ -1406,6 +1478,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             if busy:
                 self.memory_recommendation_apply_btn.setEnabled(False)
                 self.memory_recommendation_apply_btn.setToolTip("Unavailable while calibration is running.")
+            elif flash_fault_latched:
+                self.memory_recommendation_apply_btn.setEnabled(False)
+                self.memory_recommendation_apply_btn.setToolTip("Unavailable while flash safety fault is latched.")
             elif getattr(self, "_memory_recommendation_preview", None) is not None:
                 self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
 
@@ -1530,6 +1605,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Triggers a flash for the droplet imaging.
         """
         if DropletImagingDialog._is_calibration_busy(self):
+            return
+        if self._is_flash_fault_latched():
             return
         self.controller.capture_droplet_image()
 
@@ -1662,6 +1739,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.exposure_time_spinbox,
             self.model.droplet_camera_model.get_exposure_time(),
         )
+        self._apply_flash_safety_ui_state()
 
     def start_droplet_camera(self):
         print('Starting droplet imaging')
@@ -3320,6 +3398,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
                 f"{self._session_ready_text()} (camera unavailable: {self._camera_start_error})",
                 color="red",
             )
+        self._apply_flash_safety_state()
 
     def _session_ready_text(self):
         msg = f"Session created: {self.store.session_id}"
@@ -3483,6 +3562,9 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("Idle")
         self.status_label.setWordWrap(True)
         capture_v.addWidget(self.status_label)
+        self.flash_safety_label = QtWidgets.QLabel("Flash session disarmed.")
+        self.flash_safety_label.setWordWrap(True)
+        capture_v.addWidget(self.flash_safety_label)
         left_v.addWidget(capture_group)
 
         right = QtWidgets.QWidget()
@@ -3510,6 +3592,7 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.capture_preview_btn.clicked.connect(self._capture_preview_only)
         self.capture_pair_btn.clicked.connect(self._capture_background_then_droplet)
         self.reject_last_btn.clicked.connect(self._reject_last_image)
+        self.model.droplet_camera_model.flash_signal.connect(self._apply_flash_safety_state)
 
         self.flash_duration_spin.valueChanged.connect(
             lambda v: self.controller.set_flash_duration(int(v))
@@ -3627,9 +3710,50 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
         self.selected_label_value.setText(txt)
 
     def _set_buttons_enabled(self, enabled: bool):
+        enabled = bool(enabled) and not self._is_flash_fault_latched()
         self.capture_preview_btn.setEnabled(enabled)
         self.capture_pair_btn.setEnabled(enabled)
         self.reject_last_btn.setEnabled(enabled)
+
+    def _is_flash_fault_latched(self):
+        getter = getattr(self.model.droplet_camera_model, "get_flash_fault_latched", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(self.model.droplet_camera_model, "flash_fault_latched", False))
+
+    def _flash_fault_reason_text(self):
+        getter = getattr(self.model.droplet_camera_model, "get_flash_fault_reason_display", None)
+        if callable(getter):
+            try:
+                return str(getter())
+            except Exception:
+                pass
+        raw = str(getattr(self.model.droplet_camera_model, "flash_fault_reason", "") or "").strip()
+        return raw.replace("_", " ") if raw else "None"
+
+    def _apply_flash_safety_state(self):
+        armed_getter = getattr(self.model.droplet_camera_model, "get_flash_session_armed", None)
+        session_armed = bool(armed_getter()) if callable(armed_getter) else bool(
+            getattr(self.model.droplet_camera_model, "flash_session_armed", False)
+        )
+        if self._is_flash_fault_latched():
+            self._set_buttons_enabled(False)
+            self.flash_safety_label.setText(
+                "Flash safety fault latched: "
+                f"{self._flash_fault_reason_text()}. Close and reopen the dataset window after PE8 is low."
+            )
+            self.flash_safety_label.setStyleSheet("color: darkred; font-weight: 600;")
+        elif session_armed:
+            self.flash_safety_label.setText("Flash session armed.")
+            self.flash_safety_label.setStyleSheet("color: darkgreen;")
+            if not self._capture_inflight:
+                self._set_buttons_enabled(True)
+        else:
+            self.flash_safety_label.setText("Flash session disarmed.")
+            self.flash_safety_label.setStyleSheet("color: #555555;")
 
     def setup_shortcuts(self):
         """

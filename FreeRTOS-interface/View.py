@@ -3799,6 +3799,9 @@ class BoardStatusBox(QGroupBox):
             # 'Mass': QLabel('0'),
             # 'Stable': QLabel('False')
         }
+        if hasattr(self.model, "droplet_camera_model"):
+            self.labels['Flash Session'] = QLabel('Disarmed')
+            self.labels['Flash Fault'] = QLabel('None')
         if self.legacy_mode:
             self.labels['Mass'] = QLabel('0')
             self.labels['Stable'] = QLabel('False')
@@ -3821,6 +3824,19 @@ class BoardStatusBox(QGroupBox):
         self.labels['Paused'].setText(str(self.model.machine_model.paused))
         self.labels['Cycle Count'].setText(str(self.model.machine_model.cycle_count))
         self.labels['Current Micros'].setText(str(self.model.machine_model.current_micros))
+        cam = getattr(self.model, "droplet_camera_model", None)
+        if cam is not None and 'Flash Session' in self.labels:
+            armed_getter = getattr(cam, "get_flash_session_armed", None)
+            fault_getter = getattr(cam, "get_flash_fault_latched", None)
+            reason_getter = getattr(cam, "get_flash_fault_reason_display", None)
+            armed = bool(armed_getter()) if callable(armed_getter) else bool(getattr(cam, "flash_session_armed", False))
+            fault_latched = bool(fault_getter()) if callable(fault_getter) else bool(getattr(cam, "flash_fault_latched", False))
+            if callable(reason_getter):
+                reason_text = str(reason_getter())
+            else:
+                reason_text = str(getattr(cam, "flash_fault_reason", "") or "None")
+            self.labels['Flash Session'].setText('Armed' if armed else 'Disarmed')
+            self.labels['Flash Fault'].setText(reason_text if fault_latched else 'None')
 
         if self.legacy_mode:
             self.labels['Mass'].setText(str(self.model.calibration_model.get_current_mass()))

@@ -90,6 +90,7 @@ class Controller(QObject):
         self.machine.machine_connected_signal.connect(self.update_machine_connection_status)
         self.machine.reset_report_received.connect(self.handle_reset_report)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
+        self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 
@@ -1192,6 +1193,9 @@ class Controller(QObject):
         Initiates a non-blocking image capture. If a callback is provided,
         it will be invoked with the captured frame once the capture completes.
         """
+        if self._is_flash_fault_latched():
+            self._handle_blocked_capture(callback)
+            return False
         if callback is not None:
             if self.pending_capture_callback is not None:
                 print("Capture already pending; dropping new capture callback.")
@@ -1233,6 +1237,9 @@ class Controller(QObject):
 
     def handle_capture_request(self, callback):
             # protect against overlapping requests
+        if self._is_flash_fault_latched():
+            self._handle_blocked_capture(callback)
+            return
         if self.pending_capture_callback is not None:
             print("Capture already pending; dropping new request.")
             return
@@ -1256,9 +1263,47 @@ class Controller(QObject):
         except Exception:
             pass
         try:
-            self.model.calibration_manager.calibrationError.emit(msg)
+            manager_error = getattr(self.model.calibration_manager, "calibrationError", None)
+            if manager_error is not None and hasattr(manager_error, "emit"):
+                manager_error.emit(msg)
         except Exception:
             pass
+
+    def _is_flash_fault_latched(self) -> bool:
+        cam = getattr(self.model, "droplet_camera_model", None)
+        getter = getattr(cam, "get_flash_fault_latched", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(cam, "flash_fault_latched", False))
+
+    def _flash_fault_reason_text(self) -> str:
+        cam = getattr(self.model, "droplet_camera_model", None)
+        getter = getattr(cam, "get_flash_fault_reason_display", None)
+        if callable(getter):
+            try:
+                reason = str(getter() or "").strip()
+                if reason:
+                    return reason
+            except Exception:
+                pass
+        raw = str(getattr(cam, "flash_fault_reason", "") or "").strip().replace("_", " ")
+        return raw or "Flash safety fault latched."
+
+    def _handle_blocked_capture(self, callback=None):
+        message = (
+            "Droplet capture blocked because the flash safety latch is active. "
+            f"{self._flash_fault_reason_text()}. Close and reopen the imager after PE8 is low."
+        )
+        print(f"[Camera] capture blocked: {message}")
+        if callback is not None:
+            try:
+                callback(None)
+            except Exception as exc:
+                print(f"Callback raised after blocked capture: {exc}")
+        self._emit_active_calibration_error(message)
 
     def handle_move_request(self, move_vector, callback):
         # Perform the move command then call the callback.

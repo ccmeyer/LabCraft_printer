@@ -26,6 +26,7 @@
 #include "BoardConfig.h"
 #include "CrashLog.h"
 #include "WatchdogSupervisor.h"
+#include <stdio.h>
 
 extern void MX_LED_Init(void);
 
@@ -122,6 +123,31 @@ extern void MX_HEARTBEAT_Start(void);
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+static void Configure_PE8_TriggerPulldown(void)
+{
+    GPIO_InitTypeDef gi = {0};
+    gi.Pin = GPIO_PIN_8;
+    gi.Mode = GPIO_MODE_IT_RISING;
+    gi.Pull = GPIO_PULLDOWN;
+    gi.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOE, &gi);
+    __HAL_GPIO_EXTI_CLEAR_FLAG(GPIO_PIN_8);
+}
+
+static void Log_PE8_TriggerBiasState(void)
+{
+    char msg[96];
+    const unsigned long line_high =
+        (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_8) == GPIO_PIN_SET) ? 1ul : 0ul;
+    const unsigned long pull_mode = (unsigned long)((GPIOE->PUPDR >> (8u * 2u)) & 0x3u);
+    snprintf(msg,
+             sizeof(msg),
+             "PE8_BIAS pull=%lu line=%lu exti=rising\r\n",
+             pull_mode,
+             line_high);
+    MX_LOGGER_Log_entry(msg);
+}
 
 //static void Reclaim_PE8_For_EXTI(void)
 //{
@@ -362,12 +388,10 @@ int main(void)
   MX_PRINTER_Init(1300,2500);
   MX_FLASH_Init(/*pulseDurationUs=*/2000);	// 1usec pulse = 180 ticks
 
-//  Reclaim_PE8_For_EXTI();
-//  Force_PE8_EXTI_Rising_WithPulldown();
-
   MX_ORCH_Init();
   CrashLog_SetBootStage(CRASH_BOOT_STAGE_ORCH_READY);
   MX_LOGGER_Init(&huart1, &hdma_usart1_tx);
+  Log_PE8_TriggerBiasState();
   CrashLog_SetBootStage(CRASH_BOOT_STAGE_LOGGER_READY);
 //  MX_COMM_Init(&huart2);     // start the Comm task on UART2
 
@@ -1319,6 +1343,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1 | GPIO_PIN_14 | GPIO_PIN_15, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_2 | GPIO_PIN_5, GPIO_PIN_SET);
+  Configure_PE8_TriggerPulldown();
   /* USER CODE END MX_GPIO_Init_2 */
 }
 

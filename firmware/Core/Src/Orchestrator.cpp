@@ -41,6 +41,15 @@ extern "C" uint32_t RTOS_StackOverflowHookFired(void);
 Orchestrator* Orchestrator::_instance = nullptr;
 
 namespace {
+
+const char* flashDisarmReasonToken(const char* reason)
+{
+  return (reason != nullptr && reason[0] != '\0') ? reason : "unknown";
+}
+
+}
+
+namespace {
 bool s_resetReportSent = false;
 
 #ifndef LC_CRASH_TEST_GRIPPER_OPEN_WDT
@@ -599,6 +608,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
           // Starts the flash trigger monitoring task
 		#if LC_HAS_IMAGING == 1
             g_flash_init_cmd_count++;
+            const bool taskExisted = (_flashTaskHandle != nullptr);
         	if (!_flashTaskHandle) {
         		const BaseType_t taskRc = xTaskCreate(
 					_flashTaskEntry,
@@ -619,8 +629,15 @@ void Orchestrator::executeCommand(const Command &cmd) {
                     g_flash_init_timer_create_fail_count++;
                 }
 			}
-			HAL_GPIO_WritePin(_flashAckPort, _flashAckPin, GPIO_PIN_RESET);
-            if (_flashTaskHandle && _flashAckTmr) {
+			_flashAckLow();
+            if (_flashAckTmr) {
+              xTimerStop(_flashAckTmr, 0);
+            }
+            if (_flashTaskHandle && _flashAckTmr && !taskExisted) {
+                if (_armFlashSession()) {
+                    g_flash_init_ok_count++;
+                }
+            } else if (_flashTaskHandle && _flashAckTmr && FlashSafety::isSessionArmed(_flashSafety)) {
                 g_flash_init_ok_count++;
             }
 		#endif
@@ -629,6 +646,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
         case CMD_STOP_FLASH: {
 		#if LC_HAS_IMAGING == 1
           // Ends the flash trigger monitoring task
+            _disarmFlashSession("stop", true);
         	if (_flashTaskHandle) {
         		vTaskDelete(_flashTaskHandle);
         		_flashTaskHandle = nullptr;
@@ -1807,7 +1825,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         const uint32_t flashInitOkCount = Orchestrator::getFlashInitOkCount();
                         const uint32_t flashInitTaskCreateFailCount = Orchestrator::getFlashInitTaskCreateFailCount();
                         const uint32_t flashInitTimerCreateFailCount = Orchestrator::getFlashInitTimerCreateFailCount();
-					    uint32_t flashWidthNs = 0;
+                        const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
+                        const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
+                        const char* flashFaultReason = Orchestrator::getFlashFaultReason();
+                        uint32_t flashWidthNs = 0;
                         uint32_t flashWidthMinNs = 0;
                         uint32_t flashWidthMaxNs = 0;
 	#if LC_HAS_IMAGING == 1
@@ -1817,11 +1838,12 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         flashWidthMinNs = static_cast<uint32_t>(Flash::kMinPulseNs);
                         flashWidthMaxNs = static_cast<uint32_t>(Flash::kMaxPulseNs);
 	#endif
-					    char metrics[320];
+					    char metrics[384];
 					    snprintf(metrics, sizeof(metrics),
                                  "flash_delay_us=%lu;flash_width_ns=%lu;flash_width_min_ns=%lu;flash_width_max_ns=%lu;"
                                  "ext_count=%lu;flash_ack_count=%lu;flash_task_wake_count=%lu;flash_task_done_count=%lu;"
-                                 "flash_init_cmd_count=%lu;flash_init_ok_count=%lu;flash_init_task_create_fail_count=%lu;flash_init_timer_create_fail_count=%lu",
+                                 "flash_init_cmd_count=%lu;flash_init_ok_count=%lu;flash_init_task_create_fail_count=%lu;flash_init_timer_create_fail_count=%lu;"
+                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s",
 					             static_cast<unsigned long>(flashDelay),
 					             static_cast<unsigned long>(flashWidthNs),
                                  static_cast<unsigned long>(flashWidthMinNs),
@@ -1833,7 +1855,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
                                  static_cast<unsigned long>(flashInitCmdCount),
                                  static_cast<unsigned long>(flashInitOkCount),
                                  static_cast<unsigned long>(flashInitTaskCreateFailCount),
-                                 static_cast<unsigned long>(flashInitTimerCreateFailCount));
+                                 static_cast<unsigned long>(flashInitTimerCreateFailCount),
+                                 static_cast<unsigned long>(flashSessionArmed),
+                                 static_cast<unsigned long>(flashFaultLatched),
+                                 flashFaultReason);
 					    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
 					  }
 
@@ -1873,15 +1898,19 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         const uint32_t dWake = wakePost - wakePre;
                         const uint32_t dDone = donePost - donePre;
                         const bool taskPresent = (_flashTaskHandle != nullptr);
+                        const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
+                        const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
+                        const char* flashFaultReason = Orchestrator::getFlashFaultReason();
                         const bool pass = (!taskPresent) ||
-                                          (started > 0u) &&
-                                          (timedOut == 0u) &&
-                                          (dWake >= started) &&
-                                          (dDone >= started) &&
-                                          (dAck >= started);
-                        char metrics[224];
+                                          ((started > 0u) &&
+                                           (timedOut == 0u) &&
+                                           (dWake >= started) &&
+                                           (dDone >= started) &&
+                                           (dAck >= started));
+                        char metrics[320];
                         snprintf(metrics, sizeof(metrics),
-                                 "skipped_no_flash_task=%lu;cycles_req=%lu;cycles_started=%lu;cycles_timeout=%lu;ext_delta=%lu;flash_ack_delta=%lu;flash_task_wake_delta=%lu;flash_task_done_delta=%lu",
+                                 "skipped_no_flash_task=%lu;cycles_req=%lu;cycles_started=%lu;cycles_timeout=%lu;ext_delta=%lu;flash_ack_delta=%lu;flash_task_wake_delta=%lu;flash_task_done_delta=%lu;"
+                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s",
                                  static_cast<unsigned long>(taskPresent ? 0u : 1u),
                                  static_cast<unsigned long>(kBurstCycles),
                                  static_cast<unsigned long>(started),
@@ -1889,7 +1918,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
                                  static_cast<unsigned long>(dExt),
                                  static_cast<unsigned long>(dAck),
                                  static_cast<unsigned long>(dWake),
-                                 static_cast<unsigned long>(dDone));
+                                 static_cast<unsigned long>(dDone),
+                                 static_cast<unsigned long>(flashSessionArmed),
+                                 static_cast<unsigned long>(flashFaultLatched),
+                                 flashFaultReason);
                         if (!runOne(1007, "flash_imaging_burst_diag_safe", pass, metrics)) goto selftest_done;
                       }
 	
@@ -3038,6 +3070,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
   cancelCurrent();            // cancel active motion/dispense
 
   // 2) Stop background tasks/services
+  _disarmFlashSession("shutdown", true);
   if (_flashTaskHandle) {
     vTaskDelete(_flashTaskHandle);
     _flashTaskHandle = nullptr;
@@ -3250,6 +3283,91 @@ void Orchestrator::setFlashDelay(uint32_t flashDelay) {
 	_flashDelay = flashDelay;
 }
 
+bool Orchestrator::_isFlashTriggerHigh() const {
+  return HAL_GPIO_ReadPin(_trigPort, _trigPin) == GPIO_PIN_SET;
+}
+
+void Orchestrator::_clearFlashTaskNotifications() {
+  if (!_flashTaskHandle) {
+    return;
+  }
+  (void)xTaskNotifyStateClear(_flashTaskHandle);
+}
+
+void Orchestrator::_logFlashArmed() {
+  Logger::instance()->log("FLASH_ARMED\r\n");
+}
+
+void Orchestrator::_logFlashDisarmed(const char* reason) {
+  Logger::instance()->log("FLASH_DISARMED reason=%s\r\n", flashDisarmReasonToken(reason));
+}
+
+void Orchestrator::_logFlashFault(FlashSafety::FaultReason reason) {
+  Logger::instance()->log("FLASH_FAULT reason=%s\r\n", FlashSafety::faultReasonToken(reason));
+}
+
+void Orchestrator::_latchFlashFault(FlashSafety::FaultReason reason, bool deferLog) {
+  _flashSafety.sessionArmed = false;
+  _flashSafety.awaitingRelease = false;
+  _flashSafety.faultLatched = true;
+  _flashSafety.faultReason = reason;
+  if (deferLog) {
+    _flashFaultLogPending = true;
+    return;
+  }
+  _logFlashFault(reason);
+  _logFlashDisarmed("fault");
+}
+
+void Orchestrator::_emitPendingFlashFaultLogs() {
+  if (!_flashFaultLogPending) {
+    return;
+  }
+  _flashFaultLogPending = false;
+  if (_flashSafety.faultLatched) {
+    _logFlashFault(_flashSafety.faultReason);
+    _logFlashDisarmed("fault");
+  }
+}
+
+bool Orchestrator::_armFlashSession() {
+  _flashAckLow();
+  if (_flashAckTmr) {
+    xTimerStop(_flashAckTmr, 0);
+  }
+  _flashFaultLogPending = false;
+  _clearFlashTaskNotifications();
+  const auto armAction = FlashSafety::arm(_flashSafety, _isFlashTriggerHigh());
+  if (armAction == FlashSafety::ArmAction::FaultLatched) {
+    _logFlashFault(_flashSafety.faultReason);
+    _logFlashDisarmed("fault");
+    return false;
+  }
+  _logFlashArmed();
+  return true;
+}
+
+void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
+  const bool hadState = FlashSafety::isSessionArmed(_flashSafety) ||
+                        FlashSafety::isFaultLatched(_flashSafety) ||
+                        _flashSafety.awaitingRelease;
+  _flashAckLow();
+  if (_flashAckTmr) {
+    xTimerStop(_flashAckTmr, 0);
+  }
+  _clearFlashTaskNotifications();
+  _flashFaultLogPending = false;
+  if (hadState) {
+    _logFlashDisarmed(reason);
+  }
+  _flashSafety.sessionArmed = false;
+  _flashSafety.awaitingRelease = false;
+  if (clearFault) {
+    _flashSafety.faultLatched = false;
+    _flashSafety.faultReason = FlashSafety::FaultReason::None;
+  }
+}
+
 
 // schedule a one-shot callback in N microseconds:
 void Orchestrator::scheduleFlashIn() {
@@ -3272,12 +3390,15 @@ void Orchestrator::scheduleFlashIn() {
 void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
 	if (_instance && GPIO_Pin == _instance->_trigPin && _instance->_flashTaskHandle) {
 		g_exti8_count++;
-
-	    if (_instance->_awaitingRelease) {
-	      // Already handling a HIGH level; ignore spurious repeats
+	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety);
+	    if (triggerAction == FlashSafety::TriggerAction::IgnoredDisarmed ||
+	        triggerAction == FlashSafety::TriggerAction::IgnoredFaultLatched) {
 	      return;
 	    }
-	    _instance->_awaitingRelease = true;
+	    if (triggerAction == FlashSafety::TriggerAction::FaultLatched) {
+	      _instance->_flashFaultLogPending = true;
+	      return;
+	    }
 
 		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 	    BaseType_t woke = pdFALSE;
@@ -3312,6 +3433,10 @@ void Orchestrator::_flashTaskLoop() {
 	uint32_t note = 0;
 	xTaskNotifyWait(/*ulBitsToClearOnEntry*/0, /*ulBitsToClearOnExit*/0xFFFFFFFFu, &note, portMAX_DELAY);
     g_flash_task_wake_count++;
+    _emitPendingFlashFaultLogs();
+    if (!FlashSafety::isSessionArmed(_flashSafety) || FlashSafety::isFaultLatched(_flashSafety)) {
+      continue;
+    }
 
 
     _flashInProgress = true;
@@ -3330,20 +3455,31 @@ void Orchestrator::_flashTaskLoop() {
 //    Logger::instance()->log("-FLASH COMP-\r\n");
 
     // then don’t proceed until the Pi’s line goes back low
-    while (HAL_GPIO_ReadPin(_trigPort, _trigPin) == GPIO_PIN_SET) {
+    const TickType_t waitStart = xTaskGetTickCount();
+    for (;;) {
+      const TickType_t elapsedTicks = xTaskGetTickCount() - waitStart;
+      const uint32_t elapsedMs = static_cast<uint32_t>(
+          (static_cast<uint64_t>(elapsedTicks) * 1000u) / configTICK_RATE_HZ);
+      const auto releaseAction = FlashSafety::onReleasePoll(
+          _flashSafety,
+          _isFlashTriggerHigh(),
+          elapsedMs,
+          kFlashReleaseTimeoutMs);
+      if (releaseAction == FlashSafety::ReleaseAction::Released) {
+        break;
+      }
+      if (releaseAction == FlashSafety::ReleaseAction::FaultLatched) {
+        _logFlashFault(_flashSafety.faultReason);
+        _logFlashDisarmed("fault");
+        break;
+      }
       vTaskDelay(pdMS_TO_TICKS(1));
     }
 
+    _emitPendingFlashFaultLogs();
     Logger::instance()->log("-FLASH COMP-\r\n");
 
-//    // release the latch and drop any queued notifies that arrived while high
-    _awaitingRelease = false;
-
-    // Drain any latched notifications using the SAME bitwise API:
-    uint32_t dummy;
-    while (xTaskNotifyWait(0, 0xFFFFFFFFu, &dummy, 0) == pdTRUE) {
-      // loop clears any pending bits (if your EXTI queued extras)
-    }
+    _clearFlashTaskNotifications();
 
     _flashInProgress = false;
     g_flash_task_done_count++;

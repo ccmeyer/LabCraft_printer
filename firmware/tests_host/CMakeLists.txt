@@ -21,6 +21,7 @@ add_executable(fw_tests
     tests/test_stepper_limit_policy.cpp
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
+    tests/test_flash_safety.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp
@@ -31,6 +32,7 @@ add_executable(fw_tests
     ../Core/Src/PressureRegulatorMath.cpp
     ../Core/Src/StepperProfileMath.cpp
     ../Core/Src/CrashLogCodec.c
+    ../Core/Src/FlashSafety.cpp
 )
 
 target_include_directories(fw_tests PRIVATE

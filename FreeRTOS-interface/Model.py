@@ -6987,6 +6987,17 @@ class Model(QObject):
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
                                                     status_dict.get('Last_completed', self.machine_model.last_completed_command_num))
         self.machine_state_updated.emit()
+
+    def update_flash_session_state(self, flash_state: dict):
+        cam = getattr(self, "droplet_camera_model", None)
+        updater = getattr(cam, "update_flash_session_state", None)
+        if callable(updater):
+            updater(
+                armed=bool((flash_state or {}).get("flash_session_armed", False)),
+                fault_latched=bool((flash_state or {}).get("flash_fault_latched", False)),
+                fault_reason=str((flash_state or {}).get("flash_fault_reason", "") or ""),
+            )
+        self.machine_state_updated.emit()
     
     def load_reactions_from_csv(self,csv_file_path):
         """

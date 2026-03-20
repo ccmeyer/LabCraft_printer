@@ -1067,6 +1067,71 @@ def parse_tlv_payload(payload: bytes) -> dict:
 
     return result
 
+
+def default_flash_safety_state() -> dict:
+    return {
+        "flash_session_armed": False,
+        "flash_fault_latched": False,
+        "flash_fault_reason": "",
+    }
+
+
+def parse_flash_safety_log_event(text: str) -> dict | None:
+    message = str(text or "").strip()
+    if message == "FLASH_ARMED":
+        return {"kind": "armed"}
+
+    m = re.match(r"^FLASH_DISARMED(?:\s+reason=(?P<reason>[a-z_]+))?$", message)
+    if m:
+        return {"kind": "disarmed", "reason": (m.group("reason") or "").strip().lower()}
+
+    m = re.match(r"^FLASH_FAULT(?:\s+reason=(?P<reason>[a-z_]+))?$", message)
+    if m:
+        return {"kind": "fault", "reason": (m.group("reason") or "").strip().lower()}
+
+    return None
+
+
+def apply_flash_safety_log_event(state: dict | None, event: dict | None) -> dict:
+    next_state = dict(default_flash_safety_state())
+    if isinstance(state, dict):
+        next_state.update(
+            {
+                "flash_session_armed": bool(state.get("flash_session_armed", False)),
+                "flash_fault_latched": bool(state.get("flash_fault_latched", False)),
+                "flash_fault_reason": str(state.get("flash_fault_reason", "") or ""),
+            }
+        )
+
+    if not isinstance(event, dict):
+        return next_state
+
+    kind = str(event.get("kind", "")).strip().lower()
+    reason = str(event.get("reason", "") or "").strip().lower()
+
+    if kind == "armed":
+        next_state["flash_session_armed"] = True
+        next_state["flash_fault_latched"] = False
+        next_state["flash_fault_reason"] = ""
+        return next_state
+
+    if kind == "fault":
+        next_state["flash_session_armed"] = False
+        next_state["flash_fault_latched"] = True
+        next_state["flash_fault_reason"] = reason
+        return next_state
+
+    if kind == "disarmed":
+        next_state["flash_session_armed"] = False
+        if reason in ("stop", "shutdown"):
+            next_state["flash_fault_latched"] = False
+            next_state["flash_fault_reason"] = ""
+        elif reason == "fault":
+            next_state["flash_fault_latched"] = True
+        return next_state
+
+    return next_state
+
 class SerialReader(QThread):
     status_received = Signal(dict)
     ackReceived     = Signal(object)  # dict with ack_cmd, seq8, seq32
@@ -1245,6 +1310,7 @@ class LogReader(QThread):
     lineReceived   = Signal(str)     # existing
     statsUpdated   = Signal(object)  # emits a dict with parsed stats (see below)
     messageReceived = Signal(str)
+    flashStateChanged = Signal(object)
     
 
     def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360, serial_factory=serial.Serial):
@@ -1262,6 +1328,7 @@ class LogReader(QThread):
 
         self.message_history = deque(maxlen=2000)  # NEW: keep up to 2000 recent messages
         self._level_re = re.compile(r'^\s*\[(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\]\s*(.*)$', re.I)
+        self._flash_state = default_flash_safety_state()
 
         print(f"LogReader initialized on {log_port} at {baud} baud")
 
@@ -1408,6 +1475,10 @@ class LogReader(QThread):
         entry = {"ts": time.time(), "text": text, "level": level}
         self.message_history.append(entry)
         self.messageReceived.emit(entry["text"])
+        flash_event = parse_flash_safety_log_event(entry["text"])
+        if flash_event is not None:
+            self._flash_state = apply_flash_safety_log_event(self._flash_state, flash_event)
+            self.flashStateChanged.emit(dict(self._flash_state))
 
 class Command:
     """
@@ -1601,6 +1672,7 @@ class Machine(QObject):
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_stats_updated = Signal(object)  # Signal to emit when log stats are updated
     log_message_received = Signal(str)  # Signal to emit when a log message is received
+    flash_state_updated = Signal(object)
 
     def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE, serial_factory=serial.Serial):
         super().__init__()
@@ -1623,6 +1695,7 @@ class Machine(QObject):
         self.execution_interval_ms = 90
         self.sent_command = None
         self._last_reset_report = None
+        self._flash_state = default_flash_safety_state()
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
@@ -1858,6 +1931,8 @@ class Machine(QObject):
 
         self.stop_reader_thread()
         self.stop_log_thread()
+        self._flash_state = default_flash_safety_state()
+        self.flash_state_updated.emit(dict(self._flash_state))
 
         try: self._gripper_idle_timer.stop()
         except Exception: pass
@@ -2018,6 +2093,7 @@ class Machine(QObject):
             self.log_reader.lineReceived.connect(self.on_log_line_received)
             self.log_reader.statsUpdated.connect(self.on_stats_updated)
             self.log_reader.messageReceived.connect(self.on_log_message_received)
+            self.log_reader.flashStateChanged.connect(self.on_flash_state_changed)
             self.log_reader.start()
         except Exception as e:
             print(f"Could not start log thread: {e}")
@@ -2028,6 +2104,19 @@ class Machine(QObject):
 
     def on_log_message_received(self, message: str):
         self.log_message_received.emit(message)
+
+    def on_flash_state_changed(self, state: dict):
+        next_state = default_flash_safety_state()
+        if isinstance(state, dict):
+            next_state.update(
+                {
+                    "flash_session_armed": bool(state.get("flash_session_armed", False)),
+                    "flash_fault_latched": bool(state.get("flash_fault_latched", False)),
+                    "flash_fault_reason": str(state.get("flash_fault_reason", "") or ""),
+                }
+            )
+        self._flash_state = next_state
+        self.flash_state_updated.emit(dict(self._flash_state))
         
     def stop_log_thread(self):
         """

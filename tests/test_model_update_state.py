@@ -73,3 +73,30 @@ def test_model_update_state_applies_regulator_activity_flags(qapp):
     assert model.machine_model.regulating_print_pressure is True
     assert model.machine_model.regulating_refuel_pressure is False
     assert emissions == [True]
+
+
+def test_model_update_flash_session_state_updates_droplet_camera_and_emits(qapp):
+    model = Model.__new__(Model)
+    captured = []
+    model.droplet_camera_model = SimpleNamespace(
+        update_flash_session_state=lambda **kwargs: captured.append(kwargs),
+    )
+    emissions = []
+    model.machine_state_updated = SimpleNamespace(emit=lambda: emissions.append(True))
+
+    model.update_flash_session_state(
+        {
+            "flash_session_armed": True,
+            "flash_fault_latched": True,
+            "flash_fault_reason": "line_stuck_high",
+        }
+    )
+
+    assert captured == [
+        {
+            "armed": True,
+            "fault_latched": True,
+            "fault_reason": "line_stuck_high",
+        }
+    ]
+    assert emissions == [True]

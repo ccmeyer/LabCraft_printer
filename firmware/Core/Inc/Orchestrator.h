@@ -10,6 +10,7 @@
 #include "Stepper.h"
 #include "PressureRegulator.h"
 #include "BoardConfig.h"
+#include "FlashSafety.h"
 
 #include <cstdint>
 #include <cstring>
@@ -229,6 +230,9 @@ public:
   static uint32_t getFlashInitTaskCreateFailCount() { return instance()->g_flash_init_task_create_fail_count; }
   static uint32_t getFlashInitTimerCreateFailCount() { return instance()->g_flash_init_timer_create_fail_count; }
   static uint16_t getImagingDroplets()  { return instance()->_imagingDroplets; }
+  static bool isFlashSessionArmed()     { return FlashSafety::isSessionArmed(instance()->_flashSafety); }
+  static bool isFlashFaultLatched()     { return FlashSafety::isFaultLatched(instance()->_flashSafety); }
+  static const char* getFlashFaultReason() { return FlashSafety::faultReasonToken(instance()->_flashSafety.faultReason); }
   void noteFlashAckFromISR()            { g_flash_ack_count++; }
 
 #else
@@ -249,6 +253,9 @@ public:
   static uint32_t getFlashInitTaskCreateFailCount() { return 0; }
   static uint32_t getFlashInitTimerCreateFailCount() { return 0; }
   static uint16_t getImagingDroplets()  { return 0; }
+  static bool isFlashSessionArmed()     { return false; }
+  static bool isFlashFaultLatched()     { return false; }
+  static const char* getFlashFaultReason() { return "none"; }
 
 #endif
 
@@ -299,11 +306,13 @@ private:
   uint16_t			 _imagingFreq;
 
   static constexpr uint32_t kFlashAckMs = 5; // how long to hold the "flash fired" pin high
+  static constexpr uint32_t kFlashReleaseTimeoutMs = 20;
 
   // GPIO that reports "flash fired" to the Pi
   GPIO_TypeDef*    _flashAckPort = GPIOE;
   uint16_t         _flashAckPin  = GPIO_PIN_12;
-  volatile bool _awaitingRelease = false;   // true after 1st EXTI until line goes LOW
+  FlashSafety::State _flashSafety{};
+  volatile bool _flashFaultLogPending = false;
   volatile uint32_t g_exti8_count = 0;
   volatile uint32_t g_flash_ack_count = 0;
   volatile uint32_t g_flash_task_wake_count = 0;
@@ -313,6 +322,15 @@ private:
   volatile uint32_t g_flash_init_task_create_fail_count = 0;
   volatile uint32_t g_flash_init_timer_create_fail_count = 0;
 
+  bool _isFlashTriggerHigh() const;
+  void _clearFlashTaskNotifications();
+  bool _armFlashSession();
+  void _disarmFlashSession(const char* reason, bool clearFault);
+  void _latchFlashFault(FlashSafety::FaultReason reason, bool deferLog);
+  void _emitPendingFlashFaultLogs();
+  void _logFlashArmed();
+  void _logFlashDisarmed(const char* reason);
+  void _logFlashFault(FlashSafety::FaultReason reason);
 
   static void _flashAckTimerCb(TimerHandle_t);
 
