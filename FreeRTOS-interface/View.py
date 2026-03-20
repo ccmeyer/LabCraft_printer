@@ -24,6 +24,7 @@ import sys
 import random
 import time
 import shutil
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 import cv2
 from utilities import ShortcutManager
@@ -1415,7 +1416,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.bottom_layout.addWidget(self.pause_machine_button)
 
         self.reagent_selection = QComboBox()
-        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names_formated())
+        self._populate_reagent_selection()
         self.reagent_selection.currentIndexChanged.connect(self.update_well_colors)
         self.bottom_layout.addWidget(self.reagent_selection)
 
@@ -1478,12 +1479,24 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if hasattr(self, "plate_format_value_label"):
             self.plate_format_value_label.setText(f"{name} ({rows}x{cols})")
 
+    def _populate_reagent_selection(self):
+        self.reagent_selection.clear()
+        for stock_id in self.model.stock_solutions.get_stock_solution_names():
+            stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
+            self.reagent_selection.addItem(stock_formatted, userData=stock_id)
+
     def gripper_update_handler(self):
         """Handle when the gripper picks up a new printer head."""
         if self.model.rack_model.gripper_printer_head is not None:
             printer_head = self.model.rack_model.gripper_printer_head
-            stock_name = printer_head.get_stock_name(new_line=False)
-            self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_name))
+            stock_id = printer_head.get_stock_id()
+            find_data = getattr(self.reagent_selection, "findData", None)
+            if callable(find_data):
+                idx = find_data(stock_id)
+            else:
+                stock_name = printer_head.get_display_stock_name(new_line=False)
+                idx = self.reagent_selection.findText(stock_name)
+            self.reagent_selection.setCurrentIndex(idx)
             self.update_well_colors()            
     
     def update_well_colors(self, *_args):
@@ -1494,14 +1507,23 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if not self.model.reaction_collection.is_empty():
             # Get the current reagent selection
             stock_index = self.reagent_selection.currentIndex()
-            stock_formatted = self.reagent_selection.itemText(stock_index)
-            stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
+            item_data = getattr(self.reagent_selection, "itemData", None)
+            if callable(item_data):
+                stock_id = item_data(stock_index)
+            else:
+                stock_formatted = self.reagent_selection.itemText(stock_index)
+                stock_id = self.model.stock_solutions.get_stock_id_from_formatted(stock_formatted)
             #print(f"Stock ID: {stock_id}, Stock Index: {stock_index}, Stock Formatted: {stock_formatted}")
             if stock_id == None:
                 print('No reagent selected')
                 stock_id = self.model.stock_solutions.get_stock_solution_names()[0]
-                stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
-                self.reagent_selection.setCurrentIndex(self.reagent_selection.findText(stock_formatted))
+                find_data = getattr(self.reagent_selection, "findData", None)
+                if callable(find_data):
+                    idx = find_data(stock_id)
+                else:
+                    stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
+                    idx = self.reagent_selection.findText(stock_formatted)
+                self.reagent_selection.setCurrentIndex(idx)
                 #print(f'---Using default reagent: {stock_id}---')
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
             printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
@@ -1567,8 +1589,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
     def on_experiment_loaded(self):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
-        self.reagent_selection.clear()
-        self.reagent_selection.addItems(self.model.stock_solutions.get_stock_solution_names_formated())
+        self._populate_reagent_selection()
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
@@ -3568,7 +3589,7 @@ class RackBox(QGroupBox):
                 printer_head_manager = self.model.printer_head_manager
                 # Check if the selected printer head is unassigned
                 for printer_head in printer_head_manager.get_unassigned_printer_heads():
-                    if selected_text == f"{printer_head.get_stock_name()}":
+                    if selected_text == printer_head.get_display_stock_name():
                         self.controller.swap_printer_head(slot_number, printer_head)
                         self.update_all_slots()  # Update all dropdowns after swapping
                         self.update_unassigned_printer_heads()  # Update the table to reflect the change
@@ -3577,7 +3598,7 @@ class RackBox(QGroupBox):
                 # Check if the selected printer head is in another slot
                 for i, slot in enumerate(self.rack_model.slots):
                     if i != slot_number and slot.printer_head:
-                        slot_text = f"Slot {i+1}: {slot.printer_head.get_stock_name()}"
+                        slot_text = f"Slot {i+1}: {slot.printer_head.get_display_stock_name()}"
                         if selected_text == slot_text:
                             self.controller.swap_printer_heads_between_slots(slot_number, i)
                             self.update_all_slots()  # Update all dropdowns after swapping
@@ -3604,7 +3625,7 @@ class RackBox(QGroupBox):
                 complete = printer_head.check_complete(self.model.well_plate)
             else:
                 complete = False
-            label.setText(f"{printer_head.get_stock_name(new_line=True)}")
+            label.setText(printer_head.get_display_stock_name(new_line=True))
             color = QtGui.QColor(printer_head.color)
             color.setAlphaF(0.7)
             rgba_color = f"rgba({color.red()},{color.green()},{color.blue()},{color.alpha()})"
@@ -3662,12 +3683,12 @@ class RackBox(QGroupBox):
 
         # Add all unassigned printer heads
         for printer_head in self.model.printer_head_manager.get_unassigned_printer_heads():
-            dropdown.addItem(printer_head.get_stock_name())
+            dropdown.addItem(printer_head.get_display_stock_name())
 
         # Add all printer heads in other slots
         for i, slot in enumerate(self.rack_model.get_all_slots()):
             if i != slot_number and slot.printer_head:
-                dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_stock_name()}")
+                dropdown.addItem(f"Slot {i+1}: {slot.printer_head.get_display_stock_name()}")
         
         dropdown.blockSignals(False)
 
@@ -3675,7 +3696,7 @@ class RackBox(QGroupBox):
         """Update the UI when the gripper state changes."""
         if self.rack_model.gripper_printer_head:
             printer_head = self.rack_model.gripper_printer_head
-            self.gripper_label.setText(f"{printer_head.get_stock_name(new_line=True)}")
+            self.gripper_label.setText(printer_head.get_display_stock_name(new_line=True))
             self.gripper_label.setStyleSheet(f"background-color: {printer_head.color}; color: white;")
             volume = printer_head.get_current_volume()
             if volume is None:
@@ -3693,8 +3714,6 @@ class RackBox(QGroupBox):
         self.unassigned_table.setRowCount(len(unassigned_printer_heads))
 
         for row, printer_head in enumerate(unassigned_printer_heads):
-            reagent_name = printer_head.get_reagent_name()
-            concencentration = printer_head.get_stock_concentration()
             if not printer_head.is_calibration_chip():
                 complete = printer_head.check_complete(self.model.well_plate)
             else:
@@ -3703,7 +3722,7 @@ class RackBox(QGroupBox):
             color = QtGui.QColor(color)
             color.setAlphaF(0.5)
 
-            text_name = f"{reagent_name} - {concencentration} M"
+            text_name = printer_head.get_display_stock_name()
             if printer_head.is_calibration_chip():
                 text_name = f"Calibration"
             reagent_item = QTableWidgetItem(text_name)
@@ -3954,13 +3973,13 @@ class ExperimentDesignDialog(QDialog):
     COL_REAGENT      = 1
     COL_GROUP        = 2
     COL_HEAD_TYPE    = 3
-    COL_PRIOR        = 4
-    COL_STARTING     = 5
-    COL_TARGETS      = 6
-    COL_UNITS        = 7
-    COL_SET_STOCK    = 8
-    COL_MAX_STOCK    = 9
-    COL_DROPLET      = 10
+    COL_STARTING     = 4
+    COL_TARGETS      = 5
+    COL_UNITS        = 6
+    COL_SET_STOCK    = 7
+    COL_MAX_STOCK    = 8
+    COL_DROPLET      = 9
+    COL_PRIOR        = 10
     COL_DELETE       = 11
 
     def __init__(self, model: ExperimentModel, main_window):
@@ -4014,26 +4033,47 @@ class ExperimentDesignDialog(QDialog):
         self.root.addLayout(right, stretch=3) # make right wider
 
         # ---------- Reagents table (top-right) ----------
-        self.reagent_table = QTableWidget(0, 12, self)
+        reagent_table_box = QtWidgets.QWidget(self)
+        reagent_table_layout = QHBoxLayout(reagent_table_box)
+        reagent_table_layout.setContentsMargins(0, 0, 0, 0)
+        reagent_table_layout.setSpacing(0)
+
+        self.reagent_name_table = QTableWidget(0, 1, self)
+        self.reagent_name_table.setHorizontalHeaderLabels(["Stock / Label"])
+        self.reagent_name_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.reagent_name_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.reagent_name_table.setColumnWidth(0, 180)
+        self.reagent_name_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.reagent_name_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.reagent_name_table.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.reagent_name_table.verticalHeader().setVisible(False)
+        reagent_table_layout.addWidget(self.reagent_name_table, stretch=0)
+
+        self.reagent_table = QTableWidget(0, 11, self)
         self.reagent_table.setHorizontalHeaderLabels([
-            "Stock / Label", "Reagent", "Group", "Head Type", "Prior", "Starting",
-            "Targets", "Units", "Fixed Stock Conc", "Max Stock Conc", "Droplet Vol (nL)", "Delete"
+            "Reagent", "Group", "Head Type", "Starting", "Targets", "Units",
+            "Fixed Stock Conc", "Max Stock Conc", "Droplet Vol (nL)", "Prior", "Delete"
         ])
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.reagent_table.setColumnWidth(0, 180)   # Stock / Label
-        self.reagent_table.setColumnWidth(1, 170)   # Reagent
-        self.reagent_table.setColumnWidth(2, 140)   # Group
-        self.reagent_table.setColumnWidth(3, 150)   # Head type
-        self.reagent_table.setColumnWidth(4, 130)   # Prior
-        self.reagent_table.setColumnWidth(5, 90)    # Starting
-        self.reagent_table.setColumnWidth(6, 220)   # Targets
-        self.reagent_table.setColumnWidth(7, 90)    # Units
-        self.reagent_table.setColumnWidth(8, 120)   # Fixed stock conc
-        self.reagent_table.setColumnWidth(9, 120)   # Max stock conc
-        self.reagent_table.setColumnWidth(10, 95)   # Droplet vol
-        self.reagent_table.setColumnWidth(11, 90)   # Delete
-        right.addWidget(self.reagent_table)
+        self.reagent_table.setColumnWidth(0, 170)   # Reagent
+        self.reagent_table.setColumnWidth(1, 70)    # Group
+        self.reagent_table.setColumnWidth(2, 75)    # Head type
+        self.reagent_table.setColumnWidth(3, 90)    # Starting
+        self.reagent_table.setColumnWidth(4, 220)   # Targets
+        self.reagent_table.setColumnWidth(5, 90)    # Units
+        self.reagent_table.setColumnWidth(6, 120)   # Fixed stock conc
+        self.reagent_table.setColumnWidth(7, 120)   # Max stock conc
+        self.reagent_table.setColumnWidth(8, 95)    # Droplet vol
+        self.reagent_table.setColumnWidth(9, 130)   # Prior
+        self.reagent_table.setColumnWidth(10, 90)   # Delete
+        reagent_table_layout.addWidget(self.reagent_table, stretch=1)
+        right.addWidget(reagent_table_box)
+        self.reagent_table.verticalScrollBar().valueChanged.connect(self._sync_frozen_reagent_scroll)
+        self.reagent_name_table.verticalScrollBar().valueChanged.connect(self._sync_main_reagent_scroll)
+        self.reagent_table.verticalHeader().sectionResized.connect(self._sync_frozen_reagent_row_height)
+        self.reagent_name_table.verticalHeader().sectionResized.connect(self._sync_main_reagent_row_height)
+        self.reagent_name_table.horizontalHeader().sectionResized.connect(lambda *_: self._sync_reagent_tables_geometry())
 
         # ---------- Stock table (bottom-right) ----------
         # Add "Max / Rxn (nL)" column
@@ -4243,6 +4283,7 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_stock_table()
         self._update_summary_labels(initial=True)
         self._refresh_all_lock_states()
+        self._sync_reagent_tables_geometry()
         self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
             self._refresh_all_lock_states
         )
@@ -4251,6 +4292,106 @@ class ExperimentDesignDialog(QDialog):
     # -----------------------------
     # Table row utilities
     # -----------------------------
+
+    def _has_frozen_reagent_column(self) -> bool:
+        return getattr(self, "reagent_name_table", None) is not None
+
+    def _reagent_table_and_column(self, logical_col: int):
+        if self._has_frozen_reagent_column():
+            if logical_col == self.COL_STOCK_LABEL:
+                return self.reagent_name_table, 0
+            return self.reagent_table, logical_col - 1
+        return self.reagent_table, logical_col
+
+    def _reagent_cell_widget(self, row: int, logical_col: int):
+        table, col = self._reagent_table_and_column(logical_col)
+        if table is None or row < 0 or row >= table.rowCount():
+            return None
+        return table.cellWidget(row, col)
+
+    def _set_reagent_cell_widget(self, row: int, logical_col: int, widget):
+        table, col = self._reagent_table_and_column(logical_col)
+        if table is not None:
+            table.setCellWidget(row, col, widget)
+
+    def _reagent_column_width(self, logical_col: int) -> int:
+        table, col = self._reagent_table_and_column(logical_col)
+        return 0 if table is None else int(table.columnWidth(col))
+
+    def _reagent_row_count(self) -> int:
+        table = self.reagent_name_table if self._has_frozen_reagent_column() else getattr(self, "reagent_table", None)
+        return 0 if table is None else table.rowCount()
+
+    def _reagent_insert_row(self, row: int):
+        if self._has_frozen_reagent_column():
+            self.reagent_name_table.insertRow(row)
+        if getattr(self, "reagent_table", None) is not None:
+            self.reagent_table.insertRow(row)
+
+    def _reagent_remove_row(self, row: int):
+        if self._has_frozen_reagent_column():
+            self.reagent_name_table.removeRow(row)
+        if getattr(self, "reagent_table", None) is not None:
+            self.reagent_table.removeRow(row)
+
+    def _clear_reagent_rows(self):
+        if self._has_frozen_reagent_column():
+            self.reagent_name_table.setRowCount(0)
+        if getattr(self, "reagent_table", None) is not None:
+            self.reagent_table.setRowCount(0)
+
+    def _iter_reagent_widgets(self):
+        for row in range(self._reagent_row_count()):
+            for logical_col in range(self.COL_DELETE + 1):
+                widget = self._reagent_cell_widget(row, logical_col)
+                if widget is not None:
+                    yield row, logical_col, widget
+
+    def _sync_reagent_tables_geometry(self):
+        if not self._has_frozen_reagent_column():
+            return
+        header_height = self.reagent_table.horizontalHeader().height()
+        self.reagent_name_table.horizontalHeader().setFixedHeight(header_height)
+        frozen_width = self.reagent_name_table.columnWidth(0) + (self.reagent_name_table.frameWidth() * 2)
+        self.reagent_name_table.setFixedWidth(frozen_width)
+        self._sync_all_reagent_row_heights()
+
+    def _sync_reagent_row_height(self, row: int):
+        if not self._has_frozen_reagent_column():
+            return
+        if row < 0 or row >= self._reagent_row_count():
+            return
+        height = max(self.reagent_table.rowHeight(row), self.reagent_name_table.rowHeight(row))
+        self.reagent_table.setRowHeight(row, height)
+        self.reagent_name_table.setRowHeight(row, height)
+
+    def _sync_all_reagent_row_heights(self):
+        for row in range(self._reagent_row_count()):
+            self._sync_reagent_row_height(row)
+
+    def _sync_frozen_reagent_scroll(self, value: int):
+        if not self._has_frozen_reagent_column():
+            return
+        if self.reagent_name_table.verticalScrollBar().value() != value:
+            self.reagent_name_table.verticalScrollBar().setValue(value)
+
+    def _sync_main_reagent_scroll(self, value: int):
+        if not self._has_frozen_reagent_column():
+            return
+        if self.reagent_table.verticalScrollBar().value() != value:
+            self.reagent_table.verticalScrollBar().setValue(value)
+
+    def _sync_frozen_reagent_row_height(self, row: int, _old_size: int, new_size: int):
+        if not self._has_frozen_reagent_column():
+            return
+        if self.reagent_name_table.rowHeight(row) != new_size:
+            self.reagent_name_table.setRowHeight(row, new_size)
+
+    def _sync_main_reagent_row_height(self, row: int, _old_size: int, new_size: int):
+        if not self._has_frozen_reagent_column():
+            return
+        if self.reagent_table.rowHeight(row) != new_size:
+            self.reagent_table.setRowHeight(row, new_size)
 
     def _bridge_get_runtime_model(self):
         return getattr(self, "runtime_model", None) or getattr(getattr(self, "main_window", None), "model", None)
@@ -4304,9 +4445,9 @@ class ExperimentDesignDialog(QDialog):
     def _find_row_for_widget(self, widget):
         if widget is None or getattr(self, "reagent_table", None) is None:
             return -1
-        for row in range(self.reagent_table.rowCount()):
-            for col in range(self.reagent_table.columnCount()):
-                if self.reagent_table.cellWidget(row, col) is widget:
+        for row in range(self._reagent_row_count()):
+            for logical_col in range(self.COL_DELETE + 1):
+                if self._reagent_cell_widget(row, logical_col) is widget:
                     return row
         return -1
 
@@ -4443,8 +4584,8 @@ class ExperimentDesignDialog(QDialog):
         return label, color, " | ".join(details)
 
     def _resolve_reagent_selection_from_row(self, row: int):
-        name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
-        reagent_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_REAGENT)
+        name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+        reagent_combo: QComboBox = self._reagent_cell_widget(row, self.COL_REAGENT)
         stock_label = (name_edit.text() or "").strip() if name_edit is not None else ""
         reagent_payload = self._combo_current_payload(reagent_combo)
         reagent_text = self._combo_current_text(reagent_combo)
@@ -4461,12 +4602,12 @@ class ExperimentDesignDialog(QDialog):
         }
 
     def _refresh_prior_availability_for_row(self, row: int):
-        if row < 0 or row >= self.reagent_table.rowCount():
+        if row < 0 or row >= self._reagent_row_count():
             return None
         runtime_model = self._bridge_get_runtime_model()
-        prior_label: QLabel = self.reagent_table.cellWidget(row, self.COL_PRIOR)
-        head_type_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_HEAD_TYPE)
-        dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, self.COL_DROPLET)
+        prior_label: QLabel = self._reagent_cell_widget(row, self.COL_PRIOR)
+        head_type_combo: QComboBox = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
+        dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
         if prior_label is None:
             return None
 
@@ -4502,13 +4643,13 @@ class ExperimentDesignDialog(QDialog):
         return preview
 
     def _refresh_all_prior_availability(self):
-        for row in range(self.reagent_table.rowCount()):
+        for row in range(self._reagent_row_count()):
             self._refresh_prior_availability_for_row(row)
 
     def _on_reagent_identity_changed(self, *_args):
         row = self._find_row_for_widget(self.sender())
         if row >= 0:
-            name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
+            name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
             resolved = self._resolve_reagent_selection_from_row(row)
             suggested_label = (resolved.get("resolved") or {}).get("display_name")
             if name_edit is not None and self._is_placeholder_stock_label(name_edit.text()) and suggested_label:
@@ -4556,8 +4697,8 @@ class ExperimentDesignDialog(QDialog):
 
         # add to set and to all combos
         self.choice_groups.add(name)
-        for row in range(self.reagent_table.rowCount()):
-            c: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
+        for row in range(self._reagent_row_count()):
+            c: QComboBox = self._reagent_cell_widget(row, self.COL_GROUP)
             if c.findText(name) < 0:
                 c.blockSignals(True)
                 c.insertItem(c.count() - 1, name)
@@ -4591,13 +4732,13 @@ class ExperimentDesignDialog(QDialog):
                         reagent_display_name: str | None = None,
                         intended_head_type_id: str | None = None,
                         intended_head_type_display_name: str | None = None):
-        row = self.reagent_table.rowCount()
-        self.reagent_table.insertRow(row)
+        row = self._reagent_row_count()
+        self._reagent_insert_row(row)
 
         # 0 Stock / Label
         name_edit = QLineEdit(name or f"reagent-{row+1}")
         name_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_STOCK_LABEL, name_edit)
+        self._set_reagent_cell_widget(row, self.COL_STOCK_LABEL, name_edit)
 
         # 1 Reagent identity
         reagent_combo = self._build_known_reagent_selector(
@@ -4605,7 +4746,7 @@ class ExperimentDesignDialog(QDialog):
             reagent_display_name=reagent_display_name,
             reagent_id=reagent_id,
         )
-        self.reagent_table.setCellWidget(row, self.COL_REAGENT, reagent_combo)
+        self._set_reagent_cell_widget(row, self.COL_REAGENT, reagent_combo)
 
         # 2 Group
         group_combo = self._make_group_combo()
@@ -4614,79 +4755,82 @@ class ExperimentDesignDialog(QDialog):
                                 else self.GROUP_ADDITIVE)
         )
         group_combo.activated.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_GROUP, group_combo)
+        self._set_reagent_cell_widget(row, self.COL_GROUP, group_combo)
 
         # 3 Intended head type
         head_type_combo = self._build_head_type_selector(head_type_id=intended_head_type_id)
         if intended_head_type_display_name and head_type_combo.currentIndex() <= 0:
             head_type_combo.setToolTip(str(intended_head_type_display_name))
-        self.reagent_table.setCellWidget(row, self.COL_HEAD_TYPE, head_type_combo)
+        self._set_reagent_cell_widget(row, self.COL_HEAD_TYPE, head_type_combo)
 
-        # 4 Prior availability
-        prior_label = QLabel("Head type not set")
-        prior_label.setWordWrap(True)
-        prior_label.setStyleSheet("color:#996515;")
-        self.reagent_table.setCellWidget(row, self.COL_PRIOR, prior_label)
-
-        # 5 Starting concentration
+        # 4 Starting concentration
         start_spin = QDoubleSpinBox()
         start_spin.setDecimals(4)
         start_spin.setRange(0.0, 1e12)
         start_spin.setSingleStep(0.1)
         start_spin.setValue(float(starting_conc or 0.0))
         start_spin.valueChanged.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_STARTING, start_spin)
+        self._set_reagent_cell_widget(row, self.COL_STARTING, start_spin)
 
-        # 6 Targets
+        # 5 Targets
         tgt_edit = QLineEdit(targets)
         tgt_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_TARGETS, tgt_edit)
+        self._set_reagent_cell_widget(row, self.COL_TARGETS, tgt_edit)
 
-        # 7 Units
+        # 6 Units
         units_edit = QLineEdit(units)
         units_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_UNITS, units_edit)
+        self._set_reagent_cell_widget(row, self.COL_UNITS, units_edit)
 
-        # 8 Fixed Stock Conc (blank => optimize)
+        # 7 Fixed Stock Conc (blank => optimize)
         stock_edit = QLineEdit("" if forced_stock_conc in (None, 0.0) else str(forced_stock_conc))
         stock_edit.setPlaceholderText("auto")
         stock_edit.setToolTip(self._default_fixed_stock_tooltip())
         stock_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_SET_STOCK, stock_edit)
+        self._set_reagent_cell_widget(row, self.COL_SET_STOCK, stock_edit)
 
-        # 9 Max Stock Conc (blank => unbounded)
+        # 8 Max Stock Conc (blank => unbounded)
         max_stock_edit = QLineEdit("" if max_stock_conc in (None, 0.0) else str(max_stock_conc))
         max_stock_edit.setPlaceholderText("unbounded")
         max_stock_edit.setToolTip(self._default_max_stock_tooltip())
         max_stock_edit.textEdited.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_MAX_STOCK, max_stock_edit)
+        self._set_reagent_cell_widget(row, self.COL_MAX_STOCK, max_stock_edit)
 
-        # 10 Droplet vol
+        # 9 Droplet vol
         dv_spin = QDoubleSpinBox()
         dv_spin.setDecimals(1)
         dv_spin.setRange(0.1, 100_000.0)
         dv_spin.setSingleStep(1.0)
         dv_spin.setValue(float(droplet_nL))
         dv_spin.valueChanged.connect(self._schedule_auto_update)
-        self.reagent_table.setCellWidget(row, self.COL_DROPLET, dv_spin)
+        self._set_reagent_cell_widget(row, self.COL_DROPLET, dv_spin)
+
+        # 10 Prior availability
+        prior_label = QLabel("Head type not set")
+        prior_label.setWordWrap(True)
+        prior_label.setStyleSheet("color:#996515;")
+        self._set_reagent_cell_widget(row, self.COL_PRIOR, prior_label)
 
         # 11 Delete
         del_btn = QPushButton("Delete")
         del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
-        self.reagent_table.setCellWidget(row, self.COL_DELETE, del_btn)
+        self._set_reagent_cell_widget(row, self.COL_DELETE, del_btn)
 
+        self._sync_reagent_row_height(row)
         self._refresh_prior_availability_for_row(row)
+        self._sync_reagent_tables_geometry()
         self._schedule_auto_update()
 
     def _delete_row(self, r: int):
-        self.reagent_table.removeRow(r)
-        for i in range(self.reagent_table.rowCount()):
-            btn: QPushButton = self.reagent_table.cellWidget(i, self.COL_DELETE)
+        self._reagent_remove_row(r)
+        for i in range(self._reagent_row_count()):
+            btn: QPushButton = self._reagent_cell_widget(i, self.COL_DELETE)
             try:
                 btn.clicked.disconnect()
             except Exception:
                 pass
             btn.clicked.connect(lambda _, rr=i: self._delete_row(rr))
+        self._sync_reagent_tables_geometry()
         self._refresh_all_prior_availability()
         self._schedule_auto_update()
 
@@ -4699,7 +4843,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
-        self.reagent_table.setRowCount(0)
+        self._clear_reagent_rows()
         # Additives
         for f in getattr(self.model, "factors", []):
             if f.kind == "additive":
@@ -4737,6 +4881,7 @@ class ExperimentDesignDialog(QDialog):
                         intended_head_type_id=getattr(o, "intended_head_type_id", None),
                         intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
                     )
+        self._sync_reagent_tables_geometry()
         self._refresh_all_prior_availability()
     # -----------------------------
     # Uploaded design mode toggling
@@ -5068,6 +5213,123 @@ class ExperimentDesignDialog(QDialog):
         self._apply_manual_assignment_lock_state()
         self._apply_gripper_edit_lock_state()
 
+    def _apply_uploaded_design_mode_to_ui(self, active: bool):
+        self._uploaded_design_active = bool(active)
+
+        self.add_reagent_btn.setEnabled(not active)
+        self.subset_chk.setEnabled(not active)
+        self.reduction_spin.setEnabled(not active and self.subset_chk.isChecked())
+
+        lock_cols = {
+            self.COL_STOCK_LABEL,
+            self.COL_GROUP,
+            self.COL_TARGETS,
+            self.COL_UNITS,
+            self.COL_DELETE,
+        }
+
+        for _row, col, w in self._iter_reagent_widgets():
+            if col in lock_cols:
+                if isinstance(w, QLineEdit):
+                    w.setReadOnly(active)
+                elif isinstance(w, QComboBox):
+                    w.setEnabled(not active)
+                elif isinstance(w, QPushButton):
+                    w.setEnabled(not active)
+                else:
+                    w.setEnabled(not active)
+            else:
+                if isinstance(w, QLineEdit):
+                    w.setReadOnly(False)
+                else:
+                    w.setEnabled(True)
+
+    def _apply_gripper_edit_lock_state(self):
+        self._editing_locked_by_gripper = self._is_gripper_loaded()
+        locked = self._editing_locked_by_gripper
+
+        mutating_controls = [
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "run_btn",
+            "new_btn",
+            "save_btn",
+            "load_btn",
+            "finish_btn",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "fill_name_edit",
+            "fill_dv_spin",
+            "allow_two_chk",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+            "plate_format_combo",
+        ]
+        for attr_name in mutating_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None and locked:
+                widget.setEnabled(False)
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for _row, _col, w in self._iter_reagent_widgets():
+                if isinstance(w, QLineEdit):
+                    if locked:
+                        w.setReadOnly(True)
+                elif locked:
+                    w.setEnabled(False)
+
+        if locked:
+            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+        elif hasattr(self, "status_lbl") and self.status_lbl is not None:
+            if self.status_lbl.text() == "Design is view-only while a printer head is loaded in the gripper.":
+                self._set_status("")
+
+    def _apply_default_edit_state(self):
+        baseline_controls = [
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "run_btn",
+            "new_btn",
+            "save_btn",
+            "load_btn",
+            "finish_btn",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "fill_name_edit",
+            "fill_dv_spin",
+            "allow_two_chk",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+        ]
+        for attr_name in baseline_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(True)
+
+        if hasattr(self, "random_seed_spin") and hasattr(self, "randomize_chk"):
+            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
+        if hasattr(self, "reduction_spin") and hasattr(self, "subset_chk"):
+            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for _row, _col, w in self._iter_reagent_widgets():
+                if isinstance(w, QLineEdit):
+                    w.setReadOnly(False)
+                else:
+                    w.setEnabled(True)
+
     # -----------------------------
     # Model rebuild & metadata
     # -----------------------------
@@ -5082,8 +5344,8 @@ class ExperimentDesignDialog(QDialog):
             return None
 
     def _validation_key_for_row(self, row: int) -> tuple[str, Optional[str]]:
-        name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
-        group_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
+        name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+        group_combo: QComboBox = self._reagent_cell_widget(row, self.COL_GROUP)
         reagent_name = (name_edit.text() or "").strip() if name_edit is not None else ""
         group_name = group_combo.currentText() if group_combo is not None else self.GROUP_ADDITIVE
         if not reagent_name:
@@ -5134,10 +5396,10 @@ class ExperimentDesignDialog(QDialog):
 
     def _collect_raw_stock_input_issues(self) -> Dict[tuple[str, Optional[str]], List[Dict[str, Any]]]:
         issues: Dict[tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
-        for row in range(self.reagent_table.rowCount()):
+        for row in range(self._reagent_row_count()):
             key = self._validation_key_for_row(row)
-            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
-            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
+            stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_MAX_STOCK)
             label = self._key_label(key) if not key[0].startswith("__row_") else f"Row {row + 1}"
 
             for field_name, widget in (("fixed_stock", stock_edit), ("max_stock", max_stock_edit)):
@@ -5215,14 +5477,14 @@ class ExperimentDesignDialog(QDialog):
         widget.setToolTip("\n".join(tooltip_lines) if tooltip_lines else default_tooltip)
 
     def _apply_stock_input_issue_state(self, issue_map: Mapping[tuple[str, Optional[str]], Sequence[Mapping[str, Any]]]):
-        for row in range(self.reagent_table.rowCount()):
+        for row in range(self._reagent_row_count()):
             key = self._validation_key_for_row(row)
             key_issues = list((issue_map or {}).get(key, []))
             stock_issues = [issue for issue in key_issues if str(issue.get("field")) == "fixed_stock"]
             max_issues = [issue for issue in key_issues if str(issue.get("field")) == "max_stock"]
 
-            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
-            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
+            stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_MAX_STOCK)
             self._style_stock_input_widget(
                 stock_edit,
                 issues=stock_issues,
@@ -5235,8 +5497,8 @@ class ExperimentDesignDialog(QDialog):
             )
 
     def _clear_target_color_state(self):
-        for row in range(self.reagent_table.rowCount()):
-            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
+        for row in range(self._reagent_row_count()):
+            tgt_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_TARGETS)
             if tgt_edit is not None:
                 tgt_edit.setStyleSheet("")
                 tgt_edit.setToolTip("")
@@ -5256,17 +5518,17 @@ class ExperimentDesignDialog(QDialog):
         self.model.factors.clear()
         created_choice_groups: Set[str] = set()
 
-        for row in range(self.reagent_table.rowCount()):
-            name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
-            reagent_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_REAGENT)
-            group_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
-            head_type_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_HEAD_TYPE)
-            start_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, self.COL_STARTING)
-            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
-            units_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_UNITS)
-            stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_SET_STOCK)
-            max_stock_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_MAX_STOCK)
-            dv_spin: QDoubleSpinBox = self.reagent_table.cellWidget(row, self.COL_DROPLET)
+        for row in range(self._reagent_row_count()):
+            name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+            reagent_combo: QComboBox = self._reagent_cell_widget(row, self.COL_REAGENT)
+            group_combo: QComboBox = self._reagent_cell_widget(row, self.COL_GROUP)
+            head_type_combo: QComboBox = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
+            start_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_STARTING)
+            tgt_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_TARGETS)
+            units_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_UNITS)
+            stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_SET_STOCK)
+            max_stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_MAX_STOCK)
+            dv_spin: QDoubleSpinBox = self._reagent_cell_widget(row, self.COL_DROPLET)
 
             r_name = (name_edit.text() or "").strip()
             reagent_payload = self._combo_current_payload(reagent_combo)
@@ -5586,10 +5848,10 @@ class ExperimentDesignDialog(QDialog):
         except Exception:
             preview = {}
 
-        for row in range(self.reagent_table.rowCount()):
-            name_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_STOCK_LABEL)
-            group_combo: QComboBox = self.reagent_table.cellWidget(row, self.COL_GROUP)
-            tgt_edit: QLineEdit = self.reagent_table.cellWidget(row, self.COL_TARGETS)
+        for row in range(self._reagent_row_count()):
+            name_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+            group_combo: QComboBox = self._reagent_cell_widget(row, self.COL_GROUP)
+            tgt_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_TARGETS)
 
             reagent_name = (name_edit.text() or "").strip()
             group_name = group_combo.currentText()
@@ -5701,7 +5963,7 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.insertRow(rr)
             self.stock_table.setItem(rr, 0, QTableWidgetItem(str(r.get("factor_name", ""))))
             self.stock_table.setItem(rr, 1, QTableWidgetItem(str(r.get("option_name", ""))))
-            self.stock_table.setItem(rr, 2, QTableWidgetItem(self._fmt_num(r.get("stock_concentration", ""))))
+            self.stock_table.setItem(rr, 2, QTableWidgetItem(self._fmt_stock_conc_display(r.get("stock_concentration", ""))))
             self.stock_table.setItem(rr, 3, QTableWidgetItem(self._fmt_num(r.get("delta_per_drop", ""))))
             self.stock_table.setItem(rr, 4, QTableWidgetItem(str(r.get("units", ""))))
             self.stock_table.setItem(rr, 5, QTableWidgetItem(self._fmt_num(r.get("droplet_volume_nL", ""))))
@@ -5984,6 +6246,26 @@ class ExperimentDesignDialog(QDialog):
     def _set_status(self, msg: str):
         self.status_lbl.setToolTip(msg)
         self.status_lbl.setText(msg)
+
+    @staticmethod
+    def _fmt_stock_conc_display(x, sig_figs: int = 3) -> str:
+        try:
+            value = Decimal(str(x))
+        except (InvalidOperation, TypeError, ValueError):
+            return str(x)
+
+        if not value.is_finite():
+            return str(x)
+        if value == 0:
+            return "0"
+
+        exponent = value.adjusted() - (int(sig_figs) - 1)
+        quantum = Decimal(f"1e{exponent}")
+        rounded = value.quantize(quantum, rounding=ROUND_HALF_UP)
+        text = format(rounded, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return "0" if text in ("-0", "+0") else text
 
     @staticmethod
     def _fmt_num(x) -> str:

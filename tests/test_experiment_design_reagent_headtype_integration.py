@@ -62,6 +62,35 @@ class _RuntimeModelStub:
         return ["water"]
 
 
+class _SignalStub:
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        self._callbacks.append(callback)
+        return callback
+
+    def disconnect(self, callback=None):
+        if callback is None:
+            self._callbacks.clear()
+            return
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+
+class _WellPlateStub:
+    excluded_wells = set()
+
+    def get_all_plate_names(self):
+        return ["shallow-384_well_plate"]
+
+    def get_current_plate_name(self):
+        return "shallow-384_well_plate"
+
+    def get_plate_data_by_name(self, _name):
+        return {"rows": 16, "columns": 24}
+
+
 def _bind_dialog_method(dialog, name):
     method = getattr(ExperimentDesignDialog, name)
     setattr(dialog, name, method.__get__(dialog, ExperimentDesignDialog))
@@ -102,6 +131,26 @@ def _build_dialog_stub(runtime_model):
     dialog._combo_current_text = ExperimentDesignDialog._combo_current_text
     dialog._is_placeholder_stock_label = ExperimentDesignDialog._is_placeholder_stock_label
     return dialog
+
+
+def _build_real_dialog():
+    runtime_model = _RuntimeModelStub()
+    runtime_model.well_plate = _WellPlateStub()
+    runtime_model.rack_model = SimpleNamespace(
+        gripper_updated=_SignalStub(),
+        get_gripper_printer_head=lambda: None,
+    )
+    main_window = SimpleNamespace(
+        model=runtime_model,
+        color_dict={
+            "dark_red": "#8a0303",
+            "blue": "#1e64b4",
+            "dark_blue": "#1b3a57",
+            "light_blue": "#3b82f6",
+        },
+        profile=SimpleNamespace(name="modern"),
+    )
+    return ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
 
 
 def test_experiment_model_from_dict_keeps_legacy_rows_backward_compatible():
@@ -185,7 +234,7 @@ def test_experiment_designer_prior_indicator_uses_preview_status(qapp):
     )
 
     preview = dialog._refresh_prior_availability_for_row(0)
-    label: QLabel = dialog.reagent_table.cellWidget(0, ExperimentDesignDialog.COL_PRIOR)
+    label: QLabel = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_PRIOR)
 
     assert preview["status"] == "strong"
     assert label.text() == "Strong prior"
@@ -215,7 +264,7 @@ def test_experiment_designer_prior_indicator_shows_memory_disabled(qapp):
     )
 
     preview = dialog._refresh_prior_availability_for_row(0)
-    label: QLabel = dialog.reagent_table.cellWidget(0, ExperimentDesignDialog.COL_PRIOR)
+    label: QLabel = dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_PRIOR)
 
     assert preview["status"] == "memory_disabled"
     assert label.text() == "Memory disabled"
@@ -250,6 +299,43 @@ def test_load_reactions_from_model_applies_design_identity(experiment_model_fact
     assert water_stock.display_name == "Water"
     assert water_stock.intended_head_type_id == "nozzle_100um"
     assert water_stock.intended_head_type_display_name == "100 um nozzle"
+
+
+def test_experiment_designer_freezes_name_column_and_reorders_prior(qapp):
+    dialog = _build_real_dialog()
+    dialog.setMinimumSize(0, 0)
+    for idx in range(12):
+        dialog._add_reagent_row(
+            name=f"Water stock {idx + 1}",
+            targets="0, 1, 2, 3",
+            units="mM",
+            droplet_nL=10.0,
+            reagent_id="water",
+            reagent_display_name="Water",
+            intended_head_type_id="nozzle_100um",
+            intended_head_type_display_name="100 um nozzle",
+        )
+
+    dialog.resize(640, 260)
+    dialog.show()
+    qapp.processEvents()
+
+    assert dialog.reagent_name_table is not None
+    assert dialog._reagent_row_count() == dialog.reagent_table.rowCount() == dialog.reagent_name_table.rowCount()
+    assert dialog._reagent_cell_widget(0, ExperimentDesignDialog.COL_STOCK_LABEL) is dialog.reagent_name_table.cellWidget(0, 0)
+    assert dialog._reagent_column_width(ExperimentDesignDialog.COL_GROUP) == 70
+    assert dialog._reagent_column_width(ExperimentDesignDialog.COL_HEAD_TYPE) == 75
+    assert dialog.reagent_table.horizontalHeaderItem(dialog.COL_PRIOR - 1).text() == "Prior"
+
+    dialog.reagent_table.horizontalScrollBar().setValue(dialog.reagent_table.horizontalScrollBar().maximum())
+    qapp.processEvents()
+    assert dialog.reagent_name_table.horizontalScrollBar().value() == 0
+
+    dialog.reagent_table.verticalScrollBar().setValue(dialog.reagent_table.verticalScrollBar().maximum())
+    qapp.processEvents()
+    assert dialog.reagent_name_table.verticalScrollBar().value() == dialog.reagent_table.verticalScrollBar().value()
+
+    dialog.close()
 
 
 def test_runtime_printer_head_identity_is_generated_from_intended_head_type(tmp_path):

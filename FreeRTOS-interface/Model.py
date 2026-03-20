@@ -31,6 +31,7 @@ import shutil
 import csv
 import math
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
@@ -38,6 +39,26 @@ import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
+
+
+def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
+    try:
+        dec_value = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(value)
+
+    if not dec_value.is_finite():
+        return str(value)
+    if dec_value == 0:
+        return "0"
+
+    exponent = dec_value.adjusted() - (int(sig_figs) - 1)
+    quantum = Decimal(f"1e{exponent}")
+    rounded = dec_value.quantize(quantum, rounding=ROUND_HALF_UP)
+    text = format(rounded, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "+0") else text
 
 def find_key_points(columns, line_values):
     """
@@ -4039,8 +4060,8 @@ class StockSolution(QObject):
         super().__init__()
         self.stock_id = stock_id
         self.reagent_name = reagent_name
-        self.concentration = f"{float(concentration):.2f}"
-        # self.concentration = concentration
+        self.raw_concentration = float(concentration)
+        self.concentration = f"{self.raw_concentration:.2f}"
         self.units = units
         self.required_volume = required_volume
         self.reagent_id = None
@@ -4063,14 +4084,20 @@ class StockSolution(QObject):
     
     def get_stock_concentration(self):
         return self.concentration
-    
-    def get_stock_name(self,new_line=False):
+
+    def get_display_stock_concentration(self, sig_figs: int = 3):
+        return _format_stock_display_sig_figs(self.raw_concentration, sig_figs=sig_figs)
+
+    def get_display_stock_name(self, new_line=False, sig_figs: int = 3):
         if self.units == '--':
             return f"{self.reagent_name}"
-        elif new_line:
-            return f"{self.reagent_name}\n{self.concentration} {self.units}"
-        else:
-            return f"{self.reagent_name} - {self.concentration} {self.units}"
+        display_concentration = self.get_display_stock_concentration(sig_figs=sig_figs)
+        if new_line:
+            return f"{self.reagent_name}\n{display_concentration} {self.units}"
+        return f"{self.reagent_name} - {display_concentration} {self.units}"
+    
+    def get_stock_name(self,new_line=False):
+        return self.get_display_stock_name(new_line=new_line)
 
     def set_reagent_identity(
         self,
@@ -5053,11 +5080,21 @@ class PrinterHead(QObject):
         if self.stock_solution is None:
             return '--'
         return self.stock_solution.get_stock_concentration()
+
+    def get_display_stock_concentration(self, sig_figs: int = 3):
+        if self.stock_solution is None:
+            return '--'
+        return self.stock_solution.get_display_stock_concentration(sig_figs=sig_figs)
     
     def get_stock_name(self,new_line=False):
         if self.stock_solution is None:
             return 'Calibration'
         return self.stock_solution.get_stock_name(new_line=new_line)
+
+    def get_display_stock_name(self, new_line=False, sig_figs: int = 3):
+        if self.stock_solution is None:
+            return 'Calibration'
+        return self.stock_solution.get_display_stock_name(new_line=new_line, sig_figs=sig_figs)
 
     def get_color(self):
         return self.color

@@ -11,10 +11,26 @@ from View import ExperimentDesignDialog
 
 
 class _OptimizeModelStub:
-    def __init__(self, responses):
+    def __init__(self, responses, stock_rows=None):
         self._responses = list(responses)
         self.optimize_calls = 0
         self.generated = 0
+        self._stock_rows = list(
+            stock_rows
+            or [
+                {
+                    "factor_name": "AddA",
+                    "option_name": "",
+                    "stock_concentration": 10.0,
+                    "delta_per_drop": 0.2,
+                    "units": "mM",
+                    "droplet_volume_nL": 10.0,
+                    "max_per_rxn_nL": 20.0,
+                    "total_droplets": 10,
+                    "total_volume_uL": 1.0,
+                }
+            ]
+        )
 
     def optimize_stock_solutions(self, **_kwargs):
         self.optimize_calls += 1
@@ -26,19 +42,7 @@ class _OptimizeModelStub:
         self.generated += 1
 
     def get_stock_table_rows(self, include_fill=True):
-        return [
-            {
-                "factor_name": "AddA",
-                "option_name": "",
-                "stock_concentration": 10.0,
-                "delta_per_drop": 0.2,
-                "units": "mM",
-                "droplet_volume_nL": 10.0,
-                "max_per_rxn_nL": 20.0,
-                "total_droplets": 10,
-                "total_volume_uL": 1.0,
-            }
-        ]
+        return list(self._stock_rows)
 
     def get_target_preview_map(self):
         return {}
@@ -50,10 +54,10 @@ class _OptimizeModelStub:
         return 0.0
 
 
-def _build_dialog(*, fixed_text="", max_text="", responses=None):
+def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.color_dict = {"dark_red": "#8a0303"}
-    dialog.model = _OptimizeModelStub(responses or [])
+    dialog.model = _OptimizeModelStub(responses or [], stock_rows=stock_rows)
     dialog.status_lbl = QLabel("")
     dialog.stock_table_status_lbl = QLabel("")
     dialog.stock_table = QTableWidget(0, 9)
@@ -142,3 +146,38 @@ def test_invalid_max_stock_keeps_table_stale_until_fixed(qapp):
     assert max_edit.styleSheet() == ""
     assert dialog.stock_table_status_lbl.text() == ""
     assert dialog.stock_table.styleSheet() == ""
+
+
+def test_refresh_stock_table_formats_stock_concentration_to_three_significant_figures(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        stock_rows=[
+            {
+                "factor_name": "AddA",
+                "option_name": "",
+                "stock_concentration": 99.696,
+                "delta_per_drop": 0.2,
+                "units": "mM",
+                "droplet_volume_nL": 10.0,
+                "max_per_rxn_nL": 20.0,
+                "total_droplets": 10,
+                "total_volume_uL": 1.0,
+            },
+            {
+                "factor_name": "AddB",
+                "option_name": "",
+                "stock_concentration": 3.465,
+                "delta_per_drop": 0.1,
+                "units": "mM",
+                "droplet_volume_nL": 10.0,
+                "max_per_rxn_nL": 10.0,
+                "total_droplets": 5,
+                "total_volume_uL": 0.5,
+            },
+        ]
+    )
+
+    ExperimentDesignDialog._refresh_stock_table(dialog)
+
+    assert dialog.stock_table.item(0, 2).text() == "99.7"
+    assert dialog.stock_table.item(1, 2).text() == "3.47"
+    assert dialog.stock_table.item(0, 3).text() == "0.2"
