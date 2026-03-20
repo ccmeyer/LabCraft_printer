@@ -37,11 +37,66 @@ except ImportError:
     gpiod = None
 
 def _gpiofind(line_name: str):
-    if shutil.which("gpiofind") is None:
-        raise RuntimeError("gpiofind not found. Install it: sudo apt install gpiod")
-    out = subprocess.check_output(["gpiofind", line_name], text=True).strip()
-    chip_path, off = out.split()
-    return chip_path, int(off)
+    """
+    Resolve a GPIO line name like "GPIO17" to (chip_path, offset).
+
+    Prefer the legacy gpiofind CLI when present, but fall back to scanning the
+    available gpiochips via the Python gpiod binding. Newer Raspberry Pi /
+    Debian images may ship gpioinfo/gpiodetect without the standalone gpiofind
+    binary.
+    """
+    gpiofind_bin = shutil.which("gpiofind")
+    if gpiofind_bin is not None:
+        out = subprocess.check_output([gpiofind_bin, line_name], text=True).strip()
+        chip_path, off = out.split()
+        return chip_path, int(off)
+
+    try:
+        import gpiod
+    except Exception as e:
+        raise RuntimeError(
+            "gpiofind is not available and python gpiod could not be imported. "
+            "Install python3-libgpiod, or configure GPIO using chip+offset."
+        ) from e
+
+    chip_paths = sorted(glob.glob("/dev/gpiochip*"))
+    lookup_errors = []
+    for chip_path in chip_paths:
+        chip = None
+        try:
+            chip = gpiod.Chip(chip_path)
+
+            if hasattr(chip, "line_offset_from_id"):
+                try:
+                    return chip_path, int(chip.line_offset_from_id(line_name))
+                except Exception:
+                    pass
+
+            get_line_info = getattr(chip, "get_line_info", None)
+            if callable(get_line_info):
+                try:
+                    info = get_line_info(line_name)
+                except Exception:
+                    info = None
+                if info is not None:
+                    offset = getattr(info, "offset", getattr(info, "line_offset", None))
+                    if offset is not None:
+                        return chip_path, int(offset)
+        except Exception as e:
+            lookup_errors.append(f"{chip_path}: {e}")
+        finally:
+            close = getattr(chip, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    available = " ".join(chip_paths) or "<none>"
+    detail = f" Lookup errors: {'; '.join(lookup_errors)}" if lookup_errors else ""
+    raise FileNotFoundError(
+        f"GPIO line {line_name!r} was not found. Available chips: {available}.{detail}"
+    )
 
 def _open_chip(chip_name: str):
     """Open a gpiod.Chip allowing 'gpiochipX' or '/dev/gpiochipX'."""
