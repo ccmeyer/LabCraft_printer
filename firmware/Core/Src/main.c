@@ -1312,7 +1312,13 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  // Force all stepper drivers disabled immediately after GPIO init.
+  // The generated pin defaults above drive these active-low ENABLE lines low,
+  // which can briefly energize the motors during boot before Stepper::begin()
+  // restores the intended disabled state.
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_1 | GPIO_PIN_14 | GPIO_PIN_15, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_2 | GPIO_PIN_5, GPIO_PIN_SET);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
