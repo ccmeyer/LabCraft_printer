@@ -6,7 +6,6 @@ from PySide6.QtGui import QPalette, QColor, QPixmap, QIcon
 import os, json
 
 from hardware.profile import get_profile
-from legacy.mass_calibration import MassCalibrationModel, Balance
 
 def set_dark_theme(app):
     app.setStyle(QStyleFactory.create("Fusion"))
@@ -64,6 +63,8 @@ def main():
     pixmap = QPixmap(logo_path)  # Replace with your logo image path
     splash = QSplashScreen(pixmap)
     splash.show()
+    # Let the splash paint before heavier module imports and object setup continue.
+    app.processEvents()
 
     from Machine_FreeRTOS import Machine
     from Model import Model
@@ -82,6 +83,8 @@ def main():
     controller = Controller(machine, model, profile=profile)
 
     if profile.name == "legacy":
+        from legacy.mass_calibration import MassCalibrationModel, Balance
+
         model.calibration_model = MassCalibrationModel(
             machine_model=model.machine_model,
             printer_head_manager=model.printer_head_manager,

@@ -107,7 +107,18 @@ def test_popup_yes_no_keeps_transparent_icon(monkeypatch):
 
 def test_app_main_sets_labcraft_icon_before_showing_window():
     app_source = Path("FreeRTOS-interface/App.py").read_text(encoding="utf-8")
+    pre_main_source = app_source.split("def main():", 1)[0]
 
     assert 'app.setDesktopFileName("labcraft-printer")' in app_source
     assert "LabCraft_icon.png" in app_source
     assert "app.setWindowIcon(app_icon)" in app_source
+    assert "app.processEvents()" in app_source
+    assert "from legacy.mass_calibration import MassCalibrationModel, Balance" not in pre_main_source
+    assert "from legacy.mass_calibration import MassCalibrationModel, Balance" in app_source.split("if profile.name == \"legacy\":", 1)[1]
+
+
+def test_view_lazy_loads_mass_calibration_dialog_only_for_legacy_path():
+    view_source = Path("FreeRTOS-interface/View.py").read_text(encoding="utf-8")
+
+    assert "from legacy.mass_calibration import MassCalibrationDialog" not in view_source.splitlines()[:80]
+    assert "from legacy.mass_calibration import MassCalibrationDialog" in view_source
