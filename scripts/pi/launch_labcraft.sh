@@ -21,12 +21,15 @@ if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
   PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 elif [ -x "$REPO_ROOT/venv/bin/python" ]; then
   PYTHON_BIN="$REPO_ROOT/venv/bin/python"
+elif [ -x "$REPO_ROOT/env/bin/python" ]; then
+  PYTHON_BIN="$REPO_ROOT/env/bin/python"
 else
   {
     printf '\n[%s] Launcher failed: no repo-local Python interpreter found.\n' "$(date -Iseconds)"
     printf 'Expected one of:\n'
     printf '  %s\n' "$REPO_ROOT/.venv/bin/python"
     printf '  %s\n' "$REPO_ROOT/venv/bin/python"
+    printf '  %s\n' "$REPO_ROOT/env/bin/python"
   } >>"$LOG_FILE"
   exit 1
 fi

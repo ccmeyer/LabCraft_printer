@@ -24,6 +24,10 @@ choose_python() {
     printf '%s\n' "$REPO_ROOT/venv/bin/python"
     return 0
   fi
+  if [ -x "$REPO_ROOT/env/bin/python" ]; then
+    printf '%s\n' "$REPO_ROOT/env/bin/python"
+    return 0
+  fi
   return 1
 }
 
@@ -43,7 +47,7 @@ esac
 [ -f "$ICON_PATH" ] || fail "Icon not found at $ICON_PATH"
 [ -f "$LAUNCHER_PATH" ] || fail "Launcher script not found at $LAUNCHER_PATH"
 
-PYTHON_BIN="$(choose_python)" || fail "No repo-local .venv or venv interpreter was found. Keep using the current manual setup until the Python environment is ready."
+PYTHON_BIN="$(choose_python)" || fail "No repo-local .venv, venv, or env interpreter was found. Keep using the current manual setup until the Python environment is ready."
 
 printf 'Using repo root: %s\n' "$REPO_ROOT"
 printf 'Using Python: %s\n' "$PYTHON_BIN"

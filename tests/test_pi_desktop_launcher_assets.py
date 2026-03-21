@@ -18,11 +18,12 @@ def test_launch_script_sets_repo_root_and_logs_to_root_logs_dir():
     assert 'exec "$PYTHON_BIN" "$APP_PATH"' in text
 
 
-def test_launch_script_supports_dotvenv_and_venv_repo_layouts():
+def test_launch_script_supports_dotvenv_venv_and_env_repo_layouts():
     text = _read("scripts/pi/launch_labcraft.sh")
 
     assert '$REPO_ROOT/.venv/bin/python' in text
     assert '$REPO_ROOT/venv/bin/python' in text
+    assert '$REPO_ROOT/env/bin/python' in text
     assert "no repo-local Python interpreter found" in text
 
 
@@ -30,6 +31,9 @@ def test_installer_is_user_scoped_and_does_not_reconfigure_pi():
     text = _read("scripts/pi/install_desktop_launcher.sh")
 
     assert '${XDG_DATA_HOME:-$HOME/.local/share}/applications' in text
+    assert '$REPO_ROOT/.venv/bin/python' in text
+    assert '$REPO_ROOT/venv/bin/python' in text
+    assert '$REPO_ROOT/env/bin/python' in text
     assert 'chmod +x "$LAUNCHER_PATH"' in text
     assert 'import App' in text
     assert "apt-get" not in text
