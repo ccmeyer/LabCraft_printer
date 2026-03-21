@@ -9,3 +9,4 @@ Icon=__LABCRAFT_ICON__
 Terminal=false
 Categories=Science;Engineering;
 StartupNotify=true
+StartupWMClass=labcraft-printer

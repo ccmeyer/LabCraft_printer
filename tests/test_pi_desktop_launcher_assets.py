@@ -52,4 +52,5 @@ def test_desktop_template_uses_absolute_runtime_placeholders_and_no_terminal():
     assert "Path=__LABCRAFT_PATH__" in text
     assert "Icon=__LABCRAFT_ICON__" in text
     assert "Terminal=false" in text
+    assert "StartupWMClass=labcraft-printer" in text
     assert "Name=LabCraft Printer" in text

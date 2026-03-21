@@ -108,5 +108,6 @@ def test_popup_yes_no_keeps_transparent_icon(monkeypatch):
 def test_app_main_sets_labcraft_icon_before_showing_window():
     app_source = Path("FreeRTOS-interface/App.py").read_text(encoding="utf-8")
 
+    assert 'app.setDesktopFileName("labcraft-printer")' in app_source
     assert "LabCraft_icon.png" in app_source
     assert "app.setWindowIcon(app_icon)" in app_source

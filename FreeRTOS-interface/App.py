@@ -52,6 +52,7 @@ def load_settings(file_path):
 
 def main():
     app = QApplication(sys.argv)
+    app.setDesktopFileName("labcraft-printer")
 
     # Create splash screen
     script_dir = os.path.dirname(os.path.abspath(__file__))
