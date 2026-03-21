@@ -493,7 +493,7 @@ class ConnectionWidget(QGroupBox):
         self.main_window = main_window
         self.color_dict = getattr(
             self.main_window, "color_dict",
-            {"dark_blue": "#1b3a57", "light_blue": "#3b82f6"}
+            {"dark_blue": "#1b3a57", "light_blue": "#3b82f6", "mid_gray": "#6e6e6e"}
         )
         self.model = model
         self.controller = controller
@@ -505,6 +505,7 @@ class ConnectionWidget(QGroupBox):
         # Defaults
         self.machine_default = self.model.get_default_machine_port()
         self.balance_default = self.model.get_default_balance_port()
+        self._machine_disconnect_pending = False
 
         # # Fixed on-board port (e.g., "/dev/ttyACM0" on the Pi)
         # self.fixed_port = self.model.get_default_machine_port()  # must return a string
@@ -514,6 +515,9 @@ class ConnectionWidget(QGroupBox):
         # Model → View
         self.model.machine_model.machine_state_updated.connect(
             self.update_machine_connect_button
+        )
+        self.controller.machine.disconnect_complete_signal.connect(
+            self._handle_machine_disconnect_complete
         )
 
         if self.legacy_mode:
@@ -658,10 +662,21 @@ class ConnectionWidget(QGroupBox):
 
     def request_machine_connect_change(self):
         """Toggle connect/disconnect."""
+        if self._machine_disconnect_pending:
+            return
         if self.model.machine_model.machine_connected:
+            self._set_machine_disconnect_pending(True)
             self.controller.disconnect_machine()
         else:
             self.connect_machine()
+
+    @QtCore.Slot()
+    def _handle_machine_disconnect_complete(self):
+        self._set_machine_disconnect_pending(False)
+
+    def _set_machine_disconnect_pending(self, pending: bool):
+        self._machine_disconnect_pending = pending
+        self.update_machine_connect_button(self.model.machine_model.machine_connected)
 
     # def connect_machine(self):
     #     """Emit the fixed port to controller; no dropdown involved."""
@@ -699,6 +714,25 @@ class ConnectionWidget(QGroupBox):
     #             f"background-color: {self.color_dict['light_blue']}; color: white;"
     #         )
     def update_machine_connect_button(self, machine_connected: bool):
+        if not machine_connected and self._machine_disconnect_pending:
+            self._machine_disconnect_pending = False
+
+        if self._machine_disconnect_pending:
+            disconnecting_color = self.color_dict.get(
+                "mid_gray",
+                self.color_dict.get("dark_gray", "#6e6e6e"),
+            )
+            self.machine_connect_button.setText("Disconnecting...")
+            self.machine_connect_button.setChecked(True)
+            self.machine_connect_button.setEnabled(False)
+            self.machine_connect_button.setStyleSheet(
+                f"background-color: {disconnecting_color}; color: white;"
+            )
+            if self.legacy_mode:
+                self.machine_port_combo.setEnabled(False)
+            return
+
+        self.machine_connect_button.setEnabled(True)
         if machine_connected:
             self.machine_connect_button.setText("Disconnect")
             self.machine_connect_button.setChecked(True)
