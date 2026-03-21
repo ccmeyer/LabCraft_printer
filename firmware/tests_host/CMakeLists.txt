@@ -22,6 +22,7 @@ add_executable(fw_tests
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
     tests/test_flash_safety.cpp
+    tests/test_flash_output_state.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp

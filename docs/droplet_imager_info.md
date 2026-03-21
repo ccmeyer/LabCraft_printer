@@ -538,3 +538,33 @@ To protect the illumination LED from over-long pulses, flash width is now hard-c
 - maximum: `5000 ns`
 
 Any higher requested value is reduced to the max before the pulse is applied.
+
+The PE8 trigger line remains protected, and the PE9 flash-driver output path now also has an explicit safe-idle requirement:
+
+- firmware re-applies an internal `GPIO_PULLDOWN` for PE8 after generated GPIO init, then clears stale EXTI8 pending state before normal runtime
+- boot logs include `PE8_BIAS ...` so bring-up can confirm the trigger input is biased low
+- the machine wiring must include a `10 kOhm` pull-down from the PE9 flash-driver trigger net to ground at the flash-driver input side
+- firmware now keeps PE9 in `GPIO_MODE_OUTPUT_PP` + `GPIO_PULLDOWN` and drives it low unless the flash session is explicitly armed
+- when the flash session is armed, firmware hands PE9 over to `TIM1_CH1` with `GPIO_PULLDOWN`, then reclaims it back to GPIO-low on stop, shutdown, or flash fault
+- logs now include `PE9_SAFE_IDLE`, `PE9_ARMED_OUTPUT`, and `PE9_FLASH_FIRE`
+
+### Flash safety session behavior
+
+`START_READ_CAMERA` still means "arm the MCU flash session", but the MCU now latches a flash fault and disarms on unsafe trigger conditions:
+
+- `FLASH_FAULT reason=line_high_on_arm`
+- `FLASH_FAULT reason=retrigger_while_high`
+- `FLASH_FAULT reason=line_stuck_high`
+
+When a fault latches:
+
+- the firmware logs `FLASH_DISARMED reason=fault`
+- no additional trigger edges are accepted until the host performs an explicit `STOP_READ_CAMERA` then `START_READ_CAMERA`
+- the host UI disables capture controls and shows the fault reason
+
+Recommended bring-up sequence after this change:
+
+1. Validate the new machine with the illumination LED disconnected or replaced by a safe dummy load if possible.
+2. Confirm the boot log shows `PE8_BIAS ... line=0`.
+3. Confirm the boot log shows `PE9_SAFE_IDLE ... line=0` before the imager is opened.
+4. Close and reopen the droplet imager or dataset window to clear a latched flash fault after the wiring issue is fixed and PE8 is low again.

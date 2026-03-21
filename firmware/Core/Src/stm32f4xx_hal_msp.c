@@ -21,6 +21,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 /* USER CODE BEGIN Includes */
+#include "Flash.h"
 
 /* USER CODE END Includes */
 extern DMA_HandleTypeDef hdma_usart1_tx;
@@ -320,6 +321,9 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
   if(htim->Instance==TIM1)
   {
     /* USER CODE BEGIN TIM1_MspPostInit 0 */
+    if (MX_FLASH_ShouldConfigureOutputGpio() == 0u) {
+      return;
+    }
 
     /* USER CODE END TIM1_MspPostInit 0 */
     __HAL_RCC_GPIOE_CLK_ENABLE();

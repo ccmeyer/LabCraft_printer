@@ -24,6 +24,12 @@ extern "C" {
  *                    so pulseTicks≈180)
  */
 void MX_FLASH_Init(uint16_t pulseDurationNs);
+void MX_FLASH_ArmOutput(void);
+void MX_FLASH_SetSafeIdle(void);
+void MX_FLASH_ReportOutputState(void);
+uint8_t MX_FLASH_IsOutputArmed(void);
+const char* MX_FLASH_OutputModeToken(void);
+uint8_t MX_FLASH_ShouldConfigureOutputGpio(void);
 
 ///**
 // * Call this from your C HAL_GPIO_EXTI_Callback whenever EXTI8 fires:

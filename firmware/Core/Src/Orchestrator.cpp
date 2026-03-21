@@ -638,6 +638,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
                     g_flash_init_ok_count++;
                 }
             } else if (_flashTaskHandle && _flashAckTmr && FlashSafety::isSessionArmed(_flashSafety)) {
+                MX_FLASH_ArmOutput();
                 g_flash_init_ok_count++;
             }
 		#endif
@@ -1821,13 +1822,15 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         const uint32_t flashAckCount = Orchestrator::getFlashAckCount();
                         const uint32_t flashTaskWakeCount = Orchestrator::getFlashTaskWakeCount();
                         const uint32_t flashTaskDoneCount = Orchestrator::getFlashTaskDoneCount();
-                        const uint32_t flashInitCmdCount = Orchestrator::getFlashInitCmdCount();
-                        const uint32_t flashInitOkCount = Orchestrator::getFlashInitOkCount();
-                        const uint32_t flashInitTaskCreateFailCount = Orchestrator::getFlashInitTaskCreateFailCount();
-                        const uint32_t flashInitTimerCreateFailCount = Orchestrator::getFlashInitTimerCreateFailCount();
-                        const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
-                        const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
-                        const char* flashFaultReason = Orchestrator::getFlashFaultReason();
+					    const uint32_t flashInitCmdCount = Orchestrator::getFlashInitCmdCount();
+					    const uint32_t flashInitOkCount = Orchestrator::getFlashInitOkCount();
+					    const uint32_t flashInitTaskCreateFailCount = Orchestrator::getFlashInitTaskCreateFailCount();
+					    const uint32_t flashInitTimerCreateFailCount = Orchestrator::getFlashInitTimerCreateFailCount();
+					    const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
+					    const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
+					    const char* flashFaultReason = Orchestrator::getFlashFaultReason();
+                        const uint32_t flashOutputArmed = static_cast<uint32_t>(MX_FLASH_IsOutputArmed());
+                        const char* flashOutputMode = MX_FLASH_OutputModeToken();
                         uint32_t flashWidthNs = 0;
                         uint32_t flashWidthMinNs = 0;
                         uint32_t flashWidthMaxNs = 0;
@@ -1840,10 +1843,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 	#endif
 					    char metrics[384];
 					    snprintf(metrics, sizeof(metrics),
-                                 "flash_delay_us=%lu;flash_width_ns=%lu;flash_width_min_ns=%lu;flash_width_max_ns=%lu;"
+                                "flash_delay_us=%lu;flash_width_ns=%lu;flash_width_min_ns=%lu;flash_width_max_ns=%lu;"
                                  "ext_count=%lu;flash_ack_count=%lu;flash_task_wake_count=%lu;flash_task_done_count=%lu;"
                                  "flash_init_cmd_count=%lu;flash_init_ok_count=%lu;flash_init_task_create_fail_count=%lu;flash_init_timer_create_fail_count=%lu;"
-                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s",
+                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s;flash_output_armed=%lu;flash_output_mode=%s",
 					             static_cast<unsigned long>(flashDelay),
 					             static_cast<unsigned long>(flashWidthNs),
                                  static_cast<unsigned long>(flashWidthMinNs),
@@ -1858,7 +1861,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
                                  static_cast<unsigned long>(flashInitTimerCreateFailCount),
                                  static_cast<unsigned long>(flashSessionArmed),
                                  static_cast<unsigned long>(flashFaultLatched),
-                                 flashFaultReason);
+                                 flashFaultReason,
+                                 static_cast<unsigned long>(flashOutputArmed),
+                                 flashOutputMode);
 					    if (!runOne(1005, "flash_config_readonly", true, metrics)) goto selftest_done;
 					  }
 
@@ -1901,6 +1906,8 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         const uint32_t flashSessionArmed = Orchestrator::isFlashSessionArmed() ? 1u : 0u;
                         const uint32_t flashFaultLatched = Orchestrator::isFlashFaultLatched() ? 1u : 0u;
                         const char* flashFaultReason = Orchestrator::getFlashFaultReason();
+                        const uint32_t flashOutputArmed = static_cast<uint32_t>(MX_FLASH_IsOutputArmed());
+                        const char* flashOutputMode = MX_FLASH_OutputModeToken();
                         const bool pass = (!taskPresent) ||
                                           ((started > 0u) &&
                                            (timedOut == 0u) &&
@@ -1910,7 +1917,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
                         char metrics[320];
                         snprintf(metrics, sizeof(metrics),
                                  "skipped_no_flash_task=%lu;cycles_req=%lu;cycles_started=%lu;cycles_timeout=%lu;ext_delta=%lu;flash_ack_delta=%lu;flash_task_wake_delta=%lu;flash_task_done_delta=%lu;"
-                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s",
+                                 "flash_session_armed=%lu;flash_fault_latched=%lu;flash_fault_reason=%s;flash_output_armed=%lu;flash_output_mode=%s",
                                  static_cast<unsigned long>(taskPresent ? 0u : 1u),
                                  static_cast<unsigned long>(kBurstCycles),
                                  static_cast<unsigned long>(started),
@@ -1921,7 +1928,9 @@ void Orchestrator::executeCommand(const Command &cmd) {
                                  static_cast<unsigned long>(dDone),
                                  static_cast<unsigned long>(flashSessionArmed),
                                  static_cast<unsigned long>(flashFaultLatched),
-                                 flashFaultReason);
+                                 flashFaultReason,
+                                 static_cast<unsigned long>(flashOutputArmed),
+                                 flashOutputMode);
                         if (!runOne(1007, "flash_imaging_burst_diag_safe", pass, metrics)) goto selftest_done;
                       }
 	
@@ -3311,6 +3320,7 @@ void Orchestrator::_latchFlashFault(FlashSafety::FaultReason reason, bool deferL
   _flashSafety.awaitingRelease = false;
   _flashSafety.faultLatched = true;
   _flashSafety.faultReason = reason;
+  MX_FLASH_SetSafeIdle();
   if (deferLog) {
     _flashFaultLogPending = true;
     return;
@@ -3325,6 +3335,7 @@ void Orchestrator::_emitPendingFlashFaultLogs() {
   }
   _flashFaultLogPending = false;
   if (_flashSafety.faultLatched) {
+    MX_FLASH_SetSafeIdle();
     _logFlashFault(_flashSafety.faultReason);
     _logFlashDisarmed("fault");
   }
@@ -3339,10 +3350,12 @@ bool Orchestrator::_armFlashSession() {
   _clearFlashTaskNotifications();
   const auto armAction = FlashSafety::arm(_flashSafety, _isFlashTriggerHigh());
   if (armAction == FlashSafety::ArmAction::FaultLatched) {
+    MX_FLASH_SetSafeIdle();
     _logFlashFault(_flashSafety.faultReason);
     _logFlashDisarmed("fault");
     return false;
   }
+  MX_FLASH_ArmOutput();
   _logFlashArmed();
   return true;
 }
@@ -3357,6 +3370,7 @@ void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
   }
   _clearFlashTaskNotifications();
   _flashFaultLogPending = false;
+  MX_FLASH_SetSafeIdle();
   if (hadState) {
     _logFlashDisarmed(reason);
   }
@@ -3371,6 +3385,8 @@ void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
 
 // schedule a one-shot callback in N microseconds:
 void Orchestrator::scheduleFlashIn() {
+  Logger::instance()->log("PE9_FLASH_FIRE\r\n");
+
   // clear any pending flags
   __HAL_TIM_CLEAR_FLAG(&htim12, TIM_FLAG_CC1|TIM_FLAG_UPDATE);
 

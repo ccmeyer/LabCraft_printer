@@ -93,6 +93,9 @@ extern void MX_PRESSURE_REGR_SetTarget(float p);
 extern void MX_REG_INNER_LIMIT(uint16_t GPIO_Pin);
 
 extern void MX_FLASH_Init(uint16_t pulseDurationNs);
+extern void MX_FLASH_ArmOutput(void);
+extern void MX_FLASH_SetSafeIdle(void);
+extern void MX_FLASH_ReportOutputState(void);
 //extern void MX_FLASH_Init(uint16_t pulseTicks);
 extern void MX_FLASH_ONCE();
 extern void MX_FLASH_TriggerCallback(uint16_t GPIO_Pin);
@@ -392,6 +395,7 @@ int main(void)
   CrashLog_SetBootStage(CRASH_BOOT_STAGE_ORCH_READY);
   MX_LOGGER_Init(&huart1, &hdma_usart1_tx);
   Log_PE8_TriggerBiasState();
+  MX_FLASH_ReportOutputState();
   CrashLog_SetBootStage(CRASH_BOOT_STAGE_LOGGER_READY);
 //  MX_COMM_Init(&huart2);     // start the Comm task on UART2
 
