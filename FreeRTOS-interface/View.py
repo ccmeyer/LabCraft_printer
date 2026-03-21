@@ -124,8 +124,7 @@ class MainWindow(QMainWindow):
         self.central_widget = QWidget()
         self.central_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setCentralWidget(self.central_widget)
-        transparent_icon = self.make_transparent_icon()
-        self.setWindowIcon(transparent_icon)
+        self.setWindowIcon(self.make_window_icon())
 
         self.layout = QHBoxLayout(self.central_widget)
 
@@ -278,6 +277,12 @@ class MainWindow(QMainWindow):
         transparent_pixmap = QtGui.QPixmap.fromImage(transparent_image)
         transparent_icon = QtGui.QIcon(transparent_pixmap)
         return transparent_icon
+
+    def make_window_icon(self):
+        icon_path = os.path.join(self.script_dir, 'Presets', 'LabCraft_icon.png')
+        if os.path.exists(icon_path):
+            return QtGui.QIcon(icon_path)
+        return self.make_transparent_icon()
 
     def show_well_plate_tab(self):
         """Switch the center tab widget to the Well Plate tab."""

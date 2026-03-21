@@ -2,7 +2,7 @@ import sys
 from PySide6.QtWidgets import QApplication, QSplashScreen
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QStyleFactory
-from PySide6.QtGui import QPalette, QColor, QPixmap
+from PySide6.QtGui import QPalette, QColor, QPixmap, QIcon
 import os, json
 
 from hardware.profile import get_profile
@@ -55,6 +55,10 @@ def main():
 
     # Create splash screen
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(script_dir, 'Presets', 'LabCraft_icon.png')
+    app_icon = QIcon(icon_path)
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     logo_path = os.path.join(script_dir, 'Presets','LabCraft_logo.png')
     pixmap = QPixmap(logo_path)  # Replace with your logo image path
     splash = QSplashScreen(pixmap)
