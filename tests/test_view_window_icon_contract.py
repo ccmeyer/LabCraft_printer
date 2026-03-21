@@ -121,4 +121,5 @@ def test_view_lazy_loads_mass_calibration_dialog_only_for_legacy_path():
     view_source = Path("FreeRTOS-interface/View.py").read_text(encoding="utf-8")
 
     assert "from legacy.mass_calibration import MassCalibrationDialog" not in view_source.splitlines()[:80]
-    assert "from legacy.mass_calibration import MassCalibrationDialog" in view_source
+    assert "MassCalibrationDialog = None" in view_source
+    assert "def _get_mass_calibration_dialog_class():" in view_source

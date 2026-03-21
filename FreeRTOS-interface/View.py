@@ -33,6 +33,18 @@ import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Optional, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
+MassCalibrationDialog = None
+
+
+def _get_mass_calibration_dialog_class():
+    global MassCalibrationDialog
+    if MassCalibrationDialog is None:
+        from legacy.mass_calibration import MassCalibrationDialog as _MassCalibrationDialog
+
+        MassCalibrationDialog = _MassCalibrationDialog
+    return MassCalibrationDialog
+
+
 class OptionsDialog(QtWidgets.QDialog):
     def __init__(self, title, message, options):
         super().__init__()
@@ -1313,9 +1325,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if not self.legacy_mode:
             self.droplet_imager()
         else:
-            from legacy.mass_calibration import MassCalibrationDialog
-
-            mass_calibration_dialog = MassCalibrationDialog(self.main_window,self.model,self.controller)
+            mass_calibration_dialog_cls = _get_mass_calibration_dialog_class()
+            mass_calibration_dialog = mass_calibration_dialog_cls(self.main_window,self.model,self.controller)
             mass_calibration_dialog.exec()
         # droplet_imaging_dialog = DropletImagingDialog(self.main_window,self.model,self.controller)
         # droplet_imaging_dialog.exec()
