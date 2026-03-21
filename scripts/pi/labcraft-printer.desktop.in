@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=LabCraft Printer
+Comment=Launch the LabCraft droplet printer control app
+Exec=__LABCRAFT_EXEC__
+Path=__LABCRAFT_PATH__
+Icon=__LABCRAFT_ICON__
+Terminal=false
+Categories=Science;Engineering;
+StartupNotify=true
