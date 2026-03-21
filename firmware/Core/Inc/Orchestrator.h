@@ -306,7 +306,6 @@ private:
   uint16_t			 _imagingFreq;
 
   static constexpr uint32_t kFlashAckMs = 5; // how long to hold the "flash fired" pin high
-  static constexpr uint32_t kFlashReleaseTimeoutMs = 20;
 
   // GPIO that reports "flash fired" to the Pi
   GPIO_TypeDef*    _flashAckPort = GPIOE;

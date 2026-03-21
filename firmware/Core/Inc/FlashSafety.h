@@ -20,14 +20,13 @@ enum class ArmAction : uint8_t {
 enum class TriggerAction : uint8_t {
   IgnoredDisarmed = 0u,
   IgnoredFaultLatched,
-  Accepted,
-  FaultLatched
+  IgnoredBusy,
+  Accepted
 };
 
 enum class ReleaseAction : uint8_t {
   Released = 0u,
-  WaitingForLow,
-  FaultLatched
+  WaitingForLow
 };
 
 struct State {
@@ -66,20 +65,13 @@ constexpr TriggerAction onTrigger(State& state)
     return TriggerAction::IgnoredDisarmed;
   }
   if (state.awaitingRelease) {
-    state.sessionArmed = false;
-    state.faultLatched = true;
-    state.awaitingRelease = false;
-    state.faultReason = FaultReason::RetriggerWhileHigh;
-    return TriggerAction::FaultLatched;
+    return TriggerAction::IgnoredBusy;
   }
   state.awaitingRelease = true;
   return TriggerAction::Accepted;
 }
 
-constexpr ReleaseAction onReleasePoll(State& state,
-                                      bool lineHigh,
-                                      uint32_t elapsedMs,
-                                      uint32_t timeoutMs)
+constexpr ReleaseAction onReleasePoll(State& state, bool lineHigh)
 {
   if (!state.awaitingRelease) {
     return ReleaseAction::Released;
@@ -88,14 +80,7 @@ constexpr ReleaseAction onReleasePoll(State& state,
     state.awaitingRelease = false;
     return ReleaseAction::Released;
   }
-  if (elapsedMs < timeoutMs) {
-    return ReleaseAction::WaitingForLow;
-  }
-  state.sessionArmed = false;
-  state.faultLatched = true;
-  state.awaitingRelease = false;
-  state.faultReason = FaultReason::LineStuckHigh;
-  return ReleaseAction::FaultLatched;
+  return ReleaseAction::WaitingForLow;
 }
 
 constexpr bool isSessionArmed(const State& state)

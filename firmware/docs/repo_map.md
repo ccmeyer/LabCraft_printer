@@ -125,7 +125,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 - High-level command execution/state machine:
   - `firmware/Core/Inc/Orchestrator.h`, `firmware/Core/Src/Orchestrator.cpp`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
-  - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`), and the 20 ms stuck-high release guard.
+  - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
 
 ### Logging/status/indicators
 

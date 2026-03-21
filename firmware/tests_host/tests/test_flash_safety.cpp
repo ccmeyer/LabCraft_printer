@@ -46,7 +46,7 @@ TEST(FlashSafetyHelpers, FirstTriggerIsAcceptedWhileArmed)
     CHECK_FALSE(FlashSafety::isFaultLatched(state));
 }
 
-TEST(FlashSafetyHelpers, RetriggerWhileAwaitingReleaseFaultsAndDisarms)
+TEST(FlashSafetyHelpers, RetriggerWhileAwaitingReleaseIsIgnoredAndSessionStaysArmed)
 {
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
@@ -54,28 +54,44 @@ TEST(FlashSafetyHelpers, RetriggerWhileAwaitingReleaseFaultsAndDisarms)
 
     const auto action = FlashSafety::onTrigger(state);
 
-    LONGS_EQUAL(static_cast<long>(FlashSafety::TriggerAction::FaultLatched),
+    LONGS_EQUAL(static_cast<long>(FlashSafety::TriggerAction::IgnoredBusy),
                 static_cast<long>(action));
-    CHECK_FALSE(FlashSafety::isSessionArmed(state));
-    CHECK_TRUE(FlashSafety::isFaultLatched(state));
-    CHECK_FALSE(state.awaitingRelease);
-    STRCMP_EQUAL("retrigger_while_high", FlashSafety::faultReasonToken(state.faultReason));
+    CHECK_TRUE(FlashSafety::isSessionArmed(state));
+    CHECK_FALSE(FlashSafety::isFaultLatched(state));
+    CHECK_TRUE(state.awaitingRelease);
+    STRCMP_EQUAL("none", FlashSafety::faultReasonToken(state.faultReason));
 }
 
-TEST(FlashSafetyHelpers, ReleasePollingFaultsIfLineStaysHighPastTimeout)
+TEST(FlashSafetyHelpers, ReleasePollingKeepsWaitingIfLineStaysHigh)
 {
     FlashSafety::State state{};
     FlashSafety::arm(state, false);
     FlashSafety::onTrigger(state);
 
-    const auto action = FlashSafety::onReleasePoll(state, true, 20u, 20u);
+    const auto action = FlashSafety::onReleasePoll(state, true);
 
-    LONGS_EQUAL(static_cast<long>(FlashSafety::ReleaseAction::FaultLatched),
+    LONGS_EQUAL(static_cast<long>(FlashSafety::ReleaseAction::WaitingForLow),
                 static_cast<long>(action));
-    CHECK_FALSE(FlashSafety::isSessionArmed(state));
-    CHECK_TRUE(FlashSafety::isFaultLatched(state));
+    CHECK_TRUE(FlashSafety::isSessionArmed(state));
+    CHECK_FALSE(FlashSafety::isFaultLatched(state));
+    CHECK_TRUE(state.awaitingRelease);
+    STRCMP_EQUAL("none", FlashSafety::faultReasonToken(state.faultReason));
+}
+
+TEST(FlashSafetyHelpers, ReleasePollingClearsBusyStateWhenLineReturnsLow)
+{
+    FlashSafety::State state{};
+    FlashSafety::arm(state, false);
+    FlashSafety::onTrigger(state);
+
+    const auto action = FlashSafety::onReleasePoll(state, false);
+
+    LONGS_EQUAL(static_cast<long>(FlashSafety::ReleaseAction::Released),
+                static_cast<long>(action));
+    CHECK_TRUE(FlashSafety::isSessionArmed(state));
+    CHECK_FALSE(FlashSafety::isFaultLatched(state));
     CHECK_FALSE(state.awaitingRelease);
-    STRCMP_EQUAL("line_stuck_high", FlashSafety::faultReasonToken(state.faultReason));
+    STRCMP_EQUAL("none", FlashSafety::faultReasonToken(state.faultReason));
 }
 
 TEST(FlashSafetyHelpers, StopClearsFaultAndReturnsToDisarmedState)

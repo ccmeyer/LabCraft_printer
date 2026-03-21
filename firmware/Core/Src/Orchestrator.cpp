@@ -3417,11 +3417,8 @@ void Orchestrator::flashNotifyFromISR(uint16_t GPIO_Pin) {
 		g_exti8_count++;
 	    const auto triggerAction = FlashSafety::onTrigger(_instance->_flashSafety);
 	    if (triggerAction == FlashSafety::TriggerAction::IgnoredDisarmed ||
-	        triggerAction == FlashSafety::TriggerAction::IgnoredFaultLatched) {
-	      return;
-	    }
-	    if (triggerAction == FlashSafety::TriggerAction::FaultLatched) {
-	      _instance->_flashFaultLogPending = true;
+	        triggerAction == FlashSafety::TriggerAction::IgnoredFaultLatched ||
+	        triggerAction == FlashSafety::TriggerAction::IgnoredBusy) {
 	      return;
 	    }
 
@@ -3478,22 +3475,9 @@ void Orchestrator::_flashTaskLoop() {
 //    Logger::instance()->log("-FLASH COMP-\r\n");
 
     // then don’t proceed until the Pi’s line goes back low
-    const TickType_t waitStart = xTaskGetTickCount();
     for (;;) {
-      const TickType_t elapsedTicks = xTaskGetTickCount() - waitStart;
-      const uint32_t elapsedMs = static_cast<uint32_t>(
-          (static_cast<uint64_t>(elapsedTicks) * 1000u) / configTICK_RATE_HZ);
-      const auto releaseAction = FlashSafety::onReleasePoll(
-          _flashSafety,
-          _isFlashTriggerHigh(),
-          elapsedMs,
-          kFlashReleaseTimeoutMs);
+      const auto releaseAction = FlashSafety::onReleasePoll(_flashSafety, _isFlashTriggerHigh());
       if (releaseAction == FlashSafety::ReleaseAction::Released) {
-        break;
-      }
-      if (releaseAction == FlashSafety::ReleaseAction::FaultLatched) {
-        _logFlashFault(_flashSafety.faultReason);
-        _logFlashDisarmed("fault");
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(1));
