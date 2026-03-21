@@ -613,7 +613,7 @@ void Orchestrator::executeCommand(const Command &cmd) {
         		const BaseType_t taskRc = xTaskCreate(
 					_flashTaskEntry,
 					"FlashMon",
-					256,
+					512,
 					this,
 					tskIDLE_PRIORITY+3,     // even higher than Orchestrator
 					&_flashTaskHandle
@@ -1994,8 +1994,11 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						    bool hasPrinter = false;
 						    bool hasPressure = false;
 						    bool hasLogStats = false;
+						    bool hasFlashMon = false;
 						    uint32_t pregCount = 0u;
 						    uint16_t stackMinWords = 0xFFFFu;
+						    uint16_t printerHwmWords = 0u;
+						    uint16_t flashMonHwmWords = 0u;
 						    char stackMinTask[12] = "none";
 						    for (UBaseType_t i = 0; i < captured; ++i) {
 						      const char* taskName = taskStats[i].pcTaskName;
@@ -2011,12 +2014,17 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						        trackForMin = true;
 						      } else if (strcmp(taskName, "PRNT") == 0) {
 						        hasPrinter = true;
+						        printerHwmWords = taskStats[i].usStackHighWaterMark;
 						        trackForMin = true;
 						      } else if (strcmp(taskName, "Pressure") == 0) {
 						        hasPressure = true;
 						        trackForMin = true;
 						      } else if (strcmp(taskName, "LogStats") == 0) {
 						        hasLogStats = true;
+						        trackForMin = true;
+						      } else if (strcmp(taskName, "FlashMon") == 0) {
+						        hasFlashMon = true;
+						        flashMonHwmWords = taskStats[i].usStackHighWaterMark;
 						        trackForMin = true;
 						      } else if (strcmp(taskName, "PReg") == 0) {
 						        pregCount++;
@@ -2042,10 +2050,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						                      !trunc &&
 						                      (pregCount == static_cast<uint32_t>(LC_PRESSURE_PORTS)) &&
 						                      (stackOverflowFired == 0u);
-						    char metrics[176];
+						    char metrics[256];
 						    snprintf(metrics,
 						             sizeof(metrics),
-						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u;stk_ovf=%lu",
+						             "heap_now=%lu;heap_min=%lu;stk_min=%u;stk_task=%s;task_n=%u;core_miss=%lu;preg_n=%lu;trunc=%u;stk_ovf=%lu;prnt_hwm_words=%u;flashmon_hwm_words=%u;flashmon_present=%u",
 						             static_cast<unsigned long>(heapNow),
 						             static_cast<unsigned long>(heapMin),
 						             static_cast<unsigned>(stackMinWords),
@@ -2054,7 +2062,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
 						             static_cast<unsigned long>(coreMissing),
 						             static_cast<unsigned long>(pregCount),
 						             trunc ? 1u : 0u,
-						             static_cast<unsigned long>(stackOverflowFired));
+						             static_cast<unsigned long>(stackOverflowFired),
+						             static_cast<unsigned>(printerHwmWords),
+						             static_cast<unsigned>(flashMonHwmWords),
+						             hasFlashMon ? 1u : 0u);
 						    if (!runOne(1040, "rtos_memory_headroom_safe", pass, metrics)) goto selftest_done;
 						  }
 
@@ -3385,8 +3396,6 @@ void Orchestrator::_disarmFlashSession(const char* reason, bool clearFault) {
 
 // schedule a one-shot callback in N microseconds:
 void Orchestrator::scheduleFlashIn() {
-  Logger::instance()->log("PE9_FLASH_FIRE\r\n");
-
   // clear any pending flags
   __HAL_TIM_CLEAR_FLAG(&htim12, TIM_FLAG_CC1|TIM_FLAG_UPDATE);
 
@@ -3458,8 +3467,6 @@ void Orchestrator::_flashTaskLoop() {
     _flashInProgress = true;
     xEventGroupClearBits(_doneEvents, BIT_FLASH_DONE);
 
-    Logger::instance()->log("-FLASH RX-\r\n");
-
     if (_imagingDroplets == 0){
     	Orchestrator::instance()->scheduleFlashIn();
     }
@@ -3493,14 +3500,12 @@ void Orchestrator::_flashTaskLoop() {
     }
 
     _emitPendingFlashFaultLogs();
-    Logger::instance()->log("-FLASH COMP-\r\n");
 
     _clearFlashTaskNotifications();
 
     _flashInProgress = false;
     g_flash_task_done_count++;
     xEventGroupSetBits(_doneEvents, BIT_FLASH_DONE);
-    Logger::instance()->log("-FLASH DONE-\r\n");
   }
 }
 

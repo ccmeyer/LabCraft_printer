@@ -125,6 +125,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 - High-level command execution/state machine:
   - `firmware/Core/Inc/Orchestrator.h`, `firmware/Core/Src/Orchestrator.cpp`
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
+  - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`), and the 20 ms stuck-high release guard.
 
 ### Logging/status/indicators
 
@@ -140,7 +141,13 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 ### Flash trigger/imaging path
 
 - `firmware/Core/Inc/Flash.h`, `firmware/Core/Src/Flash.cpp`
+- `firmware/Core/Inc/FlashOutputState.h`
+- `firmware/Core/Inc/FlashSafety.h`, `firmware/Core/Src/FlashSafety.cpp`
 - Main integration through callbacks in `main.c` and orchestrator flash task functions.
+- `main.c` now re-applies PE8 as `GPIO_MODE_IT_RISING` + `GPIO_PULLDOWN` in the post-GPIO-init user block and logs `PE8_BIAS ...` after logger startup.
+- PE9 is kept in a safe idle GPIO-low state unless the flash session is explicitly armed; logs emit `PE9_SAFE_IDLE` and `PE9_ARMED_OUTPUT`, while the hot flash-trigger path intentionally avoids per-trigger logging to protect small task stacks.
+- The self-test RTOS task snapshot now reports `prnt_hwm_words`, `flashmon_hwm_words`, and `flashmon_present` so flash-trigger stack headroom can be verified after firmware changes.
+- Hardware requirement: the PE9 flash-driver trigger net must have an external `10 kOhm` pull-down at the flash-driver input side so the output path never floats when the MCU is not actively driving a flash pulse.
 
 ### Non-volatile configuration
 
