@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
-from PySide6.QtCore import Qt, QTimer, QEventLoop, Signal, Slot, QSignalBlocker
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QSignalBlocker
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -120,9 +120,16 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Droplet Printer Interface")
         self.init_ui()
         self.disconnected = False
+        self._close_disconnect_pending = False
+        self._close_after_disconnect = False
+        self._close_disconnect_dialog = None
+        self._close_disconnect_timer = None
+        self._close_disconnect_timeout_prompt = False
+        self._close_disconnect_signal_hooked = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
         self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
+        self._ensure_close_disconnect_signal_hook()
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
         self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
 
@@ -350,25 +357,147 @@ class MainWindow(QMainWindow):
             return normalized in {"no", "n"}
         return False
 
-    def _wait_for_disconnect(self, timeout_ms=None):
-        if timeout_ms is None:
-            timeout_ms = getattr(self, "close_disconnect_timeout_ms", self.CLOSE_DISCONNECT_TIMEOUT_MS)
+    def _get_close_disconnect_timeout_ms(self):
+        return getattr(self, "close_disconnect_timeout_ms", self.CLOSE_DISCONNECT_TIMEOUT_MS)
 
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(loop.quit)
+    def _ensure_close_disconnect_signal_hook(self):
+        if getattr(self, "_close_disconnect_signal_hooked", False):
+            return
+        signal = getattr(getattr(self.controller, "machine", None), "disconnect_complete_signal", None)
+        if signal is None:
+            return
+        signal.connect(self._handle_close_disconnect_complete)
+        self._close_disconnect_signal_hooked = True
 
-        signal = self.controller.machine.disconnect_complete_signal
-        signal.connect(loop.quit)
-        timer.start(timeout_ms)
-        loop.exec()
-        timer.stop()
+    def _get_close_disconnect_timer(self):
+        timer = getattr(self, "_close_disconnect_timer", None)
+        if timer is None:
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._handle_close_disconnect_timeout)
+            self._close_disconnect_timer = timer
+        return timer
+
+    def _show_close_disconnect_dialog(self, timed_out: bool = False):
+        dialog = getattr(self, "_close_disconnect_dialog", None)
+        if dialog is None:
+            dialog = QtWidgets.QMessageBox(self)
+            dialog.setWindowIcon(self.make_transparent_icon())
+            dialog.buttonClicked.connect(self._handle_close_disconnect_dialog_clicked)
+            self._close_disconnect_dialog = dialog
+
+        dialog.setWindowTitle("Closing Application")
+        dialog.setIcon(QtWidgets.QMessageBox.Information)
+        dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+
+        if timed_out:
+            dialog.setText("Still disconnecting from the MCU.")
+            dialog.setInformativeText(
+                "The application is still waiting for the MCU to finish disconnecting. "
+                "You can keep waiting or cancel closing and return to the application."
+            )
+            dialog.setStandardButtons(QtWidgets.QMessageBox.Retry | QtWidgets.QMessageBox.Cancel)
+
+            keep_waiting_button = dialog.button(QtWidgets.QMessageBox.Retry)
+            if keep_waiting_button is not None:
+                keep_waiting_button.setText("Keep Waiting")
+
+            cancel_button = dialog.button(QtWidgets.QMessageBox.Cancel)
+            if cancel_button is not None:
+                cancel_button.setText("Cancel Close")
+        else:
+            dialog.setText("Disconnecting from the MCU and closing the application...")
+            dialog.setInformativeText(
+                "The application will close automatically when the MCU confirms that "
+                "disconnect is complete."
+            )
+            dialog.setStandardButtons(QtWidgets.QMessageBox.NoButton)
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _dismiss_close_disconnect_dialog(self):
+        dialog = getattr(self, "_close_disconnect_dialog", None)
+        if dialog is None:
+            return
 
         try:
-            signal.disconnect(loop.quit)
+            dialog.hide()
+            dialog.close()
         except Exception:
             pass
+
+        try:
+            dialog.deleteLater()
+        except Exception:
+            pass
+
+        self._close_disconnect_dialog = None
+
+    def _cancel_pending_close_disconnect(self):
+        self._close_disconnect_pending = False
+        self._close_disconnect_timeout_prompt = False
+        self._close_after_disconnect = False
+
+        timer = getattr(self, "_close_disconnect_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        self._dismiss_close_disconnect_dialog()
+
+    def _begin_close_disconnect(self):
+        self._ensure_close_disconnect_signal_hook()
+        self.disconnected = False
+        self._close_disconnect_pending = True
+        self._close_after_disconnect = False
+        self._close_disconnect_timeout_prompt = False
+        self._show_close_disconnect_dialog(timed_out=False)
+        self._get_close_disconnect_timer().start(self._get_close_disconnect_timeout_ms())
+        self.controller.disconnect_machine()
+
+    @Slot()
+    def _handle_close_disconnect_timeout(self):
+        if not getattr(self, "_close_disconnect_pending", False):
+            return
+
+        self._close_disconnect_timeout_prompt = True
+        self._show_close_disconnect_dialog(timed_out=True)
+
+    @Slot(QtWidgets.QAbstractButton)
+    def _handle_close_disconnect_dialog_clicked(self, button):
+        if not getattr(self, "_close_disconnect_pending", False):
+            return
+
+        dialog = getattr(self, "_close_disconnect_dialog", None)
+        if dialog is None:
+            return
+
+        standard_button = dialog.standardButton(button)
+        if standard_button == QtWidgets.QMessageBox.Retry:
+            self._close_disconnect_timeout_prompt = False
+            self._show_close_disconnect_dialog(timed_out=False)
+            self._get_close_disconnect_timer().start(self._get_close_disconnect_timeout_ms())
+            return
+
+        if standard_button == QtWidgets.QMessageBox.Cancel:
+            self._cancel_pending_close_disconnect()
+
+    @Slot()
+    def _handle_close_disconnect_complete(self):
+        if not getattr(self, "_close_disconnect_pending", False):
+            return
+
+        self._close_disconnect_pending = False
+        self._close_disconnect_timeout_prompt = False
+        self._close_after_disconnect = True
+
+        timer = getattr(self, "_close_disconnect_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        self._dismiss_close_disconnect_dialog()
+        self.close()
     
     def popup_input(self,title, message):
         text, ok = QtWidgets.QInputDialog.getText(self, title, message)
@@ -457,19 +586,27 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle the window close event."""
+        if getattr(self, "_close_after_disconnect", False):
+            self._close_after_disconnect = False
+            event.accept()
+            return
+
+        if getattr(self, "_close_disconnect_pending", False):
+            event.ignore()
+            self._show_close_disconnect_dialog(
+                timed_out=getattr(self, "_close_disconnect_timeout_prompt", False)
+            )
+            return
+
         if self.model.machine_model.is_connected():
             response = self.popup_yes_no('Close Application','Disconnect from the machine and close the application?')
-            if self._is_no_response(response):
+            if not self._is_yes_response(response):
                 event.ignore()
                 return
-            else:
-                self.disconnected = False
-                self.controller.disconnect_machine()
-                self._wait_for_disconnect()
-                if self.disconnected:
-                    print('Disconnected machine')
-                else:
-                    print('Failed to disconnect the machine')
+
+            self._begin_close_disconnect()
+            event.ignore()
+            return
         # if self.model.machine_model.is_balance_connected():
         #     self.controller.disconnect_balance()
         #     print('Disconnected balance')
