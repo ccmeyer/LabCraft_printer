@@ -163,6 +163,19 @@ def test_stock_prep_dialog_prepopulates_rows_and_filters_invalid_entries(qapp):
     assert dialog.table.item(0, StockPrepDialog.COL_STATUS).text() == "Enter source concentration"
 
 
+def test_stock_prep_dialog_displays_values_with_two_decimal_places(qapp):
+    row = _row(factor_name="GroupA", option_name="Choice1", stock_concentration=400.126, total_volume_uL=55.556)
+    dialog, _model, _main_window = _make_dialog([row])
+
+    _prep_spin(dialog, 0).setValue(100.129)
+    _source_spin(dialog, 0).setValue(2000.0)
+
+    assert dialog.table.item(0, StockPrepDialog.COL_TARGET_CONC).text() == "400.13"
+    assert dialog.table.item(0, StockPrepDialog.COL_REQUIRED_VOL).text() == "55.56"
+    assert dialog.table.item(0, StockPrepDialog.COL_STOCK_TO_ADD).text() == "20.03"
+    assert dialog.table.item(0, StockPrepDialog.COL_DILUENT_TO_ADD).text() == "80.1"
+
+
 def test_stock_prep_dialog_hydrates_saved_defaults_and_row_values(qapp):
     row = _row(factor_name="GroupA", option_name="Choice1", stock_concentration=400.0, total_volume_uL=100.0)
     entry = _stock_prep_entry(row, prep_volume_uL=222.0, source_concentration=1500.0)
@@ -456,4 +469,8 @@ def test_stock_prep_dialog_uses_spinbox_widgets_for_editable_columns(qapp):
 
     assert isinstance(_prep_spin(dialog, 0), QDoubleSpinBox)
     assert isinstance(_source_spin(dialog, 0), QDoubleSpinBox)
+    assert dialog.dead_volume_spin.decimals() == 2
+    assert dialog.calibration_extra_spin.decimals() == 2
+    assert _prep_spin(dialog, 0).decimals() == 2
+    assert _source_spin(dialog, 0).decimals() == 2
     assert _source_spin(dialog, 0).specialValueText() == "--"

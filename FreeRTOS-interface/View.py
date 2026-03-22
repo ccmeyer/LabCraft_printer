@@ -1601,14 +1601,14 @@ class StockPrepDialog(QDialog):
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Dead Volume Extra (uL)", self))
         self.dead_volume_spin = QDoubleSpinBox(self)
-        self.dead_volume_spin.setDecimals(3)
+        self.dead_volume_spin.setDecimals(2)
         self.dead_volume_spin.setRange(0.0, 1_000_000.0)
         self.dead_volume_spin.setValue(self.DEFAULT_DEAD_VOLUME_UL)
         controls_layout.addWidget(self.dead_volume_spin)
 
         controls_layout.addWidget(QLabel("Calibration Extra (uL)", self))
         self.calibration_extra_spin = QDoubleSpinBox(self)
-        self.calibration_extra_spin.setDecimals(3)
+        self.calibration_extra_spin.setDecimals(2)
         self.calibration_extra_spin.setRange(0.0, 1_000_000.0)
         self.calibration_extra_spin.setValue(self.DEFAULT_CALIBRATION_EXTRA_UL)
         controls_layout.addWidget(self.calibration_extra_spin)
@@ -1702,14 +1702,14 @@ class StockPrepDialog(QDialog):
             persisted_entry = self._get_saved_row_state(row)
 
             prep_spin = QDoubleSpinBox(self.table)
-            prep_spin.setDecimals(3)
+            prep_spin.setDecimals(2)
             prep_spin.setRange(0.0, 1_000_000.0)
             prep_spin.setValue(self._resolve_prep_volume(row, persisted_entry))
             prep_spin.valueChanged.connect(lambda _value, rr=row_index: self._recompute_row(rr))
             self.table.setCellWidget(row_index, self.COL_PREP_VOL, prep_spin)
 
             source_spin = QDoubleSpinBox(self.table)
-            source_spin.setDecimals(6)
+            source_spin.setDecimals(2)
             source_spin.setRange(0.0, 1_000_000.0)
             source_spin.setSpecialValueText("--")
             source_spin.setValue(self._resolve_source_concentration(persisted_entry))
@@ -1924,7 +1924,7 @@ class StockPrepDialog(QDialog):
             xv = float(x)
             if abs(xv - round(xv)) < 1e-9:
                 return str(int(round(xv)))
-            return f"{xv:.3f}".rstrip("0").rstrip(".")
+            return f"{xv:.2f}".rstrip("0").rstrip(".")
         except Exception:
             return str(x)
 
