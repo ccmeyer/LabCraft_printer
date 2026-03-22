@@ -286,6 +286,7 @@ class ExperimentModel(QObject):
             "start_row": 0,
             "start_col": 0, 
         }
+        self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
 
         # Results of optimization
         # key for additives: (factor_name, None)
@@ -405,6 +406,148 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def _default_stock_prep_state(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "defaults": {
+                "dead_volume_extra_uL": 20.0,
+                "calibration_extra_uL": 10.0,
+            },
+            "entries": {},
+        }
+
+    def _normalize_stock_prep_state(self, raw_state: Any) -> Dict[str, Any]:
+        state = self._default_stock_prep_state()
+        if not isinstance(raw_state, dict):
+            return state
+
+        raw_defaults = raw_state.get("defaults")
+        if isinstance(raw_defaults, dict):
+            for key in ("dead_volume_extra_uL", "calibration_extra_uL"):
+                try:
+                    value = float(raw_defaults.get(key, state["defaults"][key]))
+                except Exception:
+                    continue
+                if math.isfinite(value) and value >= 0.0:
+                    state["defaults"][key] = value
+
+        raw_entries = raw_state.get("entries")
+        if isinstance(raw_entries, dict):
+            entries: Dict[str, Dict[str, Any]] = {}
+            for key, entry in raw_entries.items():
+                if not isinstance(key, str) or not isinstance(entry, dict):
+                    continue
+                try:
+                    stock_concentration = float(entry.get("stock_concentration", 0.0))
+                    prep_volume_uL = float(entry.get("prep_volume_uL", 0.0))
+                    source_concentration = float(entry.get("source_concentration", 0.0))
+                except Exception:
+                    continue
+                if not (
+                    math.isfinite(stock_concentration)
+                    and math.isfinite(prep_volume_uL)
+                    and math.isfinite(source_concentration)
+                ):
+                    continue
+                if prep_volume_uL < 0.0 or source_concentration < 0.0:
+                    continue
+                entries[key] = {
+                    "factor_name": str(entry.get("factor_name", "") or ""),
+                    "option_name": str(entry.get("option_name", "") or ""),
+                    "stock_concentration": stock_concentration,
+                    "units": str(entry.get("units", "") or ""),
+                    "prep_volume_uL": prep_volume_uL,
+                    "source_concentration": source_concentration,
+                }
+            state["entries"] = entries
+
+        return state
+
+    def build_stock_prep_key(self, row) -> str:
+        factor_name = str((row or {}).get("factor_name", "") or "")
+        option_name = str((row or {}).get("option_name", "") or "")
+        units = str((row or {}).get("units", "") or "")
+        concentration = format(float((row or {}).get("stock_concentration", 0.0) or 0.0), ".12g")
+        return "|".join([factor_name, option_name, concentration, units])
+
+    def get_stock_prep_defaults(self) -> Dict[str, float]:
+        defaults = self.stock_prep_state.get("defaults", {}) if isinstance(self.stock_prep_state, dict) else {}
+        return {
+            "dead_volume_extra_uL": float(defaults.get("dead_volume_extra_uL", 20.0) or 0.0),
+            "calibration_extra_uL": float(defaults.get("calibration_extra_uL", 10.0) or 0.0),
+        }
+
+    def get_stock_prep_entry(self, row) -> Dict[str, Any] | None:
+        entries = self.stock_prep_state.get("entries", {}) if isinstance(self.stock_prep_state, dict) else {}
+        if not isinstance(entries, dict):
+            return None
+        entry = entries.get(self.build_stock_prep_key(row))
+        if not isinstance(entry, dict):
+            return None
+        return dict(entry)
+
+    def set_stock_prep_snapshot(
+        self,
+        rows,
+        *,
+        dead_volume_extra_uL: float,
+        calibration_extra_uL: float,
+    ) -> None:
+        defaults = self._default_stock_prep_state()["defaults"]
+        try:
+            dead_value = float(dead_volume_extra_uL)
+        except Exception:
+            dead_value = defaults["dead_volume_extra_uL"]
+        try:
+            calibration_value = float(calibration_extra_uL)
+        except Exception:
+            calibration_value = defaults["calibration_extra_uL"]
+
+        if not math.isfinite(dead_value) or dead_value < 0.0:
+            dead_value = defaults["dead_volume_extra_uL"]
+        if not math.isfinite(calibration_value) or calibration_value < 0.0:
+            calibration_value = defaults["calibration_extra_uL"]
+
+        entries: Dict[str, Dict[str, Any]] = {}
+        for row in rows or []:
+            try:
+                factor_name = str((row or {}).get("factor_name", "") or "")
+                option_name = str((row or {}).get("option_name", "") or "")
+                stock_concentration = float((row or {}).get("stock_concentration", 0.0) or 0.0)
+                units = str((row or {}).get("units", "") or "")
+                prep_volume_uL = float((row or {}).get("prep_volume_uL", 0.0) or 0.0)
+                source_concentration = float((row or {}).get("source_concentration", 0.0) or 0.0)
+            except Exception:
+                continue
+            if not (
+                math.isfinite(stock_concentration)
+                and math.isfinite(prep_volume_uL)
+                and math.isfinite(source_concentration)
+            ):
+                continue
+            if prep_volume_uL < 0.0 or source_concentration < 0.0:
+                continue
+
+            key = self.build_stock_prep_key(row)
+            entries[key] = {
+                "factor_name": factor_name,
+                "option_name": option_name,
+                "stock_concentration": stock_concentration,
+                "units": units,
+                "prep_volume_uL": prep_volume_uL,
+                "source_concentration": source_concentration,
+            }
+
+        self.stock_prep_state = {
+            "version": 1,
+            "defaults": {
+                "dead_volume_extra_uL": dead_value,
+                "calibration_extra_uL": calibration_value,
+            },
+            "entries": entries,
+        }
+        self.unsaved_changes = True
 
     def _allow_two_from_metadata(self) -> bool:
         return bool(self.metadata.get("allow_two_stock_solutions", False))
@@ -2944,6 +3087,7 @@ class ExperimentModel(QObject):
         """
         data: Dict[str, object] = {
             "metadata": self.metadata,
+            "stock_prep": self.stock_prep_state,
             "factors": [
                 {
                     "name": f.name,
@@ -3025,6 +3169,7 @@ class ExperimentModel(QObject):
 
         # --- metadata + factors (existing behavior) ---
         self.metadata = d.get("metadata", self.metadata)
+        self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
         self.factors = []
 
         for f in d.get("factors", []):
@@ -4027,6 +4172,7 @@ class ExperimentModel(QObject):
             "start_row": 0,
             "start_col": 0,
         }
+        self.stock_prep_state = self._default_stock_prep_state()
         self.plans_per_option.clear()
         self._unreachable_preview_map = {}
         self._target_preview_map = {}

@@ -1572,6 +1572,7 @@ class StockPrepDialog(QDialog):
         self.experiment_model = experiment_model
         self.main_window = main_window
         self._stock_rows = self._load_stock_rows()
+        self._close_persist_complete = False
 
         self.setWindowTitle("Stock Prep Calculator")
         self.setModal(True)
@@ -1587,6 +1588,7 @@ class StockPrepDialog(QDialog):
                 self.setWindowIcon(icon)
 
         self._build_ui()
+        self._hydrate_defaults_from_model()
         self._populate_table()
 
     def _build_ui(self):
@@ -1697,11 +1699,12 @@ class StockPrepDialog(QDialog):
                 self.COL_REQUIRED_VOL,
                 self._fmt_num(row.get("total_volume_uL", "")),
             )
+            persisted_entry = self._get_saved_row_state(row)
 
             prep_spin = QDoubleSpinBox(self.table)
             prep_spin.setDecimals(3)
             prep_spin.setRange(0.0, 1_000_000.0)
-            prep_spin.setValue(self._suggested_prep_volume(row))
+            prep_spin.setValue(self._resolve_prep_volume(row, persisted_entry))
             prep_spin.valueChanged.connect(lambda _value, rr=row_index: self._recompute_row(rr))
             self.table.setCellWidget(row_index, self.COL_PREP_VOL, prep_spin)
 
@@ -1709,7 +1712,7 @@ class StockPrepDialog(QDialog):
             source_spin.setDecimals(6)
             source_spin.setRange(0.0, 1_000_000.0)
             source_spin.setSpecialValueText("--")
-            source_spin.setValue(0.0)
+            source_spin.setValue(self._resolve_source_concentration(persisted_entry))
             source_spin.valueChanged.connect(lambda _value, rr=row_index: self._recompute_row(rr))
             self.table.setCellWidget(row_index, self.COL_SOURCE_CONC, source_spin)
 
@@ -1724,6 +1727,56 @@ class StockPrepDialog(QDialog):
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         item.setTextAlignment(alignment)
         self.table.setItem(row, col, item)
+
+    def _hydrate_defaults_from_model(self):
+        getter = getattr(self.experiment_model, "get_stock_prep_defaults", None)
+        if not callable(getter):
+            return
+        try:
+            defaults = getter() or {}
+        except Exception:
+            return
+        dead_volume = self._coerce_nonnegative_float(
+            defaults.get("dead_volume_extra_uL", self.DEFAULT_DEAD_VOLUME_UL),
+            self.DEFAULT_DEAD_VOLUME_UL,
+        )
+        calibration_extra = self._coerce_nonnegative_float(
+            defaults.get("calibration_extra_uL", self.DEFAULT_CALIBRATION_EXTRA_UL),
+            self.DEFAULT_CALIBRATION_EXTRA_UL,
+        )
+        self.dead_volume_spin.setValue(dead_volume)
+        self.calibration_extra_spin.setValue(calibration_extra)
+
+    def _get_saved_row_state(self, row: Mapping[str, Any]) -> Dict[str, Any] | None:
+        getter = getattr(self.experiment_model, "get_stock_prep_entry", None)
+        if not callable(getter):
+            return None
+        try:
+            entry = getter(row)
+        except Exception:
+            return None
+        return entry if isinstance(entry, dict) else None
+
+    def _resolve_prep_volume(self, row: Mapping[str, Any], persisted_entry: Dict[str, Any] | None) -> float:
+        suggested = self._suggested_prep_volume(row)
+        if not persisted_entry:
+            return suggested
+        return self._coerce_nonnegative_float(persisted_entry.get("prep_volume_uL"), suggested)
+
+    def _resolve_source_concentration(self, persisted_entry: Dict[str, Any] | None) -> float:
+        if not persisted_entry:
+            return 0.0
+        return self._coerce_nonnegative_float(persisted_entry.get("source_concentration"), 0.0)
+
+    @staticmethod
+    def _coerce_nonnegative_float(value, fallback: float) -> float:
+        try:
+            coerced = float(value)
+        except Exception:
+            return float(fallback)
+        if not math.isfinite(coerced) or coerced < 0.0:
+            return float(fallback)
+        return coerced
 
     def _suggested_prep_volume(self, row: Mapping[str, Any]) -> float:
         required = float(row.get("total_volume_uL", 0.0) or 0.0)
@@ -1796,6 +1849,74 @@ class StockPrepDialog(QDialog):
         if -1e-9 < diluent_uL < 0:
             diluent_uL = 0.0
         return stock_uL, diluent_uL
+
+    def _collect_stock_prep_snapshot(self) -> List[Dict[str, Any]]:
+        snapshot_rows: List[Dict[str, Any]] = []
+        for row_index, row in enumerate(self._stock_rows):
+            prep_spin = self.table.cellWidget(row_index, self.COL_PREP_VOL)
+            source_spin = self.table.cellWidget(row_index, self.COL_SOURCE_CONC)
+            if not isinstance(prep_spin, QDoubleSpinBox) or not isinstance(source_spin, QDoubleSpinBox):
+                continue
+            snapshot_rows.append({
+                "factor_name": str(row.get("factor_name", "") or ""),
+                "option_name": str(row.get("option_name", "") or ""),
+                "stock_concentration": float(row.get("stock_concentration", 0.0) or 0.0),
+                "units": str(row.get("units", "") or ""),
+                "prep_volume_uL": float(prep_spin.value()),
+                "source_concentration": float(source_spin.value()),
+            })
+        return snapshot_rows
+
+    def _persist_stock_prep_state(self) -> bool:
+        rows = self._collect_stock_prep_snapshot()
+        setter = getattr(self.experiment_model, "set_stock_prep_snapshot", None)
+        if callable(setter):
+            setter(
+                rows,
+                dead_volume_extra_uL=float(self.dead_volume_spin.value()),
+                calibration_extra_uL=float(self.calibration_extra_spin.value()),
+            )
+
+        experiment_path = getattr(self.experiment_model, "experiment_file_path", None)
+        saver = getattr(self.experiment_model, "save_experiment", None)
+        if not experiment_path or not callable(saver):
+            return True
+
+        try:
+            saver()
+        except Exception as exc:
+            popup = getattr(self.main_window, "popup_message", None)
+            if callable(popup):
+                popup("Save Stock Prep Failed", f"Could not save stock prep values: {exc}")
+            return False
+        return True
+
+    def _persist_before_close(self) -> bool:
+        if self._close_persist_complete:
+            return True
+        if not self._persist_stock_prep_state():
+            return False
+        self._close_persist_complete = True
+        return True
+
+    def accept(self):
+        if not self._persist_before_close():
+            return
+        super().accept()
+
+    def reject(self):
+        if not self._persist_before_close():
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._close_persist_complete:
+            super().closeEvent(event)
+            return
+        if not self._persist_before_close():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     @staticmethod
     def _fmt_num(x) -> str:
