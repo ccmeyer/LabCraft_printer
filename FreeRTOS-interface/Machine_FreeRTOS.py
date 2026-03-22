@@ -1445,13 +1445,26 @@ class LogReader(QThread):
             pass
 
     def wait_for_stop(self, timeout_ms):
+        wait_started = time.monotonic()
         try:
             stopped = (not self.isRunning()) or bool(self.wait(timeout_ms))
         except Exception:
             stopped = False
+        wait_elapsed_ms = int((time.monotonic() - wait_started) * 1000)
 
         if stopped:
+            close_started = time.monotonic()
             self._close_serial_port()
+            close_elapsed_ms = int((time.monotonic() - close_started) * 1000)
+            print(
+                "LogReader stop timing: "
+                f"wait={wait_elapsed_ms} ms, close={close_elapsed_ms} ms"
+            )
+        else:
+            print(
+                "LogReader stop timing: "
+                f"wait timed out after {wait_elapsed_ms} ms (budget {timeout_ms} ms)"
+            )
         return stopped
 
     def stop(self):
