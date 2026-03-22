@@ -101,3 +101,83 @@ def test_log_reader_emits_flash_state_updates_from_log_lines(qapp):
             "flash_fault_reason": "",
         },
     ]
+
+
+def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffective(qapp):
+    class _Serial:
+        def __init__(self):
+            self.is_open = True
+            self.cancel_calls = 0
+            self.close_calls = 0
+
+        def cancel_read(self):
+            self.cancel_calls += 1
+
+        def close(self):
+            self.close_calls += 1
+            self.is_open = False
+
+    class _TestLogReader(mfr.LogReader):
+        def __init__(self, ser):
+            self.wait_calls = []
+            self.interrupt_calls = 0
+            super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
+
+        def requestInterruption(self):
+            self.interrupt_calls += 1
+
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+            return True
+
+    ser = _Serial()
+    reader = _TestLogReader(ser)
+
+    stopped = reader.stop()
+
+    assert stopped is True
+    assert reader.interrupt_calls == 1
+    assert reader.wait_calls == [mfr.LOG_READER_STOP_WAIT_MS]
+    assert ser.cancel_calls == 1
+    assert ser.close_calls == 1
+    assert ser.is_open is False
+
+
+def test_log_reader_stop_tolerates_cancel_and_close_errors(qapp):
+    class _Serial:
+        def __init__(self):
+            self.is_open = True
+            self.cancel_calls = 0
+            self.close_calls = 0
+
+        def cancel_read(self):
+            self.cancel_calls += 1
+            raise RuntimeError("cancel_read failed")
+
+        def close(self):
+            self.close_calls += 1
+            raise RuntimeError("close failed")
+
+    class _TestLogReader(mfr.LogReader):
+        def __init__(self, ser):
+            self.wait_calls = []
+            self.interrupt_calls = 0
+            super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
+
+        def requestInterruption(self):
+            self.interrupt_calls += 1
+
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+            return False
+
+    ser = _Serial()
+    reader = _TestLogReader(ser)
+
+    stopped = reader.stop()
+
+    assert stopped is False
+    assert reader.interrupt_calls == 1
+    assert reader.wait_calls == [mfr.LOG_READER_STOP_WAIT_MS]
+    assert ser.cancel_calls == 1
+    assert ser.close_calls == 1

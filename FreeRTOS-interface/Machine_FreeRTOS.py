@@ -28,6 +28,8 @@ from hardware.null_devices import NullCamera
 
 logger = logging.getLogger(__name__)
 
+LOG_READER_STOP_WAIT_MS = 250
+
 try:
     from picamera2 import Picamera2
     import gpiod
@@ -1317,6 +1319,7 @@ class LogReader(QThread):
         super().__init__(parent)
         self.ser = serial_factory(log_port, baud, timeout=1)
         self._running = True
+        self._stop_requested = False
         self._in_stats = False
         self._stats_block = []
         self.last_stats = None
@@ -1399,24 +1402,37 @@ class LogReader(QThread):
                 break
 
     def stop(self):
-        # Signal loop to stop
+        if self._stop_requested:
+            try:
+                return not self.isRunning()
+            except Exception:
+                return True
+
+        self._stop_requested = True
         self._running = False
+
         try:
-            # Unblock any pending read so the thread can exit immediately
-            if hasattr(self.ser, "cancel_read"):
-                self.ser.cancel_read()
+            self.requestInterruption()
         except Exception:
             pass
 
-        # give the thread time to unwind out of run()
-        self.wait(1000)
-
-        # Close port last
+        ser = getattr(self, "ser", None)
         try:
-            if self.ser and self.ser.is_open:
-                self.ser.close()
+            if ser is not None and hasattr(ser, "cancel_read"):
+                ser.cancel_read()
         except Exception:
             pass
+
+        try:
+            if ser is not None and getattr(ser, "is_open", False):
+                ser.close()
+        except Exception:
+            pass
+
+        try:
+            return bool(self.wait(LOG_READER_STOP_WAIT_MS))
+        except Exception:
+            return False
 
     # ---------- parsing ----------
     def _finish_stats_block(self):
@@ -2117,19 +2133,46 @@ class Machine(QObject):
             )
         self._flash_state = next_state
         self.flash_state_updated.emit(dict(self._flash_state))
+
+    def _disconnect_log_reader_signals(self, reader):
+        for signal_obj, slot in (
+            (getattr(reader, "lineReceived", None), self.on_log_line_received),
+            (getattr(reader, "statsUpdated", None), self.on_stats_updated),
+            (getattr(reader, "messageReceived", None), self.on_log_message_received),
+            (getattr(reader, "flashStateChanged", None), self.on_flash_state_changed),
+        ):
+            if signal_obj is None:
+                continue
+            try:
+                signal_obj.disconnect(slot)
+            except Exception:
+                pass
         
     def stop_log_thread(self):
         """
         Stop the log reader thread.
         """
-        if self.log_reader is not None:
-            try:
-                self.log_reader.stop()
-                self.log_reader.wait(200)
-            except Exception:
-                pass
+        reader = self.log_reader
+        if reader is None:
+            return
+
+        self._disconnect_log_reader_signals(reader)
+
+        stopped = False
+        try:
+            stopped = bool(reader.stop())
+        except Exception:
+            pass
+        finally:
             self.log_reader = None
+
+        if stopped:
             print("Log reader thread stopped")
+        else:
+            print(
+                f"Log reader thread shutdown timed out after {LOG_READER_STOP_WAIT_MS} ms; "
+                "continuing teardown"
+            )
 
     def begin_execution_timer(self):
         print('Starting execution timer')
