@@ -24,13 +24,14 @@ import sys
 import random
 import time
 import shutil
+import math
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 import cv2
 from utilities import ShortcutManager
 import CalibrationClasses
 import importlib
-from typing import Mapping, Sequence, Optional, Any, List, Optional, Tuple, Set
+from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
 MassCalibrationDialog = None
@@ -1544,6 +1545,268 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.target_pressure = pressure
         self.controller.set_absolute_print_pressure(pressure)
 
+class StockPrepDialog(QDialog):
+    COL_REAGENT = 0
+    COL_TARGET_CONC = 1
+    COL_UNITS = 2
+    COL_REQUIRED_VOL = 3
+    COL_PREP_VOL = 4
+    COL_SOURCE_CONC = 5
+    COL_STOCK_TO_ADD = 6
+    COL_DILUENT_TO_ADD = 7
+    COL_STATUS = 8
+
+    DEFAULT_DEAD_VOLUME_UL = 20.0
+    DEFAULT_CALIBRATION_EXTRA_UL = 10.0
+    INFO_TEXT = (
+        "One row per experiment stock. Fill reagent is excluded. Two-stock plans appear "
+        "as separate rows. Calculations assume a compatible diluent, typically water."
+    )
+    EMPTY_TEXT = (
+        "No calculated stock plan is available. Generate an experiment in Experiment Editor first."
+    )
+
+    def __init__(self, experiment_model: ExperimentModel, main_window):
+        parent = main_window if isinstance(main_window, QWidget) else None
+        super().__init__(parent)
+        self.experiment_model = experiment_model
+        self.main_window = main_window
+        self._stock_rows = self._load_stock_rows()
+
+        self.setWindowTitle("Stock Prep Calculator")
+        self.setModal(True)
+        self.resize(1100, 520)
+
+        icon_factory = getattr(self.main_window, "make_transparent_icon", None)
+        if callable(icon_factory):
+            try:
+                icon = icon_factory()
+            except Exception:
+                icon = None
+            if icon is not None:
+                self.setWindowIcon(icon)
+
+        self._build_ui()
+        self._populate_table()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        info_label = QLabel(self.INFO_TEXT, self)
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(QLabel("Dead Volume Extra (uL)", self))
+        self.dead_volume_spin = QDoubleSpinBox(self)
+        self.dead_volume_spin.setDecimals(3)
+        self.dead_volume_spin.setRange(0.0, 1_000_000.0)
+        self.dead_volume_spin.setValue(self.DEFAULT_DEAD_VOLUME_UL)
+        controls_layout.addWidget(self.dead_volume_spin)
+
+        controls_layout.addWidget(QLabel("Calibration Extra (uL)", self))
+        self.calibration_extra_spin = QDoubleSpinBox(self)
+        self.calibration_extra_spin.setDecimals(3)
+        self.calibration_extra_spin.setRange(0.0, 1_000_000.0)
+        self.calibration_extra_spin.setValue(self.DEFAULT_CALIBRATION_EXTRA_UL)
+        controls_layout.addWidget(self.calibration_extra_spin)
+
+        self.apply_suggested_button = QPushButton("Apply Suggested Volumes", self)
+        self.apply_suggested_button.clicked.connect(self._apply_suggested_prep_volumes)
+        controls_layout.addWidget(self.apply_suggested_button)
+        controls_layout.addStretch(1)
+        layout.addLayout(controls_layout)
+
+        self.table = QTableWidget(0, 9, self)
+        self.table.setHorizontalHeaderLabels([
+            "Reagent",
+            "Target Conc",
+            "Units",
+            "Required Vol (uL)",
+            "Prep Vol (uL)",
+            "Source Conc",
+            "Stock To Add (uL)",
+            "Diluent To Add (uL)",
+            "Status",
+        ])
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table)
+
+        self.empty_state_label = QLabel("", self)
+        self.empty_state_label.setWordWrap(True)
+        self.empty_state_label.setStyleSheet("color:#666; font-style: italic;")
+        self.empty_state_label.hide()
+        layout.addWidget(self.empty_state_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.close_button = QPushButton("Close", self)
+        self.close_button.clicked.connect(self.accept)
+        button_row.addWidget(self.close_button)
+        layout.addLayout(button_row)
+
+    def _load_stock_rows(self) -> List[Dict[str, Any]]:
+        getter = getattr(self.experiment_model, "get_stock_table_rows", None)
+        if not callable(getter):
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for row in getter(include_fill=False):
+            units = str(row.get("units", "") or "")
+            if units == "--":
+                continue
+
+            total_volume = row.get("total_volume_uL", None)
+            try:
+                total_volume_uL = float(total_volume)
+            except Exception:
+                continue
+            if not math.isfinite(total_volume_uL) or total_volume_uL <= 0:
+                continue
+
+            normalized = dict(row)
+            normalized["total_volume_uL"] = total_volume_uL
+            rows.append(normalized)
+        return rows
+
+    def _populate_table(self):
+        self.table.setRowCount(0)
+        if not self._stock_rows:
+            self.empty_state_label.setText(self.EMPTY_TEXT)
+            self.empty_state_label.show()
+            return
+
+        self.empty_state_label.clear()
+        self.empty_state_label.hide()
+
+        for row_index, row in enumerate(self._stock_rows):
+            self.table.insertRow(row_index)
+            label = str(row.get("option_name") or row.get("factor_name") or "")
+            self._set_readonly_item(row_index, self.COL_REAGENT, label)
+            self._set_readonly_item(
+                row_index,
+                self.COL_TARGET_CONC,
+                self._fmt_num(row.get("stock_concentration", "")),
+            )
+            self._set_readonly_item(row_index, self.COL_UNITS, str(row.get("units", "")))
+            self._set_readonly_item(
+                row_index,
+                self.COL_REQUIRED_VOL,
+                self._fmt_num(row.get("total_volume_uL", "")),
+            )
+
+            prep_spin = QDoubleSpinBox(self.table)
+            prep_spin.setDecimals(3)
+            prep_spin.setRange(0.0, 1_000_000.0)
+            prep_spin.setValue(self._suggested_prep_volume(row))
+            prep_spin.valueChanged.connect(lambda _value, rr=row_index: self._recompute_row(rr))
+            self.table.setCellWidget(row_index, self.COL_PREP_VOL, prep_spin)
+
+            source_spin = QDoubleSpinBox(self.table)
+            source_spin.setDecimals(6)
+            source_spin.setRange(0.0, 1_000_000.0)
+            source_spin.setSpecialValueText("--")
+            source_spin.setValue(0.0)
+            source_spin.valueChanged.connect(lambda _value, rr=row_index: self._recompute_row(rr))
+            self.table.setCellWidget(row_index, self.COL_SOURCE_CONC, source_spin)
+
+            self._set_readonly_item(row_index, self.COL_STOCK_TO_ADD, "")
+            self._set_readonly_item(row_index, self.COL_DILUENT_TO_ADD, "")
+            self._set_readonly_item(row_index, self.COL_STATUS, "", alignment=Qt.AlignLeft | Qt.AlignVCenter)
+
+        self._recompute_all_rows()
+
+    def _set_readonly_item(self, row: int, col: int, text: str, alignment=Qt.AlignCenter):
+        item = QTableWidgetItem(str(text))
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        item.setTextAlignment(alignment)
+        self.table.setItem(row, col, item)
+
+    def _suggested_prep_volume(self, row: Mapping[str, Any]) -> float:
+        required = float(row.get("total_volume_uL", 0.0) or 0.0)
+        return required + float(self.dead_volume_spin.value()) + float(self.calibration_extra_spin.value())
+
+    def _apply_suggested_prep_volumes(self):
+        for row_index, row in enumerate(self._stock_rows):
+            prep_spin = self.table.cellWidget(row_index, self.COL_PREP_VOL)
+            if isinstance(prep_spin, QDoubleSpinBox):
+                prep_spin.setValue(self._suggested_prep_volume(row))
+        self._recompute_all_rows()
+
+    def _recompute_all_rows(self):
+        for row_index in range(self.table.rowCount()):
+            self._recompute_row(row_index)
+
+    def _recompute_row(self, row_index: int):
+        if row_index < 0 or row_index >= len(self._stock_rows):
+            return
+
+        row = self._stock_rows[row_index]
+        target_conc = float(row.get("stock_concentration", 0.0) or 0.0)
+        prep_spin = self.table.cellWidget(row_index, self.COL_PREP_VOL)
+        source_spin = self.table.cellWidget(row_index, self.COL_SOURCE_CONC)
+        if not isinstance(prep_spin, QDoubleSpinBox) or not isinstance(source_spin, QDoubleSpinBox):
+            return
+
+        prep_volume_uL = float(prep_spin.value())
+        source_conc = float(source_spin.value())
+
+        stock_item = self.table.item(row_index, self.COL_STOCK_TO_ADD)
+        diluent_item = self.table.item(row_index, self.COL_DILUENT_TO_ADD)
+        status_item = self.table.item(row_index, self.COL_STATUS)
+        if stock_item is None or diluent_item is None or status_item is None:
+            return
+
+        def _set_blank(message: str):
+            stock_item.setText("")
+            diluent_item.setText("")
+            status_item.setText(message)
+
+        if source_conc <= 0:
+            _set_blank("Enter source concentration")
+            return
+        if prep_volume_uL <= 0:
+            _set_blank("Enter prep volume")
+            return
+        if source_conc + 1e-12 < target_conc:
+            _set_blank("Source concentration must be >= target concentration")
+            return
+
+        if abs(source_conc - target_conc) <= 1e-12:
+            stock_uL = prep_volume_uL
+            diluent_uL = 0.0
+        else:
+            stock_uL, diluent_uL = self._calculate_dilution(target_conc, source_conc, prep_volume_uL)
+
+        stock_item.setText(self._fmt_num(stock_uL))
+        diluent_item.setText(self._fmt_num(diluent_uL))
+        status_item.setText("Ready")
+
+    def _calculate_dilution(
+        self,
+        target_conc: float,
+        source_conc: float,
+        prep_volume_uL: float,
+    ) -> Tuple[float, float]:
+        stock_uL = (float(target_conc) / float(source_conc)) * float(prep_volume_uL)
+        diluent_uL = float(prep_volume_uL) - stock_uL
+        if -1e-9 < diluent_uL < 0:
+            diluent_uL = 0.0
+        return stock_uL, diluent_uL
+
+    @staticmethod
+    def _fmt_num(x) -> str:
+        try:
+            xv = float(x)
+            if abs(xv - round(xv)) < 1e-9:
+                return str(int(round(xv)))
+            return f"{xv:.3f}".rstrip("0").rstrip(".")
+        except Exception:
+            return str(x)
+
 class WellPlateWidget(QtWidgets.QGroupBox):
     def __init__(self, main_window, model, controller):
         super().__init__('PLATE')
@@ -1591,6 +1854,10 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.design_experiment_button = QPushButton("Experiment Editor")
         self.design_experiment_button.clicked.connect(self.open_experiment_designer)
         self.bottom_layout.addWidget(self.design_experiment_button)
+
+        self.stock_prep_button = QPushButton("Prep Stocks")
+        self.stock_prep_button.clicked.connect(self.open_stock_prep_dialog)
+        self.bottom_layout.addWidget(self.stock_prep_button)
 
         self.start_print_array_button = QPushButton("Start Print")
         self.start_print_array_button.setStyleSheet(f"background-color: {self.color_dict['darker_gray']}; color: white;")
@@ -1822,6 +2089,10 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         dialog = ExperimentDesignDialog(self.model.experiment_model,self.main_window)
         if dialog.exec():
             print("Experiment file generated and loaded.")
+
+    def open_stock_prep_dialog(self):
+        dialog = StockPrepDialog(self.model.experiment_model, self.main_window)
+        dialog.exec()
 
 class SimplePositionWidget(QGroupBox):
     home_requested = QtCore.Signal()  # Signal to request homing
