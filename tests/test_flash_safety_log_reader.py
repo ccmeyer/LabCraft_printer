@@ -103,6 +103,21 @@ def test_log_reader_emits_flash_state_updates_from_log_lines(qapp):
     ]
 
 
+def test_log_reader_uses_short_serial_timeout(qapp):
+    timeouts = []
+
+    class _Serial:
+        def __init__(self):
+            self.is_open = False
+
+        def read_until(self, expected=b"\n", size=1024):
+            return b""
+
+    mfr.LogReader(serial_factory=lambda _port, _baud, timeout=0.0: (timeouts.append(timeout), _Serial())[1])
+
+    assert timeouts == [mfr.LOG_READER_SERIAL_TIMEOUT_S]
+
+
 def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffective(qapp):
     class _Serial:
         def __init__(self):
@@ -180,4 +195,4 @@ def test_log_reader_stop_tolerates_cancel_and_close_errors(qapp):
     assert reader.interrupt_calls == 1
     assert reader.wait_calls == [mfr.LOG_READER_STOP_WAIT_MS]
     assert ser.cancel_calls == 1
-    assert ser.close_calls == 1
+    assert ser.close_calls == 0

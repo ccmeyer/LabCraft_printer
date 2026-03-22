@@ -102,7 +102,7 @@ def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile):
     assert machine.log_reader is None
 
 
-def test_stop_log_thread_continues_when_reader_stop_times_out(qapp, test_profile, capsys):
+def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, test_profile, capsys):
     machine = Machine(SimpleNamespace(), profile=test_profile)
 
     class _SignalTracker:
@@ -128,5 +128,58 @@ def test_stop_log_thread_continues_when_reader_stop_times_out(qapp, test_profile
     out = capsys.readouterr().out
 
     assert reader.stop_calls == 1
-    assert machine.log_reader is None
-    assert f"timed out after {mfr.LOG_READER_STOP_WAIT_MS} ms" in out
+    assert machine.log_reader is reader
+    assert "did not stop cleanly" in out
+
+
+def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
+    profile = SimpleNamespace(
+        name="current",
+        has_refuel_camera=False,
+        has_droplet_camera=False,
+        has_log_channel=True,
+    )
+    machine = Machine(SimpleNamespace(), profile=profile)
+
+    class _SignalTracker:
+        def __init__(self):
+            self.connected = []
+
+        def connect(self, slot):
+            self.connected.append(slot)
+
+    old_reader_calls = {"stop": 0}
+
+    class _OldReader:
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            old_reader_calls["stop"] += 1
+            return True
+
+    created = []
+
+    class _NewReader:
+        def __init__(self, baud, serial_factory=None):
+            self.baud = baud
+            self.serial_factory = serial_factory
+            self.lineReceived = _SignalTracker()
+            self.statsUpdated = _SignalTracker()
+            self.messageReceived = _SignalTracker()
+            self.flashStateChanged = _SignalTracker()
+            self.start_calls = 0
+            created.append(self)
+
+        def start(self):
+            self.start_calls += 1
+
+    monkeypatch.setattr(mfr, "LogReader", _NewReader)
+    machine.log_reader = _OldReader()
+
+    machine.begin_log_thread()
+
+    assert old_reader_calls["stop"] == 1
+    assert len(created) == 1
+    assert machine.log_reader is created[0]
+    assert created[0].start_calls == 1

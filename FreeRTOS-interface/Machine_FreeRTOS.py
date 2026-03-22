@@ -28,7 +28,8 @@ from hardware.null_devices import NullCamera
 
 logger = logging.getLogger(__name__)
 
-LOG_READER_STOP_WAIT_MS = 250
+LOG_READER_SERIAL_TIMEOUT_S = 0.1
+LOG_READER_STOP_WAIT_MS = 1000
 
 try:
     from picamera2 import Picamera2
@@ -1317,7 +1318,7 @@ class LogReader(QThread):
 
     def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", history_len=360, serial_factory=serial.Serial):
         super().__init__(parent)
-        self.ser = serial_factory(log_port, baud, timeout=1)
+        self.ser = serial_factory(log_port, baud, timeout=LOG_READER_SERIAL_TIMEOUT_S)
         self._running = True
         self._stop_requested = False
         self._in_stats = False
@@ -1361,7 +1362,7 @@ class LogReader(QThread):
     # ---------- thread loop ----------
     def run(self):
         """Continuously read lines and emit them + parse stats blocks."""
-        while self._running:
+        while self._running and not self.isInterruptionRequested():
             try:
                 if not self.ser or not self.ser.is_open:
                     break
@@ -1401,12 +1402,23 @@ class LogReader(QThread):
             except (serial.SerialException, OSError, TypeError, ValueError):
                 break
 
+    def _close_serial_port(self):
+        ser = getattr(self, "ser", None)
+        try:
+            if ser is not None and getattr(ser, "is_open", False):
+                ser.close()
+        except Exception:
+            pass
+
     def stop(self):
         if self._stop_requested:
             try:
-                return not self.isRunning()
+                stopped = not self.isRunning() or bool(self.wait(LOG_READER_STOP_WAIT_MS))
             except Exception:
-                return True
+                stopped = True
+            if stopped:
+                self._close_serial_port()
+            return stopped
 
         self._stop_requested = True
         self._running = False
@@ -1416,23 +1428,21 @@ class LogReader(QThread):
         except Exception:
             pass
 
-        ser = getattr(self, "ser", None)
         try:
+            ser = getattr(self, "ser", None)
             if ser is not None and hasattr(ser, "cancel_read"):
                 ser.cancel_read()
         except Exception:
             pass
 
         try:
-            if ser is not None and getattr(ser, "is_open", False):
-                ser.close()
+            stopped = bool(self.wait(LOG_READER_STOP_WAIT_MS))
         except Exception:
-            pass
+            stopped = False
 
-        try:
-            return bool(self.wait(LOG_READER_STOP_WAIT_MS))
-        except Exception:
-            return False
+        if stopped:
+            self._close_serial_port()
+        return stopped
 
     # ---------- parsing ----------
     def _finish_stats_block(self):
@@ -2101,8 +2111,18 @@ class Machine(QObject):
             self.log_reader = None
             return
 
-        if self.log_reader is not None:
-            return
+        reader = self.log_reader
+        if reader is not None:
+            try:
+                if reader.isRunning():
+                    return
+            except Exception:
+                return
+            try:
+                reader.stop()
+            except Exception:
+                pass
+            self.log_reader = None
 
         try:
             self.log_reader = LogReader(self.baud, serial_factory=self._serial_factory)
@@ -2163,16 +2183,14 @@ class Machine(QObject):
             stopped = bool(reader.stop())
         except Exception:
             pass
-        finally:
+
+        if stopped:
             self.log_reader = None
 
         if stopped:
             print("Log reader thread stopped")
         else:
-            print(
-                f"Log reader thread shutdown timed out after {LOG_READER_STOP_WAIT_MS} ms; "
-                "continuing teardown"
-            )
+            print("Log reader thread did not stop cleanly; keeping existing reader reference")
 
     def begin_execution_timer(self):
         print('Starting execution timer')
