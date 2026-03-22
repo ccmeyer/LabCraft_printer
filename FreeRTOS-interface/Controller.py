@@ -1177,9 +1177,78 @@ class Controller(QObject):
         self.machine.start_refuel_camera()
         self.machine.refuel_led_on()
 
+    def _build_refuel_capture_context(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        context = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "monotonic_s": time.monotonic(),
+            "print_pressure": None,
+            "refuel_pressure": None,
+            "print_pulse_width": None,
+            "refuel_pulse_width": None,
+            "location": "",
+        }
+        if machine_model is None:
+            return context
+
+        getters = (
+            ("print_pressure", "get_current_print_pressure"),
+            ("refuel_pressure", "get_current_refuel_pressure"),
+            ("print_pulse_width", "get_print_pulse_width"),
+            ("refuel_pulse_width", "get_refuel_pulse_width"),
+            ("location", "get_current_location"),
+        )
+        for key, getter_name in getters:
+            getter = getattr(machine_model, getter_name, None)
+            if callable(getter):
+                try:
+                    context[key] = getter()
+                except Exception:
+                    pass
+        return context
+
     def capture_refuel_image(self):
         frame = self.machine.capture_refuel_image()
-        self.model.refuel_camera_model.start_analysis(frame)
+        if frame is None:
+            return None
+        context = self._build_refuel_capture_context()
+        self.model.refuel_camera_model.start_analysis(frame, context=context)
+        return frame
+
+    def run_refuel_balance_burst(self, droplet_count, settle_ms, on_complete=None, on_error=None):
+        if not self.machine.check_if_all_completed():
+            msg = "Cannot start refuel burst: command queue is not empty."
+            if callable(on_error):
+                on_error(msg)
+            return False
+        if not self.model.machine_model.regulating_print_pressure:
+            msg = "Cannot start refuel burst: print pressure regulation is not enabled."
+            if callable(on_error):
+                on_error(msg)
+            return False
+
+        droplet_count = max(1, int(droplet_count))
+        settle_ms = max(1, int(settle_ms))
+
+        def _burst_complete_handler():
+            if callable(on_complete):
+                on_complete(self._build_refuel_capture_context())
+
+        ok_print = self.machine.print_droplets(droplet_count, manual=True)
+        if ok_print is False:
+            msg = "Failed to enqueue refuel balance print burst."
+            if callable(on_error):
+                on_error(msg)
+            return False
+
+        ok_wait = self.machine.wait_ms(settle_ms, handler=_burst_complete_handler, manual=True)
+        if ok_wait is False:
+            msg = "Failed to enqueue refuel balance settle delay."
+            if callable(on_error):
+                on_error(msg)
+            return False
+
+        return True
 
     def stop_refuel_camera(self):
         self.machine.stop_refuel_camera()

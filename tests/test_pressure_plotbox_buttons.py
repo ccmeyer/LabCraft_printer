@@ -14,9 +14,20 @@ class _FakeMachineModel(QObject):
     regulation_state_changed = Signal(bool)
     pressure_updated = Signal()
 
-    def __init__(self, *, regulating_print_pressure=False, current_location="camera"):
+    def __init__(
+        self,
+        *,
+        regulating_print_pressure=False,
+        regulating_refuel_pressure=None,
+        current_location="camera",
+    ):
         super().__init__()
         self.regulating_print_pressure = regulating_print_pressure
+        self.regulating_refuel_pressure = (
+            regulating_print_pressure
+            if regulating_refuel_pressure is None
+            else regulating_refuel_pressure
+        )
         self.current_location = current_location
         self.print_pulse_width = 3000
         self.refuel_pulse_width = 3000
@@ -101,6 +112,22 @@ def _patch_droplet_launch(monkeypatch, events, *, main_window, model, controller
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
 
 
+def _patch_refuel_launch(monkeypatch, events, *, main_window, model, controller):
+    class _RefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            events.append("refuel_dialog_init")
+
+        def exec(self):
+            events.append("refuel_dialog_exec")
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
+
+
 def test_current_profile_pressure_box_removes_extra_bottom_buttons(qapp):
     events = []
     popups = []
@@ -111,8 +138,22 @@ def test_current_profile_pressure_box_removes_extra_bottom_buttons(qapp):
     )
 
     assert hasattr(box, "calibrate_pressure_button")
+    assert hasattr(box, "refuel_camera_button")
     assert not hasattr(box, "droplet_imager_button")
     assert not hasattr(box, "nozzle_dataset_button")
+
+
+def test_legacy_profile_pressure_box_hides_refuel_camera_button(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(LEGACY_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert hasattr(box, "calibrate_pressure_button")
+    assert not hasattr(box, "refuel_camera_button")
 
 
 def test_current_profile_calibrate_pressure_rejects_when_queue_not_empty(monkeypatch, qapp):
@@ -141,6 +182,36 @@ def test_current_profile_calibrate_pressure_rejects_when_queue_not_empty(monkeyp
     model.reload_droplet_model.assert_not_called()
 
 
+def test_current_profile_refuel_camera_rejects_when_queue_not_empty(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events, queue_clear=False)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    assert popups == [
+        (
+            "Commands Still Running",
+            "Please wait for the current commands to finish before starting the refuel camera.",
+        )
+    ]
+    controller.move_to_location.assert_not_called()
+    model.reload_refuel_model.assert_not_called()
+
+
 def test_current_profile_calibrate_pressure_requires_gripper_head(monkeypatch, qapp):
     events = []
     popups = []
@@ -167,6 +238,36 @@ def test_current_profile_calibrate_pressure_requires_gripper_head(monkeypatch, q
     model.reload_droplet_model.assert_not_called()
 
 
+def test_current_profile_refuel_camera_requires_gripper_head(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=None,
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    assert popups == [
+        (
+            "No Printer Head",
+            "Please load a printer head into the gripper before starting refuel imaging.",
+        )
+    ]
+    controller.move_to_location.assert_not_called()
+    model.reload_refuel_model.assert_not_called()
+
+
 def test_current_profile_calibrate_pressure_requires_regulated_pressure(monkeypatch, qapp):
     events = []
     popups = []
@@ -191,6 +292,36 @@ def test_current_profile_calibrate_pressure_requires_regulated_pressure(monkeypa
     ]
     controller.move_to_location.assert_not_called()
     model.reload_droplet_model.assert_not_called()
+
+
+def test_current_profile_refuel_camera_requires_both_regulated_pressures(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=False,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    assert popups == [
+        (
+            "Pressure Not Regulated",
+            "Please regulate both print and refuel pressure before starting the refuel camera.",
+        )
+    ]
+    controller.move_to_location.assert_not_called()
+    model.reload_refuel_model.assert_not_called()
 
 
 def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monkeypatch, qapp):
@@ -222,6 +353,39 @@ def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monke
     model.reload_refuel_model.assert_not_called()
 
 
+def test_current_profile_refuel_camera_opens_refuel_dialog_at_camera(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    assert events == [
+        "reload_refuel_model",
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+    ]
+    main_window.popup_yes_no.assert_not_called()
+    controller.move_to_location.assert_not_called()
+    controller.disconnect_droplet_camera_signals.assert_not_called()
+    controller.connect_droplet_camera_signals.assert_not_called()
+    model.reload_droplet_model.assert_not_called()
+
+
 def test_current_profile_calibrate_pressure_requires_camera_position_on_decline(monkeypatch, qapp):
     events = []
     popups = []
@@ -251,6 +415,41 @@ def test_current_profile_calibrate_pressure_requires_camera_position_on_decline(
     ]
     controller.move_to_location.assert_not_called()
     model.reload_droplet_model.assert_not_called()
+
+
+def test_current_profile_refuel_camera_requires_camera_position_on_decline(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(
+        CURRENT_PROFILE,
+        popups,
+        popup_response=QMessageBox.StandardButton.No,
+    )
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="plate",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    main_window.popup_yes_no.assert_called_once()
+    assert popups == [
+        (
+            "Must Be At Camera",
+            "Please move the machine to the camera position before starting refuel imaging.",
+        )
+    ]
+    controller.move_to_location.assert_not_called()
+    model.reload_refuel_model.assert_not_called()
 
 
 def test_current_profile_calibrate_pressure_moves_then_launches_droplet_imager(monkeypatch, qapp):
@@ -292,6 +491,52 @@ def test_current_profile_calibrate_pressure_moves_then_launches_droplet_imager(m
         "droplet_dialog_init",
         "droplet_dialog_exec",
     ]
+    assert popups == []
+
+
+def test_current_profile_refuel_camera_moves_then_launches_refuel_dialog(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(
+        CURRENT_PROFILE,
+        popups,
+        popup_response=QMessageBox.StandardButton.Yes,
+    )
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="plate",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    _patch_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
+
+    box.refuel_camera()
+
+    main_window.popup_yes_no.assert_called_once()
+    controller.move_to_location.assert_called_once()
+    move_args = controller.move_to_location.call_args
+    assert move_args.args == ("camera",)
+    assert move_args.kwargs["manual"] is True
+    on_complete = move_args.kwargs["on_complete"]
+    assert callable(on_complete)
+    assert events == []
+
+    on_complete()
+
+    assert events == [
+        "reload_refuel_model",
+        "enable_print_profile",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+    ]
+    controller.disconnect_droplet_camera_signals.assert_not_called()
+    controller.connect_droplet_camera_signals.assert_not_called()
     assert popups == []
 
 

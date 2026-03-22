@@ -1308,6 +1308,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.calibrate_pressure_button.clicked.connect(self.calibrate_pressure)
         self.layout.addWidget(self.calibrate_pressure_button, 4, 0, 1, 2)
 
+        if not self.legacy_mode:
+            self.refuel_camera_button = QtWidgets.QPushButton("Refuel Camera")
+            self.refuel_camera_button.clicked.connect(self.refuel_camera)
+            self.layout.addWidget(self.refuel_camera_button, 5, 0, 1, 2)
+
         self.print_pulse_width_label = QtWidgets.QLabel("Print Pulse Width:")
         self.print_pulse_width_spinbox = QtWidgets.QSpinBox()
         self.print_pulse_width_spinbox.setRange(0, 10000)
@@ -1480,6 +1485,19 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(self.main_window,self.model,self.controller)
         droplet_imaging_dialog.exec()
 
+    def _launch_refuel_camera_dialog(self):
+        """Open the refuel camera dialog after preflight checks have passed."""
+        importlib.reload(CalibrationClasses.View)
+        importlib.reload(CalibrationClasses)
+        self.model.reload_refuel_model()
+        self.controller.enable_print_profile()
+        refuel_camera_dialog = CalibrationClasses.RefuelCameraWindow(
+            self.main_window,
+            self.model,
+            self.controller,
+        )
+        refuel_camera_dialog.exec()
+
     def droplet_imager(self):
         """Open the droplet imager dialog after verifying prerequisites."""
         if not self.controller.check_if_all_completed():
@@ -1523,6 +1541,54 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             "camera",
             manual=True,
             on_complete=self._launch_droplet_imager_dialog,
+        )
+
+    def refuel_camera(self):
+        """Open the refuel camera dialog after verifying prerequisites."""
+        if not self.controller.check_if_all_completed():
+            self.popup_message_signal.emit(
+                "Commands Still Running",
+                "Please wait for the current commands to finish before starting the refuel camera.",
+            )
+            return
+
+        if self.model.rack_model.get_gripper_printer_head() is None:
+            self.popup_message_signal.emit(
+                "No Printer Head",
+                "Please load a printer head into the gripper before starting refuel imaging.",
+            )
+            return
+
+        if (
+            not self.model.machine_model.regulating_print_pressure
+            or not self.model.machine_model.regulating_refuel_pressure
+        ):
+            self.popup_message_signal.emit(
+                "Pressure Not Regulated",
+                "Please regulate both print and refuel pressure before starting the refuel camera.",
+            )
+            return
+
+        current_location = str(self.model.machine_model.get_current_location() or "").strip().lower()
+        if current_location == "camera":
+            self._launch_refuel_camera_dialog()
+            return
+
+        response = self.main_window.popup_yes_no(
+            "Move To Camera",
+            "Refuel imaging must start at the camera position. Would you like to move to the camera position now?",
+        )
+        if not self.main_window._is_yes_response(response):
+            self.popup_message_signal.emit(
+                "Must Be At Camera",
+                "Please move the machine to the camera position before starting refuel imaging.",
+            )
+            return
+
+        self.controller.move_to_location(
+            "camera",
+            manual=True,
+            on_complete=self._launch_refuel_camera_dialog,
         )
 
     def nozzle_position_dataset_capture(self):

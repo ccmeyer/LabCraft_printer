@@ -20832,7 +20832,7 @@ class DropletCameraModel(QObject):
 class ImageAnalysisThread(QThread):
     # Define signals to send results back to the main thread
     # analysis_done = Signal(object,object,object,object)  # Send original, thresholded, and analyzed image and result
-    analysis_done = Signal(object, object, object)  # Send original, and annotated image and detected level
+    analysis_done = Signal(object, object, object, object)  # Send original, annotated image, level, and meniscus row
 
     def __init__(self, image, offset, width, threshold, prominence, empty_cutoff, last_row, parent=None):
         super().__init__(parent)
@@ -20845,12 +20845,18 @@ class ImageAnalysisThread(QThread):
         self.original_image = image
         self.annotated_image = None
         self.level_data = None
+        self.meniscus_row = None
 
     def run(self):
         # Perform image analysis
         self.analyze_image()
         # Emit results
-        self.analysis_done.emit(self.original_image, self.annotated_image, self.level_data)
+        self.analysis_done.emit(
+            self.original_image,
+            self.annotated_image,
+            self.level_data,
+            self.meniscus_row,
+        )
 
     def find_printer_head(self,cur_img, threshold_value=50):
         """
@@ -20985,6 +20991,7 @@ class ImageAnalysisThread(QThread):
             print("Printer head not found, using default values")
             self.annotated_image = cur_img.copy()
             self.level_data = None
+            self.meniscus_row = None
             return
         else:
             x0, y0, w0, h0 = self.get_channel_bounds(cur_img, x, y, w, h, left_offset=self.offset, channel_width=self.width)
@@ -21007,18 +21014,22 @@ class ImageAnalysisThread(QThread):
         cv2.rectangle(cur_img, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Green rectangle
 
         self.annotated_image = cur_img.copy()
+        self.meniscus_row = int(meniscus_row)
 
         # Calculate level data by calculating the difference between the meniscus row and the bottom of the channel
-        self.level_data = h0 - meniscus_row
+        self.level_data = h0 - self.meniscus_row
 
 class RefuelCameraModel(QObject):
-    '''
-    Stores all the data from the refuel camera system
-    '''
-    update_level_ui_signal = Signal()
-    # level_updated_signal = Signal()
+    """
+    Stores live refuel-camera measurements plus advisory calibration session state.
+    """
 
-    def __init__(self):
+    PROCESS_NAME = "RefuelBalanceCalibrationProcess"
+    PHASE_NAME = "refuel_balance"
+
+    update_level_ui_signal = Signal()
+
+    def __init__(self, owner_model=None):
         super().__init__()
         print("Loaded New")
         self.offset = None
@@ -21029,21 +21040,44 @@ class RefuelCameraModel(QObject):
 
         self.current_level = None
         self.level_log = []
-        self.stable = False
+        self.sample_trace = []
+        self.last_meniscus_row = None
         self.original_image = None
         self.annotated_image = None
+        self.analysis_thread = None
 
-    def update_threshold(self, value):
-        self.threshold_value = value
+        self.target_level_px = None
+        self.target_meniscus_row = None
+        self.tolerance_px = 5.0
+        self.session_started_at = None
+        self.session_active = False
+        self.last_burst_result = None
+        self.live_status = None
 
-    def update_blur(self, value):
-        self.blur_size = value
+        self.capture_interval_ms = 500
+        self.default_burst_droplet_count = 20
+        self.default_settle_ms = 1000
+        self.default_baseline_samples = 5
+        self.default_post_samples = 5
 
-    def update_left_bound(self, value):
-        self.left_bound = value
+        self.owner_model = None
+        self._process_recorder = None
+        self._recorder_run_dir = None
+        self._session_start_monotonic = None
+        self._analysis_context = None
+        self._analysis_in_progress = False
+        self._burst_state = None
 
-    def update_right_bound(self, value):
-        self.right_bound = value
+        self.attach_owner_model(owner_model)
+
+    @staticmethod
+    def _now_utc():
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def attach_owner_model(self, owner_model):
+        self.owner_model = owner_model
+        if owner_model is not None:
+            self._process_recorder = CalibrationProcessRecorder(owner_model)
 
     def update_analysis_parameters(self, offset, width, threshold, prom, empty_cutoff):
         self.offset = offset
@@ -21052,31 +21086,444 @@ class RefuelCameraModel(QObject):
         self.prominence = prom
         self.empty_cutoff = empty_cutoff
 
+    def set_capture_interval_ms(self, interval_ms):
+        try:
+            self.capture_interval_ms = max(1, int(interval_ms))
+        except Exception:
+            self.capture_interval_ms = 500
+
+    def set_burst_defaults(self, *, droplet_count=None, settle_ms=None, baseline_samples=None, post_samples=None):
+        if droplet_count is not None:
+            self.default_burst_droplet_count = max(1, int(droplet_count))
+        if settle_ms is not None:
+            self.default_settle_ms = max(1, int(settle_ms))
+        if baseline_samples is not None:
+            self.default_baseline_samples = max(1, int(baseline_samples))
+        if post_samples is not None:
+            self.default_post_samples = max(1, int(post_samples))
+
     def update_current_level(self, level):
         self.current_level = level
+        self.live_status = self.classify_live_status(level)
 
-    def start_analysis(self, frame):
-        # Resize the image to fit within 640x480 while maintaining aspect ratio
+    def _record_mode_enabled(self):
+        owner = getattr(self, "owner_model", None)
+        manager = getattr(owner, "calibration_manager", None) if owner is not None else None
+        getter = getattr(manager, "get_record_mode_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return False
+
+    def _build_refuel_run_meta(self):
+        meta = {}
+        owner = getattr(self, "owner_model", None)
+        manager = getattr(owner, "calibration_manager", None) if owner is not None else None
+        builder = getattr(manager, "_build_recorder_meta", None)
+        if callable(builder):
+            try:
+                payload = builder()
+                if isinstance(payload, dict):
+                    meta.update(payload)
+            except Exception:
+                pass
+
+        meta.update(
+            {
+                "target_level_px": self.target_level_px,
+                "target_meniscus_row": self.target_meniscus_row,
+                "tolerance_px": self.tolerance_px,
+                "capture_interval_ms": self.capture_interval_ms,
+                "burst_defaults": {
+                    "droplet_count": self.default_burst_droplet_count,
+                    "settle_ms": self.default_settle_ms,
+                    "baseline_samples": self.default_baseline_samples,
+                    "post_samples": self.default_post_samples,
+                },
+            }
+        )
+        return meta
+
+    def _ensure_recorder_started(self):
+        if self._recorder_run_dir is not None:
+            return self._recorder_run_dir
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None or not self._record_mode_enabled():
+            return None
+        try:
+            run_dir = recorder.start_run(
+                self.PROCESS_NAME,
+                self.PHASE_NAME,
+                extra_meta=self._build_refuel_run_meta(),
+            )
+            self._recorder_run_dir = run_dir
+            recorder.append_event(
+                "session_started",
+                {
+                    "target_level_px": self.target_level_px,
+                    "target_meniscus_row": self.target_meniscus_row,
+                    "tolerance_px": self.tolerance_px,
+                },
+            )
+            return run_dir
+        except Exception as exc:
+            print(f"[RefuelRecorder] Failed to start run: {exc}")
+            return None
+
+    def _record_event(self, event_type, payload=None):
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None or self._recorder_run_dir is None:
+            return None
+        try:
+            return recorder.append_event(str(event_type), payload or {})
+        except Exception as exc:
+            print(f"[RefuelRecorder] Failed to append event '{event_type}': {exc}")
+            return None
+
+    def _record_analysis(self, payload):
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None or self._recorder_run_dir is None:
+            return None
+        try:
+            return recorder.append_analysis(payload or {})
+        except Exception as exc:
+            print(f"[RefuelRecorder] Failed to append analysis: {exc}")
+            return None
+
+    def _record_capture_frame(self, image, *, role, metadata=None):
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None or self._recorder_run_dir is None or image is None:
+            return None
+        try:
+            return recorder.save_capture_image(image, role=str(role), metadata=metadata or {})
+        except Exception as exc:
+            print(f"[RefuelRecorder] Failed to save capture image: {exc}")
+            return None
+
+    def _finalize_recorder(self, outcome="completed", *, error_message=""):
+        recorder = getattr(self, "_process_recorder", None)
+        if recorder is None or self._recorder_run_dir is None:
+            return
+        try:
+            recorder.finalize_run(str(outcome), error_message=str(error_message or ""))
+        except Exception as exc:
+            print(f"[RefuelRecorder] Failed to finalize run: {exc}")
+        self._recorder_run_dir = None
+
+    def _normalize_capture_context(self, context=None):
+        payload = dict(context or {})
+        payload.setdefault("timestamp_utc", self._now_utc())
+        payload.setdefault("monotonic_s", time.monotonic())
+        payload.setdefault("print_pressure", None)
+        payload.setdefault("refuel_pressure", None)
+        payload.setdefault("print_pulse_width", None)
+        payload.setdefault("refuel_pulse_width", None)
+        payload.setdefault("location", "")
+        return payload
+
+    def _append_sample(self, level_data, meniscus_row, context):
+        context = self._normalize_capture_context(context)
+        if self._session_start_monotonic is None:
+            self._session_start_monotonic = float(context["monotonic_s"])
+            self.session_started_at = str(context["timestamp_utc"])
+
+        elapsed_s = max(0.0, float(context["monotonic_s"]) - float(self._session_start_monotonic))
+        phase = "live"
+        if self._burst_state is not None:
+            post_start = self._burst_state.get("post_start_monotonic")
+            if post_start is not None and float(context["monotonic_s"]) >= float(post_start):
+                phase = "post_burst"
+
+        sample = {
+            "sample_index": len(self.sample_trace) + 1,
+            "timestamp_utc": str(context["timestamp_utc"]),
+            "elapsed_s": float(elapsed_s),
+            "monotonic_s": float(context["monotonic_s"]),
+            "level_px": float(level_data),
+            "meniscus_row": int(meniscus_row) if meniscus_row is not None else None,
+            "print_pressure": context.get("print_pressure"),
+            "refuel_pressure": context.get("refuel_pressure"),
+            "print_pulse_width": context.get("print_pulse_width"),
+            "refuel_pulse_width": context.get("refuel_pulse_width"),
+            "location": context.get("location", ""),
+            "phase": str(phase),
+        }
+        self.sample_trace.append(sample)
+        self.update_level_log(float(level_data))
+        if self.session_active:
+            self._record_analysis({"kind": "refuel_level_sample", **sample})
+        return sample
+
+    def start_analysis(self, frame, context=None):
+        if frame is None:
+            return False
+        if self._analysis_in_progress:
+            return False
+
         frame = cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
-        if len(self.level_log) > 0:
-            last_level = self.level_log[-1]
-        else:
-            last_level = None
-        self.analysis_thread = ImageAnalysisThread(frame, self.offset, self.width, self.threshold, self.prominence, self.empty_cutoff,last_level)
-        self.analysis_thread.analysis_done.connect(self.update_ui_with_analysis)
-        self.analysis_thread.start()
+        self._analysis_context = self._normalize_capture_context(context)
+        self._analysis_in_progress = True
+        self.analysis_thread = ImageAnalysisThread(
+            frame,
+            self.offset,
+            self.width,
+            self.threshold,
+            self.prominence,
+            self.empty_cutoff,
+            self.last_meniscus_row,
+        )
+        try:
+            finished_signal = getattr(self.analysis_thread, "finished", None)
+            if finished_signal is not None:
+                finished_signal.connect(self._mark_analysis_finished)
+        except Exception:
+            pass
+        try:
+            self.analysis_thread.analysis_done.connect(self.update_ui_with_analysis)
+            self.analysis_thread.start()
+        except Exception:
+            self._analysis_in_progress = False
+            self._analysis_context = None
+            raise
+        return True
 
-    # def update_ui_with_analysis(self, original_image, thresholded_image, level_image, level_data):
-    def update_ui_with_analysis(self, original_image, annotated_image, level_data):
-        # self.original_image = analyzed_images
+    def _mark_analysis_finished(self):
+        self._analysis_in_progress = False
+
+    def update_ui_with_analysis(self, original_image, annotated_image, level_data, meniscus_row):
+        context = self._analysis_context
+        self._analysis_context = None
+        self._analysis_in_progress = False
+
         if original_image is not None:
             self.original_image = original_image
         if annotated_image is not None:
             self.annotated_image = annotated_image
+        if meniscus_row is not None:
+            self.last_meniscus_row = int(meniscus_row)
         if level_data is not None:
-            self.update_current_level(level_data)
-            self.update_level_log(level_data)
+            self.update_current_level(float(level_data))
+            self._append_sample(float(level_data), meniscus_row, context)
+            self.finalize_burst_from_recent_samples()
         self.update_level_ui_signal.emit()
+
+    def lock_current_as_target(self, tolerance_px):
+        if self.current_level is None or self.last_meniscus_row is None:
+            return False, "Capture a valid level before setting the target."
+
+        if self.session_active or self._recorder_run_dir is not None:
+            self.reset_session()
+
+        self.tolerance_px = float(tolerance_px)
+        self.target_level_px = float(self.current_level)
+        self.target_meniscus_row = int(self.last_meniscus_row)
+        self.session_active = True
+        self.live_status = self.classify_live_status(self.current_level)
+
+        self._ensure_recorder_started()
+        self._record_event(
+            "target_locked",
+            {
+                "target_level_px": self.target_level_px,
+                "target_meniscus_row": self.target_meniscus_row,
+                "tolerance_px": self.tolerance_px,
+            },
+        )
+        self._record_capture_frame(
+            self.original_image,
+            role="target_lock",
+            metadata={
+                "target_level_px": self.target_level_px,
+                "tolerance_px": self.tolerance_px,
+            },
+        )
+        self.update_level_ui_signal.emit()
+        return True, ""
+
+    def reset_session(self):
+        if self._recorder_run_dir is not None:
+            self._record_event("target_reset", {"reason": "operator_reset"})
+            self._finalize_recorder("completed")
+
+        self.level_log = []
+        self.sample_trace = []
+        self.target_level_px = None
+        self.target_meniscus_row = None
+        self.session_started_at = None
+        self.session_active = False
+        self.last_burst_result = None
+        self.live_status = None
+        self._session_start_monotonic = None
+        self._burst_state = None
+        self.update_level_ui_signal.emit()
+
+    def close_session(self):
+        if self._recorder_run_dir is not None:
+            self._record_event(
+                "dialog_closed",
+                {
+                    "target_level_px": self.target_level_px,
+                    "last_level_px": self.current_level,
+                    "last_burst_result": self.last_burst_result,
+                },
+            )
+            self._finalize_recorder("completed")
+
+    def classify_live_status(self, level=None):
+        if level is None:
+            level = self.current_level
+        if level is None or self.target_level_px is None:
+            return None
+        delta = float(level) - float(self.target_level_px)
+        if delta < -float(self.tolerance_px):
+            return "Low"
+        if delta > float(self.tolerance_px):
+            return "High"
+        return "In Band"
+
+    def begin_burst(self, pre_samples, post_samples, settle_ms, droplet_count):
+        if self._burst_state is not None:
+            return {"ok": False, "code": "burst_in_progress", "message": "A burst test is already running."}
+        if not self.session_active or self.target_level_px is None:
+            return {"ok": False, "code": "no_target", "message": "Set a target level before running a burst test."}
+
+        pre_samples = max(1, int(pre_samples))
+        post_samples = max(1, int(post_samples))
+        settle_ms = max(1, int(settle_ms))
+        droplet_count = max(1, int(droplet_count))
+        self.set_burst_defaults(
+            droplet_count=droplet_count,
+            settle_ms=settle_ms,
+            baseline_samples=pre_samples,
+            post_samples=post_samples,
+        )
+
+        recent_samples = self.sample_trace[-pre_samples:]
+        if len(recent_samples) < pre_samples:
+            return {
+                "ok": False,
+                "code": "waiting_for_samples",
+                "message": f"Waiting for {pre_samples} valid baseline samples.",
+            }
+
+        baseline_mean = float(sum(s["level_px"] for s in recent_samples) / len(recent_samples))
+        if abs(baseline_mean - float(self.target_level_px)) > float(self.tolerance_px):
+            return {
+                "ok": False,
+                "code": "baseline_out_of_band",
+                "message": "Baseline level is outside the target band.",
+                "baseline_mean": baseline_mean,
+            }
+
+        start_index = len(self.sample_trace) - len(recent_samples)
+        for idx in range(start_index, len(self.sample_trace)):
+            self.sample_trace[idx]["phase"] = "baseline"
+
+        self.last_burst_result = None
+        self._burst_state = {
+            "pre_samples": pre_samples,
+            "post_samples": post_samples,
+            "settle_ms": settle_ms,
+            "droplet_count": droplet_count,
+            "baseline_mean": baseline_mean,
+            "baseline_sample_count": len(recent_samples),
+            "post_start_monotonic": None,
+            "post_start_utc": None,
+        }
+        self.update_level_ui_signal.emit()
+        return {
+            "ok": True,
+            "code": "ready",
+            "message": "Burst test ready.",
+            "baseline_mean": baseline_mean,
+        }
+
+    def mark_burst_started(self):
+        if self._burst_state is None:
+            return
+        self._record_event(
+            "burst_started",
+            {
+                "droplet_count": self._burst_state.get("droplet_count"),
+                "settle_ms": self._burst_state.get("settle_ms"),
+                "pre_samples": self._burst_state.get("pre_samples"),
+                "post_samples": self._burst_state.get("post_samples"),
+                "baseline_mean": self._burst_state.get("baseline_mean"),
+            },
+        )
+
+    def cancel_burst(self, reason):
+        if self._burst_state is not None:
+            self._record_event("burst_blocked", {"reason": str(reason)})
+        self._burst_state = None
+        self.update_level_ui_signal.emit()
+
+    def mark_burst_wait_complete(self, context=None):
+        if self._burst_state is None:
+            return
+        payload = self._normalize_capture_context(context)
+        self._burst_state["post_start_monotonic"] = float(payload["monotonic_s"])
+        self._burst_state["post_start_utc"] = str(payload["timestamp_utc"])
+        self.update_level_ui_signal.emit()
+
+    def finalize_burst_from_recent_samples(self):
+        if self._burst_state is None:
+            return None
+
+        post_start = self._burst_state.get("post_start_monotonic")
+        if post_start is None:
+            return None
+
+        eligible = [s for s in self.sample_trace if float(s.get("monotonic_s", 0.0)) >= float(post_start)]
+        if len(eligible) < int(self._burst_state.get("post_samples", 1)):
+            return None
+
+        post_samples = eligible[: int(self._burst_state["post_samples"])]
+        for sample in post_samples:
+            sample["phase"] = "post_burst"
+
+        post_mean = float(sum(s["level_px"] for s in post_samples) / len(post_samples))
+        baseline_mean = float(self._burst_state["baseline_mean"])
+        drift_px = float(post_mean - baseline_mean)
+        target_error_px = float(post_mean - float(self.target_level_px))
+        if drift_px < -float(self.tolerance_px):
+            recommendation = "Increase refuel pressure"
+        elif drift_px > float(self.tolerance_px):
+            recommendation = "Decrease refuel pressure"
+        else:
+            recommendation = "Refuel balance is within band"
+
+        result = {
+            "baseline_mean": baseline_mean,
+            "post_mean": post_mean,
+            "drift_px": drift_px,
+            "target_error_px": target_error_px,
+            "recommendation": recommendation,
+            "droplet_count": int(self._burst_state["droplet_count"]),
+            "settle_ms": int(self._burst_state["settle_ms"]),
+            "pre_samples": int(self._burst_state["pre_samples"]),
+            "post_samples": int(self._burst_state["post_samples"]),
+            "completed_at_utc": self._now_utc(),
+        }
+        self.last_burst_result = result
+        self._record_analysis({"kind": "refuel_burst_result", **result})
+        self._record_event("burst_completed", result)
+        self._record_capture_frame(self.original_image, role="burst_completion", metadata=result)
+        self._burst_state = None
+        self.update_level_ui_signal.emit()
+        return result
+
+    def record_manual_frame(self):
+        return self._record_capture_frame(
+            self.original_image,
+            role="manual_save",
+            metadata={
+                "target_level_px": self.target_level_px,
+                "current_level_px": self.current_level,
+            },
+        )
 
     def get_original_image(self):
         return self.original_image
@@ -21084,8 +21531,8 @@ class RefuelCameraModel(QObject):
     def get_annotated_image(self):
         return self.annotated_image
 
-    def update_level_log(self,level):
-        '''Add a new level to the existing log'''
+    def update_level_log(self, level):
+        """Add a new level to the rolling display log."""
         self.level_log.append(level)
         if len(self.level_log) > 100:
             self.level_log.pop(0)
@@ -21093,8 +21540,41 @@ class RefuelCameraModel(QObject):
     def get_level_log(self):
         return self.level_log
 
+    def get_sample_trace(self):
+        return list(self.sample_trace)
+
     def get_current_level(self):
         return self.current_level
+
+    def get_last_meniscus_row(self):
+        return self.last_meniscus_row
+
+    def get_target_level_px(self):
+        return self.target_level_px
+
+    def get_target_meniscus_row(self):
+        return self.target_meniscus_row
+
+    def get_tolerance_px(self):
+        return self.tolerance_px
+
+    def get_session_started_at(self):
+        return self.session_started_at
+
+    def is_session_active(self):
+        return bool(self.session_active)
+
+    def is_burst_in_progress(self):
+        return self._burst_state is not None
+
+    def is_analysis_in_progress(self):
+        return bool(self._analysis_in_progress)
+
+    def get_live_status(self):
+        return self.live_status
+
+    def get_last_burst_result(self):
+        return self.last_burst_result
         
 
 

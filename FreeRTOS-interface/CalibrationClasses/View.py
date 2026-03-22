@@ -18,9 +18,11 @@ import time
 import shutil
 import uuid
 from datetime import datetime
+from pathlib import Path
 import cv2
 from utilities import ShortcutManager
 from .Model import NozzlePositionChecklistStore
+from hardware.null_devices import NullCamera
 
 class RackCalibrationFixDialog(QtWidgets.QDialog):
     def __init__(self, main_window, model, controller):
@@ -4079,64 +4081,68 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
 
 
 class RefuelCameraWindow(QtWidgets.QDialog):
-    def __init__(self,main_window,model,controller):
+    def __init__(self, main_window, model, controller):
         super().__init__()
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
 
         self.model = model
         self.refuel_camera_model = self.model.refuel_camera_model
+        self.refuel_camera_model.attach_owner_model(self.model)
         self.controller = controller
+        self._camera_ready = False
+        self._camera_failure_shown = False
+        self._pending_burst_request = False
+        self._capture_interval_ms = 500
+        self._save_dir = Path(__file__).resolve().parents[2] / "artifacts" / "refuel_camera_frames"
+        self.refuel_camera_model.set_capture_interval_ms(self._capture_interval_ms)
 
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
-
-        # self.controller.enter_print_mode()
-
         self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle("Refuel Camera")
-        self.resize(1200, 700)
+        self.resize(1280, 760)
 
-        self.layout = QGridLayout()
+        root = QGridLayout(self)
+        control_layout = QVBoxLayout()
 
-        self.control_layout = QVBoxLayout()
+        capture_group = QtWidgets.QGroupBox("Capture")
+        capture_form = QtWidgets.QVBoxLayout(capture_group)
         self.capture_button = QPushButton("Start Capturing Images")
         self.capture_button.clicked.connect(self.toggle_capture)
-
         self.save_button = QPushButton("Save Current Frame")
         self.save_button.clicked.connect(self.save_frame)
+        capture_form.addWidget(self.capture_button)
+        capture_form.addWidget(self.save_button)
+        control_layout.addWidget(capture_group)
 
-        # self.reference_button = QPushButton("Set Reference Image")
-        # self.reference_button.clicked.connect(self.set_reference_image)
+        analysis_group = QtWidgets.QGroupBox("Analysis")
+        analysis_form = QtWidgets.QFormLayout(analysis_group)
 
         self.offset_spinbox = QSpinBox()
-        self.offset_spinbox.setRange(0, 100)  # Assuming cropped image max width
+        self.offset_spinbox.setRange(0, 100)
         self.offset_spinbox.setValue(40)
         self.offset_spinbox.setSingleStep(2)
-        self.offset_spinbox.setPrefix("Left Offset: ")
         self.offset_spinbox.valueChanged.connect(self.update_analysis)
 
         self.width_spinbox = QSpinBox()
         self.width_spinbox.setRange(0, 200)
         self.width_spinbox.setValue(20)
         self.width_spinbox.setSingleStep(2)
-        self.width_spinbox.setPrefix("Channel width: ")
         self.width_spinbox.valueChanged.connect(self.update_analysis)
 
         self.threshold_spinbox = QSpinBox()
-        self.threshold_spinbox.setRange(5, 250)  # Assuming cropped image max width
+        self.threshold_spinbox.setRange(5, 250)
         self.threshold_spinbox.setValue(60)
         self.threshold_spinbox.setSingleStep(5)
-        self.threshold_spinbox.setPrefix("Threshold: ")
         self.threshold_spinbox.valueChanged.connect(self.update_analysis)
 
         self.prom_spinbox = QSpinBox()
-        self.prom_spinbox.setRange(2, 20)  # Assuming cropped image max height
+        self.prom_spinbox.setRange(2, 20)
         self.prom_spinbox.setValue(4)
         self.prom_spinbox.setSingleStep(1)
-        self.prom_spinbox.setPrefix("Prominence: ")
         self.prom_spinbox.valueChanged.connect(self.update_analysis)
 
         self.empty_cutoff = QDoubleSpinBox()
@@ -4144,81 +4150,176 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.empty_cutoff.setRange(0.0, 2.0)
         self.empty_cutoff.setValue(0.25)
         self.empty_cutoff.setSingleStep(0.05)
-        self.empty_cutoff.setPrefix("Empty Cutoff: ")
         self.empty_cutoff.valueChanged.connect(self.update_analysis)
 
-        # Label to show the current level reading
+        analysis_form.addRow("Left Offset", self.offset_spinbox)
+        analysis_form.addRow("Channel Width", self.width_spinbox)
+        analysis_form.addRow("Threshold", self.threshold_spinbox)
+        analysis_form.addRow("Prominence", self.prom_spinbox)
+        analysis_form.addRow("Empty Cutoff", self.empty_cutoff)
+        control_layout.addWidget(analysis_group)
+
+        setpoint_group = QtWidgets.QGroupBox("Setpoint")
+        setpoint_form = QtWidgets.QFormLayout(setpoint_group)
+
         self.level_label = QLabel("Current Level: N/A")
         self.level_label.setAlignment(Qt.AlignCenter)
-        self.level_label.setStyleSheet("font-size: 16px; font-weight: bold;")
-        self.level_label.setFixedHeight(30)
-        self.level_label.setFixedWidth(200)
-        self.level_label.setStyleSheet("background-color: lightgray; border: 1px solid black;")
+        self.level_label.setStyleSheet("background-color: lightgray; border: 1px solid black; padding: 4px;")
+
+        self.target_level_label = QLabel("Target Level: N/A")
+        self.target_level_label.setAlignment(Qt.AlignCenter)
+        self.target_level_label.setStyleSheet("background-color: lightgray; border: 1px solid black; padding: 4px;")
+
+        self.tolerance_spinbox = QSpinBox()
+        self.tolerance_spinbox.setRange(1, 100)
+        self.tolerance_spinbox.setValue(5)
+        self.tolerance_spinbox.setSuffix(" px")
+
+        self.live_status_label = QLabel("Status: N/A")
+        self.live_status_label.setAlignment(Qt.AlignCenter)
+        self.live_status_label.setStyleSheet("background-color: lightgray; border: 1px solid black; padding: 4px;")
+
+        self.set_target_button = QPushButton("Set Current As Target")
+        self.set_target_button.clicked.connect(self.lock_current_target)
+        self.reset_session_button = QPushButton("Reset Session")
+        self.reset_session_button.clicked.connect(self.reset_session)
+
+        setpoint_form.addRow("Current", self.level_label)
+        setpoint_form.addRow("Target", self.target_level_label)
+        setpoint_form.addRow("Tolerance", self.tolerance_spinbox)
+        setpoint_form.addRow("Live Status", self.live_status_label)
+        setpoint_form.addRow(self.set_target_button)
+        setpoint_form.addRow(self.reset_session_button)
+        control_layout.addWidget(setpoint_group)
+
+        burst_group = QtWidgets.QGroupBox("Burst Test")
+        burst_form = QtWidgets.QFormLayout(burst_group)
+
+        self.burst_droplet_spinbox = QSpinBox()
+        self.burst_droplet_spinbox.setRange(1, 1000)
+        self.burst_droplet_spinbox.setValue(20)
+        self.burst_droplet_spinbox.valueChanged.connect(self._sync_burst_defaults_from_ui)
+
+        self.settle_delay_spinbox = QSpinBox()
+        self.settle_delay_spinbox.setRange(1, 60000)
+        self.settle_delay_spinbox.setValue(1000)
+        self.settle_delay_spinbox.setSuffix(" ms")
+        self.settle_delay_spinbox.valueChanged.connect(self._sync_burst_defaults_from_ui)
+
+        self.baseline_samples_spinbox = QSpinBox()
+        self.baseline_samples_spinbox.setRange(1, 50)
+        self.baseline_samples_spinbox.setValue(5)
+        self.baseline_samples_spinbox.valueChanged.connect(self._sync_burst_defaults_from_ui)
+
+        self.post_samples_spinbox = QSpinBox()
+        self.post_samples_spinbox.setRange(1, 50)
+        self.post_samples_spinbox.setValue(5)
+        self.post_samples_spinbox.valueChanged.connect(self._sync_burst_defaults_from_ui)
+
+        self.burst_button = QPushButton("Run Print Burst Test")
+        self.burst_button.clicked.connect(self.start_burst_test)
+        self.burst_status_label = QLabel("Burst idle.")
+        self.burst_status_label.setWordWrap(True)
+
+        burst_form.addRow("Droplet Count", self.burst_droplet_spinbox)
+        burst_form.addRow("Settle Delay", self.settle_delay_spinbox)
+        burst_form.addRow("Baseline Samples", self.baseline_samples_spinbox)
+        burst_form.addRow("Post Samples", self.post_samples_spinbox)
+        burst_form.addRow(self.burst_button)
+        burst_form.addRow("Status", self.burst_status_label)
+        control_layout.addWidget(burst_group)
+
+        summary_group = QtWidgets.QGroupBox("Session Summary")
+        summary_form = QtWidgets.QFormLayout(summary_group)
+        self.summary_baseline_label = QLabel("—")
+        self.summary_post_label = QLabel("—")
+        self.summary_drift_label = QLabel("—")
+        self.summary_error_label = QLabel("—")
+        self.summary_recommendation_label = QLabel("—")
+        self.summary_recommendation_label.setWordWrap(True)
+        summary_form.addRow("Baseline Mean", self.summary_baseline_label)
+        summary_form.addRow("Post Mean", self.summary_post_label)
+        summary_form.addRow("Drift", self.summary_drift_label)
+        summary_form.addRow("Target Error", self.summary_error_label)
+        summary_form.addRow("Recommendation", self.summary_recommendation_label)
+        control_layout.addWidget(summary_group)
+        control_layout.addStretch(1)
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setFixedWidth(480)
         self.image_label.setFixedHeight(640)
 
-        # Add a plot to show the level over time
         self.level_series = QtCharts.QLineSeries()
         self.level_series.setColor(QtCore.Qt.white)
+        self.target_series = QtCharts.QLineSeries()
+        self.target_series.setColor(QtGui.QColor("#f4d35e"))
+        self.upper_band_series = QtCharts.QLineSeries()
+        self.upper_band_series.setColor(QtGui.QColor("#7bd389"))
+        self.lower_band_series = QtCharts.QLineSeries()
+        self.lower_band_series.setColor(QtGui.QColor("#7bd389"))
+
+        band_pen = QtGui.QPen(QtGui.QColor("#7bd389"))
+        band_pen.setStyle(QtCore.Qt.DashLine)
+        self.upper_band_series.setPen(band_pen)
+        self.lower_band_series.setPen(band_pen)
+
         self.level_chart = QtCharts.QChart()
         self.level_chart.setTheme(QtCharts.QChart.ChartThemeDark)
-        self.level_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict['dark_gray']))  # Set the background color to grey
-        self.level_chart.addSeries(self.level_series)
-        # self.level_chart.createDefaultAxes()
+        self.level_chart.setBackgroundBrush(QtGui.QBrush(self.color_dict["dark_gray"]))
         self.level_chart.setTitle("Refuel level over time")
+        self.level_chart.legend().hide()
 
         self.axisX = QtCharts.QValueAxis()
-        self.axisX.setTickCount(3)
-        self.axisX.setRange(0, 100)
+        self.axisX.setTickCount(5)
+        self.axisX.setRange(0, 10)
         self.axisX.setTitleText("Time (s)")
+
         self.axisY = QtCharts.QValueAxis()
-        self.axisY.setTickCount(3)
+        self.axisY.setTickCount(5)
         self.axisY.setRange(0, 250)
-        self.axisY.setTitleText("Level")
+        self.axisY.setTitleText("Level (px)")
 
         self.level_chart.addAxis(self.axisX, QtCore.Qt.AlignBottom)
         self.level_chart.addAxis(self.axisY, QtCore.Qt.AlignLeft)
-        self.level_series.attachAxis(self.axisX)
-        self.level_series.attachAxis(self.axisY)
+        for series in (self.level_series, self.target_series, self.upper_band_series, self.lower_band_series):
+            self.level_chart.addSeries(series)
+            series.attachAxis(self.axisX)
+            series.attachAxis(self.axisY)
 
-        # Create a chart view to display the chart
         self.level_chart_view = QtCharts.QChartView(self.level_chart)
         self.level_chart_view.setRenderHint(QtGui.QPainter.Antialiasing)
-        self.level_chart.legend().hide()  # Hide
         self.level_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.level_chart_view.setFixedSize(480, 240)
+        self.level_chart_view.setFixedSize(520, 260)
 
+        root.addLayout(control_layout, 0, 0, 2, 1)
+        root.addWidget(self.image_label, 0, 1)
+        root.addWidget(self.level_chart_view, 1, 1)
 
-        self.control_layout.addWidget(self.capture_button)
-        self.control_layout.addWidget(self.save_button)
-        # self.control_layout.addWidget(self.reference_button)
-        self.control_layout.addWidget(self.offset_spinbox)
-        self.control_layout.addWidget(self.width_spinbox)
-        self.control_layout.addWidget(self.threshold_spinbox)
-        self.control_layout.addWidget(self.prom_spinbox)
-        self.control_layout.addWidget(self.empty_cutoff)
-        self.control_layout.addWidget(self.level_label)
+        self.analysis_control_widgets = (
+            self.offset_spinbox,
+            self.width_spinbox,
+            self.threshold_spinbox,
+            self.prom_spinbox,
+            self.empty_cutoff,
+        )
+        self.burst_control_widgets = (
+            self.burst_droplet_spinbox,
+            self.settle_delay_spinbox,
+            self.baseline_samples_spinbox,
+            self.post_samples_spinbox,
+            self.burst_button,
+        )
 
-
-        self.layout.addLayout(self.control_layout, 0, 0, 2, 1)
-        self.layout.addWidget(self.image_label, 0, 1)
-        self.layout.addWidget(self.level_chart_view, 1, 1)
-        # self.layout.addWidget(self.plot_canvas, 1, 1)
-
-        self.setLayout(self.layout)
-
-        # Timer for periodic image capture
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_image)
         self.capturing = False
 
+        self.refuel_camera_model.update_level_ui_signal.connect(self.update_refuel_ui)
+        self._sync_burst_defaults_from_ui()
         self.start_camera()
         self.update_analysis()
-
-        self.refuel_camera_model.update_level_ui_signal.connect(self.update_refuel_ui)
+        self.update_refuel_ui()
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -4247,68 +4348,252 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('v','Print only 20', lambda: self.controller.print_only(20))
         self.shortcut_manager.add_shortcut('t','Print 20 droplets', lambda: self.controller.print_droplets(20))
 
+    @staticmethod
+    def _format_value(value, suffix=""):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value):.1f}{suffix}"
+        except Exception:
+            return f"{value}{suffix}"
+
+    def _sync_burst_defaults_from_ui(self):
+        self.refuel_camera_model.set_burst_defaults(
+            droplet_count=self.burst_droplet_spinbox.value(),
+            settle_ms=self.settle_delay_spinbox.value(),
+            baseline_samples=self.baseline_samples_spinbox.value(),
+            post_samples=self.post_samples_spinbox.value(),
+        )
+
+    def _set_analysis_controls_enabled(self, enabled):
+        for widget in self.analysis_control_widgets:
+            widget.setEnabled(enabled)
+
+    def _set_burst_controls_enabled(self, enabled):
+        for widget in self.burst_control_widgets:
+            widget.setEnabled(enabled)
+
+    def _set_live_status_text(self, status):
+        text = status or "N/A"
+        self.live_status_label.setText(f"Status: {text}")
+        color = "lightgray"
+        if status == "In Band":
+            color = "#7bd389"
+        elif status == "Low":
+            color = "#ffb347"
+        elif status == "High":
+            color = "#ff8c94"
+        self.live_status_label.setStyleSheet(f"background-color: {color}; border: 1px solid black; padding: 4px;")
+
+    def _sync_session_controls(self):
+        burst_active = self.refuel_camera_model.is_burst_in_progress()
+        session_active = self.refuel_camera_model.is_session_active()
+        self.capture_button.setEnabled(self._camera_ready)
+        self.set_target_button.setEnabled(self.refuel_camera_model.get_current_level() is not None and not burst_active)
+        self.reset_session_button.setEnabled(session_active or burst_active or self.refuel_camera_model.get_last_burst_result() is not None)
+        self._set_analysis_controls_enabled(not session_active and not burst_active)
+        self._set_burst_controls_enabled(self._camera_ready and not burst_active)
+        if not self._camera_ready:
+            self.burst_button.setEnabled(False)
+
     def toggle_capture(self):
-        """
-        Starts or stops capturing images based on the button toggle.
-        """
+        """Starts or stops capturing images based on the button toggle."""
+        if not self._camera_ready:
+            return
         if self.capturing:
             self.timer.stop()
             self.capture_button.setText("Start Capturing Images")
         else:
-            self.timer.start(500)  # Capture every 100 milliseconds
+            self.timer.start(self._capture_interval_ms)
             self.capture_button.setText("Stop Capturing Images")
         self.capturing = not self.capturing
 
+    def _set_capture_idle(self):
+        self.timer.stop()
+        self.capturing = False
+        self.capture_button.setText("Start Capturing Images")
+
+    def _handle_camera_failure(self, message, *, popup=False):
+        self._camera_ready = False
+        self._set_capture_idle()
+        self.capture_button.setEnabled(False)
+        self.image_label.clear()
+        self.image_label.setText(message)
+        self.level_label.setText("Current Level: N/A")
+        self._set_live_status_text(None)
+        if popup and not self._camera_failure_shown:
+            self._camera_failure_shown = True
+            QtWidgets.QMessageBox.warning(self, "Refuel Camera Unavailable", message)
+        self._sync_session_controls()
+
     def start_camera(self):
-        self.controller.start_refuel_camera()
+        try:
+            self.controller.start_refuel_camera()
+            machine = getattr(self.controller, "machine", None)
+            refuel_camera = getattr(machine, "refuel_camera", None) if machine is not None else None
+            if isinstance(refuel_camera, NullCamera):
+                raise RuntimeError("Refuel camera is unavailable on this system.")
+        except Exception as exc:
+            self._handle_camera_failure(str(exc), popup=True)
+            return False
+
+        self._camera_ready = True
+        self.capture_button.setEnabled(True)
+        self._sync_session_controls()
+        return True
 
     def capture_image(self):
-        self.controller.capture_refuel_image()
+        if not self._camera_ready:
+            return
+        try:
+            frame = self.controller.capture_refuel_image()
+        except Exception as exc:
+            self._handle_camera_failure(f"Refuel capture failed: {exc}", popup=True)
+            return
+        if frame is None:
+            self._handle_camera_failure("Camera did not return a frame.", popup=True)
 
     def stop_camera(self):
-        self.controller.stop_refuel_camera()
+        try:
+            self.controller.stop_refuel_camera()
+        except Exception as exc:
+            print(f"[RefuelCamera] stop_camera failed: {exc}")
 
     def save_frame(self):
-        """
-        Saves the current frame to a file.
-        """
+        """Saves the current frame to a file."""
         original_image = self.refuel_camera_model.get_original_image()
         if original_image is not None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"./MVC-interface/Images/Refuel/refuel_frame_{timestamp}.png"
-            cv2.imwrite(filename, original_image)
+            self._save_dir.mkdir(parents=True, exist_ok=True)
+            filename = self._save_dir / f"refuel_frame_{timestamp}.png"
+            cv2.imwrite(str(filename), original_image)
+            self.refuel_camera_model.record_manual_frame()
             print(f"Frame saved as {filename}")
         else:
             print("No image captured yet.")
 
-    def numpy_to_qimage(self,image):
-        """
-        Converts a numpy array (captured image) to a QImage.
-        """
+    def numpy_to_qimage(self, image):
+        """Converts a numpy array (captured image) to a QImage."""
         height, width, channels = image.shape
         bytes_per_line = channels * width
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888)
         return qimage.rgbSwapped()
 
-    def numpy_to_qimage_grayscale(self,image):
-        """
-        Converts a grayscale numpy array to a QImage.
-        """
+    def numpy_to_qimage_grayscale(self, image):
+        """Converts a grayscale numpy array to a QImage."""
         height, width = image.shape
         bytes_per_line = width
         qimage = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
         return qimage
 
+    def lock_current_target(self):
+        ok, message = self.refuel_camera_model.lock_current_as_target(self.tolerance_spinbox.value())
+        if not ok:
+            QtWidgets.QMessageBox.warning(self, "Target Unavailable", message)
+            return
+        self.burst_status_label.setText("Target locked. Ready for burst testing.")
+        self.update_refuel_ui()
+
+    def reset_session(self):
+        self._pending_burst_request = False
+        self.refuel_camera_model.reset_session()
+        self.burst_status_label.setText("Burst idle.")
+        self.update_refuel_ui()
+
+    def _record_blocked_burst(self, message):
+        recorder = getattr(self.refuel_camera_model, "_record_event", None)
+        if callable(recorder):
+            recorder("burst_blocked", {"reason": str(message)})
+
+    def start_burst_test(self):
+        if not self._camera_ready:
+            QtWidgets.QMessageBox.warning(self, "Refuel Camera", "Refuel camera is not ready.")
+            return
+        if not self.refuel_camera_model.is_session_active():
+            QtWidgets.QMessageBox.warning(self, "Refuel Camera", "Set the current level as the target before starting a burst test.")
+            return
+        if not self.capturing:
+            self.toggle_capture()
+        self._pending_burst_request = True
+        self.burst_status_label.setText("Waiting for baseline samples...")
+        self._try_start_pending_burst()
+        self._sync_session_controls()
+
+    def _try_start_pending_burst(self):
+        if not self._pending_burst_request or self.refuel_camera_model.is_burst_in_progress():
+            return
+
+        result = self.refuel_camera_model.begin_burst(
+            self.baseline_samples_spinbox.value(),
+            self.post_samples_spinbox.value(),
+            self.settle_delay_spinbox.value(),
+            self.burst_droplet_spinbox.value(),
+        )
+        if not result.get("ok"):
+            code = result.get("code")
+            message = result.get("message", "Unable to start burst test.")
+            self.burst_status_label.setText(message)
+            if code == "waiting_for_samples":
+                return
+            self._pending_burst_request = False
+            self._record_blocked_burst(message)
+            QtWidgets.QMessageBox.warning(self, "Burst Test Blocked", message)
+            self._sync_session_controls()
+            return
+
+        started = self.controller.run_refuel_balance_burst(
+            self.burst_droplet_spinbox.value(),
+            self.settle_delay_spinbox.value(),
+            on_complete=self._on_burst_wait_complete,
+            on_error=self._on_burst_sequence_error,
+        )
+        if not started:
+            self._pending_burst_request = False
+            self.refuel_camera_model.cancel_burst("Failed to enqueue refuel balance burst.")
+            self.burst_status_label.setText("Failed to enqueue burst test.")
+            self._sync_session_controls()
+            return
+
+        self._pending_burst_request = False
+        self.refuel_camera_model.mark_burst_started()
+        self.burst_status_label.setText("Burst queued. Waiting for post-burst samples...")
+        self._sync_session_controls()
+
+    def _on_burst_sequence_error(self, message):
+        self._pending_burst_request = False
+        self.refuel_camera_model.cancel_burst(message)
+        self.burst_status_label.setText(message)
+        QtWidgets.QMessageBox.warning(self, "Burst Test Error", message)
+        self._sync_session_controls()
+
+    def _on_burst_wait_complete(self, context):
+        self.refuel_camera_model.mark_burst_wait_complete(context)
+        self.burst_status_label.setText("Collecting post-burst samples...")
+        self._sync_session_controls()
+
+    def _update_burst_summary(self):
+        result = self.refuel_camera_model.get_last_burst_result()
+        if not result:
+            self.summary_baseline_label.setText("-")
+            self.summary_post_label.setText("-")
+            self.summary_drift_label.setText("-")
+            self.summary_error_label.setText("-")
+            self.summary_recommendation_label.setText("-")
+            return
+        self.summary_baseline_label.setText(self._format_value(result.get("baseline_mean")))
+        self.summary_post_label.setText(self._format_value(result.get("post_mean")))
+        self.summary_drift_label.setText(self._format_value(result.get("drift_px"), " px"))
+        self.summary_error_label.setText(self._format_value(result.get("target_error_px"), " px"))
+        self.summary_recommendation_label.setText(str(result.get("recommendation", "-")))
+
     def update_refuel_ui(self):
         annotated_image = self.refuel_camera_model.get_annotated_image()
 
-        # Convert numpy array to QImage for display
-        qimage = self.numpy_to_qimage(annotated_image)
-
-        # Display original image
-        pixmap = QPixmap.fromImage(qimage)
-        self.image_label.setPixmap(pixmap)
-        self.image_label.setScaledContents(True)
+        if annotated_image is not None:
+            qimage = self.numpy_to_qimage(annotated_image)
+            pixmap = QPixmap.fromImage(qimage)
+            self.image_label.setPixmap(pixmap)
+            self.image_label.setScaledContents(True)
 
         level = self.refuel_camera_model.get_current_level()
         if level is not None:
@@ -4316,47 +4601,96 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         else:
             self.level_label.setText("Current Level: N/A")
 
-        # Update the level chart
+        target_level = self.refuel_camera_model.get_target_level_px()
+        if target_level is not None:
+            self.target_level_label.setText(f"Target Level: {target_level:.1f}")
+        else:
+            self.target_level_label.setText("Target Level: N/A")
+
+        self._set_live_status_text(self.refuel_camera_model.get_live_status())
+        self._update_burst_summary()
         self.update_level_chart()
+        if self.refuel_camera_model.is_burst_in_progress():
+            if "Collecting" not in self.burst_status_label.text():
+                self.burst_status_label.setText("Burst running...")
+        elif self.refuel_camera_model.get_last_burst_result() is not None:
+            self.burst_status_label.setText("Burst complete.")
+
+        self._sync_session_controls()
+        if self._pending_burst_request and not self.refuel_camera_model.is_burst_in_progress():
+            QtCore.QTimer.singleShot(0, self._try_start_pending_burst)
 
     def update_level_chart(self):
-        """
-        Update the level chart with the current level data.
-        """
-        level_log = self.refuel_camera_model.get_level_log()
-        # if len(level_log) > 0:
-        #     self.level_axisY.setRange(min(level_log) - 1, max(level_log) + 1)
-        # else:
-        #     self.level_axisY.setRange(0, 100)
-        
-        # Clear the series and add new data
+        """Update the level chart with elapsed-time samples and target overlays."""
+        trace = self.refuel_camera_model.get_sample_trace()
         self.level_series.clear()
-        for i, level in enumerate(level_log):
-            self.level_series.append(i, level)
-        # Update the X axis range based on the number of data points
-        if len(level_log) > 0:
-            self.axisX.setRange(0, len(level_log) - 1)
-        else:
-            self.axisX.setRange(0, 100)
+        self.target_series.clear()
+        self.upper_band_series.clear()
+        self.lower_band_series.clear()
 
+        y_values = []
+        if trace:
+            for sample in trace:
+                x_value = float(sample.get("elapsed_s", 0.0))
+                y_value = float(sample.get("level_px", 0.0))
+                self.level_series.append(x_value, y_value)
+                y_values.append(y_value)
+
+            x0 = float(trace[0].get("elapsed_s", 0.0))
+            x1 = float(trace[-1].get("elapsed_s", x0))
+            if x1 <= x0:
+                x1 = x0 + 1.0
+            self.axisX.setRange(0.0, max(1.0, x1))
+
+            target_level = self.refuel_camera_model.get_target_level_px()
+            tolerance = self.refuel_camera_model.get_tolerance_px()
+            if target_level is not None:
+                band_upper = float(target_level) + float(tolerance)
+                band_lower = float(target_level) - float(tolerance)
+                for series, y_value in (
+                    (self.target_series, float(target_level)),
+                    (self.upper_band_series, band_upper),
+                    (self.lower_band_series, band_lower),
+                ):
+                    series.append(x0, y_value)
+                    series.append(x1, y_value)
+                y_values.extend([float(target_level), band_upper, band_lower])
+        else:
+            self.axisX.setRange(0.0, 10.0)
+        if y_values:
+            y_low = min(y_values) - 5.0
+            y_high = max(y_values) + 5.0
+            if y_high <= y_low:
+                y_high = y_low + 10.0
+            self.axisY.setRange(y_low, y_high)
+        else:
+            self.axisY.setRange(0.0, 250.0)
 
     def update_analysis(self):
-        """
-        Update the analysis parameters based on the spinbox values.
-        """
+        """Update the analysis parameters based on the spinbox values."""
+        if self.refuel_camera_model.is_session_active():
+            return
         offset = self.offset_spinbox.value()
         width = self.width_spinbox.value()
         threshold = self.threshold_spinbox.value()
         prom = self.prom_spinbox.value()
         empty_cutoff = self.empty_cutoff.value()
-        # Update the model with the new parameters
         self.refuel_camera_model.update_analysis_parameters(offset, width, threshold, prom, empty_cutoff)
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
-        self.timer.stop()
+        self._pending_burst_request = False
+        try:
+            self.refuel_camera_model.close_session()
+        except Exception as exc:
+            print(f"[RefuelCamera] close_session failed: {exc}")
+        self._set_capture_idle()
         self.stop_camera()
-        # self.controller.exit_print_mode()
+        try:
+            self.controller.disable_print_profile()
+        except Exception as exc:
+            print(f"[RefuelCamera] disable_print_profile failed: {exc}")
+        event.accept()
         super().closeEvent(event)
 
 
