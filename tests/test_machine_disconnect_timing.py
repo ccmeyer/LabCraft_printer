@@ -39,7 +39,7 @@ def test_on_goodbye_done_still_disconnects_when_buffer_reset_fails(qapp, test_pr
     assert called["disconnect"] == 1
 
 
-def test_stop_log_thread_does_not_wait_after_reader_stop(qapp, test_profile):
+def test_stop_log_thread_uses_reader_wait_for_stop_only(qapp, test_profile):
     machine = Machine(SimpleNamespace(), profile=test_profile)
 
     class _SignalTracker:
@@ -48,14 +48,18 @@ def test_stop_log_thread_does_not_wait_after_reader_stop(qapp, test_profile):
 
     class _Reader:
         def __init__(self):
-            self.stop_calls = 0
+            self.request_stop_calls = 0
+            self.wait_for_stop_calls = []
             self.lineReceived = _SignalTracker()
             self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
-        def stop(self):
-            self.stop_calls += 1
+        def request_stop(self):
+            self.request_stop_calls += 1
+
+        def wait_for_stop(self, timeout):
+            self.wait_for_stop_calls.append(timeout)
             return True
 
         def wait(self, _timeout):
@@ -66,7 +70,8 @@ def test_stop_log_thread_does_not_wait_after_reader_stop(qapp, test_profile):
 
     machine.stop_log_thread()
 
-    assert reader.stop_calls == 1
+    assert reader.request_stop_calls == 1
+    assert reader.wait_for_stop_calls == [mfr.READER_STOP_FALLBACK_WAIT_MS]
     assert machine.log_reader is None
 
 
@@ -87,11 +92,13 @@ def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile):
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
-        def stop(self):
+        def request_stop(self):
             assert self.lineReceived.disconnected == [machine.on_log_line_received]
             assert self.statsUpdated.disconnected == [machine.on_stats_updated]
             assert self.messageReceived.disconnected == [machine.on_log_message_received]
             assert self.flashStateChanged.disconnected == [machine.on_flash_state_changed]
+
+        def wait_for_stop(self, _timeout):
             return True
 
     reader = _Reader()
@@ -111,14 +118,18 @@ def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, tes
 
     class _Reader:
         def __init__(self):
-            self.stop_calls = 0
+            self.request_stop_calls = 0
+            self.wait_for_stop_calls = []
             self.lineReceived = _SignalTracker()
             self.statsUpdated = _SignalTracker()
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
 
-        def stop(self):
-            self.stop_calls += 1
+        def request_stop(self):
+            self.request_stop_calls += 1
+
+        def wait_for_stop(self, timeout):
+            self.wait_for_stop_calls.append(timeout)
             return False
 
     reader = _Reader()
@@ -127,7 +138,8 @@ def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, tes
     machine.stop_log_thread()
     out = capsys.readouterr().out
 
-    assert reader.stop_calls == 1
+    assert reader.request_stop_calls == 1
+    assert reader.wait_for_stop_calls == [mfr.READER_STOP_FALLBACK_WAIT_MS]
     assert machine.log_reader is reader
     assert "did not stop cleanly" in out
 
@@ -183,3 +195,98 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
     assert len(created) == 1
     assert machine.log_reader is created[0]
     assert created[0].start_calls == 1
+
+
+def test_begin_reader_thread_replaces_stopped_reader_reference(qapp, test_profile, monkeypatch):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = object()
+
+    class _SignalTracker:
+        def __init__(self):
+            self.connected = []
+
+        def connect(self, slot):
+            self.connected.append(slot)
+
+    old_reader_calls = {"stop": 0}
+
+    class _OldReader:
+        def isRunning(self):
+            return False
+
+        def stop(self):
+            old_reader_calls["stop"] += 1
+            return True
+
+    created = []
+
+    class _NewReader:
+        def __init__(self, ser):
+            self.ser = ser
+            self.status_received = _SignalTracker()
+            self.ackReceived = _SignalTracker()
+            self.resetReportReceived = _SignalTracker()
+            self.start_calls = 0
+            created.append(self)
+
+        def start(self):
+            self.start_calls += 1
+
+    monkeypatch.setattr(mfr, "SerialReader", _NewReader)
+    machine.reader = _OldReader()
+
+    machine.begin_reader_thread()
+
+    assert old_reader_calls["stop"] == 1
+    assert len(created) == 1
+    assert machine.reader is created[0]
+    assert created[0].start_calls == 1
+
+
+def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profile, capsys):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    events = []
+
+    class _SignalTracker:
+        def disconnect(self, _slot):
+            events.append("log:disconnect")
+
+    class _SerialReader:
+        def request_stop(self):
+            events.append("serial:request")
+
+        def wait_for_stop(self, timeout):
+            events.append(f"serial:wait:{timeout}")
+            return True
+
+    class _LogReader:
+        def __init__(self):
+            self.lineReceived = _SignalTracker()
+            self.statsUpdated = _SignalTracker()
+            self.messageReceived = _SignalTracker()
+            self.flashStateChanged = _SignalTracker()
+            self.wait_calls = 0
+
+        def request_stop(self):
+            events.append("log:request")
+
+        def wait_for_stop(self, timeout):
+            self.wait_calls += 1
+            events.append(f"log:wait:{timeout}")
+            return self.wait_calls > 1
+
+    machine.reader = _SerialReader()
+    machine.log_reader = _LogReader()
+
+    machine.reset_board()
+    out = capsys.readouterr().out
+
+    first_wait_index = next(index for index, value in enumerate(events) if ":wait:" in value)
+    assert events.index("serial:request") < first_wait_index
+    assert events.index("log:request") < first_wait_index
+    assert f"serial:wait:{mfr.SERIAL_READER_STOP_WAIT_MS}" in events
+    assert f"log:wait:{mfr.LOG_READER_STOP_WAIT_MS}" in events
+    assert f"log:wait:{mfr.READER_STOP_FALLBACK_WAIT_MS}" in events
+    assert "Requesting serial and log reader shutdown..." in out
+    assert "Log reader thread fast stop timed out" in out
+    assert "Reader shutdown finished in" in out

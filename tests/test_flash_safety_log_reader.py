@@ -118,7 +118,7 @@ def test_log_reader_uses_short_serial_timeout(qapp):
     assert timeouts == [mfr.LOG_READER_SERIAL_TIMEOUT_S]
 
 
-def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffective(qapp):
+def test_log_reader_request_stop_and_wait_for_stop_close_port_on_clean_exit(qapp):
     class _Serial:
         def __init__(self):
             self.is_open = True
@@ -138,6 +138,9 @@ def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffect
             self.interrupt_calls = 0
             super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
 
+        def isRunning(self):
+            return True
+
         def requestInterruption(self):
             self.interrupt_calls += 1
 
@@ -148,7 +151,8 @@ def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffect
     ser = _Serial()
     reader = _TestLogReader(ser)
 
-    stopped = reader.stop()
+    reader.request_stop()
+    stopped = reader.wait_for_stop(mfr.LOG_READER_STOP_WAIT_MS)
 
     assert stopped is True
     assert reader.interrupt_calls == 1
@@ -158,7 +162,7 @@ def test_log_reader_stop_closes_port_and_waits_once_when_cancel_read_is_ineffect
     assert ser.is_open is False
 
 
-def test_log_reader_stop_tolerates_cancel_and_close_errors(qapp):
+def test_log_reader_wait_for_stop_tolerates_cancel_and_close_errors(qapp):
     class _Serial:
         def __init__(self):
             self.is_open = True
@@ -179,6 +183,9 @@ def test_log_reader_stop_tolerates_cancel_and_close_errors(qapp):
             self.interrupt_calls = 0
             super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
 
+        def isRunning(self):
+            return True
+
         def requestInterruption(self):
             self.interrupt_calls += 1
 
@@ -189,7 +196,8 @@ def test_log_reader_stop_tolerates_cancel_and_close_errors(qapp):
     ser = _Serial()
     reader = _TestLogReader(ser)
 
-    stopped = reader.stop()
+    reader.request_stop()
+    stopped = reader.wait_for_stop(mfr.LOG_READER_STOP_WAIT_MS)
 
     assert stopped is False
     assert reader.interrupt_calls == 1

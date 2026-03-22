@@ -29,7 +29,9 @@ from hardware.null_devices import NullCamera
 logger = logging.getLogger(__name__)
 
 LOG_READER_SERIAL_TIMEOUT_S = 0.1
-LOG_READER_STOP_WAIT_MS = 1000
+SERIAL_READER_STOP_WAIT_MS = 250
+LOG_READER_STOP_WAIT_MS = 250
+READER_STOP_FALLBACK_WAIT_MS = 1000
 
 try:
     from picamera2 import Picamera2
@@ -1143,6 +1145,7 @@ class SerialReader(QThread):
     def __init__(self, ser, parent=None):
         super().__init__(parent)
         self.ser = ser
+        self._stop_requested = False
         
     @staticmethod
     def _parse_ack(payload: bytes) -> dict:
@@ -1299,15 +1302,27 @@ class SerialReader(QThread):
             except (serial.SerialException, OSError, TypeError, ValueError, IndexError):
                 break
 
-    def stop(self):
-        # helper to mirror LogReader.stop()
+    def request_stop(self):
+        if self._stop_requested:
+            return
+
+        self._stop_requested = True
         self.requestInterruption()
         try:
             if hasattr(self.ser, "cancel_read"):
                 self.ser.cancel_read()
         except Exception:
             pass
-        self.wait(1000)
+
+    def wait_for_stop(self, timeout_ms):
+        try:
+            return (not self.isRunning()) or bool(self.wait(timeout_ms))
+        except Exception:
+            return False
+
+    def stop(self):
+        self.request_stop()
+        return self.wait_for_stop(READER_STOP_FALLBACK_WAIT_MS)
 
 class LogReader(QThread):
     lineReceived   = Signal(str)     # existing
@@ -1410,15 +1425,9 @@ class LogReader(QThread):
         except Exception:
             pass
 
-    def stop(self):
+    def request_stop(self):
         if self._stop_requested:
-            try:
-                stopped = not self.isRunning() or bool(self.wait(LOG_READER_STOP_WAIT_MS))
-            except Exception:
-                stopped = True
-            if stopped:
-                self._close_serial_port()
-            return stopped
+            return
 
         self._stop_requested = True
         self._running = False
@@ -1435,14 +1444,19 @@ class LogReader(QThread):
         except Exception:
             pass
 
+    def wait_for_stop(self, timeout_ms):
         try:
-            stopped = bool(self.wait(LOG_READER_STOP_WAIT_MS))
+            stopped = (not self.isRunning()) or bool(self.wait(timeout_ms))
         except Exception:
             stopped = False
 
         if stopped:
             self._close_serial_port()
         return stopped
+
+    def stop(self):
+        self.request_stop()
+        return self.wait_for_stop(READER_STOP_FALLBACK_WAIT_MS)
 
     # ---------- parsing ----------
     def _finish_stats_block(self):
@@ -1955,8 +1969,35 @@ class Machine(QObject):
                 pass
         self._pending_acks.clear()
 
-        self.stop_reader_thread()
-        self.stop_log_thread()
+        serial_reader = self.reader
+        log_reader = self.log_reader
+        if log_reader is not None:
+            self._disconnect_log_reader_signals(log_reader)
+
+        shutdown_started = time.monotonic()
+        serial_shutdown_ms = 0
+        log_shutdown_ms = 0
+        if serial_reader is not None or log_reader is not None:
+            print("Requesting serial and log reader shutdown...")
+            self._request_reader_stop(serial_reader, "Serial reader thread")
+            self._request_reader_stop(log_reader, "Log reader thread")
+            serial_shutdown_ms, _ = self._wait_for_reader_stop(
+                serial_reader,
+                "reader",
+                "Serial reader thread",
+                SERIAL_READER_STOP_WAIT_MS,
+            )
+            log_shutdown_ms, _ = self._wait_for_reader_stop(
+                log_reader,
+                "log_reader",
+                "Log reader thread",
+                LOG_READER_STOP_WAIT_MS,
+            )
+            total_shutdown_ms = int((time.monotonic() - shutdown_started) * 1000)
+            print(
+                "Reader shutdown finished in "
+                f"{total_shutdown_ms} ms (serial={serial_shutdown_ms} ms, log={log_shutdown_ms} ms)"
+            )
         self._flash_state = default_flash_safety_state()
         self.flash_state_updated.emit(dict(self._flash_state))
 
@@ -2070,6 +2111,20 @@ class Machine(QObject):
         """
         Start the serial reader thread to read data from the machine.
         """
+        reader = self.reader
+        if reader is not None:
+            try:
+                if reader.isRunning():
+                    print('Serial reader thread already running')
+                    return
+            except Exception:
+                return
+            try:
+                reader.stop()
+            except Exception:
+                pass
+            self.reader = None
+
         if self.reader is None:
             self.reader = SerialReader(self.ser)
             self.reader.status_received.connect(self.update_status)
@@ -2091,17 +2146,19 @@ class Machine(QObject):
         """
         Stop the serial reader thread.
         """
-        if self.reader is not None:
-            try:
-                self.reader.stop()
-            except Exception:
-                # fallback to old behavior
-                self.reader.requestInterruption()
-                self.reader.wait(1000)
-            self.reader = None
-            print('Serial reader thread stopped')
-        else:
+        reader = self.reader
+        if reader is None:
             print('No serial reader thread to stop')
+            return
+
+        self._request_reader_stop(reader, "Serial reader thread")
+        self._wait_for_reader_stop(
+            reader,
+            "reader",
+            "Serial reader thread",
+            READER_STOP_FALLBACK_WAIT_MS,
+            fallback_timeout_ms=None,
+        )
 
     def begin_log_thread(self):
         """
@@ -2167,6 +2224,48 @@ class Machine(QObject):
                 signal_obj.disconnect(slot)
             except Exception:
                 pass
+
+    def _request_reader_stop(self, reader, label):
+        if reader is None:
+            return
+        try:
+            reader.request_stop()
+        except Exception as exc:
+            print(f"{label} stop request raised an error: {exc}")
+
+    def _wait_for_reader_stop(self, reader, attr_name, label, timeout_ms, fallback_timeout_ms=READER_STOP_FALLBACK_WAIT_MS):
+        if reader is None:
+            return 0, True
+
+        wait_started = time.monotonic()
+        try:
+            stopped = bool(reader.wait_for_stop(timeout_ms))
+        except Exception as exc:
+            print(f"{label} stop wait raised an error: {exc}")
+            stopped = False
+        elapsed_ms = int((time.monotonic() - wait_started) * 1000)
+
+        if not stopped and fallback_timeout_ms is not None:
+            print(
+                f"{label} fast stop timed out after {elapsed_ms} ms; "
+                f"waiting up to {fallback_timeout_ms} ms more"
+            )
+            wait_started = time.monotonic()
+            try:
+                stopped = bool(reader.wait_for_stop(fallback_timeout_ms))
+            except Exception as exc:
+                print(f"{label} fallback stop wait raised an error: {exc}")
+                stopped = False
+            elapsed_ms += int((time.monotonic() - wait_started) * 1000)
+
+        if stopped:
+            if getattr(self, attr_name, None) is reader:
+                setattr(self, attr_name, None)
+            print(f"{label} stopped in {elapsed_ms} ms")
+        else:
+            print(f"{label} did not stop cleanly after {elapsed_ms} ms; keeping existing reader reference")
+
+        return elapsed_ms, stopped
         
     def stop_log_thread(self):
         """
@@ -2177,20 +2276,14 @@ class Machine(QObject):
             return
 
         self._disconnect_log_reader_signals(reader)
-
-        stopped = False
-        try:
-            stopped = bool(reader.stop())
-        except Exception:
-            pass
-
-        if stopped:
-            self.log_reader = None
-
-        if stopped:
-            print("Log reader thread stopped")
-        else:
-            print("Log reader thread did not stop cleanly; keeping existing reader reference")
+        self._request_reader_stop(reader, "Log reader thread")
+        self._wait_for_reader_stop(
+            reader,
+            "log_reader",
+            "Log reader thread",
+            READER_STOP_FALLBACK_WAIT_MS,
+            fallback_timeout_ms=None,
+        )
 
     def begin_execution_timer(self):
         print('Starting execution timer')

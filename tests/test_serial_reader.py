@@ -150,3 +150,41 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert reports[0]["recovery_boot"] is True
     assert "during open_gripper" in reports[0]["summary"]
     assert "first late task pressure" in reports[0]["summary"]
+
+
+def test_serial_reader_request_stop_is_idempotent_and_waits_with_requested_timeout(qapp):
+    class _Serial:
+        def __init__(self):
+            self.is_open = True
+            self.cancel_calls = 0
+
+        def cancel_read(self):
+            self.cancel_calls += 1
+
+    class _TestSerialReader(mfr.SerialReader):
+        def __init__(self, ser):
+            self.interrupt_calls = 0
+            self.wait_calls = []
+            super().__init__(ser)
+
+        def isRunning(self):
+            return True
+
+        def requestInterruption(self):
+            self.interrupt_calls += 1
+
+        def wait(self, timeout):
+            self.wait_calls.append(timeout)
+            return True
+
+    ser = _Serial()
+    reader = _TestSerialReader(ser)
+
+    reader.request_stop()
+    reader.request_stop()
+    stopped = reader.wait_for_stop(mfr.SERIAL_READER_STOP_WAIT_MS)
+
+    assert stopped is True
+    assert reader.interrupt_calls == 1
+    assert reader.wait_calls == [mfr.SERIAL_READER_STOP_WAIT_MS]
+    assert ser.cancel_calls == 1
