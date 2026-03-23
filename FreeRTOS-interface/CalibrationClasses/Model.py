@@ -667,6 +667,423 @@ class CalibrationProcessRecorder:
             return verdict
 
 
+class RefuelDatasetCaptureStore:
+    """
+    Run-scoped recorder for refuel-level dataset capture.
+    Keeps scene/frame manifests beside raw captures while reusing CalibrationProcessRecorder.
+    """
+
+    PROCESS_NAME = "RefuelLevelDatasetCaptureProcess"
+    PHASE_NAME = "refuel_level_dataset_capture"
+    SCHEMA_VERSION = 1
+
+    def __init__(self, model, *, process_name=None, phase_name=None):
+        self.model = model
+        self.process_name = str(process_name or self.PROCESS_NAME)
+        self.phase_name = str(phase_name or self.PHASE_NAME)
+        self.recorder = CalibrationProcessRecorder(model)
+        self.reset_state()
+
+    @staticmethod
+    def _now_utc():
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _write_jsonl_atomic(path, rows):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, default=numpy_encoder) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _touch_file(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8"):
+                pass
+
+    @staticmethod
+    def _dedupe_tags(tags):
+        out = []
+        seen = set()
+        for raw in tags or []:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            out.append(value)
+        return out
+
+    @staticmethod
+    def _json_copy(payload):
+        return json.loads(json.dumps(payload or {}, default=numpy_encoder))
+
+    def reset_state(self):
+        self.run_dir = None
+        self.last_run_dir = None
+        self.scenes_path = None
+        self.frames_path = None
+        self.labels_path = None
+        self._scene_records = []
+        self._frame_records = []
+        self._frames_by_id = {}
+        self._current_scene = None
+        self._last_frame_id = None
+        self._scene_index = 0
+        self._sequence_index = 0
+        self._session_meta = {}
+
+    def is_active(self):
+        return bool(self.run_dir)
+
+    def get_run_dir(self):
+        return self.run_dir or self.last_run_dir
+
+    def get_current_scene(self):
+        return dict(self._current_scene) if self._current_scene else None
+
+    def get_frame_records(self, *, accepted_only=False):
+        rows = list(self._frame_records)
+        if accepted_only:
+            rows = [row for row in rows if not bool(row.get("rejected"))]
+        return [dict(row) for row in rows]
+
+    def _sync_scene_file(self):
+        if self.scenes_path:
+            self._write_jsonl_atomic(self.scenes_path, self._scene_records)
+
+    def _sync_frame_file(self):
+        if self.frames_path:
+            self._write_jsonl_atomic(self.frames_path, self._frame_records)
+
+    def _append_event(self, event_type, payload=None):
+        evt = self.recorder.append_event(str(event_type), payload or {})
+        if evt is None and self.run_dir:
+            path = os.path.join(self.run_dir, "events.jsonl")
+            row = {
+                "schema_version": int(self.SCHEMA_VERSION),
+                "event_id": str(uuid.uuid4()),
+                "event_index": None,
+                "ts_utc": self._now_utc(),
+                "run_id": self._session_meta.get("run_id", ""),
+                "process_name": self.process_name,
+                "phase_name": self.phase_name,
+                "event_type": str(event_type),
+                "state_name": "",
+                "level": "info",
+                "payload": payload or {},
+            }
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, default=numpy_encoder) + "\n")
+            return row
+        return evt
+
+    def _build_run_meta(
+        self,
+        *,
+        operator_id="",
+        notes="",
+        camera_profile_name="",
+        default_sequence_length=10,
+        default_sequence_interval_ms=500,
+    ):
+        meta = {}
+        manager = getattr(self.model, "calibration_manager", None)
+        builder = getattr(manager, "_build_recorder_meta", None)
+        if callable(builder):
+            try:
+                payload = builder()
+                if isinstance(payload, dict):
+                    meta.update(payload)
+            except Exception:
+                pass
+
+        experiment_model = getattr(self.model, "experiment_model", None)
+        experiment_path = getattr(experiment_model, "experiment_dir_path", None)
+        meta.update(
+            {
+                "operator_id": str(operator_id or os.getenv("USERNAME") or "unknown"),
+                "notes": str(notes or ""),
+                "experiment_path": str(experiment_path or ""),
+                "camera_profile_name": str(camera_profile_name or "refuel_camera_default"),
+                "image_format": "png",
+                "raw_only": True,
+                "save_online_analysis_seed": True,
+                "default_sequence_length": int(max(1, int(default_sequence_length))),
+                "default_sequence_interval_ms": int(max(1, int(default_sequence_interval_ms))),
+            }
+        )
+        return meta
+
+    def start_session(
+        self,
+        *,
+        operator_id="",
+        notes="",
+        camera_profile_name="",
+        default_sequence_length=10,
+        default_sequence_interval_ms=500,
+    ):
+        if self.run_dir is not None:
+            return self.run_dir
+
+        extra_meta = self._build_run_meta(
+            operator_id=operator_id,
+            notes=notes,
+            camera_profile_name=camera_profile_name,
+            default_sequence_length=default_sequence_length,
+            default_sequence_interval_ms=default_sequence_interval_ms,
+        )
+        run_dir = self.recorder.start_run(
+            self.process_name,
+            self.phase_name,
+            extra_meta=extra_meta,
+        )
+
+        self.run_dir = str(run_dir)
+        self.last_run_dir = str(run_dir)
+        self.scenes_path = os.path.join(self.run_dir, "scenes.jsonl")
+        self.frames_path = os.path.join(self.run_dir, "frames.jsonl")
+        self.labels_path = os.path.join(self.run_dir, "labels.jsonl")
+        self._touch_file(os.path.join(self.run_dir, "analysis.jsonl"))
+        self._touch_file(self.scenes_path)
+        self._touch_file(self.frames_path)
+        self._touch_file(self.labels_path)
+        self._scene_records = []
+        self._frame_records = []
+        self._frames_by_id = {}
+        self._current_scene = None
+        self._last_frame_id = None
+        self._scene_index = 0
+        self._sequence_index = 0
+        self._session_meta = {
+            "run_id": os.path.basename(self.run_dir),
+            **extra_meta,
+        }
+        self._append_event(
+            "session_started",
+            {
+                "operator_id": extra_meta.get("operator_id"),
+                "notes": extra_meta.get("notes"),
+                "camera_profile_name": extra_meta.get("camera_profile_name"),
+            },
+        )
+        return self.run_dir
+
+    def _finalize_current_scene(self, *, reason="scene_ended"):
+        if self._current_scene is None:
+            return None
+
+        scene = self._current_scene
+        scene["ended_at_utc"] = self._now_utc()
+        accepted = 0
+        rejected = 0
+        for record in self._frame_records:
+            if record.get("scene_id") != scene.get("scene_id"):
+                continue
+            if record.get("rejected"):
+                rejected += 1
+            else:
+                accepted += 1
+        scene["accepted_frame_count"] = int(accepted)
+        scene["rejected_frame_count"] = int(rejected)
+        self._sync_scene_file()
+        self._append_event(
+            "scene_ended",
+            {
+                "scene_id": scene.get("scene_id"),
+                "reason": str(reason or "scene_ended"),
+                "accepted_frame_count": int(accepted),
+                "rejected_frame_count": int(rejected),
+            },
+        )
+        self._current_scene = None
+        return dict(scene)
+
+    def start_scene(
+        self,
+        *,
+        purpose,
+        scene_tags=None,
+        notes="",
+        geometry_expected_static=True,
+        machine_context=None,
+        camera_context=None,
+    ):
+        if self.run_dir is None:
+            raise RuntimeError("Start a dataset session before starting a scene.")
+
+        if self._current_scene is not None:
+            self._finalize_current_scene(reason="replaced_by_new_scene")
+
+        self._scene_index += 1
+        scene_id = f"scene_{self._scene_index:03d}"
+        scene = {
+            "schema_version": int(self.SCHEMA_VERSION),
+            "scene_id": scene_id,
+            "scene_index": int(self._scene_index),
+            "started_at_utc": self._now_utc(),
+            "ended_at_utc": None,
+            "purpose": str(purpose or "nominal_static"),
+            "geometry_expected_static": bool(geometry_expected_static),
+            "notes": str(notes or ""),
+            "scene_tags": self._dedupe_tags(scene_tags),
+            "machine_context": self._json_copy(machine_context),
+            "camera_context": self._json_copy(camera_context),
+            "accepted_frame_count": 0,
+            "rejected_frame_count": 0,
+        }
+        self._scene_records.append(scene)
+        self._current_scene = scene
+        self._sync_scene_file()
+        self._append_event(
+            "scene_started",
+            {
+                "scene_id": scene_id,
+                "purpose": scene["purpose"],
+                "scene_tags": list(scene["scene_tags"]),
+            },
+        )
+        return dict(scene)
+
+    def next_sequence_id(self):
+        self._sequence_index += 1
+        return f"seq_{self._sequence_index:03d}"
+
+    def capture_frame(
+        self,
+        image,
+        *,
+        frame_kind,
+        sequence_id="",
+        sequence_index=1,
+        sequence_length=1,
+        frame_tags=None,
+        notes="",
+        machine_context=None,
+        camera_context=None,
+        analysis_seed=None,
+    ):
+        if self.run_dir is None:
+            raise RuntimeError("Start a dataset session before capturing frames.")
+        if self._current_scene is None:
+            raise RuntimeError("Start a scene before capturing frames.")
+        if image is None:
+            raise ValueError("Cannot capture an empty refuel dataset frame.")
+
+        raw_shape = list(np.asarray(image).shape)
+        cap = self.recorder.save_capture_image(
+            image,
+            role="raw",
+            file_ext="png",
+            metadata={"scene_id": self._current_scene["scene_id"]},
+        )
+        if cap is None:
+            raise RuntimeError("Failed to save refuel dataset frame.")
+
+        frame_id = f"frame_{int(cap['capture_index']):06d}"
+        record = {
+            "schema_version": int(self.SCHEMA_VERSION),
+            "frame_id": frame_id,
+            "scene_id": self._current_scene["scene_id"],
+            "capture_id": cap["capture_id"],
+            "capture_index": int(cap["capture_index"]),
+            "image_relpath": cap["image_relpath"],
+            "captured_at_utc": cap["captured_at_utc"],
+            "raw_image_shape": raw_shape,
+            "frame_kind": str(frame_kind or "single"),
+            "sequence_id": str(sequence_id or ""),
+            "sequence_index": int(sequence_index) if sequence_index is not None else None,
+            "sequence_length": int(sequence_length) if sequence_length is not None else None,
+            "frame_tags": self._dedupe_tags(frame_tags),
+            "notes": str(notes or ""),
+            "machine_context": self._json_copy(machine_context),
+            "camera_context": self._json_copy(camera_context),
+            "rejected": False,
+            "rejected_at_utc": None,
+            "reject_reason": "",
+        }
+        self._frame_records.append(record)
+        self._frames_by_id[frame_id] = record
+        self._last_frame_id = frame_id
+        self._sync_frame_file()
+        self._append_event(
+            "frame_captured",
+            {
+                "frame_id": frame_id,
+                "scene_id": record["scene_id"],
+                "frame_kind": record["frame_kind"],
+                "sequence_id": record["sequence_id"],
+            },
+        )
+
+        if isinstance(analysis_seed, dict) and analysis_seed.get("predicted_status") not in (None, "", "not_found"):
+            payload = {
+                "kind": "refuel_dataset_seed",
+                "frame_id": frame_id,
+                "capture_id": cap["capture_id"],
+                "capture_index": int(cap["capture_index"]),
+                "image_relpath": cap["image_relpath"],
+                **self._json_copy(analysis_seed),
+            }
+            self.recorder.append_analysis(payload)
+
+        return dict(record)
+
+    def reject_last_capture(self, *, reason=""):
+        if not self._last_frame_id:
+            return None
+        record = self._frames_by_id.get(self._last_frame_id)
+        if record is None or bool(record.get("rejected")):
+            return None
+
+        record["rejected"] = True
+        record["rejected_at_utc"] = self._now_utc()
+        record["reject_reason"] = str(reason or "")
+        self._sync_frame_file()
+        evt = self._append_event(
+            "frame_rejected",
+            {
+                "frame_id": record["frame_id"],
+                "scene_id": record["scene_id"],
+                "reason": str(reason or ""),
+            },
+        )
+        for scene in self._scene_records:
+            if scene.get("scene_id") == record.get("scene_id"):
+                scene["rejected_frame_count"] = int(scene.get("rejected_frame_count", 0)) + 1
+                break
+        self._sync_scene_file()
+        return evt
+
+    def end_session(self, *, outcome="completed", error_message=""):
+        if self.run_dir is None:
+            return None
+
+        self._finalize_current_scene(reason="session_ended")
+        accepted_frames = len([row for row in self._frame_records if not bool(row.get("rejected"))])
+        self._append_event(
+            "session_ended",
+            {
+                "scene_count": len(self._scene_records),
+                "accepted_frame_count": int(accepted_frames),
+                "total_frame_count": len(self._frame_records),
+            },
+        )
+        self.recorder.finalize_run(str(outcome or "completed"), error_message=str(error_message or ""))
+        last_dir = self.run_dir
+        self.last_run_dir = last_dir
+        self.reset_state()
+        self.last_run_dir = last_dir
+        return last_dir
+
+
 class CalibrationManager(QObject):
     calibrationStageChanged = Signal(str, str)  # (message, color_name)
     calibrationCompleted = Signal()
@@ -20842,10 +21259,15 @@ class ImageAnalysisThread(QThread):
         self.prominence = prominence
         self.empty_cutoff = empty_cutoff
         self.last_row = last_row
+        self.input_shape = tuple(image.shape) if image is not None else None
         self.original_image = image
         self.annotated_image = None
         self.level_data = None
         self.meniscus_row = None
+        self.head_bbox = None
+        self.channel_bounds = None
+        self.detected_status = "not_found"
+        self.detected_details = {}
 
     def run(self):
         # Perform image analysis
@@ -20961,7 +21383,7 @@ class ImageAnalysisThread(QThread):
         print("No peaks found")
         return None
 
-    def check_fill_state(self,image,x0,y0,w0,h0,empty_cutoff=0.15):
+    def check_fill_state(self,image,x0,y0,w0,h0,empty_cutoff=0.15, return_details=False):
         """
         When no peaks are found, this function checks the profile to determine if the channel is empty or full.
         """
@@ -20975,10 +21397,15 @@ class ImageAnalysisThread(QThread):
 
         if score < empty_cutoff:
             print("Channel is empty.")
-            return h0 - 3
+            row = h0 - 3
+            state = "empty"
         else:
             print("Channel is full.")
-            return 3
+            row = 3
+            state = "full"
+        if return_details:
+            return row, state, float(score)
+        return row
 
     def analyze_image(self):
         # self.original_image = cv2.rotate(self.original_image, cv2.ROTATE_180)
@@ -20992,9 +21419,13 @@ class ImageAnalysisThread(QThread):
             self.annotated_image = cur_img.copy()
             self.level_data = None
             self.meniscus_row = None
+            self.detected_status = "not_found"
+            self.detected_details = {"reason": "printer_head_not_found"}
             return
         else:
             x0, y0, w0, h0 = self.get_channel_bounds(cur_img, x, y, w, h, left_offset=self.offset, channel_width=self.width)
+            self.head_bbox = (int(x), int(y), int(w), int(h))
+            self.channel_bounds = (int(x0), int(y0), int(w0), int(h0))
 
         profile = self.get_channel_profile(cur_img, x0, y0, w0, h0)
 
@@ -21003,9 +21434,19 @@ class ImageAnalysisThread(QThread):
                             fluid_darker=False,
                             search_band=(0,h0-30),
                             min_prominence=self.prominence)
+        fill_state = "visible"
+        fill_score = None
 
         if meniscus_row is None:
-            meniscus_row = self.check_fill_state(cur_img, x0, y0, w0, h0, empty_cutoff=self.empty_cutoff)
+            meniscus_row, fill_state, fill_score = self.check_fill_state(
+                cur_img,
+                x0,
+                y0,
+                w0,
+                h0,
+                empty_cutoff=self.empty_cutoff,
+                return_details=True,
+            )
         level_y = y0 + meniscus_row
 
         cv2.line(cur_img, (x0, level_y), (x0 + w0, level_y), (0, 0, 255), 2)  # Red line
@@ -21015,6 +21456,13 @@ class ImageAnalysisThread(QThread):
 
         self.annotated_image = cur_img.copy()
         self.meniscus_row = int(meniscus_row)
+        self.detected_status = str(fill_state or "visible")
+        self.detected_details = {
+            "head_bbox": list(self.head_bbox) if self.head_bbox is not None else None,
+            "channel_bounds": list(self.channel_bounds) if self.channel_bounds is not None else None,
+            "fill_score": float(fill_score) if fill_score is not None else None,
+            "last_row": int(self.last_row) if self.last_row is not None else None,
+        }
 
         # Calculate level data by calculating the difference between the meniscus row and the bottom of the channel
         self.level_data = h0 - self.meniscus_row
@@ -21062,6 +21510,7 @@ class RefuelCameraModel(QObject):
 
         self.owner_model = None
         self._process_recorder = None
+        self.dataset_capture_store = None
         self._recorder_run_dir = None
         self._session_start_monotonic = None
         self._analysis_context = None
@@ -21078,6 +21527,10 @@ class RefuelCameraModel(QObject):
         self.owner_model = owner_model
         if owner_model is not None:
             self._process_recorder = CalibrationProcessRecorder(owner_model)
+            self.dataset_capture_store = RefuelDatasetCaptureStore(owner_model)
+        else:
+            self._process_recorder = None
+            self.dataset_capture_store = None
 
     def update_analysis_parameters(self, offset, width, threshold, prom, empty_cutoff):
         self.offset = offset
@@ -21101,6 +21554,214 @@ class RefuelCameraModel(QObject):
             self.default_baseline_samples = max(1, int(baseline_samples))
         if post_samples is not None:
             self.default_post_samples = max(1, int(post_samples))
+
+    def _seed_analysis_parameters(self):
+        return {
+            "offset": int(self.offset if self.offset is not None else 40),
+            "width": int(self.width if self.width is not None else 20),
+            "threshold": int(self.threshold if self.threshold is not None else 60),
+            "prominence": int(self.prominence if self.prominence is not None else 4),
+            "empty_cutoff": float(self.empty_cutoff if self.empty_cutoff is not None else 0.25),
+        }
+
+    @staticmethod
+    def _map_analysis_point_to_raw(point, raw_shape, input_shape):
+        if point is None or raw_shape is None or input_shape is None:
+            return None
+        raw_h, raw_w = int(raw_shape[0]), int(raw_shape[1])
+        in_h, in_w = int(input_shape[0]), int(input_shape[1])
+        xa, ya = float(point[0]), float(point[1])
+        resized_x = float(in_w - 1) - ya
+        resized_y = xa
+        x_scale = float(max(raw_w - 1, 1)) / float(max(in_w - 1, 1))
+        y_scale = float(max(raw_h - 1, 1)) / float(max(in_h - 1, 1))
+        x_raw = int(round(resized_x * x_scale))
+        y_raw = int(round(resized_y * y_scale))
+        x_raw = max(0, min(raw_w - 1, x_raw))
+        y_raw = max(0, min(raw_h - 1, y_raw))
+        return [x_raw, y_raw]
+
+    def _map_analysis_line_to_raw(self, p0, p1, raw_shape, input_shape):
+        return [
+            self._map_analysis_point_to_raw(p0, raw_shape, input_shape),
+            self._map_analysis_point_to_raw(p1, raw_shape, input_shape),
+        ]
+
+    def build_dataset_analysis_seed(self, frame):
+        if frame is None:
+            return None
+        try:
+            params = self._seed_analysis_parameters()
+            resized = cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
+            worker = ImageAnalysisThread(
+                resized,
+                params["offset"],
+                params["width"],
+                params["threshold"],
+                params["prominence"],
+                params["empty_cutoff"],
+                self.last_meniscus_row,
+            )
+            worker.analyze_image()
+        except Exception as exc:
+            print(f"[RefuelDataset] seed analysis failed: {exc}")
+            return None
+
+        if worker.channel_bounds is None or worker.input_shape is None:
+            return None
+
+        x0, y0, w0, h0 = worker.channel_bounds
+        input_shape = worker.input_shape
+        raw_shape = np.asarray(frame).shape
+        channel_geometry = {
+            "left_wall": self._map_analysis_line_to_raw((x0, y0), (x0, y0 + h0), raw_shape, input_shape),
+            "right_wall": self._map_analysis_line_to_raw((x0 + w0, y0), (x0 + w0, y0 + h0), raw_shape, input_shape),
+            "top_line": self._map_analysis_line_to_raw((x0, y0), (x0 + w0, y0), raw_shape, input_shape),
+            "bottom_line": self._map_analysis_line_to_raw((x0, y0 + h0), (x0 + w0, y0 + h0), raw_shape, input_shape),
+        }
+
+        meniscus_line = None
+        if worker.meniscus_row is not None and str(worker.detected_status) == "visible":
+            level_y = y0 + int(worker.meniscus_row)
+            meniscus_line = self._map_analysis_line_to_raw(
+                (x0, level_y),
+                (x0 + w0, level_y),
+                raw_shape,
+                input_shape,
+            )
+
+        status = str(worker.detected_status or "not_found")
+        confidence = 0.0
+        if status == "visible":
+            confidence = 0.8
+        elif status in ("full", "empty"):
+            confidence = 0.35
+
+        return {
+            "detector_name": "current_refuel_detector",
+            "detector_version": "phase2_dataset_seed_v1",
+            "predicted_status": status,
+            "predicted_channel_geometry": channel_geometry,
+            "predicted_meniscus_line": meniscus_line,
+            "predicted_level_px": float(worker.level_data) if worker.level_data is not None else None,
+            "confidence": float(confidence),
+            "details": {
+                **(worker.detected_details or {}),
+                "analysis_parameters": params,
+            },
+        }
+
+    def start_dataset_session(
+        self,
+        *,
+        operator_id="",
+        notes="",
+        camera_profile_name="",
+        default_sequence_length=10,
+        default_sequence_interval_ms=500,
+    ):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.start_session(
+            operator_id=operator_id,
+            notes=notes,
+            camera_profile_name=camera_profile_name,
+            default_sequence_length=default_sequence_length,
+            default_sequence_interval_ms=default_sequence_interval_ms,
+        )
+
+    def end_dataset_session(self, *, outcome="completed", error_message=""):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.end_session(outcome=outcome, error_message=error_message)
+
+    def start_dataset_scene(
+        self,
+        *,
+        purpose,
+        scene_tags=None,
+        notes="",
+        geometry_expected_static=True,
+        machine_context=None,
+        camera_context=None,
+    ):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.start_scene(
+            purpose=purpose,
+            scene_tags=scene_tags,
+            notes=notes,
+            geometry_expected_static=geometry_expected_static,
+            machine_context=machine_context,
+            camera_context=camera_context,
+        )
+
+    def capture_dataset_frame(
+        self,
+        frame,
+        *,
+        frame_kind,
+        sequence_id="",
+        sequence_index=1,
+        sequence_length=1,
+        frame_tags=None,
+        notes="",
+        machine_context=None,
+        camera_context=None,
+    ):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        seed = self.build_dataset_analysis_seed(frame)
+        return store.capture_frame(
+            frame,
+            frame_kind=frame_kind,
+            sequence_id=sequence_id,
+            sequence_index=sequence_index,
+            sequence_length=sequence_length,
+            frame_tags=frame_tags,
+            notes=notes,
+            machine_context=machine_context,
+            camera_context=camera_context,
+            analysis_seed=seed,
+        )
+
+    def reject_last_dataset_capture(self, *, reason=""):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.reject_last_capture(reason=reason)
+
+    def is_dataset_session_active(self):
+        store = getattr(self, "dataset_capture_store", None)
+        return bool(store is not None and store.is_active())
+
+    def get_dataset_run_dir(self):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.get_run_dir()
+
+    def get_dataset_current_scene(self):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.get_current_scene()
+
+    def get_dataset_frame_records(self, *, accepted_only=False):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return []
+        return store.get_frame_records(accepted_only=accepted_only)
+
+    def next_dataset_sequence_id(self):
+        store = getattr(self, "dataset_capture_store", None)
+        if store is None:
+            return None
+        return store.next_sequence_id()
 
     def update_current_level(self, level):
         self.current_level = level

@@ -178,6 +178,24 @@ def test_refuel_camera_model_none_frame_is_safe_noop():
     assert model.annotated_image == "keep"
 
 
+def test_refuel_camera_model_build_dataset_analysis_seed_returns_geometry_and_level():
+    analysis_view, head_rect = _build_analysis_view(meniscus_row=60)
+    raw_frame = _thread_input_from_analysis_view(analysis_view)
+    model = RefuelCameraModel()
+    model.update_analysis_parameters(40, 20, 80, 4, 0.25)
+
+    seed = model.build_dataset_analysis_seed(raw_frame)
+
+    assert seed is not None
+    assert seed["predicted_status"] == "visible"
+    assert abs(seed["predicted_level_px"] - (head_rect[3] - 60)) <= 3
+    assert seed["predicted_channel_geometry"]["left_wall"] is not None
+    assert seed["predicted_meniscus_line"] is not None
+    for point in seed["predicted_meniscus_line"]:
+        assert 0 <= point[0] < raw_frame.shape[1]
+        assert 0 <= point[1] < raw_frame.shape[0]
+
+
 def test_refuel_camera_model_lock_target_tracks_setpoint_and_status():
     model = RefuelCameraModel()
     model.current_level = 52.5

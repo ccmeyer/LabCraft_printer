@@ -1208,12 +1208,20 @@ class Controller(QObject):
         return context
 
     def capture_refuel_image(self):
-        frame = self.machine.capture_refuel_image()
-        if frame is None:
-            return None
-        context = self._build_refuel_capture_context()
-        self.model.refuel_camera_model.start_analysis(frame, context=context)
+        frame, _context = self.capture_refuel_image_with_context(analyze=True)
         return frame
+
+    def capture_refuel_image_with_context(self, *, analyze=True):
+        frame = self.machine.capture_refuel_image()
+        context = self._build_refuel_capture_context()
+        if frame is None:
+            return None, context
+        if analyze:
+            self.model.refuel_camera_model.start_analysis(frame, context=context)
+        return frame, context
+
+    def get_refuel_capture_context(self):
+        return self._build_refuel_capture_context()
 
     def run_refuel_balance_burst(self, droplet_count, settle_ms, on_complete=None, on_error=None):
         if not self.machine.check_if_all_completed():

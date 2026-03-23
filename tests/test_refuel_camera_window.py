@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+import tempfile
 
 import numpy as np
 from PySide6.QtGui import QCloseEvent
@@ -24,6 +25,10 @@ def _make_dialog(
             increase_step_size=lambda: None,
             decrease_step_size=lambda: None,
         ),
+        calibration_manager=SimpleNamespace(
+            _build_recorder_meta=lambda: {},
+        ),
+        experiment_model=SimpleNamespace(experiment_dir_path=tempfile.mkdtemp()),
         refuel_camera_model=RefuelCameraModel(),
     )
     controller = SimpleNamespace(
@@ -35,6 +40,10 @@ def _make_dialog(
         print_droplets=Mock(),
         start_refuel_camera=Mock(side_effect=start_side_effect),
         capture_refuel_image=Mock(return_value=capture_return),
+        capture_refuel_image_with_context=Mock(
+            return_value=(capture_return, {"timestamp_utc": "2026-03-21T10:00:00Z", "monotonic_s": 10.0})
+        ),
+        get_refuel_capture_context=Mock(return_value={"location": "camera", "monotonic_s": 9.0}),
         run_refuel_balance_burst=Mock(return_value=run_burst_return),
         stop_refuel_camera=Mock(),
         disable_print_profile=Mock(),
@@ -204,3 +213,41 @@ def test_refuel_camera_window_chart_uses_elapsed_time_and_target_overlay(qapp):
     assert dialog.upper_band_series.count() == 2
     assert dialog.lower_band_series.count() == 2
     assert dialog.axisX.max() >= 3.5
+
+
+def test_refuel_camera_window_dataset_session_and_single_capture(qapp):
+    dialog, model, controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((32, 24, 3), dtype=np.uint8),
+    )
+
+    dialog.start_dataset_session()
+    dialog.start_dataset_scene()
+    dialog.capture_dataset_single()
+
+    assert model.refuel_camera_model.is_dataset_session_active() is True
+    assert model.refuel_camera_model.get_dataset_current_scene() is not None
+    assert len(model.refuel_camera_model.get_dataset_frame_records()) == 1
+    assert controller.capture_refuel_image_with_context.called
+    assert "Captured frame_" in dialog.dataset_status_label.text()
+    assert dialog.dataset_session_path_label.text() != "-"
+
+
+def test_refuel_camera_window_reject_last_dataset_capture(monkeypatch, qapp):
+    dialog, model, _controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((16, 16, 3), dtype=np.uint8),
+    )
+    dialog.start_dataset_session()
+    dialog.start_dataset_scene()
+    dialog.capture_dataset_single()
+    monkeypatch.setattr(
+        CalibrationView.QtWidgets.QInputDialog,
+        "getText",
+        lambda *args, **kwargs: ("bad frame", True),
+    )
+
+    dialog.reject_last_dataset_capture()
+
+    assert model.refuel_camera_model.get_dataset_frame_records(accepted_only=True) == []
+    assert "rejected" in dialog.dataset_status_label.text().lower()

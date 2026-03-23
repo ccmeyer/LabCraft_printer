@@ -4093,6 +4093,7 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self._camera_ready = False
         self._camera_failure_shown = False
         self._pending_burst_request = False
+        self._dataset_sequence_state = None
         self._capture_interval_ms = 500
         self._save_dir = Path(__file__).resolve().parents[2] / "artifacts" / "refuel_camera_frames"
         self.refuel_camera_model.set_capture_interval_ms(self._capture_interval_ms)
@@ -4243,6 +4244,72 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         summary_form.addRow("Target Error", self.summary_error_label)
         summary_form.addRow("Recommendation", self.summary_recommendation_label)
         control_layout.addWidget(summary_group)
+
+        dataset_group = QtWidgets.QGroupBox("Dataset Capture")
+        dataset_form = QtWidgets.QFormLayout(dataset_group)
+
+        dataset_button_row = QtWidgets.QGridLayout()
+        self.dataset_start_button = QPushButton("Start Dataset Session")
+        self.dataset_start_button.clicked.connect(self.start_dataset_session)
+        self.dataset_end_button = QPushButton("End Dataset Session")
+        self.dataset_end_button.clicked.connect(self.end_dataset_session)
+        self.dataset_scene_button = QPushButton("Start New Scene")
+        self.dataset_scene_button.clicked.connect(self.start_dataset_scene)
+        self.dataset_capture_single_button = QPushButton("Capture Single")
+        self.dataset_capture_single_button.clicked.connect(self.capture_dataset_single)
+        self.dataset_capture_sequence_button = QPushButton("Capture Sequence")
+        self.dataset_capture_sequence_button.clicked.connect(self.capture_dataset_sequence)
+        self.dataset_reject_last_button = QPushButton("Reject Last Capture")
+        self.dataset_reject_last_button.clicked.connect(self.reject_last_dataset_capture)
+
+        dataset_button_row.addWidget(self.dataset_start_button, 0, 0)
+        dataset_button_row.addWidget(self.dataset_end_button, 0, 1)
+        dataset_button_row.addWidget(self.dataset_scene_button, 1, 0)
+        dataset_button_row.addWidget(self.dataset_capture_single_button, 1, 1)
+        dataset_button_row.addWidget(self.dataset_capture_sequence_button, 2, 0)
+        dataset_button_row.addWidget(self.dataset_reject_last_button, 2, 1)
+        dataset_form.addRow(dataset_button_row)
+
+        self.dataset_session_path_label = QLabel("-")
+        self.dataset_session_path_label.setWordWrap(True)
+        self.dataset_session_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.dataset_scene_label = QLabel("Scene: N/A")
+        self.dataset_scene_label.setWordWrap(True)
+        self.dataset_status_label = QLabel("Dataset idle.")
+        self.dataset_status_label.setWordWrap(True)
+
+        self.dataset_purpose_combo = QComboBox()
+        self.dataset_purpose_combo.addItems(["nominal_static", "stress", "temporal"])
+
+        self.dataset_scene_tags_edit = QLineEdit()
+        self.dataset_scene_tags_edit.setPlaceholderText("comma-separated scene tags")
+        self.dataset_frame_tags_edit = QLineEdit()
+        self.dataset_frame_tags_edit.setPlaceholderText("comma-separated frame tags")
+
+        self.dataset_sequence_length_spin = QSpinBox()
+        self.dataset_sequence_length_spin.setRange(1, 1000)
+        self.dataset_sequence_length_spin.setValue(10)
+
+        self.dataset_sequence_interval_spin = QSpinBox()
+        self.dataset_sequence_interval_spin.setRange(1, 60000)
+        self.dataset_sequence_interval_spin.setValue(self._capture_interval_ms)
+        self.dataset_sequence_interval_spin.setSuffix(" ms")
+
+        self.dataset_notes_edit = QtWidgets.QPlainTextEdit()
+        self.dataset_notes_edit.setPlaceholderText("Optional notes for the current dataset session/scene/frame.")
+        self.dataset_notes_edit.setFixedHeight(80)
+
+        dataset_form.addRow("Session Path", self.dataset_session_path_label)
+        dataset_form.addRow("Current Scene", self.dataset_scene_label)
+        dataset_form.addRow("Scene Purpose", self.dataset_purpose_combo)
+        dataset_form.addRow("Scene Tags", self.dataset_scene_tags_edit)
+        dataset_form.addRow("Frame Tags", self.dataset_frame_tags_edit)
+        dataset_form.addRow("Sequence Length", self.dataset_sequence_length_spin)
+        dataset_form.addRow("Sequence Interval", self.dataset_sequence_interval_spin)
+        dataset_form.addRow("Notes", self.dataset_notes_edit)
+        dataset_form.addRow("Status", self.dataset_status_label)
+        control_layout.addWidget(dataset_group)
         control_layout.addStretch(1)
 
         self.image_label = QLabel("No image captured yet.")
@@ -4310,6 +4377,19 @@ class RefuelCameraWindow(QtWidgets.QDialog):
             self.post_samples_spinbox,
             self.burst_button,
         )
+        self.dataset_control_widgets = (
+            self.dataset_end_button,
+            self.dataset_scene_button,
+            self.dataset_capture_single_button,
+            self.dataset_capture_sequence_button,
+            self.dataset_reject_last_button,
+            self.dataset_purpose_combo,
+            self.dataset_scene_tags_edit,
+            self.dataset_frame_tags_edit,
+            self.dataset_sequence_length_spin,
+            self.dataset_sequence_interval_spin,
+            self.dataset_notes_edit,
+        )
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.capture_image)
@@ -4365,6 +4445,72 @@ class RefuelCameraWindow(QtWidgets.QDialog):
             post_samples=self.post_samples_spinbox.value(),
         )
 
+    @staticmethod
+    def _parse_tag_text(text):
+        parts = []
+        seen = set()
+        for raw in str(text or "").split(","):
+            value = raw.strip()
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            parts.append(value)
+        return parts
+
+    def _dataset_camera_profile_name(self):
+        machine = getattr(self.controller, "machine", None)
+        refuel_camera = getattr(machine, "refuel_camera", None) if machine is not None else None
+        if refuel_camera is None:
+            return "refuel_camera_default"
+        return str(refuel_camera.__class__.__name__ or "refuel_camera_default")
+
+    def _build_dataset_machine_context(self, base_context=None):
+        payload = dict(base_context or {})
+        machine_model = getattr(self.model, "machine_model", None)
+        if machine_model is None:
+            return payload
+        payload.setdefault("regulating_print_pressure", bool(getattr(machine_model, "regulating_print_pressure", False)))
+        payload.setdefault("regulating_refuel_pressure", bool(getattr(machine_model, "regulating_refuel_pressure", False)))
+        for key, getter_name in (
+            ("print_pressure", "get_current_print_pressure"),
+            ("refuel_pressure", "get_current_refuel_pressure"),
+            ("print_pulse_width", "get_print_pulse_width"),
+            ("refuel_pulse_width", "get_refuel_pulse_width"),
+            ("location", "get_current_location"),
+        ):
+            getter = getattr(machine_model, getter_name, None)
+            if callable(getter):
+                try:
+                    payload[key] = getter()
+                except Exception:
+                    pass
+        return payload
+
+    def _build_dataset_camera_context(self):
+        return {
+            "camera_profile_name": self._dataset_camera_profile_name(),
+            "capture_interval_ms": int(self._capture_interval_ms),
+            "analysis_parameters": {
+                "left_offset": int(self.offset_spinbox.value()),
+                "channel_width": int(self.width_spinbox.value()),
+                "threshold": int(self.threshold_spinbox.value()),
+                "prominence": int(self.prom_spinbox.value()),
+                "empty_cutoff": float(self.empty_cutoff.value()),
+            },
+        }
+
+    def _capture_refuel_frame_with_context(self):
+        capture_with_context = getattr(self.controller, "capture_refuel_image_with_context", None)
+        if callable(capture_with_context):
+            return capture_with_context(analyze=True)
+        frame = self.controller.capture_refuel_image()
+        context_getter = getattr(self.controller, "get_refuel_capture_context", None)
+        context = context_getter() if callable(context_getter) else {}
+        return frame, context
+
     def _set_analysis_controls_enabled(self, enabled):
         for widget in self.analysis_control_widgets:
             widget.setEnabled(enabled)
@@ -4372,6 +4518,21 @@ class RefuelCameraWindow(QtWidgets.QDialog):
     def _set_burst_controls_enabled(self, enabled):
         for widget in self.burst_control_widgets:
             widget.setEnabled(enabled)
+
+    def _set_dataset_controls_enabled(self, enabled):
+        for widget in self.dataset_control_widgets:
+            widget.setEnabled(enabled)
+
+    def _sync_dataset_labels(self):
+        run_dir = self.refuel_camera_model.get_dataset_run_dir()
+        self.dataset_session_path_label.setText(str(run_dir or "-"))
+        scene = self.refuel_camera_model.get_dataset_current_scene()
+        if scene:
+            self.dataset_scene_label.setText(
+                f"Scene: {scene.get('scene_id', 'N/A')} ({scene.get('purpose', 'unknown')})"
+            )
+        else:
+            self.dataset_scene_label.setText("Scene: N/A")
 
     def _set_live_status_text(self, status):
         text = status or "N/A"
@@ -4388,6 +4549,9 @@ class RefuelCameraWindow(QtWidgets.QDialog):
     def _sync_session_controls(self):
         burst_active = self.refuel_camera_model.is_burst_in_progress()
         session_active = self.refuel_camera_model.is_session_active()
+        dataset_active = self.refuel_camera_model.is_dataset_session_active()
+        dataset_scene_active = self.refuel_camera_model.get_dataset_current_scene() is not None
+        dataset_sequence_active = self._dataset_sequence_state is not None
         self.capture_button.setEnabled(self._camera_ready)
         self.set_target_button.setEnabled(self.refuel_camera_model.get_current_level() is not None and not burst_active)
         self.reset_session_button.setEnabled(session_active or burst_active or self.refuel_camera_model.get_last_burst_result() is not None)
@@ -4395,6 +4559,174 @@ class RefuelCameraWindow(QtWidgets.QDialog):
         self._set_burst_controls_enabled(self._camera_ready and not burst_active)
         if not self._camera_ready:
             self.burst_button.setEnabled(False)
+        self.dataset_start_button.setEnabled(self._camera_ready and not dataset_active and not dataset_sequence_active)
+        self.dataset_end_button.setEnabled(dataset_active and not dataset_sequence_active)
+        self._set_dataset_controls_enabled(dataset_active and not dataset_sequence_active)
+        if not dataset_scene_active:
+            self.dataset_capture_single_button.setEnabled(False)
+            self.dataset_capture_sequence_button.setEnabled(False)
+        if not dataset_active:
+            self.dataset_scene_button.setEnabled(False)
+            self.dataset_capture_single_button.setEnabled(False)
+            self.dataset_capture_sequence_button.setEnabled(False)
+            self.dataset_reject_last_button.setEnabled(False)
+        if not self._camera_ready:
+            self.dataset_capture_single_button.setEnabled(False)
+            self.dataset_capture_sequence_button.setEnabled(False)
+        self.dataset_reject_last_button.setEnabled(
+            dataset_active
+            and not dataset_sequence_active
+            and bool(self.refuel_camera_model.get_dataset_frame_records())
+        )
+        self._sync_dataset_labels()
+
+    def start_dataset_session(self):
+        if not self._camera_ready:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Refuel camera is not ready.")
+            return
+        run_dir = self.refuel_camera_model.start_dataset_session(
+            operator_id=os.getenv("USERNAME") or "unknown",
+            notes=self.dataset_notes_edit.toPlainText().strip(),
+            camera_profile_name=self._dataset_camera_profile_name(),
+            default_sequence_length=self.dataset_sequence_length_spin.value(),
+            default_sequence_interval_ms=self.dataset_sequence_interval_spin.value(),
+        )
+        if not run_dir:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Unable to start a refuel dataset session.")
+            return
+        self.dataset_status_label.setText("Dataset session started. Create a scene before capturing frames.")
+        self._sync_session_controls()
+
+    def end_dataset_session(self):
+        if not self.refuel_camera_model.is_dataset_session_active():
+            return
+        self._dataset_sequence_state = None
+        run_dir = self.refuel_camera_model.end_dataset_session()
+        self.dataset_status_label.setText(f"Dataset session ended. Last run: {run_dir or '-'}")
+        self._sync_session_controls()
+
+    def start_dataset_scene(self):
+        if not self.refuel_camera_model.is_dataset_session_active():
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Start a dataset session before creating a scene.")
+            return
+        machine_context = self._build_dataset_machine_context(
+            getattr(self.controller, "get_refuel_capture_context", lambda: {})()
+        )
+        scene = self.refuel_camera_model.start_dataset_scene(
+            purpose=self.dataset_purpose_combo.currentText(),
+            scene_tags=self._parse_tag_text(self.dataset_scene_tags_edit.text()),
+            notes=self.dataset_notes_edit.toPlainText().strip(),
+            geometry_expected_static=True,
+            machine_context=machine_context,
+            camera_context=self._build_dataset_camera_context(),
+        )
+        self.dataset_status_label.setText(f"Active scene: {scene.get('scene_id', 'N/A')}")
+        self._sync_session_controls()
+
+    def _capture_dataset_frame(self, *, frame_kind, sequence_id="", sequence_index=1, sequence_length=1):
+        if not self.refuel_camera_model.is_dataset_session_active():
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Start a dataset session before capturing frames.")
+            return False
+        if self.refuel_camera_model.get_dataset_current_scene() is None:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Start a scene before capturing frames.")
+            return False
+        if not self._camera_ready:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Refuel camera is not ready.")
+            return False
+
+        frame, context = self._capture_refuel_frame_with_context()
+        if frame is None:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Camera did not return a frame.")
+            self.dataset_status_label.setText("Dataset capture failed: no frame returned.")
+            return False
+
+        record = self.refuel_camera_model.capture_dataset_frame(
+            frame,
+            frame_kind=frame_kind,
+            sequence_id=sequence_id,
+            sequence_index=sequence_index,
+            sequence_length=sequence_length,
+            frame_tags=self._parse_tag_text(self.dataset_frame_tags_edit.text()),
+            notes=self.dataset_notes_edit.toPlainText().strip(),
+            machine_context=self._build_dataset_machine_context(context),
+            camera_context=self._build_dataset_camera_context(),
+        )
+        if record is None:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Failed to persist the dataset frame.")
+            self.dataset_status_label.setText("Dataset capture failed while writing the frame.")
+            return False
+        self.dataset_status_label.setText(
+            f"Captured {record.get('frame_id', '')} ({record.get('frame_kind', 'single')})."
+        )
+        self._sync_session_controls()
+        return True
+
+    def capture_dataset_single(self):
+        self._capture_dataset_frame(frame_kind="single", sequence_index=1, sequence_length=1)
+
+    def capture_dataset_sequence(self):
+        if self._dataset_sequence_state is not None:
+            return
+        sequence_length = int(self.dataset_sequence_length_spin.value())
+        if sequence_length <= 0:
+            QtWidgets.QMessageBox.warning(self, "Dataset Capture", "Sequence length must be at least 1.")
+            return
+        sequence_id = self.refuel_camera_model.next_dataset_sequence_id()
+        self._dataset_sequence_state = {
+            "sequence_id": sequence_id,
+            "sequence_length": sequence_length,
+            "next_index": 1,
+            "interval_ms": int(self.dataset_sequence_interval_spin.value()),
+        }
+        self.dataset_status_label.setText(f"Capturing sequence {sequence_id}...")
+        self._sync_session_controls()
+        QtCore.QTimer.singleShot(0, self._capture_next_dataset_sequence_frame)
+
+    def _capture_next_dataset_sequence_frame(self):
+        state = self._dataset_sequence_state
+        if state is None:
+            return
+
+        ok = self._capture_dataset_frame(
+            frame_kind="sequence",
+            sequence_id=state["sequence_id"],
+            sequence_index=state["next_index"],
+            sequence_length=state["sequence_length"],
+        )
+        if not ok:
+            self._dataset_sequence_state = None
+            self.dataset_status_label.setText("Sequence capture stopped due to capture failure.")
+            self._sync_session_controls()
+            return
+
+        if state["next_index"] >= state["sequence_length"]:
+            self.dataset_status_label.setText(f"Sequence {state['sequence_id']} complete.")
+            self._dataset_sequence_state = None
+            self._sync_session_controls()
+            return
+
+        state["next_index"] += 1
+        QtCore.QTimer.singleShot(int(state["interval_ms"]), self._capture_next_dataset_sequence_frame)
+
+    def reject_last_dataset_capture(self):
+        if not self.refuel_camera_model.get_dataset_frame_records():
+            QtWidgets.QMessageBox.information(self, "Nothing to reject", "No dataset capture is available to reject.")
+            return
+        reason, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Reject Last Dataset Capture",
+            "Reason (optional):",
+            QtWidgets.QLineEdit.Normal,
+            "",
+        )
+        if not ok:
+            return
+        evt = self.refuel_camera_model.reject_last_dataset_capture(reason=reason)
+        if evt is None:
+            QtWidgets.QMessageBox.information(self, "Nothing to reject", "No dataset capture is available to reject.")
+            return
+        self.dataset_status_label.setText("Last dataset capture marked as rejected.")
+        self._sync_session_controls()
 
     def toggle_capture(self):
         """Starts or stops capturing images based on the button toggle."""
@@ -4416,11 +4748,13 @@ class RefuelCameraWindow(QtWidgets.QDialog):
     def _handle_camera_failure(self, message, *, popup=False):
         self._camera_ready = False
         self._set_capture_idle()
+        self._dataset_sequence_state = None
         self.capture_button.setEnabled(False)
         self.image_label.clear()
         self.image_label.setText(message)
         self.level_label.setText("Current Level: N/A")
         self._set_live_status_text(None)
+        self.dataset_status_label.setText(message)
         if popup and not self._camera_failure_shown:
             self._camera_failure_shown = True
             QtWidgets.QMessageBox.warning(self, "Refuel Camera Unavailable", message)
@@ -4680,10 +5014,15 @@ class RefuelCameraWindow(QtWidgets.QDialog):
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         self._pending_burst_request = False
+        self._dataset_sequence_state = None
         try:
             self.refuel_camera_model.close_session()
         except Exception as exc:
             print(f"[RefuelCamera] close_session failed: {exc}")
+        try:
+            self.refuel_camera_model.end_dataset_session()
+        except Exception as exc:
+            print(f"[RefuelCamera] end_dataset_session failed: {exc}")
         self._set_capture_idle()
         self.stop_camera()
         try:
