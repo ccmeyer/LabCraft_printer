@@ -1,7 +1,9 @@
 import sys
 import types
 
-if "Model" not in sys.modules:
+try:
+    import Model  # noqa: F401
+except ImportError:
     fake_model = types.ModuleType("Model")
     fake_model.Model = object
     fake_model.PrinterHead = object
@@ -15,14 +17,25 @@ import pytest
 from Controller import Controller
 
 
-def _build_controller(current_location, current_z, target, *, profile_name="current"):
+def _build_controller(
+    current_location,
+    current_z,
+    target,
+    *,
+    profile_name="current",
+    well_plate=None,
+    location_lookup=None,
+):
     calls = []
     c = Controller.__new__(Controller)
     c.profile = SimpleNamespace(name=profile_name)
     c.expected_position = {"X": 0, "Y": 0, "Z": current_z}
     c.expected_location = current_location
+    if location_lookup is None:
+        location_lookup = lambda name: target.copy()
     c.model = SimpleNamespace(
-        location_model=SimpleNamespace(get_location_dict=lambda name: target.copy())
+        location_model=SimpleNamespace(get_location_dict=location_lookup),
+        well_plate=well_plate,
     )
     c.error_occurred_signal = SimpleNamespace(emit=lambda *args, **kwargs: None)
     c.set_absolute_Z = lambda z, **kwargs: calls.append(("z", z))
@@ -246,3 +259,57 @@ def test_move_to_location_on_complete_runs_after_location_update():
 
     assert ("location", "plate") in events
     assert events.index(("location", "plate")) < events.index("complete")
+
+
+def test_move_to_location_plate_prefers_active_plate_reference_coords():
+    location_lookups = []
+    plate_target = {"X": 700, "Y": 800, "Z": 900}
+    fallback_target = {"X": 1000, "Y": 2000, "Z": 3000}
+    c, calls = _build_controller(
+        "pause",
+        50000,
+        fallback_target,
+        well_plate=SimpleNamespace(get_plate_reference_coords=lambda: plate_target.copy()),
+        location_lookup=lambda name: location_lookups.append(name) or fallback_target.copy(),
+    )
+
+    Controller.move_to_location(c, "plate")
+
+    assert location_lookups == []
+    assert calls[-1] == ("xyz", 700, 800, 900)
+    assert c.expected_location == "plate"
+
+
+def test_move_to_location_plate_falls_back_to_legacy_location_when_plate_reference_missing():
+    location_lookups = []
+    fallback_target = {"X": 1000, "Y": 2000, "Z": 60000}
+    c, calls = _build_controller(
+        "camera",
+        50000,
+        fallback_target,
+        well_plate=SimpleNamespace(get_plate_reference_coords=lambda: None),
+        location_lookup=lambda name: location_lookups.append(name) or fallback_target.copy(),
+    )
+
+    Controller.move_to_location(c, "plate")
+
+    assert location_lookups == ["plate"]
+    assert ("z", 35000) in calls
+    assert calls[-1] == ("xyz", 1000, 2000, 60000)
+
+
+def test_move_to_location_non_plate_names_ignore_well_plate_reference():
+    location_lookups = []
+    pause_target = {"X": 111, "Y": 222, "Z": 333}
+    c, calls = _build_controller(
+        "home",
+        50000,
+        pause_target,
+        well_plate=SimpleNamespace(get_plate_reference_coords=lambda: {"X": 9, "Y": 9, "Z": 9}),
+        location_lookup=lambda name: location_lookups.append(name) or pause_target.copy(),
+    )
+
+    Controller.move_to_location(c, "pause")
+
+    assert location_lookups == ["pause"]
+    assert calls[-1] == ("xyz", 111, 222, 333)

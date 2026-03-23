@@ -2265,7 +2265,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if plate_calibration_dialog.exec() == QDialog.Accepted:
             print("Calibration completed successfully.")
             self.model.well_plate.update_calibration_data()
-            self.model.location_model.post_calibration_update(self.model.well_plate.calibrations['top_left'])
 
         else:
             print("Calibration was canceled or failed.")

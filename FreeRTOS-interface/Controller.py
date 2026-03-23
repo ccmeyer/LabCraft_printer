@@ -787,6 +787,17 @@ class Controller(QObject):
 
         if coords is not None:
             original_target = coords
+        elif target_name_norm == "plate":
+            # Treat "plate" as the active plate anchor first, with the legacy
+            # persisted waypoint preserved as a fallback for uncalibrated plates.
+            original_target = None
+            well_plate = getattr(self.model, "well_plate", None)
+            if well_plate is not None:
+                get_plate_reference_coords = getattr(well_plate, "get_plate_reference_coords", None)
+                if callable(get_plate_reference_coords):
+                    original_target = get_plate_reference_coords()
+            if original_target is None:
+                original_target = self.model.location_model.get_location_dict(name)
         else:
             original_target = self.model.location_model.get_location_dict(name)
 

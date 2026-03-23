@@ -4737,6 +4737,21 @@ class WellPlate(QObject):
     
     def get_temp_calibration_by_name(self, name):
         return self.temp_calibration_data.get(name, None)
+
+    def get_plate_reference_coords(self):
+        """Return a copy of the active plate anchor when top-left is valid."""
+        coords = self.calibrations.get('top_left')
+        if not isinstance(coords, dict):
+            return None
+
+        required_axes = ('X', 'Y', 'Z')
+        try:
+            for axis in required_axes:
+                int(coords[axis])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        return {axis: coords[axis] for axis in required_axes}
     
     def set_calibration_position(self, position_name, coordinates):
         """Set a temporary calibration position."""
@@ -6084,20 +6099,6 @@ class LocationModel(QObject):
     def get_location_names(self):
         """Get a list of all location names."""
         return list(self.locations.keys())
-    
-    def post_calibration_update(self,calibration_data):
-        self.update_pause_location(calibration_data)
-        self.update_plate_location(calibration_data)
-        self.save_locations()
-    
-    def update_pause_location(self,coords):
-        offset_coords = {'X':coords['X']-500,'Y':coords['Y']-500,'Z':coords['Z']}
-        self.update_location_coords('pause',offset_coords)
-        #print(f"Pause location updated.")
-
-    def update_plate_locatin(self,coords):
-        self.update_location_coords('plate',coords)
-        #print(f"Plate location updated.")
 
 class MachineModel(QObject):
     '''
