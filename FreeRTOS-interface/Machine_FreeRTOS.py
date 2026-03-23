@@ -981,6 +981,11 @@ CRASH_TASK_NAMES = {
     4: "pressure",
     5: "print_regulator",
     6: "refuel_regulator",
+    7: "home_x",
+    8: "home_y",
+    9: "home_z",
+    10: "home_print_regulator",
+    11: "home_refuel_regulator",
 }
 
 CRASH_BOOT_STAGE_NAMES = {

@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include "FreeRTOS.h"
+#include "semphr.h"
 #include "task.h"
 
 class Logger {
@@ -44,8 +45,10 @@ private:
 
   static constexpr size_t BUF_SIZE = 512;
   uint8_t   _buf[BUF_SIZE];
+  char      _formatScratch[BUF_SIZE] = {};
   volatile size_t _head = 0, _tail = 0;
   size_t _inflightLen = 0;
+  SemaphoreHandle_t _logMutex = nullptr;
 
   // Task handle so we could suspend/kill it if we ever wanted
   TaskHandle_t _statsTaskHandle = nullptr;

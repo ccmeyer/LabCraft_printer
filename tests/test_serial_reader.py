@@ -152,6 +152,56 @@ def test_serial_reader_emits_reset_report_without_consuming_ack_path(qapp):
     assert "first late task pressure" in reports[0]["summary"]
 
 
+def test_serial_reader_decodes_home_task_names_in_reset_reports(qapp):
+    reset_payload = bytes(
+        [
+            mfr.RESET_REPORT,
+            0x01,
+            mfr.TAG_RESET_SEQ32,
+            4,
+            1,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_CAUSE,
+            1,
+            3,
+            mfr.TAG_RESET_FLAGS,
+            4,
+            mfr.CRASHLOG_FLAG_PENDING,
+            0,
+            0,
+            0,
+            mfr.TAG_RESET_LAST_FAULT,
+            1,
+            6,
+            mfr.TAG_RESET_LAST_TASK,
+            1,
+            7,
+            mfr.TAG_RESET_BOOT_STAGE,
+            1,
+            7,
+            mfr.TAG_RESET_FAULT_STAGE,
+            1,
+            7,
+            mfr.TAG_RESET_WATCHDOG_LATE_TASK,
+            1,
+            0,
+        ]
+    )
+    fake_ser = FakeSerial(_frame(reset_payload))
+
+    reader = mfr.SerialReader(fake_ser)
+    reports = []
+    reader.resetReportReceived.connect(reports.append)
+
+    reader.run()
+
+    assert len(reports) == 1
+    assert reports[0]["last_task_name"] == "home_x"
+    assert "home_x" in reports[0]["summary"]
+
+
 def test_serial_reader_request_stop_is_idempotent_and_waits_with_requested_timeout(qapp):
     class _Serial:
         def __init__(self):

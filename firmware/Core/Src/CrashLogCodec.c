@@ -54,6 +54,11 @@ const char* CrashLog_TaskIdName(CrashTaskId taskId)
     case CRASH_TASK_PRESSURE: return "press";
     case CRASH_TASK_PREG_P: return "pregp";
     case CRASH_TASK_PREG_R: return "pregr";
+    case CRASH_TASK_HOME_X: return "homex";
+    case CRASH_TASK_HOME_Y: return "homey";
+    case CRASH_TASK_HOME_Z: return "homez";
+    case CRASH_TASK_HOME_P: return "homep";
+    case CRASH_TASK_HOME_R: return "homer";
     default: return "none";
   }
 }
@@ -66,5 +71,10 @@ CrashTaskId CrashLog_TaskIdFromTaskName(const char* taskName)
   if (strcmp(taskName, "Pressure") == 0) return CRASH_TASK_PRESSURE;
   if (strcmp(taskName, "StartDefaultTask") == 0 || strcmp(taskName, "MotorInit") == 0) return CRASH_TASK_BOOT;
   if (strcmp(taskName, "PReg") == 0) return CRASH_TASK_PREG_P;
+  if (strcmp(taskName, "HomeX") == 0) return CRASH_TASK_HOME_X;
+  if (strcmp(taskName, "HomeY") == 0) return CRASH_TASK_HOME_Y;
+  if (strcmp(taskName, "HomeZ") == 0) return CRASH_TASK_HOME_Z;
+  if (strcmp(taskName, "HomePR_P") == 0) return CRASH_TASK_HOME_P;
+  if (strcmp(taskName, "HomePR_R") == 0) return CRASH_TASK_HOME_R;
   return CRASH_TASK_NONE;
 }

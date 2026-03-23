@@ -3154,17 +3154,68 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
   Comm::instance()->sendAckWithSeq32(CMD_BYE_DONE, byeSeq8, byeSeq32, have32);
 }
 
+void Orchestrator::_logHomeTaskStackUsage(const char* taskName,
+                                          uint16_t allocWords,
+                                          uint16_t hwmWords)
+{
+  Logger* logger = Logger::instance();
+  if (logger == nullptr) {
+    return;
+  }
+
+  const char* safeTaskName = (taskName != nullptr) ? taskName : "unknown";
+  logger->log("[Stack] task=%s alloc_w=%u hwm_w=%u\r\n",
+              safeTaskName,
+              static_cast<unsigned>(allocWords),
+              static_cast<unsigned>(hwmWords));
+  if ((hwmWords != 0u) && (hwmWords < HOME_STACK_WARN_WORDS)) {
+    logger->log("[StackWarn] task=%s alloc_w=%u hwm_w=%u\r\n",
+                safeTaskName,
+                static_cast<unsigned>(allocWords),
+                static_cast<unsigned>(hwmWords));
+  }
+}
+
 // ---------- Async homing task ----------
 void Orchestrator::_homeTaskEntry(void* ctx)
 {
   auto* a = static_cast<HomeTaskArgs*>(ctx);
+  Orchestrator* orch = instance();
+  const char* taskName = "HomeAx";
+  volatile uint16_t* hwmSlot = nullptr;
+  if ((orch != nullptr) && (a != nullptr)) {
+    if (a->stepper == Stepper::stepperX()) {
+      taskName = "HomeX";
+      hwmSlot = &orch->_homeXStackHwmWords;
+    } else if (a->stepper == Stepper::stepperY()) {
+      taskName = "HomeY";
+      hwmSlot = &orch->_homeYStackHwmWords;
+    } else if (a->stepper == Stepper::stepperZ()) {
+      taskName = "HomeZ";
+      hwmSlot = &orch->_homeZStackHwmWords;
+    }
+  }
+
   a->stepper->home(a->fastHz, a->slowHz, a->backoffSteps);
+
+  uint16_t hwmWords = 0u;
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+  hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
+#endif
+  if (hwmSlot != nullptr) {
+    *hwmSlot = hwmWords;
+  }
+  _logHomeTaskStackUsage(taskName, HOME_STACK_WORDS, hwmWords);
+
   xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
 
   // Clear the handle for this bank so a new home can be started later
-  if (a->stepper == Stepper::stepperX()) instance()->_taskHomeX = nullptr;
-  else if (a->stepper == Stepper::stepperY()) instance()->_taskHomeY = nullptr;
-  else if (a->stepper == Stepper::stepperZ()) instance()->_taskHomeZ = nullptr;
+  if (orch != nullptr) {
+    if (a->stepper == Stepper::stepperX()) orch->_taskHomeX = nullptr;
+    else if (a->stepper == Stepper::stepperY()) orch->_taskHomeY = nullptr;
+    else if (a->stepper == Stepper::stepperZ()) orch->_taskHomeZ = nullptr;
+  }
 
   vTaskDelete(nullptr);
 }
@@ -3227,12 +3278,43 @@ void Orchestrator::startHomeAsync(Stepper* s,
 void Orchestrator::_regHomeTaskEntry(void* ctx)
 {
   auto* a = static_cast<RegHomeTaskArgs*>(ctx);
+  Orchestrator* orch = instance();
+  const char* taskName = "HomePR";
+  volatile uint16_t* hwmSlot = nullptr;
+  if ((orch != nullptr) && (a != nullptr)) {
+    if (a->reg == &PressureRegulator::regP()) {
+      taskName = "HomePR_P";
+      hwmSlot = &orch->_homePStackHwmWords;
+    }
+#if (LC_PRESSURE_PORTS > 1)
+    else if (a->reg == &PressureRegulator::regR()) {
+      taskName = "HomePR_R";
+      hwmSlot = &orch->_homeRStackHwmWords;
+    }
+#endif
+  }
+
   a->reg->homeWithValve(a->fastHz, a->slowHz, a->backoffSteps);
+
+  uint16_t hwmWords = 0u;
+#if (INCLUDE_uxTaskGetStackHighWaterMark == 1)
+  const UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+  hwmWords = (hwm > 0xFFFFu) ? 0xFFFFu : static_cast<uint16_t>(hwm);
+#endif
+  if (hwmSlot != nullptr) {
+    *hwmSlot = hwmWords;
+  }
+  _logHomeTaskStackUsage(taskName, REG_HOME_STACK_WORDS, hwmWords);
+
   xEventGroupSetBits(Orchestrator::getDoneEvents(), a->doneBit);
 
-  if (a->reg == &PressureRegulator::regP()) instance()->_taskHomeP = nullptr;
+  if ((orch != nullptr) && (a->reg == &PressureRegulator::regP())) {
+    orch->_taskHomeP = nullptr;
+  }
 #if (LC_PRESSURE_PORTS > 1)
-  else if (a->reg == &PressureRegulator::regR()) instance()->_taskHomeR = nullptr;
+  else if ((orch != nullptr) && (a->reg == &PressureRegulator::regR())) {
+    orch->_taskHomeR = nullptr;
+  }
 #endif
   vTaskDelete(nullptr);
 }

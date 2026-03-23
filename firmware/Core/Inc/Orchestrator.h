@@ -355,8 +355,13 @@ private:
   };
 
   // ---- Static stacks/TCBs for homing tasks (no heap allocation) ----
-  static constexpr uint16_t HOME_STACK_WORDS     = 320;  // ~1280 bytes
-  static constexpr uint16_t REG_HOME_STACK_WORDS = 384;  // ~1536 bytes
+  static constexpr uint16_t HOME_STACK_WORDS      = 640;  // ~2560 bytes
+  static constexpr uint16_t REG_HOME_STACK_WORDS  = 768;  // ~3072 bytes
+  static constexpr uint16_t HOME_STACK_WARN_WORDS = 128;  // minimum acceptable free headroom
+
+  static void _logHomeTaskStackUsage(const char* taskName,
+                                     uint16_t allocWords,
+                                     uint16_t hwmWords);
 
   // X & Y home tasks
   StaticTask_t  _tcbHomeX{};
@@ -371,12 +376,16 @@ private:
   HomeTaskArgs  _argsHomeX{};
   HomeTaskArgs  _argsHomeY{};
   HomeTaskArgs  _argsHomeZ{};
+  volatile uint16_t _homeXStackHwmWords = 0u;
+  volatile uint16_t _homeYStackHwmWords = 0u;
+  volatile uint16_t _homeZStackHwmWords = 0u;
 
   // P regulator home task
   StaticTask_t     _tcbHomeP{};
   StackType_t      _stackHomeP[REG_HOME_STACK_WORDS];
   TaskHandle_t     _taskHomeP = nullptr;
   RegHomeTaskArgs  _argsHomeP{};
+  volatile uint16_t _homePStackHwmWords = 0u;
 
 #if (LC_PRESSURE_PORTS > 1)
   // R regulator home task (only on dual-channel machines)
@@ -384,6 +393,7 @@ private:
   StackType_t      _stackHomeR[REG_HOME_STACK_WORDS];
   TaskHandle_t     _taskHomeR = nullptr;
   RegHomeTaskArgs  _argsHomeR{};
+  volatile uint16_t _homeRStackHwmWords = 0u;
 #endif
 };
 

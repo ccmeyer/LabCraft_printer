@@ -31,4 +31,17 @@ TEST(CrashLogCodec, TaskIdToMetricStringIsStable)
     STRCMP_EQUAL("boot", CrashLog_TaskIdName(CRASH_TASK_BOOT));
     STRCMP_EQUAL("status", CrashLog_TaskIdName(CRASH_TASK_STATUS));
     STRCMP_EQUAL("pregr", CrashLog_TaskIdName(CRASH_TASK_PREG_R));
+    STRCMP_EQUAL("homex", CrashLog_TaskIdName(CRASH_TASK_HOME_X));
+    STRCMP_EQUAL("homer", CrashLog_TaskIdName(CRASH_TASK_HOME_R));
+}
+
+TEST(CrashLogCodec, TaskNameMapsHomeWorkers)
+{
+    LONGS_EQUAL((int)CRASH_TASK_HOME_X, (int)CrashLog_TaskIdFromTaskName("HomeX"));
+    LONGS_EQUAL((int)CRASH_TASK_HOME_R, (int)CrashLog_TaskIdFromTaskName("HomePR_R"));
+}
+
+TEST(CrashLogCodec, UnknownTaskNameMapsToNone)
+{
+    LONGS_EQUAL((int)CRASH_TASK_NONE, (int)CrashLog_TaskIdFromTaskName("UnknownTask"));
 }
