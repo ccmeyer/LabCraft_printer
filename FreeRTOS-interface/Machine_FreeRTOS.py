@@ -11,6 +11,7 @@ from dfu_update_worker import DfuUpdateWorker
 from collections import deque
 
 import serial
+from serial.tools.list_ports import comports
 import re
 import json
 import logging
@@ -32,6 +33,78 @@ LOG_READER_SERIAL_TIMEOUT_S = 0.1
 SERIAL_READER_STOP_WAIT_MS = 250
 LOG_READER_STOP_WAIT_MS = 250
 READER_STOP_FALLBACK_WAIT_MS = 1000
+
+
+def _normalize_serial_port_name(port) -> str | None:
+    text = str(port or "").strip()
+    return text or None
+
+
+def resolve_log_port(control_port: str | None,
+                     configured_log_port: str | None = None,
+                     port_infos=None) -> str | None:
+    control = _normalize_serial_port_name(control_port)
+    configured = _normalize_serial_port_name(configured_log_port)
+
+    if configured is not None:
+        if control is not None and configured.lower() == control.lower():
+            return None
+        return configured
+
+    if port_infos is not None:
+        infos = list(port_infos)
+    else:
+        try:
+            infos = list(comports())
+        except Exception:
+            infos = []
+    candidates = []
+
+    for info in infos:
+        device = _normalize_serial_port_name(getattr(info, "device", None))
+        if device is None:
+            continue
+        if control is not None and device.lower() == control.lower():
+            continue
+
+        desc = str(getattr(info, "description", "") or "")
+        manuf = str(getattr(info, "manufacturer", "") or "")
+        hwid = str(getattr(info, "hwid", "") or "")
+        text = " ".join((device, desc, manuf, hwid)).lower()
+
+        score = 0
+        if device.lower().startswith("/dev/ttyusb"):
+            score += 60
+        if "cp210" in text or "silicon labs" in text:
+            score += 50
+        if "usb serial" in text or "uart" in text or "ftdi" in text or "ch340" in text:
+            score += 35
+        if "debug" in text or "logger" in text or "log" in text:
+            score += 15
+        if any(token in text for token in ("balance", "scale", "ohaus", "sartorius", "mettler", "toledo")):
+            score -= 100
+
+        candidates.append((score, device))
+
+    if control is not None and control.lower().startswith("/dev/ttyama"):
+        ttyusb = sorted(device for _score, device in candidates if device.lower().startswith("/dev/ttyusb"))
+        if ttyusb:
+            return ttyusb[0]
+        if os.path.exists("/dev/ttyUSB0"):
+            return "/dev/ttyUSB0"
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (-item[0], item[1].lower()))
+    best_score, best_device = candidates[0]
+    if best_score > 0:
+        return best_device
+
+    if len(candidates) == 1 and best_score >= 0:
+        return best_device
+
+    return None
 
 try:
     from picamera2 import Picamera2
@@ -1732,11 +1805,17 @@ class Machine(QObject):
     log_message_received = Signal(str)  # Signal to emit when a log message is received
     flash_state_updated = Signal(object)
 
-    def __init__(self,model, profile: HardwareProfile = CURRENT_PROFILE, serial_factory=serial.Serial):
+    def __init__(self,
+                 model,
+                 profile: HardwareProfile = CURRENT_PROFILE,
+                 serial_factory=serial.Serial,
+                 log_port: str | None = None):
         super().__init__()
         self.model = model
         self.profile = profile
         self._serial_factory = serial_factory
+        self._configured_log_port = _normalize_serial_port_name(log_port)
+        self._resolved_log_port = None
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -2186,6 +2265,16 @@ class Machine(QObject):
             self.log_reader = None
             return
 
+        log_port = resolve_log_port(self.port, self._configured_log_port)
+        self._resolved_log_port = log_port
+        if not log_port:
+            print(
+                "No dedicated log UART could be resolved. "
+                "Set LOG_PORT in Settings.json if your logger is on a separate serial adapter."
+            )
+            self.log_reader = None
+            return
+
         reader = self.log_reader
         if reader is not None:
             try:
@@ -2200,7 +2289,7 @@ class Machine(QObject):
             self.log_reader = None
 
         try:
-            self.log_reader = LogReader(self.baud, serial_factory=self._serial_factory)
+            self.log_reader = LogReader(self.baud, log_port=log_port, serial_factory=self._serial_factory)
             self.log_reader.lineReceived.connect(self.on_log_line_received)
             self.log_reader.statsUpdated.connect(self.on_stats_updated)
             self.log_reader.messageReceived.connect(self.on_log_message_received)
