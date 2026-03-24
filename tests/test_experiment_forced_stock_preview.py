@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from Model import CURRENT_PROFILE, ExperimentModel
+from Model import CURRENT_PROFILE, ExperimentModel, SingleStockPlan, TwoStockPlan
 
 
 def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0):
@@ -11,6 +11,134 @@ def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0):
         final_reaction_volume_nL=float(final_volume_nl),
     )
     return em
+
+
+def _single_plan_error_key(
+    em,
+    targets,
+    plan,
+    *,
+    droplet_nl,
+    final_volume_nl,
+    starting_conc=0.0,
+    units="mM",
+):
+    rows = [
+        em._evaluate_single_forced_target(
+            t_final=float(target),
+            starting_conc=float(starting_conc),
+            forced_stock_conc=float(plan.stock_concentration),
+            droplet_nL=float(droplet_nl),
+            final_volume_nL=float(final_volume_nl),
+            units=units,
+        )
+        for target in targets
+    ]
+    worst = max(float(row["abs_error"]) for row in rows)
+    mean = sum(float(row["abs_error"]) for row in rows) / len(rows)
+    return (worst, mean, float(plan.stock_concentration), float(plan.max_volume_nL))
+
+
+def _two_plan_error_key(
+    em,
+    targets,
+    plan,
+    *,
+    droplet_nl,
+    final_volume_nl,
+    starting_conc=0.0,
+    units="mM",
+):
+    rows = [
+        em._evaluate_two_stock_target(
+            t_final=float(target),
+            starting_conc=float(starting_conc),
+            stock_concentrations=tuple(float(v) for v in plan.stock_concs),
+            droplet_nL=float(droplet_nl),
+            final_volume_nL=float(final_volume_nl),
+            units=units,
+        )
+        for target in targets
+    ]
+    worst = max(float(row["abs_error"]) for row in rows)
+    mean = sum(float(row["abs_error"]) for row in rows) / len(rows)
+    return (worst, mean, float(plan.conc_sum), float(plan.max_volume_nL))
+
+
+def _build_single_stock_plan(
+    em,
+    targets,
+    stock_concentration,
+    *,
+    droplet_nl,
+    final_volume_nl,
+    units="mM",
+):
+    delta = float(stock_concentration) * float(droplet_nl) / float(final_volume_nl)
+    drops = {}
+    max_volume_nl = 0.0
+    for target in targets:
+        row = em._evaluate_single_forced_target(
+            t_final=float(target),
+            starting_conc=0.0,
+            forced_stock_conc=float(stock_concentration),
+            droplet_nL=float(droplet_nl),
+            final_volume_nL=float(final_volume_nl),
+            units=units,
+        )
+        assert row["reachable"] is True
+        droplets = int(row["droplets"])
+        drops[float(target)] = droplets
+        max_volume_nl = max(max_volume_nl, droplets * float(droplet_nl))
+    return SingleStockPlan(
+        delta_per_drop=float(delta),
+        stock_concentration=float(stock_concentration),
+        droplet_nL=float(droplet_nl),
+        units=units,
+        droplets_per_target=drops,
+        max_volume_nL=float(max_volume_nl),
+        lookup_quantum=1e-6,
+        n_stocks=1,
+    )
+
+
+def _build_two_stock_plan(
+    em,
+    targets,
+    stock_concentrations,
+    *,
+    droplet_nl,
+    final_volume_nl,
+    units="mM",
+):
+    c1, c2 = (float(stock_concentrations[0]), float(stock_concentrations[1]))
+    d1 = c1 * float(droplet_nl) / float(final_volume_nl)
+    d2 = c2 * float(droplet_nl) / float(final_volume_nl)
+    drops = {}
+    max_volume_nl = 0.0
+    for target in targets:
+        row = em._evaluate_two_stock_target(
+            t_final=float(target),
+            starting_conc=0.0,
+            stock_concentrations=(c1, c2),
+            droplet_nL=float(droplet_nl),
+            final_volume_nL=float(final_volume_nl),
+            units=units,
+        )
+        assert row["reachable"] is True
+        ab = tuple(int(v) for v in row["droplets"])
+        drops[float(target)] = ab
+        max_volume_nl = max(max_volume_nl, (ab[0] + ab[1]) * float(droplet_nl))
+    return TwoStockPlan(
+        deltas=(float(d1), float(d2)),
+        stock_concs=(c1, c2),
+        droplet_nL=float(droplet_nl),
+        units=units,
+        droplets_per_target=drops,
+        max_volume_nL=float(max_volume_nl),
+        conc_sum=float(c1 + c2),
+        n_stocks=2,
+    )
 
 
 def test_forced_stock_preview_accepts_nearest_achievable_targets():
@@ -146,6 +274,187 @@ def test_max_stock_bound_filters_single_stock_candidates():
         max_stock_conc=0.4,
     )
     assert candidates == []
+
+
+def test_bounded_auto_stock_prefers_lowest_error_candidate_under_selected_volume_limit():
+    targets = [0.149, 0.192, 0.366, 0.553]
+    droplet_nl = 12.0
+    final_volume_nl = 5000.0
+    max_stock_conc = 1.2
+
+    em = _make_model(target_volume_nl=5000.0, final_volume_nl=final_volume_nl)
+    candidates = em._enumerate_single_stock_candidates(
+        targets,
+        droplet_nl,
+        "mM",
+        final_volume_nL=final_volume_nl,
+        max_refine=60,
+        max_stock_conc=max_stock_conc,
+    )
+    assert candidates
+
+    baseline = candidates[0]
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.max_volume_nL <= baseline.max_volume_nL + 1e-12
+    ]
+    expected = min(
+        eligible,
+        key=lambda candidate: _single_plan_error_key(
+            em,
+            targets,
+            candidate,
+            droplet_nl=droplet_nl,
+            final_volume_nl=final_volume_nl,
+        ),
+    )
+    baseline_key = _single_plan_error_key(
+        em,
+        targets,
+        baseline,
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )
+    expected_key = _single_plan_error_key(
+        em,
+        targets,
+        expected,
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )
+
+    assert expected.stock_concentration > baseline.stock_concentration
+    assert expected_key[:2] < baseline_key[:2]
+
+    em.add_additive("AddA", targets, "mM", droplet_nl, max_stock_conc=max_stock_conc)
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+
+    assert result["best"]
+    plan = em.plans_per_option[("AddA", None)]
+    assert plan["n_stocks"] == 1
+    assert plan["stocks"][0]["stock_concentration"] == pytest.approx(expected.stock_concentration)
+
+    preview = em.get_target_preview_map()[("AddA", None)]
+    preview_worst = max(float(row["abs_error"]) for row in preview)
+    preview_mean = sum(float(row["abs_error"]) for row in preview) / len(preview)
+    assert preview_worst == pytest.approx(expected_key[0])
+    assert preview_mean == pytest.approx(expected_key[1])
+
+
+def test_two_stock_accuracy_refinement_prefers_lower_error_pair_at_same_volume(monkeypatch):
+    targets = [0.31, 0.91, 1.21]
+    droplet_nl = 10.0
+    final_volume_nl = 500.0
+
+    em = _make_model(target_volume_nl=20.0, final_volume_nl=final_volume_nl)
+    em.add_additive("AddA", targets, "mM", droplet_nl)
+
+    single_plan = _build_single_stock_plan(
+        em,
+        targets,
+        15.0,
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )
+    lower_conc_two = _build_two_stock_plan(
+        em,
+        targets,
+        (14.0, 28.0),
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )
+    better_error_two = _build_two_stock_plan(
+        em,
+        targets,
+        (15.5, 30.0),
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )
+
+    assert single_plan.max_volume_nL > 20.0
+    assert lower_conc_two.max_volume_nL == pytest.approx(better_error_two.max_volume_nL)
+    assert lower_conc_two.conc_sum < better_error_two.conc_sum
+    assert _two_plan_error_key(
+        em,
+        targets,
+        better_error_two,
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )[:2] < _two_plan_error_key(
+        em,
+        targets,
+        lower_conc_two,
+        droplet_nl=droplet_nl,
+        final_volume_nl=final_volume_nl,
+    )[:2]
+
+    monkeypatch.setattr(
+        em,
+        "_enumerate_single_stock_candidates",
+        lambda *args, **kwargs: [single_plan],
+    )
+    monkeypatch.setattr(
+        em,
+        "_enumerate_two_stock_candidates_with_meta",
+        lambda *args, **kwargs: ([lower_conc_two, better_error_two], False),
+    )
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True)
+
+    assert result["best"]
+    assert ("AddA", None) in result["two_stock_keys"]
+    assert result["worst_nonfill_nL"] == pytest.approx(better_error_two.max_volume_nL)
+
+    plan = em.plans_per_option[("AddA", None)]
+    assert plan["n_stocks"] == 2
+    assert tuple(stock["stock_concentration"] for stock in plan["stocks"]) == pytest.approx(better_error_two.stock_concs)
+
+
+def test_accuracy_refinement_skips_fixed_stock_plans(monkeypatch):
+    em = _make_model(target_volume_nl=1000.0, final_volume_nl=1000.0)
+    em.add_additive("AddA", [0.001, 0.149], "mM", 12.0, forced_stock_conc=35.0)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Fixed-stock plans should skip accuracy refinement scoring")
+
+    monkeypatch.setattr(em, "_score_single_stock_plan", fail_if_called)
+
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True)
+
+    assert result["best"]
+    plan = em.plans_per_option[("AddA", None)]
+    assert plan["stocks"][0]["stock_concentration"] == pytest.approx(35.0)
+    issues = result["issues_by_key"][("AddA", None)]
+    assert any(issue["field"] == "fixed_stock" and issue["code"] == "fixed_unreachable_targets" for issue in issues)
+
+
+def test_accuracy_refinement_does_not_increase_single_stock_volume_demand():
+    targets = [0.149, 0.192, 0.366, 0.553]
+    droplet_nl = 12.0
+    final_volume_nl = 5000.0
+    max_stock_conc = 1.2
+
+    em = _make_model(target_volume_nl=5000.0, final_volume_nl=final_volume_nl)
+    candidates = em._enumerate_single_stock_candidates(
+        targets,
+        droplet_nl,
+        "mM",
+        final_volume_nL=final_volume_nl,
+        max_refine=60,
+        max_stock_conc=max_stock_conc,
+    )
+    baseline = candidates[0]
+
+    em.add_additive("AddA", targets, "mM", droplet_nl, max_stock_conc=max_stock_conc)
+    result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+
+    assert result["best"]
+    preview = em.get_target_preview_map()[("AddA", None)]
+    max_printed_nl = max(int(row["droplets"]) for row in preview) * droplet_nl
+    assert max_printed_nl <= baseline.max_volume_nL + 1e-12
+    assert result["worst_nonfill_nL"] <= baseline.max_volume_nL + 1e-12
+    assert result["worst_nonfill_nL"] <= 5000.0 + 1e-12
 
 
 def test_two_stock_toggle_can_unlock_volume_budget_limited_design():

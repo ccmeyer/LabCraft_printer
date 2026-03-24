@@ -244,6 +244,14 @@ class TwoStockPlan:
     n_stocks: int = 2
 
 
+@dataclass(frozen=True)
+class _PlanAccuracyScore:
+    worst_abs_error: float
+    mean_abs_error: float
+    concentration_burden: float
+    max_volume_nL: float
+
+
 # --------------------------
 # Experiment Model (v2)
 # --------------------------
@@ -683,6 +691,104 @@ class ExperimentModel(QObject):
             "units": units,
             "n_stocks": 2,
         }
+
+    @staticmethod
+    def _plan_accuracy_score_is_better(
+        candidate: _PlanAccuracyScore,
+        incumbent: _PlanAccuracyScore,
+        *,
+        tol: float = 1e-12,
+    ) -> bool:
+        candidate_values = (
+            float(candidate.worst_abs_error),
+            float(candidate.mean_abs_error),
+            float(candidate.concentration_burden),
+            float(candidate.max_volume_nL),
+        )
+        incumbent_values = (
+            float(incumbent.worst_abs_error),
+            float(incumbent.mean_abs_error),
+            float(incumbent.concentration_burden),
+            float(incumbent.max_volume_nL),
+        )
+        for cand_value, inc_value in zip(candidate_values, incumbent_values):
+            if cand_value < inc_value - tol:
+                return True
+            if cand_value > inc_value + tol:
+                return False
+        return False
+
+    def _summarize_plan_accuracy_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        concentration_burden: float,
+        max_volume_nL: float,
+    ) -> _PlanAccuracyScore:
+        abs_errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
+        if abs_errors:
+            worst_abs_error = max(abs_errors)
+            mean_abs_error = sum(abs_errors) / len(abs_errors)
+        else:
+            worst_abs_error = 0.0
+            mean_abs_error = 0.0
+        return _PlanAccuracyScore(
+            worst_abs_error=float(worst_abs_error),
+            mean_abs_error=float(mean_abs_error),
+            concentration_burden=float(concentration_burden),
+            max_volume_nL=float(max_volume_nL),
+        )
+
+    def _score_single_stock_plan(
+        self,
+        opt: OptionSpec,
+        plan: SingleStockPlan,
+        *,
+        final_volume_nL: float,
+    ) -> _PlanAccuracyScore:
+        rows = [
+            self._evaluate_single_forced_target(
+                t_final=float(t_final),
+                starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                forced_stock_conc=float(plan.stock_concentration),
+                droplet_nL=float(plan.droplet_nL),
+                final_volume_nL=float(final_volume_nL),
+                units=str(plan.units or getattr(opt, "units", "")),
+            )
+            for t_final in getattr(opt, "targets", []) or []
+        ]
+        return self._summarize_plan_accuracy_rows(
+            rows,
+            concentration_burden=float(plan.stock_concentration),
+            max_volume_nL=float(plan.max_volume_nL),
+        )
+
+    def _score_two_stock_plan(
+        self,
+        opt: OptionSpec,
+        plan: TwoStockPlan,
+        *,
+        final_volume_nL: float,
+    ) -> _PlanAccuracyScore:
+        rows = [
+            self._evaluate_two_stock_target(
+                t_final=float(t_final),
+                starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                stock_concentrations=(
+                    float(plan.stock_concs[0]),
+                    float(plan.stock_concs[1]),
+                ),
+                droplet_nL=float(plan.droplet_nL),
+                final_volume_nL=float(final_volume_nL),
+                units=str(plan.units or getattr(opt, "units", "")),
+            )
+            for t_final in getattr(opt, "targets", []) or []
+        ]
+        return self._summarize_plan_accuracy_rows(
+            rows,
+            concentration_burden=float(plan.conc_sum),
+            max_volume_nL=float(plan.max_volume_nL),
+        )
 
     def _candidate_single_stock_deltas(
         self,
@@ -1592,6 +1698,58 @@ class ExperimentModel(QObject):
                             break
             return singles_this is not None and (ch_idx[(gname, oname)] + 1 < len(singles_this))
 
+        def _refine_single_selection(
+            opt: OptionSpec,
+            singles: List[SingleStockPlan],
+            current_index: int,
+        ) -> int:
+            current_plan = singles[current_index]
+            volume_limit = float(current_plan.max_volume_nL)
+            best_index = int(current_index)
+            best_score = self._score_single_stock_plan(
+                opt,
+                current_plan,
+                final_volume_nL=V_final,
+            )
+            for idx, candidate in enumerate(singles):
+                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                    continue
+                candidate_score = self._score_single_stock_plan(
+                    opt,
+                    candidate,
+                    final_volume_nL=V_final,
+                )
+                if self._plan_accuracy_score_is_better(candidate_score, best_score):
+                    best_index = idx
+                    best_score = candidate_score
+            return best_index
+
+        def _refine_two_selection(
+            opt: OptionSpec,
+            twos: List[TwoStockPlan],
+            current_index: int,
+        ) -> int:
+            current_plan = twos[current_index]
+            volume_limit = float(current_plan.max_volume_nL)
+            best_index = int(current_index)
+            best_score = self._score_two_stock_plan(
+                opt,
+                current_plan,
+                final_volume_nL=V_final,
+            )
+            for idx, candidate in enumerate(twos):
+                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                    continue
+                candidate_score = self._score_two_stock_plan(
+                    opt,
+                    candidate,
+                    final_volume_nL=V_final,
+                )
+                if self._plan_accuracy_score_is_better(candidate_score, best_score):
+                    best_index = idx
+                    best_score = candidate_score
+            return best_index
+
         # -----------------------------
         # Step 1: single-stock only
         # -----------------------------
@@ -1885,6 +2043,29 @@ class ExperimentModel(QObject):
                             else:
                                 ch_idx[key] = i
                                 break
+
+        # Improve target matching without increasing local printed-volume demand.
+        for name, singles, twos in additives:
+            opt = additive_option_map[name]
+            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+                continue
+            if add_two_idx[name] is not None:
+                if twos:
+                    add_two_idx[name] = _refine_two_selection(opt, twos, add_two_idx[name])
+            else:
+                add_idx[name] = _refine_single_selection(opt, singles, add_idx[name])
+
+        for gname, bucket in choice_groups.items():
+            for oname, singles, twos in bucket:
+                key = (gname, oname)
+                opt = choice_option_map[key]
+                if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+                    continue
+                if ch_two_idx[key] is not None:
+                    if twos:
+                        ch_two_idx[key] = _refine_two_selection(opt, twos, ch_two_idx[key])
+                else:
+                    ch_idx[key] = _refine_single_selection(opt, singles, ch_idx[key])
 
         final_worst = worst_case_nonfill_volume()
         if final_worst > V_print + 1e-6:
