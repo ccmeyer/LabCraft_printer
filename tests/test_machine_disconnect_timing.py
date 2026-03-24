@@ -173,11 +173,8 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
     created = []
 
     class _NewReader:
-        def __init__(self, baud, parent=None, log_port="/dev/ttyUSB0", history_len=360, serial_factory=None):
+        def __init__(self, baud, serial_factory=None):
             self.baud = baud
-            self.parent = parent
-            self.log_port = log_port
-            self.history_len = history_len
             self.serial_factory = serial_factory
             self.lineReceived = _SignalTracker()
             self.statsUpdated = _SignalTracker()
@@ -190,9 +187,7 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
             self.start_calls += 1
 
     monkeypatch.setattr(mfr, "LogReader", _NewReader)
-    monkeypatch.setattr(mfr, "resolve_log_port", lambda control_port, configured_log_port=None: "COM9")
     machine.log_reader = _OldReader()
-    machine.port = "COM4"
 
     machine.begin_log_thread()
 

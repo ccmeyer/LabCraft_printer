@@ -17,6 +17,22 @@
 // singleton init
 Logger* Logger::_instance = nullptr;
 
+namespace {
+
+uint32_t loggerSaveAndDisableInterrupts()
+{
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  return primask;
+}
+
+void loggerRestoreInterrupts(uint32_t primask)
+{
+  __set_PRIMASK(primask);
+}
+
+}  // namespace
+
 Logger::Logger() {}
 
 Logger* Logger::instance() {
@@ -40,27 +56,42 @@ void Logger::log(const char* fmt, ...) {
   size_t n = (len > (int)BUF_SIZE ? BUF_SIZE : static_cast<size_t>(len));
 
   // 2) copy into the ring buffer
+  const uint32_t primask = loggerSaveAndDisableInterrupts();
   for (size_t i = 0; i < n; ++i) {
     this->_buf[_head] = static_cast<uint8_t>(tmp[i]);
     _head = (_head + 1) % BUF_SIZE;
   }
+  loggerRestoreInterrupts(primask);
 
   // 3) kick off a DMA send if not already in flight
   _flush();
 }
 
 void Logger::_flush() {
-//  if (_dmaBusy || _head == _tail) return;
-//  size_t chunk = (_head > _tail)
-//    ? (_head - _tail)
-//    : (BUF_SIZE - _tail);
-//  _dmaBusy = true;
-//  HAL_UART_Transmit_DMA(_huart, &this->_buf[_tail], chunk);
-	if (_dmaBusy || _head == _tail) return;
-	size_t chunk = (_head >= _tail) ? (_head - _tail) : (BUF_SIZE - _tail);
-	_inflightLen = chunk;
-	_dmaBusy = true;
-	HAL_UART_Transmit_DMA(_huart, &_buf[_tail], (uint16_t)chunk);
+  if (_huart == nullptr) return;
+
+  uint8_t* txPtr = nullptr;
+  uint16_t txLen = 0u;
+  {
+    const uint32_t primask = loggerSaveAndDisableInterrupts();
+    if (_dmaBusy || _head == _tail) {
+      loggerRestoreInterrupts(primask);
+      return;
+    }
+    const size_t chunk = (_head >= _tail) ? (_head - _tail) : (BUF_SIZE - _tail);
+    _inflightLen = chunk;
+    _dmaBusy = true;
+    txPtr = &_buf[_tail];
+    txLen = static_cast<uint16_t>(chunk);
+    loggerRestoreInterrupts(primask);
+  }
+
+  if (HAL_UART_Transmit_DMA(_huart, txPtr, txLen) != HAL_OK) {
+    const uint32_t primask = loggerSaveAndDisableInterrupts();
+    _inflightLen = 0u;
+    _dmaBusy = false;
+    loggerRestoreInterrupts(primask);
+  }
 }
 
 //// Called by HAL when the DMA transfer completes
@@ -89,9 +120,11 @@ void Logger::_dmaComplete() {
 //  _tail     = (_tail + chunk) % BUF_SIZE;
 // if there's more left, send it now
 //	_flush();
+  const uint32_t primask = loggerSaveAndDisableInterrupts();
   _tail = (_tail + _inflightLen) % BUF_SIZE;
-  _inflightLen = 0;
-  _dmaBusy  = false;
+  _inflightLen = 0u;
+  _dmaBusy = false;
+  loggerRestoreInterrupts(primask);
   _flush();
 
 }

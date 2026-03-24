@@ -79,7 +79,7 @@ def main():
     # Initialize components
     model = Model(profile=profile)
 
-    machine = Machine(model, profile=profile, log_port=settings.get("LOG_PORT"))
+    machine = Machine(model,profile=profile)
     controller = Controller(machine, model, profile=profile)
 
     if profile.name == "legacy":
