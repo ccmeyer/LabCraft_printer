@@ -11,6 +11,75 @@ The short version is:
 - Manual tuning still happens through operator actions: adjust refuel pressure/pulse width, fire print-only or refuel-only bursts, and watch whether the measured level drifts.
 - The code already contains the basic pieces for this workflow, but the feature looks only partially integrated into the main UI and has several rough edges.
 
+## Status Update: Dataset-First Capture Workflow
+
+The current refuel dialog is now intended primarily for dataset collection, not target locking or burst tuning.
+Where this section conflicts with older notes below, this section is the current behavior.
+
+### What is in the window now
+
+- `Capture`
+  - `Start Capturing Images`
+  - `Save Snapshot`
+  - current level readout
+  - visible snapshot folder and last snapshot path
+
+- `Analysis`
+  - left offset
+  - channel width
+  - threshold
+  - prominence
+  - empty cutoff
+
+- `Dataset Capture`
+  - start/end dataset session
+  - start new scene
+  - capture single
+  - capture sequence
+  - reject last capture
+  - visible dataset run path, current scene, and status
+
+The older `Setpoint`, `Burst Test`, and `Session Summary` sections are no longer surfaced in this window.
+
+### How to gather training data
+
+1. Open `Refuel Camera` from the main UI.
+2. Click `Start Capturing Images` to confirm the channel is framed correctly in the rotated live preview.
+3. Use `Save Snapshot` only for ad hoc raw-image saves.
+4. For dataset collection:
+   - click `Start Dataset Session`
+   - confirm the run path shown in the dialog
+   - click `Start New Scene` whenever head position, focus, exposure, lighting, or framing changes
+   - use manual `print_only` and `refuel_only` pulses to move the fluid level
+   - use `Capture Single` for distinct still frames
+   - use `Capture Sequence` only when you want a short temporal run
+   - use `Reject Last Capture` for the most recent bad frame
+   - click `End Dataset Session` when finished
+5. Annotate later with the offline dataset annotation tool. The capture window does not label images during collection.
+
+### Where files are saved
+
+- Ad hoc snapshots:
+  - `artifacts/refuel_camera_frames/refuel_frame_<timestamp>.png`
+
+- Dataset captures:
+  - `calibration_recordings/RefuelLevelDatasetCaptureProcess/run_<timestamp>_<id>/captures/cap_<index>_raw.png`
+
+The dataset run directory also contains:
+
+- `run_meta.json`
+- `events.jsonl`
+- `scenes.jsonl`
+- `frames.jsonl`
+- `analysis.jsonl`
+- `labels.jsonl`
+
+### Raw image handling
+
+- The live preview still uses a rotated analysis view so the channel is easy to inspect.
+- Saved snapshots and dataset captures now use the raw camera frame as the source of truth.
+- Resize/rotate operations are applied only to analysis/display copies, not to the saved training data.
+
 ## Current High-Level Model
 
 The refuel system is split into three mostly separate concerns:

@@ -54,6 +54,21 @@ def _make_dialog(
     return dialog, model, controller
 
 
+def test_refuel_camera_window_is_dataset_first_ui(qapp):
+    dialog, _model, _controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+
+    assert dialog.save_button.text() == "Save Snapshot"
+    assert dialog.snapshot_folder_label.text() == str(dialog._save_dir)
+    assert "training data" in dialog.capture_help_label.text().lower()
+    assert not hasattr(dialog, "set_target_button")
+    assert not hasattr(dialog, "burst_button")
+    assert not hasattr(dialog, "summary_baseline_label")
+    assert not hasattr(dialog, "level_chart_view")
+
+
 def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profile(qapp):
     dialog, _model, controller = _make_dialog(
         qapp,
@@ -71,12 +86,13 @@ def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profil
     assert event.isAccepted()
 
 
-def test_refuel_camera_window_save_frame_creates_output_directory(monkeypatch, qapp, tmp_path):
+def test_refuel_camera_window_save_frame_creates_output_directory_and_uses_raw_image(monkeypatch, qapp, tmp_path):
     dialog, model, _controller = _make_dialog(
         qapp,
         capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
     )
-    model.refuel_camera_model.original_image = np.zeros((8, 8, 3), dtype=np.uint8)
+    model.refuel_camera_model.raw_capture_image = np.zeros((10, 16, 3), dtype=np.uint8)
+    model.refuel_camera_model.annotated_image = np.zeros((6, 6, 3), dtype=np.uint8)
     dialog._save_dir = tmp_path / "refuel_camera_frames"
     written = {}
 
@@ -91,7 +107,28 @@ def test_refuel_camera_window_save_frame_creates_output_directory(monkeypatch, q
 
     assert dialog._save_dir.exists()
     assert written["path"].parent == dialog._save_dir
-    assert written["shape"] == (8, 8, 3)
+    assert written["shape"] == (10, 16, 3)
+    assert dialog.last_snapshot_label.text() == str(written["path"].resolve())
+
+
+def test_refuel_camera_window_preview_preserves_aspect_ratio(qapp):
+    dialog, model, _controller = _make_dialog(
+        qapp,
+        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
+    )
+    model.refuel_camera_model.annotated_image = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    dialog.show()
+    qapp.processEvents()
+    dialog.update_refuel_ui()
+    qapp.processEvents()
+
+    pixmap = dialog.image_label.pixmap()
+    assert pixmap is not None
+    assert dialog.image_label.hasScaledContents() is False
+    assert abs((pixmap.width() / pixmap.height()) - (640 / 480)) < 0.05
+    assert pixmap.width() <= dialog.image_label.width()
+    assert pixmap.height() <= dialog.image_label.height()
 
 
 def test_refuel_camera_window_none_capture_disables_session_without_crashing(monkeypatch, qapp):
@@ -130,91 +167,6 @@ def test_refuel_camera_window_start_failure_shows_warning_and_stays_idle(monkeyp
     warning.assert_called_once()
 
 
-def test_refuel_camera_window_lock_target_disables_analysis_controls_and_reset_reenables(qapp):
-    dialog, model, _controller = _make_dialog(
-        qapp,
-        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
-    )
-    model.refuel_camera_model.current_level = 88.0
-    model.refuel_camera_model.last_meniscus_row = 21
-
-    dialog.lock_current_target()
-
-    assert dialog.target_level_label.text() == "Target Level: 88.0"
-    assert dialog.offset_spinbox.isEnabled() is False
-    assert dialog.width_spinbox.isEnabled() is False
-    assert dialog.threshold_spinbox.isEnabled() is False
-
-    dialog.reset_session()
-
-    assert dialog.offset_spinbox.isEnabled() is True
-    assert dialog.width_spinbox.isEnabled() is True
-    assert dialog.threshold_spinbox.isEnabled() is True
-
-
-def test_refuel_camera_window_start_burst_auto_starts_capture_and_waits_for_samples(qapp):
-    dialog, model, controller = _make_dialog(
-        qapp,
-        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
-    )
-    model.refuel_camera_model.current_level = 90.0
-    model.refuel_camera_model.last_meniscus_row = 25
-    dialog.lock_current_target()
-
-    dialog.start_burst_test()
-
-    assert dialog.capturing is True
-    assert dialog.timer.isActive() is True
-    controller.run_refuel_balance_burst.assert_not_called()
-    assert "Waiting for 5 valid baseline samples." in dialog.burst_status_label.text()
-
-
-def test_refuel_camera_window_burst_controls_disable_while_burst_active(qapp):
-    dialog, model, controller = _make_dialog(
-        qapp,
-        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
-    )
-    model.refuel_camera_model.current_level = 100.0
-    model.refuel_camera_model.last_meniscus_row = 20
-    dialog.lock_current_target()
-    model.refuel_camera_model.sample_trace = [
-        {"elapsed_s": 0.0, "monotonic_s": 1.0, "level_px": 100.0, "phase": "live"},
-        {"elapsed_s": 0.5, "monotonic_s": 1.5, "level_px": 100.0, "phase": "live"},
-        {"elapsed_s": 1.0, "monotonic_s": 2.0, "level_px": 101.0, "phase": "live"},
-        {"elapsed_s": 1.5, "monotonic_s": 2.5, "level_px": 99.0, "phase": "live"},
-        {"elapsed_s": 2.0, "monotonic_s": 3.0, "level_px": 100.0, "phase": "live"},
-    ]
-    dialog.capturing = True
-
-    dialog.start_burst_test()
-
-    controller.run_refuel_balance_burst.assert_called_once()
-    assert dialog.burst_button.isEnabled() is False
-    assert dialog.baseline_samples_spinbox.isEnabled() is False
-    assert dialog.post_samples_spinbox.isEnabled() is False
-
-
-def test_refuel_camera_window_chart_uses_elapsed_time_and_target_overlay(qapp):
-    dialog, model, _controller = _make_dialog(
-        qapp,
-        capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
-    )
-    model.refuel_camera_model.sample_trace = [
-        {"elapsed_s": 0.0, "monotonic_s": 1.0, "level_px": 100.0, "phase": "live"},
-        {"elapsed_s": 3.5, "monotonic_s": 4.5, "level_px": 102.0, "phase": "live"},
-    ]
-    model.refuel_camera_model.target_level_px = 101.0
-    model.refuel_camera_model.tolerance_px = 5.0
-
-    dialog.update_level_chart()
-
-    assert dialog.level_series.count() == 2
-    assert dialog.target_series.count() == 2
-    assert dialog.upper_band_series.count() == 2
-    assert dialog.lower_band_series.count() == 2
-    assert dialog.axisX.max() >= 3.5
-
-
 def test_refuel_camera_window_dataset_session_and_single_capture(qapp):
     dialog, model, controller = _make_dialog(
         qapp,
@@ -231,6 +183,7 @@ def test_refuel_camera_window_dataset_session_and_single_capture(qapp):
     assert controller.capture_refuel_image_with_context.called
     assert "Captured frame_" in dialog.dataset_status_label.text()
     assert dialog.dataset_session_path_label.text() != "-"
+    assert "scene_" in dialog.dataset_scene_label.text()
 
 
 def test_refuel_camera_window_reject_last_dataset_capture(monkeypatch, qapp):

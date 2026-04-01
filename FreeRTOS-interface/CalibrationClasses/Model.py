@@ -21490,6 +21490,8 @@ class RefuelCameraModel(QObject):
         self.level_log = []
         self.sample_trace = []
         self.last_meniscus_row = None
+        self.raw_capture_image = None
+        self.analysis_input_image = None
         self.original_image = None
         self.annotated_image = None
         self.analysis_thread = None
@@ -21565,6 +21567,23 @@ class RefuelCameraModel(QObject):
         }
 
     @staticmethod
+    def _copy_frame(frame):
+        if frame is None:
+            return None
+        if isinstance(frame, np.ndarray):
+            return frame.copy()
+        try:
+            return np.asarray(frame).copy()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build_analysis_working_frame(frame):
+        if frame is None:
+            return None
+        return cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
+
+    @staticmethod
     def _map_analysis_point_to_raw(point, raw_shape, input_shape):
         if point is None or raw_shape is None or input_shape is None:
             return None
@@ -21592,7 +21611,7 @@ class RefuelCameraModel(QObject):
             return None
         try:
             params = self._seed_analysis_parameters()
-            resized = cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
+            resized = self._build_analysis_working_frame(frame)
             worker = ImageAnalysisThread(
                 resized,
                 params["offset"],
@@ -21923,7 +21942,11 @@ class RefuelCameraModel(QObject):
         if self._analysis_in_progress:
             return False
 
-        frame = cv2.resize(frame, (480, 640), interpolation=cv2.INTER_AREA)
+        raw_frame = self._copy_frame(frame)
+        if raw_frame is None:
+            return False
+        frame = self._build_analysis_working_frame(raw_frame)
+        self.raw_capture_image = raw_frame
         self._analysis_context = self._normalize_capture_context(context)
         self._analysis_in_progress = True
         self.analysis_thread = ImageAnalysisThread(
@@ -21959,7 +21982,7 @@ class RefuelCameraModel(QObject):
         self._analysis_in_progress = False
 
         if original_image is not None:
-            self.original_image = original_image
+            self.analysis_input_image = original_image
         if annotated_image is not None:
             self.annotated_image = annotated_image
         if meniscus_row is not None:
@@ -21993,7 +22016,7 @@ class RefuelCameraModel(QObject):
             },
         )
         self._record_capture_frame(
-            self.original_image,
+            self.get_raw_capture_image(),
             role="target_lock",
             metadata={
                 "target_level_px": self.target_level_px,
@@ -22171,14 +22194,14 @@ class RefuelCameraModel(QObject):
         self.last_burst_result = result
         self._record_analysis({"kind": "refuel_burst_result", **result})
         self._record_event("burst_completed", result)
-        self._record_capture_frame(self.original_image, role="burst_completion", metadata=result)
+        self._record_capture_frame(self.get_raw_capture_image(), role="burst_completion", metadata=result)
         self._burst_state = None
         self.update_level_ui_signal.emit()
         return result
 
     def record_manual_frame(self):
         return self._record_capture_frame(
-            self.original_image,
+            self.get_raw_capture_image(),
             role="manual_save",
             metadata={
                 "target_level_px": self.target_level_px,
@@ -22187,7 +22210,13 @@ class RefuelCameraModel(QObject):
         )
 
     def get_original_image(self):
-        return self.original_image
+        return self.get_raw_capture_image()
+
+    def get_raw_capture_image(self):
+        return self.raw_capture_image
+
+    def get_analysis_input_image(self):
+        return self.analysis_input_image
 
     def get_annotated_image(self):
         return self.annotated_image

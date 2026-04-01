@@ -158,6 +158,7 @@ def test_refuel_camera_model_start_analysis_uses_last_meniscus_row(monkeypatch):
     assert captured["last_row"] == 17
     assert captured["shape"] == (640, 480, 3)
     assert captured["started"] is True
+    assert model.get_raw_capture_image().shape == (16, 16, 3)
 
 
 def test_refuel_camera_model_none_frame_is_safe_noop():
@@ -165,7 +166,7 @@ def test_refuel_camera_model_none_frame_is_safe_noop():
     model.current_level = 42
     model.level_log = [42]
     model.last_meniscus_row = 11
-    model.original_image = "keep"
+    model.raw_capture_image = "keep"
     model.annotated_image = "keep"
 
     ok = model.start_analysis(None)
@@ -174,7 +175,7 @@ def test_refuel_camera_model_none_frame_is_safe_noop():
     assert model.current_level == 42
     assert model.level_log == [42]
     assert model.last_meniscus_row == 11
-    assert model.original_image == "keep"
+    assert model.get_raw_capture_image() == "keep"
     assert model.annotated_image == "keep"
 
 
@@ -215,6 +216,8 @@ def test_refuel_camera_model_lock_target_tracks_setpoint_and_status():
 
 def test_refuel_camera_model_update_ui_records_timestamped_sample_context():
     model = RefuelCameraModel()
+    raw_frame = np.zeros((15, 11, 3), dtype=np.uint8)
+    model.raw_capture_image = raw_frame.copy()
     model._analysis_context = _sample_context(mono=25.0)
 
     model.update_ui_with_analysis("orig", "ann", 42.0, 11)
@@ -229,6 +232,8 @@ def test_refuel_camera_model_update_ui_records_timestamped_sample_context():
     assert trace[0]["refuel_pulse_width"] == 900
     assert trace[0]["location"] == "camera"
     assert model.get_level_log() == [42.0]
+    assert np.array_equal(model.get_raw_capture_image(), raw_frame)
+    assert model.get_analysis_input_image() == "orig"
 
 
 def test_refuel_camera_model_invalid_analysis_does_not_append_sample():
@@ -355,7 +360,7 @@ def test_refuel_camera_model_record_mode_creates_run_and_analysis_files(tmp_path
     model = RefuelCameraModel(owner)
     model.current_level = 88.0
     model.last_meniscus_row = 19
-    model.original_image = np.zeros((12, 12, 3), dtype=np.uint8)
+    model.raw_capture_image = np.zeros((12, 12, 3), dtype=np.uint8)
 
     ok, _ = model.lock_current_as_target(5)
 
@@ -400,7 +405,7 @@ def test_refuel_camera_model_record_mode_off_does_not_create_run(tmp_path):
     model = RefuelCameraModel(owner)
     model.current_level = 77.0
     model.last_meniscus_row = 14
-    model.original_image = np.zeros((8, 8, 3), dtype=np.uint8)
+    model.raw_capture_image = np.zeros((8, 8, 3), dtype=np.uint8)
 
     ok, _ = model.lock_current_as_target(5)
 
