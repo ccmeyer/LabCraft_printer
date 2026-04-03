@@ -4,7 +4,7 @@
 
 - Date created: 2026-04-01
 - Owner: Codex + user
-- Status: Stage 2 nozzle retune implemented and re-reviewed across six annotated runs; Stage 3 not started
+- Status: Stage 5 near-nozzle width extraction, steady-rate fitting, tail-onset detection, and middle-volume extrapolation implemented, tested, and reviewed on two real runs; Stage 6 metadata join and gravimetric residual analysis is next
 - Scope: offline Python analysis only for the first increment. No MVC, firmware, or protocol changes are planned in the initial phases.
 
 ## Objective
@@ -19,6 +19,7 @@ Build an incremental, reviewable image-analysis pipeline for stream characteriza
 - computes framewise visible volume `V(t)` from the silhouette only
 - detects when fluid leaves the field of view and marks later volume estimates untrusted
 - saves annotated artifacts and reports at every phase so each step can be reviewed before moving on
+- later estimates total printed volume as the sum of trusted visible volume, a steady-rate middle extrapolation, and a tail estimate
 - later fits a head / steady / tail model to trusted `V(t)` rather than to raw `dV/dt`
 
 ## Verified Dataset Inputs
@@ -116,8 +117,9 @@ Proposed output layout:
 - `analysis/stream_characterization/runs/<run_id>/stage_02_nozzle/...`
 - `analysis/stream_characterization/runs/<run_id>/stage_03_silhouette/...`
 - `analysis/stream_characterization/runs/<run_id>/stage_04_volume/...`
-- `analysis/stream_characterization/runs/<run_id>/stage_05_summary/...`
-- `analysis/stream_characterization/runs/<run_id>/stage_06_fit/...`
+- `analysis/stream_characterization/runs/<run_id>/stage_05_fit/...`
+- `analysis/stream_characterization/runs/<run_id>/stage_06_summary/...`
+- `analysis/stream_characterization/runs/<run_id>/stage_07_tail/...`
 - `analysis/stream_characterization/experiment_summary.csv`
 - `analysis/stream_characterization/experiment_summary.json`
 
@@ -185,6 +187,12 @@ Proposed output layout:
 - `tools/stream_analysis/fov.py`
   - field-of-view exit detection
   - trusted/untrusted frame labeling
+- `tools/stream_analysis/fit.py`
+  - near-nozzle width feature extraction
+  - head / steady / tail phase detection
+  - robust steady-rate fitting
+  - middle-volume extrapolation between FOV exit and tail onset
+  - tail-model hooks and uncertainty reporting
 - `tools/stream_analysis/reporting.py`
   - annotated images
   - run manifests
@@ -231,7 +239,11 @@ Planned CLI shape:
 - `volume`
   - run through visible-volume and FOV-exit detection
 - `fit`
-  - run head / steady / tail fitting on trusted `V(t)`
+  - derive near-nozzle width features from the attached stream
+  - detect head-end, steady window, and tail onset
+  - fit the steady `dV/dt` from trusted `V(t)` only
+  - extrapolate missing middle volume between FOV exit and tail onset
+  - leave tail estimation as a distinct final slice until its model is validated
 - `run-all`
   - execute all completed pipeline stages up to `--through-stage`
 
@@ -439,57 +451,174 @@ Acceptance criteria:
 - the first FOV-exit point is saved as a concrete run-level event
 - later model-fitting inputs use trusted `V(t)` only
 
-### Stage 5: Run Summary And Metadata Join
+### Stage 5: Near-Nozzle Width, Steady-Rate Fit, And Middle Extrapolation
+
+Goal:
+
+- segment each run into head, steady, and tail phases after the lower-level pipeline is validated
+- estimate a per-run partial total printed volume as:
+  - trusted visible volume before FOV exit
+  - steady-rate extrapolated middle volume between FOV exit and tail onset
+  - a placeholder for the still-unmodeled tail volume
+
+Implementation notes:
+
+- implement Stage 5 as a new standalone `fit` stage:
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_fit()` -> `tools/stream_analysis/fit.py`
+  - recompute Stage 4 in-process rather than reading saved Stage 4 files back from disk
+- do not estimate the core steady model directly from raw `dV/dt`
+- use two signals together:
+  - trusted visible volume `V(t)` from Stage 4
+  - attached-primary near-nozzle width from Stage 3 edge traces
+- derive the near-nozzle width only from the attached primary, not from detached components
+- keep the raw visible-volume trace, width trace, and fitted phase model together in the outputs
+
+Recommended execution slices:
+
+- Stage 5a: near-nozzle width feature extraction
+  - derive a fixed physical band below the tracked nozzle using initial defaults:
+    - `near_nozzle_band_top_px = 24`
+    - `near_nozzle_band_height_px = 40`
+  - for each frame with an attached primary, compute:
+    - `attached_near_nozzle_width_median_px`
+    - `attached_near_nozzle_width_iqr_px`
+    - `attached_near_nozzle_band_valid_row_count`
+    - `attached_near_nozzle_band_y0_px`
+    - `attached_near_nozzle_band_y1_px`
+  - smooth the width trace with a short rolling median before changepoint detection
+  - this slice is geometry-only and should not yet produce extrapolated volume
+- Stage 5b: steady-window detection and robust steady-rate fit
+  - fit only on frames where `volume_trust_label == "trusted"`
+  - search for the earliest contiguous trusted window that satisfies initial review defaults:
+    - at least `8` frames
+    - robust linear fit on `V(t)` with high goodness of fit
+    - smoothed near-nozzle width remaining on a stable plateau
+  - choose the window with the best balance of:
+    - early onset
+    - long duration
+    - stable width
+    - stable fitted residuals
+  - export:
+    - `steady_start_capture_index`
+    - `steady_end_capture_index`
+    - `steady_rate_nl_per_us`
+    - `steady_width_plateau_px`
+    - fit residual diagnostics
+- Stage 5c: tail-onset detection and middle-volume extrapolation
+  - continue monitoring the near-nozzle width after FOV exit while the attached primary remains measurable
+  - define tail onset as the first persistent width drop after the steady window using initial review defaults:
+    - smoothed width falls below `0.92 * steady_width_plateau_px`
+    - the drop persists for at least `3` consecutive frames
+  - compute:
+    - `middle_extrapolation_start = first_untrusted_frame`
+    - `middle_extrapolation_end = tail_start_frame`
+    - `middle_extrapolated_volume_nl = steady_rate_nl_per_us * delta_t_us`
+  - keep this slice separate from the tail estimate so the middle extrapolation can be reviewed independently
+- Stage 5d: partial-total export with explicit tail placeholder
+  - until the tail model exists, do not silently report a final total as if it were complete
+  - instead export:
+    - `trusted_visible_volume_nl`
+    - `middle_extrapolated_volume_nl`
+    - `partial_total_without_tail_nl`
+    - `tail_volume_nl = null`
+    - `final_total_status = "tail_pending"`
+
+Validation artifacts required:
+
+- `phase_features.csv`
+- `phase_boundaries.json`
+- `steady_fit.json`
+- `middle_extrapolation.json`
+- `Vt_fit.png`
+- `width_trace.png`
+- residual plot
+- annotated segment-boundary plot
+
+Acceptance criteria:
+
+- the steady-rate fit consumes trusted visible-volume data only
+- the head-end and tail-onset boundaries are reviewable on both the volume trace and the near-nozzle width trace
+- the middle extrapolation is computed only between the first untrusted frame and the detected tail-onset frame
+- detached components can contribute to Stage 4 trust, but only the attached primary drives the near-nozzle width signal
+- raw traces, fitted traces, and boundary annotations are all preserved in outputs
+- any run without a validated tail model must clearly report a partial total rather than an implied final total
+
+### Stage 6: Run Summary, Metadata Join, And Gravimetric Residual Analysis
 
 Goal:
 
 - summarize per-run results
 - join image-derived metrics back to stream metadata
-- group replicate runs by operating condition
+- compare the Stage 5 partial totals against gravimetric totals
+- group replicate runs by operating condition so the missing tail behavior can be studied before Stage 7
 
 Implementation notes:
 
 - join on run directory name / `Dataset name`
 - report metadata fields alongside derived image metrics
 - include artifact locations in the run summary
+- carry through Stage 5 outputs such as:
+  - trusted visible volume before FOV exit
+  - steady-rate estimate
+  - extrapolated middle volume
+  - partial total without tail
+  - tail estimate or explicit tail-pending status
+  - total-estimate quality flags
+- add gravimetric comparison fields needed to study the missing tail:
+  - `gravimetric_total_nl`
+  - `partial_total_without_tail_nl`
+  - `tail_residual_nl`
+  - `tail_residual_fraction`
+- group results by print pressure and print pulse width so the residual tail behavior can be compared across operating conditions
 
 Validation artifacts required:
 
 - per-run summary JSON
 - experiment summary CSV
 - experiment summary JSON
+- gravimetric residual comparison plots grouped by pulse width and pressure
 - replicate comparison plots grouped by pulse width and pressure
 
 Acceptance criteria:
 
 - each analyzed run produces one summary row
 - summary rows include both source metadata and image-analysis outputs
+- the gravimetric residual after Stage 5 partial-volume estimation is visible and comparable across replicate groups
 - replicate groups can be reviewed without opening individual run folders
 
-### Stage 6: Head / Steady / Tail Fit On Trusted `V(t)`
+### Stage 7: Tail-Volume Model And Final Total Estimate
 
 Goal:
 
-- fit a higher-level model to trusted visible volume after the lower-level pipeline is validated
+- develop and validate a tail-volume model after the Stage 6 gravimetric residual patterns are available
+- convert the Stage 5 partial total into a final estimated total printed volume
 
 Implementation notes:
 
-- fit only on trusted `V(t)`
-- do not estimate the core model directly from raw `dV/dt`
-- preserve the raw visible-volume trace alongside the fit
+- use Stage 6 residual analysis to choose the first tail-model family instead of hard-coding it in advance
+- candidate tail approaches to evaluate:
+  - residual attached-volume integration while the nozzle-connected body remains measurable
+  - a width-decay-driven tail integral
+  - a calibrated empirical tail fraction against gravimetric totals
+  - a pressure / pulse-width-conditioned regression on `tail_residual_nl`
+- preserve the Stage 5 partial total and Stage 7 tail estimate as separate reported terms
+- include explicit uncertainty or confidence fields so the final total is not presented as exact
 
 Validation artifacts required:
 
-- fit parameter JSON
-- `Vt_fit.png`
-- residual plot
-- annotated segment-boundary plot
+- `tail_model.json`
+- `tail_fit_diagnostics.csv`
+- `tail_residual_plots.png`
+- `final_total_comparison.png`
 
 Acceptance criteria:
 
-- the fit consumes trusted visible-volume data only
-- fit artifacts make the segmentation and residuals reviewable
-- raw and fitted traces are both preserved in outputs
+- the chosen tail model improves agreement with gravimetric totals relative to the Stage 5 partial total alone
+- the final total remains decomposable into:
+  - trusted visible volume
+  - middle extrapolated volume
+  - tail estimated volume
+- the model assumptions and residuals are reviewable across operating conditions
 
 ## Progress Update Policy
 
@@ -1995,6 +2124,664 @@ Next recommended step:
 - use the tracked nozzle point directly for Stage 3 silhouette extraction and keep grip-refresh segmentation explicitly out of the critical path for now
 - if the early tracked lag on `run_20260327_230520_9567e1ee` matters during later review, do one narrow tracking-cap cleanup pass without changing the raw point detector again
 
+### Early attached fallback and tracking recovery pass
+
+Goal:
+
+- fix the early attached regression in `run_20260327_230520_9567e1ee` frames `8-13` without disturbing the hollow-bulb acquisition protections or the already-stable late transition behavior in the other reviewed runs
+
+Root cause:
+
+- frames `8-9` did not have a usable raw line/core cue, so `_apply_tracking()` accepted very weak `attached_black_droplet_center` points through `local_raw_fallback`
+- those low-confidence fallback points then became the recent attached tracked reference
+- frames `10-13` already had good raw `visible_nozzle_line` detections, but the attached `12 px/frame` cap still ramped from the bad fallback anchors instead of snapping back to the recovered raw nozzle row
+
+Implementation:
+
+- tightened `local_raw_fallback` in `_apply_tracking()` so early attached fallback is only allowed when the raw point is either:
+  - reasonably confident, or
+  - vertically close to the recent attached reference / acquisition search center
+- added a short `attached_continuity_hold` path so rejected weak fallback points hold the previous tracked attached y for up to `2` frames instead of snapping to implausible droplet centroids
+- made the attached tracking cap source-aware so prior `segment_fill`, `local_raw_fallback`, and `attached_continuity_hold` rows cannot act as trusted cap references
+- added a reacquisition override so strong recovered `visible_nozzle_line` or `attached_core_separation` rows bypass the cap and snap directly to the raw y
+- exported and rendered new diagnostics for:
+  - fallback rejection and reference y
+  - continuity hold usage/count
+  - cap application / cap reference source
+  - cap bypass on strong reacquisition
+
+Validation:
+
+- syntax check:
+  - `.\env\Scripts\python.exe -m py_compile tools\stream_analysis\nozzle.py tools\stream_analysis\annotations.py tests\test_stream_analysis_nozzle.py`
+  - result: passed
+- focused Stage 2 / annotation / CLI tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_nozzle.py tests\test_stream_analysis_annotations.py tests\test_stream_analysis_cli.py`
+  - result: `69 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `686 passed`
+- reran Stage 2 with `sample-count 121` for:
+  - `run_20260327_230520_9567e1ee`
+  - `run_20260327_231931_2fd25ece`
+  - `run_20260328_005146_dd931d49`
+  - `run_20260327_230807_2858b360`
+  - `run_20260327_231322_ecc89833`
+- refreshed tuning diagnostics:
+  - `analysis/stream_characterization/annotations/diagnostics/nozzle_candidate_diagnostics.csv`
+  - `analysis/stream_characterization/annotations/diagnostics/nozzle_candidate_summary.json`
+- refreshed annotated-set evaluation:
+  - `analysis/stream_characterization/annotations/nozzle_evaluation.csv`
+  - `analysis/stream_characterization/annotations/nozzle_evaluation.json`
+
+Artifact review:
+
+- the targeted `run_20260327_230520_9567e1ee` regression is now corrected:
+  - frame `8`:
+    - weak droplet centroid `312.46 px` rejected
+    - `attached_continuity_hold` used
+    - tracked y held at `327.37 px`
+  - frame `9`:
+    - weak droplet centroid `277.62 px` rejected
+    - `attached_continuity_hold` used
+    - tracked y held at `327.37 px`
+  - frames `10-13`:
+    - strong recovered raw `visible_nozzle_line` rows at `325 / 329 / 327 / 327 px`
+    - cap bypassed for reacquisition
+    - tracked y now snaps directly to the raw line row instead of lagging upward
+- updated annotated-set evaluation remains stable overall:
+  - overall mean distance: `2.333 px`
+  - overall median distance: `2.236 px`
+- per-run evaluation after the fix:
+  - `run_20260327_230520_9567e1ee`
+    - mean distance: `2.016 px`
+    - median distance: `1.997 px`
+    - mode match: `0.843`
+  - `run_20260327_231931_2fd25ece`
+    - mean distance: `2.138 px`
+    - median distance: `1.803 px`
+  - `run_20260328_005146_dd931d49`
+    - mean distance: `2.362 px`
+    - median distance: `2.255 px`
+  - `run_20260327_230807_2858b360`
+    - mean distance: `3.244 px`
+    - median distance: `3.143 px`
+  - `run_20260327_231322_ecc89833`
+    - mean distance: `1.958 px`
+    - median distance: `2.236 px`
+
+Open issues after this patch:
+
+- the reviewed runs now hold the nozzle correctly through the specifically tuned intervals
+- mode matching still trails point-placement quality for:
+  - `attached_black_droplet_center`
+  - `attached_core_separation`
+- shift segmentation remains too conservative to trust as a Phase 3 boundary signal, but the tracked nozzle point is now stable enough to use directly for Phase 3 silhouette extraction
+
+### 2026-04-03 - Phase 3 silhouette extraction implemented and reviewed
+
+Call path implemented:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> reusable Stage 2 builder in `tools/stream_analysis/nozzle.py` -> `tools/stream_analysis/silhouette.py`
+
+Files changed:
+
+- `tools/stream_analysis/silhouette.py`
+- `tools/stream_analysis/nozzle.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_silhouette.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added Stage 3 export code in `tools/stream_analysis/silhouette.py` with:
+  - dynamic ROI recentered on the tracked nozzle `x`
+  - direct grayscale Otsu thresholding inside the ROI
+  - corridor masking around the tracked nozzle `x`
+  - below-nozzle cutoff using `tracked_nozzle_y_px + nozzle_guard_px`
+  - morphology + hole fill so bright-core gaps collapse into one filled silhouette
+  - nozzle-anchored connected-component selection rather than largest-component-only selection
+  - per-row edge tracing exported as absolute `x_left_px`, `x_right_px`, `width_px`, and `center_x_px`
+  - sample panels showing the tracked nozzle marker, cutoff line, raw mask, selected filled mask, and contour/edge overlays
+- added a reusable internal Stage 2 run builder in `tools/stream_analysis/nozzle.py` so Stage 3 recomputes tracked nozzle rows in-process instead of requiring pre-existing Stage 2 files on disk
+- added a `silhouette` command to `tools/stream_analysis/cli.py`
+- added focused synthetic Stage 3 tests and a CLI integration test
+- removed an old debug print from Stage 2 track plotting so CLI commands keep stdout machine-readable JSON
+
+Validation:
+
+- syntax check:
+  - `.\env\Scripts\python.exe -m py_compile tools\stream_analysis\silhouette.py tools\stream_analysis\cli.py tools\stream_analysis\nozzle.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_cli.py`
+  - result: passed
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_nozzle.py`
+  - result: `67 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `692 passed`
+- real-data Stage 3 export review:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py silhouette --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase3_review" --run-id run_20260327_225848_829e10c1 --run-id run_20260327_230520_9567e1ee --run-id run_20260327_230807_2858b360 --run-id run_20260327_231322_ecc89833 --run-id run_20260327_231931_2fd25ece --run-id run_20260328_005146_dd931d49 --sample-count 12 --nozzle-guard-px 2 --min-component-area-px 120`
+  - result: passed
+
+Artifacts generated for review:
+
+- `tmp/stream_analysis_phase3_review/silhouette_manifest.json`
+- per-run Stage 3 outputs under:
+  - `tmp/stream_analysis_phase3_review/runs/<run_id>/stage_03_silhouette/`
+
+Artifact review summary:
+
+- run-level status counts:
+  - `run_20260327_225848_829e10c1`: `121 ok`
+  - `run_20260327_230520_9567e1ee`: `120 ok`, `1 empty_mask`
+  - `run_20260327_230807_2858b360`: `120 ok`, `1 empty_mask`
+  - `run_20260327_231322_ecc89833`: `120 ok`, `1 no_component_selected`
+  - `run_20260327_231931_2fd25ece`: `118 ok`, `3 empty_mask`
+  - `run_20260328_005146_dd931d49`: `116 ok`, `5 empty_mask`
+- all successful frames in the six-run review set produced contiguous `y` coverage with no row gaps in `edge_traces.csv`
+- late-frame failures cluster where Stage 2 is already in low-confidence detached or `segment_fill` territory, which is consistent with the current Phase 3 policy of surfacing weak downstream geometry explicitly rather than silently fabricating edges
+
+Open issues after this phase:
+
+- a handful of very late detached frames end in `empty_mask` after the below-nozzle cutoff and direct-threshold path remove all usable signal
+- `run_20260327_231322_ecc89833` frame `121` produced `no_component_selected` instead of `ok`
+- Stage 3 currently reports low-confidence / `segment_fill`-anchored silhouettes faithfully, but Stage 4 will need to decide how those frames affect trust and FOV-exit labeling
+- shift segmentation remains too conservative to use as a required Phase 3 dependency and stays out of the critical path
+
+Next recommended step:
+
+- begin Stage 4 visible-volume integration directly from `edge_traces.csv` / `edge_traces.json`
+- define the Stage 4 trust/FOV rule around the current late-frame `empty_mask` and `no_component_selected` outcomes
+- if late detached frame coverage becomes important, do one narrow Phase 3 selector/threshold refinement pass without reopening the Stage 2 point detector
+
+### 2026-04-03 - Stage 3 open-bottom fill refinement for long attached streams
+
+Call path updated:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> reusable Stage 2 builder in `tools/stream_analysis/nozzle.py` -> `tools/stream_analysis/silhouette.py`
+
+Files changed:
+
+- `tools/stream_analysis/silhouette.py`
+- `tests/test_stream_analysis_silhouette.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added a post-selection fill refinement path in `tools/stream_analysis/silhouette.py`
+  - keep the existing morphology + binary hole-fill path as the default
+  - detect when the selected silhouette contains a bright interior region near the tracked centerline that stays connected to the ROI bottom border
+  - switch only those frames to a row-envelope fill that spans each selected row from the left outer edge to the right outer edge
+  - keep component selection unchanged so the fix only changes filling, not which component is chosen
+- updated Stage 3 metrics to expose:
+  - `fill_strategy`
+  - `open_bottom_interior_detected`
+  - `row_fill_added_pixel_count`
+- updated Stage 3 sample panels and edge tracing so they use the refined final selected mask
+- added focused regression coverage for:
+  - the open-bottom interior topology that `binary_fill_holes` cannot close
+  - the already-filled-body case that should remain on the default strategy
+  - export-level confirmation that `row_envelope_fill` is emitted on a synthetic open-bottom frame
+
+Validation:
+
+- syntax check:
+  - `.\env\Scripts\python.exe -m py_compile tools\stream_analysis\silhouette.py tests\test_stream_analysis_silhouette.py`
+  - result: passed
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_nozzle.py`
+  - result: `70 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `695 passed`
+- regenerated real-data review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py silhouette --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase3_review" --run-id run_20260327_225848_829e10c1 --run-id run_20260327_230520_9567e1ee --run-id run_20260327_230807_2858b360 --run-id run_20260327_231322_ecc89833 --run-id run_20260327_231931_2fd25ece --run-id run_20260328_005146_dd931d49 --sample-count 12 --extra-frame-index 56 --extra-frame-index 66 --extra-frame-index 77 --extra-frame-index 88 --extra-frame-index 99 --extra-frame-index 100`
+  - result: passed
+
+Targeted artifact review notes:
+
+- regenerated review panels are under:
+  - `tmp/stream_analysis_phase3_review/runs/run_20260328_005146_dd931d49/stage_03_silhouette/samples/`
+- the originally reported long-stream frames now report:
+  - frame `56`: `binary_hole_fill`, `row_fill_added_pixel_count=0`
+  - frame `66`: `row_envelope_fill`, `row_fill_added_pixel_count=18947`
+  - frame `77`: `row_envelope_fill`, `row_fill_added_pixel_count=18536`
+  - frame `88`: `row_envelope_fill`, `row_fill_added_pixel_count=17829`
+  - frame `99`: `row_envelope_fill`, `row_fill_added_pixel_count=9995`
+  - frame `100`: `binary_hole_fill`, `row_fill_added_pixel_count=0`
+- the regenerated panels for frames `66`, `77`, `88`, and `99` now show the bright core filled all the way through the selected silhouette even when the stream exits the field of view at the bottom
+- frame `56` stays on the default fill path, which is consistent with the earlier numerical check that it was not failing for the same open-bottom reason
+
+Residual note:
+
+- this refinement intentionally stays narrow and only activates when the selected interior background leaks to the ROI bottom border; other late detached-frame outcomes remain governed by the existing Stage 3 thresholding and selection logic
+
+### 2026-04-03 - Stage 3 offset open-bottom detector added for frame-56-type misses
+
+Call path updated:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage3_silhouette()` -> `_refine_selected_fill()`
+
+Files changed:
+
+- `tools/stream_analysis/silhouette.py`
+- `tests/test_stream_analysis_silhouette.py`
+- `docs/stream_analysis_plan.md`
+
+Root cause:
+
+- frame `56` in `run_20260328_005146_dd931d49` still missed the lower bright-core fill because the existing Stage 3 trigger only searched for an open-bottom interior gap that straddled the tracked nozzle `x`
+- on that frame, the lower cavity drifted about `13-15 px` left of the tracked nozzle `x`, so the selected silhouette still contained a real bottom-connected interior background component, but `_find_open_bottom_interior_seed()` never seeded into it
+
+Implemented:
+
+- kept the existing tracked-center seed detector as the fast path
+- added a fallback interior-component detector in `tools/stream_analysis/silhouette.py` that scans `selected_mask == 0` for bottom-connected interior background components that:
+  - do not touch the ROI top, left, or right borders
+  - begin below the cutoff region
+  - have enough area and height to be meaningful
+  - are bounded by selected pixels on both sides for most of their occupied rows
+- added `fill_trigger_source` to `silhouette_metrics.csv` with:
+  - `none`
+  - `tracked_center_gap`
+  - `background_component_fallback`
+- kept the repair action unchanged:
+  - once either detector proves an eligible open-bottom interior, Stage 3 still applies the same row-envelope fill and traces edges from that final refined mask
+
+Validation:
+
+- syntax check:
+  - `.\env\Scripts\python.exe -m py_compile tools\stream_analysis\silhouette.py tests\test_stream_analysis_silhouette.py`
+  - result: passed
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_nozzle.py`
+  - result: `74 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `699 passed`
+- regenerated real-data review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py silhouette --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase3_review" --run-id run_20260327_225848_829e10c1 --run-id run_20260327_230520_9567e1ee --run-id run_20260327_230807_2858b360 --run-id run_20260327_231322_ecc89833 --run-id run_20260327_231931_2fd25ece --run-id run_20260328_005146_dd931d49 --sample-count 12 --extra-frame-index 56 --extra-frame-index 66 --extra-frame-index 77 --extra-frame-index 88 --extra-frame-index 99 --extra-frame-index 100`
+  - result: passed
+
+Targeted artifact review notes:
+
+- reviewed long-stream frames now report:
+  - frame `56`: `row_envelope_fill`, `fill_trigger_source=background_component_fallback`, `row_fill_added_pixel_count=1295`
+  - frame `66`: `row_envelope_fill`, `fill_trigger_source=tracked_center_gap`, `row_fill_added_pixel_count=18947`
+  - frame `77`: `row_envelope_fill`, `fill_trigger_source=tracked_center_gap`, `row_fill_added_pixel_count=18536`
+  - frame `88`: `row_envelope_fill`, `fill_trigger_source=tracked_center_gap`, `row_fill_added_pixel_count=17829`
+  - frame `99`: `row_envelope_fill`, `fill_trigger_source=tracked_center_gap`, `row_fill_added_pixel_count=9995`
+  - frame `100`: `binary_hole_fill`, `fill_trigger_source=none`, `row_fill_added_pixel_count=0`
+- frame `57` remained on the default path:
+  - `binary_hole_fill`, `fill_trigger_source=none`
+- frame `55` also switched to `background_component_fallback`; a targeted debug panel shows the same kind of laterally shifted lower cavity appearing one frame earlier, so this looks like a physically consistent improvement rather than a new overfill regression
+
+Residual note:
+
+- the fallback detector is still intentionally constrained to bottom-connected interior cavities inside the selected component; if later reviews surface over-triggering on other runs, the next narrow refinement should tighten the bounded-row criterion rather than changing the row-envelope fill itself
+
+### 2026-04-03 - Stage 3 multi-component fluid export and Phase 4a visible volume added
+
+Call path added:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage3_silhouette()` / `export_stage4_volume()`
+
+Files changed:
+
+- `tools/stream_analysis/silhouette.py`
+- `tools/stream_analysis/volume.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_silhouette.py`
+- `tests/test_stream_analysis_volume.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- refactored Stage 3 so one internal per-run builder now returns:
+  - frame-level silhouette metrics
+  - per-component metrics
+  - multi-component edge traces
+  - sampled frame inputs for overlays
+- kept the attached-body selector authoritative:
+  - `_select_primary_component()` still chooses one nozzle-connected `attached_primary`
+  - Stage 3 frame status is still driven only by that attached primary
+- added conservative detached-fluid acceptance on remaining connected components:
+  - component must already pass the existing area threshold
+  - component must start at least `24 px` below the cutoff row
+  - component center must stay within the existing ROI corridor and within `max(32 px, 0.12 * roi_width)` of the attached anchor center
+  - accepted detached components are sorted deterministically and exported as `detached_01`, `detached_02`, and so on
+- applied the same fill refinement path to accepted detached components:
+  - enclosed holes still use binary hole fill
+  - open-bottom bright cores still switch to row-envelope fill, but now detached components use their own anchor center as the local horizontal reference
+- expanded Stage 3 exports:
+  - `edge_traces.csv` and `edge_traces.json` now include `component_id`, `component_role`, and `component_rank`
+  - new `component_metrics.csv` records one row per accepted component per frame
+  - `silhouette_metrics.csv` now records accepted attached/detached component counts and area totals
+  - Stage 3 review panels now show all accepted visible fluid rather than only the attached body
+- added Phase 4a visible-volume export in `tools/stream_analysis/volume.py`:
+  - new `volume` CLI subcommand
+  - recomputes Stage 3 in-process instead of reading saved Stage 3 files back from disk
+  - integrates attached and detached components independently with the existing axisymmetric row model
+  - exports `frame_metrics.csv`, `component_volumes.csv`, `volume_timeseries.csv`, `volume_timeseries.json`, `volume_manifest.json`, and sample panels
+- intentionally left FOV-exit and trust labeling out of this slice:
+  - Stage 4 now owns visible volume
+  - trusted/untrusted and first-FOV-exit labeling are still pending for the later Stage 4 completion step
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_nozzle.py`
+  - result: `83 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `708 passed`
+
+Planned real-data review for this slice:
+
+- regenerate Stage 3 and Stage 4 artifacts under `tmp/stream_analysis_phase4_review`
+- explicitly review detached-droplet frames:
+  - `run_20260327_230520_9567e1ee` frames `23`, `34`, `45`
+- re-check the long-stream open-bottom frames to confirm the detached-component refactor did not disturb the recent fill fixes:
+  - `run_20260328_005146_dd931d49` frames `56`, `66`, `77`, `88`, `99`, `100`
+
+Residual note:
+
+- Stage 4 in this slice computes visible volume only; because FOV-exit/trust labeling is still intentionally deferred, downstream consumers should not yet interpret `total_visible_volume_um3` as the final trusted run-level volume curve
+- detached-fluid acceptance is intentionally conservative in v1 and currently excludes far side blobs or detached-only frames that are not clearly centered under the attached stream body
+
+### 2026-04-03 - Stage 4 trust labeling and nL unit migration completed
+
+Call path updated:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage4_volume()` -> `tools/stream_analysis/fov.py`
+
+Files changed:
+
+- `tools/stream_analysis/fov.py`
+- `tools/stream_analysis/volume.py`
+- `tests/test_stream_analysis_volume.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added a small internal `tools/stream_analysis/fov.py` helper module for:
+  - attached-primary bottom-contact detection
+  - run-latched trusted/untrusted labeling
+  - per-run FOV-exit report assembly
+- completed Stage 4 trust semantics:
+  - trust remains `trusted` while the attached primary stays above the ROI bottom
+  - the first `ok` frame where the attached primary reaches the bottom ROI row becomes the first `untrusted_fov_exit` frame
+  - all later frames stay `untrusted_fov_exit`, even if the attached primary later retreats upward or Stage 3 geometry becomes unavailable
+  - pre-exit Stage 3 failures remain `unavailable_geometry`
+- migrated Stage 4 public outputs from `um^3` to `nL`:
+  - `frame_metrics.csv`
+  - `component_volumes.csv`
+  - `volume_timeseries.csv`
+  - `volume_timeseries.json`
+  - sample overlays
+  - `volume_manifest.json`
+- added the remaining Stage 4 artifacts:
+  - `fov_exit_report.json`
+  - `Vt.png`
+- kept the ownership split explicit:
+  - Stage 3 still produces geometry only
+  - Stage 4 now owns visible-volume export, trust labeling, and FOV-exit detection
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `90 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `715 passed`
+- regenerated real-data review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py volume --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase4b_review" --run-id run_20260327_230520_9567e1ee --run-id run_20260328_005146_dd931d49 --sample-count 12 --extra-frame-index 23 --extra-frame-index 34 --extra-frame-index 45 --extra-frame-index 55 --extra-frame-index 56 --extra-frame-index 57 --extra-frame-index 66 --extra-frame-index 77 --extra-frame-index 88 --extra-frame-index 99 --extra-frame-index 100`
+  - result: passed
+
+Targeted artifact review notes:
+
+- detached-droplet run `run_20260327_230520_9567e1ee`:
+  - detached droplets remain included in visible volume and do not independently trigger FOV exit
+  - frames `23`, `34`, and `45` remain `trusted`
+  - example frame volumes:
+    - frame `23`: attached `5.933 nL`, detached `11.878 nL`, total `17.811 nL`
+    - frame `34`: attached `15.886 nL`, detached `12.670 nL`, total `28.556 nL`
+    - frame `45`: attached `13.539 nL`, detached `15.987 nL`, total `29.526 nL`
+  - first FOV exit is later in the run at frame `111`
+- long-stream run `run_20260328_005146_dd931d49`:
+  - first FOV exit is frame `37`
+  - frame `36` remains `trusted` with `attached_bottom_touches_fov=False`
+  - frame `37` is the first `untrusted_fov_exit` frame with `fov_exit_triggered=True`, `attached_bottom_touches_fov=True`, and reason `attached_primary_touches_bottom_roi`
+  - later reviewed frames `55`, `56`, `57`, `66`, `77`, `88`, `99`, and `100` remain latched as `untrusted_fov_exit`
+  - the recent open-bottom fill fixes remain intact under the new trust labeling
+
+Residual note:
+
+- this Stage 4 slice now defines trusted visible volume, but the later summary and fitting stages still need to be updated to explicitly consume the new `volume_trust_label == "trusted"` rows and the nL-facing public columns
+
+### 2026-04-03 - Stage 4 trust trigger switched to any accepted fluid within 32 px of the ROI bottom
+
+Call path updated:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage4_volume()` -> `tools/stream_analysis/fov.py`
+
+Files changed:
+
+- `tools/stream_analysis/fov.py`
+- `tools/stream_analysis/volume.py`
+- `tests/test_stream_analysis_volume.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- changed the Stage 4 FOV/trust trigger from attached-primary bottom contact to accepted-fluid near-bottom detection:
+  - Stage 4 now evaluates every accepted Stage 3 component in the frame
+  - for each accepted component, it computes `distance_from_bottom_px = (roi_y1 - 1) - last_valid_y_px`
+  - the first `ok` frame with any accepted component at `distance_from_bottom_px <= 32` becomes the first `untrusted_fov_exit` frame
+  - later frames remain latched as `untrusted_fov_exit`
+- kept Stage 3 unchanged and kept trust ownership in Stage 4:
+  - Stage 3 still exports geometry only
+  - Stage 4 now decides trust using attached and detached accepted-fluid geometry together
+- updated Stage 4 public outputs:
+  - removed `attached_bottom_touches_fov`
+  - added `accepted_fluid_near_fov_exit`
+  - added `fov_near_component_count`
+  - added `min_accepted_fluid_distance_from_bottom_px`
+  - added `fov_near_bottom_px: 32` to `volume_manifest.json` and `fov_exit_report.json`
+  - expanded `fov_exit_report.json` with `trigger_components`
+- updated Stage 4 review visuals:
+  - sample panels now describe the trigger as accepted fluid near the ROI bottom
+  - `Vt.png` now marks the first accepted-fluid near-bottom frame instead of using attached-specific wording
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `91 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `716 passed`
+- regenerated real-data review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py volume --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase4c_review" --run-id run_20260327_230520_9567e1ee --run-id run_20260328_005146_dd931d49 --sample-count 12 --extra-frame-index 23 --extra-frame-index 29 --extra-frame-index 30 --extra-frame-index 34 --extra-frame-index 36 --extra-frame-index 37 --extra-frame-index 38 --extra-frame-index 45 --extra-frame-index 55 --extra-frame-index 56 --extra-frame-index 57 --extra-frame-index 66 --extra-frame-index 77 --extra-frame-index 88 --extra-frame-index 99 --extra-frame-index 100`
+  - result: passed
+
+Targeted artifact review notes:
+
+- long-stream run `run_20260328_005146_dd931d49`:
+  - the first untrusted frame moves earlier from frame `37` to frame `29`
+  - the trigger component is `detached_01`, which is already within `25 px` of the ROI bottom on frame `29`
+  - frame `29` now reports:
+    - `accepted_fluid_near_fov_exit=True`
+    - `fov_near_component_count=1`
+    - `min_accepted_fluid_distance_from_bottom_px=25`
+    - `fov_exit_triggered=True`
+    - `fov_exit_reason=accepted_fluid_near_bottom_roi`
+  - frame `30` still has the detached component touching bottom, but it is now a latched follow-on frame rather than the first trigger
+  - later reviewed frames `55`, `56`, `57`, `66`, `77`, `88`, `99`, and `100` remain `untrusted_fov_exit`
+- detached-droplet run `run_20260327_230520_9567e1ee`:
+  - the first untrusted frame remains frame `37`
+  - no accepted component is within `32 px` of the ROI bottom on frame `36`:
+    - `min_accepted_fluid_distance_from_bottom_px=41`
+    - `accepted_fluid_near_fov_exit=False`
+  - frame `37` is the first trigger frame and is driven by detached accepted fluid:
+    - trigger component `detached_01`
+    - `distance_from_bottom_px=0`
+  - detached droplets in frames `23`, `34`, and `45` still contribute to visible volume while trust stays `trusted` until the near-bottom boundary is crossed
+
+Residual note:
+
+- the trigger now covers accepted detached fluid as intended, but it is still limited to accepted Stage 3 components; raw threshold blobs outside Stage 3 acceptance still do not affect trust
+- later stages still need to consume the current Stage 4 trust fields and the nL-facing public volume schema
+
+### 2026-04-03 - Later-phase plan reordered around partial-volume estimation before summary analysis
+
+Completed:
+
+- revised the later-phase plan to match the current interpretation of the volume problem:
+  - trusted visible volume before FOV exit
+  - steady-rate extrapolation between FOV exit and tail onset
+  - a distinct tail-volume estimate
+- changed the planned steady/tail detection strategy so it now combines:
+  - trusted Stage 4 visible volume
+  - attached-primary near-nozzle width extracted from Stage 3 edge traces
+- reordered the remaining stages so they now flow as:
+  - Stage 5: per-run width features, steady-rate fit, tail-onset detection, middle extrapolation, and partial total
+  - Stage 6: run summary, metadata join, and gravimetric residual analysis
+  - Stage 7: tail-volume model and final total estimate
+- split the future Stage 5 implementation into explicit reviewable slices:
+  - Stage 5a: near-nozzle width feature extraction
+  - Stage 5b: steady-window detection and robust steady-rate fitting
+  - Stage 5c: tail-onset detection and middle-volume extrapolation
+  - Stage 5d: partial-total export with explicit tail placeholder
+- updated the planned module layout and CLI responsibilities so the next implementation pass has a concrete home:
+  - `tools/stream_analysis/fit.py`
+  - `fit` CLI subcommand
+- updated Stage 6 so future run summaries will carry the new volume-estimation and gravimetric-residual fields once Stage 5 is implemented
+- added a distinct Stage 7 placeholder so the tail model can be planned after the Stage 6 residual patterns are visible
+
+Artifacts generated:
+
+- none; planning update only
+
+Open issues:
+
+- the exact Stage 5a near-nozzle band defaults (`24 px` offset, `40 px` height) still need real-data review once implemented
+- the exact steady-width plateau tolerance and tail-drop threshold are intentionally frozen only as initial review defaults and may need one narrow tuning pass
+- the tail-volume model remains unresolved and should stay a separate Stage 7 slice until it is validated against real runs and gravimetric totals
+
+Next steps:
+
+- implement Stage 5a first and review the resulting width traces against the current `V(t)` plots on the same runs already reviewed for Stage 4
+- implement Stage 5b second so the steady-rate fit can be reviewed before any extrapolated volume is reported
+- implement Stage 5c third to produce the middle-volume estimate between first-untrusted and tail-onset
+- keep Stage 5d as a partial-total export only, then use Stage 6 to study the residual tail against gravimetric totals before planning Stage 7
+
+### 2026-04-03 - Stage 5 near-nozzle width, steady-rate fit, and middle extrapolation completed
+
+Call path added:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_fit()` -> reusable `tools/stream_analysis/volume.py::_build_stage4_run()` -> `tools/stream_analysis/fit.py`
+
+Files changed:
+
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/volume.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_fit.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added a standalone Stage 5 `fit` export stage and CLI subcommand
+- refactored Stage 4 so `tools/stream_analysis/volume.py` now exposes a reusable `_build_stage4_run()` helper that returns:
+  - labeled Stage 4 frame rows
+  - Stage 4 component-volume rows
+  - Stage 4 FOV report
+  - pass-through Stage 3 geometry rows needed by Stage 5
+- added attached-primary near-nozzle width extraction in `tools/stream_analysis/fit.py`
+  - width band anchored to the tracked nozzle with the initial reviewed defaults:
+    - `near_nozzle_band_top_px = 24`
+    - `near_nozzle_band_height_px = 40`
+  - width metrics exported per frame:
+    - `attached_near_nozzle_width_median_px`
+    - `attached_near_nozzle_width_iqr_px`
+    - `attached_near_nozzle_band_valid_row_count`
+    - `attached_near_nozzle_band_y0_px`
+    - `attached_near_nozzle_band_y1_px`
+    - `attached_near_nozzle_width_smoothed_px`
+- added earliest-window steady detection using trusted Stage 4 `V(t)` and the attached width plateau together
+  - candidate frames must be trusted, have visible volume, and have valid attached-band width
+  - steady fit uses Theil-Sen on `delay_from_emergence_us` vs `total_visible_volume_nl`
+  - the earliest qualifying window is selected and then extended forward while the fit and width-span criteria remain valid
+- added tail-onset detection from the attached near-nozzle width trace
+  - searches only after the steady window
+  - detects the first persistent width drop below the steady plateau by `tail_drop_frac = 0.08` for `tail_persist_frames = 3`
+- added conservative middle extrapolation
+  - uses trusted visible volume at the last trusted frame
+  - extrapolates only from first-untrusted to tail-onset
+  - performs no middle extrapolation if the steady fit or tail onset is unresolved
+  - exports `tail_volume_nl = null` and `final_total_status = "tail_pending"` rather than implying a finished total
+- added Stage 5 outputs:
+  - `phase_features.csv`
+  - `phase_boundaries.json`
+  - `steady_fit.json`
+  - `middle_extrapolation.json`
+  - `Vt_fit.png`
+  - `width_trace.png`
+  - per-run and top-level `fit_manifest.json`
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `101 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `726 passed`
+- regenerated real-data review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py fit --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase5_review" --run-id run_20260327_230520_9567e1ee --run-id run_20260328_005146_dd931d49 --sample-count 12`
+  - result: passed
+
+Targeted artifact review notes:
+
+- review artifacts are under:
+  - `tmp/stream_analysis_phase5_review/runs/<run_id>/stage_05_fit/`
+- detached-droplet run `run_20260327_230520_9567e1ee`:
+  - first untrusted frame remains `37`
+  - earliest steady window selected: frames `14-36`
+  - steady rate: `0.01898 nL/us`
+  - steady width plateau: `74.0 px`
+  - tail onset detected at frame `89`
+  - trusted visible volume: `31.206 nL`
+  - middle extrapolated volume: `49.357 nL`
+  - partial total without tail: `80.563 nL`
+  - near-nozzle width is visibly settling through frames `12-15` (`86.0 -> 81.5 -> 78.0 -> 74.0 px`), stays near `74 px` through the steady window, then begins its persistent drop at frame `89` (`66.0 px`)
+- long-stream run `run_20260328_005146_dd931d49`:
+  - first untrusted frame remains `29`
+  - earliest steady window selected: frames `13-28`
+  - steady rate: `0.02488 nL/us`
+  - steady width plateau: `74.0 px`
+  - tail onset detected at frame `94`
+  - trusted visible volume: `28.292 nL`
+  - middle extrapolated volume: `80.856 nL`
+  - partial total without tail: `109.148 nL`
+  - near-nozzle width settles through frames `11-13` (`85.0 -> 79.5 -> 75.0 px`), remains near `74 px` through the steady window and first-untrusted boundary, then begins its persistent drop at frame `94` (`64.0 px`)
+
+Residual note:
+
+- Stage 5 now produces a reviewed per-run partial total, but the tail term is still intentionally unresolved and exported only as `null`
+- the initial width-band, width-drop, and steady-window defaults look promising on the two reviewed runs, but Stage 6 still needs the cross-run metadata join and gravimetric residual study before any tail model is planned
+
+Next step:
+
+- begin Stage 6 run-summary and metadata-join work so the new Stage 5 partial totals can be compared directly against gravimetric totals and grouped by print pressure / pulse width before planning Stage 7 tail estimation
+
 ## Progress Checklist
 
 - [x] Inspect repository structure and choose the cleanest analysis location
@@ -2006,11 +2793,13 @@ Next recommended step:
 - [x] Review Stage 1 artifacts and update this document
 - [x] Implement Stage 2 per-frame nozzle tracking and shift segmentation
 - [x] Review Stage 2 artifacts and update this document
-- [ ] Implement Stage 3 silhouette extraction
-- [ ] Review Stage 3 artifacts and update this document
-- [ ] Implement Stage 4 visible-volume and FOV-exit detection
-- [ ] Review Stage 4 artifacts and update this document
-- [ ] Implement Stage 5 run summaries and metadata joins
-- [ ] Review Stage 5 artifacts and update this document
-- [ ] Implement Stage 6 head / steady / tail fitting on trusted `V(t)`
+- [x] Implement Stage 3 silhouette extraction
+- [x] Review Stage 3 artifacts and update this document
+- [x] Implement Stage 4 visible-volume and FOV-exit detection
+- [x] Review Stage 4 artifacts and update this document
+- [x] Implement Stage 5 near-nozzle width, steady-rate fit, and middle extrapolation
+- [x] Review Stage 5 artifacts and update this document
+- [ ] Implement Stage 6 run summaries, metadata joins, and gravimetric residual analysis
 - [ ] Review Stage 6 artifacts and update this document
+- [ ] Implement Stage 7 tail-volume model and final total estimate
+- [ ] Review Stage 7 artifacts and update this document

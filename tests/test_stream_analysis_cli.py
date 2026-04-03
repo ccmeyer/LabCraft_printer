@@ -6,11 +6,15 @@ from pathlib import Path
 import pytest
 
 from tools.stream_analysis import annotations as annotation_mod
+from tools.stream_analysis import fit as fit_mod
 from tools.stream_analysis import nozzle as nozzle_mod
+from tools.stream_analysis import silhouette as silhouette_mod
+from tools.stream_analysis import volume as volume_mod
 from tools.stream_analysis import cli
 from tests.test_stream_analysis_baseline import _make_baseline_experiment
 from tests.test_stream_analysis_dataset import _make_experiment
 from tests.test_stream_analysis_nozzle import _make_nozzle_experiment
+from tests.test_stream_analysis_silhouette import _fake_stage2_run, _make_silhouette_experiment
 
 
 def test_cli_inventory_main_writes_default_outputs(tmp_path, capsys):
@@ -198,6 +202,115 @@ def test_cli_nozzle_main_writes_default_outputs(tmp_path, capsys):
     assert (stage_dir / "nozzle_track.csv").exists()
     assert (stage_dir / "shift_events.json").exists()
     assert (stage_dir / "nozzle_track.png").exists()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
+    assert payload["run_ids"] == [run_dir.name]
+
+
+def test_cli_silhouette_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    monkeypatch.setattr(silhouette_mod, "_build_stage2_run", _fake_stage2_run)
+
+    rc = cli.main(
+        [
+            "silhouette",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "3",
+            "--nozzle-guard-px",
+            "2",
+            "--min-component-area-px",
+            "50",
+        ]
+    )
+
+    assert rc == 0
+    output_root = Path(exp_dir) / "analysis" / "stream_characterization"
+    stage_dir = output_root / "runs" / run_dir.name / "stage_03_silhouette"
+    assert (stage_dir / "silhouette_metrics.csv").exists()
+    assert (stage_dir / "edge_traces.csv").exists()
+    assert (stage_dir / "edge_traces.json").exists()
+    assert (stage_dir / "sample_contact_sheet.png").exists()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
+    assert payload["run_ids"] == [run_dir.name]
+
+
+def test_cli_volume_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    monkeypatch.setattr(volume_mod.silhouette_mod, "_build_stage2_run", _fake_stage2_run)
+
+    rc = cli.main(
+        [
+            "volume",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "3",
+            "--nozzle-guard-px",
+            "2",
+            "--min-component-area-px",
+            "50",
+        ]
+    )
+
+    assert rc == 0
+    output_root = Path(exp_dir) / "analysis" / "stream_characterization"
+    stage_dir = output_root / "runs" / run_dir.name / "stage_04_volume"
+    assert (stage_dir / "frame_metrics.csv").exists()
+    assert (stage_dir / "component_volumes.csv").exists()
+    assert (stage_dir / "volume_timeseries.csv").exists()
+    assert (stage_dir / "volume_timeseries.json").exists()
+    assert (stage_dir / "fov_exit_report.json").exists()
+    assert (stage_dir / "Vt.png").exists()
+    assert (stage_dir / "sample_contact_sheet.png").exists()
+
+    report = json.loads((stage_dir / "fov_exit_report.json").read_text(encoding="utf-8"))
+    assert "fov_near_bottom_px" in report
+    assert "trigger_components" in report
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
+    assert payload["run_ids"] == [run_dir.name]
+
+
+def test_cli_fit_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    monkeypatch.setattr(fit_mod.volume_mod.silhouette_mod, "_build_stage2_run", _fake_stage2_run)
+
+    rc = cli.main(
+        [
+            "fit",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "3",
+            "--nozzle-guard-px",
+            "2",
+            "--min-component-area-px",
+            "50",
+            "--min-steady-frames",
+            "2",
+            "--width-smooth-window",
+            "3",
+            "--tail-persist-frames",
+            "1",
+        ]
+    )
+
+    assert rc == 0
+    output_root = Path(exp_dir) / "analysis" / "stream_characterization"
+    stage_dir = output_root / "runs" / run_dir.name / "stage_05_fit"
+    assert (stage_dir / "phase_features.csv").exists()
+    assert (stage_dir / "phase_boundaries.json").exists()
+    assert (stage_dir / "steady_fit.json").exists()
+    assert (stage_dir / "middle_extrapolation.json").exists()
+    assert (stage_dir / "Vt_fit.png").exists()
+    assert (stage_dir / "width_trace.png").exists()
+    assert (stage_dir / "fit_manifest.json").exists()
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["selected_run_count"] == 1

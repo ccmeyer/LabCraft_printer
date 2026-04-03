@@ -188,6 +188,13 @@ DIAGNOSTIC_BASE_COLUMNS = [
     "transition_fill_used",
     "transition_fill_source",
     "anchor_rejected_as_reflection",
+    "local_raw_fallback_rejected",
+    "local_raw_fallback_reference_y_px",
+    "attached_continuity_hold_used",
+    "attached_continuity_hold_count",
+    "attached_tracking_cap_applied",
+    "attached_tracking_cap_reference_source",
+    "attached_tracking_cap_bypassed_for_reacquisition",
 ]
 
 DEFAULT_SEARCH_WIDTH_FRAC = 0.22
@@ -1058,7 +1065,14 @@ def _render_candidate_overlay(path: Path, row: dict):
         (
             f"fill_used={bool(row.get('transition_fill_used'))} "
             f"fill_src={row.get('transition_fill_source') or 'n/a'} "
-            f"anchor_reject={bool(row.get('anchor_rejected_as_reflection'))}"
+            f"anchor_reject={bool(row.get('anchor_rejected_as_reflection'))} "
+            f"fallback_reject={bool(row.get('local_raw_fallback_rejected'))} "
+            f"fallback_ref={_fmt_optional(row.get('local_raw_fallback_reference_y_px'))} "
+            f"hold={bool(row.get('attached_continuity_hold_used'))}/"
+            f"{int(row.get('attached_continuity_hold_count') or 0)} "
+            f"cap={bool(row.get('attached_tracking_cap_applied'))} "
+            f"cap_src={row.get('attached_tracking_cap_reference_source') or 'n/a'} "
+            f"cap_bypass={bool(row.get('attached_tracking_cap_bypassed_for_reacquisition'))}"
         )
     )
     for mode in nozzle_mod.CANDIDATE_ORDER:
@@ -1283,6 +1297,13 @@ def diagnose_nozzle_candidates(
             "transition_fill_used": bool(diagnostics_bundle["raw_row"].get("transition_fill_used")),
             "transition_fill_source": diagnostics_bundle["raw_row"].get("transition_fill_source"),
             "anchor_rejected_as_reflection": bool(diagnostics_bundle["raw_row"].get("anchor_rejected_as_reflection")),
+            "local_raw_fallback_rejected": bool(diagnostics_bundle["raw_row"].get("local_raw_fallback_rejected")),
+            "local_raw_fallback_reference_y_px": diagnostics_bundle["raw_row"].get("local_raw_fallback_reference_y_px"),
+            "attached_continuity_hold_used": bool(diagnostics_bundle["raw_row"].get("attached_continuity_hold_used")),
+            "attached_continuity_hold_count": int(diagnostics_bundle["raw_row"].get("attached_continuity_hold_count") or 0),
+            "attached_tracking_cap_applied": bool(diagnostics_bundle["raw_row"].get("attached_tracking_cap_applied")),
+            "attached_tracking_cap_reference_source": diagnostics_bundle["raw_row"].get("attached_tracking_cap_reference_source"),
+            "attached_tracking_cap_bypassed_for_reacquisition": bool(diagnostics_bundle["raw_row"].get("attached_tracking_cap_bypassed_for_reacquisition")),
         }
         for mode, metric in candidate_metrics.items():
             row[f"{mode}_available"] = bool(metric["available"])

@@ -9,7 +9,10 @@ from tools.stream_analysis.annotations import (
 )
 from tools.stream_analysis.baseline import export_stage1_baseline
 from tools.stream_analysis.dataset import _print_json, export_stage0_inventory
+from tools.stream_analysis.fit import export_stage5_fit
 from tools.stream_analysis.nozzle import export_stage2_nozzle
+from tools.stream_analysis.silhouette import export_stage3_silhouette
+from tools.stream_analysis.volume import export_stage4_volume
 
 
 def build_parser():
@@ -206,6 +209,441 @@ def build_parser():
         help="Minimum raw confidence needed before a frame is trusted as an anchor for smoothing.",
     )
 
+    silhouette = subparsers.add_parser(
+        "silhouette",
+        help="Build Stage 3 filled-silhouette artifacts.",
+    )
+    silhouette.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    silhouette.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output directory. Defaults to the experiment-local analysis directory.",
+    )
+    silhouette.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to export. May be provided multiple times.",
+    )
+    silhouette.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Include unmatched run directories when no explicit run ids are supplied.",
+    )
+    silhouette.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of selected runs to export.",
+    )
+    silhouette.add_argument(
+        "--sample-count",
+        type=int,
+        default=6,
+        help="Number of evenly spaced sample frames to render per run.",
+    )
+    silhouette.add_argument(
+        "--extra-frame-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Additional 1-based frame indices to include in the review artifacts.",
+    )
+    silhouette.add_argument(
+        "--search-width-frac",
+        type=float,
+        default=0.22,
+        help="Fraction of image width to search for nozzle structure around the frame center.",
+    )
+    silhouette.add_argument(
+        "--search-top-frac",
+        type=float,
+        default=0.08,
+        help="Top search boundary as a fraction of image height.",
+    )
+    silhouette.add_argument(
+        "--search-bottom-frac",
+        type=float,
+        default=0.30,
+        help="Bottom search boundary as a fraction of image height.",
+    )
+    silhouette.add_argument(
+        "--blur-sigma",
+        type=float,
+        default=12.0,
+        help="Gaussian blur sigma used to estimate the local background for dark-structure detection.",
+    )
+    silhouette.add_argument(
+        "--residual-threshold",
+        type=int,
+        default=18,
+        help="Threshold applied to the local dark-structure residual mask.",
+    )
+    silhouette.add_argument(
+        "--shift-threshold-px",
+        type=float,
+        default=6.0,
+        help="Median jump threshold used to declare a grip-refresh segment boundary.",
+    )
+    silhouette.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.55,
+        help="Minimum raw confidence needed before a frame is trusted as an anchor for smoothing.",
+    )
+    silhouette.add_argument(
+        "--roi-width-frac",
+        type=float,
+        default=0.35,
+        help="Fraction of image width to keep around the tracked nozzle x position.",
+    )
+    silhouette.add_argument(
+        "--roi-top-frac",
+        type=float,
+        default=0.10,
+        help="Top crop boundary as a fraction of image height.",
+    )
+    silhouette.add_argument(
+        "--roi-bottom-frac",
+        type=float,
+        default=1.0,
+        help="Bottom crop boundary as a fraction of image height.",
+    )
+    silhouette.add_argument(
+        "--corridor-width-frac",
+        type=float,
+        default=0.70,
+        help="Fraction of the dynamic ROI width to keep around the tracked nozzle x position.",
+    )
+    silhouette.add_argument(
+        "--nozzle-guard-px",
+        type=int,
+        default=2,
+        help="Extra pixels below the tracked nozzle row before silhouette rows become eligible.",
+    )
+    silhouette.add_argument(
+        "--min-component-area-px",
+        type=int,
+        default=120,
+        help="Minimum filled connected-component area eligible for selection.",
+    )
+
+    volume = subparsers.add_parser(
+        "volume",
+        help="Build Stage 4 visible-volume artifacts.",
+    )
+    volume.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    volume.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output directory. Defaults to the experiment-local analysis directory.",
+    )
+    volume.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to export. May be provided multiple times.",
+    )
+    volume.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Include unmatched run directories when no explicit run ids are supplied.",
+    )
+    volume.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of selected runs to export.",
+    )
+    volume.add_argument(
+        "--sample-count",
+        type=int,
+        default=6,
+        help="Number of evenly spaced sample frames to render per run.",
+    )
+    volume.add_argument(
+        "--extra-frame-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Additional 1-based frame indices to include in the review artifacts.",
+    )
+    volume.add_argument(
+        "--search-width-frac",
+        type=float,
+        default=0.22,
+        help="Fraction of image width to search for nozzle structure around the frame center.",
+    )
+    volume.add_argument(
+        "--search-top-frac",
+        type=float,
+        default=0.08,
+        help="Top search boundary as a fraction of image height.",
+    )
+    volume.add_argument(
+        "--search-bottom-frac",
+        type=float,
+        default=0.30,
+        help="Bottom search boundary as a fraction of image height.",
+    )
+    volume.add_argument(
+        "--blur-sigma",
+        type=float,
+        default=12.0,
+        help="Gaussian blur sigma used to estimate the local background for dark-structure detection.",
+    )
+    volume.add_argument(
+        "--residual-threshold",
+        type=int,
+        default=18,
+        help="Threshold applied to the local dark-structure residual mask.",
+    )
+    volume.add_argument(
+        "--shift-threshold-px",
+        type=float,
+        default=6.0,
+        help="Median jump threshold used to declare a grip-refresh segment boundary.",
+    )
+    volume.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.55,
+        help="Minimum raw confidence needed before a frame is trusted as an anchor for smoothing.",
+    )
+    volume.add_argument(
+        "--roi-width-frac",
+        type=float,
+        default=0.35,
+        help="Fraction of image width to keep around the tracked nozzle x position.",
+    )
+    volume.add_argument(
+        "--roi-top-frac",
+        type=float,
+        default=0.10,
+        help="Top crop boundary as a fraction of image height.",
+    )
+    volume.add_argument(
+        "--roi-bottom-frac",
+        type=float,
+        default=1.0,
+        help="Bottom crop boundary as a fraction of image height.",
+    )
+    volume.add_argument(
+        "--corridor-width-frac",
+        type=float,
+        default=0.70,
+        help="Fraction of the dynamic ROI width to keep around the tracked nozzle x position.",
+    )
+    volume.add_argument(
+        "--nozzle-guard-px",
+        type=int,
+        default=2,
+        help="Extra pixels below the tracked nozzle row before silhouette rows become eligible.",
+    )
+    volume.add_argument(
+        "--min-component-area-px",
+        type=int,
+        default=120,
+        help="Minimum filled connected-component area eligible for selection.",
+    )
+
+    fit = subparsers.add_parser(
+        "fit",
+        help="Build Stage 5 steady-rate fit and middle-extrapolation artifacts.",
+    )
+    fit.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    fit.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output directory. Defaults to the experiment-local analysis directory.",
+    )
+    fit.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to export. May be provided multiple times.",
+    )
+    fit.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Include unmatched run directories when no explicit run ids are supplied.",
+    )
+    fit.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of selected runs to export.",
+    )
+    fit.add_argument(
+        "--sample-count",
+        type=int,
+        default=6,
+        help="Number of evenly spaced sample frames to render per run.",
+    )
+    fit.add_argument(
+        "--extra-frame-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Additional 1-based frame indices to include in the review artifacts.",
+    )
+    fit.add_argument(
+        "--search-width-frac",
+        type=float,
+        default=0.22,
+        help="Fraction of image width to search for nozzle structure around the frame center.",
+    )
+    fit.add_argument(
+        "--search-top-frac",
+        type=float,
+        default=0.08,
+        help="Top search boundary as a fraction of image height.",
+    )
+    fit.add_argument(
+        "--search-bottom-frac",
+        type=float,
+        default=0.30,
+        help="Bottom search boundary as a fraction of image height.",
+    )
+    fit.add_argument(
+        "--blur-sigma",
+        type=float,
+        default=12.0,
+        help="Gaussian blur sigma used to estimate the local background for dark-structure detection.",
+    )
+    fit.add_argument(
+        "--residual-threshold",
+        type=int,
+        default=18,
+        help="Threshold applied to the local dark-structure residual mask.",
+    )
+    fit.add_argument(
+        "--shift-threshold-px",
+        type=float,
+        default=6.0,
+        help="Median jump threshold used to declare a grip-refresh segment boundary.",
+    )
+    fit.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.55,
+        help="Minimum raw confidence needed before a frame is trusted as an anchor for smoothing.",
+    )
+    fit.add_argument(
+        "--roi-width-frac",
+        type=float,
+        default=0.35,
+        help="Fraction of image width to keep around the tracked nozzle x position.",
+    )
+    fit.add_argument(
+        "--roi-top-frac",
+        type=float,
+        default=0.10,
+        help="Top crop boundary as a fraction of image height.",
+    )
+    fit.add_argument(
+        "--roi-bottom-frac",
+        type=float,
+        default=1.0,
+        help="Bottom crop boundary as a fraction of image height.",
+    )
+    fit.add_argument(
+        "--corridor-width-frac",
+        type=float,
+        default=0.70,
+        help="Fraction of the dynamic ROI width to keep around the tracked nozzle x position.",
+    )
+    fit.add_argument(
+        "--nozzle-guard-px",
+        type=int,
+        default=2,
+        help="Extra pixels below the tracked nozzle row before silhouette rows become eligible.",
+    )
+    fit.add_argument(
+        "--min-component-area-px",
+        type=int,
+        default=120,
+        help="Minimum filled connected-component area eligible for selection.",
+    )
+    fit.add_argument(
+        "--near-nozzle-band-top-px",
+        type=int,
+        default=24,
+        help="Top offset below the tracked nozzle for the width band.",
+    )
+    fit.add_argument(
+        "--near-nozzle-band-height-px",
+        type=int,
+        default=40,
+        help="Height of the attached-stream width band below the nozzle.",
+    )
+    fit.add_argument(
+        "--min-band-valid-rows",
+        type=int,
+        default=24,
+        help="Minimum number of attached edge rows required for a valid near-nozzle width sample.",
+    )
+    fit.add_argument(
+        "--width-smooth-window",
+        type=int,
+        default=5,
+        help="Centered rolling-median window used to smooth the width trace.",
+    )
+    fit.add_argument(
+        "--min-steady-frames",
+        type=int,
+        default=8,
+        help="Minimum contiguous trusted frames required for a steady-window fit.",
+    )
+    fit.add_argument(
+        "--steady-width-tol-frac",
+        type=float,
+        default=0.08,
+        help="Maximum allowed width span as a fraction of the steady width plateau.",
+    )
+    fit.add_argument(
+        "--steady-width-tol-px",
+        type=float,
+        default=4.0,
+        help="Minimum absolute width-span tolerance for the steady window.",
+    )
+    fit.add_argument(
+        "--steady-fit-r2-min",
+        type=float,
+        default=0.985,
+        help="Minimum R^2 required for the steady Theil-Sen fit.",
+    )
+    fit.add_argument(
+        "--steady-fit-nrmse-max",
+        type=float,
+        default=0.03,
+        help="Maximum normalized RMSE allowed for the steady Theil-Sen fit.",
+    )
+    fit.add_argument(
+        "--tail-drop-frac",
+        type=float,
+        default=0.08,
+        help="Fractional drop below the steady width plateau that indicates tail onset.",
+    )
+    fit.add_argument(
+        "--tail-persist-frames",
+        type=int,
+        default=3,
+        help="Number of consecutive width-drop frames required to declare tail onset.",
+    )
+
     annotate = subparsers.add_parser(
         "annotate-nozzle",
         help="Launch the offline nozzle-annotation UI.",
@@ -386,6 +824,86 @@ def main(argv=None):
             residual_threshold=int(args.residual_threshold),
             shift_threshold_px=float(args.shift_threshold_px),
             confidence_threshold=float(args.confidence_threshold),
+        )
+    elif args.command == "silhouette":
+        payload = export_stage3_silhouette(
+            args.experiment_root,
+            output_root=args.output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_unmatched=bool(args.include_unmatched),
+            sample_count=int(args.sample_count),
+            extra_frame_indices=list(args.extra_frame_index or []),
+            search_width_frac=float(args.search_width_frac),
+            search_top_frac=float(args.search_top_frac),
+            search_bottom_frac=float(args.search_bottom_frac),
+            blur_sigma=float(args.blur_sigma),
+            residual_threshold=int(args.residual_threshold),
+            shift_threshold_px=float(args.shift_threshold_px),
+            confidence_threshold=float(args.confidence_threshold),
+            roi_width_frac=float(args.roi_width_frac),
+            roi_top_frac=float(args.roi_top_frac),
+            roi_bottom_frac=float(args.roi_bottom_frac),
+            corridor_width_frac=float(args.corridor_width_frac),
+            nozzle_guard_px=int(args.nozzle_guard_px),
+            min_component_area_px=int(args.min_component_area_px),
+        )
+    elif args.command == "volume":
+        payload = export_stage4_volume(
+            args.experiment_root,
+            output_root=args.output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_unmatched=bool(args.include_unmatched),
+            sample_count=int(args.sample_count),
+            extra_frame_indices=list(args.extra_frame_index or []),
+            search_width_frac=float(args.search_width_frac),
+            search_top_frac=float(args.search_top_frac),
+            search_bottom_frac=float(args.search_bottom_frac),
+            blur_sigma=float(args.blur_sigma),
+            residual_threshold=int(args.residual_threshold),
+            shift_threshold_px=float(args.shift_threshold_px),
+            confidence_threshold=float(args.confidence_threshold),
+            roi_width_frac=float(args.roi_width_frac),
+            roi_top_frac=float(args.roi_top_frac),
+            roi_bottom_frac=float(args.roi_bottom_frac),
+            corridor_width_frac=float(args.corridor_width_frac),
+            nozzle_guard_px=int(args.nozzle_guard_px),
+            min_component_area_px=int(args.min_component_area_px),
+        )
+    elif args.command == "fit":
+        payload = export_stage5_fit(
+            args.experiment_root,
+            output_root=args.output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_unmatched=bool(args.include_unmatched),
+            sample_count=int(args.sample_count),
+            extra_frame_indices=list(args.extra_frame_index or []),
+            search_width_frac=float(args.search_width_frac),
+            search_top_frac=float(args.search_top_frac),
+            search_bottom_frac=float(args.search_bottom_frac),
+            blur_sigma=float(args.blur_sigma),
+            residual_threshold=int(args.residual_threshold),
+            shift_threshold_px=float(args.shift_threshold_px),
+            confidence_threshold=float(args.confidence_threshold),
+            roi_width_frac=float(args.roi_width_frac),
+            roi_top_frac=float(args.roi_top_frac),
+            roi_bottom_frac=float(args.roi_bottom_frac),
+            corridor_width_frac=float(args.corridor_width_frac),
+            nozzle_guard_px=int(args.nozzle_guard_px),
+            min_component_area_px=int(args.min_component_area_px),
+            near_nozzle_band_top_px=int(args.near_nozzle_band_top_px),
+            near_nozzle_band_height_px=int(args.near_nozzle_band_height_px),
+            min_band_valid_rows=int(args.min_band_valid_rows),
+            width_smooth_window=int(args.width_smooth_window),
+            min_steady_frames=int(args.min_steady_frames),
+            steady_width_tol_frac=float(args.steady_width_tol_frac),
+            steady_width_tol_px=float(args.steady_width_tol_px),
+            steady_fit_r2_min=float(args.steady_fit_r2_min),
+            steady_fit_nrmse_max=float(args.steady_fit_nrmse_max),
+            tail_drop_frac=float(args.tail_drop_frac),
+            tail_persist_frames=int(args.tail_persist_frames),
         )
     elif args.command == "annotate-nozzle":
         payload = launch_nozzle_annotation_session(

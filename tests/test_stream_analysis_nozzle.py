@@ -2112,6 +2112,121 @@ def test_apply_tracking_prefers_stable_visible_prior_fill_for_short_gap():
     assert tracked_rows[2]["used_segment_fill"] is True
 
 
+def test_apply_tracking_allows_nearby_local_raw_fallback_without_stable_prior():
+    raw_rows = [
+        {
+            "capture_index": 1,
+            "raw_nozzle_x_px": 180.0,
+            "raw_nozzle_y_px": 205.0,
+            "raw_confidence": 0.05,
+            "raw_mode": "attached_black_droplet_center",
+            "compact_droplet_score": 0.05,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.30,
+            "visible_line_acquisition_search_center_y_px": 200.0,
+        },
+    ]
+
+    tracked_rows, _boundaries = mod._apply_tracking(
+        raw_rows,
+        shift_threshold_px=20.0,
+        confidence_threshold=0.55,
+    )
+
+    assert tracked_rows[0]["final_mode"] == "segment_fill"
+    assert abs(float(tracked_rows[0]["tracked_nozzle_y_px"]) - 205.0) <= 1.0
+    assert tracked_rows[0]["transition_fill_source"] == "local_raw_fallback"
+    assert bool(tracked_rows[0]["local_raw_fallback_rejected"]) is False
+    assert abs(float(tracked_rows[0]["local_raw_fallback_reference_y_px"]) - 200.0) <= 1.0
+
+
+def test_apply_tracking_rejects_far_local_raw_fallback_and_uses_continuity_hold():
+    raw_rows = [
+        {
+            "capture_index": 1,
+            "raw_nozzle_x_px": 180.0,
+            "raw_nozzle_y_px": 200.0,
+            "raw_confidence": 0.82,
+            "raw_mode": "attached_core_separation",
+            "neck_score": 0.82,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.82,
+        },
+        {
+            "capture_index": 2,
+            "raw_nozzle_x_px": 181.0,
+            "raw_nozzle_y_px": 240.0,
+            "raw_confidence": 0.05,
+            "raw_mode": "attached_black_droplet_center",
+            "compact_droplet_score": 0.05,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.30,
+            "visible_line_acquisition_search_center_y_px": 200.0,
+        },
+    ]
+
+    tracked_rows, _boundaries = mod._apply_tracking(
+        raw_rows,
+        shift_threshold_px=20.0,
+        confidence_threshold=0.55,
+    )
+
+    assert bool(tracked_rows[1]["local_raw_fallback_rejected"]) is True
+    assert tracked_rows[1]["transition_fill_source"] == "attached_continuity_hold"
+    assert bool(tracked_rows[1]["attached_continuity_hold_used"]) is True
+    assert int(tracked_rows[1]["attached_continuity_hold_count"]) == 1
+    assert abs(float(tracked_rows[1]["tracked_nozzle_y_px"]) - 200.0) <= 1.0
+
+
+def test_apply_tracking_bypasses_attached_cap_for_strong_reacquisition_after_fallback():
+    raw_rows = [
+        {
+            "capture_index": 1,
+            "raw_nozzle_x_px": 180.0,
+            "raw_nozzle_y_px": 200.0,
+            "raw_confidence": 0.82,
+            "raw_mode": "attached_core_separation",
+            "neck_score": 0.82,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.82,
+        },
+        {
+            "capture_index": 2,
+            "raw_nozzle_x_px": 180.0,
+            "raw_nozzle_y_px": 206.0,
+            "raw_confidence": 0.05,
+            "raw_mode": "attached_black_droplet_center",
+            "compact_droplet_score": 0.05,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.30,
+            "visible_line_acquisition_search_center_y_px": 200.0,
+        },
+        {
+            "capture_index": 3,
+            "raw_nozzle_x_px": 180.0,
+            "raw_nozzle_y_px": 250.0,
+            "raw_confidence": 0.95,
+            "raw_mode": "visible_nozzle_line",
+            "line_band_score": 0.95,
+            "stable_visible_line_y_px": None,
+            "attached_support_score": 0.95,
+        },
+    ]
+
+    tracked_rows, _boundaries = mod._apply_tracking(
+        raw_rows,
+        shift_threshold_px=20.0,
+        confidence_threshold=0.55,
+    )
+
+    assert tracked_rows[1]["transition_fill_source"] == "local_raw_fallback"
+    assert tracked_rows[2]["final_mode"] == "visible_nozzle_line"
+    assert abs(float(tracked_rows[2]["tracked_nozzle_y_px"]) - 250.0) <= 1.0
+    assert bool(tracked_rows[2]["attached_tracking_cap_applied"]) is False
+    assert bool(tracked_rows[2]["attached_tracking_cap_bypassed_for_reacquisition"]) is True
+    assert tracked_rows[2]["attached_tracking_cap_reference_source"] in (None, "")
+
+
 def test_apply_tracking_uses_transition_fill_and_rejects_reflection_anchor():
     raw_rows = [
         {

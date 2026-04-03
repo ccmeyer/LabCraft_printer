@@ -154,6 +154,13 @@ TRACK_COLUMNS = [
     "transition_fill_used",
     "transition_fill_source",
     "anchor_rejected_as_reflection",
+    "local_raw_fallback_rejected",
+    "local_raw_fallback_reference_y_px",
+    "attached_continuity_hold_used",
+    "attached_continuity_hold_count",
+    "attached_tracking_cap_applied",
+    "attached_tracking_cap_reference_source",
+    "attached_tracking_cap_bypassed_for_reacquisition",
     "sample_frame",
 ]
 
@@ -3773,6 +3780,46 @@ def _detect_run_raw_rows(
     return raw_rows, frame_diagnostics
 
 
+def _build_stage2_run(
+    run_id: str,
+    frame_rows: list[dict],
+    *,
+    search_width_frac: float,
+    search_top_frac: float,
+    search_bottom_frac: float,
+    blur_sigma: float,
+    residual_scale: float,
+    residual_threshold: int,
+    min_area_px: int,
+    top_band_slack_px: int,
+    shift_threshold_px: float,
+    confidence_threshold: float,
+):
+    raw_rows, frame_diagnostics = _detect_run_raw_rows(
+        run_id,
+        frame_rows,
+        search_width_frac=search_width_frac,
+        search_top_frac=search_top_frac,
+        search_bottom_frac=search_bottom_frac,
+        blur_sigma=blur_sigma,
+        residual_scale=residual_scale,
+        residual_threshold=residual_threshold,
+        min_area_px=min_area_px,
+        top_band_slack_px=top_band_slack_px,
+    )
+    tracked_rows, shift_events = _apply_tracking(
+        raw_rows,
+        shift_threshold_px=shift_threshold_px,
+        confidence_threshold=confidence_threshold,
+    )
+    return {
+        "raw_rows": raw_rows,
+        "tracked_rows": tracked_rows,
+        "shift_events": shift_events,
+        "frame_diagnostics": frame_diagnostics,
+    }
+
+
 def _row_mode_family(row: dict):
     raw_mode = _clean_text(row.get("raw_mode")) or "no_signal"
     if raw_mode in ATTACHED_MODES:
@@ -3959,11 +4006,12 @@ def _apply_tracking(
     ]
 
     final_rows = []
-    last_tracked_by_family: dict[str, tuple[float, float]] = {}
+    last_tracked_by_family: dict[str, dict[str, object]] = {}
     recent_raw_modes: list[str] = []
     attached_support_low = float(MODE_SCORE_THRESHOLDS["attached_support_low"])
     protected_visible_fill_count = 0
     transition_fill_count = 0
+    attached_continuity_hold_count = 0
     for index, row in enumerate(raw_rows):
         raw_mode = _clean_text(row.get("raw_mode")) or "no_signal"
         raw_confidence = float(row.get("raw_confidence") or 0.0)
@@ -4004,21 +4052,50 @@ def _apply_tracking(
         tracked_confidence = raw_confidence
         transition_fill_used = False
         transition_fill_source = None
+        local_raw_fallback_rejected = False
+        local_raw_fallback_reference_y_px = None
+        attached_continuity_hold_used = False
+        attached_tracking_cap_applied = False
+        attached_tracking_cap_reference_source = None
+        attached_tracking_cap_bypassed_for_reacquisition = False
 
         if keep_raw:
             tracked_x = float(row["raw_nozzle_x_px"])
             tracked_y = float(row["raw_nozzle_y_px"])
+            strong_reacquisition = bool(
+                family == "attached"
+                and raw_mode in {"visible_nozzle_line", "attached_core_separation"}
+                and raw_score >= max(float(mode_threshold) + 0.10, 0.85)
+            )
             if (
                 family == "attached"
                 and not bool(row.get("shift_event_before"))
                 and "attached" in last_tracked_by_family
             ):
-                _last_x, last_y = last_tracked_by_family["attached"]
-                delta_y = float(tracked_y - last_y)
-                if abs(delta_y) > 12.0:
-                    tracked_y = float(last_y + (12.0 * np.sign(delta_y)))
+                last_attached_meta = last_tracked_by_family["attached"]
+                last_y = float(last_attached_meta["y"])
+                last_source = str(last_attached_meta.get("source") or "unknown")
+                last_mode = _clean_text(last_attached_meta.get("raw_mode")) or "no_signal"
+                last_score = float(last_attached_meta.get("raw_score") or 0.0)
+                cap_reference_allowed = bool(
+                    bool(last_attached_meta.get("keep_raw"))
+                    and last_source == "raw_keep"
+                    and (
+                        last_mode in {"visible_nozzle_line", "attached_core_separation"}
+                        or (last_mode == "attached_black_droplet_center" and last_score >= 0.35)
+                    )
+                )
+                if strong_reacquisition:
+                    attached_tracking_cap_bypassed_for_reacquisition = True
+                elif cap_reference_allowed:
+                    delta_y = float(tracked_y - last_y)
+                    if abs(delta_y) > 12.0:
+                        tracked_y = float(last_y + (12.0 * np.sign(delta_y)))
+                        attached_tracking_cap_applied = True
+                    attached_tracking_cap_reference_source = last_mode
             protected_visible_fill_count = 0
             transition_fill_count = 0
+            attached_continuity_hold_count = 0
         else:
             used_visible_prior_fill = False
             used_transition_fill = False
@@ -4033,7 +4110,7 @@ def _apply_tracking(
                 if row.get("raw_nozzle_x_px") is not None:
                     tracked_x = float(row["raw_nozzle_x_px"])
                 elif "attached" in last_tracked_by_family:
-                    tracked_x = float(last_tracked_by_family["attached"][0])
+                    tracked_x = float(last_tracked_by_family["attached"]["x"])
                 used_visible_prior_fill = tracked_x is not None and tracked_y is not None
                 if used_visible_prior_fill:
                     protected_visible_fill_count = int(protected_visible_fill_count + 1)
@@ -4050,9 +4127,9 @@ def _apply_tracking(
                     if row.get("raw_nozzle_x_px") is not None:
                         tracked_x = float(row["raw_nozzle_x_px"])
                     elif "detached" in last_tracked_by_family:
-                        tracked_x = float(last_tracked_by_family["detached"][0])
+                        tracked_x = float(last_tracked_by_family["detached"]["x"])
                     elif "attached" in last_tracked_by_family:
-                        tracked_x = float(last_tracked_by_family["attached"][0])
+                        tracked_x = float(last_tracked_by_family["attached"]["x"])
                     used_transition_fill = tracked_x is not None and tracked_y is not None
                     if used_transition_fill:
                         transition_fill_count = int(transition_fill_count + 1)
@@ -4067,10 +4144,42 @@ def _apply_tracking(
                         and row.get("raw_nozzle_x_px") is not None
                         and row.get("raw_nozzle_y_px") is not None
                     ):
-                        tracked_x = float(row["raw_nozzle_x_px"])
-                        tracked_y = float(row["raw_nozzle_y_px"])
-                        transition_fill_source = "local_raw_fallback"
+                        fallback_reference_y = None
+                        if "attached" in last_tracked_by_family:
+                            fallback_reference_y = float(last_tracked_by_family["attached"]["y"])
+                        elif row.get("visible_line_acquisition_search_center_y_px") not in (None, ""):
+                            fallback_reference_y = float(row["visible_line_acquisition_search_center_y_px"])
+                        elif row.get("visible_line_acquisition_upper_bound_y_px") not in (None, ""):
+                            fallback_reference_y = float(row["visible_line_acquisition_upper_bound_y_px"])
+                        local_raw_fallback_reference_y_px = fallback_reference_y
+                        fallback_allowed = bool(raw_score >= 0.20)
+                        if (
+                            not fallback_allowed
+                            and fallback_reference_y is not None
+                            and abs(float(row["raw_nozzle_y_px"]) - float(fallback_reference_y)) <= 8.0
+                        ):
+                            fallback_allowed = True
+                        if fallback_allowed:
+                            tracked_x = float(row["raw_nozzle_x_px"])
+                            tracked_y = float(row["raw_nozzle_y_px"])
+                            transition_fill_source = "local_raw_fallback"
+                            attached_continuity_hold_count = 0
+                        else:
+                            local_raw_fallback_rejected = True
+                            if "attached" in last_tracked_by_family and attached_continuity_hold_count < 2:
+                                tracked_y = float(last_tracked_by_family["attached"]["y"])
+                                if row.get("raw_nozzle_x_px") is not None:
+                                    tracked_x = float(row["raw_nozzle_x_px"])
+                                else:
+                                    tracked_x = float(last_tracked_by_family["attached"]["x"])
+                                attached_continuity_hold_used = tracked_x is not None and tracked_y is not None
+                                if attached_continuity_hold_used:
+                                    attached_continuity_hold_count = int(attached_continuity_hold_count + 1)
+                                    transition_fill_source = "attached_continuity_hold"
+                            else:
+                                attached_continuity_hold_count = 0
                     else:
+                        attached_continuity_hold_count = 0
                         tracked_x, tracked_y = anchor_x, anchor_y
                         if tracked_x is not None and tracked_y is not None:
                             transition_fill_source = (
@@ -4114,9 +4223,24 @@ def _apply_tracking(
         final_row["transition_fill_used"] = bool(transition_fill_used)
         final_row["transition_fill_source"] = transition_fill_source
         final_row["anchor_rejected_as_reflection"] = bool(anchor_rejected_as_reflection)
+        final_row["local_raw_fallback_rejected"] = bool(local_raw_fallback_rejected)
+        final_row["local_raw_fallback_reference_y_px"] = local_raw_fallback_reference_y_px
+        final_row["attached_continuity_hold_used"] = bool(attached_continuity_hold_used)
+        final_row["attached_continuity_hold_count"] = int(attached_continuity_hold_count)
+        final_row["attached_tracking_cap_applied"] = bool(attached_tracking_cap_applied)
+        final_row["attached_tracking_cap_reference_source"] = attached_tracking_cap_reference_source
+        final_row["attached_tracking_cap_bypassed_for_reacquisition"] = bool(attached_tracking_cap_bypassed_for_reacquisition)
         final_rows.append(final_row)
         if tracked_x is not None and tracked_y is not None and family in {"attached", "detached"}:
-            last_tracked_by_family[family] = (float(tracked_x), float(tracked_y))
+            last_tracked_by_family[family] = {
+                "x": float(tracked_x),
+                "y": float(tracked_y),
+                "source": "raw_keep" if keep_raw else (transition_fill_source or "segment_fill"),
+                "raw_mode": raw_mode,
+                "raw_score": float(raw_score),
+                "keep_raw": bool(keep_raw),
+                "final_mode": final_mode,
+            }
         recent_raw_modes.append(raw_mode)
 
     return final_rows, boundaries
@@ -4498,7 +4622,14 @@ def _build_sample_panel(gray: np.ndarray, diagnostics: dict, track_row: dict):
             f"far_reject={bool(track_row.get('only_nozzle_rejected_far_from_prior'))} "
             f"low_reject={bool(track_row.get('only_nozzle_rejected_lower_reflection'))} "
             f"anchor_low={bool(track_row.get('only_nozzle_anchor_rejected_as_low_reflection'))} "
-            f"fill_src={track_row.get('transition_fill_source') or 'none'}"
+            f"fill_src={track_row.get('transition_fill_source') or 'none'} "
+            f"fallback_reject={bool(track_row.get('local_raw_fallback_rejected'))} "
+            f"fallback_ref={('n/a' if track_row.get('local_raw_fallback_reference_y_px') is None else format(float(track_row.get('local_raw_fallback_reference_y_px')), '.1f'))} "
+            f"hold={bool(track_row.get('attached_continuity_hold_used'))}/"
+            f"{int(track_row.get('attached_continuity_hold_count') or 0)} "
+            f"cap={bool(track_row.get('attached_tracking_cap_applied'))} "
+            f"cap_src={track_row.get('attached_tracking_cap_reference_source') or 'n/a'} "
+            f"cap_bypass={bool(track_row.get('attached_tracking_cap_bypassed_for_reacquisition'))}"
         ),
     )
 
@@ -4705,6 +4836,13 @@ def _raw_track_row(run_id: str, frame_row: dict, diagnostics: dict):
         "transition_fill_used": False,
         "transition_fill_source": None,
         "anchor_rejected_as_reflection": False,
+        "local_raw_fallback_rejected": False,
+        "local_raw_fallback_reference_y_px": None,
+        "attached_continuity_hold_used": False,
+        "attached_continuity_hold_count": 0,
+        "attached_tracking_cap_applied": False,
+        "attached_tracking_cap_reference_source": None,
+        "attached_tracking_cap_bypassed_for_reacquisition": False,
         "sample_frame": False,
     }
 
@@ -4746,7 +4884,7 @@ def export_stage2_nozzle(
         if not frame_rows:
             raise ValueError(f"No frame index rows available for run: {run_id}")
 
-        raw_rows, frame_diagnostics = _detect_run_raw_rows(
+        stage2_run = _build_stage2_run(
             run_id,
             frame_rows,
             search_width_frac=search_width_frac,
@@ -4757,13 +4895,12 @@ def export_stage2_nozzle(
             residual_threshold=residual_threshold,
             min_area_px=min_area_px,
             top_band_slack_px=top_band_slack_px,
-        )
-
-        tracked_rows, shift_events = _apply_tracking(
-            raw_rows,
             shift_threshold_px=shift_threshold_px,
             confidence_threshold=confidence_threshold,
         )
+        tracked_rows = list(stage2_run["tracked_rows"])
+        shift_events = list(stage2_run["shift_events"])
+        frame_diagnostics = list(stage2_run["frame_diagnostics"])
         sample_indices = set(
             _sample_indices(
                 len(frame_rows),
