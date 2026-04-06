@@ -9,6 +9,7 @@ from tools.stream_analysis import annotations as annotation_mod
 from tools.stream_analysis import fit as fit_mod
 from tools.stream_analysis import nozzle as nozzle_mod
 from tools.stream_analysis import silhouette as silhouette_mod
+from tools.stream_analysis import summary as summary_mod
 from tools.stream_analysis import volume as volume_mod
 from tools.stream_analysis import cli
 from tests.test_stream_analysis_baseline import _make_baseline_experiment
@@ -315,3 +316,259 @@ def test_cli_fit_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
     payload = json.loads(capsys.readouterr().out)
     assert payload["selected_run_count"] == 1
     assert payload["run_ids"] == [run_dir.name]
+
+
+def test_cli_fit_cache_main_dispatches_and_prints_payload(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir, _unmatched_run = _make_experiment(tmp_path)
+    captured = {}
+
+    def _fake_export_stage5_review_cache(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {
+            "cache_root": str(tmp_path / "cache"),
+            "selected_run_count": 1,
+            "cached_run_count": 1,
+            "runs": [{"run_id": run_dir.name}],
+        }
+
+    monkeypatch.setattr(cli, "export_stage5_review_cache", _fake_export_stage5_review_cache)
+
+    rc = cli.main(
+        [
+            "fit-cache",
+            "--experiment-root",
+            str(exp_dir),
+            "--run-id",
+            run_dir.name,
+            "--rebuild",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["experiment_root"] == str(exp_dir)
+    assert captured["kwargs"]["run_ids"] == [run_dir.name]
+    assert captured["kwargs"]["rebuild"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cached_run_count"] == 1
+
+
+def test_cli_fit_review_main_dispatches_and_prints_payload(tmp_path, capsys, monkeypatch):
+    captured = {}
+
+    def _fake_export_stage5_cached_review(cache_root, **kwargs):
+        captured["cache_root"] = cache_root
+        captured["kwargs"] = kwargs
+        return {
+            "cache_root": str(cache_root),
+            "selected_run_count": 1,
+            "analyzed_run_count": 1,
+        }
+
+    monkeypatch.setattr(cli, "export_stage5_cached_review", _fake_export_stage5_cached_review)
+
+    rc = cli.main(
+        [
+            "fit-review",
+            "--cache-root",
+            str(tmp_path / "cache"),
+            "--width-smooth-window",
+            "7",
+            "--steady-fit-mode",
+            "recompute",
+            "--steady-fit-exclude-last-trusted-frames",
+            "3",
+            "--flow-fit-backfill-max-frames",
+            "4",
+            "--flow-fit-backfill-width-delta-px",
+            "6.5",
+            "--flow-fit-backfill-monotonic-slack-px",
+            "0.5",
+            "--tail-start-mode",
+            "descriptor-unified",
+            "--tail-direct-target-drop-to-threshold-frac",
+            "0.18",
+            "--tail-direct-target-peak-lead-us",
+            "210",
+            "--tail-direct-target-shrink-rate-ratio",
+            "0.11",
+            "--tail-shoulder-target-drop-to-threshold-frac",
+            "0.20",
+            "--tail-shoulder-target-peak-lead-us",
+            "250",
+            "--tail-shoulder-target-shrink-rate-ratio",
+            "0.10",
+            "--tail-score-drop-weight",
+            "2.5",
+            "--tail-score-peak-lead-weight",
+            "1.25",
+            "--tail-score-shrink-rate-weight",
+            "0.8",
+            "--tail-score-drop-scale",
+            "0.07",
+            "--tail-score-peak-lead-scale-us",
+            "55",
+            "--tail-score-shrink-rate-scale",
+            "0.03",
+            "--tail-unified-band-drop-min",
+            "0.16",
+            "--tail-unified-band-drop-max",
+            "0.34",
+            "--tail-unified-band-peak-lead-min-us",
+            "170",
+            "--tail-unified-band-peak-lead-max-us",
+            "310",
+            "--tail-unified-band-shrink-rate-ratio-min",
+            "0.06",
+            "--tail-unified-band-shrink-rate-ratio-max",
+            "0.17",
+            "--tail-unified-target-drop-to-threshold-frac",
+            "0.20",
+            "--tail-unified-target-peak-lead-us",
+            "240",
+            "--tail-unified-target-shrink-rate-ratio",
+            "0.12",
+            "--volume-uncertainty-sample-count",
+            "2048",
+            "--volume-uncertainty-seed",
+            "11",
+            "--tail-uncertainty-score-tolerance",
+            "1.25",
+            "--tail-drop-frac",
+            "0.05",
+            "--tail-persist-frames",
+            "4",
+            "--include-suspect-gravimetric",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["cache_root"] == str(tmp_path / "cache")
+    assert captured["kwargs"]["width_smooth_window"] == 7
+    assert captured["kwargs"]["steady_fit_mode"] == "recompute"
+    assert captured["kwargs"]["steady_fit_exclude_last_trusted_frames"] == 3
+    assert captured["kwargs"]["flow_fit_backfill_max_frames"] == 4
+    assert captured["kwargs"]["flow_fit_backfill_width_delta_px"] == 6.5
+    assert captured["kwargs"]["flow_fit_backfill_monotonic_slack_px"] == 0.5
+    assert captured["kwargs"]["tail_start_mode"] == "descriptor-unified"
+    assert captured["kwargs"]["tail_direct_target_drop_to_threshold_frac"] == 0.18
+    assert captured["kwargs"]["tail_direct_target_peak_lead_us"] == 210.0
+    assert captured["kwargs"]["tail_direct_target_shrink_rate_ratio"] == 0.11
+    assert captured["kwargs"]["tail_shoulder_target_drop_to_threshold_frac"] == 0.20
+    assert captured["kwargs"]["tail_shoulder_target_peak_lead_us"] == 250.0
+    assert captured["kwargs"]["tail_shoulder_target_shrink_rate_ratio"] == 0.10
+    assert captured["kwargs"]["tail_score_drop_weight"] == 2.5
+    assert captured["kwargs"]["tail_score_peak_lead_weight"] == 1.25
+    assert captured["kwargs"]["tail_score_shrink_rate_weight"] == 0.8
+    assert captured["kwargs"]["tail_score_drop_scale"] == 0.07
+    assert captured["kwargs"]["tail_score_peak_lead_scale_us"] == 55.0
+    assert captured["kwargs"]["tail_score_shrink_rate_scale"] == 0.03
+    assert captured["kwargs"]["tail_unified_band_drop_min"] == 0.16
+    assert captured["kwargs"]["tail_unified_band_drop_max"] == 0.34
+    assert captured["kwargs"]["tail_unified_band_peak_lead_min_us"] == 170.0
+    assert captured["kwargs"]["tail_unified_band_peak_lead_max_us"] == 310.0
+    assert captured["kwargs"]["tail_unified_band_shrink_rate_ratio_min"] == 0.06
+    assert captured["kwargs"]["tail_unified_band_shrink_rate_ratio_max"] == 0.17
+    assert captured["kwargs"]["tail_unified_target_drop_to_threshold_frac"] == 0.20
+    assert captured["kwargs"]["tail_unified_target_peak_lead_us"] == 240.0
+    assert captured["kwargs"]["tail_unified_target_shrink_rate_ratio"] == 0.12
+    assert captured["kwargs"]["volume_uncertainty_sample_count"] == 2048
+    assert captured["kwargs"]["volume_uncertainty_seed"] == 11
+    assert captured["kwargs"]["tail_uncertainty_score_tolerance"] == 1.25
+    assert captured["kwargs"]["tail_drop_frac"] == 0.05
+    assert captured["kwargs"]["tail_persist_frames"] == 4
+    assert captured["kwargs"]["include_suspect_gravimetric"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["analyzed_run_count"] == 1
+
+
+def test_cli_summary_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+
+    def _fake_stage5_run(run_id: str, frame_rows: list[dict], **_kwargs):
+        return {
+            "summary": {
+                "steady_fit_status": "ok",
+                "steady_start_capture_index": 10,
+                "steady_end_capture_index": 20,
+                "steady_rate_nl_per_us": 0.02,
+                "steady_r2": 0.998,
+                "steady_nrmse": 0.01,
+                "steady_width_plateau_px": 74.0,
+                "tail_confirmation_capture_index": 66,
+                "tail_confirmation_delay_from_emergence_us": 3300,
+                "tail_detection_mode": "confirmed_persistent",
+                "tail_start_selection_mode": "shoulder_adjusted",
+                "tail_shoulder_end_capture_index": 68,
+                "tail_shoulder_end_delay_from_emergence_us": 3400,
+                "tail_start_capture_index": 70,
+                "tail_start_delay_from_emergence_us": 3500,
+                "tail_onset_status": "ok",
+                "trusted_visible_volume_nl": 30.0,
+                "middle_extrapolated_volume_nl": 40.0,
+                "partial_total_without_tail_nl": 70.0,
+                "tail_volume_nl": None,
+                "middle_extrapolation_status": "ok",
+                "final_total_status": "tail_pending",
+            },
+            "phase_boundaries": {
+                "steady_start_delay_from_emergence_us": 500,
+                "steady_end_delay_from_emergence_us": 1000,
+                "first_untrusted_capture_index": 25,
+                "first_untrusted_delay_from_emergence_us": 1250,
+                "tail_confirmation_capture_index": 66,
+                "tail_confirmation_delay_from_emergence_us": 3300,
+                "tail_detection_mode": "confirmed_persistent",
+                "tail_start_selection_mode": "shoulder_adjusted",
+                "tail_shoulder_end_capture_index": 68,
+                "tail_shoulder_end_delay_from_emergence_us": 3400,
+                "tail_start_capture_index": 70,
+                "tail_start_delay_from_emergence_us": 3500,
+            },
+            "steady_fit_payload": {
+                "run_id": run_id,
+                "steady_fit_status": "ok",
+            },
+            "middle_payload": {
+                "run_id": run_id,
+                "tail_confirmation_capture_index": 66,
+                "tail_confirmation_delay_from_emergence_us": 3300,
+                "tail_detection_mode": "confirmed_persistent",
+                "tail_start_selection_mode": "shoulder_adjusted",
+                "tail_shoulder_end_capture_index": 68,
+                "tail_shoulder_end_delay_from_emergence_us": 3400,
+                "middle_extrapolation_status": "ok",
+            },
+            "stage4_run": {
+                "fov_report": {
+                    "first_untrusted_capture_index": 25,
+                    "first_fov_exit_delay_from_emergence_us": 1250,
+                    "trigger_components": [],
+                }
+            },
+        }
+
+    monkeypatch.setattr(summary_mod.fit_mod, "_build_stage5_run", _fake_stage5_run)
+
+    rc = cli.main(
+        [
+            "summary",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "3",
+        ]
+    )
+
+    assert rc == 0
+    output_root = Path(exp_dir) / "analysis" / "stream_characterization"
+    assert (output_root / "experiment_summary.csv").exists()
+    assert (output_root / "condition_summary.csv").exists()
+    assert (output_root / "summary_progress.json").exists()
+    assert (output_root / "summary_manifest.json").exists()
+    stage_dir = output_root / "runs" / run_dir.name / "stage_06_summary"
+    assert (stage_dir / "run_summary.json").exists()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
+    assert payload["analyzed_run_count"] == 1

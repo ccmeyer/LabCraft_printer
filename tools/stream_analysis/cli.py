@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from tools.stream_analysis import fit as fit_mod
 from tools.stream_analysis.annotations import (
     diagnose_nozzle_candidates,
     evaluate_nozzle_annotations,
@@ -11,7 +12,12 @@ from tools.stream_analysis.baseline import export_stage1_baseline
 from tools.stream_analysis.dataset import _print_json, export_stage0_inventory
 from tools.stream_analysis.fit import export_stage5_fit
 from tools.stream_analysis.nozzle import export_stage2_nozzle
+from tools.stream_analysis.review_cache import (
+    export_stage5_cached_review,
+    export_stage5_review_cache,
+)
 from tools.stream_analysis.silhouette import export_stage3_silhouette
+from tools.stream_analysis.summary import export_stage6_summary
 from tools.stream_analysis.volume import export_stage4_volume
 
 
@@ -644,6 +650,476 @@ def build_parser():
         help="Number of consecutive width-drop frames required to declare tail onset.",
     )
 
+    fit_cache = subparsers.add_parser(
+        "fit-cache",
+        help="Freeze Stage 5 review inputs so tail-start experiments can rerun from cache.",
+    )
+    fit_cache.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    fit_cache.add_argument(
+        "--cache-root",
+        default="",
+        help="Optional cache directory. Defaults to an experiment-local Stage 5 review cache directory.",
+    )
+    fit_cache.add_argument(
+        "--source-output-root",
+        default="",
+        help="Optional analysis output root to import existing Stage 5 artifacts from before falling back to raw rebuilds.",
+    )
+    fit_cache.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to cache. May be provided multiple times.",
+    )
+    fit_cache.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Include unmatched run directories when no explicit run ids are supplied.",
+    )
+    fit_cache.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of selected runs to cache.",
+    )
+    fit_cache.add_argument(
+        "--refresh-missing",
+        action="store_true",
+        help="Refresh only runs that do not already have valid cache entries.",
+    )
+    fit_cache.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Rebuild selected cache entries even when valid cached inputs already exist.",
+    )
+
+    fit_review = subparsers.add_parser(
+        "fit-review",
+        help="Recompute Stage 5 tail-review artifacts from frozen cache inputs.",
+    )
+    fit_review.add_argument(
+        "--cache-root",
+        required=True,
+        help="Stage 5 review cache directory produced by fit-cache.",
+    )
+    fit_review.add_argument(
+        "--output-root",
+        default="",
+        help="Optional review output directory. Defaults to a sibling Stage 5 review directory next to the cache.",
+    )
+    fit_review.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to review. May be provided multiple times.",
+    )
+    fit_review.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of cached runs to review.",
+    )
+    fit_review.add_argument(
+        "--include-suspect-gravimetric",
+        action="store_true",
+        help="Include suspect gravimetric reference runs in experiment-level plots and condition summaries.",
+    )
+    fit_review.add_argument(
+        "--width-smooth-window",
+        type=int,
+        default=5,
+        help="Centered rolling-median window used to smooth the cached width trace.",
+    )
+    fit_review.add_argument(
+        "--steady-fit-mode",
+        choices=["frozen", "recompute"],
+        default="frozen",
+        help="Whether to replay the frozen Stage 5 steady fit or recompute it from the first plateau seed with optional pre-plateau backfill through the pre-exit cached V(t) points.",
+    )
+    fit_review.add_argument(
+        "--steady-fit-exclude-last-trusted-frames",
+        type=int,
+        default=2,
+        help="When recomputing the steady fit, exclude this many trusted frames immediately before FOV exit.",
+    )
+    fit_review.add_argument(
+        "--flow-fit-backfill-max-frames",
+        type=int,
+        default=3,
+        help="When recomputing the steady fit, allow up to this many earlier trusted points to be backfilled ahead of the plateau seed for the flow-fit window.",
+    )
+    fit_review.add_argument(
+        "--flow-fit-backfill-width-delta-px",
+        type=float,
+        default=8.0,
+        help="Maximum smoothed-width overshoot above the plateau allowed for an earlier backfilled flow-fit point.",
+    )
+    fit_review.add_argument(
+        "--flow-fit-backfill-monotonic-slack-px",
+        type=float,
+        default=0.75,
+        help="Maximum amount an earlier backfilled point may be narrower than the next retained point while still counting as settling toward the plateau.",
+    )
+    fit_review.add_argument(
+        "--tail-drop-frac",
+        type=float,
+        default=0.08,
+        help="Fractional drop below the frozen steady width plateau that indicates tail onset.",
+    )
+    fit_review.add_argument(
+        "--tail-persist-frames",
+        type=int,
+        default=3,
+        help="Number of consecutive width-drop frames required to declare tail onset.",
+    )
+    fit_review.add_argument(
+        "--tail-start-mode",
+        choices=[
+            fit_mod.TAIL_START_MODE_LEGACY,
+            fit_mod.TAIL_START_MODE_DESCRIPTOR_SCORE,
+            fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
+        ],
+        default=fit_mod.TAIL_START_MODE_LEGACY,
+        help="Whether to keep the legacy tail-start anchor, use the existing path-specific descriptor scoring, or use the unified review-side descriptor selector.",
+    )
+    fit_review.add_argument(
+        "--tail-direct-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
+        help="Review-only descriptor-score target for direct-path normalized width-drop-to-threshold fraction.",
+    )
+    fit_review.add_argument(
+        "--tail-direct-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_PEAK_LEAD_US,
+        help="Review-only descriptor-score target for direct-path lead time before the tail shrink-rate peak.",
+    )
+    fit_review.add_argument(
+        "--tail-direct-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
+        help="Review-only descriptor-score target for direct-path shrink-rate ratio relative to the tail-only peak.",
+    )
+    fit_review.add_argument(
+        "--tail-shoulder-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_DROP_TO_THRESHOLD_FRAC,
+        help="Review-only descriptor-score target for shoulder-path normalized width-drop-to-threshold fraction.",
+    )
+    fit_review.add_argument(
+        "--tail-shoulder-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_PEAK_LEAD_US,
+        help="Review-only descriptor-score target for shoulder-path lead time before the tail shrink-rate peak.",
+    )
+    fit_review.add_argument(
+        "--tail-shoulder-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_SHRINK_RATE_RATIO,
+        help="Review-only descriptor-score target for shoulder-path shrink-rate ratio relative to the tail-only peak.",
+    )
+    fit_review.add_argument(
+        "--tail-score-drop-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_DROP_WEIGHT,
+        help="Review-only descriptor-score weight for normalized width-drop-to-threshold distance.",
+    )
+    fit_review.add_argument(
+        "--tail-score-peak-lead-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_PEAK_LEAD_WEIGHT,
+        help="Review-only descriptor-score weight for tail-peak lead-time distance.",
+    )
+    fit_review.add_argument(
+        "--tail-score-shrink-rate-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_SHRINK_RATE_WEIGHT,
+        help="Review-only descriptor-score weight for shrink-rate-ratio distance.",
+    )
+    fit_review.add_argument(
+        "--tail-score-drop-scale",
+        type=float,
+        default=fit_mod.TAIL_SCORE_DROP_SCALE,
+        help="Review-only descriptor-score normalization scale for drop-to-threshold distance.",
+    )
+    fit_review.add_argument(
+        "--tail-score-peak-lead-scale-us",
+        type=float,
+        default=fit_mod.TAIL_SCORE_PEAK_LEAD_SCALE_US,
+        help="Review-only descriptor-score normalization scale for peak-lead distance in microseconds.",
+    )
+    fit_review.add_argument(
+        "--tail-score-shrink-rate-scale",
+        type=float,
+        default=fit_mod.TAIL_SCORE_SHRINK_RATE_SCALE,
+        help="Review-only descriptor-score normalization scale for shrink-rate-ratio distance.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-drop-min",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_DROP_MIN,
+        help="Review-only descriptor-unified minimum normalized width-drop-to-threshold fraction for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-drop-max",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_DROP_MAX,
+        help="Review-only descriptor-unified maximum normalized width-drop-to-threshold fraction for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-peak-lead-min-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MIN_US,
+        help="Review-only descriptor-unified minimum lead time before the tail-only shrink-rate peak for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-peak-lead-max-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MAX_US,
+        help="Review-only descriptor-unified maximum lead time before the tail-only shrink-rate peak for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-shrink-rate-ratio-min",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MIN,
+        help="Review-only descriptor-unified minimum shrink-rate ratio for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-band-shrink-rate-ratio-max",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MAX,
+        help="Review-only descriptor-unified maximum shrink-rate ratio for earliest-in-band selection.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_DROP_TO_THRESHOLD_FRAC,
+        help="Review-only descriptor-unified score-fallback target for normalized width-drop-to-threshold fraction.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_PEAK_LEAD_US,
+        help="Review-only descriptor-unified score-fallback target for lead time before the tail-only shrink-rate peak.",
+    )
+    fit_review.add_argument(
+        "--tail-unified-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_SHRINK_RATE_RATIO,
+        help="Review-only descriptor-unified score-fallback target for shrink-rate ratio relative to the tail-only peak.",
+    )
+    fit_review.add_argument(
+        "--volume-uncertainty-sample-count",
+        type=int,
+        default=fit_mod.VOLUME_UNCERTAINTY_SAMPLE_COUNT,
+        help="Review-only Monte Carlo sample count used for propagated predicted-volume uncertainty.",
+    )
+    fit_review.add_argument(
+        "--volume-uncertainty-seed",
+        type=int,
+        default=fit_mod.VOLUME_UNCERTAINTY_SEED,
+        help="Review-only RNG seed used for propagated predicted-volume uncertainty.",
+    )
+    fit_review.add_argument(
+        "--tail-uncertainty-score-tolerance",
+        type=float,
+        default=fit_mod.TAIL_UNCERTAINTY_SCORE_TOLERANCE,
+        help="When no in-band tail candidates exist, include review-side tail candidates within this score tolerance of the best score in the propagated uncertainty set.",
+    )
+
+    summary = subparsers.add_parser(
+        "summary",
+        help="Build Stage 6 run summaries and gravimetric residual artifacts.",
+    )
+    summary.add_argument(
+        "--experiment-root",
+        required=True,
+        help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    summary.add_argument(
+        "--output-root",
+        default="",
+        help="Optional output directory. Defaults to the experiment-local analysis directory.",
+    )
+    summary.add_argument(
+        "--run-id",
+        action="append",
+        default=[],
+        help="Optional run id to export. May be provided multiple times.",
+    )
+    summary.add_argument(
+        "--include-unmatched",
+        action="store_true",
+        help="Include unmatched run directories when no explicit run ids are supplied.",
+    )
+    summary.add_argument(
+        "--limit-runs",
+        type=int,
+        default=0,
+        help="Optional cap on the number of selected runs to export.",
+    )
+    summary.add_argument(
+        "--sample-count",
+        type=int,
+        default=6,
+        help="Number of evenly spaced sample frames to render per run.",
+    )
+    summary.add_argument(
+        "--extra-frame-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Additional 1-based frame indices to include in the review artifacts.",
+    )
+    summary.add_argument(
+        "--search-width-frac",
+        type=float,
+        default=0.22,
+        help="Fraction of image width to search for nozzle structure around the frame center.",
+    )
+    summary.add_argument(
+        "--search-top-frac",
+        type=float,
+        default=0.08,
+        help="Top search boundary as a fraction of image height.",
+    )
+    summary.add_argument(
+        "--search-bottom-frac",
+        type=float,
+        default=0.30,
+        help="Bottom search boundary as a fraction of image height.",
+    )
+    summary.add_argument(
+        "--blur-sigma",
+        type=float,
+        default=12.0,
+        help="Gaussian blur sigma used to estimate the local background for dark-structure detection.",
+    )
+    summary.add_argument(
+        "--residual-threshold",
+        type=int,
+        default=18,
+        help="Threshold applied to the local dark-structure residual mask.",
+    )
+    summary.add_argument(
+        "--shift-threshold-px",
+        type=float,
+        default=6.0,
+        help="Median jump threshold used to declare a grip-refresh segment boundary.",
+    )
+    summary.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.55,
+        help="Minimum raw confidence needed before a frame is trusted as an anchor for smoothing.",
+    )
+    summary.add_argument(
+        "--roi-width-frac",
+        type=float,
+        default=0.35,
+        help="Fraction of image width to keep around the tracked nozzle x position.",
+    )
+    summary.add_argument(
+        "--roi-top-frac",
+        type=float,
+        default=0.10,
+        help="Top crop boundary as a fraction of image height.",
+    )
+    summary.add_argument(
+        "--roi-bottom-frac",
+        type=float,
+        default=1.0,
+        help="Bottom crop boundary as a fraction of image height.",
+    )
+    summary.add_argument(
+        "--corridor-width-frac",
+        type=float,
+        default=0.70,
+        help="Fraction of the dynamic ROI width to keep around the tracked nozzle x position.",
+    )
+    summary.add_argument(
+        "--nozzle-guard-px",
+        type=int,
+        default=2,
+        help="Extra pixels below the tracked nozzle row before silhouette rows become eligible.",
+    )
+    summary.add_argument(
+        "--min-component-area-px",
+        type=int,
+        default=120,
+        help="Minimum filled connected-component area eligible for selection.",
+    )
+    summary.add_argument(
+        "--near-nozzle-band-top-px",
+        type=int,
+        default=24,
+        help="Top offset below the tracked nozzle for the width band.",
+    )
+    summary.add_argument(
+        "--near-nozzle-band-height-px",
+        type=int,
+        default=40,
+        help="Height of the attached-stream width band below the nozzle.",
+    )
+    summary.add_argument(
+        "--min-band-valid-rows",
+        type=int,
+        default=24,
+        help="Minimum number of attached edge rows required for a valid near-nozzle width sample.",
+    )
+    summary.add_argument(
+        "--width-smooth-window",
+        type=int,
+        default=5,
+        help="Centered rolling-median window used to smooth the width trace.",
+    )
+    summary.add_argument(
+        "--min-steady-frames",
+        type=int,
+        default=8,
+        help="Minimum contiguous trusted frames required for a steady-window fit.",
+    )
+    summary.add_argument(
+        "--steady-width-tol-frac",
+        type=float,
+        default=0.08,
+        help="Maximum allowed width span as a fraction of the steady width plateau.",
+    )
+    summary.add_argument(
+        "--steady-width-tol-px",
+        type=float,
+        default=4.0,
+        help="Minimum absolute width-span tolerance for the steady window.",
+    )
+    summary.add_argument(
+        "--steady-fit-r2-min",
+        type=float,
+        default=0.985,
+        help="Minimum R^2 required for the steady Theil-Sen fit.",
+    )
+    summary.add_argument(
+        "--steady-fit-nrmse-max",
+        type=float,
+        default=0.03,
+        help="Maximum normalized RMSE allowed for the steady Theil-Sen fit.",
+    )
+    summary.add_argument(
+        "--tail-drop-frac",
+        type=float,
+        default=0.08,
+        help="Fractional drop below the steady width plateau that indicates tail onset.",
+    )
+    summary.add_argument(
+        "--tail-persist-frames",
+        type=int,
+        default=3,
+        help="Number of consecutive width-drop frames required to declare tail onset.",
+    )
+
     annotate = subparsers.add_parser(
         "annotate-nozzle",
         help="Launch the offline nozzle-annotation UI.",
@@ -873,6 +1349,114 @@ def main(argv=None):
         )
     elif args.command == "fit":
         payload = export_stage5_fit(
+            args.experiment_root,
+            output_root=args.output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_unmatched=bool(args.include_unmatched),
+            sample_count=int(args.sample_count),
+            extra_frame_indices=list(args.extra_frame_index or []),
+            search_width_frac=float(args.search_width_frac),
+            search_top_frac=float(args.search_top_frac),
+            search_bottom_frac=float(args.search_bottom_frac),
+            blur_sigma=float(args.blur_sigma),
+            residual_threshold=int(args.residual_threshold),
+            shift_threshold_px=float(args.shift_threshold_px),
+            confidence_threshold=float(args.confidence_threshold),
+            roi_width_frac=float(args.roi_width_frac),
+            roi_top_frac=float(args.roi_top_frac),
+            roi_bottom_frac=float(args.roi_bottom_frac),
+            corridor_width_frac=float(args.corridor_width_frac),
+            nozzle_guard_px=int(args.nozzle_guard_px),
+            min_component_area_px=int(args.min_component_area_px),
+            near_nozzle_band_top_px=int(args.near_nozzle_band_top_px),
+            near_nozzle_band_height_px=int(args.near_nozzle_band_height_px),
+            min_band_valid_rows=int(args.min_band_valid_rows),
+            width_smooth_window=int(args.width_smooth_window),
+            min_steady_frames=int(args.min_steady_frames),
+            steady_width_tol_frac=float(args.steady_width_tol_frac),
+            steady_width_tol_px=float(args.steady_width_tol_px),
+            steady_fit_r2_min=float(args.steady_fit_r2_min),
+            steady_fit_nrmse_max=float(args.steady_fit_nrmse_max),
+            tail_drop_frac=float(args.tail_drop_frac),
+            tail_persist_frames=int(args.tail_persist_frames),
+        )
+    elif args.command == "fit-cache":
+        payload = export_stage5_review_cache(
+            args.experiment_root,
+            cache_root=args.cache_root or None,
+            source_output_root=args.source_output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_unmatched=bool(args.include_unmatched),
+            refresh_missing=bool(args.refresh_missing),
+            rebuild=bool(args.rebuild),
+        )
+    elif args.command == "fit-review":
+        payload = export_stage5_cached_review(
+            args.cache_root,
+            output_root=args.output_root or None,
+            run_ids=args.run_id or None,
+            limit_runs=(args.limit_runs or None),
+            include_suspect_gravimetric=bool(args.include_suspect_gravimetric),
+            width_smooth_window=int(args.width_smooth_window),
+            steady_fit_mode=str(args.steady_fit_mode),
+            steady_fit_exclude_last_trusted_frames=int(
+                args.steady_fit_exclude_last_trusted_frames
+            ),
+            flow_fit_backfill_max_frames=int(args.flow_fit_backfill_max_frames),
+            flow_fit_backfill_width_delta_px=float(args.flow_fit_backfill_width_delta_px),
+            flow_fit_backfill_monotonic_slack_px=float(
+                args.flow_fit_backfill_monotonic_slack_px
+            ),
+            tail_start_mode=str(args.tail_start_mode),
+            tail_direct_target_drop_to_threshold_frac=float(
+                args.tail_direct_target_drop_to_threshold_frac
+            ),
+            tail_direct_target_peak_lead_us=float(args.tail_direct_target_peak_lead_us),
+            tail_direct_target_shrink_rate_ratio=float(
+                args.tail_direct_target_shrink_rate_ratio
+            ),
+            tail_shoulder_target_drop_to_threshold_frac=float(
+                args.tail_shoulder_target_drop_to_threshold_frac
+            ),
+            tail_shoulder_target_peak_lead_us=float(
+                args.tail_shoulder_target_peak_lead_us
+            ),
+            tail_shoulder_target_shrink_rate_ratio=float(
+                args.tail_shoulder_target_shrink_rate_ratio
+            ),
+            tail_score_drop_weight=float(args.tail_score_drop_weight),
+            tail_score_peak_lead_weight=float(args.tail_score_peak_lead_weight),
+            tail_score_shrink_rate_weight=float(args.tail_score_shrink_rate_weight),
+            tail_score_drop_scale=float(args.tail_score_drop_scale),
+            tail_score_peak_lead_scale_us=float(args.tail_score_peak_lead_scale_us),
+            tail_score_shrink_rate_scale=float(args.tail_score_shrink_rate_scale),
+            tail_unified_band_drop_min=float(args.tail_unified_band_drop_min),
+            tail_unified_band_drop_max=float(args.tail_unified_band_drop_max),
+            tail_unified_band_peak_lead_min_us=float(args.tail_unified_band_peak_lead_min_us),
+            tail_unified_band_peak_lead_max_us=float(args.tail_unified_band_peak_lead_max_us),
+            tail_unified_band_shrink_rate_ratio_min=float(
+                args.tail_unified_band_shrink_rate_ratio_min
+            ),
+            tail_unified_band_shrink_rate_ratio_max=float(
+                args.tail_unified_band_shrink_rate_ratio_max
+            ),
+            tail_unified_target_drop_to_threshold_frac=float(
+                args.tail_unified_target_drop_to_threshold_frac
+            ),
+            tail_unified_target_peak_lead_us=float(args.tail_unified_target_peak_lead_us),
+            tail_unified_target_shrink_rate_ratio=float(
+                args.tail_unified_target_shrink_rate_ratio
+            ),
+            volume_uncertainty_sample_count=int(args.volume_uncertainty_sample_count),
+            volume_uncertainty_seed=int(args.volume_uncertainty_seed),
+            tail_uncertainty_score_tolerance=float(args.tail_uncertainty_score_tolerance),
+            tail_drop_frac=float(args.tail_drop_frac),
+            tail_persist_frames=int(args.tail_persist_frames),
+        )
+    elif args.command == "summary":
+        payload = export_stage6_summary(
             args.experiment_root,
             output_root=args.output_root or None,
             run_ids=args.run_id or None,

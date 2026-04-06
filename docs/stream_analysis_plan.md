@@ -4,7 +4,7 @@
 
 - Date created: 2026-04-01
 - Owner: Codex + user
-- Status: Stage 5 near-nozzle width extraction, steady-rate fitting, tail-onset detection, and middle-volume extrapolation implemented, tested, and reviewed on two real runs; Stage 6 metadata join and gravimetric residual analysis is next
+- Status: Stage 5 raw fitting, cache-backed Stage 5 fast-review tooling, review-only gravimetric-confidence analysis, review-only recompute flow-fit tooling, and review-only unified descriptor tail-start tooling are implemented and tested; Stage 7 tail modeling remains deferred while Stage 5 onset timing is iterated from cached review inputs
 - Scope: offline Python analysis only for the first increment. No MVC, firmware, or protocol changes are planned in the initial phases.
 
 ## Objective
@@ -466,12 +466,20 @@ Implementation notes:
 - implement Stage 5 as a new standalone `fit` stage:
   - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_fit()` -> `tools/stream_analysis/fit.py`
   - recompute Stage 4 in-process rather than reading saved Stage 4 files back from disk
+- keep the raw `fit` path as the stable baseline for now; current review-only Stage 5 iteration happens through:
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_review_cache()` -> `tools/stream_analysis/review_cache.py`
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_cached_review()` -> `tools/stream_analysis/review_cache.py` -> reusable `tools/stream_analysis/fit.py::_build_stage5_review_run()`
 - do not estimate the core steady model directly from raw `dV/dt`
 - use two signals together:
   - trusted visible volume `V(t)` from Stage 4
   - attached-primary near-nozzle width from Stage 3 edge traces
 - derive the near-nozzle width only from the attached primary, not from detached components
 - keep the raw visible-volume trace, width trace, and fitted phase model together in the outputs
+- the cache-backed review path now adds first-class review artifacts for both signals:
+  - gravimetric-equivalent centerline plus CI95 time band
+  - width-trace and shrink-rate contact sheets
+  - `V(t)` fit contact sheets with the selected flow-fit window and CI band
+  - per-run tail candidate tables for review-only onset tuning
 
 Recommended execution slices:
 
@@ -488,31 +496,66 @@ Recommended execution slices:
   - smooth the width trace with a short rolling median before changepoint detection
   - this slice is geometry-only and should not yet produce extrapolated volume
 - Stage 5b: steady-window detection and robust steady-rate fit
-  - fit only on frames where `volume_trust_label == "trusted"`
-  - search for the earliest contiguous trusted window that satisfies initial review defaults:
-    - at least `8` frames
-    - robust linear fit on `V(t)` with high goodness of fit
-    - smoothed near-nozzle width remaining on a stable plateau
-  - choose the window with the best balance of:
-    - early onset
-    - long duration
-    - stable width
-    - stable fitted residuals
-  - export:
-    - `steady_start_capture_index`
-    - `steady_end_capture_index`
-    - `steady_rate_nl_per_us`
-    - `steady_width_plateau_px`
-    - fit residual diagnostics
+  - raw `fit` path:
+    - fit only on frames where `volume_trust_label == "trusted"`
+    - search for the earliest contiguous trusted window that satisfies the current steady defaults:
+      - at least `8` frames
+      - robust linear fit on `V(t)` with high goodness of fit
+      - smoothed near-nozzle width remaining on a stable plateau
+    - export:
+      - `steady_start_capture_index`
+      - `steady_end_capture_index`
+      - `steady_rate_nl_per_us`
+      - `steady_width_plateau_px`
+      - fit residual diagnostics
+  - review-only `fit-review` path:
+    - supports `steady_fit_mode = frozen | recompute`
+    - `frozen` replays the cached Stage 5 steady-fit payload exactly
+    - `recompute` now separates:
+      - `plateau window`: the first width-flat seed after lag, used for `steady_start_capture_index`, `steady_end_capture_index`, the plateau anchor, and tail-search anchoring
+      - `flow-fit window`: the longer final `V(t)` fit window used for `steady_rate_nl_per_us`, `steady_intercept_nl`, CI, and gravimetric-equivalent timing
+    - current review-side recompute defaults:
+      - exclude the last `2` trusted frames before FOV exit from flow fitting
+      - allow up to `3` earlier backfilled points before the plateau seed when width is already settling toward the plateau
+      - allow at most one isolated interior outlier drop inside the flow-fit window
+    - the final central rate and the CI95 slope interval are both computed from the same post-prune flow-fit point set
+    - current review outputs expose:
+      - plateau vs flow-fit boundaries
+      - selected fit points and excluded near-exit trusted points
+      - CI95 slope band
+      - residual drift and max-residual diagnostics
+      - gravimetric-equivalent centerline and CI95 time band derived from the steady-rate CI
 - Stage 5c: tail-onset detection and middle-volume extrapolation
-  - continue monitoring the near-nozzle width after FOV exit while the attached primary remains measurable
-  - define tail onset as the first persistent width drop after the steady window using initial review defaults:
-    - smoothed width falls below `0.92 * steady_width_plateau_px`
-    - the drop persists for at least `3` consecutive frames
-  - compute:
-    - `middle_extrapolation_start = first_untrusted_frame`
-    - `middle_extrapolation_end = tail_start_frame`
-    - `middle_extrapolated_volume_nl = steady_rate_nl_per_us * delta_t_us`
+  - raw `fit` path:
+    - continue monitoring the near-nozzle width after FOV exit while the attached primary remains measurable
+    - confirm a tail break when the smoothed width falls below `0.92 * steady_width_plateau_px` for at least `3` consecutive frames
+    - use the current shoulder-aware raw Stage 5 rule:
+      - direct backtrack for simple declines
+      - shoulder-aware adjustment when a flat shoulder remains above threshold before the final drop
+      - truncated-width-loss fallback when width ends during a real final decline
+    - compute:
+      - `middle_extrapolation_start = first_untrusted_frame`
+      - `middle_extrapolation_end = tail_start_frame`
+      - `middle_extrapolated_volume_nl = steady_rate_nl_per_us * delta_t_us`
+  - review-only `fit-review` path:
+    - keeps the raw shoulder/direct path split available as diagnostic metadata
+    - currently supports three tail-start modes:
+      - `legacy`
+      - `descriptor-score`
+      - `descriptor-unified`
+    - current recommended review mode is `descriptor-unified`, which:
+      - uses one shared candidate window from `preliminary_tail_start` through `tail_confirmation`
+      - computes per-candidate descriptors from the smoothed width trace and the tail-only shrink-rate peak:
+        - `drop_to_threshold_frac`
+        - `shrink_rate_ratio`
+        - `tail_peak_lead_us`
+      - chooses the earliest candidate inside the current gravimetric-calibrated descriptor band
+      - falls back to the shared weighted descriptor score only if no candidate enters the band
+      - keeps `tail_start_selection_mode` only as metadata rather than as the final candidate-window definition
+    - review outputs now include:
+      - `tail_start_candidates.csv`
+      - selected tail descriptor fields in the run summary and experiment summary
+      - width/shrink-rate plots showing the selected tail, the legacy anchor, and the tail-only shrink-rate peak
   - keep this slice separate from the tail estimate so the middle extrapolation can be reviewed independently
 - Stage 5d: partial-total export with explicit tail placeholder
   - until the tail model exists, do not silently report a final total as if it were complete
@@ -557,6 +600,11 @@ Implementation notes:
 - join on run directory name / `Dataset name`
 - report metadata fields alongside derived image metrics
 - include artifact locations in the run summary
+- keep the Stage 6 execution model long-run friendly:
+  - recompute Stage 5 in-process for each selected run
+  - write final manifest JSON to `stdout`
+  - emit incremental progress lines to `stderr`
+  - update a root-level `summary_progress.json` checkpoint after each completed run
 - carry through Stage 5 outputs such as:
   - trusted visible volume before FOV exit
   - steady-rate estimate
@@ -564,11 +612,13 @@ Implementation notes:
   - partial total without tail
   - tail estimate or explicit tail-pending status
   - total-estimate quality flags
-- add gravimetric comparison fields needed to study the missing tail:
+- add signed gravimetric comparison fields needed to study the missing tail:
   - `gravimetric_total_nl`
   - `partial_total_without_tail_nl`
-  - `tail_residual_nl`
-  - `tail_residual_fraction`
+  - `signed_residual_nl = gravimetric_total_nl - partial_total_without_tail_nl`
+  - `signed_residual_fraction`
+  - `partial_to_gravimetric_ratio`
+  - `partial_exceeds_gravimetric`
 - group results by print pressure and print pulse width so the residual tail behavior can be compared across operating conditions
 
 Validation artifacts required:
@@ -576,6 +626,9 @@ Validation artifacts required:
 - per-run summary JSON
 - experiment summary CSV
 - experiment summary JSON
+- condition summary CSV
+- condition summary JSON
+- `summary_progress.json`
 - gravimetric residual comparison plots grouped by pulse width and pressure
 - replicate comparison plots grouped by pulse width and pressure
 
@@ -585,6 +638,7 @@ Acceptance criteria:
 - summary rows include both source metadata and image-analysis outputs
 - the gravimetric residual after Stage 5 partial-volume estimation is visible and comparable across replicate groups
 - replicate groups can be reviewed without opening individual run folders
+- long runs provide live progress via `stderr` and a machine-readable checkpoint file
 
 ### Stage 7: Tail-Volume Model And Final Total Estimate
 
@@ -2782,6 +2836,472 @@ Next step:
 
 - begin Stage 6 run-summary and metadata-join work so the new Stage 5 partial totals can be compared directly against gravimetric totals and grouped by print pressure / pulse width before planning Stage 7 tail estimation
 
+### 2026-04-03 - Stage 6 run summary, metadata join, gravimetric residual analysis, and long-run progress reporting completed
+
+Call path added:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage6_summary()` -> reusable `tools/stream_analysis/fit.py::_build_stage5_run()` -> `tools/stream_analysis/summary.py`
+
+Files changed:
+
+- `tools/stream_analysis/summary.py`
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_summary.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added a standalone Stage 6 `summary` export stage and CLI subcommand
+- refactored Stage 5 so `tools/stream_analysis/fit.py` now exposes a reusable `_build_stage5_run()` helper that returns:
+  - Stage 5 phase-feature rows
+  - phase boundaries
+  - steady-fit payload
+  - middle-extrapolation payload
+  - Stage 5 summary values
+  - pass-through Stage 4 data needed by Stage 6
+- added per-run Stage 6 summary export:
+  - `runs/<run_id>/stage_06_summary/run_summary.json`
+- added experiment-level summary exports:
+  - `experiment_summary.csv`
+  - `experiment_summary.json`
+  - `condition_summary.csv`
+  - `condition_summary.json`
+- added signed gravimetric residual diagnostics using the current water assumption:
+  - `gravimetric_total_nl = metadata_mass_print * 1000`
+  - `signed_residual_nl = gravimetric_total_nl - partial_total_without_tail_nl`
+  - `signed_residual_fraction`
+  - `partial_to_gravimetric_ratio`
+  - `partial_exceeds_gravimetric`
+- grouped summary outputs by `(print_pressure, print_pw_us)` and added condition-level aggregate fields such as:
+  - `gravimetric_total_nl_mean`
+  - `partial_total_without_tail_nl_mean`
+  - `signed_residual_nl_mean`
+  - `signed_residual_nl_std`
+  - `signed_residual_fraction_mean`
+  - `partial_to_gravimetric_ratio_mean`
+  - `overprediction_run_count`
+- added Stage 6 review plots:
+  - `partial_vs_gravimetric_scatter.png`
+  - `signed_residual_by_condition.png`
+  - `signed_residual_fraction_by_condition.png`
+  - `signed_residual_vs_middle_duration.png`
+- added long-run progress reporting:
+  - final manifest JSON stays on `stdout`
+  - per-run progress lines go to `stderr`
+  - root-level `summary_progress.json` is updated after each completed run so interrupted runs still leave a machine-readable checkpoint
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_summary.py tests\test_stream_analysis_fit.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `107 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `732 passed`
+- regenerated full-dataset Stage 6 review artifacts:
+  - `mkdir tmp\stream_analysis_phase6_review`
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase6_review" 1> tmp\stream_analysis_phase6_review\summary_stdout.json 2> tmp\stream_analysis_phase6_review\summary_progress.log`
+  - result: completed with full outputs written under `tmp\stream_analysis_phase6_review`
+
+Targeted artifact review notes:
+
+- Stage 6 analyzed all `26` matched CSV-backed runs and produced `8` condition groups
+- all `26` analyzed rows had usable gravimetric totals
+- `24` of `26` runs have `partial_exceeds_gravimetric = true`, which means the current Stage 5 partial total is usually slightly high rather than obviously low
+- the condition summaries show a narrow overprediction pattern for most conditions:
+  - `0.65 bar / 2500 us`: mean signed residual `-3.13 nL`
+  - `0.65 bar / 3000 us`: mean signed residual `-9.08 nL`
+  - `0.75 bar / 2500 us`: mean signed residual `-3.73 nL`
+  - `0.75 bar / 3000 us`: mean signed residual `-3.79 nL`
+  - `0.75 bar / 3500 us`: mean signed residual `-2.35 nL`
+  - `0.85 bar / 2500 us`: mean signed residual `-2.85 nL`
+  - `0.85 bar / 3000 us`: mean signed residual `-3.59 nL`
+- the main outlier condition is `0.65 bar / 3500 us`, whose mean signed residual is strongly positive because one run has unresolved tail onset:
+  - `run_20260328_000102_5ef6ee34`
+  - `tail_onset_status = unresolved`
+  - `middle_extrapolation_status = unresolved_no_tail_onset`
+  - `partial_total_without_tail_nl = 31.120 nL`
+  - `gravimetric_total_nl = 97.600 nL`
+  - `signed_residual_nl = 66.480 nL`
+- two previously reviewed runs reproduce the Stage 5 numbers inside the full summary:
+  - `run_20260327_230520_9567e1ee`: partial total `80.563 nL`, gravimetric `71.100 nL`, signed residual `-9.463 nL`
+  - `run_20260328_005146_dd931d49`: partial total `109.148 nL`, gravimetric `103.700 nL`, signed residual `-5.448 nL`
+- `summary_progress.log` and `summary_progress.json` both confirm that long full-dataset runs are observable while running and leave a usable checkpoint when complete
+
+Residual note:
+
+- Stage 6 confirms that the current Stage 5 baseline is usually a slight overprediction, which supports the earlier observation that tail contribution may often be small and that the next refinement likely belongs in tail-onset timing rather than in a large positive tail model
+- one unresolved-tail outlier still needs targeted review before Stage 7 planning so it is not mistaken for a true large tail-volume regime
+
+Next step:
+
+- use the Stage 6 residual structure to decide whether Stage 5 tail onset should be refined with a narrow backtracking rule before planning or implementing Stage 7 tail-volume modeling
+
+### 2026-04-03 - Stage 5 tail-onset refinement implemented and Stage 6 rerun reviewed
+
+Call path refined:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_fit()` -> `tools/stream_analysis/fit.py`
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage6_summary()` -> reusable `tools/stream_analysis/fit.py::_build_stage5_run()` -> `tools/stream_analysis/summary.py`
+
+Files changed:
+
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/summary.py`
+- `tests/test_stream_analysis_fit.py`
+- `tests/test_stream_analysis_summary.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- refined Stage 5 tail detection so the width-threshold persistence rule now serves as a confirmation rule rather than the reported onset timestamp
+- after a persistent break is confirmed, Stage 5 now backtracks through the smoothed width trace to the start of the decline episode and uses that backtracked frame as `tail_start_capture_index`
+- added a narrow truncated-width-loss fallback for runs where the width decline is real but width availability disappears before the full persistence count completes
+- added new Stage 5 outputs:
+  - `tail_confirmation_capture_index`
+  - `tail_confirmation_delay_from_emergence_us`
+  - `tail_detection_mode`
+  - `tail_confirmation_frame` in `phase_features.csv`
+- carried the new tail fields through Stage 6 per-run summaries and run-level JSON
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_summary.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `111 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `736 passed`
+- regenerated targeted Stage 5 review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py fit --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase5_refined_review" --run-id run_20260327_230520_9567e1ee --run-id run_20260328_005146_dd931d49 --run-id run_20260328_000102_5ef6ee34 --sample-count 12`
+  - result: passed
+- regenerated refined full-dataset Stage 6 review artifacts:
+  - `mkdir tmp\stream_analysis_phase6_refined_review`
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase6_refined_review" 1> tmp\stream_analysis_phase6_refined_review\summary_stdout.json 2> tmp\stream_analysis_phase6_refined_review\summary_progress.log`
+  - result: Stage 6 completed with full outputs written under `tmp\stream_analysis_phase6_refined_review`
+
+Targeted artifact review notes:
+
+- refined Stage 5 review artifacts are under:
+  - `tmp/stream_analysis_phase5_refined_review/runs/<run_id>/stage_05_fit/`
+- detached-droplet run `run_20260327_230520_9567e1ee`:
+  - `tail_confirmation_capture_index = 89`
+  - backtracked `tail_start_capture_index = 85`
+  - partial total moved from `80.563 nL` to `76.766 nL`
+  - gravimetric total is `71.100 nL`, so signed residual improved from `-9.463 nL` to `-5.666 nL`
+- long-stream run `run_20260328_005146_dd931d49`:
+  - `tail_confirmation_capture_index = 94`
+  - backtracked `tail_start_capture_index = 79`
+  - partial total moved from `109.148 nL` to `90.489 nL`
+  - gravimetric total is `103.700 nL`, so signed residual moved from `-5.448 nL` to `13.211 nL`
+- previously unresolved run `run_20260328_000102_5ef6ee34`:
+  - `tail_detection_mode = confirmed_truncated_width_loss`
+  - `tail_confirmation_capture_index = 109`
+  - backtracked `tail_start_capture_index = 105`
+  - partial total moved from `31.120 nL` to `98.902 nL`
+  - gravimetric total is `97.600 nL`, so the signed residual is now `-1.302 nL`
+
+Refined Stage 6 summary notes:
+
+- Stage 6 again analyzed all `26` matched CSV-backed runs and produced `8` condition groups
+- the refinement sharply reduced outright overprediction:
+  - baseline Stage 6: `24 / 26` runs had `partial_exceeds_gravimetric = true`
+  - refined Stage 6: `6 / 26` runs have `partial_exceeds_gravimetric = true`
+- the mean signed residual moved from `-1.03 nL` in the baseline summary to `+4.35 nL` after the refinement, which means the dataset-wide bias shifted from slight overprediction to moderate underprediction
+- mean absolute residual improved slightly:
+  - baseline Stage 6: `6.15 nL`
+  - refined Stage 6: `5.70 nL`
+- the biggest baseline outlier is now resolved:
+  - `run_20260328_000102_5ef6ee34` no longer has unresolved tail onset and no longer dominates the `0.65 bar / 3500 us` condition with a large positive residual
+- the condition means moved substantially toward underprediction in several groups after the refinement, including:
+  - `0.75 bar / 3000 us`: mean signed residual `-3.79 nL -> +4.41 nL`
+  - `0.85 bar / 3000 us`: mean signed residual `-3.59 nL -> +13.35 nL`
+
+Residual note:
+
+- the backtracked-onset refinement fixed the obvious late-tail problem and resolved the truncated-tail outlier, but it appears too aggressive for some longer runs and now tends to underpredict at the dataset level
+- Stage 7 tail modeling still should not begin until the Stage 5 onset timing is accepted, because the current refined residual pattern suggests there is still a Stage 5 boundary-placement problem rather than a clean standalone tail term
+
+Next step:
+
+- review the refined Stage 5 / Stage 6 artifacts and decide whether Stage 5 needs a narrower backtracking rule before any Stage 7 tail-volume model is attempted
+
+### 2026-04-03 - Stage 5 shoulder-aware tail-onset refinement implemented and Stage 6 rerun reviewed
+
+Call path refined:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_fit()` -> `tools/stream_analysis/fit.py`
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage6_summary()` -> reusable `tools/stream_analysis/fit.py::_build_stage5_run()` -> `tools/stream_analysis/summary.py`
+
+Files changed:
+
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/summary.py`
+- `tests/test_stream_analysis_fit.py`
+- `tests/test_stream_analysis_summary.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- investigated the five runs where the previous refined onset landed too early and confirmed that the failure mode was a long flat shoulder just below the steady-width plateau but still above the tail-width threshold
+- kept the existing tail confirmation rules unchanged:
+  - persistent threshold confirmation
+  - truncated-width-loss confirmation
+- kept the existing preliminary backtrack unchanged as the first onset candidate
+- added a new shoulder-aware onset adjustment after confirmation:
+  - searches the interval from the preliminary onset through the frame before confirmation
+  - finds the last qualifying flat shoulder with:
+    - at least `5` valid smoothed-width frames
+    - width span `<= 1.0 px`
+    - every width strictly above the tail threshold
+    - a follow-on drop of at least `1.5 px` within the next `2` valid frames
+  - if a shoulder is found, moves `tail_start_capture_index` to the first valid frame after the shoulder end
+  - otherwise keeps the direct backtracked onset
+- added new Stage 5 review fields:
+  - `tail_start_selection_mode`
+  - `tail_shoulder_end_capture_index`
+  - `tail_shoulder_end_delay_from_emergence_us`
+  - `tail_shoulder_end_frame` in `phase_features.csv`
+- updated `width_trace.png` and `Vt_fit.png` so the shoulder-end marker is visible when the shoulder-aware rule applies
+- carried the new tail-start fields through Stage 6 run-level summaries and experiment-level exports
+
+Validation:
+
+- focused stream-analysis tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_summary.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py tests\test_stream_analysis_nozzle.py`
+  - result: `114 passed`
+- full Python suite:
+  - `.\env\Scripts\python.exe -m pytest -q`
+  - result: `739 passed`
+- regenerated targeted 10-run Stage 5 review artifacts:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py fit --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase5_shoulder_review" --run-id run_20260327_230520_9567e1ee --run-id run_20260327_231322_ecc89833 --run-id run_20260327_230807_2858b360 --run-id run_20260327_235824_fc32934b --run-id run_20260328_000102_5ef6ee34 --run-id run_20260328_001819_65e7f48d --run-id run_20260328_003354_8cf1bfcb --run-id run_20260328_004724_cfc969f5 --run-id run_20260328_004925_93d336a3 --run-id run_20260328_005146_dd931d49 --sample-count 8`
+  - result: passed
+- regenerated full-dataset Stage 6 review artifacts:
+  - `mkdir tmp\stream_analysis_phase6_shoulder_review`
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --experiment-root "FreeRTOS-interface\Experiments\Stream_characterization-20260327_225650" --output-root "tmp\stream_analysis_phase6_shoulder_review" 1> tmp\stream_analysis_phase6_shoulder_review\summary_stdout.json 2> tmp\stream_analysis_phase6_shoulder_review\summary_progress.log`
+  - result: Stage 6 completed with full outputs written under `tmp\stream_analysis_phase6_shoulder_review`
+
+Targeted Stage 5 review notes:
+
+- the custom gravimetric-width review artifacts are under:
+  - `tmp/stream_analysis_phase5_shoulder_review/gravimetric_width_review/`
+- the five previously problematic runs now move later and much closer to the gravimetric-equality marker:
+  - `run_20260327_235824_fc32934b`:
+    - `tail_start_selection_mode = shoulder_adjusted`
+    - `tail_shoulder_end_capture_index = 103`
+    - `tail_start_capture_index = 104`
+    - gravimetric-equality delay `5019.39 us`
+    - tail start delay `5100 us`
+  - `run_20260328_004925_93d336a3`:
+    - `tail_start_selection_mode = shoulder_adjusted`
+    - `tail_shoulder_end_capture_index = 91`
+    - `tail_start_capture_index = 92`
+    - gravimetric-equality delay `4461.64 us`
+    - tail start delay `4500 us`
+  - `run_20260328_005146_dd931d49`:
+    - `tail_start_selection_mode = shoulder_adjusted`
+    - `tail_shoulder_end_capture_index = 90`
+    - `tail_start_capture_index = 91`
+    - gravimetric-equality delay `4381.02 us`
+    - tail start delay `4450 us`
+  - `run_20260328_004724_cfc969f5`:
+    - `tail_start_selection_mode = shoulder_adjusted`
+    - `tail_shoulder_end_capture_index = 91`
+    - `tail_start_capture_index = 92`
+    - gravimetric-equality delay `4423.22 us`
+    - tail start delay `4500 us`
+  - `run_20260328_003354_8cf1bfcb`:
+    - `tail_start_selection_mode = shoulder_adjusted`
+    - `tail_shoulder_end_capture_index = 105`
+    - `tail_start_capture_index = 106`
+    - gravimetric-equality delay `5220.12 us`
+    - tail start delay `5200 us`
+- the known-good references stay effectively unchanged:
+  - `run_20260327_230520_9567e1ee`:
+    - `tail_detection_mode = confirmed_persistent`
+    - `tail_start_selection_mode = direct_backtrack`
+    - `tail_start_capture_index = 85`
+  - `run_20260328_000102_5ef6ee34`:
+    - `tail_detection_mode = confirmed_truncated_width_loss`
+    - `tail_start_selection_mode = direct_backtrack`
+    - `tail_start_capture_index = 105`
+- one additional run also benefited from the shoulder-aware rule:
+  - `run_20260327_230807_2858b360`
+  - `tail_start_selection_mode = shoulder_adjusted`
+  - `tail_shoulder_end_capture_index = 87`
+  - `tail_start_capture_index = 88`
+
+Shoulder-aware Stage 6 summary notes:
+
+- Stage 6 again analyzed all `26` matched CSV-backed runs and produced `8` condition groups
+- the shoulder-aware refinement improved dataset-level agreement substantially relative to the earlier backtracked-only refinement:
+  - overprediction count: `6 / 26 -> 16 / 26`
+  - mean signed residual: `+4.35 nL -> -0.70 nL`
+  - mean absolute residual: `5.70 nL -> 2.38 nL`
+- the five problematic long-shoulder runs all moved much closer to zero signed residual:
+  - `run_20260327_235824_fc32934b`: `-1.593 nL`
+  - `run_20260328_004925_93d336a3`: `-0.945 nL`
+  - `run_20260328_005146_dd931d49`: `-1.716 nL`
+  - `run_20260328_004724_cfc969f5`: `-1.909 nL`
+  - `run_20260328_003354_8cf1bfcb`: `+0.448 nL`
+- the previously unresolved-truncated run remains resolved and close to gravimetric:
+  - `run_20260328_000102_5ef6ee34`
+  - `signed_residual_nl = -1.302`
+- condition means moved much closer to zero than in the backtracked-only refinement, including:
+  - `0.65 bar / 3500 us`: `+5.42 nL -> +0.98 nL`
+  - `0.75 bar / 3500 us`: `+7.35 nL -> +0.26 nL`
+  - `0.85 bar / 3000 us`: `+13.35 nL -> -1.52 nL`
+
+Residual note:
+
+- the shoulder-aware refinement preserves the earlier win on truncated tails while avoiding the premature onset placement seen in long shoulder traces
+- the full-dataset residuals are now much tighter and centered close to zero, which suggests the remaining disagreement is smaller and more appropriate for Stage 7 tail-model planning rather than another large Stage 5 boundary redesign
+
+Next step:
+
+- review the new Stage 6 residual plots and decide whether the remaining residual structure is small enough to move on to Stage 7 tail-model exploration or whether a final narrow Stage 5 tuning pass is still justified
+
+### 2026-04-05 - Stage 5 fast-review cache and cache-only review loop implemented
+
+Call path added:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_review_cache()` -> `tools/stream_analysis/review_cache.py`
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_cached_review()` -> `tools/stream_analysis/review_cache.py` -> reusable `tools/stream_analysis/fit.py::_build_stage5_review_run()`
+
+Files changed:
+
+- `tools/stream_analysis/review_cache.py`
+- `tools/stream_analysis/cli.py`
+- `tools/stream_analysis/fit.py`
+- `tests/test_stream_analysis_review_cache.py`
+- `tests/test_stream_analysis_fit.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added a canonical Stage 5 review cache under `analysis/stream_characterization/stage_05_review_cache/`
+- added `fit-cache` to freeze reusable per-run review inputs:
+  - `phase_input.csv`
+  - `run_context.json`
+  - top-level `cache_manifest.json`
+- cache creation now uses the planned source precedence:
+  - reuse an existing valid cache entry unless `--rebuild` is requested
+  - import existing Stage 5 artifacts from `stage_05_fit/` when available
+  - fall back to a one-time raw Stage 5 build only for missing runs
+- added `fit-review` so width smoothing, tail-start placement, middle extrapolation, summaries, and plots can be regenerated from cached inputs without rerunning Stages 1-4
+- froze the current steady-rate fit inside the cache by storing the Stage 5 steady-fit payload and replaying it during cache-only review
+- carried frozen anchors through cache-only review:
+  - `trusted_visible_volume_nl`
+  - `first_untrusted_capture_index`
+  - `first_untrusted_delay_from_emergence_us`
+- added cache-review run summary fields:
+  - `gravimetric_reference_status`
+  - `include_in_gravimetric_plots`
+  - `gravimetric_equality_delay_us`
+  - `cache_source_kind`
+  - `phase_input_csv`
+  - `run_context_json`
+- made cache-only review regenerate the same reviewable outputs needed for tail-start iteration:
+  - per-run `phase_features.csv`, `steady_fit.json`, `middle_extrapolation.json`, `phase_boundaries.json`
+  - per-run `width_trace.png`, `Vt_fit.png`, `run_summary.json`, `run_summary.csv`
+  - experiment-level `experiment_summary.csv/json`, `condition_summary.csv/json`
+  - experiment-level gravimetric comparison plots
+  - `gravimetric_width_review/width_trace_review_index.csv`
+  - per-run `gravimetric_width_review/run_<id>_width_trace_with_gravimetric.png`
+- defaulted the cache-review comparison plots and condition means to exclude the suspect `0.65 bar / 3000 us` gravimetric references while still preserving those runs in:
+  - the cache itself
+  - per-run width plots
+  - experiment summary tables
+  - the gravimetric width-review index
+
+Validation:
+
+- focused cache / fit / CLI / summary tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_review_cache.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_summary.py`
+  - result: `37 passed`
+- broader stream-analysis suite:
+  - `.\env\Scripts\python.exe -m pytest -q tests -k stream_analysis`
+  - result: `132 passed, 613 deselected`
+
+Review workflow note:
+
+- the intended Stage 5 iteration loop is now:
+  - `fit-cache` once to freeze inputs
+  - `fit-review` repeatedly while tuning only width smoothing and tail-start rules
+- this should remove the slow repeated reruns of upstream image-analysis stages when only the Stage 5 onset logic is being adjusted
+
+Next step:
+
+- use `fit-cache` on the current experiment outputs, then iterate on Stage 5 tail-start rules with `fit-review` so onset consistency can be compared quickly against the cached width traces and gravimetric-equality markers
+
+### 2026-04-05 - Stage 5 review-only flow-fit and descriptor tail-start tooling expanded
+
+Call path expanded:
+
+- `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_cached_review()` -> `tools/stream_analysis/review_cache.py` -> reusable `tools/stream_analysis/fit.py::_build_stage5_review_run()`
+
+Files changed:
+
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/review_cache.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_fit.py`
+- `tests/test_stream_analysis_review_cache.py`
+- `tests/test_stream_analysis_cli.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- added review-only gravimetric-equivalent confidence analysis from cached Stage 5 inputs:
+  - reconstructs a CI95 steady-rate band from the selected `V(t)` fit points
+  - projects the gravimetric-equivalent center and CI95 band onto the width trace and normalized shrink-rate trace
+  - exports gravimetric-equivalent width-position and shrink-rate descriptors
+- added `V(t)` review contact sheets and review indexes so all runs can be compared visually:
+  - selected fit points
+  - excluded near-exit trusted points
+  - flow-fit slope line
+  - CI95 slope band
+- expanded review-only steady-fit recompute mode:
+  - separates the plateau seed window used for tail anchoring from the longer flow-fit window used for the rate and CI
+  - supports near-exit trusted-point exclusion, limited pre-plateau backfill, and conservative one-point outlier pruning
+  - now keeps the central flow rate and the CI95 slope interval on the same final point set
+- expanded review-only tail-start selection modes:
+  - `descriptor-score` for path-specific descriptor scoring
+  - `descriptor-unified` for one shared candidate window from `preliminary_tail_start` through `tail_confirmation`
+  - `descriptor-unified` currently uses the gravimetric-calibrated descriptor band first, then falls back to the shared score if no candidate enters the band
+- added run-level audit artifacts for tail-start review:
+  - `tail_start_candidates.csv`
+  - `tail_start_refinement_mode`
+  - `tail_start_band_selection_status`
+  - selected descriptor values and candidate-window bounds in the review summaries and width-review index
+
+Validation:
+
+- focused fit / review-cache / CLI / summary tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_review_cache.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_summary.py`
+  - result: passed
+- broader stream-analysis suite:
+  - `.\env\Scripts\python.exe -m pytest -q tests -k stream_analysis`
+  - result: passed
+- current review iterations were regenerated from cache only, without rerunning Stages 1-4
+
+Current review-state notes:
+
+- the review-only flow-fit work suggests the remaining disagreement is more likely in tail placement than in the steady-rate fit itself
+- the current review-only preferred tail-start mode is `descriptor-unified`, because it reduces the path-driven late-selection behavior seen when direct and shoulder runs used different final candidate windows
+- the remaining known tail-start issue is inside the in-band chooser itself:
+  - most runs pick the earliest acceptable point cleanly
+  - a small number of runs likely need a score-guarded refinement so the chosen earliest in-band point is not allowed to drift too far from the best in-band score
+
+Next step:
+
+- keep the current unified descriptor band and candidate window, then refine the in-band chooser so it remains early without selecting a visibly worse in-band candidate
+
 ## Progress Checklist
 
 - [x] Inspect repository structure and choose the cleanest analysis location
@@ -2799,7 +3319,7 @@ Next step:
 - [x] Review Stage 4 artifacts and update this document
 - [x] Implement Stage 5 near-nozzle width, steady-rate fit, and middle extrapolation
 - [x] Review Stage 5 artifacts and update this document
-- [ ] Implement Stage 6 run summaries, metadata joins, and gravimetric residual analysis
-- [ ] Review Stage 6 artifacts and update this document
+- [x] Implement Stage 6 run summaries, metadata joins, and gravimetric residual analysis
+- [x] Review Stage 6 artifacts and update this document
 - [ ] Implement Stage 7 tail-volume model and final total estimate
 - [ ] Review Stage 7 artifacts and update this document
