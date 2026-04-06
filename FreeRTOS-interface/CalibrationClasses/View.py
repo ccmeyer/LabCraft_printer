@@ -593,6 +593,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._managed_manual_spinboxes = []
         self._manual_controls_locked = False
         self._startup_focus_initialized = False
+        self._stream_capture_last_status = None
         try:
             self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
         except Exception:
@@ -865,6 +866,68 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Add groups to control panel
         control_panel_v.addWidget(self.manual_group)
         control_panel_v.addWidget(self.calib_group)
+
+        self.stream_capture_group = QtWidgets.QGroupBox("Stream Gravimetric Capture")
+        stream_grid = QtWidgets.QGridLayout(self.stream_capture_group)
+        stream_grid.setHorizontalSpacing(8)
+        stream_grid.setVerticalSpacing(6)
+        srow = 0
+
+        self.stream_capture_status_label = QtWidgets.QLabel("Ready to begin stream gravimetric capture.")
+        self.stream_capture_status_label.setWordWrap(True)
+        stream_grid.addWidget(self.stream_capture_status_label, srow, 0, 1, 2); srow += 1
+
+        self.stream_capture_summary_label = QtWidgets.QLabel("Run: - | Counts: -")
+        self.stream_capture_summary_label.setWordWrap(True)
+        stream_grid.addWidget(self.stream_capture_summary_label, srow, 0, 1, 2); srow += 1
+
+        self.stream_capture_starting_mass_label = QtWidgets.QLabel("Starting Mass (mg):")
+        self.stream_capture_starting_mass_spin = QtWidgets.QDoubleSpinBox()
+        self.stream_capture_starting_mass_spin.setDecimals(4)
+        self.stream_capture_starting_mass_spin.setRange(-100000.0, 100000.0)
+        self.stream_capture_starting_mass_spin.setSingleStep(0.01)
+        self.stream_capture_starting_mass_spin.setValue(0.0)
+        stream_grid.addWidget(self.stream_capture_starting_mass_label, srow, 0)
+        stream_grid.addWidget(self.stream_capture_starting_mass_spin, srow, 1); srow += 1
+
+        self.stream_capture_ending_mass_label = QtWidgets.QLabel("Ending Mass (mg):")
+        self.stream_capture_ending_mass_spin = QtWidgets.QDoubleSpinBox()
+        self.stream_capture_ending_mass_spin.setDecimals(4)
+        self.stream_capture_ending_mass_spin.setRange(-100000.0, 100000.0)
+        self.stream_capture_ending_mass_spin.setSingleStep(0.01)
+        self.stream_capture_ending_mass_spin.setValue(0.0)
+        stream_grid.addWidget(self.stream_capture_ending_mass_label, srow, 0)
+        stream_grid.addWidget(self.stream_capture_ending_mass_spin, srow, 1); srow += 1
+
+        self.stream_capture_rep_label = QtWidgets.QLabel("Rep:")
+        self.stream_capture_rep_spin = QtWidgets.QSpinBox()
+        self.stream_capture_rep_spin.setRange(1, 999)
+        self.stream_capture_rep_spin.setValue(1)
+        stream_grid.addWidget(self.stream_capture_rep_label, srow, 0)
+        stream_grid.addWidget(self.stream_capture_rep_spin, srow, 1); srow += 1
+
+        self.stream_capture_notes_label = QtWidgets.QLabel("Notes:")
+        self.stream_capture_notes_edit = QtWidgets.QPlainTextEdit()
+        self.stream_capture_notes_edit.setPlaceholderText("Optional notes for stream_metadata.csv and session provenance.")
+        self.stream_capture_notes_edit.setMaximumBlockCount(20)
+        self.stream_capture_notes_edit.setMinimumHeight(72)
+        stream_grid.addWidget(self.stream_capture_notes_label, srow, 0, QtCore.Qt.AlignTop)
+        stream_grid.addWidget(self.stream_capture_notes_edit, srow, 1); srow += 1
+
+        self.stream_capture_begin_button = QtWidgets.QPushButton("Begin Session")
+        self.stream_capture_begin_button.clicked.connect(self.begin_stream_gravimetric_capture)
+        self.stream_capture_save_button = QtWidgets.QPushButton("Save Row")
+        self.stream_capture_save_button.clicked.connect(self.save_stream_gravimetric_capture)
+        self.stream_capture_discard_button = QtWidgets.QPushButton("Discard")
+        self.stream_capture_discard_button.clicked.connect(self.discard_stream_gravimetric_capture)
+        self.stream_capture_begin_button.setMinimumHeight(32)
+        self.stream_capture_save_button.setMinimumHeight(32)
+        self.stream_capture_discard_button.setMinimumHeight(32)
+        stream_grid.addWidget(self.stream_capture_begin_button, srow, 0)
+        stream_grid.addWidget(self.stream_capture_save_button, srow, 1); srow += 1
+        stream_grid.addWidget(self.stream_capture_discard_button, srow, 0, 1, 2); srow += 1
+
+        control_panel_v.addWidget(self.stream_capture_group)
 
         self.recommendation_group = QtWidgets.QGroupBox("Calibration Memory Recommendation")
         recommendation_v = QtWidgets.QVBoxLayout(self.recommendation_group)
@@ -1145,6 +1208,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.calibrationCompleted.connect(self._refresh_manual_control_lock_state)
         self.model.calibration_manager.calibrationQueueCompleted.connect(self._refresh_manual_control_lock_state)
         self.model.calibration_manager.calibrationError.connect(self._refresh_manual_control_lock_state)
+        stream_capture_signal = getattr(self.model.calibration_manager, "streamCaptureStateChanged", None)
+        if stream_capture_signal is not None:
+            stream_capture_signal.connect(self._sync_stream_capture_panel_state)
+            stream_capture_signal.connect(self._refresh_manual_control_lock_state)
 
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
@@ -1158,6 +1225,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.populate_summary_table()
         self._refresh_manual_control_lock_state()
         self._apply_flash_safety_ui_state()
+        self._sync_stream_capture_panel_state()
 
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
@@ -1338,7 +1406,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 sweep_active = bool(manager.is_pulsewidth_sweep_active())
             except Exception:
                 sweep_active = False
-        return active is not None or bool(queue) or sweep_active
+        stream_busy = False
+        stream_busy_getter = getattr(manager, "is_stream_gravimetric_capture_busy", None)
+        if callable(stream_busy_getter):
+            try:
+                stream_busy = bool(stream_busy_getter())
+            except Exception:
+                stream_busy = False
+        return active is not None or bool(queue) or sweep_active or stream_busy
 
     def _sync_manual_controls_from_model(self, force=False):
         DropletImagingDialog._sync_manual_spinbox_value(
@@ -1488,6 +1563,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         if hasattr(self, "load_selected_button"):
             self._update_load_button_state()
+
+        if hasattr(self, "stream_capture_group"):
+            self._sync_stream_capture_panel_state()
 
     def eventFilter(self, watched, event):
         spinbox = self._manual_spinbox_focus_targets.get(watched)
@@ -1695,6 +1773,174 @@ class DropletImagingDialog(QtWidgets.QDialog):
             mgr.set_record_mode_enabled(bool(enabled))
         except Exception:
             mgr.record_mode_enabled = bool(enabled)
+        self._sync_stream_capture_panel_state()
+
+    def _get_stream_capture_state(self):
+        mgr = getattr(self.model, "calibration_manager", None)
+        getter = getattr(mgr, "get_stream_gravimetric_capture_state", None)
+        if callable(getter):
+            try:
+                state = getter()
+            except Exception:
+                state = None
+            if isinstance(state, dict):
+                return state
+        return {
+            "status": "idle",
+            "status_message": "Ready to begin stream gravimetric capture.",
+            "error_message": "",
+            "session_id": None,
+            "starting_flash": None,
+            "ending_flash": None,
+            "raw_flash_delta": None,
+            "background_capture_count": None,
+            "printed_capture_count": None,
+            "timecourse_run_id": None,
+            "rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
+            "suggested_rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
+            "notes": "",
+        }
+
+    @staticmethod
+    def _stream_capture_blocks_new_starts(state: dict | None):
+        status = str((state or {}).get("status") or "idle")
+        return status in {"awaiting_mass", "error", "stopped"}
+
+    def _sync_stream_capture_panel_state(self, state: dict | None = None):
+        if not hasattr(self, "stream_capture_group"):
+            return
+        state = dict(state or self._get_stream_capture_state())
+        status = str(state.get("status") or "idle")
+        status_message = str(state.get("status_message") or "Ready to begin stream gravimetric capture.")
+        error_message = str(state.get("error_message") or "")
+        session_id = str(state.get("session_id") or "-")
+        timecourse_run_id = str(state.get("timecourse_run_id") or "-")
+        background_count = state.get("background_capture_count")
+        printed_count = state.get("printed_capture_count")
+        starting_flash = state.get("starting_flash")
+        ending_flash = state.get("ending_flash")
+        raw_flash_delta = state.get("raw_flash_delta")
+
+        self.stream_capture_status_label.setText(status_message)
+        if error_message and status in {"error", "stopped"}:
+            self.stream_capture_status_label.setStyleSheet("color: darkred; font-weight: 600;")
+        elif status == "awaiting_mass":
+            self.stream_capture_status_label.setStyleSheet("color: darkgreen; font-weight: 600;")
+        else:
+            self.stream_capture_status_label.setStyleSheet("")
+
+        self.stream_capture_summary_label.setText(
+            "Session: "
+            f"{session_id}\n"
+            f"Timecourse: {timecourse_run_id} | Start flash: {starting_flash if starting_flash is not None else '-'} | "
+            f"End flash: {ending_flash if ending_flash is not None else '-'} | Delta: {raw_flash_delta if raw_flash_delta is not None else '-'}\n"
+            f"Background captures: {background_count if background_count is not None else '-'} | "
+            f"Num printed: {printed_count if printed_count is not None else '-'}"
+        )
+
+        record_mode_enabled = True
+        try:
+            record_mode_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
+        except Exception:
+            record_mode_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
+        experiment_ready = False
+        try:
+            experiment_ready = bool(getattr(self.model.experiment_model, "experiment_dir_path", None))
+        except Exception:
+            experiment_ready = False
+        flash_fault_latched = self._is_flash_fault_latched()
+        stream_busy = False
+        busy_getter = getattr(self.model.calibration_manager, "is_stream_gravimetric_capture_busy", None)
+        if callable(busy_getter):
+            try:
+                stream_busy = bool(busy_getter())
+            except Exception:
+                stream_busy = status in {"running", "awaiting_mass"}
+        else:
+            stream_busy = status in {"running", "awaiting_mass"}
+
+        if status == "idle":
+            suggested_rep = int(state.get("suggested_rep") or state.get("rep") or 1)
+            if not self.stream_capture_rep_spin.hasFocus():
+                self.stream_capture_rep_spin.setValue(max(1, suggested_rep))
+            if self._stream_capture_last_status not in (None, "idle"):
+                self.stream_capture_starting_mass_spin.setValue(0.0)
+                self.stream_capture_ending_mass_spin.setValue(0.0)
+                self.stream_capture_notes_edit.clear()
+        elif status in {"running", "awaiting_mass", "error", "stopped"}:
+            rep_value = int(state.get("rep") or state.get("suggested_rep") or 1)
+            if not self.stream_capture_rep_spin.hasFocus():
+                self.stream_capture_rep_spin.setValue(max(1, rep_value))
+
+        begin_enabled = (
+            status == "idle"
+            and record_mode_enabled
+            and experiment_ready
+            and (not flash_fault_latched)
+            and (not DropletImagingDialog._is_calibration_busy(self))
+        )
+        save_enabled = status == "awaiting_mass"
+        discard_enabled = status in {"awaiting_mass", "error", "stopped"}
+
+        self.stream_capture_begin_button.setEnabled(begin_enabled)
+        self.stream_capture_save_button.setEnabled(save_enabled)
+        self.stream_capture_discard_button.setEnabled(discard_enabled)
+        self.stream_capture_starting_mass_spin.setEnabled(status == "idle")
+        self.stream_capture_ending_mass_spin.setEnabled(status == "awaiting_mass")
+        self.stream_capture_rep_spin.setEnabled(status in {"idle", "awaiting_mass"})
+        self.stream_capture_notes_edit.setEnabled(status in {"idle", "awaiting_mass"})
+
+        block_new_starts = self._stream_capture_blocks_new_starts(state)
+        for widget_name in (
+            "prime_head_button",
+            "calibrate_nozzle_button",
+            "calibrate_focus_button",
+            "calibrate_emergence_button",
+            "calibrate_pressure_scan_button",
+            "scan_trajectory_button",
+            "calibrate_pressure_sweep_button",
+            "calibrate_characterization_button",
+            "calibrate_timecourse_button",
+            "calibrate_all_button",
+            "calibrate_all_pw_button",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            if block_new_starts:
+                widget.setEnabled(False)
+            elif not flash_fault_latched:
+                widget.setEnabled(True)
+
+        if hasattr(self, "record_calibration_checkbox"):
+            self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
+
+        self._stream_capture_last_status = status
+
+    def begin_stream_gravimetric_capture(self):
+        result = self.controller.start_stream_gravimetric_capture(
+            float(self.stream_capture_starting_mass_spin.value()),
+            rep_override=int(self.stream_capture_rep_spin.value()),
+            notes=self.stream_capture_notes_edit.toPlainText().strip(),
+        )
+        if isinstance(result, tuple) and result and (result[0] is False):
+            QtWidgets.QMessageBox.warning(self, "Stream Capture", str(result[1] or "Failed to start stream gravimetric capture."))
+
+    def save_stream_gravimetric_capture(self):
+        result = self.controller.finalize_stream_gravimetric_capture(
+            float(self.stream_capture_ending_mass_spin.value()),
+            rep_override=int(self.stream_capture_rep_spin.value()),
+            notes=self.stream_capture_notes_edit.toPlainText().strip(),
+        )
+        if isinstance(result, tuple) and result and (result[0] is False):
+            QtWidgets.QMessageBox.warning(self, "Stream Capture", str(result[1] or "Failed to save stream gravimetric capture row."))
+
+    def discard_stream_gravimetric_capture(self):
+        result = self.controller.discard_stream_gravimetric_capture(
+            reason="operator_discarded",
+        )
+        if isinstance(result, tuple) and result and (result[0] is False):
+            QtWidgets.QMessageBox.warning(self, "Stream Capture", str(result[1] or "Failed to discard stream gravimetric capture."))
 
     def set_calibration_memory_enabled(self, enabled: bool):
         mgr = self.model.calibration_manager
@@ -1760,6 +2006,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.update_stage_and_log("Calibration Completed", "green")
         self.reset_calibration_buttons()
         self._refresh_manual_control_lock_state()
+        try:
+            if bool(getattr(self.model.calibration_manager, "should_suppress_process_verdict", lambda: False)()):
+                self.model.calibration_manager.clear_pending_process_verdict(
+                    reason="stream_capture_verdict_suppressed"
+                )
+                return
+        except Exception:
+            pass
         QTimer.singleShot(0, lambda: self._prompt_calibration_verdict(default_outcome="success"))
 
     def on_calibration_queue_completed(self):
@@ -1782,6 +2036,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_all_pw_button.setText("Calibrate All (PW Range)")
         self._refresh_manual_control_lock_state()
         QtWidgets.QMessageBox.warning(self, "Calibration Error", error_message)
+        try:
+            if bool(getattr(self.model.calibration_manager, "should_suppress_process_verdict", lambda: False)()):
+                self.model.calibration_manager.clear_pending_process_verdict(
+                    reason="stream_capture_verdict_suppressed"
+                )
+                return
+        except Exception:
+            pass
         QTimer.singleShot(
             0,
             lambda err=str(error_message): self._prompt_calibration_verdict(

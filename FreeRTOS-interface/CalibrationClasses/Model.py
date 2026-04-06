@@ -1090,6 +1090,7 @@ class CalibrationManager(QObject):
     calibrationError = Signal(str)
     calibrationQueueCompleted = Signal()
     characterizationSummaryUpdated = Signal()  # Notify UI to rebuild the summary table
+    streamCaptureStateChanged = Signal(dict)
 
     analyzedImageUpdated = Signal(object)
 
@@ -1122,7 +1123,31 @@ class CalibrationManager(QObject):
         "trajectory_calibration": "trajectory",
         "droplet_trajectory": "trajectory",
         "droplet_search": "droplet_search",
+        "droplet_timecourse": "droplet_timecourse",
     }
+    STREAM_CAPTURE_QUEUE = (
+        "nozzle_position",
+        "nozzle_focus",
+        "droplet_emergence",
+        "droplet_timecourse",
+    )
+    STREAM_METADATA_HEADERS = [
+        "Dataset name",
+        "Print PW",
+        "Print Pressure",
+        "Refuel PW",
+        "Refuel Pressure",
+        "Rep",
+        "Starting mass",
+        "Starting flash",
+        "Ending flash",
+        "Ending mass",
+        "Mass Change",
+        "Num printed",
+        "Mass/print",
+        "CV",
+        "Notes",
+    ]
 
     def __init__(self, model, parent=None):
         super().__init__(parent)
@@ -1173,11 +1198,13 @@ class CalibrationManager(QObject):
         self._calibration_memory_prior_runtime = {}
         self._calibration_memory_ui_recommendation = {}
         self._pending_process_verdict = None
+        self._stream_capture_state = {}
 
         self.calibration_queue = []
 
         self.model.machine_state_updated.connect(self.update_offsets_from_nozzle)
         self.calibrationQueueCompleted.connect(self._on_queue_completed_for_pw_sweep)
+        self._reset_stream_gravimetric_capture_state()
 
     # ------------- Per-process recorder -------------
 
@@ -2505,6 +2532,7 @@ class CalibrationManager(QObject):
             'nozzle_position': NozzlePositionCalibrationProcess,
             'nozzle_focus': NozzleFocusCalibrationProcess,
             'droplet_emergence': DropletEmergenceCalibrationProcess,
+            'droplet_timecourse': DropletTimecourseProcess,
             'pressure': PressureCalibrationProcess,
             'pressure_scan': PressureBandCalibrationProcess,
             'trajectory': TrajectoryCalibrationProcess,
@@ -2564,6 +2592,11 @@ class CalibrationManager(QObject):
             self.clear_calibration_queue()
         self.calibrationStageChanged.emit("Calibration stopped","orange")
         self._finalize_process_recording("stopped", error_message="Calibration terminated by user")
+        if self.has_open_stream_gravimetric_capture():
+            self._mark_stream_capture_terminal_state(
+                status="stopped",
+                error_message="Calibration terminated by user",
+            )
         self.calibrationError.emit("Calibration terminated by user")
 
     # =================== Pulse-Width Sweep Orchestration ===================
@@ -2908,6 +2941,606 @@ class CalibrationManager(QObject):
             "refuel_pressure": refuel_pressure
         }
 
+    # ------------- Stream gravimetric capture -------------
+
+    @staticmethod
+    def _stream_capture_float_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _stream_capture_int_or_none(value):
+        try:
+            if value in (None, ""):
+                return None
+            return int(round(float(value)))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_stream_capture_decimal(value, digits: int):
+        if value in (None, ""):
+            return ""
+        try:
+            text = f"{float(value):.{int(digits)}f}"
+        except Exception:
+            return ""
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _resolve_stream_capture_experiment_dir(self):
+        exp = getattr(self.model, "experiment_model", None)
+        exp_dir = getattr(exp, "experiment_dir_path", None)
+        if exp_dir:
+            return os.path.abspath(str(exp_dir))
+        cal_path = getattr(exp, "calibration_file_path", None) or self.calibration_file_path
+        if cal_path:
+            return os.path.abspath(os.path.dirname(str(cal_path)))
+        getter = getattr(exp, "get_calibration_file_path", None)
+        if callable(getter):
+            try:
+                path = getter()
+            except Exception:
+                path = None
+            if path:
+                return os.path.abspath(os.path.dirname(str(path)))
+        return None
+
+    def _resolve_stream_capture_calibration_file_path(self):
+        exp = getattr(self.model, "experiment_model", None)
+        getter = getattr(exp, "get_calibration_file_path", None)
+        if callable(getter):
+            try:
+                path = getter()
+            except Exception:
+                path = None
+            if path:
+                return os.path.abspath(str(path))
+        path = getattr(exp, "calibration_file_path", None) or self.calibration_file_path
+        if path:
+            return os.path.abspath(str(path))
+        exp_dir = self._resolve_stream_capture_experiment_dir()
+        if exp_dir:
+            return os.path.join(exp_dir, "calibration.json")
+        return None
+
+    def _resolve_stream_capture_metadata_csv_path(self):
+        exp_dir = self._resolve_stream_capture_experiment_dir()
+        if not exp_dir:
+            return None
+        return os.path.join(exp_dir, "stream_metadata.csv")
+
+    def _resolve_stream_capture_log_path(self):
+        exp_dir = self._resolve_stream_capture_experiment_dir()
+        if not exp_dir:
+            return None
+        return os.path.join(exp_dir, "stream_capture_log.jsonl")
+
+    @staticmethod
+    def _normalize_stream_capture_pressure(value):
+        parsed = CalibrationManager._stream_capture_float_or_none(value)
+        if parsed is None:
+            return None
+        return round(float(parsed), 2)
+
+    def _build_stream_capture_condition_snapshot(self, settings: dict | None = None):
+        payload = dict(settings or {})
+        return {
+            "print_width": self._stream_capture_int_or_none(payload.get("print_width")),
+            "print_pressure": self._normalize_stream_capture_pressure(payload.get("print_pressure")),
+            "refuel_width": self._stream_capture_int_or_none(payload.get("refuel_width")),
+            "refuel_pressure": self._normalize_stream_capture_pressure(payload.get("refuel_pressure")),
+        }
+
+    def _stream_capture_condition_matches_row(self, row: dict, condition_snapshot: dict):
+        return (
+            self._stream_capture_int_or_none(row.get("Print PW")) == self._stream_capture_int_or_none(condition_snapshot.get("print_width"))
+            and self._normalize_stream_capture_pressure(row.get("Print Pressure")) == self._normalize_stream_capture_pressure(condition_snapshot.get("print_pressure"))
+            and self._stream_capture_int_or_none(row.get("Refuel PW")) == self._stream_capture_int_or_none(condition_snapshot.get("refuel_width"))
+            and self._normalize_stream_capture_pressure(row.get("Refuel Pressure")) == self._normalize_stream_capture_pressure(condition_snapshot.get("refuel_pressure"))
+        )
+
+    def _suggest_stream_capture_rep(self, condition_snapshot: dict | None = None):
+        snapshot = dict(condition_snapshot or {})
+        metadata_path = self._resolve_stream_capture_metadata_csv_path()
+        if not metadata_path or not os.path.exists(metadata_path):
+            return 1
+
+        max_rep = 0
+        try:
+            with open(metadata_path, "r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if not self._stream_capture_condition_matches_row(row, snapshot):
+                        continue
+                    rep_value = self._stream_capture_int_or_none((row or {}).get("Rep"))
+                    if rep_value is not None:
+                        max_rep = max(max_rep, int(rep_value))
+        except Exception:
+            return 1
+        return int(max_rep + 1) if max_rep > 0 else 1
+
+    def _build_default_stream_capture_state(self, *, status_message: str | None = None):
+        settings = {}
+        try:
+            settings = self.get_current_settings()
+        except Exception:
+            settings = {}
+        condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
+        suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
+        return {
+            "status": "idle",
+            "status_message": str(status_message or "Ready to begin stream gravimetric capture."),
+            "error_message": "",
+            "session_id": None,
+            "starting_mass_mg": None,
+            "ending_mass_mg": None,
+            "starting_flash": None,
+            "ending_flash": None,
+            "raw_flash_delta": None,
+            "condition_snapshot": condition_snapshot,
+            "suggested_rep": int(suggested_rep),
+            "rep": int(suggested_rep),
+            "notes": "",
+            "timecourse_run_id": None,
+            "child_processes": [],
+            "background_capture_count": None,
+            "printed_capture_count": None,
+            "printed_capture_event_count": None,
+            "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
+            "stream_capture_log_path": self._resolve_stream_capture_log_path(),
+            "sidecar_written": False,
+            "sidecar_outcome": None,
+        }
+
+    def _copy_stream_capture_state(self):
+        try:
+            return json.loads(json.dumps(self._stream_capture_state, default=numpy_encoder))
+        except Exception:
+            return dict(self._stream_capture_state or {})
+
+    def _emit_stream_capture_state_changed(self):
+        try:
+            self.streamCaptureStateChanged.emit(self._copy_stream_capture_state())
+        except Exception:
+            pass
+
+    def _reset_stream_gravimetric_capture_state(self, *, status_message: str | None = None):
+        self._stream_capture_state = self._build_default_stream_capture_state(
+            status_message=status_message,
+        )
+        self._emit_stream_capture_state_changed()
+
+    def get_stream_gravimetric_capture_state(self):
+        if not getattr(self, "_stream_capture_state", None):
+            self._reset_stream_gravimetric_capture_state()
+        state = self._copy_stream_capture_state()
+        if str(state.get("status") or "idle") == "idle":
+            settings = {}
+            try:
+                settings = self.get_current_settings()
+            except Exception:
+                settings = {}
+            condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
+            state["condition_snapshot"] = condition_snapshot
+            state["metadata_csv_path"] = self._resolve_stream_capture_metadata_csv_path()
+            state["stream_capture_log_path"] = self._resolve_stream_capture_log_path()
+            suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
+            state["suggested_rep"] = int(suggested_rep)
+            if self._stream_capture_state.get("status") == "idle":
+                self._stream_capture_state["condition_snapshot"] = dict(condition_snapshot)
+                self._stream_capture_state["metadata_csv_path"] = state["metadata_csv_path"]
+                self._stream_capture_state["stream_capture_log_path"] = state["stream_capture_log_path"]
+                self._stream_capture_state["suggested_rep"] = int(suggested_rep)
+                self._stream_capture_state["rep"] = int(self._stream_capture_state.get("rep") or suggested_rep)
+        return state
+
+    def has_open_stream_gravimetric_capture(self) -> bool:
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        return status in {"running", "awaiting_mass", "error", "stopped"}
+
+    def is_stream_gravimetric_capture_busy(self) -> bool:
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        return status in {"running", "awaiting_mass"}
+
+    def should_suppress_process_verdict(self) -> bool:
+        return bool(self.has_open_stream_gravimetric_capture())
+
+    def _current_flash_count(self):
+        try:
+            return self._stream_capture_int_or_none(self.model.droplet_camera_model.get_num_flashes())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _iter_stream_capture_jsonl(path: str):
+        if not path or not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    yield json.loads(text)
+                except Exception:
+                    continue
+
+    def _record_stream_capture_process_result(self, process_obj, *, outcome: str, error_message: str = ""):
+        if not self.has_open_stream_gravimetric_capture():
+            return
+        if process_obj is None:
+            return
+
+        run_dir = getattr(process_obj, "_recorder_run_dir", None)
+        process_name = getattr(process_obj, "_recorder_process_name", None) or process_obj.__class__.__name__
+        phase_name = getattr(process_obj, "_recorder_phase_name", None) or getattr(process_obj, "phase_name", None) or process_name
+        run_id = os.path.basename(str(run_dir)) if run_dir else None
+        entry = {
+            "process_name": str(process_name),
+            "phase_name": str(phase_name),
+            "run_id": str(run_id or ""),
+            "run_dir": str(run_dir or ""),
+            "outcome": str(outcome or ""),
+            "error_message": str(error_message or ""),
+        }
+
+        child_processes = list((self._stream_capture_state or {}).get("child_processes") or [])
+        child_processes.append(entry)
+        self._stream_capture_state["child_processes"] = child_processes
+        if str(process_name) == "DropletTimecourseProcess" and run_id:
+            self._stream_capture_state["timecourse_run_id"] = str(run_id)
+
+    def _derive_stream_capture_counts_for_run(self, run_dir: str):
+        events_path = os.path.join(str(run_dir), "events.jsonl")
+        run_meta_path = os.path.join(str(run_dir), "run_meta.json")
+        background_capture_count = 0
+        printed_capture_count = 0
+        printed_capture_event_count = 0
+        current_num_droplets = None
+
+        if os.path.exists(run_meta_path):
+            try:
+                with open(run_meta_path, "r", encoding="utf-8") as handle:
+                    run_meta = json.load(handle)
+                settings_snapshot = dict((run_meta or {}).get("settings_snapshot") or {})
+                if "num_droplets" in settings_snapshot:
+                    parsed = self._stream_capture_int_or_none(settings_snapshot.get("num_droplets"))
+                    if parsed is not None:
+                        current_num_droplets = max(0, int(parsed))
+            except Exception:
+                current_num_droplets = None
+
+        for event in self._iter_stream_capture_jsonl(events_path):
+            event_type = str((event or {}).get("event_type") or "")
+            payload = dict((event or {}).get("payload") or {})
+            if event_type in {"settings_requested", "settings_completed"}:
+                settings = dict(payload.get("settings") or {})
+                if "num_droplets" in settings:
+                    parsed = self._stream_capture_int_or_none(settings.get("num_droplets"))
+                    if parsed is not None:
+                        current_num_droplets = max(0, int(parsed))
+                continue
+
+            if event_type != "capture_result":
+                continue
+            if str(payload.get("status") or "") != "success":
+                continue
+            if current_num_droplets is None:
+                continue
+            if int(current_num_droplets) <= 0:
+                background_capture_count += 1
+            else:
+                printed_capture_event_count += 1
+                printed_capture_count += int(current_num_droplets)
+
+        return {
+            "background_capture_count": int(background_capture_count),
+            "printed_capture_count": int(printed_capture_count),
+            "printed_capture_event_count": int(printed_capture_event_count),
+        }
+
+    def _derive_stream_capture_counts(self, child_processes: list[dict] | None = None):
+        background_capture_count = 0
+        printed_capture_count = 0
+        printed_capture_event_count = 0
+        for entry in list(child_processes or (self._stream_capture_state or {}).get("child_processes") or []):
+            run_dir = str((entry or {}).get("run_dir") or "")
+            if not run_dir:
+                continue
+            counts = self._derive_stream_capture_counts_for_run(run_dir)
+            background_capture_count += int(counts.get("background_capture_count") or 0)
+            printed_capture_count += int(counts.get("printed_capture_count") or 0)
+            printed_capture_event_count += int(counts.get("printed_capture_event_count") or 0)
+        return {
+            "background_capture_count": int(background_capture_count),
+            "printed_capture_count": int(printed_capture_count),
+            "printed_capture_event_count": int(printed_capture_event_count),
+        }
+
+    def _update_stream_capture_counts(self):
+        counts = self._derive_stream_capture_counts()
+        self._stream_capture_state["background_capture_count"] = int(counts.get("background_capture_count") or 0)
+        self._stream_capture_state["printed_capture_count"] = int(counts.get("printed_capture_count") or 0)
+        self._stream_capture_state["printed_capture_event_count"] = int(counts.get("printed_capture_event_count") or 0)
+        return counts
+
+    def _write_stream_capture_log(self, *, outcome: str, error_message: str = "", csv_row: dict | None = None):
+        path = self._resolve_stream_capture_log_path()
+        if not path:
+            return None
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        row = self._copy_stream_capture_state()
+        row.update(
+            {
+                "logged_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "outcome": str(outcome or ""),
+                "error_message": str(error_message or row.get("error_message") or ""),
+                "csv_row": dict(csv_row or {}),
+            }
+        )
+
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=numpy_encoder) + "\n")
+
+        self._stream_capture_state["sidecar_written"] = True
+        self._stream_capture_state["sidecar_outcome"] = str(outcome or "")
+        self._stream_capture_state["stream_capture_log_path"] = path
+        return path
+
+    def _mark_stream_capture_terminal_state(self, *, status: str, error_message: str = ""):
+        if not self.has_open_stream_gravimetric_capture():
+            return
+        self._stream_capture_state["status"] = str(status or "error")
+        self._stream_capture_state["error_message"] = str(error_message or "")
+        ending_flash = self._current_flash_count()
+        if ending_flash is not None:
+            self._stream_capture_state["ending_flash"] = int(ending_flash)
+        start_flash = self._stream_capture_state.get("starting_flash")
+        end_flash = self._stream_capture_state.get("ending_flash")
+        if start_flash is not None and end_flash is not None:
+            self._stream_capture_state["raw_flash_delta"] = int(end_flash) - int(start_flash)
+        self._update_stream_capture_counts()
+        self._stream_capture_state["status_message"] = str(
+            error_message or f"Stream gravimetric capture {status}."
+        )
+        if not bool(self._stream_capture_state.get("sidecar_written")):
+            self._write_stream_capture_log(outcome=str(status or "error"), error_message=error_message)
+        self._emit_stream_capture_state_changed()
+
+    def _complete_stream_capture_queue_success(self):
+        if str((self._stream_capture_state or {}).get("status") or "") != "running":
+            return
+        ending_flash = self._current_flash_count()
+        if ending_flash is not None:
+            self._stream_capture_state["ending_flash"] = int(ending_flash)
+        start_flash = self._stream_capture_state.get("starting_flash")
+        end_flash = self._stream_capture_state.get("ending_flash")
+        if start_flash is not None and end_flash is not None:
+            self._stream_capture_state["raw_flash_delta"] = int(end_flash) - int(start_flash)
+        self._update_stream_capture_counts()
+        self._stream_capture_state["status"] = "awaiting_mass"
+        self._stream_capture_state["status_message"] = "Imaging complete. Enter ending mass, review counts, and save the row."
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+
+    def _build_stream_capture_metadata_row(self, *, ending_mass_mg: float, rep_value: int, notes: str):
+        timecourse_run_id = str((self._stream_capture_state or {}).get("timecourse_run_id") or "").strip()
+        printed_count = self._stream_capture_int_or_none((self._stream_capture_state or {}).get("printed_capture_count"))
+        if not timecourse_run_id:
+            raise ValueError("Timecourse run id is missing; cannot save stream metadata row.")
+        if printed_count is None or int(printed_count) <= 0:
+            raise ValueError("Printed droplet count must be positive before saving.")
+
+        condition = dict((self._stream_capture_state or {}).get("condition_snapshot") or {})
+        starting_mass = self._stream_capture_float_or_none((self._stream_capture_state or {}).get("starting_mass_mg")) or 0.0
+        ending_mass = float(ending_mass_mg)
+        mass_change = float(ending_mass - starting_mass)
+        mass_per_print = float(mass_change / int(printed_count))
+
+        row = {
+            "Dataset name": str(timecourse_run_id),
+            "Print PW": str(self._stream_capture_int_or_none(condition.get("print_width")) or ""),
+            "Print Pressure": self._format_stream_capture_decimal(condition.get("print_pressure"), 2),
+            "Refuel PW": str(self._stream_capture_int_or_none(condition.get("refuel_width")) or ""),
+            "Refuel Pressure": self._format_stream_capture_decimal(condition.get("refuel_pressure"), 2),
+            "Rep": str(int(rep_value)),
+            "Starting mass": self._format_stream_capture_decimal(starting_mass, 4),
+            "Starting flash": str(self._stream_capture_int_or_none((self._stream_capture_state or {}).get("starting_flash")) or ""),
+            "Ending flash": str(self._stream_capture_int_or_none((self._stream_capture_state or {}).get("ending_flash")) or ""),
+            "Ending mass": self._format_stream_capture_decimal(ending_mass, 4),
+            "Mass Change": self._format_stream_capture_decimal(mass_change, 4),
+            "Num printed": str(int(printed_count)),
+            "Mass/print": self._format_stream_capture_decimal(mass_per_print, 4),
+            "CV": "",
+            "Notes": str(notes or ""),
+        }
+        return row
+
+    def _append_stream_capture_metadata_row(self, row: dict):
+        path = self._resolve_stream_capture_metadata_csv_path()
+        if not path:
+            raise ValueError("Experiment path is unavailable; cannot save stream metadata row.")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                existing_headers = list(reader.fieldnames or [])
+                for existing in reader:
+                    if str(existing.get("Dataset name") or "").strip() == str(row.get("Dataset name") or "").strip():
+                        raise ValueError(f"Dataset row already exists for {row.get('Dataset name')}.")
+            if existing_headers and existing_headers != list(self.STREAM_METADATA_HEADERS):
+                required = set(self.STREAM_METADATA_HEADERS)
+                if not required.issubset(set(existing_headers)):
+                    raise ValueError("Existing stream_metadata.csv header is incompatible with the stream capture writer.")
+
+        write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, "a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(self.STREAM_METADATA_HEADERS))
+            if write_header:
+                writer.writeheader()
+            writer.writerow({key: row.get(key, "") for key in self.STREAM_METADATA_HEADERS})
+        self._stream_capture_state["metadata_csv_path"] = path
+        return path
+
+    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes=""):
+        if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
+            return False, "Stop the current calibration before starting a stream gravimetric capture."
+        if self.has_open_stream_gravimetric_capture():
+            return False, "Save or discard the existing stream gravimetric capture session first."
+        if not self.get_record_mode_enabled():
+            return False, "Record Calibration Runs must be enabled before starting a stream gravimetric capture."
+
+        experiment_dir = self._resolve_stream_capture_experiment_dir()
+        calibration_file_path = self._resolve_stream_capture_calibration_file_path()
+        if not experiment_dir or not calibration_file_path:
+            return False, "An active experiment path is required before starting a stream gravimetric capture."
+        if not os.path.isdir(experiment_dir):
+            return False, f"Experiment directory does not exist: {experiment_dir}"
+
+        starting_mass = self._stream_capture_float_or_none(starting_mass_mg)
+        if starting_mass is None:
+            return False, "Starting mass is required."
+
+        settings = self.get_current_settings()
+        condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
+        suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
+        rep_value = self._stream_capture_int_or_none(rep_override)
+        if rep_value is None or rep_value <= 0:
+            rep_value = int(suggested_rep)
+
+        try:
+            self.begin_session(calibration_file_path, notes="stream gravimetric capture")
+        except Exception as e:
+            return False, f"Failed to begin calibration session: {e}"
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        starting_flash = self._current_flash_count()
+        self._stream_capture_state = {
+            "status": "running",
+            "status_message": "Running nozzle, focus, emergence, and timecourse capture sequence.",
+            "error_message": "",
+            "session_id": f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}",
+            "starting_mass_mg": float(starting_mass),
+            "ending_mass_mg": None,
+            "starting_flash": starting_flash,
+            "ending_flash": None,
+            "raw_flash_delta": None,
+            "condition_snapshot": dict(condition_snapshot),
+            "suggested_rep": int(suggested_rep),
+            "rep": int(rep_value),
+            "notes": str(notes or ""),
+            "timecourse_run_id": None,
+            "child_processes": [],
+            "background_capture_count": None,
+            "printed_capture_count": None,
+            "printed_capture_event_count": None,
+            "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
+            "stream_capture_log_path": self._resolve_stream_capture_log_path(),
+            "sidecar_written": False,
+            "sidecar_outcome": None,
+        }
+        self._emit_stream_capture_state_changed()
+
+        self.clear_calibration_queue()
+        self.add_calibration_queue(list(self.STREAM_CAPTURE_QUEUE))
+        self.start_calibration_queue()
+
+        if self.activeCalibration is None and len(self.calibration_queue) == 0 and str(self._stream_capture_state.get("status")) == "running":
+            self._stream_capture_state["status"] = "error"
+            self._stream_capture_state["error_message"] = "Stream gravimetric capture failed to launch."
+            self._stream_capture_state["status_message"] = "Stream gravimetric capture failed to launch."
+            self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status != "awaiting_mass":
+            if status in {"error", "stopped"} and not bool((self._stream_capture_state or {}).get("sidecar_written")):
+                self._write_stream_capture_log(outcome=status, error_message=str((self._stream_capture_state or {}).get("error_message") or ""))
+            return False, "Stream gravimetric capture is not ready to save."
+
+        ending_mass = self._stream_capture_float_or_none(ending_mass_mg)
+        if ending_mass is None:
+            return False, "Ending mass is required."
+
+        rep_value = self._stream_capture_int_or_none(rep_override)
+        if rep_value is None or rep_value <= 0:
+            rep_value = int((self._stream_capture_state or {}).get("rep") or (self._stream_capture_state or {}).get("suggested_rep") or 1)
+        final_notes = str(notes if notes is not None else (self._stream_capture_state or {}).get("notes") or "")
+        self._stream_capture_state["ending_mass_mg"] = float(ending_mass)
+        self._stream_capture_state["rep"] = int(rep_value)
+        self._stream_capture_state["notes"] = final_notes
+
+        try:
+            row = self._build_stream_capture_metadata_row(
+                ending_mass_mg=float(ending_mass),
+                rep_value=int(rep_value),
+                notes=final_notes,
+            )
+            self._append_stream_capture_metadata_row(row)
+        except Exception as e:
+            message = str(e)
+            self._stream_capture_state["status"] = "error"
+            self._stream_capture_state["error_message"] = message
+            self._stream_capture_state["status_message"] = message
+            if not bool(self._stream_capture_state.get("sidecar_written")):
+                self._write_stream_capture_log(outcome="invalid_save", error_message=message)
+            self._emit_stream_capture_state_changed()
+            return False, message
+
+        self._write_stream_capture_log(outcome="saved", csv_row=row)
+        dataset_name = str(row.get("Dataset name") or "")
+        self._reset_stream_gravimetric_capture_state(
+            status_message=f"Saved stream metadata row for {dataset_name}.",
+        )
+        self.calibrationStageChanged.emit(
+            f"Saved stream metadata row for {dataset_name}.",
+            "green",
+        )
+        return True, ""
+
+    def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status == "idle":
+            return False, "No active stream gravimetric capture session to discard."
+        if status == "running" and self.activeCalibration is not None:
+            return False, "Stop the stream gravimetric capture before discarding it."
+        if status == "running":
+            self.clear_calibration_queue()
+
+        if not bool((self._stream_capture_state or {}).get("sidecar_written")):
+            outcome = "discarded" if status in {"running", "awaiting_mass"} else status
+            self._write_stream_capture_log(
+                outcome=outcome,
+                error_message=str(reason or ""),
+            )
+
+        session_id = str((self._stream_capture_state or {}).get("session_id") or "")
+        try:
+            self.clear_pending_process_verdict(reason="stream_capture_discarded")
+        except Exception:
+            pass
+        self._reset_stream_gravimetric_capture_state(
+            status_message=(
+                f"Discarded stream gravimetric capture {session_id}."
+                if session_id
+                else "Discarded stream gravimetric capture."
+            ),
+        )
+        self.calibrationStageChanged.emit(
+            "Discarded stream gravimetric capture.",
+            "orange",
+        )
+        return True, ""
+
     # ------------- Getters (alias-aware) -------------
 
     def _resolve_phase_key(self, phase_name):
@@ -3198,9 +3831,15 @@ class CalibrationManager(QObject):
             process_obj,
             default_outcome="success",
         )
+        self._record_stream_capture_process_result(
+            process_obj,
+            outcome="completed",
+        )
         self._cleanup_finished_process(process_obj)
         self.activeCalibration = None
         self._emit_readiness()
+        if len(self.calibration_queue) == 0:
+            self._complete_stream_capture_queue_success()
         self.calibrationCompleted.emit()
         if len(self.calibration_queue) > 0:
             self.calibrationStageChanged.emit("Starting next calibration in queue...", "blue")
@@ -3218,8 +3857,21 @@ class CalibrationManager(QObject):
             default_outcome="failed",
             error_message=str(error_message or ""),
         )
+        normalized_status = (
+            "stopped" if str(error_message or "").strip() == "Calibration terminated by user" else "error"
+        )
+        self._record_stream_capture_process_result(
+            process_obj,
+            outcome=normalized_status,
+            error_message=str(error_message or ""),
+        )
         self._cleanup_finished_process(process_obj)
         self.activeCalibration = None
+        if self.has_open_stream_gravimetric_capture():
+            self._mark_stream_capture_terminal_state(
+                status=normalized_status,
+                error_message=str(error_message or ""),
+            )
         self.calibrationError.emit(error_message)
         if len(self.calibration_queue) > 0:
             self.calibrationStageChanged.emit("Calibration queue stopped due to error", "red")
@@ -3375,6 +4027,11 @@ class CalibrationManager(QObject):
         return []
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
+        if str((self._stream_capture_state or {}).get("status") or "idle") in {"awaiting_mass", "error", "stopped"}:
+            msg = "Save or discard the current stream gravimetric capture session before starting another calibration."
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
         try:
             kwargs = self._prepare_calibration_memory_prior_application(proc_cls, kwargs)
         except Exception as e:

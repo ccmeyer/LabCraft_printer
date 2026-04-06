@@ -1589,6 +1589,25 @@ class Controller(QObject):
     def start_droplet_timecourse_process(self):
         self.model.calibration_manager.start_droplet_timecourse_process()
 
+    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes=""):
+        return self.model.calibration_manager.start_stream_gravimetric_capture(
+            starting_mass_mg,
+            rep_override=rep_override,
+            notes=notes,
+        )
+
+    def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
+        return self.model.calibration_manager.finalize_stream_gravimetric_capture(
+            ending_mass_mg,
+            rep_override=rep_override,
+            notes=notes,
+        )
+
+    def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
+        return self.model.calibration_manager.discard_stream_gravimetric_capture(
+            reason=reason,
+        )
+
     # def start_pressure_scan_calibration(self):
     #     # Tell the Model to start the pressure scan calibration.
     #     self.model.calibration_manager.start_pressure_scan_calibration()
