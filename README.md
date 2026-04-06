@@ -163,31 +163,15 @@ For more information, refer to the PlatformIO documentation and the documentatio
 
 ## Usage
 
-To run launch the user interface that connects and drives the machine use the following command once the virtual environment is active:
+To launch the user interface manually once the virtual environment is active, use:
 ```bash
-python .\MVC-Interface\App.py
+python FreeRTOS-interface/App.py
 ```
-Inside of the `.\MVC-Interface\Presets` directory is the file `Settings.json`. This file sets several predefined values such as the default COM ports, default plate setup, etc.
+Inside `FreeRTOS-interface/Presets`, `Settings.json` stores predefined values such as default COM ports and plate setup.
 
-## First-time setup on a new Pi
+## Pi setup status
 
-```bash
-# 1) Clone
-git clone https://github.com/ccmeyer/LabCraft_printer
-cd LabCraft_printer
-
-# 2) Provision OS deps, groups, DFU rule, UART
-./scripts/setup_pi.sh
-# Log out / reboot if groups changed
-
-# 3) Python env
-./scripts/post_clone.sh
-
-# 4) Run
-source .venv/bin/activate
-python FreeRTOS_interface/App.py
-```
-
+The repo still contains `setup_pi.sh` and `post_clone.sh`, but they are not the recommended path for an already-working Raspberry Pi OS Bookworm setup with cameras. If your Pi is already configured successfully using the manual procedure below, keep that flow as the source of truth for now and do not run those older scripts unless you are explicitly testing them.
 
 ## Updated Startup Procedure
 ```bash
@@ -287,5 +271,34 @@ rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/pandas*
 rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/matplotlib*
 rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/scipy*
 rm -rf /home/labcraft/LabCraft_printer/venv/lib/python3.11/site-packages/sklearn*
+
+# Manual launch
+python FreeRTOS-interface/App.py
+```
+
+## Optional desktop launcher install
+
+Once the Pi is already working with the manual setup above and the app launches correctly from your existing repo-local virtual environment, you can install a normal Raspberry Pi OS launcher without changing system configuration:
+
+```bash
+bash scripts/pi/install_desktop_launcher.sh
+```
+
+The launcher installer is intentionally narrow:
+
+- It installs a per-user application entry into `~/.local/share/applications/`
+- It uses the existing repo-local `.venv`, `venv`, or legacy `env`
+- It does not run `apt`, change groups, touch camera/UART config, recreate the virtual environment, or reinstall dependencies
+
+Launcher diagnostics are written to:
+
+```text
+logs/desktop-launch.log
+```
+
+To remove the launcher, delete:
+
+```bash
+rm -f ~/.local/share/applications/labcraft-printer.desktop
 ```
 
