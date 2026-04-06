@@ -556,9 +556,76 @@ def _write_progress(path: Path, payload: dict):
     _write_json(path, payload)
 
 
-def export_stage6_summary(
-    experiment_root: str | Path,
+def _build_raw_run_context(review_cache_mod, run_row: dict, stage5_run: dict, *, source: dict):
+    middle_payload = dict(stage5_run.get("middle_payload") or {})
+    return review_cache_mod._cache_context_payload(
+        run_row,
+        steady_fit_payload=dict(stage5_run.get("steady_fit_payload") or {}),
+        trusted_visible_volume_nl=_float_or_none(middle_payload.get("trusted_visible_volume_nl")),
+        first_untrusted_capture_index=_int_or_none(
+            middle_payload.get("first_untrusted_capture_index")
+        ),
+        first_untrusted_delay_from_emergence_us=_int_or_none(
+            middle_payload.get("first_untrusted_delay_from_emergence_us")
+        ),
+        fov_report=dict(stage5_run.get("stage4_run", {}).get("fov_report") or {}),
+        source=source,
+    )
+
+
+def _validate_cache_mode_raw_overrides(
+    review_cache_mod,
     *,
+    include_unmatched: bool,
+    sample_count: int,
+    extra_frame_indices: list[int] | None,
+    search_width_frac: float,
+    search_top_frac: float,
+    search_bottom_frac: float,
+    blur_sigma: float,
+    residual_threshold: int,
+    shift_threshold_px: float,
+    confidence_threshold: float,
+    roi_width_frac: float,
+    roi_top_frac: float,
+    roi_bottom_frac: float,
+    corridor_width_frac: float,
+    nozzle_guard_px: int,
+    min_component_area_px: int,
+):
+    defaults = dict(review_cache_mod.RAW_FALLBACK_STAGE5_KWARGS)
+    current_values = {
+        "sample_count": int(sample_count),
+        "extra_frame_indices": list(extra_frame_indices or []),
+        "search_width_frac": float(search_width_frac),
+        "search_top_frac": float(search_top_frac),
+        "search_bottom_frac": float(search_bottom_frac),
+        "blur_sigma": float(blur_sigma),
+        "residual_threshold": int(residual_threshold),
+        "shift_threshold_px": float(shift_threshold_px),
+        "confidence_threshold": float(confidence_threshold),
+        "roi_width_frac": float(roi_width_frac),
+        "roi_top_frac": float(roi_top_frac),
+        "roi_bottom_frac": float(roi_bottom_frac),
+        "corridor_width_frac": float(corridor_width_frac),
+        "nozzle_guard_px": int(nozzle_guard_px),
+        "min_component_area_px": int(min_component_area_px),
+    }
+    mismatches = [key for key, value in current_values.items() if value != defaults.get(key)]
+    if bool(include_unmatched):
+        mismatches.append("include_unmatched")
+    if mismatches:
+        mismatch_text = ", ".join(sorted(set(mismatches)))
+        raise ValueError(
+            "Cache-backed summary only supports default raw image-analysis knobs. "
+            f"Reset these options or rerun from the experiment root instead: {mismatch_text}"
+        )
+
+
+def export_stage6_summary(
+    experiment_root: str | Path | None = None,
+    *,
+    cache_root: str | Path | None = None,
     output_root: str | Path | None = None,
     run_ids: list[str] | None = None,
     limit_runs: int | None = None,
@@ -587,19 +654,166 @@ def export_stage6_summary(
     steady_width_tol_px: float = 4.0,
     steady_fit_r2_min: float = 0.985,
     steady_fit_nrmse_max: float = 0.03,
+    steady_fit_mode: str = "recompute",
+    steady_fit_exclude_last_trusted_frames: int = 0,
+    flow_fit_backfill_max_frames: int = 3,
+    flow_fit_backfill_width_delta_px: float = 8.0,
+    flow_fit_backfill_monotonic_slack_px: float = 0.75,
     tail_drop_frac: float = 0.08,
     tail_persist_frames: int = 3,
+    include_suspect_gravimetric: bool = False,
+    tail_start_mode: str = fit_mod.TAIL_START_MODE_LEGACY,
+    tail_direct_target_drop_to_threshold_frac: float = fit_mod.TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_direct_target_peak_lead_us: float = fit_mod.TAIL_DIRECT_TARGET_PEAK_LEAD_US,
+    tail_direct_target_shrink_rate_ratio: float = fit_mod.TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
+    tail_shoulder_target_drop_to_threshold_frac: float = fit_mod.TAIL_SHOULDER_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_shoulder_target_peak_lead_us: float = fit_mod.TAIL_SHOULDER_TARGET_PEAK_LEAD_US,
+    tail_shoulder_target_shrink_rate_ratio: float = fit_mod.TAIL_SHOULDER_TARGET_SHRINK_RATE_RATIO,
+    tail_score_drop_weight: float = fit_mod.TAIL_SCORE_DROP_WEIGHT,
+    tail_score_peak_lead_weight: float = fit_mod.TAIL_SCORE_PEAK_LEAD_WEIGHT,
+    tail_score_shrink_rate_weight: float = fit_mod.TAIL_SCORE_SHRINK_RATE_WEIGHT,
+    tail_score_drop_scale: float = fit_mod.TAIL_SCORE_DROP_SCALE,
+    tail_score_peak_lead_scale_us: float = fit_mod.TAIL_SCORE_PEAK_LEAD_SCALE_US,
+    tail_score_shrink_rate_scale: float = fit_mod.TAIL_SCORE_SHRINK_RATE_SCALE,
+    tail_unified_band_drop_min: float = fit_mod.TAIL_UNIFIED_BAND_DROP_MIN,
+    tail_unified_band_drop_max: float = fit_mod.TAIL_UNIFIED_BAND_DROP_MAX,
+    tail_unified_band_peak_lead_min_us: float = fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MIN_US,
+    tail_unified_band_peak_lead_max_us: float = fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MAX_US,
+    tail_unified_band_shrink_rate_ratio_min: float = fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MIN,
+    tail_unified_band_shrink_rate_ratio_max: float = fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MAX,
+    tail_unified_target_drop_to_threshold_frac: float = fit_mod.TAIL_UNIFIED_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_unified_target_peak_lead_us: float = fit_mod.TAIL_UNIFIED_TARGET_PEAK_LEAD_US,
+    tail_unified_target_shrink_rate_ratio: float = fit_mod.TAIL_UNIFIED_TARGET_SHRINK_RATE_RATIO,
+    volume_uncertainty_sample_count: int = fit_mod.VOLUME_UNCERTAINTY_SAMPLE_COUNT,
+    volume_uncertainty_seed: int = fit_mod.VOLUME_UNCERTAINTY_SEED,
+    tail_uncertainty_score_tolerance: float = fit_mod.TAIL_UNCERTAINTY_SCORE_TOLERANCE,
 ):
-    inventory = build_stage0_inventory(
-        experiment_root,
-        include_unmatched=include_unmatched,
-        run_ids=run_ids,
-        limit_runs=limit_runs,
+    from tools.stream_analysis import review_cache as review_cache_mod
+
+    if bool(experiment_root) == bool(cache_root):
+        raise ValueError("Provide exactly one source: --experiment-root or --cache-root.")
+
+    analysis_source_mode = "cache" if cache_root else "raw"
+    parameter_payload = fit_mod._stage5_parameter_payload(
+        sample_count=sample_count,
+        extra_frame_indices=extra_frame_indices,
+        search_width_frac=search_width_frac,
+        search_top_frac=search_top_frac,
+        search_bottom_frac=search_bottom_frac,
+        blur_sigma=blur_sigma,
+        residual_threshold=residual_threshold,
+        shift_threshold_px=shift_threshold_px,
+        confidence_threshold=confidence_threshold,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+        corridor_width_frac=corridor_width_frac,
+        nozzle_guard_px=nozzle_guard_px,
+        min_component_area_px=min_component_area_px,
+        near_nozzle_band_top_px=near_nozzle_band_top_px,
+        near_nozzle_band_height_px=near_nozzle_band_height_px,
+        min_band_valid_rows=min_band_valid_rows,
+        width_smooth_window=width_smooth_window,
+        min_steady_frames=min_steady_frames,
+        steady_width_tol_frac=steady_width_tol_frac,
+        steady_width_tol_px=steady_width_tol_px,
+        steady_fit_r2_min=steady_fit_r2_min,
+        steady_fit_nrmse_max=steady_fit_nrmse_max,
+        steady_fit_mode=steady_fit_mode,
+        steady_fit_exclude_last_trusted_frames=steady_fit_exclude_last_trusted_frames,
+        flow_fit_backfill_max_frames=flow_fit_backfill_max_frames,
+        flow_fit_backfill_width_delta_px=flow_fit_backfill_width_delta_px,
+        flow_fit_backfill_monotonic_slack_px=flow_fit_backfill_monotonic_slack_px,
+        tail_drop_frac=tail_drop_frac,
+        tail_persist_frames=tail_persist_frames,
+        tail_start_mode=tail_start_mode,
+        tail_direct_target_drop_to_threshold_frac=tail_direct_target_drop_to_threshold_frac,
+        tail_direct_target_peak_lead_us=tail_direct_target_peak_lead_us,
+        tail_direct_target_shrink_rate_ratio=tail_direct_target_shrink_rate_ratio,
+        tail_shoulder_target_drop_to_threshold_frac=tail_shoulder_target_drop_to_threshold_frac,
+        tail_shoulder_target_peak_lead_us=tail_shoulder_target_peak_lead_us,
+        tail_shoulder_target_shrink_rate_ratio=tail_shoulder_target_shrink_rate_ratio,
+        tail_score_drop_weight=tail_score_drop_weight,
+        tail_score_peak_lead_weight=tail_score_peak_lead_weight,
+        tail_score_shrink_rate_weight=tail_score_shrink_rate_weight,
+        tail_score_drop_scale=tail_score_drop_scale,
+        tail_score_peak_lead_scale_us=tail_score_peak_lead_scale_us,
+        tail_score_shrink_rate_scale=tail_score_shrink_rate_scale,
+        tail_unified_band_drop_min=tail_unified_band_drop_min,
+        tail_unified_band_drop_max=tail_unified_band_drop_max,
+        tail_unified_band_peak_lead_min_us=tail_unified_band_peak_lead_min_us,
+        tail_unified_band_peak_lead_max_us=tail_unified_band_peak_lead_max_us,
+        tail_unified_band_shrink_rate_ratio_min=tail_unified_band_shrink_rate_ratio_min,
+        tail_unified_band_shrink_rate_ratio_max=tail_unified_band_shrink_rate_ratio_max,
+        tail_unified_target_drop_to_threshold_frac=tail_unified_target_drop_to_threshold_frac,
+        tail_unified_target_peak_lead_us=tail_unified_target_peak_lead_us,
+        tail_unified_target_shrink_rate_ratio=tail_unified_target_shrink_rate_ratio,
+        volume_uncertainty_sample_count=volume_uncertainty_sample_count,
+        volume_uncertainty_seed=volume_uncertainty_seed,
+        tail_uncertainty_score_tolerance=tail_uncertainty_score_tolerance,
     )
-    output_path = Path(output_root).expanduser().resolve() if output_root else default_output_root(experiment_root)
+
+    cache_manifest = {}
+    experiment_root_text = None
+    inventory = None
+    selected_runs = []
+    selected_entries = []
+    if analysis_source_mode == "raw":
+        inventory = build_stage0_inventory(
+            experiment_root,
+            include_unmatched=include_unmatched,
+            run_ids=run_ids,
+            limit_runs=limit_runs,
+        )
+        experiment_root_text = inventory["experiment_root"]
+        selected_runs = list(inventory["selected_runs"])
+    else:
+        _validate_cache_mode_raw_overrides(
+            review_cache_mod,
+            include_unmatched=include_unmatched,
+            sample_count=sample_count,
+            extra_frame_indices=extra_frame_indices,
+            search_width_frac=search_width_frac,
+            search_top_frac=search_top_frac,
+            search_bottom_frac=search_bottom_frac,
+            blur_sigma=blur_sigma,
+            residual_threshold=residual_threshold,
+            shift_threshold_px=shift_threshold_px,
+            confidence_threshold=confidence_threshold,
+            roi_width_frac=roi_width_frac,
+            roi_top_frac=roi_top_frac,
+            roi_bottom_frac=roi_bottom_frac,
+            corridor_width_frac=corridor_width_frac,
+            nozzle_guard_px=nozzle_guard_px,
+            min_component_area_px=min_component_area_px,
+        )
+        cache_root_path = Path(cache_root).expanduser().resolve()
+        cache_manifest_path = cache_root_path / review_cache_mod.CACHE_MANIFEST_FILENAME
+        if cache_manifest_path.exists():
+            cache_manifest = review_cache_mod._load_json(cache_manifest_path)
+            experiment_root_text = cache_manifest.get("experiment_root")
+        selected_entries = review_cache_mod._selected_cache_entries(
+            cache_root_path,
+            run_ids=run_ids,
+            limit_runs=limit_runs,
+        )
+
+    output_path = (
+        Path(output_root).expanduser().resolve()
+        if output_root
+        else (
+            Path(cache_root).expanduser().resolve().parent
+            if cache_root
+            else default_output_root(experiment_root)
+        )
+    )
     output_path.mkdir(parents=True, exist_ok=True)
 
-    selected_run_ids = [str(row["run_id"]) for row in inventory["selected_runs"]]
+    selected_run_ids = (
+        [str(row["run_id"]) for row in selected_runs]
+        if analysis_source_mode == "raw"
+        else [str(entry["run_id"]) for entry in selected_entries]
+    )
     progress_path = output_path / SUMMARY_PROGRESS_FILENAME
     run_summaries_written = []
     completed_run_ids = []
@@ -619,11 +833,14 @@ def export_stage6_summary(
 
     summary_rows = []
     run_manifests = []
-    for run_index, run_row in enumerate(inventory["selected_runs"], start=1):
-        run_id = str(run_row["run_id"])
-        frame_rows = list(inventory["frames_by_run_id"][run_id])
-        if not frame_rows:
-            raise ValueError(f"No frame index rows available for run: {run_id}")
+    width_review_rows = []
+    vt_review_rows = []
+    width_review_dir = output_path / "gravimetric_width_review"
+    vt_review_dir = output_path / "vt_fit_review"
+    for run_index, run_id in enumerate(selected_run_ids, start=1):
+        run_row = None
+        run_context = None
+        cache_paths = None
 
         _progress(f"[{run_index}/{len(selected_run_ids)}] starting {run_id}")
         _write_progress(
@@ -638,52 +855,159 @@ def export_stage6_summary(
         )
 
         started = time.perf_counter()
-        stage5_run = fit_mod._build_stage5_run(
-            run_id,
-            frame_rows,
-            sample_count=sample_count,
-            extra_frame_indices=extra_frame_indices,
-            search_width_frac=search_width_frac,
-            search_top_frac=search_top_frac,
-            search_bottom_frac=search_bottom_frac,
-            blur_sigma=blur_sigma,
-            residual_threshold=residual_threshold,
-            shift_threshold_px=shift_threshold_px,
-            confidence_threshold=confidence_threshold,
-            roi_width_frac=roi_width_frac,
-            roi_top_frac=roi_top_frac,
-            roi_bottom_frac=roi_bottom_frac,
-            corridor_width_frac=corridor_width_frac,
-            nozzle_guard_px=nozzle_guard_px,
-            min_component_area_px=min_component_area_px,
-            near_nozzle_band_top_px=near_nozzle_band_top_px,
-            near_nozzle_band_height_px=near_nozzle_band_height_px,
-            min_band_valid_rows=min_band_valid_rows,
-            width_smooth_window=width_smooth_window,
-            min_steady_frames=min_steady_frames,
-            steady_width_tol_frac=steady_width_tol_frac,
-            steady_width_tol_px=steady_width_tol_px,
-            steady_fit_r2_min=steady_fit_r2_min,
-            steady_fit_nrmse_max=steady_fit_nrmse_max,
-            tail_drop_frac=tail_drop_frac,
-            tail_persist_frames=tail_persist_frames,
-        )
+        if analysis_source_mode == "raw":
+            run_row = next(row for row in selected_runs if str(row["run_id"]) == run_id)
+            frame_rows = list(inventory["frames_by_run_id"][run_id])
+            if not frame_rows:
+                raise ValueError(f"No frame index rows available for run: {run_id}")
+            stage5_run = fit_mod._build_stage5_run(run_id, frame_rows, **parameter_payload)
+            artifact_refs = _artifact_references(experiment_root, output_path, run_id)
+            stage5_paths = fit_mod._write_stage5_outputs(
+                output_path,
+                run_id,
+                stage5_run,
+                run_dir=run_row.get("run_dir"),
+                parameters=parameter_payload,
+                analysis_source_mode=analysis_source_mode,
+                referenced_stage4_fit_output_root=artifact_refs["referenced_stage4_fit_output_root"],
+                referenced_stage4_manifest_json=artifact_refs["referenced_stage4_manifest_json"],
+                referenced_stage5_fit_output_root=str(output_path),
+                referenced_stage5_manifest_json=None,
+                stage4_summary=stage5_run["stage4_run"].get("summary_counts"),
+                shift_events=stage5_run["stage4_run"].get("shift_events"),
+            )
+            run_context = _build_raw_run_context(
+                review_cache_mod,
+                dict(run_row),
+                stage5_run,
+                source={
+                    "stage4_output_root": artifact_refs["referenced_stage4_fit_output_root"],
+                    "stage4_manifest_json": artifact_refs["referenced_stage4_manifest_json"],
+                    "stage5_output_root": str(output_path),
+                    "stage5_manifest_json": str(stage5_paths["fit_manifest_json"]),
+                },
+            )
+        else:
+            entry = next(entry for entry in selected_entries if str(entry["run_id"]) == run_id)
+            cache_paths = dict(entry["paths"])
+            run_context = dict(entry["run_context"])
+            phase_input_rows = review_cache_mod._load_csv_rows(cache_paths["phase_input_csv"])
+            frozen_anchors = dict(run_context.get("frozen_anchors") or {})
+            stage5_run = fit_mod._build_stage5_review_run(
+                run_id,
+                phase_input_rows,
+                steady_fit_payload=dict(run_context.get("frozen_steady_fit") or {}),
+                fov_report=dict(run_context.get("fov_report") or {}),
+                trusted_visible_volume_nl=_float_or_none(
+                    frozen_anchors.get("trusted_visible_volume_nl")
+                ),
+                first_untrusted_delay_from_emergence_us=_int_or_none(
+                    frozen_anchors.get("first_untrusted_delay_from_emergence_us")
+                ),
+                width_smooth_window=int(width_smooth_window),
+                tail_drop_frac=float(tail_drop_frac),
+                tail_persist_frames=int(tail_persist_frames),
+                steady_fit_mode=str(steady_fit_mode),
+                steady_fit_exclude_last_trusted_frames=int(
+                    steady_fit_exclude_last_trusted_frames
+                ),
+                min_steady_frames=int(min_steady_frames),
+                steady_width_tol_frac=float(steady_width_tol_frac),
+                steady_width_tol_px=float(steady_width_tol_px),
+                flow_fit_backfill_max_frames=int(flow_fit_backfill_max_frames),
+                flow_fit_backfill_width_delta_px=float(flow_fit_backfill_width_delta_px),
+                flow_fit_backfill_monotonic_slack_px=float(
+                    flow_fit_backfill_monotonic_slack_px
+                ),
+                tail_start_mode=str(tail_start_mode),
+                tail_direct_target_drop_to_threshold_frac=float(
+                    tail_direct_target_drop_to_threshold_frac
+                ),
+                tail_direct_target_peak_lead_us=float(tail_direct_target_peak_lead_us),
+                tail_direct_target_shrink_rate_ratio=float(
+                    tail_direct_target_shrink_rate_ratio
+                ),
+                tail_shoulder_target_drop_to_threshold_frac=float(
+                    tail_shoulder_target_drop_to_threshold_frac
+                ),
+                tail_shoulder_target_peak_lead_us=float(tail_shoulder_target_peak_lead_us),
+                tail_shoulder_target_shrink_rate_ratio=float(
+                    tail_shoulder_target_shrink_rate_ratio
+                ),
+                tail_score_drop_weight=float(tail_score_drop_weight),
+                tail_score_peak_lead_weight=float(tail_score_peak_lead_weight),
+                tail_score_shrink_rate_weight=float(tail_score_shrink_rate_weight),
+                tail_score_drop_scale=float(tail_score_drop_scale),
+                tail_score_peak_lead_scale_us=float(tail_score_peak_lead_scale_us),
+                tail_score_shrink_rate_scale=float(tail_score_shrink_rate_scale),
+                tail_unified_band_drop_min=float(tail_unified_band_drop_min),
+                tail_unified_band_drop_max=float(tail_unified_band_drop_max),
+                tail_unified_band_peak_lead_min_us=float(tail_unified_band_peak_lead_min_us),
+                tail_unified_band_peak_lead_max_us=float(tail_unified_band_peak_lead_max_us),
+                tail_unified_band_shrink_rate_ratio_min=float(
+                    tail_unified_band_shrink_rate_ratio_min
+                ),
+                tail_unified_band_shrink_rate_ratio_max=float(
+                    tail_unified_band_shrink_rate_ratio_max
+                ),
+                tail_unified_target_drop_to_threshold_frac=float(
+                    tail_unified_target_drop_to_threshold_frac
+                ),
+                tail_unified_target_peak_lead_us=float(tail_unified_target_peak_lead_us),
+                tail_unified_target_shrink_rate_ratio=float(
+                    tail_unified_target_shrink_rate_ratio
+                ),
+                volume_uncertainty_sample_count=max(1, int(volume_uncertainty_sample_count)),
+                volume_uncertainty_seed=int(volume_uncertainty_seed),
+                tail_uncertainty_score_tolerance=float(
+                    tail_uncertainty_score_tolerance
+                ),
+                steady_fit_r2_min=float(steady_fit_r2_min),
+                steady_fit_nrmse_max=float(steady_fit_nrmse_max),
+            )
+            source = dict(run_context.get("source") or {})
+            stage5_paths = fit_mod._write_stage5_outputs(
+                output_path,
+                run_id,
+                stage5_run,
+                run_dir=(run_context.get("metadata_snapshot") or {}).get("run_dir"),
+                parameters=parameter_payload,
+                analysis_source_mode=analysis_source_mode,
+                cache_source_kind=source.get("kind"),
+                phase_input_csv=cache_paths["phase_input_csv"],
+                run_context_json=cache_paths["run_context_json"],
+                referenced_stage4_fit_output_root=source.get("stage4_output_root")
+                or source.get("source_output_root"),
+                referenced_stage4_manifest_json=source.get("stage4_manifest_json"),
+                referenced_stage5_fit_output_root=source.get("stage5_output_root")
+                or source.get("source_output_root"),
+                referenced_stage5_manifest_json=source.get("stage5_manifest_json")
+                or source.get("fit_manifest_json"),
+            )
 
-        summary_row = _run_summary_row(
-            dict(run_row),
+        summary_row = review_cache_mod._review_summary_row(
+            run_context,
             stage5_run,
-            experiment_root=experiment_root,
-            output_root=output_path,
+            phase_input_csv=None if cache_paths is None else cache_paths["phase_input_csv"],
+            run_context_json=None if cache_paths is None else cache_paths["run_context_json"],
+            include_suspect_gravimetric=include_suspect_gravimetric,
+            analysis_source_mode=analysis_source_mode,
         )
         stage_dir = output_path / "runs" / run_id / SUMMARY_STAGE_DIRNAME
         stage_dir.mkdir(parents=True, exist_ok=True)
         run_summary_json = stage_dir / "run_summary.json"
+        run_summary_csv = stage_dir / "run_summary.csv"
         summary_row["run_summary_json"] = str(run_summary_json)
+        _write_csv(
+            run_summary_csv,
+            _preferred_columns([summary_row], review_cache_mod.REVIEW_RUN_SUMMARY_COLUMNS),
+            [summary_row],
+        )
         run_summary_payload = {
             "schema_version": 1,
             "stage": "summary",
             "run_id": run_id,
-            "run_dir": run_row.get("run_dir"),
+            "run_dir": summary_row.get("run_dir"),
             "volume_unit": "nL",
             "summary_row": summary_row,
             "stage5_summary": dict(stage5_run["summary"]),
@@ -691,10 +1015,51 @@ def export_stage6_summary(
             "steady_fit": dict(stage5_run["steady_fit_payload"]),
             "middle_extrapolation": dict(stage5_run["middle_payload"]),
             "fov_report": dict(stage5_run["stage4_run"]["fov_report"]),
+            "run_context": run_context,
+            "analysis_parameters": dict(parameter_payload),
         }
         _write_json(run_summary_json, run_summary_payload)
         run_summaries_written.append(str(run_summary_json))
         summary_rows.append(summary_row)
+        review_feature_rows = list(stage5_run.get("phase_feature_rows") or [])
+        review_steady_fit = dict(stage5_run.get("steady_fit") or {})
+        review_tail_onset = dict(stage5_run.get("tail_onset") or {})
+        review_fov_report = dict(stage5_run.get("stage4_run", {}).get("fov_report") or {})
+        vt_review_rows.append(
+            review_cache_mod._vt_review_index_row(
+                summary_row,
+                stage5_run,
+                stage5_paths["vt_fit_png"],
+            )
+        )
+
+        gravimetric_plot_path = width_review_dir / f"{run_id}_width_trace_with_gravimetric.png"
+        review_cache_mod._plot_width_trace_with_gravimetric(
+            gravimetric_plot_path,
+            review_feature_rows,
+            run_id=run_id,
+            steady_fit=review_steady_fit,
+            tail_onset=review_tail_onset,
+            fov_report=review_fov_report,
+            gravimetric_equality_delay_us=summary_row.get("gravimetric_equality_delay_us"),
+            gravimetric_equality_delay_low_us=summary_row.get(
+                "gravimetric_equality_delay_low_us"
+            ),
+            gravimetric_equality_delay_high_us=summary_row.get(
+                "gravimetric_equality_delay_high_us"
+            ),
+            max_shrink_rate_delay_us=summary_row.get("max_shrink_rate_delay_us"),
+            max_shrink_rate_norm_per_ms=summary_row.get("max_shrink_rate_norm_per_ms"),
+        )
+        if bool(summary_row.get("include_in_gravimetric_plots")):
+            width_review_rows.append(
+                {
+                    key: summary_row.get(key)
+                    for key in review_cache_mod.WIDTH_REVIEW_INDEX_COLUMNS
+                    if key != "plot_path"
+                }
+                | {"plot_path": str(gravimetric_plot_path)}
+            )
 
         elapsed_seconds = float(time.perf_counter() - started)
         completed_run_ids.append(run_id)
@@ -724,7 +1089,8 @@ def export_stage6_summary(
         run_manifests.append(
             {
                 "run_id": run_id,
-                "run_dir": run_row.get("run_dir"),
+                "run_dir": summary_row.get("run_dir"),
+                "stage5_fit_manifest_json": str(stage5_paths["fit_manifest_json"]),
                 "run_summary_json": str(run_summary_json),
                 "steady_fit_status": summary_row.get("steady_fit_status"),
                 "tail_onset_status": summary_row.get("tail_onset_status"),
@@ -735,19 +1101,31 @@ def export_stage6_summary(
                 "partial_total_without_tail_nl": summary_row.get("partial_total_without_tail_nl"),
                 "gravimetric_total_nl": summary_row.get("gravimetric_total_nl"),
                 "signed_residual_nl": summary_row.get("signed_residual_nl"),
+                "include_in_gravimetric_plots": summary_row.get("include_in_gravimetric_plots"),
+                "gravimetric_reference_status": summary_row.get("gravimetric_reference_status"),
             }
         )
 
-    condition_rows = _condition_summary_rows(summary_rows)
+    condition_rows = review_cache_mod._condition_summary_rows(summary_rows)
+    confidence_rows = review_cache_mod._condition_confidence_rows(condition_rows)
+    plot_rows = [row for row in summary_rows if bool(row.get("include_in_gravimetric_plots"))]
 
     experiment_summary_csv = output_path / "experiment_summary.csv"
     experiment_summary_json = output_path / "experiment_summary.json"
     condition_summary_csv = output_path / "condition_summary.csv"
     condition_summary_json = output_path / "condition_summary.json"
+    condition_confidence_summary_csv = output_path / "condition_confidence_summary.csv"
+    condition_confidence_summary_json = output_path / "condition_confidence_summary.json"
     scatter_png = output_path / "partial_vs_gravimetric_scatter.png"
     residual_condition_png = output_path / "signed_residual_by_condition.png"
     residual_fraction_condition_png = output_path / "signed_residual_fraction_by_condition.png"
     residual_middle_png = output_path / "signed_residual_vs_middle_duration.png"
+    cv_condition_png = output_path / "predicted_vs_gravimetric_cv_by_condition.png"
+    uncertainty_condition_png = output_path / "predicted_volume_with_uncertainty_by_condition.png"
+    width_review_index_csv = width_review_dir / "width_trace_review_index.csv"
+    width_review_contact_sheet_png = width_review_dir / "width_trace_review_contact_sheet.png"
+    vt_review_index_csv = vt_review_dir / "vt_fit_review_index.csv"
+    vt_review_contact_sheet_png = vt_review_dir / "vt_fit_review_contact_sheet.png"
     manifest_json = output_path / "summary_manifest.json"
 
     metadata_columns = sorted(
@@ -759,8 +1137,8 @@ def export_stage6_summary(
             and key not in {"metadata_raw", "metadata_source_path"}
         }
     )
-    run_summary_columns = RUN_SUMMARY_COLUMNS + [
-        key for key in metadata_columns if key not in RUN_SUMMARY_COLUMNS
+    run_summary_columns = review_cache_mod.REVIEW_RUN_SUMMARY_COLUMNS + [
+        key for key in metadata_columns if key not in review_cache_mod.REVIEW_RUN_SUMMARY_COLUMNS
     ]
     _write_csv(experiment_summary_csv, _preferred_columns(summary_rows, run_summary_columns), summary_rows)
     _write_json(
@@ -768,38 +1146,84 @@ def export_stage6_summary(
         {
             "schema_version": 1,
             "stage": "summary",
-            "experiment_root": inventory["experiment_root"],
+            "analysis_source_mode": analysis_source_mode,
+            "experiment_root": experiment_root_text,
+            "cache_root": None if cache_root is None else str(Path(cache_root).expanduser().resolve()),
             "row_count": len(summary_rows),
             "rows": summary_rows,
         },
     )
-    _write_csv(condition_summary_csv, _preferred_columns(condition_rows, CONDITION_SUMMARY_COLUMNS), condition_rows)
+    _write_csv(
+        condition_summary_csv,
+        _preferred_columns(condition_rows, review_cache_mod.REVIEW_CONDITION_SUMMARY_COLUMNS),
+        condition_rows,
+    )
     _write_json(
         condition_summary_json,
         {
             "schema_version": 1,
             "stage": "summary",
-            "experiment_root": inventory["experiment_root"],
+            "analysis_source_mode": analysis_source_mode,
+            "experiment_root": experiment_root_text,
+            "cache_root": None if cache_root is None else str(Path(cache_root).expanduser().resolve()),
             "row_count": len(condition_rows),
             "rows": condition_rows,
         },
     )
-    _plot_partial_vs_gravimetric(scatter_png, summary_rows)
-    _plot_residual_by_condition(residual_condition_png, condition_rows, summary_rows, fraction=False)
+    _write_csv(
+        condition_confidence_summary_csv,
+        _preferred_columns(confidence_rows, review_cache_mod.CONDITION_CONFIDENCE_SUMMARY_COLUMNS),
+        confidence_rows,
+    )
+    _write_json(
+        condition_confidence_summary_json,
+        {
+            "schema_version": 1,
+            "stage": "summary",
+            "analysis_source_mode": analysis_source_mode,
+            "experiment_root": experiment_root_text,
+            "cache_root": None if cache_root is None else str(Path(cache_root).expanduser().resolve()),
+            "row_count": len(confidence_rows),
+            "rows": confidence_rows,
+        },
+    )
+    _write_csv(
+        width_review_index_csv,
+        _preferred_columns(width_review_rows, review_cache_mod.WIDTH_REVIEW_INDEX_COLUMNS),
+        width_review_rows,
+    )
+    review_cache_mod._plot_width_review_contact_sheet(width_review_contact_sheet_png, width_review_rows)
+    _write_csv(
+        vt_review_index_csv,
+        _preferred_columns(vt_review_rows, review_cache_mod.VT_REVIEW_INDEX_COLUMNS),
+        vt_review_rows,
+    )
+    review_cache_mod._plot_vt_review_contact_sheet(vt_review_contact_sheet_png, vt_review_rows)
+    _plot_partial_vs_gravimetric(scatter_png, plot_rows)
+    _plot_residual_by_condition(residual_condition_png, condition_rows, plot_rows, fraction=False)
     _plot_residual_by_condition(
         residual_fraction_condition_png,
         condition_rows,
-        summary_rows,
+        plot_rows,
         fraction=True,
     )
-    _plot_residual_vs_middle_duration(residual_middle_png, summary_rows)
+    _plot_residual_vs_middle_duration(residual_middle_png, plot_rows)
+    review_cache_mod._plot_predicted_vs_gravimetric_cv_by_condition(cv_condition_png, condition_rows)
+    review_cache_mod._plot_predicted_volume_with_uncertainty_by_condition(
+        uncertainty_condition_png,
+        summary_rows,
+    )
 
-    usable_gravimetric_rows = sum(1 for row in summary_rows if row.get("gravimetric_total_nl") is not None)
+    usable_gravimetric_rows = sum(
+        1 for row in summary_rows if bool(row.get("include_in_gravimetric_plots"))
+    )
     overprediction_run_count = sum(1 for row in summary_rows if bool(row.get("partial_exceeds_gravimetric")))
     manifest = {
         "schema_version": 1,
         "stage": "summary",
-        "experiment_root": inventory["experiment_root"],
+        "analysis_source_mode": analysis_source_mode,
+        "experiment_root": experiment_root_text,
+        "cache_root": None if cache_root is None else str(Path(cache_root).expanduser().resolve()),
         "output_root": str(output_path),
         "selected_run_count": len(selected_run_ids),
         "analyzed_run_count": len(summary_rows),
@@ -808,42 +1232,26 @@ def export_stage6_summary(
         "overprediction_run_count": overprediction_run_count,
         "volume_unit": "nL",
         "water_assumption_nl_per_mg": float(NL_PER_MG_WATER),
-        "sample_count": int(sample_count),
-        "extra_frame_indices": list(extra_frame_indices or []),
-        "search_width_frac": float(search_width_frac),
-        "search_top_frac": float(search_top_frac),
-        "search_bottom_frac": float(search_bottom_frac),
-        "blur_sigma": float(blur_sigma),
-        "residual_threshold": int(residual_threshold),
-        "shift_threshold_px": float(shift_threshold_px),
-        "confidence_threshold": float(confidence_threshold),
-        "roi_width_frac": float(roi_width_frac),
-        "roi_top_frac": float(roi_top_frac),
-        "roi_bottom_frac": float(roi_bottom_frac),
-        "corridor_width_frac": float(corridor_width_frac),
-        "nozzle_guard_px": int(nozzle_guard_px),
-        "min_component_area_px": int(min_component_area_px),
-        "near_nozzle_band_top_px": int(near_nozzle_band_top_px),
-        "near_nozzle_band_height_px": int(near_nozzle_band_height_px),
-        "min_band_valid_rows": int(min_band_valid_rows),
-        "width_smooth_window": int(width_smooth_window),
-        "min_steady_frames": int(min_steady_frames),
-        "steady_width_tol_frac": float(steady_width_tol_frac),
-        "steady_width_tol_px": float(steady_width_tol_px),
-        "steady_fit_r2_min": float(steady_fit_r2_min),
-        "steady_fit_nrmse_max": float(steady_fit_nrmse_max),
-        "tail_drop_frac": float(tail_drop_frac),
-        "tail_persist_frames": int(tail_persist_frames),
+        "include_suspect_gravimetric": bool(include_suspect_gravimetric),
+        **parameter_payload,
         "outputs": {
             "summary_progress_json": str(progress_path),
             "experiment_summary_csv": str(experiment_summary_csv),
             "experiment_summary_json": str(experiment_summary_json),
             "condition_summary_csv": str(condition_summary_csv),
             "condition_summary_json": str(condition_summary_json),
+            "condition_confidence_summary_csv": str(condition_confidence_summary_csv),
+            "condition_confidence_summary_json": str(condition_confidence_summary_json),
             "partial_vs_gravimetric_scatter_png": str(scatter_png),
             "signed_residual_by_condition_png": str(residual_condition_png),
             "signed_residual_fraction_by_condition_png": str(residual_fraction_condition_png),
             "signed_residual_vs_middle_duration_png": str(residual_middle_png),
+            "predicted_vs_gravimetric_cv_by_condition_png": str(cv_condition_png),
+            "predicted_volume_with_uncertainty_by_condition_png": str(uncertainty_condition_png),
+            "width_review_index_csv": str(width_review_index_csv),
+            "width_review_contact_sheet_png": str(width_review_contact_sheet_png),
+            "vt_review_index_csv": str(vt_review_index_csv),
+            "vt_review_contact_sheet_png": str(vt_review_contact_sheet_png),
         },
         "runs": run_manifests,
     }

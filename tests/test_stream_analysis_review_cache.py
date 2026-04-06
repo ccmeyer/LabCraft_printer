@@ -861,10 +861,10 @@ def test_export_stage5_cached_review_uses_cache_only_and_excludes_suspect_gravim
     assert (output_root / "vt_fit_review" / "vt_fit_review_index.csv").exists()
     assert (output_root / "vt_fit_review" / "vt_fit_review_contact_sheet.png").exists()
     assert (
-        output_root / "runs" / "run_suspect" / mod.FIT_REVIEW_STAGE_DIRNAME / "run_summary.json"
+        output_root / "runs" / "run_suspect" / fit_mod.FIT_STAGE_DIRNAME / "tail_start_candidates.csv"
     ).exists()
     assert (
-        output_root / "runs" / "run_suspect" / mod.FIT_REVIEW_STAGE_DIRNAME / "tail_start_candidates.csv"
+        output_root / "runs" / "run_suspect" / "stage_06_summary" / "run_summary.json"
     ).exists()
 
     with (output_root / "experiment_summary.csv").open("r", encoding="utf-8", newline="") as handle:
@@ -941,7 +941,7 @@ def test_export_stage5_cached_review_uses_cache_only_and_excludes_suspect_gravim
     assert float(ok_vt_row["steady_start_after_first_trusted_us"]) == pytest.approx(0.0, rel=1e-6)
     assert float(ok_vt_row["steady_end_to_fov_exit_us"]) == pytest.approx(100.0, rel=1e-6)
 
-    manifest_payload = json.loads((output_root / mod.REVIEW_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    manifest_payload = json.loads((output_root / "summary_manifest.json").read_text(encoding="utf-8"))
     assert manifest_payload["flow_fit_backfill_max_frames"] == 3
     assert manifest_payload["flow_fit_backfill_width_delta_px"] == pytest.approx(8.0, rel=1e-6)
     assert manifest_payload["flow_fit_backfill_monotonic_slack_px"] == pytest.approx(0.75, rel=1e-6)

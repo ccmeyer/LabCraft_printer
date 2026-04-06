@@ -21,6 +21,181 @@ from tools.stream_analysis.summary import export_stage6_summary
 from tools.stream_analysis.volume import export_stage4_volume
 
 
+def _add_late_stage_review_args(
+    parser,
+    *,
+    default_steady_fit_mode: str,
+    default_exclude_last_trusted_frames: int,
+    include_suspect: bool,
+):
+    if include_suspect:
+        parser.add_argument(
+            "--include-suspect-gravimetric",
+            action="store_true",
+            help="Include suspect gravimetric reference runs in experiment-level plots and condition summaries.",
+        )
+    parser.add_argument(
+        "--steady-fit-mode",
+        choices=["frozen", "recompute"],
+        default=default_steady_fit_mode,
+        help="Whether to replay a frozen steady fit or recompute it from the phase-input V(t) trace.",
+    )
+    parser.add_argument(
+        "--steady-fit-exclude-last-trusted-frames",
+        type=int,
+        default=default_exclude_last_trusted_frames,
+        help="When recomputing the steady fit, exclude this many trusted frames immediately before FOV exit.",
+    )
+    parser.add_argument(
+        "--flow-fit-backfill-max-frames",
+        type=int,
+        default=3,
+        help="When recomputing the steady fit, allow up to this many earlier trusted points to be backfilled ahead of the plateau seed.",
+    )
+    parser.add_argument(
+        "--flow-fit-backfill-width-delta-px",
+        type=float,
+        default=8.0,
+        help="Maximum smoothed-width overshoot above the plateau allowed for an earlier backfilled flow-fit point.",
+    )
+    parser.add_argument(
+        "--flow-fit-backfill-monotonic-slack-px",
+        type=float,
+        default=0.75,
+        help="Maximum amount an earlier backfilled point may be narrower than the next retained point while still counting as settling toward the plateau.",
+    )
+    parser.add_argument(
+        "--tail-start-mode",
+        choices=[
+            fit_mod.TAIL_START_MODE_LEGACY,
+            fit_mod.TAIL_START_MODE_DESCRIPTOR_SCORE,
+            fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
+        ],
+        default=fit_mod.TAIL_START_MODE_LEGACY,
+        help="Whether to keep the legacy tail-start anchor, use descriptor scoring, or use the unified descriptor selector.",
+    )
+    parser.add_argument(
+        "--tail-direct-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
+    )
+    parser.add_argument(
+        "--tail-direct-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_PEAK_LEAD_US,
+    )
+    parser.add_argument(
+        "--tail-direct-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
+    )
+    parser.add_argument(
+        "--tail-shoulder-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_DROP_TO_THRESHOLD_FRAC,
+    )
+    parser.add_argument(
+        "--tail-shoulder-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_PEAK_LEAD_US,
+    )
+    parser.add_argument(
+        "--tail-shoulder-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_SHOULDER_TARGET_SHRINK_RATE_RATIO,
+    )
+    parser.add_argument(
+        "--tail-score-drop-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_DROP_WEIGHT,
+    )
+    parser.add_argument(
+        "--tail-score-peak-lead-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_PEAK_LEAD_WEIGHT,
+    )
+    parser.add_argument(
+        "--tail-score-shrink-rate-weight",
+        type=float,
+        default=fit_mod.TAIL_SCORE_SHRINK_RATE_WEIGHT,
+    )
+    parser.add_argument(
+        "--tail-score-drop-scale",
+        type=float,
+        default=fit_mod.TAIL_SCORE_DROP_SCALE,
+    )
+    parser.add_argument(
+        "--tail-score-peak-lead-scale-us",
+        type=float,
+        default=fit_mod.TAIL_SCORE_PEAK_LEAD_SCALE_US,
+    )
+    parser.add_argument(
+        "--tail-score-shrink-rate-scale",
+        type=float,
+        default=fit_mod.TAIL_SCORE_SHRINK_RATE_SCALE,
+    )
+    parser.add_argument(
+        "--tail-unified-band-drop-min",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_DROP_MIN,
+    )
+    parser.add_argument(
+        "--tail-unified-band-drop-max",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_DROP_MAX,
+    )
+    parser.add_argument(
+        "--tail-unified-band-peak-lead-min-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MIN_US,
+    )
+    parser.add_argument(
+        "--tail-unified-band-peak-lead-max-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_PEAK_LEAD_MAX_US,
+    )
+    parser.add_argument(
+        "--tail-unified-band-shrink-rate-ratio-min",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MIN,
+    )
+    parser.add_argument(
+        "--tail-unified-band-shrink-rate-ratio-max",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MAX,
+    )
+    parser.add_argument(
+        "--tail-unified-target-drop-to-threshold-frac",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_DROP_TO_THRESHOLD_FRAC,
+    )
+    parser.add_argument(
+        "--tail-unified-target-peak-lead-us",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_PEAK_LEAD_US,
+    )
+    parser.add_argument(
+        "--tail-unified-target-shrink-rate-ratio",
+        type=float,
+        default=fit_mod.TAIL_UNIFIED_TARGET_SHRINK_RATE_RATIO,
+    )
+    parser.add_argument(
+        "--volume-uncertainty-sample-count",
+        type=int,
+        default=fit_mod.VOLUME_UNCERTAINTY_SAMPLE_COUNT,
+    )
+    parser.add_argument(
+        "--volume-uncertainty-seed",
+        type=int,
+        default=fit_mod.VOLUME_UNCERTAINTY_SEED,
+    )
+    parser.add_argument(
+        "--tail-uncertainty-score-tolerance",
+        type=float,
+        default=fit_mod.TAIL_UNCERTAINTY_SCORE_TOLERANCE,
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Offline stream-characterization analysis tooling."
@@ -649,6 +824,12 @@ def build_parser():
         default=3,
         help="Number of consecutive width-drop frames required to declare tail onset.",
     )
+    _add_late_stage_review_args(
+        fit,
+        default_steady_fit_mode="recompute",
+        default_exclude_last_trusted_frames=0,
+        include_suspect=False,
+    )
 
     fit_cache = subparsers.add_parser(
         "fit-cache",
@@ -937,8 +1118,12 @@ def build_parser():
     )
     summary.add_argument(
         "--experiment-root",
-        required=True,
         help="Experiment directory, stream_metadata.csv, calibration_recordings dir, process dir, or run dir.",
+    )
+    summary.add_argument(
+        "--cache-root",
+        default="",
+        help="Optional Stage 5 review cache directory to drive the canonical late-stage summary path from frozen inputs.",
     )
     summary.add_argument(
         "--output-root",
@@ -1118,6 +1303,12 @@ def build_parser():
         type=int,
         default=3,
         help="Number of consecutive width-drop frames required to declare tail onset.",
+    )
+    _add_late_stage_review_args(
+        summary,
+        default_steady_fit_mode="recompute",
+        default_exclude_last_trusted_frames=0,
+        include_suspect=True,
     )
 
     annotate = subparsers.add_parser(
@@ -1378,8 +1569,60 @@ def main(argv=None):
             steady_width_tol_px=float(args.steady_width_tol_px),
             steady_fit_r2_min=float(args.steady_fit_r2_min),
             steady_fit_nrmse_max=float(args.steady_fit_nrmse_max),
+            steady_fit_mode=str(args.steady_fit_mode),
+            steady_fit_exclude_last_trusted_frames=int(
+                args.steady_fit_exclude_last_trusted_frames
+            ),
+            flow_fit_backfill_max_frames=int(args.flow_fit_backfill_max_frames),
+            flow_fit_backfill_width_delta_px=float(args.flow_fit_backfill_width_delta_px),
+            flow_fit_backfill_monotonic_slack_px=float(
+                args.flow_fit_backfill_monotonic_slack_px
+            ),
             tail_drop_frac=float(args.tail_drop_frac),
             tail_persist_frames=int(args.tail_persist_frames),
+            tail_start_mode=str(args.tail_start_mode),
+            tail_direct_target_drop_to_threshold_frac=float(
+                args.tail_direct_target_drop_to_threshold_frac
+            ),
+            tail_direct_target_peak_lead_us=float(args.tail_direct_target_peak_lead_us),
+            tail_direct_target_shrink_rate_ratio=float(
+                args.tail_direct_target_shrink_rate_ratio
+            ),
+            tail_shoulder_target_drop_to_threshold_frac=float(
+                args.tail_shoulder_target_drop_to_threshold_frac
+            ),
+            tail_shoulder_target_peak_lead_us=float(
+                args.tail_shoulder_target_peak_lead_us
+            ),
+            tail_shoulder_target_shrink_rate_ratio=float(
+                args.tail_shoulder_target_shrink_rate_ratio
+            ),
+            tail_score_drop_weight=float(args.tail_score_drop_weight),
+            tail_score_peak_lead_weight=float(args.tail_score_peak_lead_weight),
+            tail_score_shrink_rate_weight=float(args.tail_score_shrink_rate_weight),
+            tail_score_drop_scale=float(args.tail_score_drop_scale),
+            tail_score_peak_lead_scale_us=float(args.tail_score_peak_lead_scale_us),
+            tail_score_shrink_rate_scale=float(args.tail_score_shrink_rate_scale),
+            tail_unified_band_drop_min=float(args.tail_unified_band_drop_min),
+            tail_unified_band_drop_max=float(args.tail_unified_band_drop_max),
+            tail_unified_band_peak_lead_min_us=float(args.tail_unified_band_peak_lead_min_us),
+            tail_unified_band_peak_lead_max_us=float(args.tail_unified_band_peak_lead_max_us),
+            tail_unified_band_shrink_rate_ratio_min=float(
+                args.tail_unified_band_shrink_rate_ratio_min
+            ),
+            tail_unified_band_shrink_rate_ratio_max=float(
+                args.tail_unified_band_shrink_rate_ratio_max
+            ),
+            tail_unified_target_drop_to_threshold_frac=float(
+                args.tail_unified_target_drop_to_threshold_frac
+            ),
+            tail_unified_target_peak_lead_us=float(args.tail_unified_target_peak_lead_us),
+            tail_unified_target_shrink_rate_ratio=float(
+                args.tail_unified_target_shrink_rate_ratio
+            ),
+            volume_uncertainty_sample_count=int(args.volume_uncertainty_sample_count),
+            volume_uncertainty_seed=int(args.volume_uncertainty_seed),
+            tail_uncertainty_score_tolerance=float(args.tail_uncertainty_score_tolerance),
         )
     elif args.command == "fit-cache":
         payload = export_stage5_review_cache(
@@ -1457,7 +1700,8 @@ def main(argv=None):
         )
     elif args.command == "summary":
         payload = export_stage6_summary(
-            args.experiment_root,
+            args.experiment_root or None,
+            cache_root=args.cache_root or None,
             output_root=args.output_root or None,
             run_ids=args.run_id or None,
             limit_runs=(args.limit_runs or None),
@@ -1486,8 +1730,61 @@ def main(argv=None):
             steady_width_tol_px=float(args.steady_width_tol_px),
             steady_fit_r2_min=float(args.steady_fit_r2_min),
             steady_fit_nrmse_max=float(args.steady_fit_nrmse_max),
+            steady_fit_mode=str(args.steady_fit_mode),
+            steady_fit_exclude_last_trusted_frames=int(
+                args.steady_fit_exclude_last_trusted_frames
+            ),
+            flow_fit_backfill_max_frames=int(args.flow_fit_backfill_max_frames),
+            flow_fit_backfill_width_delta_px=float(args.flow_fit_backfill_width_delta_px),
+            flow_fit_backfill_monotonic_slack_px=float(
+                args.flow_fit_backfill_monotonic_slack_px
+            ),
             tail_drop_frac=float(args.tail_drop_frac),
             tail_persist_frames=int(args.tail_persist_frames),
+            include_suspect_gravimetric=bool(args.include_suspect_gravimetric),
+            tail_start_mode=str(args.tail_start_mode),
+            tail_direct_target_drop_to_threshold_frac=float(
+                args.tail_direct_target_drop_to_threshold_frac
+            ),
+            tail_direct_target_peak_lead_us=float(args.tail_direct_target_peak_lead_us),
+            tail_direct_target_shrink_rate_ratio=float(
+                args.tail_direct_target_shrink_rate_ratio
+            ),
+            tail_shoulder_target_drop_to_threshold_frac=float(
+                args.tail_shoulder_target_drop_to_threshold_frac
+            ),
+            tail_shoulder_target_peak_lead_us=float(
+                args.tail_shoulder_target_peak_lead_us
+            ),
+            tail_shoulder_target_shrink_rate_ratio=float(
+                args.tail_shoulder_target_shrink_rate_ratio
+            ),
+            tail_score_drop_weight=float(args.tail_score_drop_weight),
+            tail_score_peak_lead_weight=float(args.tail_score_peak_lead_weight),
+            tail_score_shrink_rate_weight=float(args.tail_score_shrink_rate_weight),
+            tail_score_drop_scale=float(args.tail_score_drop_scale),
+            tail_score_peak_lead_scale_us=float(args.tail_score_peak_lead_scale_us),
+            tail_score_shrink_rate_scale=float(args.tail_score_shrink_rate_scale),
+            tail_unified_band_drop_min=float(args.tail_unified_band_drop_min),
+            tail_unified_band_drop_max=float(args.tail_unified_band_drop_max),
+            tail_unified_band_peak_lead_min_us=float(args.tail_unified_band_peak_lead_min_us),
+            tail_unified_band_peak_lead_max_us=float(args.tail_unified_band_peak_lead_max_us),
+            tail_unified_band_shrink_rate_ratio_min=float(
+                args.tail_unified_band_shrink_rate_ratio_min
+            ),
+            tail_unified_band_shrink_rate_ratio_max=float(
+                args.tail_unified_band_shrink_rate_ratio_max
+            ),
+            tail_unified_target_drop_to_threshold_frac=float(
+                args.tail_unified_target_drop_to_threshold_frac
+            ),
+            tail_unified_target_peak_lead_us=float(args.tail_unified_target_peak_lead_us),
+            tail_unified_target_shrink_rate_ratio=float(
+                args.tail_unified_target_shrink_rate_ratio
+            ),
+            volume_uncertainty_sample_count=int(args.volume_uncertainty_sample_count),
+            volume_uncertainty_seed=int(args.volume_uncertainty_seed),
+            tail_uncertainty_score_tolerance=float(args.tail_uncertainty_score_tolerance),
         )
     elif args.command == "annotate-nozzle":
         payload = launch_nozzle_annotation_session(

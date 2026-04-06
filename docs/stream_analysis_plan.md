@@ -4,7 +4,7 @@
 
 - Date created: 2026-04-01
 - Owner: Codex + user
-- Status: Stage 5 raw fitting, cache-backed Stage 5 fast-review tooling, review-only gravimetric-confidence analysis, review-only recompute flow-fit tooling, and review-only unified descriptor tail-start tooling are implemented and tested; Stage 7 tail modeling remains deferred while Stage 5 onset timing is iterated from cached review inputs
+- Status: Stages 0-6 are implemented and tested. Stage 4-6 now use one canonical late-stage pipeline for both raw recompute and cache-backed runs through `summary`; `fit-cache` remains the cache materialization helper and `fit-review` is a temporary compatibility alias to the same summary path. Stage 7 tail modeling remains deferred.
 - Scope: offline Python analysis only for the first increment. No MVC, firmware, or protocol changes are planned in the initial phases.
 
 ## Objective
@@ -122,6 +122,13 @@ Proposed output layout:
 - `analysis/stream_characterization/runs/<run_id>/stage_07_tail/...`
 - `analysis/stream_characterization/experiment_summary.csv`
 - `analysis/stream_characterization/experiment_summary.json`
+- `analysis/stream_characterization/condition_summary.csv`
+- `analysis/stream_characterization/condition_summary.json`
+- `analysis/stream_characterization/condition_confidence_summary.csv`
+- `analysis/stream_characterization/condition_confidence_summary.json`
+- `analysis/stream_characterization/summary_manifest.json`
+- `analysis/stream_characterization/gravimetric_width_review/...`
+- `analysis/stream_characterization/vt_fit_review/...`
 
 ## Assumptions And Defaults
 
@@ -224,7 +231,7 @@ Primary entrypoint:
 
 - `.\env\Scripts\python.exe tools\run_stream_analysis.py ...`
 
-Planned CLI shape:
+Current CLI shape:
 
 - `inventory`
   - discover runs
@@ -244,12 +251,19 @@ Planned CLI shape:
   - fit the steady `dV/dt` from trusted `V(t)` only
   - extrapolate missing middle volume between FOV exit and tail onset
   - leave tail estimation as a distinct final slice until its model is validated
-- `run-all`
-  - execute all completed pipeline stages up to `--through-stage`
+- `fit-cache`
+  - freeze reusable Stage 5 phase inputs and provenance under `stage_05_review_cache/`
+- `summary`
+  - canonical Stage 4-6 entrypoint
+  - with `--experiment-root`, recompute the late-stage analysis from raw run inputs
+  - with `--cache-root`, replay the same Stage 5/6 logic from frozen cache inputs
+- `fit-review`
+  - temporary compatibility alias that dispatches to the canonical `summary --cache-root ...` implementation
 
-Planned common arguments:
+Common arguments used by the main analysis commands:
 
 - `--experiment-root`
+- `--cache-root`
 - `--output-root`
 - `--run-id`
 - `--limit-runs`
@@ -259,13 +273,47 @@ Planned common arguments:
 - `--background-image`
 - `--early-frame-count`
 - `--force`
-- `--through-stage`
 
 Default behavior:
 
 - if `--run-id` is omitted, operate on the CSV-backed run set
 - if `--output-root` is omitted, write to the experiment-local analysis directory
 - if no background options are supplied, use the direct-threshold path with no subtraction
+- `summary` requires exactly one late-stage source:
+  - raw mode: `--experiment-root`
+  - cache mode: `--cache-root`
+- when `summary` is run in cache mode, raw image-analysis knobs from Stages 1-4 must remain at their defaults or the command fails clearly rather than silently ignoring them
+
+### Current Stage 4-6 usage
+
+Canonical raw late-stage run:
+
+- `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --experiment-root "FreeRTOS-interface\Experiments\<experiment_name>"`
+
+Canonical cache-backed late-stage rerun:
+
+- `.\env\Scripts\python.exe tools\run_stream_analysis.py fit-cache --experiment-root "FreeRTOS-interface\Experiments\<experiment_name>"`
+- `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --cache-root "FreeRTOS-interface\Experiments\<experiment_name>\analysis\stream_characterization\stage_05_review_cache"`
+
+Useful late-stage tuning flags shared by `fit`, `summary`, and the `fit-review` compatibility alias:
+
+- `--steady-fit-mode frozen|recompute`
+- `--steady-fit-exclude-last-trusted-frames <n>`
+- `--flow-fit-backfill-max-frames <n>`
+- `--tail-start-mode legacy|descriptor-score|descriptor-unified`
+- `--width-smooth-window <n>`
+- `--volume-uncertainty-sample-count <n>`
+- `--include-suspect-gravimetric`
+
+Canonical Stage 4-6 outputs now land in:
+
+- per-run `runs/<run_id>/stage_05_fit/`
+- per-run `runs/<run_id>/stage_06_summary/`
+- root `experiment_summary.csv/json`
+- root `condition_summary.csv/json`
+- root `condition_confidence_summary.csv/json`
+- root `summary_manifest.json`
+- root gravimetric width-review and `V(t)` review indexes / contact sheets
 
 ## Pipeline Stages
 
@@ -3301,6 +3349,88 @@ Current review-state notes:
 Next step:
 
 - keep the current unified descriptor band and candidate window, then refine the in-band chooser so it remains early without selecting a visibly worse in-band candidate
+
+### 2026-04-06 - Stage 4-6 raw and cache late-stage paths unified under `summary`
+
+Call path updated:
+
+- raw late-stage path:
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage6_summary()` -> `tools/stream_analysis/fit.py::_build_stage5_run()` -> `tools/stream_analysis/fit.py::_build_stage5_from_phase_inputs()` -> canonical Stage 5/6 writers
+- cache-backed late-stage path:
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage6_summary()` -> `tools/stream_analysis/review_cache.py` cache loading -> `tools/stream_analysis/fit.py::_build_stage5_from_phase_inputs()` -> canonical Stage 5/6 writers
+- compatibility alias:
+  - `tools/run_stream_analysis.py` -> `tools/stream_analysis/cli.py` -> `export_stage5_cached_review()` -> `tools/stream_analysis/summary.py::export_stage6_summary()`
+
+Files changed:
+
+- `tools/stream_analysis/fit.py`
+- `tools/stream_analysis/summary.py`
+- `tools/stream_analysis/review_cache.py`
+- `tools/stream_analysis/cli.py`
+- `tests/test_stream_analysis_review_cache.py`
+- `docs/stream_analysis_plan.md`
+
+Implemented:
+
+- promoted the cache/review Stage 5 builder into the canonical Stage 5 implementation:
+  - `_build_stage5_from_phase_inputs()` is now the shared late-stage core
+  - `_build_stage5_run()` is now the raw-source adapter that derives phase-input rows and forwards into the shared helper
+- made `summary` the single public Stage 4-6 entrypoint:
+  - raw mode: `summary --experiment-root ...`
+  - cache mode: `summary --cache-root ...`
+- standardized the per-run artifact contract:
+  - Stage 5 always writes to `runs/<run_id>/stage_05_fit/`
+  - Stage 6 always writes to `runs/<run_id>/stage_06_summary/`
+- standardized the root artifact contract:
+  - `experiment_summary.csv/json`
+  - `condition_summary.csv/json`
+  - `condition_confidence_summary.csv/json`
+  - residual and uncertainty plots
+  - gravimetric width-review indexes / contact sheets
+  - `V(t)` review indexes / contact sheets
+  - `summary_manifest.json`
+- kept cache-backed Stage 4 behavior lightweight:
+  - cache-backed summaries point back to the original Stage 4 / Stage 5 artifact locations stored in `run_context.json`
+  - the cache-backed summary path does not regenerate a new `stage_04_volume/`
+- kept `fit-cache` as the frozen-input materializer:
+  - it still writes `phase_input.csv`, `run_context.json`, and `cache_manifest.json`
+- kept `fit-review` only as a temporary compatibility alias:
+  - it now dispatches into the canonical `summary --cache-root ...` implementation
+  - it no longer owns a separate late-stage implementation or a distinct `stage_05_review/` output contract
+
+How to analyze a new experiment with the current code:
+
+- place the experiment in the standard recorder layout:
+  - `FreeRTOS-interface/Experiments/<experiment_name>/stream_metadata.csv`
+  - `FreeRTOS-interface/Experiments/<experiment_name>/calibration_recordings/DropletTimecourseProcess/<run_id>/...`
+- optional first sanity check:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py inventory --experiment-root "FreeRTOS-interface\Experiments\<experiment_name>"`
+  - this verifies the metadata join and writes `run_inventory.csv/json` plus unmatched-run reporting
+- canonical late-stage analysis from raw inputs:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --experiment-root "FreeRTOS-interface\Experiments\<experiment_name>"`
+  - use this when you want the current Stage 5/6 outputs recomputed from the underlying run data
+- optional cache-backed tuning loop after one raw run:
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py fit-cache --experiment-root "FreeRTOS-interface\Experiments\<experiment_name>"`
+  - `.\env\Scripts\python.exe tools\run_stream_analysis.py summary --cache-root "FreeRTOS-interface\Experiments\<experiment_name>\analysis\stream_characterization\stage_05_review_cache" --tail-start-mode descriptor-unified --steady-fit-mode recompute`
+  - use this when you want to iterate only on late-stage fit / tail / uncertainty parameters without rerunning upstream image analysis
+- optional scope controls for a new dataset:
+  - add `--run-id <run_id>` one or more times to analyze only selected runs
+  - add `--limit-runs <n>` for a small trial batch
+  - add `--include-unmatched` if you intentionally want runs not present in `stream_metadata.csv`
+- inspect completion and outputs here:
+  - root `analysis/stream_characterization/summary_progress.json`
+  - root `analysis/stream_characterization/summary_manifest.json`
+  - per-run `stage_05_fit/` and `stage_06_summary/`
+  - root experiment / condition summary tables and review plots
+
+Validation:
+
+- focused late-stage tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_fit.py tests\test_stream_analysis_summary.py tests\test_stream_analysis_review_cache.py tests\test_stream_analysis_cli.py`
+  - result: `71 passed`
+- broader stream-analysis suite:
+  - `.\env\Scripts\python.exe -m pytest -q tests -k stream_analysis`
+  - result: `166 passed, 613 deselected`
 
 ## Progress Checklist
 

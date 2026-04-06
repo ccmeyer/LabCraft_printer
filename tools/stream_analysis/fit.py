@@ -86,6 +86,29 @@ PHASE_DERIVED_COLUMNS = {
 PHASE_INPUT_COLUMNS = [
     column for column in PHASE_FEATURE_COLUMNS if column not in PHASE_DERIVED_COLUMNS
 ]
+TAIL_START_CANDIDATE_COLUMNS = [
+    "candidate_window_kind",
+    "position",
+    "capture_index",
+    "delay_from_emergence_us",
+    "width_px",
+    "drop_frac",
+    "drop_to_threshold_frac",
+    "shrink_rate_norm_per_ms",
+    "shrink_rate_ratio",
+    "tail_peak_lead_us",
+    "within_drop_band",
+    "within_peak_lead_band",
+    "within_shrink_rate_band",
+    "within_unified_band",
+    "score_drop_term",
+    "score_peak_lead_term",
+    "score_shrink_rate_term",
+    "score_total",
+    "selection_reason",
+    "is_selected",
+    "is_legacy_anchor",
+]
 
 
 def _capture_key(row: dict):
@@ -2871,7 +2894,7 @@ def _refine_tail_onset_for_review(
     return refined_tail_onset, candidate_rows
 
 
-def _build_stage5_review_run(
+def _build_stage5_from_phase_inputs(
     run_id: str,
     phase_input_rows: list[dict],
     *,
@@ -3069,6 +3092,14 @@ def _build_stage5_review_run(
         "summary": summary,
         "tail_start_candidate_rows": [dict(row) for row in tail_start_candidate_rows],
     }
+
+
+def _build_stage5_review_run(
+    run_id: str,
+    phase_input_rows: list[dict],
+    **kwargs,
+):
+    return _build_stage5_from_phase_inputs(run_id, phase_input_rows, **kwargs)
 
 
 def _apply_phase_labels(feature_rows: list[dict], steady_fit: dict, tail_onset: dict):
@@ -3397,7 +3428,7 @@ def _plot_vt_fit(path: Path, feature_rows: list[dict], *, run_id: str, steady_fi
             zorder=5,
         )
 
-    if ci_band_points:
+    if ci_band_points and hasattr(ax, "fill_between"):
         ax.fill_between(
             [x for x, _y0, _y1 in ci_band_points],
             [y0 for _x, y0, _y1 in ci_band_points],
@@ -3838,6 +3869,36 @@ def _build_stage5_run(
     steady_fit_nrmse_max: float,
     tail_drop_frac: float,
     tail_persist_frames: int,
+    steady_fit_mode: str = "recompute",
+    steady_fit_exclude_last_trusted_frames: int = 0,
+    flow_fit_backfill_max_frames: int = 3,
+    flow_fit_backfill_width_delta_px: float = 8.0,
+    flow_fit_backfill_monotonic_slack_px: float = 0.75,
+    tail_start_mode: str = TAIL_START_MODE_LEGACY,
+    tail_direct_target_drop_to_threshold_frac: float = TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_direct_target_peak_lead_us: float = TAIL_DIRECT_TARGET_PEAK_LEAD_US,
+    tail_direct_target_shrink_rate_ratio: float = TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
+    tail_shoulder_target_drop_to_threshold_frac: float = TAIL_SHOULDER_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_shoulder_target_peak_lead_us: float = TAIL_SHOULDER_TARGET_PEAK_LEAD_US,
+    tail_shoulder_target_shrink_rate_ratio: float = TAIL_SHOULDER_TARGET_SHRINK_RATE_RATIO,
+    tail_score_drop_weight: float = TAIL_SCORE_DROP_WEIGHT,
+    tail_score_peak_lead_weight: float = TAIL_SCORE_PEAK_LEAD_WEIGHT,
+    tail_score_shrink_rate_weight: float = TAIL_SCORE_SHRINK_RATE_WEIGHT,
+    tail_score_drop_scale: float = TAIL_SCORE_DROP_SCALE,
+    tail_score_peak_lead_scale_us: float = TAIL_SCORE_PEAK_LEAD_SCALE_US,
+    tail_score_shrink_rate_scale: float = TAIL_SCORE_SHRINK_RATE_SCALE,
+    tail_unified_band_drop_min: float = TAIL_UNIFIED_BAND_DROP_MIN,
+    tail_unified_band_drop_max: float = TAIL_UNIFIED_BAND_DROP_MAX,
+    tail_unified_band_peak_lead_min_us: float = TAIL_UNIFIED_BAND_PEAK_LEAD_MIN_US,
+    tail_unified_band_peak_lead_max_us: float = TAIL_UNIFIED_BAND_PEAK_LEAD_MAX_US,
+    tail_unified_band_shrink_rate_ratio_min: float = TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MIN,
+    tail_unified_band_shrink_rate_ratio_max: float = TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MAX,
+    tail_unified_target_drop_to_threshold_frac: float = TAIL_UNIFIED_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_unified_target_peak_lead_us: float = TAIL_UNIFIED_TARGET_PEAK_LEAD_US,
+    tail_unified_target_shrink_rate_ratio: float = TAIL_UNIFIED_TARGET_SHRINK_RATE_RATIO,
+    volume_uncertainty_sample_count: int = VOLUME_UNCERTAINTY_SAMPLE_COUNT,
+    volume_uncertainty_seed: int = VOLUME_UNCERTAINTY_SEED,
+    tail_uncertainty_score_tolerance: float = TAIL_UNCERTAINTY_SCORE_TOLERANCE,
 ):
     stage4_run = volume_mod._build_stage4_run(
         run_id,
@@ -3858,66 +3919,360 @@ def _build_stage5_run(
         nozzle_guard_px=nozzle_guard_px,
         min_component_area_px=min_component_area_px,
     )
-
-    feature_rows = _build_phase_feature_rows(
+    phase_feature_rows = _build_phase_feature_rows(
         stage4_run,
         near_nozzle_band_top_px=int(near_nozzle_band_top_px),
         near_nozzle_band_height_px=int(near_nozzle_band_height_px),
         min_band_valid_rows=int(min_band_valid_rows),
         width_smooth_window=int(width_smooth_window),
     )
-    steady_fit = _find_steady_window(
-        feature_rows,
+    stage5_run = _build_stage5_from_phase_inputs(
+        run_id,
+        _phase_input_rows_from_feature_rows(phase_feature_rows),
+        steady_fit_payload={},
+        fov_report=dict(stage4_run["fov_report"]),
+        trusted_visible_volume_nl=None,
+        first_untrusted_delay_from_emergence_us=_int_or_none(
+            stage4_run["fov_report"].get("first_fov_exit_delay_from_emergence_us")
+        ),
+        width_smooth_window=int(width_smooth_window),
+        tail_drop_frac=float(tail_drop_frac),
+        tail_persist_frames=int(tail_persist_frames),
+        steady_fit_mode=str(steady_fit_mode),
+        steady_fit_exclude_last_trusted_frames=int(steady_fit_exclude_last_trusted_frames),
         min_steady_frames=int(min_steady_frames),
         steady_width_tol_frac=float(steady_width_tol_frac),
         steady_width_tol_px=float(steady_width_tol_px),
+        flow_fit_backfill_max_frames=int(flow_fit_backfill_max_frames),
+        flow_fit_backfill_width_delta_px=float(flow_fit_backfill_width_delta_px),
+        flow_fit_backfill_monotonic_slack_px=float(flow_fit_backfill_monotonic_slack_px),
+        tail_start_mode=str(tail_start_mode),
+        tail_direct_target_drop_to_threshold_frac=float(
+            tail_direct_target_drop_to_threshold_frac
+        ),
+        tail_direct_target_peak_lead_us=float(tail_direct_target_peak_lead_us),
+        tail_direct_target_shrink_rate_ratio=float(tail_direct_target_shrink_rate_ratio),
+        tail_shoulder_target_drop_to_threshold_frac=float(
+            tail_shoulder_target_drop_to_threshold_frac
+        ),
+        tail_shoulder_target_peak_lead_us=float(tail_shoulder_target_peak_lead_us),
+        tail_shoulder_target_shrink_rate_ratio=float(tail_shoulder_target_shrink_rate_ratio),
+        tail_score_drop_weight=float(tail_score_drop_weight),
+        tail_score_peak_lead_weight=float(tail_score_peak_lead_weight),
+        tail_score_shrink_rate_weight=float(tail_score_shrink_rate_weight),
+        tail_score_drop_scale=float(tail_score_drop_scale),
+        tail_score_peak_lead_scale_us=float(tail_score_peak_lead_scale_us),
+        tail_score_shrink_rate_scale=float(tail_score_shrink_rate_scale),
+        tail_unified_band_drop_min=float(tail_unified_band_drop_min),
+        tail_unified_band_drop_max=float(tail_unified_band_drop_max),
+        tail_unified_band_peak_lead_min_us=float(tail_unified_band_peak_lead_min_us),
+        tail_unified_band_peak_lead_max_us=float(tail_unified_band_peak_lead_max_us),
+        tail_unified_band_shrink_rate_ratio_min=float(
+            tail_unified_band_shrink_rate_ratio_min
+        ),
+        tail_unified_band_shrink_rate_ratio_max=float(
+            tail_unified_band_shrink_rate_ratio_max
+        ),
+        tail_unified_target_drop_to_threshold_frac=float(
+            tail_unified_target_drop_to_threshold_frac
+        ),
+        tail_unified_target_peak_lead_us=float(tail_unified_target_peak_lead_us),
+        tail_unified_target_shrink_rate_ratio=float(tail_unified_target_shrink_rate_ratio),
+        volume_uncertainty_sample_count=int(volume_uncertainty_sample_count),
+        volume_uncertainty_seed=int(volume_uncertainty_seed),
+        tail_uncertainty_score_tolerance=float(tail_uncertainty_score_tolerance),
         steady_fit_r2_min=float(steady_fit_r2_min),
         steady_fit_nrmse_max=float(steady_fit_nrmse_max),
     )
-    tail_onset = _find_tail_onset(
-        feature_rows,
-        steady_fit,
-        first_untrusted_capture_index=_int_or_none(
-            stage4_run["fov_report"].get("first_untrusted_capture_index")
-        ),
-        tail_drop_frac=float(tail_drop_frac),
-        tail_persist_frames=int(tail_persist_frames),
-    )
-    middle = _middle_extrapolation(
-        feature_rows,
-        steady_fit,
-        tail_onset,
-        dict(stage4_run["fov_report"]),
-    )
-    _apply_phase_labels(feature_rows, steady_fit, tail_onset)
+    stage5_run["stage4_run"] = stage4_run
+    return stage5_run
 
-    summary = _run_phase_summary(steady_fit, tail_onset, middle)
-    summary["phase_feature_row_count"] = int(len(feature_rows))
-    summary["width_valid_frame_count"] = int(
-        sum(
-            1
-            for row in feature_rows
-            if row.get("attached_near_nozzle_width_median_px") is not None
-        )
-    )
-    summary["steady_selected_frame_count"] = int(
-        sum(1 for row in feature_rows if bool(row.get("steady_selected")))
-    )
-    summary["tail_start_capture_index"] = tail_onset.get("tail_start_capture_index")
-    summary["tail_onset_status"] = tail_onset.get("tail_onset_status")
 
+def _stage5_parameter_payload(
+    *,
+    sample_count: int,
+    extra_frame_indices: list[int] | None,
+    search_width_frac: float,
+    search_top_frac: float,
+    search_bottom_frac: float,
+    blur_sigma: float,
+    residual_threshold: int,
+    shift_threshold_px: float,
+    confidence_threshold: float,
+    roi_width_frac: float,
+    roi_top_frac: float,
+    roi_bottom_frac: float,
+    corridor_width_frac: float,
+    nozzle_guard_px: int,
+    min_component_area_px: int,
+    near_nozzle_band_top_px: int,
+    near_nozzle_band_height_px: int,
+    min_band_valid_rows: int,
+    width_smooth_window: int,
+    min_steady_frames: int,
+    steady_width_tol_frac: float,
+    steady_width_tol_px: float,
+    steady_fit_r2_min: float,
+    steady_fit_nrmse_max: float,
+    steady_fit_mode: str,
+    steady_fit_exclude_last_trusted_frames: int,
+    flow_fit_backfill_max_frames: int,
+    flow_fit_backfill_width_delta_px: float,
+    flow_fit_backfill_monotonic_slack_px: float,
+    tail_drop_frac: float,
+    tail_persist_frames: int,
+    tail_start_mode: str,
+    tail_direct_target_drop_to_threshold_frac: float,
+    tail_direct_target_peak_lead_us: float,
+    tail_direct_target_shrink_rate_ratio: float,
+    tail_shoulder_target_drop_to_threshold_frac: float,
+    tail_shoulder_target_peak_lead_us: float,
+    tail_shoulder_target_shrink_rate_ratio: float,
+    tail_score_drop_weight: float,
+    tail_score_peak_lead_weight: float,
+    tail_score_shrink_rate_weight: float,
+    tail_score_drop_scale: float,
+    tail_score_peak_lead_scale_us: float,
+    tail_score_shrink_rate_scale: float,
+    tail_unified_band_drop_min: float,
+    tail_unified_band_drop_max: float,
+    tail_unified_band_peak_lead_min_us: float,
+    tail_unified_band_peak_lead_max_us: float,
+    tail_unified_band_shrink_rate_ratio_min: float,
+    tail_unified_band_shrink_rate_ratio_max: float,
+    tail_unified_target_drop_to_threshold_frac: float,
+    tail_unified_target_peak_lead_us: float,
+    tail_unified_target_shrink_rate_ratio: float,
+    volume_uncertainty_sample_count: int,
+    volume_uncertainty_seed: int,
+    tail_uncertainty_score_tolerance: float,
+):
     return {
-        "run_id": run_id,
-        "stage4_run": stage4_run,
-        "phase_feature_rows": feature_rows,
-        "steady_fit": steady_fit,
-        "tail_onset": tail_onset,
-        "middle_extrapolation": middle,
-        "phase_boundaries": _phase_boundaries_payload(feature_rows, stage4_run, steady_fit, tail_onset, middle),
-        "steady_fit_payload": _steady_fit_payload(feature_rows, stage4_run, steady_fit),
-        "middle_payload": _middle_payload(feature_rows, stage4_run, steady_fit, tail_onset, middle),
-        "summary": summary,
+        "sample_count": int(sample_count),
+        "extra_frame_indices": list(extra_frame_indices or []),
+        "search_width_frac": float(search_width_frac),
+        "search_top_frac": float(search_top_frac),
+        "search_bottom_frac": float(search_bottom_frac),
+        "blur_sigma": float(blur_sigma),
+        "residual_threshold": int(residual_threshold),
+        "shift_threshold_px": float(shift_threshold_px),
+        "confidence_threshold": float(confidence_threshold),
+        "roi_width_frac": float(roi_width_frac),
+        "roi_top_frac": float(roi_top_frac),
+        "roi_bottom_frac": float(roi_bottom_frac),
+        "corridor_width_frac": float(corridor_width_frac),
+        "nozzle_guard_px": int(nozzle_guard_px),
+        "min_component_area_px": int(min_component_area_px),
+        "near_nozzle_band_top_px": int(near_nozzle_band_top_px),
+        "near_nozzle_band_height_px": int(near_nozzle_band_height_px),
+        "min_band_valid_rows": int(min_band_valid_rows),
+        "width_smooth_window": int(width_smooth_window),
+        "min_steady_frames": int(min_steady_frames),
+        "steady_width_tol_frac": float(steady_width_tol_frac),
+        "steady_width_tol_px": float(steady_width_tol_px),
+        "steady_fit_r2_min": float(steady_fit_r2_min),
+        "steady_fit_nrmse_max": float(steady_fit_nrmse_max),
+        "steady_fit_mode": str(steady_fit_mode),
+        "steady_fit_exclude_last_trusted_frames": int(steady_fit_exclude_last_trusted_frames),
+        "flow_fit_backfill_max_frames": int(flow_fit_backfill_max_frames),
+        "flow_fit_backfill_width_delta_px": float(flow_fit_backfill_width_delta_px),
+        "flow_fit_backfill_monotonic_slack_px": float(flow_fit_backfill_monotonic_slack_px),
+        "tail_drop_frac": float(tail_drop_frac),
+        "tail_persist_frames": int(tail_persist_frames),
+        "tail_start_mode": str(tail_start_mode),
+        "tail_direct_target_drop_to_threshold_frac": float(
+            tail_direct_target_drop_to_threshold_frac
+        ),
+        "tail_direct_target_peak_lead_us": float(tail_direct_target_peak_lead_us),
+        "tail_direct_target_shrink_rate_ratio": float(tail_direct_target_shrink_rate_ratio),
+        "tail_shoulder_target_drop_to_threshold_frac": float(
+            tail_shoulder_target_drop_to_threshold_frac
+        ),
+        "tail_shoulder_target_peak_lead_us": float(tail_shoulder_target_peak_lead_us),
+        "tail_shoulder_target_shrink_rate_ratio": float(tail_shoulder_target_shrink_rate_ratio),
+        "tail_score_drop_weight": float(tail_score_drop_weight),
+        "tail_score_peak_lead_weight": float(tail_score_peak_lead_weight),
+        "tail_score_shrink_rate_weight": float(tail_score_shrink_rate_weight),
+        "tail_score_drop_scale": float(tail_score_drop_scale),
+        "tail_score_peak_lead_scale_us": float(tail_score_peak_lead_scale_us),
+        "tail_score_shrink_rate_scale": float(tail_score_shrink_rate_scale),
+        "tail_unified_band_drop_min": float(tail_unified_band_drop_min),
+        "tail_unified_band_drop_max": float(tail_unified_band_drop_max),
+        "tail_unified_band_peak_lead_min_us": float(tail_unified_band_peak_lead_min_us),
+        "tail_unified_band_peak_lead_max_us": float(tail_unified_band_peak_lead_max_us),
+        "tail_unified_band_shrink_rate_ratio_min": float(
+            tail_unified_band_shrink_rate_ratio_min
+        ),
+        "tail_unified_band_shrink_rate_ratio_max": float(
+            tail_unified_band_shrink_rate_ratio_max
+        ),
+        "tail_unified_target_drop_to_threshold_frac": float(
+            tail_unified_target_drop_to_threshold_frac
+        ),
+        "tail_unified_target_peak_lead_us": float(tail_unified_target_peak_lead_us),
+        "tail_unified_target_shrink_rate_ratio": float(tail_unified_target_shrink_rate_ratio),
+        "volume_uncertainty_sample_count": int(volume_uncertainty_sample_count),
+        "volume_uncertainty_seed": int(volume_uncertainty_seed),
+        "tail_uncertainty_score_tolerance": float(tail_uncertainty_score_tolerance),
     }
+
+
+def _stage5_output_paths(output_root: str | Path, run_id: str):
+    stage_dir = Path(output_root).expanduser().resolve() / "runs" / str(run_id) / FIT_STAGE_DIRNAME
+    return {
+        "stage_dir": stage_dir,
+        "phase_features_csv": stage_dir / "phase_features.csv",
+        "tail_start_candidates_csv": stage_dir / "tail_start_candidates.csv",
+        "phase_boundaries_json": stage_dir / "phase_boundaries.json",
+        "steady_fit_json": stage_dir / "steady_fit.json",
+        "middle_extrapolation_json": stage_dir / "middle_extrapolation.json",
+        "vt_fit_png": stage_dir / "Vt_fit.png",
+        "width_trace_png": stage_dir / "width_trace.png",
+        "fit_manifest_json": stage_dir / "fit_manifest.json",
+    }
+
+
+def _write_stage5_outputs(
+    output_root: str | Path,
+    run_id: str,
+    stage5_run: dict,
+    *,
+    run_dir: str | None = None,
+    parameters: dict | None = None,
+    analysis_source_mode: str,
+    cache_source_kind: str | None = None,
+    phase_input_csv: str | Path | None = None,
+    run_context_json: str | Path | None = None,
+    referenced_stage4_fit_output_root: str | None = None,
+    referenced_stage4_manifest_json: str | None = None,
+    referenced_stage5_fit_output_root: str | None = None,
+    referenced_stage5_manifest_json: str | None = None,
+    stage4_summary: dict | None = None,
+    shift_events: list[dict] | None = None,
+):
+    stage4_run = dict(stage5_run.get("stage4_run") or {})
+    feature_rows = list(stage5_run.get("phase_feature_rows") or [])
+    tail_start_candidate_rows = list(stage5_run.get("tail_start_candidate_rows") or [])
+    resolved_steady_fit = dict(stage5_run.get("steady_fit") or {})
+    if not resolved_steady_fit:
+        resolved_steady_fit = _steady_fit_from_payload(
+            feature_rows,
+            dict(stage5_run.get("steady_fit_payload") or {}),
+        )
+    resolved_tail_onset = dict(stage5_run.get("tail_onset") or {})
+    if not resolved_tail_onset:
+        summary = dict(stage5_run.get("summary") or {})
+        phase_boundaries = dict(stage5_run.get("phase_boundaries") or {})
+        resolved_tail_onset = {
+            "tail_confirmation_capture_index": summary.get("tail_confirmation_capture_index")
+            or phase_boundaries.get("tail_confirmation_capture_index"),
+            "tail_confirmation_delay_from_emergence_us": summary.get(
+                "tail_confirmation_delay_from_emergence_us"
+            )
+            or phase_boundaries.get("tail_confirmation_delay_from_emergence_us"),
+            "tail_detection_mode": summary.get("tail_detection_mode")
+            or phase_boundaries.get("tail_detection_mode"),
+            "tail_start_selection_mode": summary.get("tail_start_selection_mode")
+            or phase_boundaries.get("tail_start_selection_mode"),
+            "preliminary_tail_start_capture_index": summary.get(
+                "preliminary_tail_start_capture_index"
+            )
+            or phase_boundaries.get("preliminary_tail_start_capture_index"),
+            "preliminary_tail_start_delay_from_emergence_us": summary.get(
+                "preliminary_tail_start_delay_from_emergence_us"
+            )
+            or phase_boundaries.get("preliminary_tail_start_delay_from_emergence_us"),
+            "direct_final_tail_start_capture_index": summary.get(
+                "direct_final_tail_start_capture_index"
+            )
+            or phase_boundaries.get("direct_final_tail_start_capture_index"),
+            "direct_final_tail_start_delay_from_emergence_us": summary.get(
+                "direct_final_tail_start_delay_from_emergence_us"
+            )
+            or phase_boundaries.get("direct_final_tail_start_delay_from_emergence_us"),
+            "tail_shoulder_end_capture_index": summary.get("tail_shoulder_end_capture_index")
+            or phase_boundaries.get("tail_shoulder_end_capture_index"),
+            "tail_shoulder_end_delay_from_emergence_us": summary.get(
+                "tail_shoulder_end_delay_from_emergence_us"
+            )
+            or phase_boundaries.get("tail_shoulder_end_delay_from_emergence_us"),
+            "tail_start_capture_index": summary.get("tail_start_capture_index")
+            or phase_boundaries.get("tail_start_capture_index"),
+            "tail_start_delay_from_emergence_us": summary.get("tail_start_delay_from_emergence_us")
+            or phase_boundaries.get("tail_start_delay_from_emergence_us"),
+            "tail_onset_status": summary.get("tail_onset_status"),
+        }
+    resolved_middle = dict(stage5_run.get("middle_extrapolation") or {})
+    if not resolved_middle:
+        resolved_middle = dict(stage5_run.get("middle_payload") or {})
+    paths = _stage5_output_paths(output_root, run_id)
+    paths["stage_dir"].mkdir(parents=True, exist_ok=True)
+
+    _write_csv(
+        paths["phase_features_csv"],
+        _preferred_columns(feature_rows, PHASE_FEATURE_COLUMNS),
+        feature_rows,
+    )
+    _write_csv(
+        paths["tail_start_candidates_csv"],
+        _preferred_columns(tail_start_candidate_rows, TAIL_START_CANDIDATE_COLUMNS),
+        tail_start_candidate_rows,
+    )
+    _write_json(paths["phase_boundaries_json"], stage5_run["phase_boundaries"])
+    _write_json(paths["steady_fit_json"], stage5_run["steady_fit_payload"])
+    _write_json(paths["middle_extrapolation_json"], stage5_run["middle_payload"])
+    _plot_vt_fit(
+        paths["vt_fit_png"],
+        feature_rows,
+        run_id=run_id,
+        steady_fit=resolved_steady_fit,
+        middle=resolved_middle,
+        fov_report=stage4_run.get("fov_report") or {},
+        tail_onset=resolved_tail_onset,
+    )
+    _plot_width_trace(
+        paths["width_trace_png"],
+        feature_rows,
+        run_id=run_id,
+        steady_fit=resolved_steady_fit,
+        tail_onset=resolved_tail_onset,
+        fov_report=stage4_run.get("fov_report") or {},
+    )
+
+    resolved_parameters = dict(parameters or {})
+    run_manifest = {
+        "schema_version": 1,
+        "stage": "fit",
+        "run_id": run_id,
+        "run_dir": run_dir,
+        "volume_unit": "nL",
+        "analysis_source_mode": str(analysis_source_mode),
+        "cache_source_kind": cache_source_kind,
+        "phase_input_csv": None if phase_input_csv is None else str(phase_input_csv),
+        "run_context_json": None if run_context_json is None else str(run_context_json),
+        "referenced_stage4_fit_output_root": referenced_stage4_fit_output_root,
+        "referenced_stage4_manifest_json": referenced_stage4_manifest_json,
+        "referenced_stage5_fit_output_root": referenced_stage5_fit_output_root,
+        "referenced_stage5_manifest_json": referenced_stage5_manifest_json,
+        "parameters": resolved_parameters,
+        **resolved_parameters,
+        "outputs": {
+            "phase_features_csv": str(paths["phase_features_csv"]),
+            "tail_start_candidates_csv": str(paths["tail_start_candidates_csv"]),
+            "phase_boundaries_json": str(paths["phase_boundaries_json"]),
+            "steady_fit_json": str(paths["steady_fit_json"]),
+            "middle_extrapolation_json": str(paths["middle_extrapolation_json"]),
+            "vt_fit_png": str(paths["vt_fit_png"]),
+            "width_trace_png": str(paths["width_trace_png"]),
+        },
+        "summary": dict(stage5_run["summary"]),
+        "fov_report": dict(stage4_run.get("fov_report") or {}),
+        "stage4_summary": dict(stage4_summary or stage4_run.get("summary_counts") or {}),
+        "shift_events": list(shift_events or stage4_run.get("shift_events") or []),
+    }
+    _write_json(paths["fit_manifest_json"], run_manifest)
+    paths["fit_manifest"] = run_manifest
+    return paths
 
 
 def export_stage5_fit(
@@ -3951,8 +4306,38 @@ def export_stage5_fit(
     steady_width_tol_px: float = 4.0,
     steady_fit_r2_min: float = 0.985,
     steady_fit_nrmse_max: float = 0.03,
+    steady_fit_mode: str = "recompute",
+    steady_fit_exclude_last_trusted_frames: int = 0,
+    flow_fit_backfill_max_frames: int = 3,
+    flow_fit_backfill_width_delta_px: float = 8.0,
+    flow_fit_backfill_monotonic_slack_px: float = 0.75,
     tail_drop_frac: float = 0.08,
     tail_persist_frames: int = 3,
+    tail_start_mode: str = TAIL_START_MODE_LEGACY,
+    tail_direct_target_drop_to_threshold_frac: float = TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_direct_target_peak_lead_us: float = TAIL_DIRECT_TARGET_PEAK_LEAD_US,
+    tail_direct_target_shrink_rate_ratio: float = TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
+    tail_shoulder_target_drop_to_threshold_frac: float = TAIL_SHOULDER_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_shoulder_target_peak_lead_us: float = TAIL_SHOULDER_TARGET_PEAK_LEAD_US,
+    tail_shoulder_target_shrink_rate_ratio: float = TAIL_SHOULDER_TARGET_SHRINK_RATE_RATIO,
+    tail_score_drop_weight: float = TAIL_SCORE_DROP_WEIGHT,
+    tail_score_peak_lead_weight: float = TAIL_SCORE_PEAK_LEAD_WEIGHT,
+    tail_score_shrink_rate_weight: float = TAIL_SCORE_SHRINK_RATE_WEIGHT,
+    tail_score_drop_scale: float = TAIL_SCORE_DROP_SCALE,
+    tail_score_peak_lead_scale_us: float = TAIL_SCORE_PEAK_LEAD_SCALE_US,
+    tail_score_shrink_rate_scale: float = TAIL_SCORE_SHRINK_RATE_SCALE,
+    tail_unified_band_drop_min: float = TAIL_UNIFIED_BAND_DROP_MIN,
+    tail_unified_band_drop_max: float = TAIL_UNIFIED_BAND_DROP_MAX,
+    tail_unified_band_peak_lead_min_us: float = TAIL_UNIFIED_BAND_PEAK_LEAD_MIN_US,
+    tail_unified_band_peak_lead_max_us: float = TAIL_UNIFIED_BAND_PEAK_LEAD_MAX_US,
+    tail_unified_band_shrink_rate_ratio_min: float = TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MIN,
+    tail_unified_band_shrink_rate_ratio_max: float = TAIL_UNIFIED_BAND_SHRINK_RATE_RATIO_MAX,
+    tail_unified_target_drop_to_threshold_frac: float = TAIL_UNIFIED_TARGET_DROP_TO_THRESHOLD_FRAC,
+    tail_unified_target_peak_lead_us: float = TAIL_UNIFIED_TARGET_PEAK_LEAD_US,
+    tail_unified_target_shrink_rate_ratio: float = TAIL_UNIFIED_TARGET_SHRINK_RATE_RATIO,
+    volume_uncertainty_sample_count: int = VOLUME_UNCERTAINTY_SAMPLE_COUNT,
+    volume_uncertainty_seed: int = VOLUME_UNCERTAINTY_SEED,
+    tail_uncertainty_score_tolerance: float = TAIL_UNCERTAINTY_SCORE_TOLERANCE,
 ):
     inventory = build_stage0_inventory(
         experiment_root,
@@ -3961,8 +4346,70 @@ def export_stage5_fit(
         limit_runs=limit_runs,
     )
 
-    output_path = Path(output_root).expanduser().resolve() if output_root else default_output_root(experiment_root)
+    output_path = (
+        Path(output_root).expanduser().resolve()
+        if output_root
+        else default_output_root(experiment_root)
+    )
     output_path.mkdir(parents=True, exist_ok=True)
+    parameter_payload = _stage5_parameter_payload(
+        sample_count=sample_count,
+        extra_frame_indices=extra_frame_indices,
+        search_width_frac=search_width_frac,
+        search_top_frac=search_top_frac,
+        search_bottom_frac=search_bottom_frac,
+        blur_sigma=blur_sigma,
+        residual_threshold=residual_threshold,
+        shift_threshold_px=shift_threshold_px,
+        confidence_threshold=confidence_threshold,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+        corridor_width_frac=corridor_width_frac,
+        nozzle_guard_px=nozzle_guard_px,
+        min_component_area_px=min_component_area_px,
+        near_nozzle_band_top_px=near_nozzle_band_top_px,
+        near_nozzle_band_height_px=near_nozzle_band_height_px,
+        min_band_valid_rows=min_band_valid_rows,
+        width_smooth_window=width_smooth_window,
+        min_steady_frames=min_steady_frames,
+        steady_width_tol_frac=steady_width_tol_frac,
+        steady_width_tol_px=steady_width_tol_px,
+        steady_fit_r2_min=steady_fit_r2_min,
+        steady_fit_nrmse_max=steady_fit_nrmse_max,
+        steady_fit_mode=steady_fit_mode,
+        steady_fit_exclude_last_trusted_frames=steady_fit_exclude_last_trusted_frames,
+        flow_fit_backfill_max_frames=flow_fit_backfill_max_frames,
+        flow_fit_backfill_width_delta_px=flow_fit_backfill_width_delta_px,
+        flow_fit_backfill_monotonic_slack_px=flow_fit_backfill_monotonic_slack_px,
+        tail_drop_frac=tail_drop_frac,
+        tail_persist_frames=tail_persist_frames,
+        tail_start_mode=tail_start_mode,
+        tail_direct_target_drop_to_threshold_frac=tail_direct_target_drop_to_threshold_frac,
+        tail_direct_target_peak_lead_us=tail_direct_target_peak_lead_us,
+        tail_direct_target_shrink_rate_ratio=tail_direct_target_shrink_rate_ratio,
+        tail_shoulder_target_drop_to_threshold_frac=tail_shoulder_target_drop_to_threshold_frac,
+        tail_shoulder_target_peak_lead_us=tail_shoulder_target_peak_lead_us,
+        tail_shoulder_target_shrink_rate_ratio=tail_shoulder_target_shrink_rate_ratio,
+        tail_score_drop_weight=tail_score_drop_weight,
+        tail_score_peak_lead_weight=tail_score_peak_lead_weight,
+        tail_score_shrink_rate_weight=tail_score_shrink_rate_weight,
+        tail_score_drop_scale=tail_score_drop_scale,
+        tail_score_peak_lead_scale_us=tail_score_peak_lead_scale_us,
+        tail_score_shrink_rate_scale=tail_score_shrink_rate_scale,
+        tail_unified_band_drop_min=tail_unified_band_drop_min,
+        tail_unified_band_drop_max=tail_unified_band_drop_max,
+        tail_unified_band_peak_lead_min_us=tail_unified_band_peak_lead_min_us,
+        tail_unified_band_peak_lead_max_us=tail_unified_band_peak_lead_max_us,
+        tail_unified_band_shrink_rate_ratio_min=tail_unified_band_shrink_rate_ratio_min,
+        tail_unified_band_shrink_rate_ratio_max=tail_unified_band_shrink_rate_ratio_max,
+        tail_unified_target_drop_to_threshold_frac=tail_unified_target_drop_to_threshold_frac,
+        tail_unified_target_peak_lead_us=tail_unified_target_peak_lead_us,
+        tail_unified_target_shrink_rate_ratio=tail_unified_target_shrink_rate_ratio,
+        volume_uncertainty_sample_count=volume_uncertainty_sample_count,
+        volume_uncertainty_seed=volume_uncertainty_seed,
+        tail_uncertainty_score_tolerance=tail_uncertainty_score_tolerance,
+    )
 
     run_manifests = []
     for run_row in inventory["selected_runs"]:
@@ -3974,133 +4421,51 @@ def export_stage5_fit(
         stage5_run = _build_stage5_run(
             run_id,
             frame_rows,
-            sample_count=sample_count,
-            extra_frame_indices=extra_frame_indices,
-            search_width_frac=search_width_frac,
-            search_top_frac=search_top_frac,
-            search_bottom_frac=search_bottom_frac,
-            blur_sigma=blur_sigma,
-            residual_threshold=residual_threshold,
-            shift_threshold_px=shift_threshold_px,
-            confidence_threshold=confidence_threshold,
-            roi_width_frac=roi_width_frac,
-            roi_top_frac=roi_top_frac,
-            roi_bottom_frac=roi_bottom_frac,
-            corridor_width_frac=corridor_width_frac,
-            nozzle_guard_px=nozzle_guard_px,
-            min_component_area_px=min_component_area_px,
-            near_nozzle_band_top_px=near_nozzle_band_top_px,
-            near_nozzle_band_height_px=near_nozzle_band_height_px,
-            min_band_valid_rows=min_band_valid_rows,
-            width_smooth_window=width_smooth_window,
-            min_steady_frames=min_steady_frames,
-            steady_width_tol_frac=steady_width_tol_frac,
-            steady_width_tol_px=steady_width_tol_px,
-            steady_fit_r2_min=steady_fit_r2_min,
-            steady_fit_nrmse_max=steady_fit_nrmse_max,
-            tail_drop_frac=tail_drop_frac,
-            tail_persist_frames=tail_persist_frames,
+            **parameter_payload,
         )
-        stage4_run = stage5_run["stage4_run"]
-        feature_rows = stage5_run["phase_feature_rows"]
-        steady_fit = stage5_run["steady_fit"]
-        tail_onset = stage5_run["tail_onset"]
-        middle = stage5_run["middle_extrapolation"]
-        phase_boundaries = stage5_run["phase_boundaries"]
-        steady_fit_payload = stage5_run["steady_fit_payload"]
-        middle_payload = stage5_run["middle_payload"]
-
-        stage_dir = output_path / "runs" / run_id / FIT_STAGE_DIRNAME
-        stage_dir.mkdir(parents=True, exist_ok=True)
-
-        phase_features_csv = stage_dir / "phase_features.csv"
-        phase_boundaries_json = stage_dir / "phase_boundaries.json"
-        steady_fit_json = stage_dir / "steady_fit.json"
-        middle_extrapolation_json = stage_dir / "middle_extrapolation.json"
-        vt_fit_png = stage_dir / "Vt_fit.png"
-        width_trace_png = stage_dir / "width_trace.png"
-        run_manifest_json = stage_dir / "fit_manifest.json"
-
-        _write_csv(
-            phase_features_csv,
-            _preferred_columns(feature_rows, PHASE_FEATURE_COLUMNS),
-            feature_rows,
+        output_paths = _write_stage5_outputs(
+            output_path,
+            run_id,
+            stage5_run,
+            run_dir=run_row.get("run_dir"),
+            parameters=parameter_payload,
+            analysis_source_mode="raw",
         )
-        _write_json(phase_boundaries_json, phase_boundaries)
-        _write_json(steady_fit_json, steady_fit_payload)
-        _write_json(middle_extrapolation_json, middle_payload)
-        _plot_vt_fit(
-            vt_fit_png,
-            feature_rows,
-            run_id=run_id,
-            steady_fit=steady_fit,
-            middle=middle,
-            fov_report=stage4_run["fov_report"],
-            tail_onset=tail_onset,
-        )
-        _plot_width_trace(
-            width_trace_png,
-            feature_rows,
-            run_id=run_id,
-            steady_fit=steady_fit,
-            tail_onset=tail_onset,
-            fov_report=stage4_run["fov_report"],
-        )
-
-        run_manifest = {
-            "schema_version": 1,
-            "stage": "fit",
-            "run_id": run_id,
-            "run_dir": run_row["run_dir"],
-            "volume_unit": "nL",
-            "sample_count": int(sample_count),
-            "extra_frame_indices": list(extra_frame_indices or []),
-            "near_nozzle_band_top_px": int(near_nozzle_band_top_px),
-            "near_nozzle_band_height_px": int(near_nozzle_band_height_px),
-            "min_band_valid_rows": int(min_band_valid_rows),
-            "width_smooth_window": int(width_smooth_window),
-            "min_steady_frames": int(min_steady_frames),
-            "steady_width_tol_frac": float(steady_width_tol_frac),
-            "steady_width_tol_px": float(steady_width_tol_px),
-            "steady_fit_r2_min": float(steady_fit_r2_min),
-            "steady_fit_nrmse_max": float(steady_fit_nrmse_max),
-            "tail_drop_frac": float(tail_drop_frac),
-            "tail_persist_frames": int(tail_persist_frames),
-            "outputs": {
-                "phase_features_csv": str(phase_features_csv),
-                "phase_boundaries_json": str(phase_boundaries_json),
-                "steady_fit_json": str(steady_fit_json),
-                "middle_extrapolation_json": str(middle_extrapolation_json),
-                "vt_fit_png": str(vt_fit_png),
-                "width_trace_png": str(width_trace_png),
-            },
-            "summary": dict(stage5_run["summary"]),
-            "fov_report": dict(stage4_run["fov_report"]),
-            "stage4_summary": dict(stage4_run["summary_counts"]),
-            "shift_events": list(stage4_run["shift_events"]),
-        }
-        _write_json(run_manifest_json, run_manifest)
 
         run_manifests.append(
             {
                 "run_id": run_id,
                 "run_dir": run_row["run_dir"],
-                "phase_features_csv": str(phase_features_csv),
-                "phase_boundaries_json": str(phase_boundaries_json),
-                "steady_fit_json": str(steady_fit_json),
-                "middle_extrapolation_json": str(middle_extrapolation_json),
-                "vt_fit_png": str(vt_fit_png),
-                "width_trace_png": str(width_trace_png),
-                "phase_feature_row_count": len(feature_rows),
-                "steady_fit_status": steady_fit.get("steady_fit_status"),
-                "tail_onset_status": tail_onset.get("tail_onset_status"),
-                "tail_detection_mode": tail_onset.get("tail_detection_mode"),
-                "tail_start_selection_mode": tail_onset.get("tail_start_selection_mode"),
-                "tail_confirmation_capture_index": tail_onset.get("tail_confirmation_capture_index"),
-                "tail_shoulder_end_capture_index": tail_onset.get("tail_shoulder_end_capture_index"),
-                "tail_start_capture_index": tail_onset.get("tail_start_capture_index"),
-                "middle_extrapolation_status": middle.get("middle_extrapolation_status"),
-                "partial_total_without_tail_nl": middle.get("partial_total_without_tail_nl"),
+                "phase_features_csv": str(output_paths["phase_features_csv"]),
+                "tail_start_candidates_csv": str(output_paths["tail_start_candidates_csv"]),
+                "phase_boundaries_json": str(output_paths["phase_boundaries_json"]),
+                "steady_fit_json": str(output_paths["steady_fit_json"]),
+                "middle_extrapolation_json": str(output_paths["middle_extrapolation_json"]),
+                "vt_fit_png": str(output_paths["vt_fit_png"]),
+                "width_trace_png": str(output_paths["width_trace_png"]),
+                "fit_manifest_json": str(output_paths["fit_manifest_json"]),
+                "phase_feature_row_count": len(stage5_run["phase_feature_rows"]),
+                "steady_fit_status": stage5_run["steady_fit"].get("steady_fit_status"),
+                "tail_onset_status": stage5_run["tail_onset"].get("tail_onset_status"),
+                "tail_detection_mode": stage5_run["tail_onset"].get("tail_detection_mode"),
+                "tail_start_selection_mode": stage5_run["tail_onset"].get(
+                    "tail_start_selection_mode"
+                ),
+                "tail_confirmation_capture_index": stage5_run["tail_onset"].get(
+                    "tail_confirmation_capture_index"
+                ),
+                "tail_shoulder_end_capture_index": stage5_run["tail_onset"].get(
+                    "tail_shoulder_end_capture_index"
+                ),
+                "tail_start_capture_index": stage5_run["tail_onset"].get(
+                    "tail_start_capture_index"
+                ),
+                "middle_extrapolation_status": stage5_run["middle_extrapolation"].get(
+                    "middle_extrapolation_status"
+                ),
+                "partial_total_without_tail_nl": stage5_run["middle_extrapolation"].get(
+                    "partial_total_without_tail_nl"
+                ),
             }
         )
 
@@ -4112,35 +4477,12 @@ def export_stage5_fit(
         "selected_run_count": len(run_manifests),
         "run_ids": [row["run_id"] for row in run_manifests],
         "volume_unit": "nL",
-        "sample_count": int(sample_count),
-        "extra_frame_indices": list(extra_frame_indices or []),
-        "search_width_frac": float(search_width_frac),
-        "search_top_frac": float(search_top_frac),
-        "search_bottom_frac": float(search_bottom_frac),
-        "blur_sigma": float(blur_sigma),
-        "residual_threshold": int(residual_threshold),
-        "shift_threshold_px": float(shift_threshold_px),
-        "confidence_threshold": float(confidence_threshold),
-        "roi_width_frac": float(roi_width_frac),
-        "roi_top_frac": float(roi_top_frac),
-        "roi_bottom_frac": float(roi_bottom_frac),
-        "corridor_width_frac": float(corridor_width_frac),
-        "nozzle_guard_px": int(nozzle_guard_px),
-        "min_component_area_px": int(min_component_area_px),
-        "near_nozzle_band_top_px": int(near_nozzle_band_top_px),
-        "near_nozzle_band_height_px": int(near_nozzle_band_height_px),
-        "min_band_valid_rows": int(min_band_valid_rows),
-        "width_smooth_window": int(width_smooth_window),
-        "min_steady_frames": int(min_steady_frames),
-        "steady_width_tol_frac": float(steady_width_tol_frac),
-        "steady_width_tol_px": float(steady_width_tol_px),
-        "steady_fit_r2_min": float(steady_fit_r2_min),
-        "steady_fit_nrmse_max": float(steady_fit_nrmse_max),
-        "tail_drop_frac": float(tail_drop_frac),
-        "tail_persist_frames": int(tail_persist_frames),
+        **parameter_payload,
         "runs": run_manifests,
     }
     manifest_path = output_path / "fit_manifest.json"
     _write_json(manifest_path, manifest)
     manifest["manifest_path"] = str(manifest_path)
     return manifest
+
+

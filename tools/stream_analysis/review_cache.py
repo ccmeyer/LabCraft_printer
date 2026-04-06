@@ -54,6 +54,7 @@ RAW_FALLBACK_STAGE5_KWARGS = {
 }
 
 REVIEW_RUN_SUMMARY_COLUMNS = list(summary_mod.RUN_SUMMARY_COLUMNS) + [
+    "analysis_source_mode",
     "steady_fit_mode",
     "plateau_capture_indices",
     "plateau_point_count",
@@ -449,9 +450,19 @@ def _source_stage5_paths(source_root: str | Path, run_id: str):
     }
 
 
+def _source_stage4_paths(source_root: str | Path, run_id: str):
+    source_root_path = Path(source_root).expanduser().resolve()
+    stage_dir = source_root_path / "runs" / str(run_id) / "stage_04_volume"
+    return {
+        "stage_dir": stage_dir,
+        "volume_manifest_json": stage_dir / "volume_manifest.json",
+    }
+
+
 def _import_stage5_artifacts(run_row: dict, source_root: str | Path):
     run_id = str(run_row["run_id"])
     source_paths = _source_stage5_paths(source_root, run_id)
+    stage4_paths = _source_stage4_paths(source_root, run_id)
     required_paths = [
         source_paths["phase_features_csv"],
         source_paths["steady_fit_json"],
@@ -497,6 +508,14 @@ def _import_stage5_artifacts(run_row: dict, source_root: str | Path):
         source={
             "kind": "stage5_output_import",
             "source_output_root": str(Path(source_root).expanduser().resolve()),
+            "stage4_output_root": str(Path(source_root).expanduser().resolve()),
+            "stage4_manifest_json": str(stage4_paths["volume_manifest_json"])
+            if stage4_paths["volume_manifest_json"].exists()
+            else None,
+            "stage5_output_root": str(Path(source_root).expanduser().resolve()),
+            "stage5_manifest_json": str(source_paths["fit_manifest_json"])
+            if source_paths["fit_manifest_json"].exists()
+            else None,
             "phase_features_csv": str(source_paths["phase_features_csv"]),
             "steady_fit_json": str(source_paths["steady_fit_json"]),
             "middle_extrapolation_json": str(source_paths["middle_extrapolation_json"]),
@@ -548,6 +567,10 @@ def _build_raw_stage5_cache_entry(run_row: dict, frame_rows: list[dict]):
         fov_report=dict(stage5_run["stage4_run"]["fov_report"]),
         source={
             "kind": "raw_stage5_fallback",
+            "stage4_output_root": None,
+            "stage4_manifest_json": None,
+            "stage5_output_root": None,
+            "stage5_manifest_json": None,
             "stage5_kwargs": dict(RAW_FALLBACK_STAGE5_KWARGS),
         },
     )
@@ -886,9 +909,10 @@ def _review_summary_row(
     run_context: dict,
     stage5_run: dict,
     *,
-    phase_input_csv: Path,
-    run_context_json: Path,
+    phase_input_csv: Path | None,
+    run_context_json: Path | None,
     include_suspect_gravimetric: bool,
+    analysis_source_mode: str,
 ):
     metadata_snapshot = dict(run_context.get("metadata_snapshot") or {})
     metadata_metrics = dict(run_context.get("metadata_metrics") or {})
@@ -913,6 +937,7 @@ def _review_summary_row(
     ):
         include_in_gravimetric_plots = True
 
+    source = dict(run_context.get("source") or {})
     row = {
         "run_id": metadata_snapshot.get("run_id"),
         "run_dir": metadata_snapshot.get("run_dir"),
@@ -1118,16 +1143,20 @@ def _review_summary_row(
         ),
         "middle_extrapolation_status": summary.get("middle_extrapolation_status"),
         "final_total_status": summary.get("final_total_status"),
-        "referenced_stage4_fit_output_root": run_context.get("source", {}).get("source_output_root"),
-        "referenced_stage4_manifest_json": None,
-        "referenced_stage5_fit_output_root": run_context.get("source", {}).get("source_output_root"),
-        "referenced_stage5_manifest_json": run_context.get("source", {}).get("fit_manifest_json"),
+        "analysis_source_mode": str(analysis_source_mode),
+        "referenced_stage4_fit_output_root": source.get("stage4_output_root")
+        or source.get("source_output_root"),
+        "referenced_stage4_manifest_json": source.get("stage4_manifest_json"),
+        "referenced_stage5_fit_output_root": source.get("stage5_output_root")
+        or source.get("source_output_root"),
+        "referenced_stage5_manifest_json": source.get("stage5_manifest_json")
+        or source.get("fit_manifest_json"),
         "run_summary_json": None,
         "gravimetric_reference_status": gravimetric_reference_status,
         "include_in_gravimetric_plots": include_in_gravimetric_plots,
-        "cache_source_kind": run_context.get("source", {}).get("kind"),
-        "phase_input_csv": str(phase_input_csv),
-        "run_context_json": str(run_context_json),
+        "cache_source_kind": source.get("kind"),
+        "phase_input_csv": None if phase_input_csv is None else str(phase_input_csv),
+        "run_context_json": None if run_context_json is None else str(run_context_json),
     }
     row.update(_gravimetric_equality_delay_metrics(row))
     row.update(_gravimetric_trace_metrics(stage5_run, row))
@@ -1534,6 +1563,7 @@ def _plot_width_trace_with_gravimetric(
         gravimetric_equality_delay_low_us is not None
         and gravimetric_equality_delay_high_us is not None
         and float(gravimetric_equality_delay_high_us) > float(gravimetric_equality_delay_low_us)
+        and hasattr(ax_top, "axvspan")
     ):
         ax_top.axvspan(
             float(gravimetric_equality_delay_low_us),
@@ -1650,6 +1680,7 @@ def _plot_width_trace_with_gravimetric(
         gravimetric_equality_delay_low_us is not None
         and gravimetric_equality_delay_high_us is not None
         and float(gravimetric_equality_delay_high_us) > float(gravimetric_equality_delay_low_us)
+        and hasattr(ax_bottom, "axvspan")
     ):
         ax_bottom.axvspan(
             float(gravimetric_equality_delay_low_us),
@@ -1742,14 +1773,20 @@ def _plot_width_trace_with_gravimetric(
     ax_bottom.set_ylabel("Norm shrink\nrate (1/ms)")
     ax_bottom.grid(True, alpha=0.25)
 
-    handles, labels = ax_top.get_legend_handles_labels()
-    if labels:
-        by_label = dict(zip(labels, handles))
-        ax_top.legend(by_label.values(), by_label.keys(), loc="best")
-    handles, labels = ax_bottom.get_legend_handles_labels()
-    if labels:
-        by_label = dict(zip(labels, handles))
-        ax_bottom.legend(by_label.values(), by_label.keys(), loc="best")
+    if hasattr(ax_top, "get_legend_handles_labels"):
+        handles, labels = ax_top.get_legend_handles_labels()
+        if labels:
+            by_label = dict(zip(labels, handles))
+            ax_top.legend(by_label.values(), by_label.keys(), loc="best")
+    elif hasattr(ax_top, "legend"):
+        ax_top.legend(loc="best")
+    if hasattr(ax_bottom, "get_legend_handles_labels"):
+        handles, labels = ax_bottom.get_legend_handles_labels()
+        if labels:
+            by_label = dict(zip(labels, handles))
+            ax_bottom.legend(by_label.values(), by_label.keys(), loc="best")
+    elif hasattr(ax_bottom, "legend"):
+        ax_bottom.legend(loc="best")
     fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.965])
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160)
@@ -2302,6 +2339,47 @@ def export_stage5_cached_review(
     cache_root_path = Path(cache_root).expanduser().resolve()
     if not cache_root_path.exists():
         raise FileNotFoundError(f"Review cache root does not exist: {cache_root_path}")
+
+    return summary_mod.export_stage6_summary(
+        cache_root=cache_root_path,
+        output_root=output_root,
+        run_ids=run_ids,
+        limit_runs=limit_runs,
+        include_suspect_gravimetric=include_suspect_gravimetric,
+        width_smooth_window=width_smooth_window,
+        steady_fit_mode=steady_fit_mode,
+        steady_fit_exclude_last_trusted_frames=steady_fit_exclude_last_trusted_frames,
+        flow_fit_backfill_max_frames=flow_fit_backfill_max_frames,
+        flow_fit_backfill_width_delta_px=flow_fit_backfill_width_delta_px,
+        flow_fit_backfill_monotonic_slack_px=flow_fit_backfill_monotonic_slack_px,
+        tail_start_mode=tail_start_mode,
+        tail_direct_target_drop_to_threshold_frac=tail_direct_target_drop_to_threshold_frac,
+        tail_direct_target_peak_lead_us=tail_direct_target_peak_lead_us,
+        tail_direct_target_shrink_rate_ratio=tail_direct_target_shrink_rate_ratio,
+        tail_shoulder_target_drop_to_threshold_frac=tail_shoulder_target_drop_to_threshold_frac,
+        tail_shoulder_target_peak_lead_us=tail_shoulder_target_peak_lead_us,
+        tail_shoulder_target_shrink_rate_ratio=tail_shoulder_target_shrink_rate_ratio,
+        tail_score_drop_weight=tail_score_drop_weight,
+        tail_score_peak_lead_weight=tail_score_peak_lead_weight,
+        tail_score_shrink_rate_weight=tail_score_shrink_rate_weight,
+        tail_score_drop_scale=tail_score_drop_scale,
+        tail_score_peak_lead_scale_us=tail_score_peak_lead_scale_us,
+        tail_score_shrink_rate_scale=tail_score_shrink_rate_scale,
+        tail_unified_band_drop_min=tail_unified_band_drop_min,
+        tail_unified_band_drop_max=tail_unified_band_drop_max,
+        tail_unified_band_peak_lead_min_us=tail_unified_band_peak_lead_min_us,
+        tail_unified_band_peak_lead_max_us=tail_unified_band_peak_lead_max_us,
+        tail_unified_band_shrink_rate_ratio_min=tail_unified_band_shrink_rate_ratio_min,
+        tail_unified_band_shrink_rate_ratio_max=tail_unified_band_shrink_rate_ratio_max,
+        tail_unified_target_drop_to_threshold_frac=tail_unified_target_drop_to_threshold_frac,
+        tail_unified_target_peak_lead_us=tail_unified_target_peak_lead_us,
+        tail_unified_target_shrink_rate_ratio=tail_unified_target_shrink_rate_ratio,
+        volume_uncertainty_sample_count=volume_uncertainty_sample_count,
+        volume_uncertainty_seed=volume_uncertainty_seed,
+        tail_uncertainty_score_tolerance=tail_uncertainty_score_tolerance,
+        tail_drop_frac=tail_drop_frac,
+        tail_persist_frames=tail_persist_frames,
+    )
 
     selected_entries = _selected_cache_entries(
         cache_root_path,
