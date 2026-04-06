@@ -2429,6 +2429,7 @@ def test_phase_input_rows_strip_derived_columns_and_review_run_uses_frozen_ancho
         width_smooth_window=1,
         tail_drop_frac=0.08,
         tail_persist_frames=2,
+        tail_start_mode=mod.TAIL_START_MODE_LEGACY,
     )
 
     assert stage5_run["summary"]["trusted_visible_volume_nl"] == 12.5
@@ -2632,6 +2633,8 @@ def test_export_stage5_fit_writes_expected_outputs(tmp_path, monkeypatch):
         min_steady_frames=4,
         width_smooth_window=1,
         tail_persist_frames=2,
+        steady_fit_exclude_last_trusted_frames=0,
+        tail_start_mode=mod.TAIL_START_MODE_LEGACY,
     )
 
     assert payload["selected_run_count"] == 1

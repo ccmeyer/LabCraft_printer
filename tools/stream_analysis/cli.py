@@ -71,7 +71,7 @@ def _add_late_stage_review_args(
             fit_mod.TAIL_START_MODE_DESCRIPTOR_SCORE,
             fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
         ],
-        default=fit_mod.TAIL_START_MODE_LEGACY,
+        default=fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
         help="Whether to keep the legacy tail-start anchor, use descriptor scoring, or use the unified descriptor selector.",
     )
     parser.add_argument(
@@ -827,7 +827,7 @@ def build_parser():
     _add_late_stage_review_args(
         fit,
         default_steady_fit_mode="recompute",
-        default_exclude_last_trusted_frames=0,
+        default_exclude_last_trusted_frames=2,
         include_suspect=False,
     )
 
@@ -964,7 +964,7 @@ def build_parser():
             fit_mod.TAIL_START_MODE_DESCRIPTOR_SCORE,
             fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
         ],
-        default=fit_mod.TAIL_START_MODE_LEGACY,
+        default=fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
         help="Whether to keep the legacy tail-start anchor, use the existing path-specific descriptor scoring, or use the unified review-side descriptor selector.",
     )
     fit_review.add_argument(
@@ -1307,7 +1307,7 @@ def build_parser():
     _add_late_stage_review_args(
         summary,
         default_steady_fit_mode="recompute",
-        default_exclude_last_trusted_frames=0,
+        default_exclude_last_trusted_frames=2,
         include_suspect=True,
     )
 

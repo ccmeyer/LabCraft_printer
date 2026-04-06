@@ -482,6 +482,52 @@ def test_cli_fit_review_main_dispatches_and_prints_payload(tmp_path, capsys, mon
     assert payload["analyzed_run_count"] == 1
 
 
+def test_cli_fit_main_uses_new_late_stage_defaults(tmp_path, capsys, monkeypatch):
+    captured = {}
+
+    def _fake_export_stage5_fit(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {
+            "experiment_root": str(experiment_root),
+            "selected_run_count": 0,
+            "run_ids": [],
+        }
+
+    monkeypatch.setattr(cli, "export_stage5_fit", _fake_export_stage5_fit)
+
+    rc = cli.main(["fit", "--experiment-root", str(tmp_path / "exp")])
+
+    assert rc == 0
+    assert captured["kwargs"]["steady_fit_exclude_last_trusted_frames"] == 2
+    assert captured["kwargs"]["tail_start_mode"] == "descriptor-unified"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 0
+
+
+def test_cli_fit_review_main_uses_new_late_stage_defaults(tmp_path, capsys, monkeypatch):
+    captured = {}
+
+    def _fake_export_stage5_cached_review(cache_root, **kwargs):
+        captured["cache_root"] = cache_root
+        captured["kwargs"] = kwargs
+        return {
+            "cache_root": str(cache_root),
+            "selected_run_count": 0,
+            "analyzed_run_count": 0,
+        }
+
+    monkeypatch.setattr(cli, "export_stage5_cached_review", _fake_export_stage5_cached_review)
+
+    rc = cli.main(["fit-review", "--cache-root", str(tmp_path / "cache")])
+
+    assert rc == 0
+    assert captured["kwargs"]["steady_fit_exclude_last_trusted_frames"] == 2
+    assert captured["kwargs"]["tail_start_mode"] == "descriptor-unified"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["analyzed_run_count"] == 0
+
+
 def test_cli_summary_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
     exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
 
@@ -574,3 +620,26 @@ def test_cli_summary_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
     payload = json.loads(capsys.readouterr().out)
     assert payload["selected_run_count"] == 1
     assert payload["analyzed_run_count"] == 1
+
+
+def test_cli_summary_main_uses_new_late_stage_defaults(tmp_path, capsys, monkeypatch):
+    captured = {}
+
+    def _fake_export_stage6_summary(experiment_root, **kwargs):
+        captured["experiment_root"] = experiment_root
+        captured["kwargs"] = kwargs
+        return {
+            "experiment_root": str(experiment_root),
+            "selected_run_count": 0,
+            "analyzed_run_count": 0,
+        }
+
+    monkeypatch.setattr(cli, "export_stage6_summary", _fake_export_stage6_summary)
+
+    rc = cli.main(["summary", "--experiment-root", str(tmp_path / "exp")])
+
+    assert rc == 0
+    assert captured["kwargs"]["steady_fit_exclude_last_trusted_frames"] == 2
+    assert captured["kwargs"]["tail_start_mode"] == "descriptor-unified"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["analyzed_run_count"] == 0

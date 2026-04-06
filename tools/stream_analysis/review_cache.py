@@ -2308,7 +2308,7 @@ def export_stage5_cached_review(
     flow_fit_backfill_max_frames: int = 3,
     flow_fit_backfill_width_delta_px: float = 8.0,
     flow_fit_backfill_monotonic_slack_px: float = 0.75,
-    tail_start_mode: str = fit_mod.TAIL_START_MODE_LEGACY,
+    tail_start_mode: str = fit_mod.TAIL_START_MODE_DESCRIPTOR_UNIFIED,
     tail_direct_target_drop_to_threshold_frac: float = fit_mod.TAIL_DIRECT_TARGET_DROP_TO_THRESHOLD_FRAC,
     tail_direct_target_peak_lead_us: float = fit_mod.TAIL_DIRECT_TARGET_PEAK_LEAD_US,
     tail_direct_target_shrink_rate_ratio: float = fit_mod.TAIL_DIRECT_TARGET_SHRINK_RATE_RATIO,
