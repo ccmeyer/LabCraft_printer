@@ -100,6 +100,33 @@ CONDITION_SUMMARY_COLUMNS = [
     "overprediction_run_count",
 ]
 
+CONDITION_CONSISTENCY_COLUMNS = [
+    "condition_key",
+    "print_pressure",
+    "print_pw_us",
+    "run_count",
+    "replicate_ids",
+    "consistency_status",
+    "vt_band_sample_count",
+    "trusted_vt_band_width_nl_median",
+    "trusted_vt_band_width_nl_p95",
+    "width_band_sample_count",
+    "width_band_width_px_median",
+    "width_band_width_px_p95",
+    "steady_rate_nl_per_us_std_sample",
+    "steady_rate_nl_per_us_cv",
+    "flow_fit_start_after_first_trusted_us_std",
+    "flow_fit_end_to_fov_exit_us_std",
+    "tail_confirmation_delay_from_emergence_us_std",
+    "tail_start_delay_from_emergence_us_std",
+    "partial_total_without_tail_nl_std_sample",
+    "predicted_volume_uncertainty_width_nl_median",
+    "vt_overlay_png",
+    "width_overlay_png",
+]
+
+CONDITION_CONSISTENCY_GRID_SPACING_US = 50.0
+
 
 def _float_or_none(value):
     try:
@@ -128,6 +155,32 @@ def _std_or_none(values: list[float]):
     if not values:
         return None
     return float(np.std(np.asarray(values, dtype=float), ddof=0))
+
+
+def _sample_std_or_none(values: list[float]):
+    if len(values) < 2:
+        return None
+    return float(np.std(np.asarray(values, dtype=float), ddof=1))
+
+
+def _median_or_none(values: list[float]):
+    if not values:
+        return None
+    return float(np.median(np.asarray(values, dtype=float)))
+
+
+def _percentile_or_none(values: list[float], percentile: float):
+    if not values:
+        return None
+    return float(np.percentile(np.asarray(values, dtype=float), float(percentile)))
+
+
+def _cv_or_none(values: list[float]):
+    mean_value = _mean_or_none(values)
+    std_value = _sample_std_or_none(values)
+    if mean_value is None or std_value is None or float(mean_value) == 0.0:
+        return None
+    return float(float(std_value) / abs(float(mean_value)))
 
 
 def _metadata_metrics(run_row: dict):
@@ -404,6 +457,542 @@ def _condition_style_maps(summary_rows: list[dict]):
     color_map = {value: palette[index % len(palette)] for index, value in enumerate(pressure_values)}
     marker_map = {value: markers[index % len(markers)] for index, value in enumerate(pw_values)}
     return color_map, marker_map
+
+
+def _condition_bundle_sort_key(bundle: dict):
+    replicate_index = _int_or_none(bundle.get("replicate_index"))
+    run_id = _clean_text(bundle.get("run_id")) or ""
+    return (
+        10**9 if replicate_index is None else int(replicate_index),
+        run_id,
+    )
+
+
+def _condition_run_label(bundle: dict):
+    replicate_index = _int_or_none(bundle.get("replicate_index"))
+    run_id = _clean_text(bundle.get("run_id")) or "unknown"
+    if replicate_index is None:
+        return run_id
+    return f"rep {int(replicate_index)} | {run_id}"
+
+
+def _dedupe_sorted_series(points: list[tuple[float, float]]):
+    deduped = {}
+    for x_value, y_value in sorted(points, key=lambda point: point[0]):
+        deduped[float(x_value)] = float(y_value)
+    return [(x_value, deduped[x_value]) for x_value in sorted(deduped.keys())]
+
+
+def _feature_series(
+    feature_rows: list[dict],
+    value_key: str,
+    *,
+    trusted_only: bool = False,
+):
+    points = []
+    for row in feature_rows:
+        if trusted_only and _clean_text(row.get("volume_trust_label")) != fit_mod.fov_mod.TRUST_LABEL_TRUSTED:
+            continue
+        x_value = _float_or_none(row.get("delay_from_emergence_us"))
+        y_value = _float_or_none(row.get(value_key))
+        if x_value is None or y_value is None:
+            continue
+        points.append((float(x_value), float(y_value)))
+    return _dedupe_sorted_series(points)
+
+
+def _interpolate_series_value(points: list[tuple[float, float]], x_value: float):
+    if not points:
+        return None
+    if len(points) == 1:
+        return float(points[0][1]) if float(points[0][0]) == float(x_value) else None
+
+    xs = [float(point[0]) for point in points]
+    insert_index = int(np.searchsorted(np.asarray(xs, dtype=float), float(x_value), side="left"))
+    if insert_index < len(points) and float(points[insert_index][0]) == float(x_value):
+        return float(points[insert_index][1])
+    if insert_index <= 0 or insert_index >= len(points):
+        return None
+
+    x0, y0 = points[insert_index - 1]
+    x1, y1 = points[insert_index]
+    if float(x1) == float(x0):
+        return float(y0)
+    fraction = float((float(x_value) - float(x0)) / (float(x1) - float(x0)))
+    return float(float(y0) + (fraction * (float(y1) - float(y0))))
+
+
+def _trace_spread_metrics(series_by_run: list[list[tuple[float, float]]], *, grid_spacing_us: float):
+    valid_series = [series for series in series_by_run if series]
+    if not valid_series:
+        return {"sample_count": 0, "median_spread": None, "p95_spread": None}
+
+    min_time = min(float(series[0][0]) for series in valid_series)
+    max_time = max(float(series[-1][0]) for series in valid_series)
+    if float(max_time) < float(min_time):
+        return {"sample_count": 0, "median_spread": None, "p95_spread": None}
+
+    grid = np.arange(
+        float(min_time),
+        float(max_time) + float(grid_spacing_us),
+        float(grid_spacing_us),
+        dtype=float,
+    )
+    spread_values = []
+    for x_value in grid:
+        sample_values = []
+        for series in valid_series:
+            interpolated = _interpolate_series_value(series, float(x_value))
+            if interpolated is not None:
+                sample_values.append(float(interpolated))
+        if len(sample_values) < 2:
+            continue
+        spread_values.append(
+            float(
+                np.percentile(np.asarray(sample_values, dtype=float), 95)
+                - np.percentile(np.asarray(sample_values, dtype=float), 5)
+            )
+        )
+
+    return {
+        "sample_count": len(spread_values),
+        "median_spread": _median_or_none(spread_values),
+        "p95_spread": _percentile_or_none(spread_values, 95),
+    }
+
+
+def _bundle_delay_value(bundle: dict, *keys: str):
+    summary_row = dict(bundle.get("summary_row") or {})
+    phase_boundaries = dict(bundle.get("phase_boundaries") or {})
+    tail_onset = dict(bundle.get("tail_onset") or {})
+    fov_report = dict(bundle.get("fov_report") or {})
+    steady_fit_metrics = dict(bundle.get("steady_fit_review_metrics") or {})
+    for key in keys:
+        for source in (summary_row, phase_boundaries, tail_onset, fov_report, steady_fit_metrics):
+            value = _float_or_none(source.get(key))
+            if value is not None:
+                return float(value)
+    return None
+
+
+def _plot_condition_vt_overlay(path: Path, condition_key: str, bundles: list[dict]):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    fig, (ax_trace, ax_events) = plt.subplots(
+        2,
+        1,
+        figsize=(11, 7.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.8]},
+    )
+    palette = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+    event_specs = [
+        ("steady start", "o", ("steady_start_delay_from_emergence_us",)),
+        ("steady end", "s", ("steady_end_delay_from_emergence_us",)),
+        ("first untrusted", "^", ("fov_exit_delay_from_emergence_us", "first_untrusted_delay_from_emergence_us", "first_fov_exit_delay_from_emergence_us")),
+        ("tail confirmation", "D", ("tail_confirmation_delay_from_emergence_us",)),
+        ("tail start", "X", ("tail_start_delay_from_emergence_us",)),
+    ]
+
+    labels = []
+    for run_index, bundle in enumerate(bundles):
+        color = palette[run_index % len(palette)]
+        feature_rows = list(bundle.get("phase_feature_rows") or [])
+        trusted_points = _feature_series(
+            feature_rows,
+            "total_visible_volume_nl",
+            trusted_only=True,
+        )
+        untrusted_points = [
+            (float(_float_or_none(row.get("delay_from_emergence_us"))), float(_float_or_none(row.get("total_visible_volume_nl"))))
+            for row in feature_rows
+            if _clean_text(row.get("volume_trust_label")) != fit_mod.fov_mod.TRUST_LABEL_TRUSTED
+            and _float_or_none(row.get("delay_from_emergence_us")) is not None
+            and _float_or_none(row.get("total_visible_volume_nl")) is not None
+        ]
+        untrusted_points = _dedupe_sorted_series(untrusted_points)
+        if trusted_points:
+            ax_trace.plot(
+                [x for x, _y in trusted_points],
+                [y for _x, y in trusted_points],
+                color=color,
+                linewidth=1.8,
+                alpha=0.95,
+            )
+        if untrusted_points:
+            ax_trace.plot(
+                [x for x, _y in untrusted_points],
+                [y for _x, y in untrusted_points],
+                color=color,
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.45,
+            )
+
+        steady_fit = dict(bundle.get("steady_fit") or {})
+        flow_fit_points = fit_mod._steady_fit_time_volume_points(feature_rows, steady_fit)
+        steady_rate = _float_or_none(steady_fit.get("steady_rate_nl_per_us"))
+        steady_intercept = _float_or_none(steady_fit.get("steady_intercept_nl"))
+        if flow_fit_points and steady_rate is not None and steady_intercept is not None:
+            flow_x = [float(time_us) for time_us, _volume in flow_fit_points]
+            ax_trace.plot(
+                flow_x,
+                [
+                    float(steady_intercept) + (float(steady_rate) * float(time_us))
+                    for time_us in flow_x
+                ],
+                color=color,
+                linewidth=2.4,
+                linestyle=":",
+                alpha=0.95,
+            )
+
+        labels.append(_condition_run_label(bundle))
+
+    legend_handles = []
+    for run_index, bundle in enumerate(bundles):
+        color = palette[run_index % len(palette)]
+        y_position = float(run_index)
+        for label, marker, keys in event_specs:
+            x_value = _bundle_delay_value(bundle, *keys)
+            if x_value is None:
+                continue
+            ax_events.scatter(
+                [float(x_value)],
+                [y_position],
+                color=color,
+                marker=marker,
+                s=58,
+                edgecolors="#111827",
+                linewidths=0.7,
+                zorder=4,
+            )
+        if not legend_handles:
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker=marker,
+                    color="#374151",
+                    linestyle="None",
+                    markersize=7,
+                    label=label,
+                )
+                for label, marker, _keys in event_specs
+            ]
+
+    ax_trace.set_title(
+        f"Condition V(t) Overlay - {condition_key}\n"
+        "Run colors match the event rows below"
+    )
+    ax_trace.set_ylabel("Visible volume (nL)")
+    ax_trace.grid(True, alpha=0.25)
+    ax_events.set_ylabel("Runs")
+    ax_events.set_xlabel("Delay from emergence (us)")
+    ax_events.set_yticks(range(len(labels)))
+    ax_events.set_yticklabels(labels)
+    if hasattr(ax_events, "invert_yaxis"):
+        ax_events.invert_yaxis()
+    elif hasattr(ax_events, "set_ylim"):
+        ax_events.set_ylim(len(labels) - 0.5, -0.5)
+    ax_events.grid(True, axis="x", alpha=0.25)
+    if legend_handles:
+        if hasattr(fig, "legend"):
+            fig.legend(
+                handles=legend_handles,
+                loc="upper center",
+                ncol=min(len(legend_handles), 5),
+                frameon=False,
+                bbox_to_anchor=(0.5, 0.98),
+            )
+        elif hasattr(ax_trace, "legend"):
+            ax_trace.legend(legend_handles, [handle.get_label() for handle in legend_handles], loc="best")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.94])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return path
+
+
+def _plot_condition_width_overlay(path: Path, condition_key: str, bundles: list[dict]):
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    fig, (ax_trace, ax_events) = plt.subplots(
+        2,
+        1,
+        figsize=(11, 7.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1.8]},
+    )
+    palette = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+    event_specs = [
+        ("preliminary tail start", "o", ("preliminary_tail_start_delay_from_emergence_us",)),
+        ("direct tail start", "s", ("direct_final_tail_start_delay_from_emergence_us",)),
+        ("tail shoulder end", "^", ("tail_shoulder_end_delay_from_emergence_us",)),
+        ("tail start", "D", ("tail_start_delay_from_emergence_us",)),
+        ("tail peak shrink", "X", ("tail_peak_shrink_rate_delay_us",)),
+    ]
+
+    labels = []
+    for run_index, bundle in enumerate(bundles):
+        color = palette[run_index % len(palette)]
+        width_points = _feature_series(
+            list(bundle.get("phase_feature_rows") or []),
+            "attached_near_nozzle_width_smoothed_px",
+        )
+        if width_points:
+            ax_trace.plot(
+                [x for x, _y in width_points],
+                [y for _x, y in width_points],
+                color=color,
+                linewidth=1.8,
+                alpha=0.95,
+            )
+        labels.append(_condition_run_label(bundle))
+        y_position = float(run_index)
+        for label, marker, keys in event_specs:
+            x_value = _bundle_delay_value(bundle, *keys)
+            if x_value is None:
+                continue
+            ax_events.scatter(
+                [float(x_value)],
+                [y_position],
+                color=color,
+                marker=marker,
+                s=58,
+                edgecolors="#111827",
+                linewidths=0.7,
+                zorder=4,
+            )
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=marker,
+            color="#374151",
+            linestyle="None",
+            markersize=7,
+            label=label,
+        )
+        for label, marker, _keys in event_specs
+    ]
+    ax_trace.set_title(
+        f"Condition Width Overlay - {condition_key}\n"
+        "Run colors match the event rows below"
+    )
+    ax_trace.set_ylabel("Smoothed width (px)")
+    ax_trace.grid(True, alpha=0.25)
+    ax_events.set_ylabel("Runs")
+    ax_events.set_xlabel("Delay from emergence (us)")
+    ax_events.set_yticks(range(len(labels)))
+    ax_events.set_yticklabels(labels)
+    if hasattr(ax_events, "invert_yaxis"):
+        ax_events.invert_yaxis()
+    elif hasattr(ax_events, "set_ylim"):
+        ax_events.set_ylim(len(labels) - 0.5, -0.5)
+    ax_events.grid(True, axis="x", alpha=0.25)
+    if hasattr(fig, "legend"):
+        fig.legend(
+            handles=legend_handles,
+            loc="upper center",
+            ncol=min(len(legend_handles), 5),
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.98),
+        )
+    elif hasattr(ax_trace, "legend"):
+        ax_trace.legend(legend_handles, [handle.get_label() for handle in legend_handles], loc="best")
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.94])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return path
+
+
+def _condition_consistency_rows(condition_bundles: list[dict], *, review_dir: Path | None = None):
+    grouped = {}
+    for bundle in condition_bundles:
+        condition_key = _clean_text(bundle.get("condition_key"))
+        if not condition_key:
+            continue
+        grouped.setdefault(condition_key, []).append(dict(bundle))
+
+    rows = []
+    for condition_key, bundles in sorted(grouped.items(), key=lambda item: item[0]):
+        ordered_bundles = sorted(bundles, key=_condition_bundle_sort_key)
+        summary_rows = [dict(bundle.get("summary_row") or {}) for bundle in ordered_bundles]
+        vt_series_by_run = [
+            _feature_series(
+                list(bundle.get("phase_feature_rows") or []),
+                "total_visible_volume_nl",
+                trusted_only=True,
+            )
+            for bundle in ordered_bundles
+        ]
+        width_series_by_run = [
+            _feature_series(
+                list(bundle.get("phase_feature_rows") or []),
+                "attached_near_nozzle_width_smoothed_px",
+            )
+            for bundle in ordered_bundles
+        ]
+        vt_spread = _trace_spread_metrics(
+            vt_series_by_run,
+            grid_spacing_us=CONDITION_CONSISTENCY_GRID_SPACING_US,
+        )
+        width_spread = _trace_spread_metrics(
+            width_series_by_run,
+            grid_spacing_us=CONDITION_CONSISTENCY_GRID_SPACING_US,
+        )
+        steady_rate_values = [
+            float(value)
+            for value in (
+                _float_or_none(summary_row.get("steady_rate_nl_per_us"))
+                for summary_row in summary_rows
+            )
+            if value is not None
+        ]
+        flow_fit_start_values = [
+            float(value)
+            for value in (
+                _float_or_none(
+                    dict(bundle.get("steady_fit_review_metrics") or {}).get(
+                        "flow_fit_start_after_first_trusted_us"
+                    )
+                )
+                for bundle in ordered_bundles
+            )
+            if value is not None
+        ]
+        flow_fit_end_values = [
+            float(value)
+            for value in (
+                _float_or_none(
+                    dict(bundle.get("steady_fit_review_metrics") or {}).get(
+                        "flow_fit_end_to_fov_exit_us"
+                    )
+                )
+                for bundle in ordered_bundles
+            )
+            if value is not None
+        ]
+        tail_confirmation_values = [
+            float(value)
+            for value in (
+                _float_or_none(summary_row.get("tail_confirmation_delay_from_emergence_us"))
+                for summary_row in summary_rows
+            )
+            if value is not None
+        ]
+        tail_start_values = [
+            float(value)
+            for value in (
+                _float_or_none(summary_row.get("tail_start_delay_from_emergence_us"))
+                for summary_row in summary_rows
+            )
+            if value is not None
+        ]
+        partial_total_values = [
+            float(value)
+            for value in (
+                _float_or_none(summary_row.get("partial_total_without_tail_nl"))
+                for summary_row in summary_rows
+            )
+            if value is not None
+        ]
+        predicted_uncertainty_width_values = [
+            float(value)
+            for value in (
+                _float_or_none(summary_row.get("predicted_volume_uncertainty_width_nl"))
+                for summary_row in summary_rows
+            )
+            if value is not None
+        ]
+
+        vt_overlay_path = None
+        width_overlay_path = None
+        if len(ordered_bundles) >= 2 and review_dir is not None:
+            vt_overlay_path = review_dir / f"{condition_key}__vt_overlay.png"
+            width_overlay_path = review_dir / f"{condition_key}__width_overlay.png"
+            _plot_condition_vt_overlay(vt_overlay_path, condition_key, ordered_bundles)
+            _plot_condition_width_overlay(width_overlay_path, condition_key, ordered_bundles)
+
+        if len(ordered_bundles) < 2:
+            consistency_status = "insufficient_runs"
+        elif int(vt_spread["sample_count"]) == 0 and int(width_spread["sample_count"]) == 0:
+            consistency_status = "no_common_trace_samples"
+        elif int(vt_spread["sample_count"]) == 0:
+            consistency_status = "no_common_vt_samples"
+        elif int(width_spread["sample_count"]) == 0:
+            consistency_status = "no_common_width_samples"
+        else:
+            consistency_status = "ok"
+
+        rows.append(
+            {
+                "condition_key": condition_key,
+                "print_pressure": _float_or_none(summary_rows[0].get("print_pressure")),
+                "print_pw_us": _int_or_none(summary_rows[0].get("print_pw_us")),
+                "run_count": len(ordered_bundles),
+                "replicate_ids": [
+                    _int_or_none(bundle.get("replicate_index"))
+                    for bundle in ordered_bundles
+                    if _int_or_none(bundle.get("replicate_index")) is not None
+                ],
+                "consistency_status": consistency_status,
+                "vt_band_sample_count": int(vt_spread["sample_count"]),
+                "trusted_vt_band_width_nl_median": vt_spread["median_spread"],
+                "trusted_vt_band_width_nl_p95": vt_spread["p95_spread"],
+                "width_band_sample_count": int(width_spread["sample_count"]),
+                "width_band_width_px_median": width_spread["median_spread"],
+                "width_band_width_px_p95": width_spread["p95_spread"],
+                "steady_rate_nl_per_us_std_sample": _sample_std_or_none(steady_rate_values),
+                "steady_rate_nl_per_us_cv": _cv_or_none(steady_rate_values),
+                "flow_fit_start_after_first_trusted_us_std": _sample_std_or_none(
+                    flow_fit_start_values
+                ),
+                "flow_fit_end_to_fov_exit_us_std": _sample_std_or_none(flow_fit_end_values),
+                "tail_confirmation_delay_from_emergence_us_std": _sample_std_or_none(
+                    tail_confirmation_values
+                ),
+                "tail_start_delay_from_emergence_us_std": _sample_std_or_none(
+                    tail_start_values
+                ),
+                "partial_total_without_tail_nl_std_sample": _sample_std_or_none(
+                    partial_total_values
+                ),
+                "predicted_volume_uncertainty_width_nl_median": _median_or_none(
+                    predicted_uncertainty_width_values
+                ),
+                "vt_overlay_png": None if vt_overlay_path is None else str(vt_overlay_path),
+                "width_overlay_png": None if width_overlay_path is None else str(width_overlay_path),
+            }
+        )
+    return rows
 
 
 def _plot_partial_vs_gravimetric(path: Path, summary_rows: list[dict]):
@@ -835,6 +1424,7 @@ def export_stage6_summary(
     run_manifests = []
     width_review_rows = []
     vt_review_rows = []
+    condition_consistency_bundles = []
     width_review_dir = output_path / "gravimetric_width_review"
     vt_review_dir = output_path / "vt_fit_review"
     for run_index, run_id in enumerate(selected_run_ids, start=1):
@@ -1023,8 +1613,35 @@ def export_stage6_summary(
         summary_rows.append(summary_row)
         review_feature_rows = list(stage5_run.get("phase_feature_rows") or [])
         review_steady_fit = dict(stage5_run.get("steady_fit") or {})
+        if not review_steady_fit:
+            review_steady_fit = fit_mod._steady_fit_from_payload(
+                review_feature_rows,
+                dict(stage5_run.get("steady_fit_payload") or {}),
+            )
         review_tail_onset = dict(stage5_run.get("tail_onset") or {})
         review_fov_report = dict(stage5_run.get("stage4_run", {}).get("fov_report") or {})
+        review_phase_boundaries = dict(stage5_run.get("phase_boundaries") or {})
+        condition_key = _condition_key(summary_row)
+        if condition_key is not None:
+            condition_consistency_bundles.append(
+                {
+                    "condition_key": condition_key,
+                    "run_id": run_id,
+                    "replicate_index": summary_row.get("replicate_index"),
+                    "print_pressure": summary_row.get("print_pressure"),
+                    "print_pw_us": summary_row.get("print_pw_us"),
+                    "summary_row": dict(summary_row),
+                    "phase_feature_rows": review_feature_rows,
+                    "steady_fit": review_steady_fit,
+                    "tail_onset": review_tail_onset,
+                    "phase_boundaries": review_phase_boundaries,
+                    "fov_report": review_fov_report,
+                    "steady_fit_review_metrics": review_cache_mod._steady_fit_review_metrics(
+                        stage5_run,
+                        summary_row,
+                    ),
+                }
+            )
         vt_review_rows.append(
             review_cache_mod._vt_review_index_row(
                 summary_row,
@@ -1116,17 +1733,24 @@ def export_stage6_summary(
     condition_summary_json = output_path / "condition_summary.json"
     condition_confidence_summary_csv = output_path / "condition_confidence_summary.csv"
     condition_confidence_summary_json = output_path / "condition_confidence_summary.json"
+    condition_consistency_summary_csv = output_path / "condition_consistency_summary.csv"
+    condition_consistency_summary_json = output_path / "condition_consistency_summary.json"
     scatter_png = output_path / "partial_vs_gravimetric_scatter.png"
     residual_condition_png = output_path / "signed_residual_by_condition.png"
     residual_fraction_condition_png = output_path / "signed_residual_fraction_by_condition.png"
     residual_middle_png = output_path / "signed_residual_vs_middle_duration.png"
     cv_condition_png = output_path / "predicted_vs_gravimetric_cv_by_condition.png"
     uncertainty_condition_png = output_path / "predicted_volume_with_uncertainty_by_condition.png"
+    condition_consistency_review_dir = output_path / "condition_consistency_review"
     width_review_index_csv = width_review_dir / "width_trace_review_index.csv"
     width_review_contact_sheet_png = width_review_dir / "width_trace_review_contact_sheet.png"
     vt_review_index_csv = vt_review_dir / "vt_fit_review_index.csv"
     vt_review_contact_sheet_png = vt_review_dir / "vt_fit_review_contact_sheet.png"
     manifest_json = output_path / "summary_manifest.json"
+    condition_consistency_rows = _condition_consistency_rows(
+        condition_consistency_bundles,
+        review_dir=condition_consistency_review_dir,
+    )
 
     metadata_columns = sorted(
         {
@@ -1188,6 +1812,24 @@ def export_stage6_summary(
         },
     )
     _write_csv(
+        condition_consistency_summary_csv,
+        _preferred_columns(condition_consistency_rows, CONDITION_CONSISTENCY_COLUMNS),
+        condition_consistency_rows,
+    )
+    _write_json(
+        condition_consistency_summary_json,
+        {
+            "schema_version": 1,
+            "stage": "summary",
+            "analysis_source_mode": analysis_source_mode,
+            "experiment_root": experiment_root_text,
+            "cache_root": None if cache_root is None else str(Path(cache_root).expanduser().resolve()),
+            "grid_spacing_us": float(CONDITION_CONSISTENCY_GRID_SPACING_US),
+            "row_count": len(condition_consistency_rows),
+            "rows": condition_consistency_rows,
+        },
+    )
+    _write_csv(
         width_review_index_csv,
         _preferred_columns(width_review_rows, review_cache_mod.WIDTH_REVIEW_INDEX_COLUMNS),
         width_review_rows,
@@ -1218,6 +1860,10 @@ def export_stage6_summary(
         1 for row in summary_rows if bool(row.get("include_in_gravimetric_plots"))
     )
     overprediction_run_count = sum(1 for row in summary_rows if bool(row.get("partial_exceeds_gravimetric")))
+    eligible_condition_count = len(condition_consistency_rows)
+    plotted_condition_count = sum(
+        1 for row in condition_consistency_rows if row.get("vt_overlay_png") or row.get("width_overlay_png")
+    )
     manifest = {
         "schema_version": 1,
         "stage": "summary",
@@ -1228,6 +1874,8 @@ def export_stage6_summary(
         "selected_run_count": len(selected_run_ids),
         "analyzed_run_count": len(summary_rows),
         "condition_group_count": len(condition_rows),
+        "eligible_condition_count": eligible_condition_count,
+        "plotted_condition_count": plotted_condition_count,
         "usable_gravimetric_row_count": usable_gravimetric_rows,
         "overprediction_run_count": overprediction_run_count,
         "volume_unit": "nL",
@@ -1242,6 +1890,9 @@ def export_stage6_summary(
             "condition_summary_json": str(condition_summary_json),
             "condition_confidence_summary_csv": str(condition_confidence_summary_csv),
             "condition_confidence_summary_json": str(condition_confidence_summary_json),
+            "condition_consistency_summary_csv": str(condition_consistency_summary_csv),
+            "condition_consistency_summary_json": str(condition_consistency_summary_json),
+            "condition_consistency_review_dir": str(condition_consistency_review_dir),
             "partial_vs_gravimetric_scatter_png": str(scatter_png),
             "signed_residual_by_condition_png": str(residual_condition_png),
             "signed_residual_fraction_by_condition_png": str(residual_fraction_condition_png),

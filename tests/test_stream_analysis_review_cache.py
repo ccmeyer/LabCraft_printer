@@ -852,6 +852,8 @@ def test_export_stage5_cached_review_uses_cache_only_and_excludes_suspect_gravim
     assert (output_root / "condition_summary.csv").exists()
     assert (output_root / "condition_confidence_summary.csv").exists()
     assert (output_root / "condition_confidence_summary.json").exists()
+    assert (output_root / "condition_consistency_summary.csv").exists()
+    assert (output_root / "condition_consistency_summary.json").exists()
     assert (output_root / "predicted_vs_gravimetric_cv_by_condition.png").exists()
     assert (output_root / "predicted_volume_with_uncertainty_by_condition.png").exists()
     assert (output_root / "gravimetric_width_review" / "width_trace_review_index.csv").exists()
@@ -959,4 +961,12 @@ def test_export_stage5_cached_review_uses_cache_only_and_excludes_suspect_gravim
     assert manifest_payload["tail_uncertainty_score_tolerance"] == pytest.approx(
         fit_mod.TAIL_UNCERTAINTY_SCORE_TOLERANCE,
         rel=1e-6,
+    )
+    assert manifest_payload["eligible_condition_count"] == 2
+    assert manifest_payload["plotted_condition_count"] == 0
+    assert manifest_payload["outputs"]["condition_consistency_summary_csv"].endswith(
+        "condition_consistency_summary.csv"
+    )
+    assert manifest_payload["outputs"]["condition_consistency_summary_json"].endswith(
+        "condition_consistency_summary.json"
     )

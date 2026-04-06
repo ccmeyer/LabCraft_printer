@@ -564,6 +564,8 @@ def test_cli_summary_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
     output_root = Path(exp_dir) / "analysis" / "stream_characterization"
     assert (output_root / "experiment_summary.csv").exists()
     assert (output_root / "condition_summary.csv").exists()
+    assert (output_root / "condition_consistency_summary.csv").exists()
+    assert (output_root / "condition_consistency_summary.json").exists()
     assert (output_root / "summary_progress.json").exists()
     assert (output_root / "summary_manifest.json").exists()
     stage_dir = output_root / "runs" / run_dir.name / "stage_06_summary"
