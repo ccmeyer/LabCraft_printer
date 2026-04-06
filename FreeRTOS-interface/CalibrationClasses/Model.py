@@ -34,6 +34,7 @@ import queue
 import os, json, time, uuid, tempfile, threading
 import numpy as np
 from tools.stream_analysis import online_calibration as online_cal_mod
+from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
 
 # ---- numpy encoder helper (robust JSON) ----
@@ -4676,6 +4677,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     flowFrameAnalyzed = Signal()
     repeatReplicate = Signal()
     nextDelay = Signal()
+    flowAcquisitionFinished = Signal()
+    flowFitReady = Signal()
     finalize = Signal()
 
     @staticmethod
@@ -4775,10 +4778,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_analysis_summary = {}
         self._current_flow_capture_ref = {}
         self._current_flow_capture_failure = None
+        self._flow_fit_result = {}
+        self._flow_fit_warnings = []
 
         self._run_dir = None
         self._frames_path = None
         self._plan_snapshot_path = None
+        self._flow_fit_path = None
         self._plan_snapshot_written = False
 
         self.state_prepare = QState()
@@ -4788,6 +4794,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.state_capture_flow_frame = QState()
         self.state_analyze_flow_frame = QState()
         self.state_advance_flow_phase = QState()
+        self.state_fit_flow_rate = QState()
         self.state_restore = QState()
         self.state_final = QFinalState()
 
@@ -4798,6 +4805,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.state_capture_flow_frame.entered.connect(self.onCaptureFlowFrame)
         self.state_analyze_flow_frame.entered.connect(self.onAnalyzeFlowFrame)
         self.state_advance_flow_phase.entered.connect(self.onAdvanceFlowPhase)
+        self.state_fit_flow_rate.entered.connect(self.onFitFlowRate)
         self.state_restore.entered.connect(self.onRestoreSettings)
         self.state_final.entered.connect(self.onCompleted)
 
@@ -4830,6 +4838,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.nextDelay,
             self.state_apply_flow_delay,
         )
+        self.state_advance_flow_phase.addTransition(
+            self.flowAcquisitionFinished,
+            self.state_fit_flow_rate,
+        )
+        self.state_fit_flow_rate.addTransition(
+            self.flowFitReady,
+            self.state_restore,
+        )
         self.state_restore.addTransition(
             self.calibration_manager.settingsChangeCompleted,
             self.state_final,
@@ -4843,6 +4859,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.state_capture_flow_frame,
             self.state_analyze_flow_frame,
             self.state_advance_flow_phase,
+            self.state_fit_flow_rate,
         ):
             st.addTransition(self.finalize, self.state_restore)
 
@@ -4854,6 +4871,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.state_capture_flow_frame,
             self.state_analyze_flow_frame,
             self.state_advance_flow_phase,
+            self.state_fit_flow_rate,
             self.state_restore,
             self.state_final,
         ):
@@ -4884,6 +4902,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._run_dir = str(run_dir)
         self._frames_path = os.path.join(self._run_dir, "frames.jsonl")
         self._plan_snapshot_path = os.path.join(self._run_dir, "plan_snapshot.json")
+        self._flow_fit_path = os.path.join(self._run_dir, "flow_fit.json")
 
     def _append_flow_jsonl(self, path: str, payload: dict):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -5065,6 +5084,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_analysis_summary = {}
         self._current_flow_capture_ref = {}
         self._current_flow_capture_failure = None
+        self._flow_fit_result = {}
+        self._flow_fit_warnings = []
 
         if not list(self.flow_plan.get("delays_us") or []):
             self.calibrationError.emit("Online stream calibration has no planned flow delays.")
@@ -5085,7 +5106,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         delays = list(self.flow_plan.get("delays_us") or [])
         if self._flow_delay_index >= len(delays):
             self._flow_termination_reason = self._flow_termination_reason or "planned_delays_exhausted"
-            self.finalize.emit()
+            self.flowAcquisitionFinished.emit()
             return
 
         self._current_delay_us = int(delays[self._flow_delay_index])
@@ -5110,7 +5131,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return
         if self.capture_budget.get("exhausted"):
             self._flow_termination_reason = self._flow_termination_reason or "capture_budget_exhausted"
-            self.finalize.emit()
+            self._append_flow_warning("capture_budget_exhausted")
+            self.flowAcquisitionFinished.emit()
             return
         if self._current_delay_us is None:
             self.calibrationError.emit("Online stream calibration has no active flow delay.")
@@ -5296,7 +5318,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._flow_termination_reason = str(decision.get("termination_reason") or "")
             if self._flow_termination_reason:
                 self._append_flow_warning(self._flow_termination_reason)
-            self.finalize.emit()
+            self.flowAcquisitionFinished.emit()
             return
 
         self._flow_delay_index += 1
@@ -5305,6 +5327,43 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_delay_frame_rows = []
         self._current_analysis_summary = {}
         self.nextDelay.emit()
+
+    def _write_flow_fit_artifact(self):
+        if not self._flow_fit_path:
+            return
+        artifact = online_cal_mod.build_online_stream_flow_fit_artifact(
+            condition=self._build_condition(),
+            flow_plan=dict(self.flow_plan),
+            accepted_delay_points=list(self._flow_fit_result.get("accepted_delay_points") or []),
+            fit=dict(self._flow_fit_result or {}),
+            warnings=list(self._flow_fit_warnings),
+        )
+        os.makedirs(os.path.dirname(self._flow_fit_path), exist_ok=True)
+        with open(self._flow_fit_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2, default=numpy_encoder)
+
+    @Slot()
+    def onFitFlowRate(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        self.stageChanged.emit("Online stream calibration: fitting sparse flow rate")
+        try:
+            self._flow_fit_result = dict(
+                online_fit_mod.fit_online_stream_flow_phase(
+                    measurements=list(self._measurement_rows),
+                    delay_summaries=list(self._flow_delay_summaries),
+                )
+                or {}
+            )
+            self._flow_fit_warnings = list(self._flow_fit_result.get("warnings") or [])
+            self._write_flow_fit_artifact()
+        except Exception as e:
+            self.calibrationError.emit(f"Failed to fit online stream flow rate: {e}")
+            return
+
+        self.flowFitReady.emit()
 
     def _build_restore_settings(self) -> dict:
         restore = {}
@@ -5378,24 +5437,28 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if flow_status == "insufficient_data":
             self._append_flow_warning("insufficient_accepted_delays")
 
-        flow_phase = {
-            "status": flow_status,
-            "plan": dict(self.flow_plan),
-            "attempted_delay_count": int(len(self._flow_delay_summaries)),
-            "attempted_capture_count": int(self._attempted_capture_count),
-            "accepted_delay_count": int(accepted_delay_count),
-            "accepted_measurement_count": int(accepted_measurement_count),
-            "rejected_capture_count": int(rejected_capture_count),
-            "termination_reason": str(
-                self._flow_termination_reason or "planned_delays_exhausted"
-            ),
-            "delay_summaries": [dict(row) for row in self._flow_delay_summaries],
-            "warnings": list(self._flow_warnings),
-        }
+        flow_phase = online_cal_mod.build_online_stream_flow_phase_payload(
+            status=flow_status,
+            plan=dict(self.flow_plan),
+            attempted_delay_count=int(len(self._flow_delay_summaries)),
+            attempted_capture_count=int(self._attempted_capture_count),
+            accepted_delay_count=int(accepted_delay_count),
+            accepted_measurement_count=int(accepted_measurement_count),
+            rejected_capture_count=int(rejected_capture_count),
+            termination_reason=str(self._flow_termination_reason or "planned_delays_exhausted"),
+            delay_summaries=[dict(row) for row in self._flow_delay_summaries],
+            warnings=list(self._flow_warnings),
+            fit=dict(self._flow_fit_result or {}),
+        )
         tail_phase = {
             "status": "not_run",
             "plan": dict(self.tail_plan),
         }
+        result_warnings = ["stage4_flow_fit_partial_result"]
+        for warning in list(self._flow_warnings) + list(self._flow_fit_warnings):
+            warning_label = str(warning or "").strip()
+            if warning_label and warning_label not in result_warnings:
+                result_warnings.append(warning_label)
         result = online_cal_mod.build_online_stream_result_stub(
             condition=condition,
             priors=dict(self.priors),
@@ -5403,7 +5466,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             tail_phase=tail_phase,
             predicted_stream_duration_us=None,
             predicted_volume_nl=None,
-            warnings=["stage3_flow_phase_only_no_fit"] + list(self._flow_warnings),
+            warnings=result_warnings,
         )
         self.calibrationDataUpdated.emit(
             {
@@ -5411,7 +5474,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "result": result,
             }
         )
-        self.stageChanged.emit("Online stream flow-phase acquisition complete")
+        self.stageChanged.emit("Online stream flow-phase fit complete")
         self.calibrationCompleted.emit()
 
     @Slot()

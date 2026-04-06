@@ -27,11 +27,13 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
 }
 
 
-def _to_int(value, default: int) -> int:
+def _to_int(value, default: int | None):
     try:
+        if value in (None, ""):
+            return None if default is None else int(default)
         return int(value)
     except Exception:
-        return int(default)
+        return None if default is None else int(default)
 
 
 def _to_float_or_none(value):
@@ -442,4 +444,93 @@ def build_online_stream_result_stub(
         ),
         "predicted_volume_nl": None if predicted_volume_nl is None else float(predicted_volume_nl),
         "warnings": _copy_warnings(warnings),
+    }
+
+
+def build_online_stream_flow_fit_artifact(
+    *,
+    condition: dict | None = None,
+    flow_plan: dict | None = None,
+    accepted_delay_points: list[dict] | None = None,
+    fit: dict | None = None,
+    warnings: list[str] | None = None,
+    schema_version: int = 1,
+    phase: str = "online_stream_calibration",
+) -> dict:
+    fit_obj = dict(fit or {})
+    return {
+        "schema_version": int(schema_version),
+        "phase": str(phase),
+        "condition": _copy_jsonish(condition or {}),
+        "flow_plan": _copy_jsonish(flow_plan or {}),
+        "accepted_delay_points": _copy_jsonish(
+            accepted_delay_points
+            if accepted_delay_points is not None
+            else fit_obj.get("accepted_delay_points") or []
+        ),
+        "fit": _copy_jsonish(fit_obj),
+        "warnings": _copy_warnings(
+            warnings if warnings is not None else fit_obj.get("warnings")
+        ),
+    }
+
+
+def build_online_stream_flow_phase_payload(
+    *,
+    status: str,
+    plan: dict | None = None,
+    attempted_delay_count: int,
+    attempted_capture_count: int,
+    accepted_delay_count: int,
+    accepted_measurement_count: int,
+    rejected_capture_count: int,
+    termination_reason: str | None,
+    delay_summaries: list[dict] | None = None,
+    warnings: list[str] | None = None,
+    fit: dict | None = None,
+) -> dict:
+    fit_obj = dict(fit or {})
+    return {
+        "status": str(status),
+        "plan": _copy_jsonish(plan or {}),
+        "attempted_delay_count": int(attempted_delay_count),
+        "attempted_capture_count": int(attempted_capture_count),
+        "accepted_delay_count": int(accepted_delay_count),
+        "accepted_measurement_count": int(accepted_measurement_count),
+        "rejected_capture_count": int(rejected_capture_count),
+        "termination_reason": str(termination_reason or ""),
+        "delay_summaries": _copy_jsonish(delay_summaries or []),
+        "warnings": _copy_warnings(warnings),
+        "fit_status": str(fit_obj.get("fit_status") or "unresolved_fit_failed"),
+        "flow_rate_nl_per_us": _to_float_or_none(fit_obj.get("flow_rate_nl_per_us")),
+        "flow_intercept_nl": _to_float_or_none(fit_obj.get("flow_intercept_nl")),
+        "flow_fit_delay_start_from_emergence_us": _to_int(
+            fit_obj.get("flow_fit_delay_start_from_emergence_us"),
+            None,
+        ),
+        "flow_fit_delay_end_from_emergence_us": _to_int(
+            fit_obj.get("flow_fit_delay_end_from_emergence_us"),
+            None,
+        ),
+        "steady_width_baseline_px": _to_float_or_none(fit_obj.get("steady_width_baseline_px")),
+        "steady_r2": _to_float_or_none(fit_obj.get("steady_r2")),
+        "steady_nrmse": _to_float_or_none(fit_obj.get("steady_nrmse")),
+        "steady_rate_ci95_low_nl_per_us": _to_float_or_none(
+            fit_obj.get("steady_rate_ci95_low_nl_per_us")
+        ),
+        "steady_rate_ci95_high_nl_per_us": _to_float_or_none(
+            fit_obj.get("steady_rate_ci95_high_nl_per_us")
+        ),
+        "steady_rate_ci95_relative_width": _to_float_or_none(
+            fit_obj.get("steady_rate_ci95_relative_width")
+        ),
+        "flow_fit_point_count": _to_int(fit_obj.get("flow_fit_point_count"), 0),
+        "flow_fit_outlier_prune_status": str(
+            fit_obj.get("flow_fit_outlier_prune_status") or "not_attempted"
+        ),
+        "flow_fit_dropped_outlier_delay_from_emergence_us": _to_int(
+            fit_obj.get("flow_fit_dropped_outlier_delay_from_emergence_us"),
+            None,
+        ),
+        "fit_warnings": _copy_warnings(fit_obj.get("warnings")),
     }

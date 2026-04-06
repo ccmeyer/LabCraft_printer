@@ -204,6 +204,65 @@ def test_build_online_stream_result_stub_returns_exact_top_level_shape():
     assert result["warnings"] == ["stage2_skeleton_no_measurements"]
 
 
+def test_build_online_stream_flow_fit_artifact_returns_exact_top_level_shape():
+    artifact = mod.build_online_stream_flow_fit_artifact(
+        condition={"print_pressure_psi": 0.42},
+        flow_plan={"delays_us": [3850, 4050]},
+        accepted_delay_points=[{"delay_us": 3850, "median_visible_volume_nl": 12.3}],
+        fit={"fit_status": "ok", "flow_rate_nl_per_us": 0.0187, "warnings": ["flow_fit_ok"]},
+        warnings=["flow_fit_ok"],
+    )
+
+    assert set(artifact.keys()) == {
+        "schema_version",
+        "phase",
+        "condition",
+        "flow_plan",
+        "accepted_delay_points",
+        "fit",
+        "warnings",
+    }
+    assert artifact["fit"]["fit_status"] == "ok"
+
+
+def test_build_online_stream_flow_phase_payload_appends_fit_fields():
+    payload = mod.build_online_stream_flow_phase_payload(
+        status="captured",
+        plan={"delays_us": [3850, 4050]},
+        attempted_delay_count=2,
+        attempted_capture_count=6,
+        accepted_delay_count=2,
+        accepted_measurement_count=4,
+        rejected_capture_count=2,
+        termination_reason="planned_delays_exhausted",
+        delay_summaries=[{"delay_us": 3850}],
+        warnings=["detached_near_bottom_warning"],
+        fit={
+            "fit_status": "ok",
+            "flow_rate_nl_per_us": 0.0187,
+            "flow_intercept_nl": -1.2,
+            "flow_fit_delay_start_from_emergence_us": 650,
+            "flow_fit_delay_end_from_emergence_us": 1450,
+            "steady_width_baseline_px": 74.0,
+            "steady_r2": 0.998,
+            "steady_nrmse": 0.01,
+            "steady_rate_ci95_low_nl_per_us": 0.0185,
+            "steady_rate_ci95_high_nl_per_us": 0.0189,
+            "steady_rate_ci95_relative_width": 0.02,
+            "flow_fit_point_count": 5,
+            "flow_fit_outlier_prune_status": "kept_below_local_deviation_threshold",
+            "flow_fit_dropped_outlier_delay_from_emergence_us": None,
+            "warnings": ["flow_fit_min_points_only"],
+        },
+    )
+
+    assert payload["status"] == "captured"
+    assert payload["flow_rate_nl_per_us"] == 0.0187
+    assert payload["steady_width_baseline_px"] == 74.0
+    assert payload["flow_fit_point_count"] == 5
+    assert payload["fit_warnings"] == ["flow_fit_min_points_only"]
+
+
 def test_build_online_stream_plan_snapshot_returns_exact_top_level_shape():
     snapshot = mod.build_online_stream_plan_snapshot(
         condition={"print_pressure_psi": 0.42},
@@ -457,6 +516,26 @@ def test_online_stream_helper_outputs_are_json_serializable():
             flow_phase={"status": "not_run"},
             tail_phase={"status": "not_run"},
             warnings=["stage2_skeleton_no_measurements"],
+        ),
+        "flow_fit_artifact": mod.build_online_stream_flow_fit_artifact(
+            condition={"print_pressure_psi": 0.4},
+            flow_plan={"delays_us": [3850, 4050]},
+            accepted_delay_points=[{"delay_us": 3850, "median_visible_volume_nl": 12.3}],
+            fit={"fit_status": "ok", "flow_rate_nl_per_us": 0.0187},
+            warnings=["flow_fit_ok"],
+        ),
+        "flow_phase_payload": mod.build_online_stream_flow_phase_payload(
+            status="captured",
+            plan={"delays_us": [3850, 4050]},
+            attempted_delay_count=2,
+            attempted_capture_count=6,
+            accepted_delay_count=2,
+            accepted_measurement_count=4,
+            rejected_capture_count=2,
+            termination_reason="planned_delays_exhausted",
+            delay_summaries=[{"delay_us": 3850}],
+            warnings=["detached_near_bottom_warning"],
+            fit={"fit_status": "ok", "flow_rate_nl_per_us": 0.0187, "flow_fit_point_count": 5},
         ),
     }
 
