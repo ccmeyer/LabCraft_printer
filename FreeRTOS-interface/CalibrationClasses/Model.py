@@ -33,6 +33,8 @@ import queue
 
 import os, json, time, uuid, tempfile, threading
 import numpy as np
+from tools.stream_analysis import online_calibration as online_cal_mod
+from tools.stream_analysis import online_runtime as online_runtime_mod
 
 # ---- numpy encoder helper (robust JSON) ----
 def numpy_encoder(obj):
@@ -1124,6 +1126,7 @@ class CalibrationManager(QObject):
         "droplet_trajectory": "trajectory",
         "droplet_search": "droplet_search",
         "droplet_timecourse": "droplet_timecourse",
+        "online_stream_calibration": "online_stream_calibration",
     }
     STREAM_CAPTURE_QUEUE = (
         "nozzle_position",
@@ -2918,6 +2921,9 @@ class CalibrationManager(QObject):
     def start_droplet_timecourse_process(self):
         self._try_start_process(DropletTimecourseProcess)
 
+    def start_online_stream_calibration(self):
+        return self._try_start_process(OnlineStreamCalibrationProcess)
+
     # ------------- Settings snapshot -------------
 
     def get_current_settings(self):
@@ -4068,6 +4074,7 @@ class CalibrationManager(QObject):
             # "droplet_search":                 pack(DropletSearchCalibrationProcess),
             "droplet_characterization":       pack(DropletSearchCalibrationProcess, manual_start=True),
             "pressure_sweep_characterization":pack(PressureSweepCharacterizationProcess),
+            "online_stream_calibration":      pack(OnlineStreamCalibrationProcess),
         }
         self.readinessChanged.emit(readiness)
 
@@ -4659,6 +4666,759 @@ class BaseCalibrationProcess(QObject):
             )
         except Exception as e:
             _finish(False, f"Move request failed: {e}")
+
+
+class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
+    phase_name = "online_stream_calibration"
+    supports_operator_verdict = False
+
+    flowPlanReady = Signal()
+    flowFrameAnalyzed = Signal()
+    repeatReplicate = Signal()
+    nextDelay = Signal()
+    finalize = Signal()
+
+    @staticmethod
+    def missing_requirements(cm) -> list[str]:
+        missing = []
+        try:
+            if not bool(cm.get_record_mode_enabled()):
+                missing.append("Record Calibration Runs enabled")
+        except Exception:
+            missing.append("Record Calibration Runs enabled")
+        try:
+            if cm.get_nozzle_center() is None:
+                missing.append("Nozzle center (machine coords)")
+        except Exception:
+            missing.append("Nozzle center (machine coords)")
+        try:
+            if cm.get_pressure_scan_nozzle_center_image_position() is None:
+                missing.append("Emergence-derived nozzle center (image coords)")
+        except Exception:
+            missing.append("Emergence-derived nozzle center (image coords)")
+        try:
+            if cm.get_emergence_time() is None:
+                missing.append("Emergence time")
+        except Exception:
+            missing.append("Emergence time")
+        try:
+            _ = cm.model.droplet_camera_model.get_image_size()
+        except Exception:
+            missing.append("Droplet camera")
+        try:
+            if not str(getattr(cm, "_safe_get_stock_solution", lambda: "")() or "").strip():
+                missing.append("Active stock solution")
+        except Exception:
+            missing.append("Active stock solution")
+        try:
+            if not str(getattr(cm, "_safe_get_printer_head_id", lambda: "")() or "").strip():
+                missing.append("Active printer head")
+        except Exception:
+            missing.append("Active printer head")
+        return missing
+
+    def __init__(self, calibration_manager, model, parent=None):
+        super().__init__(calibration_manager, model, parent)
+
+        missing_requirements = self.missing_requirements(calibration_manager)
+        if missing_requirements:
+            raise ValueError(
+                "OnlineStreamCalibrationProcess requires: "
+                + ", ".join(missing_requirements)
+                + "."
+            )
+
+        self.phase_name = "online_stream_calibration"
+
+        try:
+            self._orig_settings = dict(self.calibration_manager.get_current_settings() or {})
+        except Exception:
+            self._orig_settings = {}
+        self._orig_settings = {
+            "num_droplets": self._orig_settings.get("num_droplets"),
+            "flash_delay": self._orig_settings.get("flash_delay"),
+            "print_pressure": self._orig_settings.get("print_pressure"),
+            "print_width": self._orig_settings.get("print_width"),
+        }
+        self._restored_settings = False
+        self._stop_requested = False
+        self._stop_reason = None
+        self._background_capture_completed = False
+
+        self.background_image = None
+        self.flow_frame_image = None
+        self.stock_solution = str(self.calibration_manager._safe_get_stock_solution() or "")
+        self.printer_head_id = str(self.calibration_manager._safe_get_printer_head_id() or "")
+        self.emergence_time_us = int(self.calibration_manager.get_emergence_time())
+        self.priors = online_cal_mod.normalize_online_stream_prior(None)
+        self.flow_plan = online_cal_mod.build_online_stream_flow_plan(
+            emergence_time_us=self.emergence_time_us,
+            prior=self.priors,
+        )
+        self.tail_plan = online_cal_mod.build_online_stream_tail_plan(
+            emergence_time_us=self.emergence_time_us,
+            prior=self.priors,
+        )
+        self.capture_budget = online_cal_mod.new_online_stream_budget()
+        self.analysis_config = dict(online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
+
+        self._measurement_rows = []
+        self._flow_delay_summaries = []
+        self._current_delay_frame_rows = []
+        self._flow_delay_index = 0
+        self._flow_replicate_index = 0
+        self._current_delay_us = None
+        self._attempted_capture_count = 0
+        self._consecutive_failed_delays = 0
+        self._flow_termination_reason = None
+        self._flow_warnings = []
+        self._current_analysis_summary = {}
+        self._current_flow_capture_ref = {}
+        self._current_flow_capture_failure = None
+
+        self._run_dir = None
+        self._frames_path = None
+        self._plan_snapshot_path = None
+        self._plan_snapshot_written = False
+
+        self.state_prepare = QState()
+        self.state_capture_background = QState()
+        self.state_plan_flow_phase = QState()
+        self.state_apply_flow_delay = QState()
+        self.state_capture_flow_frame = QState()
+        self.state_analyze_flow_frame = QState()
+        self.state_advance_flow_phase = QState()
+        self.state_restore = QState()
+        self.state_final = QFinalState()
+
+        self.state_prepare.entered.connect(self.onPrepare)
+        self.state_capture_background.entered.connect(self.onCaptureBackground)
+        self.state_plan_flow_phase.entered.connect(self.onPlanFlowPhase)
+        self.state_apply_flow_delay.entered.connect(self.onApplyFlowDelay)
+        self.state_capture_flow_frame.entered.connect(self.onCaptureFlowFrame)
+        self.state_analyze_flow_frame.entered.connect(self.onAnalyzeFlowFrame)
+        self.state_advance_flow_phase.entered.connect(self.onAdvanceFlowPhase)
+        self.state_restore.entered.connect(self.onRestoreSettings)
+        self.state_final.entered.connect(self.onCompleted)
+
+        self.state_prepare.addTransition(
+            self.calibration_manager.settingsChangeCompleted,
+            self.state_capture_background,
+        )
+        self.state_capture_background.addTransition(
+            self.calibration_manager.captureCompleted,
+            self.state_plan_flow_phase,
+        )
+        self.state_plan_flow_phase.addTransition(self.flowPlanReady, self.state_apply_flow_delay)
+        self.state_apply_flow_delay.addTransition(
+            self.calibration_manager.settingsChangeCompleted,
+            self.state_capture_flow_frame,
+        )
+        self.state_capture_flow_frame.addTransition(
+            self.calibration_manager.captureCompleted,
+            self.state_analyze_flow_frame,
+        )
+        self.state_analyze_flow_frame.addTransition(
+            self.flowFrameAnalyzed,
+            self.state_advance_flow_phase,
+        )
+        self.state_advance_flow_phase.addTransition(
+            self.repeatReplicate,
+            self.state_capture_flow_frame,
+        )
+        self.state_advance_flow_phase.addTransition(
+            self.nextDelay,
+            self.state_apply_flow_delay,
+        )
+        self.state_restore.addTransition(
+            self.calibration_manager.settingsChangeCompleted,
+            self.state_final,
+        )
+
+        for st in (
+            self.state_prepare,
+            self.state_capture_background,
+            self.state_plan_flow_phase,
+            self.state_apply_flow_delay,
+            self.state_capture_flow_frame,
+            self.state_analyze_flow_frame,
+            self.state_advance_flow_phase,
+        ):
+            st.addTransition(self.finalize, self.state_restore)
+
+        for st in (
+            self.state_prepare,
+            self.state_capture_background,
+            self.state_plan_flow_phase,
+            self.state_apply_flow_delay,
+            self.state_capture_flow_frame,
+            self.state_analyze_flow_frame,
+            self.state_advance_flow_phase,
+            self.state_restore,
+            self.state_final,
+        ):
+            self.state_machine.addState(st)
+        self.state_machine.setInitialState(self.state_prepare)
+
+    def _build_condition(self) -> dict:
+        return {
+            "print_pressure_psi": (
+                None
+                if self._orig_settings.get("print_pressure") is None
+                else float(self._orig_settings.get("print_pressure"))
+            ),
+            "print_pulse_width_us": (
+                None
+                if self._orig_settings.get("print_width") is None
+                else int(self._orig_settings.get("print_width"))
+            ),
+            "emergence_time_us": int(self.emergence_time_us),
+            "stock_solution": str(self.stock_solution),
+            "printer_head_id": str(self.printer_head_id),
+        }
+
+    def _ensure_flow_paths(self):
+        run_dir = getattr(self, "_recorder_run_dir", None)
+        if not run_dir:
+            raise RuntimeError("Online stream calibration requires an active process recorder directory.")
+        self._run_dir = str(run_dir)
+        self._frames_path = os.path.join(self._run_dir, "frames.jsonl")
+        self._plan_snapshot_path = os.path.join(self._run_dir, "plan_snapshot.json")
+
+    def _append_flow_jsonl(self, path: str, payload: dict):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=numpy_encoder) + "\n")
+
+    def _write_plan_snapshot(self):
+        if self._plan_snapshot_written or not self._plan_snapshot_path:
+            return
+        snapshot = online_cal_mod.build_online_stream_plan_snapshot(
+            condition=self._build_condition(),
+            priors=dict(self.priors),
+            flow_plan=dict(self.flow_plan),
+            tail_plan=dict(self.tail_plan),
+            capture_budget=dict(self.capture_budget),
+            analysis_config=dict(self.analysis_config),
+        )
+        os.makedirs(os.path.dirname(self._plan_snapshot_path), exist_ok=True)
+        with open(self._plan_snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, indent=2, default=numpy_encoder)
+        self._plan_snapshot_written = True
+
+    def _append_flow_warning(self, warning: str):
+        warning_label = str(warning or "")
+        if not warning_label:
+            return
+        if warning_label not in self._flow_warnings:
+            self._flow_warnings.append(warning_label)
+
+    def _current_flow_delay_count(self) -> int:
+        return int(len(list(self.flow_plan.get("delays_us") or [])))
+
+    def _get_capture_ref(self, attr_name: str) -> dict:
+        try:
+            return dict(self._last_capture_refs.get(str(attr_name), {}) or {})
+        except Exception:
+            return {}
+
+    def _start_single_flow_capture(self, *, set_attr: str, stage_text: str, guard_timeout_ms: int = 10_000):
+        self.stageChanged.emit(stage_text)
+        self._record_event(
+            "capture_attempt",
+            {
+                "set_attr": str(set_attr),
+                "stage_text": str(stage_text),
+                "delay_us": int(self._current_delay_us or 0),
+                "replicate_index": int(self._flow_replicate_index + 1),
+                "printed_capture_index": int(self._attempted_capture_count),
+            },
+        )
+        self._current_flow_capture_ref = {}
+        self._current_flow_capture_failure = None
+        setattr(self, set_attr, None)
+        timer_ref = {"timer": None}
+
+        def _finish(frame, *, failure_reason: str | None = None):
+            self._cancel_timeout(timer_ref["timer"])
+            timer_ref["timer"] = None
+            setattr(self, set_attr, frame)
+            if frame is None:
+                self._current_flow_capture_failure = str(failure_reason or "capture_failed")
+                self._record_event(
+                    "capture_result",
+                    {
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "status": "failed",
+                        "failure_reason": self._current_flow_capture_failure,
+                        "delay_us": int(self._current_delay_us or 0),
+                        "replicate_index": int(self._flow_replicate_index + 1),
+                    },
+                    level="warning",
+                )
+                self.calibration_manager.emitCaptureCompleted()
+                return
+
+            bg_ref = self._get_capture_ref("background_image")
+            capture_ref = self._record_capture(
+                frame,
+                role="flow_frame",
+                metadata={
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "delay_us": int(self._current_delay_us or 0),
+                    "replicate_index": int(self._flow_replicate_index + 1),
+                    "pair_role": "flow_frame",
+                    "pair_id": str(bg_ref.get("pair_id") or bg_ref.get("capture_id") or uuid.uuid4()),
+                    "subtract_background_capture_id": bg_ref.get("capture_id"),
+                    "subtract_background_image_relpath": bg_ref.get("image_relpath"),
+                },
+            ) or {}
+            self._current_flow_capture_ref = dict(capture_ref)
+            if capture_ref:
+                self._last_capture_refs[set_attr] = dict(capture_ref)
+            self._record_event(
+                "capture_result",
+                {
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "status": "success",
+                    "delay_us": int(self._current_delay_us or 0),
+                    "replicate_index": int(self._flow_replicate_index + 1),
+                    "capture_ref": dict(capture_ref),
+                },
+            )
+            self.calibration_manager.emitCaptureCompleted()
+
+        timer_ref["timer"] = self._start_timeout(
+            guard_timeout_ms,
+            err_msg=None,
+            on_timeout=lambda: _finish(None, failure_reason="capture_timeout"),
+        )
+        self.calibration_manager.captureImageRequested.emit(
+            lambda frame: _finish(frame, failure_reason="capture_failed")
+        )
+
+    @Slot()
+    def onPrepare(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+        self.stageChanged.emit("Online stream calibration: preparing background capture")
+        self._request_settings_with_recording(
+            {"num_droplets": 0},
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="online_stream_prepare_background",
+        )
+
+    def _on_background_capture_success(self, _frame):
+        self._background_capture_completed = True
+
+    def _on_background_capture_final_failure(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+        self._restore_original_settings_best_effort()
+        self.calibrationError.emit("Failed to capture online stream calibration background image.")
+
+    @Slot()
+    def onCaptureBackground(self):
+        if self._stop_requested:
+            self.stageChanged.emit("Online stream calibration: stop requested, restoring settings")
+            self.finalize.emit()
+            return
+        self._capture_with_policy(
+            set_attr="background_image",
+            stage_text="Capturing online stream calibration background",
+            attempts_total=3,
+            retry_delay_ms=100,
+            guard_timeout_ms=10_000,
+            on_success=self._on_background_capture_success,
+            on_final_failure=self._on_background_capture_final_failure,
+            final_error_msg="Failed to capture online stream calibration background image.",
+        )
+
+    @Slot()
+    def onPlanFlowPhase(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+        try:
+            self._ensure_flow_paths()
+            self._write_plan_snapshot()
+        except Exception as e:
+            self.calibrationError.emit(f"Failed to initialize online stream flow artifacts: {e}")
+            return
+
+        self.flow_frame_image = None
+        self._measurement_rows = []
+        self._flow_delay_summaries = []
+        self._current_delay_frame_rows = []
+        self._flow_delay_index = 0
+        self._flow_replicate_index = 0
+        self._current_delay_us = None
+        self._attempted_capture_count = 0
+        self._consecutive_failed_delays = 0
+        self._flow_termination_reason = None
+        self._flow_warnings = []
+        self._current_analysis_summary = {}
+        self._current_flow_capture_ref = {}
+        self._current_flow_capture_failure = None
+
+        if not list(self.flow_plan.get("delays_us") or []):
+            self.calibrationError.emit("Online stream calibration has no planned flow delays.")
+            return
+
+        self.stageChanged.emit(
+            "Online stream calibration: "
+            f"planned {int(self.flow_plan.get('point_count') or 0)} flow delays"
+        )
+        self.flowPlanReady.emit()
+
+    @Slot()
+    def onApplyFlowDelay(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        delays = list(self.flow_plan.get("delays_us") or [])
+        if self._flow_delay_index >= len(delays):
+            self._flow_termination_reason = self._flow_termination_reason or "planned_delays_exhausted"
+            self.finalize.emit()
+            return
+
+        self._current_delay_us = int(delays[self._flow_delay_index])
+        self.stageChanged.emit(
+            "Online stream calibration: "
+            f"delay={int(self._current_delay_us)} us, "
+            f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
+        )
+        self._request_settings_with_recording(
+            {
+                "flash_delay": int(self._current_delay_us),
+                "num_droplets": 1,
+            },
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context=f"online_stream_apply_flow_delay_{int(self._current_delay_us)}",
+        )
+
+    @Slot()
+    def onCaptureFlowFrame(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+        if self.capture_budget.get("exhausted"):
+            self._flow_termination_reason = self._flow_termination_reason or "capture_budget_exhausted"
+            self.finalize.emit()
+            return
+        if self._current_delay_us is None:
+            self.calibrationError.emit("Online stream calibration has no active flow delay.")
+            return
+
+        self.capture_budget = online_cal_mod.consume_online_stream_budget(
+            self.capture_budget,
+            phase="flow_phase",
+            count=1,
+        )
+        self._attempted_capture_count += 1
+        self._start_single_flow_capture(
+            set_attr="flow_frame_image",
+            stage_text=(
+                "Capturing online stream flow frame "
+                f"@ {int(self._current_delay_us)} us "
+                f"(rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)})"
+            ),
+            guard_timeout_ms=10_000,
+        )
+
+    @Slot()
+    def onAnalyzeFlowFrame(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        delay_us = int(self._current_delay_us or 0)
+        delay_from_emergence_us = int(delay_us - int(self.emergence_time_us))
+        replicate_index = int(self._flow_replicate_index + 1)
+        capture_ref = dict(self._current_flow_capture_ref or {})
+
+        if self.flow_frame_image is None:
+            status = (
+                "rejected_capture_timeout"
+                if str(self._current_flow_capture_failure or "") == "capture_timeout"
+                else "rejected_capture_failed"
+            )
+            frame_row = online_cal_mod.build_online_stream_frame_row(
+                phase="flow_rate",
+                status=status,
+                delay_us=delay_us,
+                delay_from_emergence_us=delay_from_emergence_us,
+                replicate_index=replicate_index,
+                qc={
+                    "measurement_qc_pass": False,
+                    "nozzle_qc_pass": False,
+                    "silhouette_qc_pass": False,
+                },
+                image_ref=capture_ref,
+                warnings=[str(self._current_flow_capture_failure or "capture_failed")],
+                silhouette_status="capture_failed",
+                failure_reason=str(self._current_flow_capture_failure or "capture_failed"),
+                attached_width_px=None,
+                visible_volume_nl=None,
+                attached_bottom_clearance_px=None,
+                min_accepted_fluid_distance_from_bottom_px=None,
+                accepted_component_count=0,
+                accepted_detached_component_count=0,
+                detached_near_bottom_warning=False,
+                attached_bottom_guard_hit=False,
+            )
+            self._current_analysis_summary = {
+                "status": status,
+                "measurement_qc_pass": False,
+                "warnings": list(frame_row.get("warnings") or []),
+                "attached_bottom_guard_hit": False,
+            }
+            self._current_delay_frame_rows.append(frame_row)
+            self._append_flow_jsonl(self._frames_path, frame_row)
+            self.flowFrameAnalyzed.emit()
+            return
+
+        analysis = online_runtime_mod.analyze_online_stream_frame(
+            frame_image=self.flow_frame_image,
+            background_image=self.background_image,
+            nozzle_center_px=self.calibration_manager.get_pressure_scan_nozzle_center_image_position(),
+            delay_us=delay_us,
+            emergence_time_us=int(self.emergence_time_us),
+            analysis_config=dict(self.analysis_config),
+            capture_ref=capture_ref,
+            capture_index=self._attempted_capture_count,
+        )
+        summary = dict(analysis.get("summary") or {})
+        overlay = analysis.get("overlay")
+
+        frame_row = online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status=str(summary.get("status") or "rejected_measurement_qc"),
+            delay_us=delay_us,
+            delay_from_emergence_us=delay_from_emergence_us,
+            replicate_index=replicate_index,
+            qc={
+                "measurement_qc_pass": bool(summary.get("measurement_qc_pass")),
+                "nozzle_qc_pass": bool(summary.get("nozzle_qc_pass")),
+                "silhouette_qc_pass": bool(summary.get("silhouette_qc_pass")),
+            },
+            image_ref=capture_ref,
+            warnings=list(summary.get("warnings") or []),
+            silhouette_status=summary.get("silhouette_status"),
+            failure_reason=summary.get("failure_reason"),
+            attached_width_px=summary.get("attached_width_px"),
+            visible_volume_nl=summary.get("visible_volume_nl"),
+            attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
+            min_accepted_fluid_distance_from_bottom_px=summary.get(
+                "min_accepted_fluid_distance_from_bottom_px"
+            ),
+            accepted_component_count=summary.get("accepted_component_count"),
+            accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+            detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+            attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+        )
+        self._current_analysis_summary = dict(summary)
+        self._current_delay_frame_rows.append(frame_row)
+        self._append_flow_jsonl(self._frames_path, frame_row)
+
+        if bool(summary.get("measurement_qc_pass")):
+            self._measurement_rows.append(
+                online_cal_mod.build_online_stream_measurement_row(
+                    phase="flow_rate",
+                    delay_us=delay_us,
+                    delay_from_emergence_us=delay_from_emergence_us,
+                    replicate_index=replicate_index,
+                    width_px=summary.get("attached_width_px"),
+                    visible_volume_nl=summary.get("visible_volume_nl"),
+                    qc_pass=True,
+                    image_ref=capture_ref,
+                )
+            )
+
+        if overlay is not None:
+            try:
+                self.presentImageSignal.emit(overlay)
+            except Exception:
+                pass
+        else:
+            try:
+                self.presentImageSignal.emit(self.flow_frame_image)
+            except Exception:
+                pass
+
+        self.flowFrameAnalyzed.emit()
+
+    @Slot()
+    def onAdvanceFlowPhase(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        current_status = str(self._current_analysis_summary.get("status") or "")
+        replicates_per_delay = int(self.flow_plan.get("replicates_per_delay") or 1)
+        close_delay = bool(
+            current_status == "rejected_bottom_guard"
+            or int(self._flow_replicate_index + 1) >= int(replicates_per_delay)
+        )
+        if not close_delay:
+            self._flow_replicate_index += 1
+            self.repeatReplicate.emit()
+            return
+
+        delay_summary = online_cal_mod.summarize_online_stream_flow_delay(self._current_delay_frame_rows)
+        self._flow_delay_summaries.append(delay_summary)
+        for warning in list(delay_summary.get("warnings") or []):
+            self._append_flow_warning(str(warning))
+        if bool(delay_summary.get("attached_bottom_guard_hit")):
+            self._append_flow_warning("attached_bottom_guard_hit")
+        if bool(delay_summary.get("detached_near_bottom_warning")):
+            self._append_flow_warning("detached_near_bottom_warning")
+
+        if bool(delay_summary.get("delay_accepted")):
+            self._consecutive_failed_delays = 0
+        else:
+            self._consecutive_failed_delays += 1
+
+        decision = online_cal_mod.decide_online_stream_flow_next_action(
+            delay_summary=delay_summary,
+            capture_budget=self.capture_budget,
+            consecutive_failed_delays=int(self._consecutive_failed_delays),
+            attempted_delay_count=int(len(self._flow_delay_summaries)),
+            planned_delay_count=int(self._current_flow_delay_count()),
+        )
+        if str(decision.get("action") or "") == "stop":
+            self._flow_termination_reason = str(decision.get("termination_reason") or "")
+            if self._flow_termination_reason:
+                self._append_flow_warning(self._flow_termination_reason)
+            self.finalize.emit()
+            return
+
+        self._flow_delay_index += 1
+        self._flow_replicate_index = 0
+        self._current_delay_us = None
+        self._current_delay_frame_rows = []
+        self._current_analysis_summary = {}
+        self.nextDelay.emit()
+
+    def _build_restore_settings(self) -> dict:
+        restore = {}
+        orig = dict(self._orig_settings or {})
+        if orig.get("num_droplets") is not None:
+            try:
+                restore["num_droplets"] = int(orig.get("num_droplets"))
+            except Exception:
+                pass
+        if orig.get("flash_delay") is not None:
+            try:
+                restore["flash_delay"] = int(orig.get("flash_delay"))
+            except Exception:
+                pass
+        if orig.get("print_pressure") is not None:
+            try:
+                restore["print_pressure"] = float(orig.get("print_pressure"))
+            except Exception:
+                pass
+        if orig.get("print_width") is not None:
+            try:
+                restore["print_pulse_width"] = int(orig.get("print_width"))
+            except Exception:
+                pass
+        if not restore:
+            restore = {"num_droplets": 0}
+        return restore
+
+    def _restore_original_settings_best_effort(self, callback=None, *, context: str = "online_stream_restore_settings"):
+        if self._restored_settings:
+            if callable(callback):
+                callback()
+            return
+        self._restored_settings = True
+        restore = self._build_restore_settings()
+        try:
+            self._request_settings_with_recording(
+                restore,
+                callback or (lambda *args, **kwargs: None),
+                context=context,
+            )
+        except Exception:
+            if callable(callback):
+                callback()
+
+    @Slot()
+    def onRestoreSettings(self):
+        self.stageChanged.emit("Online stream calibration: restoring imaging settings")
+        self._restore_original_settings_best_effort(
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context="online_stream_restore_settings",
+        )
+
+    @Slot()
+    def onCompleted(self):
+        if self._stop_requested:
+            self.stageChanged.emit("Online stream calibration stopped")
+            self.calibrationError.emit("Calibration terminated by user")
+            return
+        if not self._background_capture_completed:
+            self.calibrationError.emit("Online stream calibration completed without background capture.")
+            return
+
+        condition = self._build_condition()
+        accepted_delay_count = int(
+            sum(1 for row in self._flow_delay_summaries if bool(row.get("delay_accepted")))
+        )
+        accepted_measurement_count = int(len(self._measurement_rows))
+        rejected_capture_count = int(max(0, self._attempted_capture_count - accepted_measurement_count))
+        flow_status = "captured" if accepted_delay_count >= 3 else "insufficient_data"
+        if flow_status == "insufficient_data":
+            self._append_flow_warning("insufficient_accepted_delays")
+
+        flow_phase = {
+            "status": flow_status,
+            "plan": dict(self.flow_plan),
+            "attempted_delay_count": int(len(self._flow_delay_summaries)),
+            "attempted_capture_count": int(self._attempted_capture_count),
+            "accepted_delay_count": int(accepted_delay_count),
+            "accepted_measurement_count": int(accepted_measurement_count),
+            "rejected_capture_count": int(rejected_capture_count),
+            "termination_reason": str(
+                self._flow_termination_reason or "planned_delays_exhausted"
+            ),
+            "delay_summaries": [dict(row) for row in self._flow_delay_summaries],
+            "warnings": list(self._flow_warnings),
+        }
+        tail_phase = {
+            "status": "not_run",
+            "plan": dict(self.tail_plan),
+        }
+        result = online_cal_mod.build_online_stream_result_stub(
+            condition=condition,
+            priors=dict(self.priors),
+            flow_phase=flow_phase,
+            tail_phase=tail_phase,
+            predicted_stream_duration_us=None,
+            predicted_volume_nl=None,
+            warnings=["stage3_flow_phase_only_no_fit"] + list(self._flow_warnings),
+        )
+        self.calibrationDataUpdated.emit(
+            {
+                "measurements": list(self._measurement_rows),
+                "result": result,
+            }
+        )
+        self.stageChanged.emit("Online stream flow-phase acquisition complete")
+        self.calibrationCompleted.emit()
+
+    @Slot()
+    def requestGracefulStop(self, reason: str = "User requested stop"):
+        self._stop_requested = True
+        self._stop_reason = str(reason)
+        self.stageChanged.emit("Online stream calibration: graceful stop requested")
 
 class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
     """

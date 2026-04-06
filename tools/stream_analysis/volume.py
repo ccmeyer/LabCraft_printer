@@ -346,6 +346,33 @@ def _component_volume_rows(component_rows: list[dict], edge_rows: list[dict]):
     return volume_rows
 
 
+def _analyze_stage4_frame(stage3_frame: dict, *, near_bottom_px: int = fov_mod.FOV_NEAR_BOTTOM_PX):
+    stage3_metric_row = dict(stage3_frame.get("metric_row") or {})
+    component_rows = [dict(row) for row in list(stage3_frame.get("component_rows") or [])]
+    edge_rows = [dict(row) for row in list(stage3_frame.get("edge_rows") or [])]
+    labeled_stage3_rows, fov_report = fov_mod.label_frame_trust(
+        [stage3_metric_row],
+        component_rows,
+        near_bottom_px=int(near_bottom_px),
+    )
+    component_volume_rows = _component_volume_rows(component_rows, edge_rows)
+    frame_metric_rows = _frame_metric_rows(labeled_stage3_rows, component_volume_rows)
+    return {
+        "labeled_stage3_row": (
+            dict(labeled_stage3_rows[0])
+            if labeled_stage3_rows
+            else dict(stage3_metric_row)
+        ),
+        "component_volume_rows": component_volume_rows,
+        "frame_metric_row": (
+            dict(frame_metric_rows[0])
+            if frame_metric_rows
+            else {}
+        ),
+        "fov_report": dict(fov_report),
+    }
+
+
 def _frame_metric_rows(stage3_metric_rows: list[dict], component_volume_rows: list[dict]):
     components_by_capture = {}
     for row in component_volume_rows:

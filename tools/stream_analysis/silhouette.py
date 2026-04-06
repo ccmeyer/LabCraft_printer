@@ -136,6 +136,19 @@ def _load_gray_image(path: Path) -> np.ndarray:
     return image
 
 
+def _coerce_gray_image(image) -> np.ndarray:
+    if image is None:
+        raise ValueError("Image is required for silhouette analysis.")
+    arr = np.asarray(image)
+    if arr.ndim == 2:
+        return arr.copy()
+    if arr.ndim == 3:
+        if arr.shape[2] == 1:
+            return arr[:, :, 0].copy()
+        return cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+    raise ValueError("Unsupported image shape for silhouette analysis.")
+
+
 def _sample_indices(frame_count: int, *, sample_count: int, extra_frame_indices: list[int] | None = None):
     indices = set()
     if frame_count <= 0:
@@ -1123,10 +1136,11 @@ def _analyze_accepted_component(
     return component_state
 
 
-def _analyze_stage3_frame(
+def _analyze_stage3_gray(
     run_id: str,
     frame_row: dict,
     tracked_row: dict,
+    gray: np.ndarray,
     *,
     roi_width_frac: float,
     roi_top_frac: float,
@@ -1135,8 +1149,7 @@ def _analyze_stage3_frame(
     nozzle_guard_px: int,
     min_component_area_px: int,
 ):
-    image_path = Path(str(frame_row["image_abs_path"]))
-    gray = _load_gray_image(image_path)
+    gray = _coerce_gray_image(gray)
     tracked_x_px = tracked_row.get("tracked_nozzle_x_px")
     tracked_y_px = tracked_row.get("tracked_nozzle_y_px")
     roi = _dynamic_roi_bounds(
@@ -1269,7 +1282,7 @@ def _analyze_stage3_frame(
         failure_reason=failure_reason,
     )
     return {
-        "image_path": str(image_path),
+        "gray": gray,
         "roi": roi,
         "corridor": corridor,
         "raw_mask": raw_mask,
@@ -1277,7 +1290,38 @@ def _analyze_stage3_frame(
         "component_rows": component_rows,
         "edge_rows": edge_rows,
         "accepted_components": accepted_components,
+        "tracked_row": tracked_row,
     }
+
+
+def _analyze_stage3_frame(
+    run_id: str,
+    frame_row: dict,
+    tracked_row: dict,
+    *,
+    roi_width_frac: float,
+    roi_top_frac: float,
+    roi_bottom_frac: float,
+    corridor_width_frac: float,
+    nozzle_guard_px: int,
+    min_component_area_px: int,
+):
+    image_path = Path(str(frame_row["image_abs_path"]))
+    gray = _load_gray_image(image_path)
+    analyzed = _analyze_stage3_gray(
+        run_id,
+        frame_row,
+        tracked_row,
+        gray,
+        roi_width_frac=roi_width_frac,
+        roi_top_frac=roi_top_frac,
+        roi_bottom_frac=roi_bottom_frac,
+        corridor_width_frac=corridor_width_frac,
+        nozzle_guard_px=nozzle_guard_px,
+        min_component_area_px=min_component_area_px,
+    )
+    analyzed["image_path"] = str(image_path)
+    return analyzed
 
 
 def _build_stage3_run(

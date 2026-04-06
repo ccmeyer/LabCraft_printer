@@ -1589,6 +1589,9 @@ class Controller(QObject):
     def start_droplet_timecourse_process(self):
         self.model.calibration_manager.start_droplet_timecourse_process()
 
+    def start_online_stream_calibration(self):
+        self.model.calibration_manager.start_online_stream_calibration()
+
     def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes=""):
         return self.model.calibration_manager.start_stream_gravimetric_capture(
             starting_mass_mg,

@@ -12,7 +12,7 @@ def _manager_stub():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._run_idx = 0
     mgr._run_id = "run-1"
-    mgr.data = {"runs": [{"steps": {"trajectory": []}}]}
+    mgr.data = {"runs": [{"steps": {"trajectory": [], "online_stream_calibration": []}}]}
     mgr.model = SimpleNamespace(
         experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "unused")
     )
@@ -51,3 +51,17 @@ def test_data_update_stores_trajectory_under_canonical_phase_key():
     assert len(steps["trajectory"]) == 1
     assert steps["trajectory"][0]["phase"] == "trajectory"
     assert steps.get("trajectory_calibration", []) == []
+
+
+def test_data_update_stores_online_stream_under_canonical_phase_key():
+    mgr = _manager_stub()
+    mgr.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+
+    CalibrationManager.onCalibrationDataUpdated(
+        mgr,
+        {"measurements": [], "result": {"ok": 1}},
+    )
+
+    steps = mgr.data["runs"][0]["steps"]
+    assert len(steps["online_stream_calibration"]) == 1
+    assert steps["online_stream_calibration"][0]["phase"] == "online_stream_calibration"
