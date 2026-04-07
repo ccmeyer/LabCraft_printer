@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_tail as mod
 
 
@@ -16,8 +17,16 @@ def _flow_fit_result(**overrides):
     return result
 
 
-def _tail_frame_row(*, delay_us: int, delay_from_emergence_us: int, status: str, width_px=None, warnings=None):
-    return {
+def _tail_frame_row(
+    *,
+    delay_us: int,
+    delay_from_emergence_us: int,
+    status: str,
+    width_px=None,
+    warnings=None,
+    **extra,
+):
+    row = {
         "phase": "tail_coarse",
         "status": status,
         "delay_us": int(delay_us),
@@ -28,6 +37,8 @@ def _tail_frame_row(*, delay_us: int, delay_from_emergence_us: int, status: str,
         "warnings": list(warnings or []),
         "attached_width_px": width_px,
     }
+    row.update(dict(extra or {}))
+    return row
 
 
 def test_plan_online_stream_tail_phase_uses_exact_prior_start_minus_lead():
@@ -83,7 +94,30 @@ def test_plan_online_stream_tail_phase_allows_warning_quality_flow_fit():
     )
 
     assert plan["run_tail"] is True
-    assert plan["planned_coarse_delay_count"] == 5
+    assert plan["planned_coarse_delay_count"] == 3
+
+
+def test_plan_online_stream_tail_phase_reserves_full_refine_bracket_budget():
+    capture_budget = online_cal_mod.consume_online_stream_budget(
+        online_cal_mod.new_online_stream_budget(),
+        phase="flow_phase",
+        count=15,
+    )
+
+    plan = mod.plan_online_stream_tail_phase(
+        flow_fit_result=_flow_fit_result(),
+        priors=None,
+        emergence_time_us=1000,
+        capture_budget=capture_budget,
+    )
+
+    assert plan["reserved_refine_delay_count"] == 3
+    assert plan["reserved_refine_capture_count"] == 6
+    assert plan["planned_coarse_delay_count"] == 7
+    assert (
+        int(plan["planned_coarse_delay_count"]) * int(plan["coarse_replicates"])
+        + int(plan["reserved_refine_capture_count"])
+    ) <= int(capture_budget["captures_remaining_hard"])
 
 
 def test_summarize_online_stream_tail_delay_marks_coarse_and_refine_triggers():
@@ -111,6 +145,37 @@ def test_summarize_online_stream_tail_delay_marks_coarse_and_refine_triggers():
     assert summary["triggered_refine"] is True
 
 
+def test_summarize_online_stream_tail_delay_triggers_on_morphology_without_width_collapse():
+    summary = mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=7200,
+                delay_from_emergence_us=4000,
+                status="accepted",
+                width_px=73.0,
+                warnings=["detached_near_bottom_warning"],
+                detached_near_bottom_warning=True,
+            ),
+            _tail_frame_row(
+                delay_us=7200,
+                delay_from_emergence_us=4000,
+                status="accepted",
+                width_px=72.0,
+                warnings=["detached_near_bottom_warning"],
+                detached_near_bottom_warning=True,
+            ),
+        ],
+        baseline_width_px=74.0,
+    )
+
+    assert summary["width_ratio_to_baseline"] > 0.95
+    assert summary["morphology_triggered_coarse"] is True
+    assert summary["morphology_triggered_refine"] is True
+    assert summary["triggered_coarse"] is True
+    assert summary["triggered_refine"] is True
+    assert summary["trigger_reason"] == "coarse_morphology_trigger"
+
+
 def test_build_online_stream_tail_refine_plan_excludes_coarse_endpoints():
     plan = mod.build_online_stream_tail_refine_plan(
         last_coarse_nontrigger_delay_us=7000,
@@ -134,6 +199,37 @@ def test_decide_online_stream_tail_next_action_switches_to_refine_on_coarse_trig
 
     assert decision["action"] == "switch_to_refine"
     assert decision["trigger_reason"] == "coarse_width_frac_le_0.90"
+
+
+def test_decide_online_stream_tail_next_action_uses_synthetic_left_bracket_when_needed():
+    decision = mod.decide_online_stream_tail_next_action(
+        mode="coarse",
+        delay_summary={
+            "delay_us": 7200,
+            "delay_accepted": True,
+            "triggered_coarse": True,
+            "width_ratio_to_baseline": 0.89,
+            "morphology_triggered_coarse": False,
+        },
+        capture_budget={"exhausted": False},
+        consecutive_failed_delays=0,
+        attempted_delay_count=3,
+        planned_delay_count=5,
+        has_last_nontrigger=False,
+        current_delay_us=7200,
+        coarse_step_us=100,
+        coarse_start_delay_us=7000,
+    )
+
+    assert decision["action"] == "switch_to_refine"
+    assert decision["synthetic_left_bracket_used"] is True
+    assert decision["synthetic_last_nontrigger_delay_us"] == 7100
+    assert decision["trigger_reason"] == "coarse_width_frac_le_0.90"
+    assert mod.build_online_stream_tail_refine_plan(
+        last_coarse_nontrigger_delay_us=decision["synthetic_last_nontrigger_delay_us"],
+        first_coarse_trigger_delay_us=7200,
+        refine_step_us=50,
+    ) == [7150]
 
 
 def test_resolve_online_stream_tail_result_prefers_earliest_refine_qualifying_delay():

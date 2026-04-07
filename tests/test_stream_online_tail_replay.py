@@ -233,11 +233,16 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
         phase="flow_phase",
         count=15,
     )
+    sparse_policy = {
+        "coarse_replicates": 1,
+        "refine_replicates": 1,
+    }
     tail_plan = online_tail_mod.plan_online_stream_tail_phase(
         flow_fit_result=flow_fit_result,
         priors=None,
         emergence_time_us=0,
         capture_budget=capture_budget,
+        policy=sparse_policy,
     )
     if not tail_plan["run_tail"]:
         return online_tail_mod.resolve_online_stream_tail_result(

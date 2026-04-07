@@ -5507,6 +5507,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_last_nontrigger_delay_us = None
         self._tail_trigger_delay_us = None
         self._tail_trigger_reason = None
+        self._tail_synthetic_left_bracket_used = False
         self._tail_phase_status = "not_run"
         self._tail_termination_reason = None
         self._tail_start_delay_from_emergence_us = None
@@ -6552,6 +6553,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "trigger_delay_us": self._tail_trigger_delay_us,
                 "last_nontrigger_delay_us": self._tail_last_nontrigger_delay_us,
                 "trigger_reason": self._tail_trigger_reason,
+                "synthetic_left_bracket_used": bool(self._tail_synthetic_left_bracket_used),
                 "warnings": list(self._tail_fit_warnings),
             },
         )
@@ -6594,6 +6596,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_last_nontrigger_delay_us = None
         self._tail_trigger_delay_us = None
         self._tail_trigger_reason = None
+        self._tail_synthetic_left_bracket_used = False
         self._tail_phase_status = "not_run"
         self._tail_termination_reason = None
         self._tail_start_delay_from_emergence_us = None
@@ -6886,7 +6889,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 if bool(delay_summary.get("triggered_coarse")):
                     if self._tail_trigger_delay_us is None:
                         self._tail_trigger_delay_us = delay_summary.get("delay_us")
-                        self._tail_trigger_reason = "coarse_width_frac_le_0.90"
+                        if delay_summary.get("trigger_reason"):
+                            self._tail_trigger_reason = str(delay_summary.get("trigger_reason"))
                 else:
                     self._tail_last_nontrigger_delay_us = delay_summary.get("delay_us")
             else:
@@ -6900,6 +6904,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 attempted_delay_count=int(len(self._tail_coarse_delay_summaries)),
                 planned_delay_count=int(len(self._tail_delay_sequence)),
                 has_last_nontrigger=bool(self._tail_last_nontrigger_delay_us is not None),
+                current_delay_us=delay_summary.get("delay_us"),
+                coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
+                coarse_start_delay_us=int(self._tail_plan.get("coarse_start_delay_us") or 0),
             )
             action = str(decision.get("action") or "")
             if action == "continue":
@@ -6911,10 +6918,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 self.nextTailDelay.emit()
                 return
             if action == "switch_to_refine":
+                if bool(decision.get("synthetic_left_bracket_used")):
+                    self._tail_synthetic_left_bracket_used = True
+                    if decision.get("synthetic_last_nontrigger_delay_us") is not None:
+                        self._tail_last_nontrigger_delay_us = decision.get(
+                            "synthetic_last_nontrigger_delay_us"
+                        )
+                    self._tail_plan["synthetic_left_bracket_used"] = True
+                    self._tail_plan["synthetic_left_bracket_delay_us"] = self._tail_last_nontrigger_delay_us
                 refine_delays = online_tail_mod.build_online_stream_tail_refine_plan(
                     last_coarse_nontrigger_delay_us=self._tail_last_nontrigger_delay_us,
                     first_coarse_trigger_delay_us=self._tail_trigger_delay_us,
                     refine_step_us=int(self._tail_plan.get("refine_step_us") or 50),
+                    coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
+                    planned_coarse_start_delay_us=int(self._tail_plan.get("coarse_start_delay_us") or 0),
                 )
                 if not refine_delays:
                     self._tail_phase_status = "captured"
@@ -6951,6 +6968,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             capture_budget=self.capture_budget,
             attempted_delay_count=int(len(self._tail_refine_delay_summaries)),
             planned_delay_count=int(len(self._tail_delay_sequence)),
+            coarse_trigger_reason=self._tail_trigger_reason,
         )
         action = str(decision.get("action") or "")
         if action == "continue":

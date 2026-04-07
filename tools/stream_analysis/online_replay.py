@@ -109,10 +109,40 @@ def _group_delay_summaries(frame_rows: list[dict], *, phase: str, baseline_width
     return summaries
 
 
-def _replay_tail_trigger_bracket(coarse_summaries: list[dict], refine_summaries: list[dict]) -> dict:
+def _tail_trigger_reason_from_summary(summary: dict | None, *, mode: str) -> str | None:
+    record = dict(summary or {})
+    if str(mode or "coarse") == "coarse":
+        if bool(record.get("morphology_triggered_coarse")) and not (
+            bool(record.get("delay_accepted"))
+            and _to_float(record.get("width_ratio_to_baseline")) is not None
+            and float(_to_float(record.get("width_ratio_to_baseline"))) <= 0.90
+        ):
+            return "coarse_morphology_trigger"
+        if bool(record.get("triggered_coarse")):
+            return "coarse_width_frac_le_0.90"
+        return None
+    if bool(record.get("morphology_triggered_refine")) and not (
+        bool(record.get("delay_accepted"))
+        and _to_float(record.get("width_ratio_to_baseline")) is not None
+        and float(_to_float(record.get("width_ratio_to_baseline"))) <= 0.95
+    ):
+        return "refine_morphology_trigger"
+    if bool(record.get("triggered_refine")):
+        return "refine_width_frac_le_0.95"
+    return None
+
+
+def _replay_tail_trigger_bracket(
+    coarse_summaries: list[dict],
+    refine_summaries: list[dict],
+    *,
+    tail_plan: dict | None = None,
+) -> dict:
     last_nontrigger_delay_us = None
     trigger_delay_us = None
     trigger_reason = None
+    synthetic_left_bracket_used = False
+    plan = dict(tail_plan or {})
     for summary in sorted(
         [dict(row or {}) for row in list(coarse_summaries or [])],
         key=lambda item: (_to_int(item.get("delay_from_emergence_us")) or 0),
@@ -122,21 +152,51 @@ def _replay_tail_trigger_bracket(coarse_summaries: list[dict], refine_summaries:
         if bool(summary.get("triggered_coarse")):
             if trigger_delay_us is None:
                 trigger_delay_us = _to_int(summary.get("delay_us"))
-                trigger_reason = "coarse_width_frac_le_0.90"
+                trigger_reason = _tail_trigger_reason_from_summary(summary, mode="coarse")
         else:
             last_nontrigger_delay_us = _to_int(summary.get("delay_us"))
 
-    refine_trigger_found = any(
-        bool(dict(row or {}).get("delay_accepted")) and bool(dict(row or {}).get("triggered_refine"))
-        for row in list(refine_summaries or [])
-    )
-    if refine_trigger_found:
+    if trigger_delay_us is not None and last_nontrigger_delay_us is None:
+        coarse_step_us = _to_int(plan.get("coarse_step_us"))
+        coarse_start_delay_us = _to_int(plan.get("coarse_start_delay_us"))
+        synthetic_delay_us = None
+        if coarse_step_us is not None:
+            synthetic_delay_us = int(trigger_delay_us - int(coarse_step_us))
+        if (
+            synthetic_delay_us is not None
+            and coarse_start_delay_us is not None
+            and int(synthetic_delay_us) >= int(coarse_start_delay_us)
+        ):
+            refine_delays = online_tail_mod.build_online_stream_tail_refine_plan(
+                last_coarse_nontrigger_delay_us=None,
+                first_coarse_trigger_delay_us=trigger_delay_us,
+                refine_step_us=int(plan.get("refine_step_us") or 50),
+                coarse_step_us=int(coarse_step_us),
+                planned_coarse_start_delay_us=int(coarse_start_delay_us),
+            )
+            if refine_delays:
+                last_nontrigger_delay_us = int(synthetic_delay_us)
+                synthetic_left_bracket_used = True
+
+    first_refine_trigger_summary = None
+    for summary in sorted(
+        [dict(row or {}) for row in list(refine_summaries or [])],
+        key=lambda item: (_to_int(item.get("delay_from_emergence_us")) or 0),
+    ):
+        if bool(summary.get("delay_accepted")) and bool(summary.get("triggered_refine")):
+            first_refine_trigger_summary = dict(summary)
+            break
+    if first_refine_trigger_summary is not None:
         return {
             "tail_phase_status": "captured",
             "termination_reason": "refine_trigger",
             "trigger_delay_us": trigger_delay_us,
             "last_nontrigger_delay_us": last_nontrigger_delay_us,
-            "trigger_reason": "refine_width_frac_le_0.95",
+            "trigger_reason": _tail_trigger_reason_from_summary(
+                first_refine_trigger_summary,
+                mode="refine",
+            ),
+            "synthetic_left_bracket_used": bool(synthetic_left_bracket_used),
             "warnings": [],
         }
     if trigger_delay_us is not None:
@@ -146,6 +206,7 @@ def _replay_tail_trigger_bracket(coarse_summaries: list[dict], refine_summaries:
             "trigger_delay_us": trigger_delay_us,
             "last_nontrigger_delay_us": last_nontrigger_delay_us,
             "trigger_reason": trigger_reason or "coarse_width_frac_le_0.90",
+            "synthetic_left_bracket_used": bool(synthetic_left_bracket_used),
             "warnings": [],
         }
     return {
@@ -154,6 +215,7 @@ def _replay_tail_trigger_bracket(coarse_summaries: list[dict], refine_summaries:
         "trigger_delay_us": None,
         "last_nontrigger_delay_us": last_nontrigger_delay_us,
         "trigger_reason": None,
+        "synthetic_left_bracket_used": False,
         "warnings": ["unresolved_no_trigger"],
     }
 
@@ -204,6 +266,34 @@ def _compare_optional_stored_field(stored_obj: dict, key: str, replayed, *, tol=
     return comparison
 
 
+def _compare_warning_sets(stored, replayed):
+    left = sorted({str(item or "").strip() for item in list(stored or []) if str(item or "").strip()})
+    right = sorted({str(item or "").strip() for item in list(replayed or []) if str(item or "").strip()})
+    return {
+        "matches": left == right,
+        "stored": left,
+        "replayed": right,
+        "abs_diff": None,
+    }
+
+
+def _compare_optional_warning_set(stored_obj: dict, key: str, replayed):
+    record = dict(stored_obj or {})
+    if str(key) not in record:
+        return {
+            "matches": True,
+            "stored": None,
+            "replayed": sorted(
+                {str(item or "").strip() for item in list(replayed or []) if str(item or "").strip()}
+            ),
+            "abs_diff": None,
+            "skipped": True,
+        }
+    comparison = _compare_warning_sets(record.get(str(key)), replayed)
+    comparison["skipped"] = False
+    return comparison
+
+
 def replay_online_stream_run(run_dir: str | Path) -> dict:
     run_path = Path(run_dir).resolve()
     plan_snapshot = _load_json(run_path / "plan_snapshot.json")
@@ -233,7 +323,11 @@ def replay_online_stream_run(run_dir: str | Path) -> dict:
         baseline_width_px=baseline_width_px,
     )
     stored_tail_plan = dict(tail_fit_artifact.get("tail_plan") or {})
-    trigger_bracket = _replay_tail_trigger_bracket(coarse_summaries, refine_summaries)
+    trigger_bracket = _replay_tail_trigger_bracket(
+        coarse_summaries,
+        refine_summaries,
+        tail_plan=stored_tail_plan,
+    )
     replay_tail_result = online_tail_mod.resolve_online_stream_tail_result(
         flow_fit_result=dict(replay_flow_fit or {}),
         tail_plan=stored_tail_plan,
@@ -244,6 +338,8 @@ def replay_online_stream_run(run_dir: str | Path) -> dict:
 
     stored_flow_fit = dict(flow_fit_artifact.get("fit") or {})
     stored_tail_result = dict(tail_fit_artifact.get("result") or {})
+    stored_tail_phase = dict(stored_tail_result.get("tail_phase") or {})
+    replay_tail_phase = dict(replay_tail_result.get("tail_phase") or {})
     comparison = {
         "flow_rate_nl_per_us": _compare_values(
             stored_flow_fit.get("flow_rate_nl_per_us"),
@@ -298,12 +394,42 @@ def replay_online_stream_run(run_dir: str | Path) -> dict:
             replay_flow_fit.get("flow_fit_dropped_outlier_delay_from_emergence_us"),
         ),
         "tail_start_delay_from_emergence_us": _compare_values(
-            (stored_tail_result.get("tail_phase") or {}).get("tail_start_delay_from_emergence_us"),
-            (replay_tail_result.get("tail_phase") or {}).get("tail_start_delay_from_emergence_us"),
+            stored_tail_phase.get("tail_start_delay_from_emergence_us"),
+            replay_tail_phase.get("tail_start_delay_from_emergence_us"),
         ),
         "tail_phase_status": _compare_values(
-            (stored_tail_result.get("tail_phase") or {}).get("status"),
-            (replay_tail_result.get("tail_phase") or {}).get("status"),
+            stored_tail_phase.get("status"),
+            replay_tail_phase.get("status"),
+        ),
+        "predicted_stream_duration_us": _compare_optional_stored_field(
+            stored_tail_result,
+            "predicted_stream_duration_us",
+            replay_tail_result.get("predicted_stream_duration_us"),
+        ),
+        "tail_termination_reason": _compare_optional_stored_field(
+            stored_tail_phase,
+            "termination_reason",
+            replay_tail_phase.get("termination_reason"),
+        ),
+        "tail_trigger_delay_from_emergence_us": _compare_optional_stored_field(
+            stored_tail_phase,
+            "trigger_delay_from_emergence_us",
+            replay_tail_phase.get("trigger_delay_from_emergence_us"),
+        ),
+        "tail_trigger_reason": _compare_optional_stored_field(
+            stored_tail_phase,
+            "trigger_reason",
+            replay_tail_phase.get("trigger_reason"),
+        ),
+        "tail_last_nontrigger_delay_from_emergence_us": _compare_optional_stored_field(
+            stored_tail_phase,
+            "last_nontrigger_delay_from_emergence_us",
+            replay_tail_phase.get("last_nontrigger_delay_from_emergence_us"),
+        ),
+        "tail_warnings": _compare_optional_warning_set(
+            stored_tail_phase,
+            "warnings",
+            replay_tail_phase.get("warnings"),
         ),
         "predicted_volume_nl": _compare_values(
             stored_tail_result.get("predicted_volume_nl"),

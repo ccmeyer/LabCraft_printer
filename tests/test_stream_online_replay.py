@@ -62,7 +62,8 @@ def _build_consistent_run(run_dir: Path):
         "refine_step_us": 50,
         "refine_replicates": 1,
         "planned_coarse_delay_count": 2,
-        "reserved_refine_capture_count": 1,
+        "reserved_refine_delay_count": 3,
+        "reserved_refine_capture_count": 3,
         "plan_source": "exact_prior_minus_lead",
     }
     flow_rows = [
@@ -307,6 +308,51 @@ def test_replay_online_stream_run_reports_mismatch_for_tampered_outlier_status(t
     assert report["comparison"]["flow_fit_outlier_prune_status"]["matches"] is False
 
 
+def test_replay_online_stream_run_reports_mismatch_for_tampered_tail_duration(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    tail_fit_path = run_dir / "tail_fit.json"
+    tail_fit = json.loads(tail_fit_path.read_text(encoding="utf-8"))
+    tail_fit["result"]["predicted_stream_duration_us"] = 1234
+    tail_fit_path.write_text(json.dumps(tail_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["predicted_stream_duration_us"]["matches"] is False
+
+
+def test_replay_online_stream_run_reports_mismatch_for_tampered_tail_trigger_reason(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    tail_fit_path = run_dir / "tail_fit.json"
+    tail_fit = json.loads(tail_fit_path.read_text(encoding="utf-8"))
+    tail_fit["result"]["tail_phase"]["trigger_reason"] = "coarse_morphology_trigger"
+    tail_fit_path.write_text(json.dumps(tail_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["tail_trigger_reason"]["matches"] is False
+
+
+def test_replay_online_stream_run_reports_mismatch_for_tampered_tail_warnings(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    tail_fit_path = run_dir / "tail_fit.json"
+    tail_fit = json.loads(tail_fit_path.read_text(encoding="utf-8"))
+    tail_fit["result"]["tail_phase"]["warnings"] = ["capture_budget_exhausted"]
+    tail_fit_path.write_text(json.dumps(tail_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["tail_warnings"]["matches"] is False
+
+
 def test_replay_online_stream_run_skips_missing_optional_flow_fit_diagnostics(tmp_path):
     run_dir = tmp_path / "run_01"
     _build_consistent_run(run_dir)
@@ -322,6 +368,25 @@ def test_replay_online_stream_run_skips_missing_optional_flow_fit_diagnostics(tm
     assert report["comparison"]["all_match"] is True
     assert report["comparison"]["steady_width_baseline_px"]["skipped"] is True
     assert report["comparison"]["flow_fit_outlier_prune_status"]["skipped"] is True
+
+
+def test_replay_online_stream_run_skips_missing_optional_tail_diagnostics(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    tail_fit_path = run_dir / "tail_fit.json"
+    tail_fit = json.loads(tail_fit_path.read_text(encoding="utf-8"))
+    tail_fit["result"].pop("predicted_stream_duration_us", None)
+    tail_fit["result"].get("tail_phase", {}).pop("trigger_reason", None)
+    tail_fit["result"].get("tail_phase", {}).pop("warnings", None)
+    tail_fit_path.write_text(json.dumps(tail_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is True
+    assert report["comparison"]["predicted_stream_duration_us"]["skipped"] is True
+    assert report["comparison"]["tail_trigger_reason"]["skipped"] is True
+    assert report["comparison"]["tail_warnings"]["skipped"] is True
 
 
 def test_replay_accepted_measurements_include_qc_and_clearance_fields():

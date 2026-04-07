@@ -121,6 +121,63 @@ def _summary_delay_from_emergence(summary: dict | None, delay_us: int | None) ->
     return None
 
 
+def _count_interior_delays(left_delay_us: int | None, right_delay_us: int | None, step_us: int) -> int:
+    left_delay_us = _to_int(left_delay_us)
+    right_delay_us = _to_int(right_delay_us)
+    step_us = max(1, _to_int(step_us, DEFAULT_ONLINE_TAIL_POLICY["refine_step_us"]))
+    if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
+        return 0
+    return int(len(range(int(left_delay_us) + int(step_us), int(right_delay_us), int(step_us))))
+
+
+def _synthetic_left_bracket_delay_us(
+    *,
+    first_coarse_trigger_delay_us: int | None,
+    coarse_step_us: int | None,
+    coarse_start_delay_us: int | None,
+) -> int | None:
+    trigger_delay_us = _to_int(first_coarse_trigger_delay_us)
+    if trigger_delay_us is None:
+        return None
+    step_us = max(1, _to_int(coarse_step_us, DEFAULT_ONLINE_TAIL_POLICY["coarse_step_us"]))
+    candidate_delay_us = int(trigger_delay_us - step_us)
+    coarse_start_delay_us = _to_int(coarse_start_delay_us)
+    if coarse_start_delay_us is not None and int(candidate_delay_us) < int(coarse_start_delay_us):
+        return None
+    return int(candidate_delay_us)
+
+
+def _tail_trigger_reason(summary: dict | None, *, mode: str, policy: dict | None = None) -> str | None:
+    resolved_policy = _resolved_policy(policy)
+    record = dict(summary or {})
+    width_ratio_to_baseline = _to_float_or_none(record.get("width_ratio_to_baseline"))
+    delay_accepted = bool(record.get("delay_accepted"))
+    mode_label = str(mode or "coarse")
+    if mode_label == "coarse":
+        if (
+            delay_accepted
+            and width_ratio_to_baseline is not None
+            and float(width_ratio_to_baseline) <= float(resolved_policy["coarse_trigger_width_frac"])
+        ):
+            return "coarse_width_frac_le_0.90"
+        if delay_accepted and bool(record.get("morphology_triggered_coarse")):
+            return "coarse_morphology_trigger"
+        if bool(record.get("triggered_coarse")):
+            return "coarse_width_frac_le_0.90"
+        return None
+    if (
+        delay_accepted
+        and width_ratio_to_baseline is not None
+        and float(width_ratio_to_baseline) <= float(resolved_policy["refine_trigger_width_frac"])
+    ):
+        return "refine_width_frac_le_0.95"
+    if delay_accepted and bool(record.get("morphology_triggered_refine")):
+        return "refine_morphology_trigger"
+    if bool(record.get("triggered_refine")):
+        return "refine_width_frac_le_0.95"
+    return None
+
+
 def plan_online_stream_tail_phase(
     *,
     flow_fit_result: dict | None,
@@ -132,6 +189,19 @@ def plan_online_stream_tail_phase(
     fit = dict(flow_fit_result or {})
     normalized_priors = online_cal_mod.normalize_online_stream_prior(priors)
     resolved_policy = _resolved_policy(policy)
+    coarse_step_us = _to_int(
+        normalized_priors.get("tail_coarse_step_us"),
+        resolved_policy["coarse_step_us"],
+    )
+    refine_step_us = int(resolved_policy["refine_step_us"])
+    refine_replicates = int(resolved_policy["refine_replicates"])
+    max_trigger_window_steps = max(1, int(resolved_policy["consecutive_failed_tail_delays_stop"]))
+    reserved_refine_delay_count = _count_interior_delays(
+        0,
+        int(coarse_step_us) * int(max_trigger_window_steps),
+        int(refine_step_us),
+    )
+    reserved_refine_capture_count = int(reserved_refine_delay_count * refine_replicates)
     fit_status = str(fit.get("fit_status") or "")
     steady_width_baseline_px = _to_float_or_none(fit.get("steady_width_baseline_px"))
     if steady_width_baseline_px is None or fit_status.startswith("unresolved"):
@@ -140,17 +210,17 @@ def plan_online_stream_tail_phase(
             "skip_reason": "missing_flow_baseline",
             "steady_width_baseline_px": steady_width_baseline_px,
             "coarse_start_delay_us": None,
-            "coarse_step_us": int(resolved_policy["coarse_step_us"]),
+            "coarse_step_us": int(coarse_step_us),
             "coarse_replicates": int(resolved_policy["coarse_replicates"]),
-            "refine_step_us": int(resolved_policy["refine_step_us"]),
-            "refine_replicates": int(resolved_policy["refine_replicates"]),
+            "refine_step_us": int(refine_step_us),
+            "refine_replicates": int(refine_replicates),
             "planned_coarse_delay_count": 0,
-            "reserved_refine_capture_count": int(resolved_policy["refine_replicates"]),
+            "reserved_refine_delay_count": int(reserved_refine_delay_count),
+            "reserved_refine_capture_count": int(reserved_refine_capture_count),
             "plan_source": "skipped_missing_flow_baseline",
         }
 
     remaining_hard = _remaining_hard_budget(capture_budget)
-    reserved_refine_capture_count = int(resolved_policy["refine_replicates"])
     coarse_replicates = int(resolved_policy["coarse_replicates"])
     planned_coarse_delay_count = max(
         0,
@@ -171,11 +241,6 @@ def plan_online_stream_tail_phase(
         )
         plan_source = "exact_prior_minus_lead"
 
-    coarse_step_us = _to_int(
-        normalized_priors.get("tail_coarse_step_us"),
-        resolved_policy["coarse_step_us"],
-    )
-
     return {
         "run_tail": True,
         "skip_reason": None,
@@ -183,9 +248,10 @@ def plan_online_stream_tail_phase(
         "coarse_start_delay_us": int(coarse_start_delay_us),
         "coarse_step_us": int(coarse_step_us),
         "coarse_replicates": int(coarse_replicates),
-        "refine_step_us": int(resolved_policy["refine_step_us"]),
-        "refine_replicates": int(resolved_policy["refine_replicates"]),
+        "refine_step_us": int(refine_step_us),
+        "refine_replicates": int(refine_replicates),
         "planned_coarse_delay_count": int(planned_coarse_delay_count),
+        "reserved_refine_delay_count": int(reserved_refine_delay_count),
         "reserved_refine_capture_count": int(reserved_refine_capture_count),
         "plan_source": str(plan_source),
     }
@@ -213,6 +279,30 @@ def summarize_online_stream_tail_delay(
         for row in rows
         for warning in list(row.get("warnings") or [])
     )
+    attached_bottom_guard_hit = any(
+        str(row.get("status") or "") == "rejected_bottom_guard"
+        or bool(row.get("attached_bottom_guard_hit"))
+        or ("attached_bottom_guard_hit" in list(row.get("warnings") or []))
+        for row in rows
+    )
+    detached_near_bottom_warning = any(
+        bool(row.get("detached_near_bottom_warning"))
+        or ("detached_near_bottom_warning" in list(row.get("warnings") or []))
+        for row in rows
+    )
+    morphology_triggered = bool(attached_bottom_guard_hit or detached_near_bottom_warning)
+    coarse_width_triggered = bool(
+        accepted_replicates > 0
+        and width_ratio_to_baseline is not None
+        and float(width_ratio_to_baseline) <= float(resolved_policy["coarse_trigger_width_frac"])
+    )
+    refine_width_triggered = bool(
+        accepted_replicates > 0
+        and width_ratio_to_baseline is not None
+        and float(width_ratio_to_baseline) <= float(resolved_policy["refine_trigger_width_frac"])
+    )
+    morphology_triggered_coarse = bool(accepted_replicates > 0 and morphology_triggered)
+    morphology_triggered_refine = bool(accepted_replicates > 0 and morphology_triggered)
     delay_us = None
     delay_from_emergence_us = None
     if rows:
@@ -227,15 +317,24 @@ def summarize_online_stream_tail_delay(
         "rejected_replicates": int(rejected_replicates),
         "median_width_px": median_width_px,
         "width_ratio_to_baseline": width_ratio_to_baseline,
-        "triggered_coarse": bool(
-            accepted_replicates > 0
-            and width_ratio_to_baseline is not None
-            and float(width_ratio_to_baseline) <= float(resolved_policy["coarse_trigger_width_frac"])
-        ),
-        "triggered_refine": bool(
-            accepted_replicates > 0
-            and width_ratio_to_baseline is not None
-            and float(width_ratio_to_baseline) <= float(resolved_policy["refine_trigger_width_frac"])
+        "triggered_coarse": bool(coarse_width_triggered or morphology_triggered_coarse),
+        "triggered_refine": bool(refine_width_triggered or morphology_triggered_refine),
+        "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
+        "detached_near_bottom_warning": bool(detached_near_bottom_warning),
+        "morphology_triggered_coarse": bool(morphology_triggered_coarse),
+        "morphology_triggered_refine": bool(morphology_triggered_refine),
+        "trigger_reason": (
+            "coarse_width_frac_le_0.90"
+            if coarse_width_triggered
+            else (
+                "coarse_morphology_trigger"
+                if morphology_triggered_coarse
+                else (
+                    "refine_width_frac_le_0.95"
+                    if refine_width_triggered
+                    else ("refine_morphology_trigger" if morphology_triggered_refine else None)
+                )
+            )
         ),
         "warnings": warnings,
         "delay_accepted": bool(accepted_replicates > 0),
@@ -247,10 +346,18 @@ def build_online_stream_tail_refine_plan(
     last_coarse_nontrigger_delay_us: int | None,
     first_coarse_trigger_delay_us: int | None,
     refine_step_us: int,
+    coarse_step_us: int | None = None,
+    planned_coarse_start_delay_us: int | None = None,
 ) -> list[int]:
     left_delay_us = _to_int(last_coarse_nontrigger_delay_us)
     right_delay_us = _to_int(first_coarse_trigger_delay_us)
     step_us = max(1, _to_int(refine_step_us, DEFAULT_ONLINE_TAIL_POLICY["refine_step_us"]))
+    if left_delay_us is None:
+        left_delay_us = _synthetic_left_bracket_delay_us(
+            first_coarse_trigger_delay_us=right_delay_us,
+            coarse_step_us=coarse_step_us,
+            coarse_start_delay_us=planned_coarse_start_delay_us,
+        )
     if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
         return []
     return [
@@ -268,6 +375,10 @@ def decide_online_stream_tail_next_action(
     attempted_delay_count: int = 0,
     planned_delay_count: int = 0,
     has_last_nontrigger: bool = False,
+    current_delay_us: int | None = None,
+    coarse_step_us: int | None = None,
+    coarse_start_delay_us: int | None = None,
+    coarse_trigger_reason: str | None = None,
     policy: dict | None = None,
 ) -> dict:
     summary = dict(delay_summary or {})
@@ -277,18 +388,34 @@ def decide_online_stream_tail_next_action(
     mode_label = str(mode or "coarse")
     if mode_label == "coarse":
         if bool(summary.get("delay_accepted")) and bool(summary.get("triggered_coarse")):
+            trigger_reason = _tail_trigger_reason(summary, mode="coarse", policy=resolved_policy)
             if bool(has_last_nontrigger):
                 return {
                     "action": "switch_to_refine",
                     "tail_phase_status": None,
                     "termination_reason": None,
-                    "trigger_reason": "coarse_width_frac_le_0.90",
+                    "trigger_reason": trigger_reason,
+                }
+            synthetic_last_nontrigger_delay_us = _synthetic_left_bracket_delay_us(
+                first_coarse_trigger_delay_us=_to_int(summary.get("delay_us"), _to_int(current_delay_us)),
+                coarse_step_us=coarse_step_us,
+                coarse_start_delay_us=coarse_start_delay_us,
+            )
+            if synthetic_last_nontrigger_delay_us is not None:
+                return {
+                    "action": "switch_to_refine",
+                    "tail_phase_status": None,
+                    "termination_reason": None,
+                    "trigger_reason": trigger_reason,
+                    "synthetic_left_bracket_used": True,
+                    "synthetic_last_nontrigger_delay_us": int(synthetic_last_nontrigger_delay_us),
                 }
             return {
-                "action": "finish_captured_immediate",
+                "action": "finish_using_coarse_trigger",
                 "tail_phase_status": "captured",
-                    "termination_reason": "coarse_trigger_immediate",
-                    "trigger_reason": "coarse_width_frac_le_0.90",
+                "termination_reason": "coarse_trigger_fallback",
+                "trigger_reason": trigger_reason,
+                "synthetic_left_bracket_used": False,
                 }
         if int(consecutive_failed_delays) >= int(resolved_policy["consecutive_failed_tail_delays_stop"]):
             return {
@@ -323,14 +450,14 @@ def decide_online_stream_tail_next_action(
             "action": "finish_captured",
             "tail_phase_status": "captured",
             "termination_reason": "refine_trigger",
-            "trigger_reason": "refine_width_frac_le_0.95",
+            "trigger_reason": _tail_trigger_reason(summary, mode="refine", policy=resolved_policy),
         }
     if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
         return {
             "action": "finish_using_coarse_trigger",
             "tail_phase_status": "captured",
             "termination_reason": "coarse_trigger_fallback",
-            "trigger_reason": "coarse_width_frac_le_0.90",
+            "trigger_reason": coarse_trigger_reason,
         }
     if bool(budget.get("exhausted")):
         return {
@@ -364,6 +491,7 @@ def resolve_online_stream_tail_result(
     tail_phase_status = str(bracket.get("tail_phase_status") or bracket.get("status") or "unresolved_no_trigger")
     termination_reason = str(bracket.get("termination_reason") or "")
     trigger_reason = str(bracket.get("trigger_reason") or "")
+    synthetic_left_bracket_used = bool(bracket.get("synthetic_left_bracket_used"))
 
     trigger_delay_us = _to_int(bracket.get("trigger_delay_us"))
     last_nontrigger_delay_us = _to_int(bracket.get("last_nontrigger_delay_us"))
@@ -374,6 +502,20 @@ def resolve_online_stream_tail_result(
         last_nontrigger_summary,
         last_nontrigger_delay_us,
     )
+    if (
+        synthetic_left_bracket_used
+        and last_nontrigger_delay_from_emergence_us is None
+        and trigger_summary
+        and trigger_delay_us is not None
+        and last_nontrigger_delay_us is not None
+    ):
+        trigger_delay_from_emergence_us = _summary_delay_from_emergence(trigger_summary, trigger_delay_us)
+        if trigger_delay_from_emergence_us is not None:
+            last_nontrigger_delay_from_emergence_us = int(
+                int(trigger_delay_from_emergence_us)
+                - int(trigger_delay_us)
+                + int(last_nontrigger_delay_us)
+            )
 
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
@@ -452,6 +594,7 @@ def resolve_online_stream_tail_result(
         "trigger_delay_from_emergence_us": trigger_delay_from_emergence_us,
         "trigger_reason": str(trigger_reason),
         "last_nontrigger_delay_from_emergence_us": last_nontrigger_delay_from_emergence_us,
+        "synthetic_left_bracket_used": bool(synthetic_left_bracket_used),
         "tail_start_delay_from_emergence_us": (
             None
             if final_tail_start_delay_from_emergence_us is None

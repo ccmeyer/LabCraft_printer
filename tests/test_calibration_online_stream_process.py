@@ -167,6 +167,7 @@ def _flow_proc(tmp_path: Path):
     proc._tail_last_nontrigger_delay_us = None
     proc._tail_trigger_delay_us = None
     proc._tail_trigger_reason = None
+    proc._tail_synthetic_left_bracket_used = False
     proc._tail_phase_status = "not_run"
     proc._tail_termination_reason = None
     proc._tail_start_delay_from_emergence_us = None
@@ -1121,6 +1122,31 @@ def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_pat
     assert snapshot["tail_plan"] == proc._tail_plan
 
 
+def test_online_stream_plan_tail_phase_reserves_refine_budget_for_late_trigger(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
+        calibration_model.online_cal_mod.new_online_stream_budget(),
+        phase="flow_phase",
+        count=15,
+    )
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+
+    proc.onPlanTailPhase()
+
+    assert proc._tail_plan["reserved_refine_capture_count"] == 6
+    assert proc._tail_plan["reserved_refine_delay_count"] == 3
+    assert len(proc._tail_delay_sequence) == 7
+    assert (
+        len(proc._tail_delay_sequence) * int(proc._tail_plan["coarse_replicates"])
+        + int(proc._tail_plan["reserved_refine_capture_count"])
+    ) <= int(proc.capture_budget["captures_remaining_hard"])
+
+
 def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_would_reject(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc._frames_path = str(tmp_path / "frames.jsonl")
@@ -1174,6 +1200,8 @@ def test_online_stream_advance_tail_phase_switches_to_refine_mode(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._tail_plan = {
         "steady_width_baseline_px": 74.0,
+        "coarse_start_delay_us": 7000,
+        "coarse_step_us": 100,
         "refine_step_us": 50,
         "coarse_replicates": 2,
         "refine_replicates": 2,
@@ -1203,6 +1231,87 @@ def test_online_stream_advance_tail_phase_switches_to_refine_mode(tmp_path):
     assert proc.nextTailDelay.calls
     assert proc._tail_mode == "refine"
     assert proc._tail_delay_sequence == [7050, 7100, 7150]
+
+
+def test_online_stream_advance_tail_phase_switches_to_refine_on_morphology_trigger(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "coarse_start_delay_us": 7000,
+        "coarse_step_us": 100,
+        "refine_step_us": 50,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_mode = "coarse"
+    proc._tail_last_nontrigger_delay_us = 7000
+    proc._tail_delay_sequence = [7000, 7200]
+    proc._tail_delay_index = 1
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7200
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_coarse",
+            status="accepted",
+            delay_us=7200,
+            delay_from_emergence_us=4000,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=["detached_near_bottom_warning"],
+            attached_width_px=72.5,
+            detached_near_bottom_warning=True,
+            attached_bottom_guard_hit=False,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "refine"
+    assert proc._tail_trigger_reason == "coarse_morphology_trigger"
+    assert proc._tail_delay_sequence == [7050, 7100, 7150]
+
+
+def test_online_stream_advance_tail_phase_uses_synthetic_bracket_for_trigger_without_nontrigger(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "coarse_start_delay_us": 7000,
+        "coarse_step_us": 100,
+        "refine_step_us": 50,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_mode = "coarse"
+    proc._tail_delay_sequence = [7000, 7100, 7200]
+    proc._tail_delay_index = 2
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7200
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_coarse",
+            status="accepted",
+            delay_us=7200,
+            delay_from_emergence_us=4000,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=66.0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "refine"
+    assert proc._tail_synthetic_left_bracket_used is True
+    assert proc._tail_last_nontrigger_delay_us == 7100
+    assert proc._tail_plan["synthetic_left_bracket_used"] is True
+    assert proc._tail_delay_sequence == [7150]
 
 
 def test_online_stream_advance_tail_phase_stops_when_no_coarse_trigger_occurs(tmp_path):
@@ -1380,6 +1489,82 @@ def test_online_stream_successful_refinement_writes_tail_fit_artifact(tmp_path):
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "captured"
     assert artifact["result"]["predicted_stream_duration_us"] == 3950
+
+
+def test_online_stream_refine_morphology_trigger_resolves_captured_tail(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "coarse_start_delay_us": 7000,
+        "coarse_step_us": 100,
+        "refine_step_us": 50,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_mode = "refine"
+    proc._tail_delay_sequence = [7150]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7150
+    proc._tail_last_nontrigger_delay_us = 7000
+    proc._tail_trigger_delay_us = 7200
+    proc._tail_trigger_reason = "coarse_width_frac_le_0.90"
+    proc._tail_coarse_delay_summaries = [
+        {
+            "delay_us": 7000,
+            "delay_from_emergence_us": 3800,
+            "attempted_replicates": 2,
+            "accepted_replicates": 2,
+            "rejected_replicates": 0,
+            "median_width_px": 72.0,
+            "width_ratio_to_baseline": 72.0 / 74.0,
+            "triggered_coarse": False,
+            "triggered_refine": False,
+            "warnings": [],
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 7200,
+            "delay_from_emergence_us": 4000,
+            "attempted_replicates": 2,
+            "accepted_replicates": 2,
+            "rejected_replicates": 0,
+            "median_width_px": 66.0,
+            "width_ratio_to_baseline": 66.0 / 74.0,
+            "triggered_coarse": True,
+            "triggered_refine": True,
+            "warnings": [],
+            "delay_accepted": True,
+        },
+    ]
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_refine",
+            status="accepted",
+            delay_us=7150,
+            delay_from_emergence_us=3950,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=["attached_bottom_guard_hit"],
+            attached_width_px=72.5,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=True,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "captured"
+    assert proc._tail_trigger_reason == "refine_morphology_trigger"
+    assert proc._tail_start_delay_from_emergence_us == 3950
 
 
 def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width():
