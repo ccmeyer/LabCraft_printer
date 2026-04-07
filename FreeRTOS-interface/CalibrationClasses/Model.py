@@ -4652,7 +4652,14 @@ class CalibrationManager(QObject):
         return []
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
-        if str((self._stream_capture_state or {}).get("status") or "idle") in {"awaiting_mass", "error", "stopped"}:
+        stream_capture_open = False
+        has_open_stream_capture = getattr(self, "has_open_stream_gravimetric_capture", None)
+        if callable(has_open_stream_capture):
+            try:
+                stream_capture_open = bool(has_open_stream_capture())
+            except Exception:
+                stream_capture_open = False
+        if stream_capture_open:
             msg = "Save or discard the current stream gravimetric capture session before starting another calibration."
             self.calibrationStageChanged.emit(msg, "red")
             self.calibrationError.emit(msg)
@@ -5392,6 +5399,18 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             missing.append("Droplet camera")
         try:
+            cam = cm.model.droplet_camera_model
+            flash_fault_getter = getattr(cam, "get_flash_fault_latched", None)
+            flash_fault_latched = (
+                bool(flash_fault_getter())
+                if callable(flash_fault_getter)
+                else bool(getattr(cam, "flash_fault_latched", False))
+            )
+            if flash_fault_latched:
+                missing.append("Flash safety fault latched")
+        except Exception:
+            pass
+        try:
             if not str(getattr(cm, "_safe_get_stock_solution", lambda: "")() or "").strip():
                 missing.append("Active stock solution")
         except Exception:
@@ -5846,6 +5865,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _tail_phase_label(self) -> str:
         return "tail_refine" if str(self._tail_mode or "coarse") == "refine" else "tail_coarse"
 
+    def _tail_phase_display_label(self) -> str:
+        return "tail refine" if str(self._tail_mode or "coarse") == "refine" else "tail coarse"
+
     def _current_flow_delay_count(self) -> int:
         return int(len(list(self.flow_plan.get("delays_us") or [])))
 
@@ -6127,7 +6149,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         self.stageChanged.emit(
             "Online stream calibration: "
-            f"planned {int(self.flow_plan.get('point_count') or 0)} flow delays"
+            f"flow phase planned {int(self.flow_plan.get('point_count') or 0)} delays"
         )
         self.flowPlanReady.emit()
 
@@ -6147,7 +6169,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_delay_us = int(delays[self._flow_delay_index])
         self.stageChanged.emit(
             "Online stream calibration: "
-            f"delay={int(self._current_delay_us)} us, "
+            f"flow delay={int(self._current_delay_us)} us, "
             f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
         )
         self._request_guarded_settings_update(
@@ -6496,7 +6518,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
 
-        self.stageChanged.emit("Online stream calibration: fitting sparse flow rate")
+        self.stageChanged.emit("Online stream calibration: fitting flow phase")
         try:
             self._flow_fit_result = dict(
                 online_fit_mod.fit_online_stream_flow_phase(
@@ -6575,7 +6597,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
 
-        self.stageChanged.emit("Online stream calibration: planning tail search")
+        self.stageChanged.emit("Online stream calibration: planning tail phase")
         self._tail_plan = dict(
             online_tail_mod.plan_online_stream_tail_phase(
                 flow_fit_result=dict(self._flow_fit_result or {}),
@@ -6669,9 +6691,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         self._tail_current_delay_us = int(delays[self._tail_delay_index])
         phase_label = self._tail_phase_label()
+        phase_display_label = self._tail_phase_display_label()
         self.stageChanged.emit(
             "Online stream calibration: "
-            f"{phase_label} delay={int(self._tail_current_delay_us)} us, "
+            f"{phase_display_label} delay={int(self._tail_current_delay_us)} us, "
             f"rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())}"
         )
         self._request_guarded_settings_update(
@@ -6682,11 +6705,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.calibration_manager.emitSettingsChangeCompleted,
             context=f"online_stream_apply_{phase_label}_{int(self._tail_current_delay_us)}",
             timeout_message=(
-                f"Timed out waiting for online stream {phase_label} settings @ {int(self._tail_current_delay_us)} us."
+                f"Timed out waiting for online stream {phase_display_label} settings @ {int(self._tail_current_delay_us)} us."
             ),
             on_timeout=lambda: self._queue_terminal_outcome_after_restore(
                 "error",
-                f"Timed out waiting for online stream {phase_label} settings @ {int(self._tail_current_delay_us)} us.",
+                f"Timed out waiting for online stream {phase_display_label} settings @ {int(self._tail_current_delay_us)} us.",
             ),
         )
 
@@ -6713,11 +6736,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         self._tail_attempted_capture_count += 1
         phase_label = self._tail_phase_label()
+        phase_display_label = self._tail_phase_display_label()
         self._start_single_tail_capture(
             set_attr="flow_frame_image",
             stage_text=(
                 "Capturing online stream "
-                f"{phase_label} frame @ {int(self._tail_current_delay_us)} us "
+                f"{phase_display_label} frame @ {int(self._tail_current_delay_us)} us "
                 f"(rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())})"
             ),
             guard_timeout_ms=10_000,

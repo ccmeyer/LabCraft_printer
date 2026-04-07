@@ -37,7 +37,11 @@ def _ready_cm():
         _safe_get_stock_solution=lambda: "water",
         _safe_get_printer_head_id=lambda: "head_A",
         model=SimpleNamespace(
-            droplet_camera_model=SimpleNamespace(get_image_size=lambda: (320, 320)),
+            droplet_camera_model=SimpleNamespace(
+                get_image_size=lambda: (320, 320),
+                get_flash_fault_latched=lambda: False,
+                flash_fault_latched=False,
+            ),
         ),
     )
 
@@ -244,6 +248,15 @@ def test_online_stream_missing_requirements_do_not_require_machine_coords():
     assert OnlineStreamCalibrationProcess.missing_requirements(cm) == []
 
 
+def test_online_stream_missing_requirements_reports_flash_fault_latched():
+    cm = _ready_cm()
+    cm.model.droplet_camera_model.get_flash_fault_latched = lambda: True
+
+    missing = OnlineStreamCalibrationProcess.missing_requirements(cm)
+
+    assert "Flash safety fault latched" in missing
+
+
 def test_start_online_stream_calibration_uses_try_start_process():
     mgr = CalibrationManager.__new__(CalibrationManager)
     called = {"proc_cls": None}
@@ -284,6 +297,26 @@ def test_emit_readiness_includes_online_stream_calibration():
     readiness = mgr.readinessChanged.calls[-1][0][0]
     assert "online_stream_calibration" in readiness
     assert readiness["online_stream_calibration"] == {"ready": True, "missing": []}
+
+
+def test_try_start_process_blocks_when_stream_capture_session_is_open():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "running"}
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+
+    started = CalibrationManager._try_start_process(mgr, OnlineStreamCalibrationProcess)
+
+    assert started is False
+    assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
+
+    mgr._stream_capture_state = {"status": "awaiting_mass_entry"}
+    started = CalibrationManager._try_start_process(mgr, OnlineStreamCalibrationProcess)
+
+    assert started is False
+    assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
 
 
 def test_online_stream_on_prepare_requests_only_num_droplets_zero():
@@ -546,6 +579,48 @@ def test_online_stream_apply_flow_delay_routes_to_fit_when_delays_are_exhausted(
 
     assert proc.flowAcquisitionFinished.calls
     assert proc._flow_termination_reason == "planned_delays_exhausted"
+
+
+def test_online_stream_stage_text_uses_operator_facing_flow_and_tail_labels(tmp_path):
+    proc = _flow_proc(tmp_path)
+
+    def _stub(
+        settings,
+        callback,
+        *,
+        context="",
+        guard_timeout_ms=None,
+        on_timeout=None,
+        timeout_message=None,
+    ):
+        return lambda: None
+
+    proc._request_guarded_settings_update = _stub
+
+    proc.onApplyFlowDelay()
+    assert "flow delay=" in proc.stageChanged.calls[-1][0][0]
+
+    proc._tail_plan = {
+        "coarse_start_delay_us": 7000,
+        "coarse_step_us": 100,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_delay_sequence = [7000]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_mode = "coarse"
+
+    proc.onApplyTailDelay()
+    assert "tail coarse delay=" in proc.stageChanged.calls[-1][0][0]
+
+    proc._tail_mode = "refine"
+    proc._tail_delay_sequence = [7050]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+
+    proc.onApplyTailDelay()
+    assert "tail refine delay=" in proc.stageChanged.calls[-1][0][0]
 
 
 def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame(tmp_path, monkeypatch):

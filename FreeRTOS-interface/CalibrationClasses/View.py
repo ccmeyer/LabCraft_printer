@@ -1673,6 +1673,48 @@ class DropletImagingDialog(QtWidgets.QDialog):
         raw = str(getattr(self.model.droplet_camera_model, "flash_fault_reason", "") or "").strip()
         return raw.replace("_", " ") if raw else "None"
 
+    def _is_online_stream_calibration_active(self):
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        active = getattr(manager, "activeCalibration", None)
+        return str(getattr(active, "phase_name", "") or "") == "online_stream_calibration"
+
+    def _recompute_online_stream_button_state(self):
+        button = getattr(self, "calibrate_online_stream_button", None)
+        if button is None:
+            return
+
+        if self._is_online_stream_calibration_active():
+            self._set_btn_state(
+                button,
+                True,
+                tooltip_override="Stop the active online stream calibration.",
+            )
+            return
+
+        readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
+        info = dict(readiness.get("online_stream_calibration", {}) or {})
+        ready = bool(info.get("ready", True))
+        missing = list(info.get("missing") or [])
+        flash_fault_latched = self._is_flash_fault_latched()
+        stream_capture_blocked = self._stream_capture_blocks_new_starts(self._get_stream_capture_state())
+
+        if flash_fault_latched:
+            self._set_btn_state(
+                button,
+                False,
+                tooltip_override="Unavailable while flash safety fault is latched.",
+            )
+            return
+        if stream_capture_blocked:
+            self._set_btn_state(
+                button,
+                False,
+                tooltip_override="Unavailable while a stream gravimetric capture session is open.",
+            )
+            return
+
+        self._set_btn_state(button, ready, missing)
+
     def _apply_flash_safety_ui_state(self):
         fault_latched = self._is_flash_fault_latched()
         armed_getter = getattr(self.model.droplet_camera_model, "get_flash_session_armed", None)
@@ -1721,6 +1763,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         if not fault_latched:
             self._refresh_manual_control_lock_state()
+            return
+        self._recompute_online_stream_button_state()
 
     def _refresh_manual_control_lock_state(self, *_args):
         busy = DropletImagingDialog._is_calibration_busy(self)
@@ -1765,6 +1809,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         if hasattr(self, "stream_capture_group"):
             self._sync_stream_capture_panel_state()
+
+        self._recompute_online_stream_button_state()
 
     def eventFilter(self, watched, event):
         spinbox = self._manual_spinbox_focus_targets.get(watched)
@@ -2322,6 +2368,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if (not block_new_starts) and (not flash_fault_latched):
             self._enable_non_readiness_calibration_buttons()
             self._apply_cached_calibration_readiness()
+        else:
+            self._recompute_online_stream_button_state()
 
         if hasattr(self, "record_calibration_checkbox"):
             self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
@@ -2748,6 +2796,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             button = getattr(self, widget_name, None)
             if button is None:
                 continue
+            if str(key) == "online_stream_calibration":
+                self._recompute_online_stream_button_state()
+                continue
             info = dict(readiness.get(str(key), {}) or {})
             if not info:
                 continue
@@ -2770,7 +2821,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _get_start_p(self) -> float:
         return float(self.start_pressure_spin.value())
        
-    def _set_btn_state(self, btn: QtWidgets.QPushButton, ready: bool, missing: list[str] | None = None):
+    def _set_btn_state(
+        self,
+        btn: QtWidgets.QPushButton,
+        ready: bool,
+        missing: list[str] | None = None,
+        *,
+        tooltip_override: str | None = None,
+    ):
         """
         Uniform visual treatment for inactive buttons:
         - disabled state
@@ -2782,11 +2840,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # Tooltip + cursor
         if ready:
-            btn.setToolTip("")
+            btn.setToolTip(str(tooltip_override or ""))
             btn.setCursor(Qt.ArrowCursor)
         else:
-            reason = ", ".join(missing or [])
-            btn.setToolTip(f"Unavailable. Missing: {reason}" if reason else "Unavailable.")
+            if tooltip_override:
+                btn.setToolTip(str(tooltip_override))
+            else:
+                reason = ", ".join(missing or [])
+                btn.setToolTip(f"Unavailable. Missing: {reason}" if reason else "Unavailable.")
             btn.setCursor(Qt.ForbiddenCursor)
 
         # Opacity effect (more obvious than default disabled styling)

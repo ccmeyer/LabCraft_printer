@@ -69,10 +69,16 @@ def _make_calibration_manager_stub():
         position_diff_dict_signal=SignalStub(),
         characterizationSummaryUpdated=SignalStub(),
         readinessChanged=SignalStub(),
+        streamCaptureStateChanged=SignalStub(),
         clear_calibration_memory_ui_recommendation_state=lambda: None,
         get_record_mode_enabled=lambda: True,
         get_calibration_memory_enabled=lambda: True,
         _emit_readiness=lambda: None,
+        activeCalibration=None,
+        calibration_queue=[],
+        is_pulsewidth_sweep_active=lambda: False,
+        is_stream_gravimetric_capture_busy=lambda: False,
+        get_stream_gravimetric_capture_state=lambda: {"status": "idle"},
     )
 
 
@@ -153,6 +159,31 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     )
 
     assert dialog.calibrate_online_stream_button.isEnabled() is True
+
+    dialog.deleteLater()
+
+
+def test_flash_fault_keeps_active_online_stream_stop_button_enabled(monkeypatch, qapp):
+    dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
+    dialog.model.calibration_manager.activeCalibration = SimpleNamespace(
+        phase_name="online_stream_calibration"
+    )
+    dialog.calibrate_online_stream_button.setText("Stop Calibration")
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": True,
+                "missing": [],
+            }
+        }
+    )
+
+    cam.flash_fault_latched = True
+    cam.flash_fault_reason = "line_stuck_high"
+    dialog.update_flash_info()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is True
+    assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
 
     dialog.deleteLater()
 

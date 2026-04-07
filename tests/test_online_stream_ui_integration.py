@@ -60,8 +60,10 @@ class _CalibrationManagerStub:
         self.position_diff_dict_signal = SignalStub()
         self.characterizationSummaryUpdated = SignalStub()
         self.readinessChanged = SignalStub()
+        self.streamCaptureStateChanged = SignalStub()
         self.activeCalibration = None
         self.calibration_queue = []
+        self.state = {"status": "idle"}
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -79,7 +81,10 @@ class _CalibrationManagerStub:
         return False
 
     def is_stream_gravimetric_capture_busy(self):
-        return False
+        return str(self.state.get("status") or "idle") != "idle"
+
+    def get_stream_gravimetric_capture_state(self):
+        return dict(self.state)
 
 
 class _ControllerStub:
@@ -190,5 +195,81 @@ def test_online_stream_readiness_controls_enabled_state_and_tooltip(monkeypatch,
 
     assert dialog.calibrate_online_stream_button.isEnabled() is True
     assert dialog.calibrate_online_stream_button.toolTip() == ""
+
+    dialog.deleteLater()
+
+
+def test_online_stream_flash_fault_overrides_ready_and_recovers_without_new_readiness(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    cam = dialog.model.droplet_camera_model
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": True,
+                "missing": [],
+            }
+        }
+    )
+    assert dialog.calibrate_online_stream_button.isEnabled() is True
+
+    cam.flash_fault_latched = True
+    cam.flash_fault_reason = "line_stuck_high"
+    dialog.update_flash_info()
+    qapp.processEvents()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
+    assert "flash safety fault" in dialog.calibrate_online_stream_button.toolTip().lower()
+
+    cam.flash_fault_latched = False
+    cam.flash_fault_reason = ""
+    dialog.update_flash_info()
+    qapp.processEvents()
+
+    assert manager.activeCalibration is None
+    assert dialog.calibrate_online_stream_button.isEnabled() is True
+    assert dialog.calibrate_online_stream_button.toolTip() == ""
+
+    dialog.deleteLater()
+
+
+def test_online_stream_stream_capture_lockout_overrides_ready_state(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": True,
+                "missing": [],
+            }
+        }
+    )
+    manager.state["status"] = "running"
+    dialog._sync_stream_capture_panel_state()
+    qapp.processEvents()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
+    assert "stream gravimetric capture" in dialog.calibrate_online_stream_button.toolTip().lower()
+
+    dialog.deleteLater()
+
+
+def test_online_stream_running_process_keeps_stop_button_enabled_when_readiness_regresses(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+    dialog.calibrate_online_stream_button.setText("Stop Calibration")
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": False,
+                "missing": ["Emergence time"],
+            }
+        }
+    )
+    qapp.processEvents()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is True
+    assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
 
     dialog.deleteLater()
