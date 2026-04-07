@@ -113,6 +113,15 @@ def _build_droplet_dialog(monkeypatch, qapp):
 def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypatch, qapp):
     dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
 
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": False,
+                "missing": ["Emergence time"],
+            }
+        }
+    )
+
     dialog.camera_timer.start(50)
     dialog.capturing = True
     cam.flash_session_armed = False
@@ -122,9 +131,28 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     dialog.update_flash_info()
 
     assert dialog.flash_button.isEnabled() is False
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.camera_timer.isActive() is False
     assert "Flash safety fault latched" in dialog.flash_safety_label.text()
     assert "Close and reopen the imager" in dialog.flash_safety_label.text()
+
+    cam.flash_fault_latched = False
+    cam.flash_fault_reason = ""
+    dialog.update_flash_info()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
+    assert "Emergence time" in dialog.calibrate_online_stream_button.toolTip()
+
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": True,
+                "missing": [],
+            }
+        }
+    )
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is True
 
     dialog.deleteLater()
 

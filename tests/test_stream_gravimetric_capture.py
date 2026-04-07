@@ -980,6 +980,15 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.stream_capture_begin_button.isEnabled() is True
     assert dialog.control_panel_scroll.widget() is dialog.control_panel
 
+    dialog.on_readiness_changed(
+        {
+            "online_stream_calibration": {
+                "ready": False,
+                "missing": ["Emergence time"],
+            }
+        }
+    )
+
     manager.state.update(
         {
             "status": "awaiting_mass_entry",
@@ -1002,6 +1011,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.stream_capture_discard_button.isEnabled() is True
     assert dialog.flash_duration_spinbox.isEnabled() is False
     assert dialog.calibrate_timecourse_button.isEnabled() is False
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.record_calibration_checkbox.isEnabled() is False
     assert dialog._stream_capture_mass_dialog is not None
     assert dialog._stream_capture_mass_dialog.isVisible() is True
@@ -1024,6 +1034,19 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
 
     controller.on_stream_gravimetric_capture_camera_reached()
     qapp.processEvents()
+
+    manager.state.update(
+        {
+            "status": "idle",
+            "status_message": "Ready to begin stream gravimetric capture.",
+            "error_message": "",
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog.calibrate_online_stream_button.isEnabled() is False
+    assert "Emergence time" in dialog.calibrate_online_stream_button.toolTip()
     assert dialog.stream_capture_begin_button.isEnabled() is True
     assert dialog.stream_capture_starting_mass_spin.value() == pytest.approx(0.0)
 

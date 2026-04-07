@@ -1005,6 +1005,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_timecourse_button.clicked.connect(self.toggle_start_timecourse_calibration)
         calib_grid.addWidget(self.calibrate_timecourse_button, crow, 0, 1, 2); crow += 1
 
+        self.calibrate_online_stream_button = QtWidgets.QPushButton("Calibrate Stream Volume")
+        self.calibrate_online_stream_button.clicked.connect(self.toggle_start_online_stream_calibration)
+        calib_grid.addWidget(self.calibrate_online_stream_button, crow, 0, 1, 2); crow += 1
+
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
         calib_grid.addWidget(self.calibrate_all_button, crow, 0, 1, 2); crow += 1
@@ -1052,10 +1056,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.calibrate_pressure_sweep_button,
             self.calibrate_characterization_button,
             self.calibrate_timecourse_button,
+            self.calibrate_online_stream_button,
             self.calibrate_all_button,
             self.calibrate_all_pw_button,
         ):
             button.setMinimumHeight(32)
+
+        self._calibration_readiness_button_specs = (
+            ("pressure_scan", "calibrate_pressure_scan_button"),
+            ("trajectory_pressure_scan", "scan_trajectory_button"),
+            ("droplet_characterization", "calibrate_characterization_button"),
+            ("pressure_sweep_characterization", "calibrate_pressure_sweep_button"),
+            ("online_stream_calibration", "calibrate_online_stream_button"),
+        )
+        self._last_calibration_readiness = {}
 
         # Add groups to control panel
         control_panel_v.addWidget(self.manual_group)
@@ -1696,6 +1710,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "calibrate_pressure_sweep_button",
             "calibrate_characterization_button",
             "calibrate_timecourse_button",
+            "calibrate_online_stream_button",
             "calibrate_all_button",
             "calibrate_all_pw_button",
             "repeat_capture_button",
@@ -2295,6 +2310,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "calibrate_pressure_sweep_button",
             "calibrate_characterization_button",
             "calibrate_timecourse_button",
+            "calibrate_online_stream_button",
             "calibrate_all_button",
             "calibrate_all_pw_button",
         ):
@@ -2303,8 +2319,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 continue
             if block_new_starts:
                 widget.setEnabled(False)
-            elif not flash_fault_latched:
-                widget.setEnabled(True)
+        if (not block_new_starts) and (not flash_fault_latched):
+            self._enable_non_readiness_calibration_buttons()
+            self._apply_cached_calibration_readiness()
 
         if hasattr(self, "record_calibration_checkbox"):
             self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
@@ -2489,6 +2506,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibrate_pressure_scan_button.setText("Scan Pressures")
         self.scan_trajectory_button.setText("Scan Trajectory Pressures")
         self.calibrate_timecourse_button.setText("Droplet Timecourse Imaging")
+        self.calibrate_online_stream_button.setText("Calibrate Stream Volume")
         self.calibrate_characterization_button.setText("Manually Characterize Droplets")
         self.calibrate_pressure_sweep_button.setText("Pressure Sweep Characterization")
 
@@ -2644,6 +2662,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.controller.start_droplet_timecourse_process()
         self._refresh_manual_control_lock_state()
 
+    def toggle_start_online_stream_calibration(self):
+        """
+        Toggles whether the online stream-volume calibration should be started.
+        """
+        if self.model.calibration_manager.activeCalibration is not None:
+            print('Stopping calibration')
+            self.calibrate_online_stream_button.setText("Calibrate Stream Volume")
+            self.controller.stop_calibration()
+        else:
+            print('Starting calibration')
+            self.calibrate_online_stream_button.setText("Stop Calibration")
+            self.controller.start_online_stream_calibration()
+        self._refresh_manual_control_lock_state()
+
     def toggle_start_all_calibration(self):
         """
         Toggles whether all calibrations should be started.
@@ -2704,24 +2736,36 @@ class DropletImagingDialog(QtWidgets.QDialog):
         Updates the UI based on the readiness of each calibration component.
         Applies a clear visual indication for inactive buttons.
         """
-        mapping = {
-            # 'pressure_calibration':            self.calibrate_pressure_button,
-            'pressure_scan':                   self.calibrate_pressure_scan_button,
-            # 'droplet_trajectory':              self.calibrate_trajectory_button,
-            'trajectory_pressure_scan':        self.scan_trajectory_button,
-            # 'droplet_search':                  self.calibrate_search_button,
-            'droplet_characterization':        self.calibrate_characterization_button,  # (same readiness as search)
-            'pressure_sweep_characterization': self.calibrate_pressure_sweep_button,
+        self._last_calibration_readiness = {
+            str(key): dict(value or {})
+            for key, value in dict(readiness or {}).items()
         }
+        self._apply_cached_calibration_readiness()
 
-        # # If you also want the search button to mirror "droplet_characterization":
-        # if 'droplet_characterization' in readiness:
-        #     r = readiness['droplet_characterization']
-        #     self._set_btn_state(self.calibrate_search_button, bool(r.get('ready')), r.get('missing'))
+    def _apply_cached_calibration_readiness(self):
+        readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
+        for key, widget_name in getattr(self, "_calibration_readiness_button_specs", ()):
+            button = getattr(self, widget_name, None)
+            if button is None:
+                continue
+            info = dict(readiness.get(str(key), {}) or {})
+            if not info:
+                continue
+            self._set_btn_state(button, bool(info.get("ready")), info.get("missing"))
 
-        for key, btn in mapping.items():
-            info = readiness.get(key, {})
-            self._set_btn_state(btn, bool(info.get('ready')), info.get('missing'))
+    def _enable_non_readiness_calibration_buttons(self):
+        for widget_name in (
+            "prime_head_button",
+            "calibrate_nozzle_button",
+            "calibrate_focus_button",
+            "calibrate_emergence_button",
+            "calibrate_timecourse_button",
+            "calibrate_all_button",
+            "calibrate_all_pw_button",
+        ):
+            button = getattr(self, widget_name, None)
+            if button is not None:
+                button.setEnabled(True)
 
     def _get_start_p(self) -> float:
         return float(self.start_pressure_spin.value())
