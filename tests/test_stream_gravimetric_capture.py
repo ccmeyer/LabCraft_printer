@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
@@ -141,13 +143,155 @@ class _StreamCaptureManagerStub:
         return dict(self.state)
 
     def is_stream_gravimetric_capture_busy(self):
-        return str(self.state.get("status") or "idle") in {"running", "awaiting_mass"}
+        return str(self.state.get("status") or "idle") in {
+            "running",
+            "pending_loading_move",
+            "moving_to_loading",
+            "awaiting_mass_entry",
+            "pending_camera_return",
+            "returning_to_camera",
+        }
 
     def should_suppress_process_verdict(self):
-        return str(self.state.get("status") or "idle") in {"running", "awaiting_mass", "error", "stopped"}
+        return str(self.state.get("status") or "idle") in {
+            "running",
+            "pending_loading_move",
+            "moving_to_loading",
+            "awaiting_mass_entry",
+            "pending_camera_return",
+            "returning_to_camera",
+            "error",
+            "stopped",
+        }
 
     def clear_pending_process_verdict(self, *, reason=""):
         self.pending_clear_reasons.append(str(reason))
+
+
+class _ViewControllerStub:
+    def __init__(self, manager, model):
+        self.manager = manager
+        self.model = model
+        self.moves = []
+        self.refuel_pressure_steps = []
+        self.refuel_only_calls = []
+        self.print_only_calls = []
+        self.print_droplet_calls = []
+        self.refuel_pulse_width_updates = []
+        self.auto_complete_moves = False
+
+    def start_read_camera(self):
+        return None
+
+    def capture_droplet_image(self, throughput_mode=False):
+        return None
+
+    def stop_droplet_camera(self):
+        return None
+
+    def set_droplet_capture_profile(self, *args, **kwargs):
+        return None
+
+    def set_command_dispatch_interval(self, *args, **kwargs):
+        return None
+
+    def stop_read_camera(self):
+        return None
+
+    def disable_print_profile(self):
+        return None
+
+    def start_stream_gravimetric_capture(self, *args, **kwargs):
+        return True, ""
+
+    def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
+        self.manager.state["status"] = "pending_camera_return"
+        self.manager.state["ending_mass_mg"] = float(ending_mass_mg)
+        self.manager.state["rep"] = int(rep_override or self.manager.state.get("rep") or 1)
+        self.manager.state["notes"] = str(notes or "")
+        self.manager.state["saved_dataset_name"] = str(self.manager.state.get("timecourse_run_id") or "run_timecourse_demo")
+        self.manager.state["status_message"] = "Saved stream metadata row. Return printer head to camera."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
+        self.manager.state["status"] = "idle"
+        self.manager.state["status_message"] = "Discarded stream gravimetric capture."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_gravimetric_capture_loading_move(self):
+        self.manager.state["status"] = "moving_to_loading"
+        self.manager.state["status_message"] = "Moving printer head to loading position for mass measurement."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def on_stream_gravimetric_capture_loading_reached(self):
+        self.manager.state["status"] = "awaiting_mass_entry"
+        self.manager.state["status_message"] = "Loading position reached. Enter ending mass and inspect the printer head."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_gravimetric_capture_camera_return(self):
+        self.manager.state["status"] = "returning_to_camera"
+        self.manager.state["status_message"] = "Returning printer head to camera."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def on_stream_gravimetric_capture_camera_reached(self):
+        self.manager.state.update(
+            {
+                "status": "idle",
+                "status_message": "Saved stream metadata row for run_timecourse_demo. Ready to begin stream gravimetric capture.",
+                "error_message": "",
+                "session_id": None,
+                "starting_mass_mg": 0.0,
+                "ending_mass_mg": None,
+                "starting_flash": None,
+                "ending_flash": None,
+                "raw_flash_delta": None,
+                "background_capture_count": None,
+                "printed_capture_count": None,
+                "timecourse_run_id": None,
+                "rep": 2,
+                "suggested_rep": 2,
+                "notes": "",
+            }
+        )
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def report_stream_gravimetric_capture_move_failure(self, target, error_message=""):
+        target = str(target or "")
+        if target == "loading":
+            self.manager.state["status"] = "pending_loading_move"
+        elif target == "camera":
+            self.manager.state["status"] = "pending_camera_return"
+        self.manager.state["error_message"] = str(error_message or "")
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def move_to_location(self, name, **kwargs):
+        self.moves.append(str(name))
+        on_complete = kwargs.get("on_complete")
+        if self.auto_complete_moves and callable(on_complete):
+            on_complete()
+        return True
+
+    def set_relative_refuel_pressure(self, pressure, manual=False):
+        self.refuel_pressure_steps.append(float(pressure))
+
+    def refuel_only(self, droplets):
+        self.refuel_only_calls.append(int(droplets))
+
+    def print_only(self, droplets):
+        self.print_only_calls.append(int(droplets))
+
+    def print_droplets(self, droplets):
+        self.print_droplet_calls.append(int(droplets))
+
+    def set_refuel_pulse_width(self, pulse_width, manual=False):
+        self.refuel_pulse_width_updates.append(int(pulse_width))
 
 
 def _make_manager_model(tmp_path, *, experiment_dir_name="experiment", num_flashes=100):
@@ -275,7 +419,7 @@ def _read_jsonl_rows(path: Path):
     ]
 
 
-def _build_view_dialog(monkeypatch, qapp):
+def _build_view_dialog(monkeypatch, qapp, *, manager=None, model=None, controller=None):
     for method_name in (
         "setup_shortcuts",
         "start_droplet_camera",
@@ -290,43 +434,42 @@ def _build_view_dialog(monkeypatch, qapp):
     ):
         monkeypatch.setattr(DropletImagingDialog, method_name, lambda self, *args, **kwargs: None)
 
-    manager = _StreamCaptureManagerStub(
-        {
-            "status": "idle",
-            "status_message": "Ready to begin stream gravimetric capture.",
-            "error_message": "",
-            "session_id": None,
-            "starting_flash": None,
-            "ending_flash": None,
-            "raw_flash_delta": None,
-            "background_capture_count": None,
-            "printed_capture_count": None,
-            "timecourse_run_id": None,
-            "rep": 1,
-            "suggested_rep": 1,
-            "notes": "",
-        }
-    )
-    model = SimpleNamespace(
-        droplet_camera_model=_ViewDropletCameraModelStub(),
-        calibration_manager=manager,
-        machine_model=SimpleNamespace(
-            get_print_pressure_bounds=lambda: (0.10, 5.00),
-            get_print_pulse_width=lambda: 1400,
-            get_current_print_pressure=lambda: 0.80,
-        ),
-        experiment_model=SimpleNamespace(experiment_dir_path="C:/tmp/example-experiment"),
-    )
-    controller = SimpleNamespace(
-        start_read_camera=lambda: None,
-        capture_droplet_image=lambda throughput_mode=False: None,
-        start_stream_gravimetric_capture=lambda *args, **kwargs: (True, ""),
-        finalize_stream_gravimetric_capture=lambda *args, **kwargs: (True, ""),
-        discard_stream_gravimetric_capture=lambda *args, **kwargs: (True, ""),
-    )
+    if manager is None:
+        manager = _StreamCaptureManagerStub(
+            {
+                "status": "idle",
+                "status_message": "Ready to begin stream gravimetric capture.",
+                "error_message": "",
+                "session_id": None,
+                "starting_mass_mg": 0.0,
+                "starting_flash": None,
+                "ending_flash": None,
+                "raw_flash_delta": None,
+                "background_capture_count": None,
+                "printed_capture_count": None,
+                "timecourse_run_id": None,
+                "rep": 1,
+                "suggested_rep": 1,
+                "notes": "",
+            }
+        )
+    if model is None:
+        model = SimpleNamespace(
+            droplet_camera_model=_ViewDropletCameraModelStub(),
+            calibration_manager=manager,
+            machine_model=SimpleNamespace(
+                get_print_pressure_bounds=lambda: (0.10, 5.00),
+                get_print_pulse_width=lambda: 1400,
+                get_refuel_pulse_width=lambda: 3000,
+                get_current_print_pressure=lambda: 0.80,
+            ),
+            experiment_model=SimpleNamespace(experiment_dir_path="C:/tmp/example-experiment"),
+        )
+    if controller is None:
+        controller = _ViewControllerStub(manager, model)
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}), model, controller)
     qapp.processEvents()
-    return dialog, manager
+    return dialog, manager, controller
 
 
 def test_stream_capture_count_replay_uses_recorded_run_meta_and_events():
@@ -499,6 +642,12 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
     manager.calibration_queue = []
     model.droplet_camera_model.num_flashes = 113
     manager._complete_stream_capture_queue_success()
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_loading_move"
+
+    move_ok, move_message = manager.begin_stream_gravimetric_capture_loading_move()
+    assert (move_ok, move_message) == (True, "")
+    reached_ok, reached_message = manager.mark_stream_gravimetric_capture_loading_reached()
+    assert (reached_ok, reached_message) == (True, "")
 
     save_ok, save_message = manager.finalize_stream_gravimetric_capture(
         5.5,
@@ -506,6 +655,7 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
         notes="saved row",
     )
     assert (save_ok, save_message) == (True, "")
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_camera_return"
 
     metadata_path = Path(model.experiment_model.experiment_dir_path) / "stream_metadata.csv"
     rows = _read_csv_rows(metadata_path)
@@ -533,6 +683,14 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
         "run_emergence",
         "run_timecourse",
     ]
+
+    return_ok, return_message = manager.begin_stream_gravimetric_capture_camera_return()
+    assert (return_ok, return_message) == (True, "")
+    camera_ok, camera_message = manager.mark_stream_gravimetric_capture_camera_reached()
+    assert (camera_ok, camera_message) == (True, "")
+    final_state = manager.get_stream_gravimetric_capture_state()
+    assert final_state["status"] == "idle"
+    assert final_state["starting_mass_mg"] == 0.0
 
 
 def test_stream_capture_discard_before_queue_start_only_writes_sidecar(tmp_path, monkeypatch):
@@ -614,7 +772,7 @@ def test_stream_capture_terminal_sessions_write_only_sidecar(
 
 
 def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict(monkeypatch, qapp):
-    dialog, manager = _build_view_dialog(monkeypatch, qapp)
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
     prompted = []
 
     monkeypatch.setattr(
@@ -630,11 +788,12 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     manager.record_mode_enabled = True
     dialog._sync_stream_capture_panel_state()
     assert dialog.stream_capture_begin_button.isEnabled() is True
+    assert dialog.control_panel_scroll.widget() is dialog.control_panel
 
     manager.state.update(
         {
-            "status": "awaiting_mass",
-            "status_message": "Imaging complete. Enter ending mass, review counts, and save the row.",
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
             "session_id": "stream_capture_demo",
             "timecourse_run_id": "run_timecourse_demo",
             "starting_flash": 100,
@@ -650,13 +809,70 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     qapp.processEvents()
 
     assert dialog.stream_capture_begin_button.isEnabled() is False
-    assert dialog.stream_capture_save_button.isEnabled() is True
     assert dialog.stream_capture_discard_button.isEnabled() is True
     assert dialog.flash_duration_spinbox.isEnabled() is False
     assert dialog.calibrate_timecourse_button.isEnabled() is False
     assert dialog.record_calibration_checkbox.isEnabled() is False
+    assert dialog._stream_capture_mass_dialog is not None
+    assert dialog._stream_capture_mass_dialog.isVisible() is True
 
     dialog.on_calibration_completed()
 
     assert manager.pending_clear_reasons == ["stream_capture_verdict_suppressed"]
     assert prompted == []
+
+    dialog._stream_capture_mass_dialog.ending_mass_spin.setValue(5.5)
+    QTest.keyClick(dialog._stream_capture_mass_dialog, Qt.Key_Equal)
+    QTest.keyClick(dialog._stream_capture_mass_dialog, Qt.Key_1)
+    qapp.processEvents()
+    assert controller.refuel_pulse_width_updates[-1] == 3500
+    assert controller.refuel_pressure_steps[-1] == -1.0
+
+    dialog._stream_capture_mass_dialog.complete_button.click()
+    qapp.processEvents()
+    assert "camera" in controller.moves
+
+    controller.on_stream_gravimetric_capture_camera_reached()
+    qapp.processEvents()
+    assert dialog.stream_capture_begin_button.isEnabled() is True
+    assert dialog.stream_capture_starting_mass_spin.value() == pytest.approx(0.0)
+
+
+def test_stream_capture_pending_mass_entry_restores_after_dialog_reopen(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_restore",
+            "timecourse_run_id": "run_restore_demo",
+            "starting_flash": 100,
+            "ending_flash": 111,
+            "raw_flash_delta": 11,
+            "background_capture_count": 1,
+            "printed_capture_count": 10,
+            "rep": 4,
+            "suggested_rep": 4,
+            "notes": "restore me",
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog._stream_capture_mass_dialog is not None
+    dialog.close()
+    qapp.processEvents()
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "awaiting_mass_entry"
+
+    reopened, _, _ = _build_view_dialog(
+        monkeypatch,
+        qapp,
+        manager=manager,
+        model=controller.model,
+        controller=controller,
+    )
+    qapp.processEvents()
+
+    assert reopened._stream_capture_mass_dialog is not None
+    assert reopened._stream_capture_mass_dialog.isVisible() is True

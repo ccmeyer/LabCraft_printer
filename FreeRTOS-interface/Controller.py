@@ -1611,6 +1611,24 @@ class Controller(QObject):
             reason=reason,
         )
 
+    def begin_stream_gravimetric_capture_loading_move(self):
+        return self.model.calibration_manager.begin_stream_gravimetric_capture_loading_move()
+
+    def on_stream_gravimetric_capture_loading_reached(self):
+        return self.model.calibration_manager.mark_stream_gravimetric_capture_loading_reached()
+
+    def begin_stream_gravimetric_capture_camera_return(self):
+        return self.model.calibration_manager.begin_stream_gravimetric_capture_camera_return()
+
+    def on_stream_gravimetric_capture_camera_reached(self):
+        return self.model.calibration_manager.mark_stream_gravimetric_capture_camera_reached()
+
+    def report_stream_gravimetric_capture_move_failure(self, target, error_message=""):
+        return self.model.calibration_manager.report_stream_gravimetric_capture_move_failure(
+            target=target,
+            error_message=error_message,
+        )
+
     # def start_pressure_scan_calibration(self):
     #     # Tell the Model to start the pressure scan calibration.
     #     self.model.calibration_manager.start_pressure_scan_calibration()

@@ -3085,7 +3085,7 @@ class CalibrationManager(QObject):
             "status_message": str(status_message or "Ready to begin stream gravimetric capture."),
             "error_message": "",
             "session_id": None,
-            "starting_mass_mg": None,
+            "starting_mass_mg": 0.0,
             "ending_mass_mg": None,
             "starting_flash": None,
             "ending_flash": None,
@@ -3103,6 +3103,7 @@ class CalibrationManager(QObject):
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
             "sidecar_written": False,
             "sidecar_outcome": None,
+            "saved_dataset_name": None,
         }
 
     def _copy_stream_capture_state(self):
@@ -3149,11 +3150,27 @@ class CalibrationManager(QObject):
 
     def has_open_stream_gravimetric_capture(self) -> bool:
         status = str((self._stream_capture_state or {}).get("status") or "idle")
-        return status in {"running", "awaiting_mass", "error", "stopped"}
+        return status in {
+            "running",
+            "pending_loading_move",
+            "moving_to_loading",
+            "awaiting_mass_entry",
+            "pending_camera_return",
+            "returning_to_camera",
+            "error",
+            "stopped",
+        }
 
     def is_stream_gravimetric_capture_busy(self) -> bool:
         status = str((self._stream_capture_state or {}).get("status") or "idle")
-        return status in {"running", "awaiting_mass"}
+        return status in {
+            "running",
+            "pending_loading_move",
+            "moving_to_loading",
+            "awaiting_mass_entry",
+            "pending_camera_return",
+            "returning_to_camera",
+        }
 
     def should_suppress_process_verdict(self) -> bool:
         return bool(self.has_open_stream_gravimetric_capture())
@@ -3332,10 +3349,97 @@ class CalibrationManager(QObject):
         if start_flash is not None and end_flash is not None:
             self._stream_capture_state["raw_flash_delta"] = int(end_flash) - int(start_flash)
         self._update_stream_capture_counts()
-        self._stream_capture_state["status"] = "awaiting_mass"
-        self._stream_capture_state["status_message"] = "Imaging complete. Enter ending mass, review counts, and save the row."
+        self._stream_capture_state["status"] = "pending_loading_move"
+        self._stream_capture_state["status_message"] = (
+            "Imaging complete. Move to the loading position for mass measurement."
+        )
         self._stream_capture_state["error_message"] = ""
         self._emit_stream_capture_state_changed()
+
+    def begin_stream_gravimetric_capture_loading_move(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status != "pending_loading_move":
+            return False, "Stream gravimetric capture is not ready to move to loading."
+        self._stream_capture_state["status"] = "moving_to_loading"
+        self._stream_capture_state["status_message"] = (
+            "Moving printer head to loading position for mass measurement."
+        )
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_capture_loading_reached(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {"pending_loading_move", "moving_to_loading"}:
+            return False, "Stream gravimetric capture is not waiting for the loading position."
+        self._stream_capture_state["status"] = "awaiting_mass_entry"
+        self._stream_capture_state["status_message"] = (
+            "Loading position reached. Enter ending mass and inspect the printer head."
+        )
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def begin_stream_gravimetric_capture_camera_return(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status != "pending_camera_return":
+            return False, "Stream gravimetric capture is not ready to return to camera."
+        dataset_name = str((self._stream_capture_state or {}).get("saved_dataset_name") or "").strip()
+        self._stream_capture_state["status"] = "returning_to_camera"
+        if dataset_name:
+            self._stream_capture_state["status_message"] = (
+                f"Saved stream metadata row for {dataset_name}. Returning printer head to camera."
+            )
+        else:
+            self._stream_capture_state["status_message"] = "Returning printer head to camera."
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_capture_camera_reached(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {"pending_camera_return", "returning_to_camera"}:
+            return False, "Stream gravimetric capture is not waiting for the camera position."
+        dataset_name = str((self._stream_capture_state or {}).get("saved_dataset_name") or "").strip()
+        status_message = (
+            f"Saved stream metadata row for {dataset_name}. Ready to begin stream gravimetric capture."
+            if dataset_name
+            else "Ready to begin stream gravimetric capture."
+        )
+        self._reset_stream_gravimetric_capture_state(status_message=status_message)
+        self.calibrationStageChanged.emit(status_message, "green")
+        return True, ""
+
+    def report_stream_gravimetric_capture_move_failure(self, *, target: str, error_message: str = ""):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        target_name = str(target or "").strip().lower()
+        message = str(error_message or "").strip()
+        if not message:
+            message = (
+                "Failed to move printer head to loading position."
+                if target_name == "loading"
+                else "Failed to move printer head to camera position."
+            )
+
+        if target_name == "loading" and status in {"pending_loading_move", "moving_to_loading"}:
+            self._stream_capture_state["status"] = "pending_loading_move"
+            self._stream_capture_state["status_message"] = (
+                f"{message} Resolve the issue and reopen the imager to retry."
+            )
+            self._stream_capture_state["error_message"] = message
+            self._emit_stream_capture_state_changed()
+            return True, ""
+
+        if target_name == "camera" and status in {"pending_camera_return", "returning_to_camera"}:
+            self._stream_capture_state["status"] = "pending_camera_return"
+            self._stream_capture_state["status_message"] = (
+                f"{message} Resolve the issue and reopen the imager to retry."
+            )
+            self._stream_capture_state["error_message"] = message
+            self._emit_stream_capture_state_changed()
+            return True, ""
+
+        return False, "Stream gravimetric capture is not waiting on that move."
 
     def _build_stream_capture_metadata_row(self, *, ending_mass_mg: float, rep_value: int, notes: str):
         timecourse_run_id = str((self._stream_capture_state or {}).get("timecourse_run_id") or "").strip()
@@ -3453,6 +3557,7 @@ class CalibrationManager(QObject):
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
             "sidecar_written": False,
             "sidecar_outcome": None,
+            "saved_dataset_name": None,
         }
         self._emit_stream_capture_state_changed()
 
@@ -3469,7 +3574,7 @@ class CalibrationManager(QObject):
 
     def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status != "awaiting_mass":
+        if status not in {"awaiting_mass", "awaiting_mass_entry"}:
             if status in {"error", "stopped"} and not bool((self._stream_capture_state or {}).get("sidecar_written")):
                 self._write_stream_capture_log(outcome=status, error_message=str((self._stream_capture_state or {}).get("error_message") or ""))
             return False, "Stream gravimetric capture is not ready to save."
@@ -3505,9 +3610,13 @@ class CalibrationManager(QObject):
 
         self._write_stream_capture_log(outcome="saved", csv_row=row)
         dataset_name = str(row.get("Dataset name") or "")
-        self._reset_stream_gravimetric_capture_state(
-            status_message=f"Saved stream metadata row for {dataset_name}.",
+        self._stream_capture_state["saved_dataset_name"] = dataset_name
+        self._stream_capture_state["status"] = "pending_camera_return"
+        self._stream_capture_state["status_message"] = (
+            f"Saved stream metadata row for {dataset_name}. Return printer head to camera."
         )
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
         self.calibrationStageChanged.emit(
             f"Saved stream metadata row for {dataset_name}.",
             "green",
@@ -3520,11 +3629,19 @@ class CalibrationManager(QObject):
             return False, "No active stream gravimetric capture session to discard."
         if status == "running" and self.activeCalibration is not None:
             return False, "Stop the stream gravimetric capture before discarding it."
+        if status in {"moving_to_loading", "returning_to_camera"}:
+            return False, "Wait for the current stream gravimetric capture move to finish before discarding it."
+        if status in {"pending_camera_return"} and str((self._stream_capture_state or {}).get("sidecar_outcome") or "") == "saved":
+            return False, "The current stream gravimetric capture row has already been saved."
         if status == "running":
             self.clear_calibration_queue()
 
         if not bool((self._stream_capture_state or {}).get("sidecar_written")):
-            outcome = "discarded" if status in {"running", "awaiting_mass"} else status
+            outcome = (
+                "discarded"
+                if status in {"running", "pending_loading_move", "awaiting_mass", "awaiting_mass_entry"}
+                else status
+            )
             self._write_stream_capture_log(
                 outcome=outcome,
                 error_message=str(reason or ""),

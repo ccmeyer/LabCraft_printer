@@ -256,19 +256,30 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
         sys.modules.pop("scipy", None)
         sys.modules.pop("scipy.optimize", None)
         sys.modules.pop("scipy.signal", None)
+        sys.modules.pop("scipy.stats", None)
+        sys.modules.pop("scipy.ndimage", None)
 
     if (force or _find_spec_or_none("scipy") is None) and "scipy" not in sys.modules:
         scipy = types.ModuleType("scipy")
         optimize = types.ModuleType("scipy.optimize")
         signal = types.ModuleType("scipy.signal")
+        stats = types.ModuleType("scipy.stats")
+        ndimage = types.ModuleType("scipy.ndimage")
         optimize.minimize = lambda *a, **k: None
         optimize.fsolve = lambda *a, **k: None
         signal.find_peaks = lambda *a, **k: ([], {})
+        stats.theilslopes = lambda y, x, *a, **k: (0.0, 0.0, 0.0, 0.0)
+        ndimage.binary_fill_holes = lambda arr, *a, **k: arr
+        ndimage.label = lambda arr, *a, **k: (arr, 1)
         scipy.optimize = optimize
         scipy.signal = signal
+        scipy.stats = stats
+        scipy.ndimage = ndimage
         sys.modules["scipy"] = scipy
         sys.modules["scipy.optimize"] = optimize
         sys.modules["scipy.signal"] = signal
+        sys.modules["scipy.stats"] = stats
+        sys.modules["scipy.ndimage"] = ndimage
     else:
         if (force or _find_spec_or_none("scipy.optimize") is None) and "scipy.optimize" not in sys.modules:
             optimize = types.ModuleType("scipy.optimize")
@@ -279,6 +290,24 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
             signal = types.ModuleType("scipy.signal")
             signal.find_peaks = lambda *a, **k: ([], {})
             sys.modules["scipy.signal"] = signal
+        if (force or _find_spec_or_none("scipy.stats") is None) and "scipy.stats" not in sys.modules:
+            stats = types.ModuleType("scipy.stats")
+            stats.theilslopes = lambda y, x, *a, **k: (0.0, 0.0, 0.0, 0.0)
+            sys.modules["scipy.stats"] = stats
+        if (force or _find_spec_or_none("scipy.ndimage") is None) and "scipy.ndimage" not in sys.modules:
+            ndimage = types.ModuleType("scipy.ndimage")
+            ndimage.binary_fill_holes = lambda arr, *a, **k: arr
+            ndimage.label = lambda arr, *a, **k: (arr, 1)
+            sys.modules["scipy.ndimage"] = ndimage
+        if "scipy" in sys.modules:
+            if "scipy.optimize" in sys.modules:
+                sys.modules["scipy"].optimize = sys.modules["scipy.optimize"]
+            if "scipy.signal" in sys.modules:
+                sys.modules["scipy"].signal = sys.modules["scipy.signal"]
+            if "scipy.stats" in sys.modules:
+                sys.modules["scipy"].stats = sys.modules["scipy.stats"]
+            if "scipy.ndimage" in sys.modules:
+                sys.modules["scipy"].ndimage = sys.modules["scipy.ndimage"]
 
     if force:
         sys.modules.pop("skimage", None)
