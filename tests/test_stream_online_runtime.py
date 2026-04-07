@@ -98,6 +98,23 @@ def test_analyze_online_stream_frame_marks_attached_bottom_guard_hit():
     assert summary["attached_bottom_clearance_px"] <= 96
 
 
+def test_analyze_online_stream_frame_preserves_tail_width_even_when_flow_bottom_guard_rejects():
+    result = mod.analyze_online_stream_frame(
+        frame_image=_frame_with_attached_stream(bottom_y=260),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "rejected_bottom_guard"
+    assert summary["measurement_qc_pass"] is False
+    assert summary["nozzle_qc_pass"] is True
+    assert summary["attached_width_px"] is not None
+
+
 def test_analyze_online_stream_frame_warns_for_detached_near_bottom_without_rejecting():
     result = mod.analyze_online_stream_frame(
         frame_image=_frame_with_detached_warning(),

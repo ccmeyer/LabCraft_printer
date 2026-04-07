@@ -43,6 +43,7 @@ if str(REPO_ROOT) not in sys.path:
 from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
+from tools.stream_analysis import online_tail as online_tail_mod
 
 # ---- numpy encoder helper (robust JSON) ----
 def numpy_encoder(obj):
@@ -5064,6 +5065,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     nextDelay = Signal()
     flowAcquisitionFinished = Signal()
     flowFitReady = Signal()
+    tailPlanReady = Signal()
+    tailFrameAnalyzed = Signal()
+    repeatTailReplicate = Signal()
+    nextTailDelay = Signal()
+    tailPhaseFinished = Signal()
     finalize = Signal()
 
     @staticmethod
@@ -5165,11 +5171,36 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_flow_capture_failure = None
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
+        self._tail_plan = {}
+        self._tail_mode = "coarse"
+        self._tail_delay_sequence = []
+        self._tail_current_delay_us = None
+        self._tail_delay_index = 0
+        self._tail_replicate_index = 0
+        self._tail_current_delay_frame_rows = []
+        self._tail_coarse_delay_summaries = []
+        self._tail_refine_delay_summaries = []
+        self._tail_last_nontrigger_delay_us = None
+        self._tail_trigger_delay_us = None
+        self._tail_trigger_reason = None
+        self._tail_phase_status = "not_run"
+        self._tail_termination_reason = None
+        self._tail_start_delay_from_emergence_us = None
+        self._predicted_stream_duration_us = None
+        self._predicted_volume_nl = None
+        self._tail_fit_result = {}
+        self._tail_fit_warnings = []
+        self._tail_consecutive_failed_delays = 0
+        self._tail_attempted_capture_count = 0
+        self._current_tail_analysis_summary = {}
+        self._current_tail_capture_ref = {}
+        self._current_tail_capture_failure = None
 
         self._run_dir = None
         self._frames_path = None
         self._plan_snapshot_path = None
         self._flow_fit_path = None
+        self._tail_fit_path = None
         self._plan_snapshot_written = False
 
         self.state_prepare = QState()
@@ -5180,6 +5211,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze_flow_frame = QState()
         self.state_advance_flow_phase = QState()
         self.state_fit_flow_rate = QState()
+        self.state_plan_tail_phase = QState()
+        self.state_apply_tail_delay = QState()
+        self.state_capture_tail_frame = QState()
+        self.state_analyze_tail_frame = QState()
+        self.state_advance_tail_phase = QState()
         self.state_restore = QState()
         self.state_final = QFinalState()
 
@@ -5191,6 +5227,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.state_analyze_flow_frame.entered.connect(self.onAnalyzeFlowFrame)
         self.state_advance_flow_phase.entered.connect(self.onAdvanceFlowPhase)
         self.state_fit_flow_rate.entered.connect(self.onFitFlowRate)
+        self.state_plan_tail_phase.entered.connect(self.onPlanTailPhase)
+        self.state_apply_tail_delay.entered.connect(self.onApplyTailDelay)
+        self.state_capture_tail_frame.entered.connect(self.onCaptureTailFrame)
+        self.state_analyze_tail_frame.entered.connect(self.onAnalyzeTailFrame)
+        self.state_advance_tail_phase.entered.connect(self.onAdvanceTailPhase)
         self.state_restore.entered.connect(self.onRestoreSettings)
         self.state_final.entered.connect(self.onCompleted)
 
@@ -5229,6 +5270,38 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         self.state_fit_flow_rate.addTransition(
             self.flowFitReady,
+            self.state_plan_tail_phase,
+        )
+        self.state_plan_tail_phase.addTransition(
+            self.tailPlanReady,
+            self.state_apply_tail_delay,
+        )
+        self.state_plan_tail_phase.addTransition(
+            self.tailPhaseFinished,
+            self.state_restore,
+        )
+        self.state_apply_tail_delay.addTransition(
+            self.calibration_manager.settingsChangeCompleted,
+            self.state_capture_tail_frame,
+        )
+        self.state_capture_tail_frame.addTransition(
+            self.calibration_manager.captureCompleted,
+            self.state_analyze_tail_frame,
+        )
+        self.state_analyze_tail_frame.addTransition(
+            self.tailFrameAnalyzed,
+            self.state_advance_tail_phase,
+        )
+        self.state_advance_tail_phase.addTransition(
+            self.repeatTailReplicate,
+            self.state_capture_tail_frame,
+        )
+        self.state_advance_tail_phase.addTransition(
+            self.nextTailDelay,
+            self.state_apply_tail_delay,
+        )
+        self.state_advance_tail_phase.addTransition(
+            self.tailPhaseFinished,
             self.state_restore,
         )
         self.state_restore.addTransition(
@@ -5245,6 +5318,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.state_analyze_flow_frame,
             self.state_advance_flow_phase,
             self.state_fit_flow_rate,
+            self.state_plan_tail_phase,
+            self.state_apply_tail_delay,
+            self.state_capture_tail_frame,
+            self.state_analyze_tail_frame,
+            self.state_advance_tail_phase,
         ):
             st.addTransition(self.finalize, self.state_restore)
 
@@ -5257,6 +5335,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.state_analyze_flow_frame,
             self.state_advance_flow_phase,
             self.state_fit_flow_rate,
+            self.state_plan_tail_phase,
+            self.state_apply_tail_delay,
+            self.state_capture_tail_frame,
+            self.state_analyze_tail_frame,
+            self.state_advance_tail_phase,
             self.state_restore,
             self.state_final,
         ):
@@ -5288,6 +5371,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._frames_path = os.path.join(self._run_dir, "frames.jsonl")
         self._plan_snapshot_path = os.path.join(self._run_dir, "plan_snapshot.json")
         self._flow_fit_path = os.path.join(self._run_dir, "flow_fit.json")
+        self._tail_fit_path = os.path.join(self._run_dir, "tail_fit.json")
 
     def _append_flow_jsonl(self, path: str, payload: dict):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -5316,6 +5400,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return
         if warning_label not in self._flow_warnings:
             self._flow_warnings.append(warning_label)
+
+    def _append_tail_warning(self, warning: str):
+        warning_label = str(warning or "")
+        if not warning_label:
+            return
+        if warning_label not in self._tail_fit_warnings:
+            self._tail_fit_warnings.append(warning_label)
+
+    def _current_tail_replicates(self) -> int:
+        if str(self._tail_mode or "coarse") == "refine":
+            return int(self._tail_plan.get("refine_replicates") or 1)
+        return int(self._tail_plan.get("coarse_replicates") or 1)
+
+    def _tail_phase_label(self) -> str:
+        return "tail_refine" if str(self._tail_mode or "coarse") == "refine" else "tail_coarse"
 
     def _current_flow_delay_count(self) -> int:
         return int(len(list(self.flow_plan.get("delays_us") or [])))
@@ -5404,6 +5503,88 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             lambda frame: _finish(frame, failure_reason="capture_failed")
         )
 
+    def _start_single_tail_capture(self, *, set_attr: str, stage_text: str, guard_timeout_ms: int = 10_000):
+        self.stageChanged.emit(stage_text)
+        self._record_event(
+            "capture_attempt",
+            {
+                "set_attr": str(set_attr),
+                "stage_text": str(stage_text),
+                "delay_us": int(self._tail_current_delay_us or 0),
+                "replicate_index": int(self._tail_replicate_index + 1),
+                "printed_capture_index": int(self._tail_attempted_capture_count),
+                "tail_mode": str(self._tail_mode or "coarse"),
+            },
+        )
+        self._current_tail_capture_ref = {}
+        self._current_tail_capture_failure = None
+        setattr(self, set_attr, None)
+        timer_ref = {"timer": None}
+
+        def _finish(frame, *, failure_reason: str | None = None):
+            self._cancel_timeout(timer_ref["timer"])
+            timer_ref["timer"] = None
+            setattr(self, set_attr, frame)
+            if frame is None:
+                self._current_tail_capture_failure = str(failure_reason or "capture_failed")
+                self._record_event(
+                    "capture_result",
+                    {
+                        "set_attr": str(set_attr),
+                        "stage_text": str(stage_text),
+                        "status": "failed",
+                        "failure_reason": self._current_tail_capture_failure,
+                        "delay_us": int(self._tail_current_delay_us or 0),
+                        "replicate_index": int(self._tail_replicate_index + 1),
+                        "tail_mode": str(self._tail_mode or "coarse"),
+                    },
+                    level="warning",
+                )
+                self.calibration_manager.emitCaptureCompleted()
+                return
+
+            bg_ref = self._get_capture_ref("background_image")
+            capture_ref = self._record_capture(
+                frame,
+                role="tail_frame",
+                metadata={
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "delay_us": int(self._tail_current_delay_us or 0),
+                    "replicate_index": int(self._tail_replicate_index + 1),
+                    "pair_role": "tail_frame",
+                    "pair_id": str(bg_ref.get("pair_id") or bg_ref.get("capture_id") or uuid.uuid4()),
+                    "subtract_background_capture_id": bg_ref.get("capture_id"),
+                    "subtract_background_image_relpath": bg_ref.get("image_relpath"),
+                    "tail_mode": str(self._tail_mode or "coarse"),
+                },
+            ) or {}
+            self._current_tail_capture_ref = dict(capture_ref)
+            if capture_ref:
+                self._last_capture_refs[set_attr] = dict(capture_ref)
+            self._record_event(
+                "capture_result",
+                {
+                    "set_attr": str(set_attr),
+                    "stage_text": str(stage_text),
+                    "status": "success",
+                    "delay_us": int(self._tail_current_delay_us or 0),
+                    "replicate_index": int(self._tail_replicate_index + 1),
+                    "tail_mode": str(self._tail_mode or "coarse"),
+                    "capture_ref": dict(capture_ref),
+                },
+            )
+            self.calibration_manager.emitCaptureCompleted()
+
+        timer_ref["timer"] = self._start_timeout(
+            guard_timeout_ms,
+            err_msg=None,
+            on_timeout=lambda: _finish(None, failure_reason="capture_timeout"),
+        )
+        self.calibration_manager.captureImageRequested.emit(
+            lambda frame: _finish(frame, failure_reason="capture_failed")
+        )
+
     @Slot()
     def onPrepare(self):
         if self._stop_requested:
@@ -5471,6 +5652,30 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_flow_capture_failure = None
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
+        self._tail_plan = {}
+        self._tail_mode = "coarse"
+        self._tail_delay_sequence = []
+        self._tail_current_delay_us = None
+        self._tail_delay_index = 0
+        self._tail_replicate_index = 0
+        self._tail_current_delay_frame_rows = []
+        self._tail_coarse_delay_summaries = []
+        self._tail_refine_delay_summaries = []
+        self._tail_last_nontrigger_delay_us = None
+        self._tail_trigger_delay_us = None
+        self._tail_trigger_reason = None
+        self._tail_phase_status = "not_run"
+        self._tail_termination_reason = None
+        self._tail_start_delay_from_emergence_us = None
+        self._predicted_stream_duration_us = None
+        self._predicted_volume_nl = None
+        self._tail_fit_result = {}
+        self._tail_fit_warnings = []
+        self._tail_consecutive_failed_delays = 0
+        self._tail_attempted_capture_count = 0
+        self._current_tail_analysis_summary = {}
+        self._current_tail_capture_ref = {}
+        self._current_tail_capture_failure = None
 
         if not list(self.flow_plan.get("delays_us") or []):
             self.calibrationError.emit("Online stream calibration has no planned flow delays.")
@@ -5750,6 +5955,438 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         self.flowFitReady.emit()
 
+    def _write_tail_fit_artifact(self):
+        if not self._tail_fit_path:
+            return
+        artifact = online_tail_mod.build_online_stream_tail_fit_artifact(
+            condition=self._build_condition(),
+            tail_plan=dict(self._tail_plan or {}),
+            steady_width_baseline_px=self._tail_plan.get("steady_width_baseline_px"),
+            coarse_delay_summaries=list(self._tail_coarse_delay_summaries),
+            refine_delay_summaries=list(self._tail_refine_delay_summaries),
+            result=dict(self._tail_fit_result or {}),
+            warnings=list(self._tail_fit_warnings),
+        )
+        os.makedirs(os.path.dirname(self._tail_fit_path), exist_ok=True)
+        with open(self._tail_fit_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2, default=numpy_encoder)
+
+    def _resolve_tail_phase(self):
+        resolve_result = online_tail_mod.resolve_online_stream_tail_result(
+            flow_fit_result=dict(self._flow_fit_result or {}),
+            tail_plan=dict(self._tail_plan or {}),
+            coarse_summaries=list(self._tail_coarse_delay_summaries),
+            refine_summaries=list(self._tail_refine_delay_summaries),
+            trigger_bracket={
+                "tail_phase_status": str(self._tail_phase_status or "unresolved_no_trigger"),
+                "termination_reason": str(self._tail_termination_reason or ""),
+                "trigger_delay_us": self._tail_trigger_delay_us,
+                "last_nontrigger_delay_us": self._tail_last_nontrigger_delay_us,
+                "trigger_reason": self._tail_trigger_reason,
+                "warnings": list(self._tail_fit_warnings),
+            },
+        )
+        self._tail_fit_result = dict(resolve_result or {})
+        self._predicted_stream_duration_us = resolve_result.get("predicted_stream_duration_us")
+        self._predicted_volume_nl = resolve_result.get("predicted_volume_nl")
+        try:
+            tail_phase = dict(resolve_result.get("tail_phase") or {})
+            self._tail_phase_status = str(tail_phase.get("status") or self._tail_phase_status or "")
+            self._tail_start_delay_from_emergence_us = tail_phase.get("tail_start_delay_from_emergence_us")
+            self._tail_fit_warnings = list(tail_phase.get("warnings") or list(self._tail_fit_warnings))
+        except Exception:
+            pass
+        self._write_tail_fit_artifact()
+
+    @Slot()
+    def onPlanTailPhase(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        self.stageChanged.emit("Online stream calibration: planning tail search")
+        self._tail_plan = dict(
+            online_tail_mod.plan_online_stream_tail_phase(
+                flow_fit_result=dict(self._flow_fit_result or {}),
+                priors=dict(self.priors or {}),
+                emergence_time_us=int(self.emergence_time_us),
+                capture_budget=dict(self.capture_budget or {}),
+            )
+            or {}
+        )
+        self._tail_mode = "coarse"
+        self._tail_delay_sequence = []
+        self._tail_current_delay_us = None
+        self._tail_delay_index = 0
+        self._tail_replicate_index = 0
+        self._tail_current_delay_frame_rows = []
+        self._tail_coarse_delay_summaries = []
+        self._tail_refine_delay_summaries = []
+        self._tail_last_nontrigger_delay_us = None
+        self._tail_trigger_delay_us = None
+        self._tail_trigger_reason = None
+        self._tail_phase_status = "not_run"
+        self._tail_termination_reason = None
+        self._tail_start_delay_from_emergence_us = None
+        self._predicted_stream_duration_us = None
+        self._predicted_volume_nl = None
+        self._tail_fit_result = {}
+        self._tail_fit_warnings = []
+        self._tail_consecutive_failed_delays = 0
+        self._tail_attempted_capture_count = 0
+        self._current_tail_analysis_summary = {}
+        self._current_tail_capture_ref = {}
+        self._current_tail_capture_failure = None
+
+        if not bool(self._tail_plan.get("run_tail")):
+            self._tail_phase_status = "unresolved_missing_flow_baseline"
+            self._tail_termination_reason = str(self._tail_plan.get("skip_reason") or "missing_flow_baseline")
+            self._append_tail_warning("unresolved_missing_flow_baseline")
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+
+        coarse_start_delay_us = int(self._tail_plan.get("coarse_start_delay_us") or 0)
+        coarse_step_us = int(self._tail_plan.get("coarse_step_us") or 100)
+        planned_coarse_delay_count = int(self._tail_plan.get("planned_coarse_delay_count") or 0)
+        if planned_coarse_delay_count <= 0:
+            self._tail_phase_status = "unresolved_budget_exhausted"
+            self._tail_termination_reason = "capture_budget_exhausted"
+            self._append_tail_warning("capture_budget_exhausted")
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+
+        self._tail_delay_sequence = [
+            int(coarse_start_delay_us + (idx * coarse_step_us))
+            for idx in range(planned_coarse_delay_count)
+        ]
+        self.tailPlanReady.emit()
+
+    @Slot()
+    def onApplyTailDelay(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        if self.capture_budget.get("exhausted"):
+            self._tail_phase_status = "unresolved_budget_exhausted"
+            self._tail_termination_reason = "capture_budget_exhausted"
+            self._append_tail_warning("capture_budget_exhausted")
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+
+        delays = list(self._tail_delay_sequence or [])
+        if self._tail_delay_index >= len(delays):
+            if str(self._tail_mode or "coarse") == "refine" and self._tail_trigger_delay_us is not None:
+                self._tail_phase_status = "captured"
+                self._tail_termination_reason = "coarse_trigger_fallback"
+                self._tail_trigger_reason = self._tail_trigger_reason or "coarse_width_frac_le_0.90"
+            else:
+                self._tail_phase_status = "unresolved_no_trigger"
+                self._tail_termination_reason = "no_coarse_trigger"
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+
+        self._tail_current_delay_us = int(delays[self._tail_delay_index])
+        phase_label = self._tail_phase_label()
+        self.stageChanged.emit(
+            "Online stream calibration: "
+            f"{phase_label} delay={int(self._tail_current_delay_us)} us, "
+            f"rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())}"
+        )
+        self._request_settings_with_recording(
+            {
+                "flash_delay": int(self._tail_current_delay_us),
+                "num_droplets": 1,
+            },
+            self.calibration_manager.emitSettingsChangeCompleted,
+            context=f"online_stream_apply_{phase_label}_{int(self._tail_current_delay_us)}",
+        )
+
+    @Slot()
+    def onCaptureTailFrame(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+        if self.capture_budget.get("exhausted"):
+            self._tail_phase_status = "unresolved_budget_exhausted"
+            self._tail_termination_reason = "capture_budget_exhausted"
+            self._append_tail_warning("capture_budget_exhausted")
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+        if self._tail_current_delay_us is None:
+            self.calibrationError.emit("Online stream calibration has no active tail delay.")
+            return
+
+        self.capture_budget = online_cal_mod.consume_online_stream_budget(
+            self.capture_budget,
+            phase="tail_phase",
+            count=1,
+        )
+        self._tail_attempted_capture_count += 1
+        phase_label = self._tail_phase_label()
+        self._start_single_tail_capture(
+            set_attr="flow_frame_image",
+            stage_text=(
+                "Capturing online stream "
+                f"{phase_label} frame @ {int(self._tail_current_delay_us)} us "
+                f"(rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())})"
+            ),
+            guard_timeout_ms=10_000,
+        )
+
+    @Slot()
+    def onAnalyzeTailFrame(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        delay_us = int(self._tail_current_delay_us or 0)
+        delay_from_emergence_us = int(delay_us - int(self.emergence_time_us))
+        replicate_index = int(self._tail_replicate_index + 1)
+        capture_ref = dict(self._current_tail_capture_ref or {})
+        phase_label = self._tail_phase_label()
+
+        if self.flow_frame_image is None:
+            status = (
+                "rejected_capture_timeout"
+                if str(self._current_tail_capture_failure or "") == "capture_timeout"
+                else "rejected_capture_failed"
+            )
+            frame_row = online_cal_mod.build_online_stream_frame_row(
+                phase=phase_label,
+                status=status,
+                delay_us=delay_us,
+                delay_from_emergence_us=delay_from_emergence_us,
+                replicate_index=replicate_index,
+                qc={
+                    "measurement_qc_pass": False,
+                    "nozzle_qc_pass": False,
+                    "silhouette_qc_pass": False,
+                    "tail_qc_pass": False,
+                },
+                image_ref=capture_ref,
+                warnings=[str(self._current_tail_capture_failure or "capture_failed")],
+                silhouette_status="capture_failed",
+                failure_reason=str(self._current_tail_capture_failure or "capture_failed"),
+                attached_width_px=None,
+                visible_volume_nl=None,
+                attached_bottom_clearance_px=None,
+                min_accepted_fluid_distance_from_bottom_px=None,
+                accepted_component_count=0,
+                accepted_detached_component_count=0,
+                detached_near_bottom_warning=False,
+                attached_bottom_guard_hit=False,
+            )
+            self._current_tail_analysis_summary = {
+                "status": status,
+                "tail_qc_pass": False,
+                "warnings": list(frame_row.get("warnings") or []),
+            }
+            self._tail_current_delay_frame_rows.append(frame_row)
+            self._append_flow_jsonl(self._frames_path, frame_row)
+            self.tailFrameAnalyzed.emit()
+            return
+
+        analysis = online_runtime_mod.analyze_online_stream_frame(
+            frame_image=self.flow_frame_image,
+            background_image=self.background_image,
+            nozzle_center_px=self.calibration_manager.get_pressure_scan_nozzle_center_image_position(),
+            delay_us=delay_us,
+            emergence_time_us=int(self.emergence_time_us),
+            analysis_config=dict(self.analysis_config),
+            capture_ref=capture_ref,
+            capture_index=self._attempted_capture_count + self._tail_attempted_capture_count,
+        )
+        summary = dict(analysis.get("summary") or {})
+        overlay = analysis.get("overlay")
+        tail_qc_pass = bool(
+            str(summary.get("silhouette_status") or "") == "ok"
+            and bool(summary.get("nozzle_qc_pass"))
+            and summary.get("attached_width_px") is not None
+        )
+        status = "accepted" if tail_qc_pass else str(summary.get("status") or "rejected_tail_qc")
+        frame_row = online_cal_mod.build_online_stream_frame_row(
+            phase=phase_label,
+            status=status,
+            delay_us=delay_us,
+            delay_from_emergence_us=delay_from_emergence_us,
+            replicate_index=replicate_index,
+            qc={
+                "measurement_qc_pass": bool(summary.get("measurement_qc_pass")),
+                "nozzle_qc_pass": bool(summary.get("nozzle_qc_pass")),
+                "silhouette_qc_pass": bool(summary.get("silhouette_qc_pass")),
+                "tail_qc_pass": bool(tail_qc_pass),
+            },
+            image_ref=capture_ref,
+            warnings=list(summary.get("warnings") or []),
+            silhouette_status=summary.get("silhouette_status"),
+            failure_reason=summary.get("failure_reason"),
+            attached_width_px=summary.get("attached_width_px"),
+            visible_volume_nl=summary.get("visible_volume_nl"),
+            attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
+            min_accepted_fluid_distance_from_bottom_px=summary.get(
+                "min_accepted_fluid_distance_from_bottom_px"
+            ),
+            accepted_component_count=summary.get("accepted_component_count"),
+            accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+            detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+            attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+        )
+        self._current_tail_analysis_summary = {
+            **dict(summary),
+            "status": str(status),
+            "tail_qc_pass": bool(tail_qc_pass),
+        }
+        self._tail_current_delay_frame_rows.append(frame_row)
+        self._append_flow_jsonl(self._frames_path, frame_row)
+
+        if bool(tail_qc_pass):
+            self._measurement_rows.append(
+                online_cal_mod.build_online_stream_measurement_row(
+                    phase=phase_label,
+                    delay_us=delay_us,
+                    delay_from_emergence_us=delay_from_emergence_us,
+                    replicate_index=replicate_index,
+                    width_px=summary.get("attached_width_px"),
+                    visible_volume_nl=summary.get("visible_volume_nl"),
+                    qc_pass=True,
+                    image_ref=capture_ref,
+                )
+            )
+
+        if overlay is not None:
+            try:
+                self.presentImageSignal.emit(overlay)
+            except Exception:
+                pass
+        else:
+            try:
+                self.presentImageSignal.emit(self.flow_frame_image)
+            except Exception:
+                pass
+
+        self.tailFrameAnalyzed.emit()
+
+    @Slot()
+    def onAdvanceTailPhase(self):
+        if self._stop_requested:
+            self.finalize.emit()
+            return
+
+        replicates_per_delay = int(self._current_tail_replicates())
+        close_delay = int(self._tail_replicate_index + 1) >= int(replicates_per_delay)
+        if not close_delay:
+            self._tail_replicate_index += 1
+            self.repeatTailReplicate.emit()
+            return
+
+        delay_summary = online_tail_mod.summarize_online_stream_tail_delay(
+            self._tail_current_delay_frame_rows,
+            self._tail_plan.get("steady_width_baseline_px"),
+        )
+        if str(self._tail_mode or "coarse") == "refine":
+            self._tail_refine_delay_summaries.append(delay_summary)
+        else:
+            self._tail_coarse_delay_summaries.append(delay_summary)
+        for warning in list(delay_summary.get("warnings") or []):
+            self._append_tail_warning(str(warning))
+
+        if str(self._tail_mode or "coarse") == "coarse":
+            if bool(delay_summary.get("delay_accepted")):
+                self._tail_consecutive_failed_delays = 0
+                if bool(delay_summary.get("triggered_coarse")):
+                    if self._tail_trigger_delay_us is None:
+                        self._tail_trigger_delay_us = delay_summary.get("delay_us")
+                        self._tail_trigger_reason = "coarse_width_frac_le_0.90"
+                else:
+                    self._tail_last_nontrigger_delay_us = delay_summary.get("delay_us")
+            else:
+                self._tail_consecutive_failed_delays += 1
+
+            decision = online_tail_mod.decide_online_stream_tail_next_action(
+                mode="coarse",
+                delay_summary=delay_summary,
+                capture_budget=self.capture_budget,
+                consecutive_failed_delays=int(self._tail_consecutive_failed_delays),
+                attempted_delay_count=int(len(self._tail_coarse_delay_summaries)),
+                planned_delay_count=int(len(self._tail_delay_sequence)),
+                has_last_nontrigger=bool(self._tail_last_nontrigger_delay_us is not None),
+            )
+            action = str(decision.get("action") or "")
+            if action == "continue":
+                self._tail_delay_index += 1
+                self._tail_replicate_index = 0
+                self._tail_current_delay_us = None
+                self._tail_current_delay_frame_rows = []
+                self._current_tail_analysis_summary = {}
+                self.nextTailDelay.emit()
+                return
+            if action == "switch_to_refine":
+                refine_delays = online_tail_mod.build_online_stream_tail_refine_plan(
+                    last_coarse_nontrigger_delay_us=self._tail_last_nontrigger_delay_us,
+                    first_coarse_trigger_delay_us=self._tail_trigger_delay_us,
+                    refine_step_us=int(self._tail_plan.get("refine_step_us") or 50),
+                )
+                if not refine_delays:
+                    self._tail_phase_status = "captured"
+                    self._tail_termination_reason = "coarse_trigger_fallback"
+                    self._tail_trigger_reason = str(
+                        decision.get("trigger_reason") or "coarse_width_frac_le_0.90"
+                    )
+                    self._resolve_tail_phase()
+                    self.tailPhaseFinished.emit()
+                    return
+                self._tail_mode = "refine"
+                self._tail_delay_sequence = list(refine_delays)
+                self._tail_delay_index = 0
+                self._tail_replicate_index = 0
+                self._tail_current_delay_us = None
+                self._tail_current_delay_frame_rows = []
+                self._current_tail_analysis_summary = {}
+                self.nextTailDelay.emit()
+                return
+
+            self._tail_phase_status = str(decision.get("tail_phase_status") or "unresolved_no_trigger")
+            self._tail_termination_reason = str(decision.get("termination_reason") or "")
+            if decision.get("trigger_reason"):
+                self._tail_trigger_reason = str(decision.get("trigger_reason"))
+            if self._tail_termination_reason:
+                self._append_tail_warning(self._tail_termination_reason)
+            self._resolve_tail_phase()
+            self.tailPhaseFinished.emit()
+            return
+
+        decision = online_tail_mod.decide_online_stream_tail_next_action(
+            mode="refine",
+            delay_summary=delay_summary,
+            capture_budget=self.capture_budget,
+            attempted_delay_count=int(len(self._tail_refine_delay_summaries)),
+            planned_delay_count=int(len(self._tail_delay_sequence)),
+        )
+        action = str(decision.get("action") or "")
+        if action == "continue":
+            self._tail_delay_index += 1
+            self._tail_replicate_index = 0
+            self._tail_current_delay_us = None
+            self._tail_current_delay_frame_rows = []
+            self._current_tail_analysis_summary = {}
+            self.nextTailDelay.emit()
+            return
+
+        self._tail_phase_status = str(decision.get("tail_phase_status") or "captured")
+        self._tail_termination_reason = str(decision.get("termination_reason") or "")
+        if decision.get("trigger_reason"):
+            self._tail_trigger_reason = str(decision.get("trigger_reason"))
+        if self._tail_termination_reason:
+            self._append_tail_warning(self._tail_termination_reason)
+        self._resolve_tail_phase()
+        self.tailPhaseFinished.emit()
+
     def _build_restore_settings(self) -> dict:
         restore = {}
         orig = dict(self._orig_settings or {})
@@ -5816,7 +6453,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         accepted_delay_count = int(
             sum(1 for row in self._flow_delay_summaries if bool(row.get("delay_accepted")))
         )
-        accepted_measurement_count = int(len(self._measurement_rows))
+        flow_measurements = [
+            dict(row or {})
+            for row in list(self._measurement_rows or [])
+            if str((row or {}).get("phase") or "") == "flow_rate"
+        ]
+        accepted_measurement_count = int(len(flow_measurements))
         rejected_capture_count = int(max(0, self._attempted_capture_count - accepted_measurement_count))
         flow_status = "captured" if accepted_delay_count >= 3 else "insufficient_data"
         if flow_status == "insufficient_data":
@@ -5835,12 +6477,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             warnings=list(self._flow_warnings),
             fit=dict(self._flow_fit_result or {}),
         )
-        tail_phase = {
-            "status": "not_run",
-            "plan": dict(self.tail_plan),
-        }
-        result_warnings = ["stage4_flow_fit_partial_result"]
-        for warning in list(self._flow_warnings) + list(self._flow_fit_warnings):
+        tail_phase = dict(
+            (dict(self._tail_fit_result or {}).get("tail_phase") or {})
+        )
+        if not tail_phase:
+            tail_phase = {
+                "status": "not_run",
+                "plan": dict(self.tail_plan),
+            }
+        result_warnings = []
+        for warning in (
+            list(self._flow_warnings)
+            + list(self._flow_fit_warnings)
+            + list(self._tail_fit_warnings)
+        ):
             warning_label = str(warning or "").strip()
             if warning_label and warning_label not in result_warnings:
                 result_warnings.append(warning_label)
@@ -5849,8 +6499,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             priors=dict(self.priors),
             flow_phase=flow_phase,
             tail_phase=tail_phase,
-            predicted_stream_duration_us=None,
-            predicted_volume_nl=None,
+            predicted_stream_duration_us=self._predicted_stream_duration_us,
+            predicted_volume_nl=self._predicted_volume_nl,
             warnings=result_warnings,
         )
         self.calibrationDataUpdated.emit(
@@ -5859,7 +6509,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "result": result,
             }
         )
-        self.stageChanged.emit("Online stream flow-phase fit complete")
+        self.stageChanged.emit("Online stream calibration complete")
         self.calibrationCompleted.emit()
 
     @Slot()

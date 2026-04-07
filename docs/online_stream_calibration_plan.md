@@ -980,6 +980,39 @@ The implementation should be split into small milestones that each end in a runn
 - complete the flow phase before adding the tail phase
 - add priors and UI polish only after the base algorithm works reliably
 
+### Current Implementation Status
+
+As of `2026-04-06`, the staged plan has progressed as follows:
+
+- Stage 1: implemented
+  - `tools/stream_analysis/online_calibration.py` now contains the frozen policy defaults, prior normalization, schedule builders, budget helpers, and JSON-safe payload builders.
+- Stage 2: implemented
+  - `Controller.start_online_stream_calibration(...)`, `CalibrationManager.start_online_stream_calibration(...)`, and `OnlineStreamCalibrationProcess` now exist and can launch the process through the existing calibration framework without UI work.
+- Stage 3: implemented
+  - the process now performs flow-phase acquisition, per-frame QC, replay-friendly artifact writing, and sparse flow stop logic.
+- Stage 4: implemented
+  - the process now performs a sparse post-acquisition flow-rate fit, writes `flow_fit.json`, and emits a partial calibration result with flow-fit diagnostics.
+- Stage 5: not implemented yet
+  - tail coarse search and refinement are still pending.
+- Stage 6: not implemented yet
+  - the droplet-imager UI entry point and operator-facing readiness/button integration are still pending.
+- Stage 7: not implemented yet
+  - explicit prior lookup/writeback and broader hardening work are still pending.
+
+Current implemented behavior:
+
+- the online stream calibration can now complete a developer-facing flow-only run end-to-end
+- the final payload includes accepted flow measurements plus a fitted `flow_rate_nl_per_us`
+- `tail_phase` still remains `not_run`
+- queue integration, UI launch, prior seeding, and tail timing are still deferred
+
+Latest automated validation completed for the implemented stages:
+
+- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_fit.py tests/test_stream_online_fit_replay.py tests/test_stream_online_calibration_helpers.py tests/test_calibration_online_stream_process.py tests/test_calibration_phase_aliases.py tests/test_calibration_process_recorder.py tests/test_calibration_recorder_toggle.py`
+  - `54 passed`
+- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_runtime.py tests/test_calibration_droplet_emergence_process.py tests/test_calibration_prebreakup_dataset_acquisition_process.py tests/test_controller_calibration_move_handlers.py`
+  - `31 passed`
+
 ### Stage 1: Pure Helper And Schema Layer
 
 Key changes:
@@ -1136,9 +1169,9 @@ Key changes:
 - add explicit prior lookup inside the new process
 - record which priors were used and which fallbacks were taken
 - write back new observations needed for future exact-condition recommendations
-- add optional detailed fit artifacts such as:
-  - `flow_fit.json`
+- extend recorder-side review artifacts such as:
   - `tail_fit.json`
+  - any additional replay / review payloads needed beyond the Stage 4 `flow_fit.json`
 - tighten automated tests and manual validation around:
   - repeated runs of the same condition
   - missing-prior fallback behavior

@@ -104,10 +104,39 @@ def _flow_proc(tmp_path: Path):
     proc.nextDelay = Recorder()
     proc.flowAcquisitionFinished = Recorder()
     proc.flowFitReady = Recorder()
+    proc.tailPlanReady = Recorder()
+    proc.tailFrameAnalyzed = Recorder()
+    proc.repeatTailReplicate = Recorder()
+    proc.nextTailDelay = Recorder()
+    proc.tailPhaseFinished = Recorder()
     proc.finalize = Recorder()
     proc._restored_settings = False
     proc._flow_fit_result = {}
     proc._flow_fit_warnings = []
+    proc._tail_plan = {}
+    proc._tail_mode = "coarse"
+    proc._tail_delay_sequence = []
+    proc._tail_current_delay_us = None
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_frame_rows = []
+    proc._tail_coarse_delay_summaries = []
+    proc._tail_refine_delay_summaries = []
+    proc._tail_last_nontrigger_delay_us = None
+    proc._tail_trigger_delay_us = None
+    proc._tail_trigger_reason = None
+    proc._tail_phase_status = "not_run"
+    proc._tail_termination_reason = None
+    proc._tail_start_delay_from_emergence_us = None
+    proc._predicted_stream_duration_us = None
+    proc._predicted_volume_nl = None
+    proc._tail_fit_result = {}
+    proc._tail_fit_warnings = []
+    proc._tail_consecutive_failed_delays = 0
+    proc._tail_attempted_capture_count = 0
+    proc._current_tail_analysis_summary = {}
+    proc._current_tail_capture_ref = {}
+    proc._current_tail_capture_failure = None
     proc._last_capture_refs = {
         "background_image": {
             "capture_id": "cap_bg",
@@ -120,6 +149,7 @@ def _flow_proc(tmp_path: Path):
     proc._frames_path = None
     proc._plan_snapshot_path = None
     proc._flow_fit_path = None
+    proc._tail_fit_path = None
     proc._plan_snapshot_written = False
     proc._cancel_timeout = lambda timer: None
     proc._start_timeout = lambda *args, **kwargs: None
@@ -481,6 +511,294 @@ def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monke
     assert artifact["warnings"] == ["flow_fit_min_points_only"]
 
 
+def test_online_stream_plan_tail_phase_skips_when_flow_baseline_is_missing(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {"fit_status": "unresolved_insufficient_delays", "steady_width_baseline_px": None}
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+
+    proc.onPlanTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_missing_flow_baseline"
+    artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
+    assert artifact["result"]["tail_phase"]["status"] == "unresolved_missing_flow_baseline"
+
+
+def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {
+        "fit_status": "warning_quality_thresholds",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+
+    proc.onPlanTailPhase()
+
+    assert proc.tailPlanReady.calls
+    assert proc._tail_plan["run_tail"] is True
+    assert proc._tail_delay_sequence
+    assert proc._tail_mode == "coarse"
+
+
+def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_would_reject(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._frames_path = str(tmp_path / "frames.jsonl")
+    proc._tail_mode = "coarse"
+    proc._tail_current_delay_us = 7150
+    proc._tail_replicate_index = 0
+    proc.flow_frame_image = np.full((320, 220), 230, dtype=np.uint8)
+    proc._current_tail_capture_ref = {
+        "capture_id": "cap_tail_01",
+        "image_relpath": "captures/tail_0001.png",
+    }
+
+    monkeypatch.setattr(
+        calibration_model.online_runtime_mod,
+        "analyze_online_stream_frame",
+        lambda **kwargs: {
+            "summary": {
+                "status": "rejected_bottom_guard",
+                "measurement_qc_pass": False,
+                "nozzle_qc_pass": True,
+                "silhouette_qc_pass": True,
+                "silhouette_status": "ok",
+                "failure_reason": "attached primary reached bottom guard",
+                "attached_width_px": 69.0,
+                "visible_volume_nl": 18.0,
+                "attached_bottom_clearance_px": 80,
+                "min_accepted_fluid_distance_from_bottom_px": 80,
+                "accepted_component_count": 1,
+                "accepted_detached_component_count": 0,
+                "detached_near_bottom_warning": False,
+                "warnings": ["attached_bottom_guard_hit"],
+                "attached_bottom_guard_hit": True,
+            },
+            "overlay": None,
+        },
+    )
+
+    proc.onAnalyzeTailFrame()
+
+    assert proc.tailFrameAnalyzed.calls
+    assert proc._measurement_rows[-1]["phase"] == "tail_coarse"
+    lines = Path(proc._frames_path).read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[0])
+    assert payload["status"] == "accepted"
+
+
+def test_online_stream_advance_tail_phase_switches_to_refine_mode(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "refine_step_us": 50,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_mode = "coarse"
+    proc._tail_last_nontrigger_delay_us = 7000
+    proc._tail_delay_sequence = [7000, 7200]
+    proc._tail_delay_index = 1
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7200
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_coarse",
+            status="accepted",
+            delay_us=7200,
+            delay_from_emergence_us=4000,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=66.0,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "refine"
+    assert proc._tail_delay_sequence == [7050, 7100, 7150]
+
+
+def test_online_stream_advance_tail_phase_stops_when_no_coarse_trigger_occurs(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+        "refine_step_us": 50,
+    }
+    proc._tail_mode = "coarse"
+    proc._tail_delay_sequence = [7000]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7000
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_coarse",
+            status="accepted",
+            delay_us=7000,
+            delay_from_emergence_us=3800,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=73.0,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_no_trigger"
+
+
+def test_online_stream_advance_tail_phase_stops_after_repeated_failed_delays(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+        "refine_step_us": 50,
+    }
+    proc._tail_mode = "coarse"
+    proc._tail_delay_sequence = [7000, 7100]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 1
+    proc._tail_consecutive_failed_delays = 1
+    proc._tail_current_delay_us = 7000
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_coarse",
+            status="rejected_silhouette_qc",
+            delay_us=7000,
+            delay_from_emergence_us=3800,
+            replicate_index=1,
+            qc={"tail_qc_pass": False},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=["silhouette_qc_failed"],
+            attached_width_px=None,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_qc_failure"
+
+
+def test_online_stream_capture_tail_frame_stops_on_budget_exhaustion(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_mode = "coarse"
+    proc._tail_current_delay_us = 7000
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+    proc._tail_plan = {"steady_width_baseline_px": 74.0}
+    proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
+        calibration_model.online_cal_mod.new_online_stream_budget(),
+        phase="flow_phase",
+        count=36,
+    )
+
+    proc.onCaptureTailFrame()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_budget_exhausted"
+
+
+def test_online_stream_successful_refinement_writes_tail_fit_artifact(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc._flow_fit_result = {
+        "fit_status": "ok",
+        "steady_width_baseline_px": 74.0,
+        "flow_rate_nl_per_us": 0.0187,
+        "flow_intercept_nl": -1.2,
+    }
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "refine_step_us": 50,
+        "coarse_replicates": 2,
+        "refine_replicates": 2,
+    }
+    proc._tail_mode = "refine"
+    proc._tail_delay_sequence = [7150]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 1
+    proc._tail_current_delay_us = 7150
+    proc._tail_last_nontrigger_delay_us = 7000
+    proc._tail_trigger_delay_us = 7200
+    proc._tail_trigger_reason = "coarse_width_frac_le_0.90"
+    proc._tail_coarse_delay_summaries = [
+        {
+            "delay_us": 7000,
+            "delay_from_emergence_us": 3800,
+            "attempted_replicates": 2,
+            "accepted_replicates": 2,
+            "rejected_replicates": 0,
+            "median_width_px": 72.0,
+            "width_ratio_to_baseline": 72.0 / 74.0,
+            "triggered_coarse": False,
+            "triggered_refine": False,
+            "warnings": [],
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 7200,
+            "delay_from_emergence_us": 4000,
+            "attempted_replicates": 2,
+            "accepted_replicates": 2,
+            "rejected_replicates": 0,
+            "median_width_px": 66.0,
+            "width_ratio_to_baseline": 66.0 / 74.0,
+            "triggered_coarse": True,
+            "triggered_refine": True,
+            "warnings": [],
+            "delay_accepted": True,
+        },
+    ]
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_refine",
+            status="accepted",
+            delay_us=7150,
+            delay_from_emergence_us=3950,
+            replicate_index=1,
+            qc={"tail_qc_pass": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=70.0,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
+    assert artifact["result"]["tail_phase"]["status"] == "captured"
+    assert artifact["result"]["predicted_stream_duration_us"] == 3950
+
+
 def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._orig_settings = {
@@ -511,7 +829,7 @@ def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width
     assert captured["context"] == "online_stream_restore_settings"
 
 
-def test_online_stream_on_completed_emits_stage4_flow_phase_payload():
+def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._stop_requested = False
     proc._background_capture_completed = True
@@ -584,6 +902,30 @@ def test_online_stream_on_completed_emits_stage4_flow_phase_payload():
         "flow_fit_dropped_outlier_delay_from_emergence_us": None,
         "warnings": ["flow_fit_min_points_only"],
     }
+    proc._tail_fit_warnings = ["refine_trigger"]
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "status": "captured",
+            "plan": {"coarse_start_delay_us": 7000},
+            "attempted_delay_count": 3,
+            "attempted_capture_count": 6,
+            "accepted_delay_count": 3,
+            "accepted_measurement_count": 4,
+            "termination_reason": "refine_trigger",
+            "coarse_delay_summaries": [{"delay_us": 7000}],
+            "refine_delay_summaries": [{"delay_us": 7150}],
+            "trigger_delay_from_emergence_us": 4000,
+            "trigger_reason": "refine_width_frac_le_0.95",
+            "last_nontrigger_delay_from_emergence_us": 3800,
+            "tail_start_delay_from_emergence_us": 3950,
+            "warnings": ["refine_trigger"],
+        },
+        "predicted_stream_duration_us": 3950,
+        "predicted_volume_nl": 72.665,
+        "warnings": ["refine_trigger"],
+    }
+    proc._predicted_stream_duration_us = 3950
+    proc._predicted_volume_nl = 72.665
     proc.stageChanged = Recorder()
     proc.calibrationDataUpdated = Recorder()
     proc.calibrationCompleted = Recorder()
@@ -604,7 +946,9 @@ def test_online_stream_on_completed_emits_stage4_flow_phase_payload():
     assert result["flow_phase"]["fit_status"] == "warning_min_points_only"
     assert result["flow_phase"]["flow_rate_nl_per_us"] == 0.0187
     assert result["flow_phase"]["fit_warnings"] == ["flow_fit_min_points_only"]
-    assert "stage4_flow_fit_partial_result" in result["warnings"]
+    assert result["tail_phase"]["status"] == "captured"
+    assert result["predicted_stream_duration_us"] == 3950
+    assert result["predicted_volume_nl"] == 72.665
     assert "insufficient_accepted_delays" in result["warnings"]
 
 
