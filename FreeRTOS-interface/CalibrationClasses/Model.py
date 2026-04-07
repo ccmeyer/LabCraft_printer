@@ -2208,8 +2208,10 @@ class CalibrationManager(QObject):
             process_obj._recorder_phase_name = getattr(process_obj, "phase_name", None) or process_obj._recorder_process_name
             process_obj._recorder_run_dir = None
             process_obj._recorder_verdict_eligible = False
+            process_obj._process_recording_finalized = False
         except Exception:
             pass
+        self._finalized_process_recording_run_dir = None
         if not getattr(self, "record_mode_enabled", False):
             return
         recorder = getattr(self, "_process_recorder", None)
@@ -2238,6 +2240,7 @@ class CalibrationManager(QObject):
             process_obj._recorder_verdict_eligible = bool(
                 getattr(process_obj, "supports_operator_verdict", True)
             )
+            process_obj._process_recording_finalized = False
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to start process recording: {e}")
 
@@ -2315,13 +2318,24 @@ class CalibrationManager(QObject):
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
             return
+        process_obj = getattr(self, "activeCalibration", None)
+        process_run_dir = None
+        if process_obj is not None:
+            if bool(getattr(process_obj, "_process_recording_finalized", False)):
+                return
+            process_run_dir = getattr(process_obj, "_recorder_run_dir", None)
         # Finalize any active run even if record mode was toggled off mid-process.
         active_dir = None
         try:
             active_dir = recorder.get_active_run_dir()
         except Exception:
             active_dir = None
+        run_dir_key = str(process_run_dir or active_dir or "")
+        if run_dir_key and run_dir_key == str(getattr(self, "_finalized_process_recording_run_dir", "") or ""):
+            return
         if (not getattr(self, "record_mode_enabled", False)) and (not active_dir):
+            return
+        if not active_dir and not process_run_dir:
             return
         try:
             if getattr(self, "record_mode_enabled", False):
@@ -2338,6 +2352,10 @@ class CalibrationManager(QObject):
                 )
             elif str(outcome) == "completed":
                 recorder.write_verdict("unknown", submitted_by="system")
+            if process_obj is not None:
+                process_obj._process_recording_finalized = True
+            if run_dir_key:
+                self._finalized_process_recording_run_dir = run_dir_key
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to finalize process recording: {e}")
 
@@ -2802,7 +2820,6 @@ class CalibrationManager(QObject):
             if hasattr(self.activeCalibration, "requestGracefulStop"):
                 try:
                     self.activeCalibration.requestGracefulStop("User requested graceful stop")
-                    self._finalize_process_recording("stopped", error_message="Calibration terminated by user")
                     return
                 except Exception:
                     pass
@@ -4452,16 +4469,22 @@ class CalibrationManager(QObject):
     @Slot(str)
     def onCalibrationError(self, error_message):
         process_obj = self.activeCalibration
-        self.calibrationStageChanged.emit("Calibration error: " + error_message, "red")
-        self._finalize_process_recording("error", error_message=str(error_message))
-        self._pending_process_verdict = self._build_pending_process_verdict_context(
-            process_obj,
-            default_outcome="failed",
-            error_message=str(error_message or ""),
-        )
         normalized_status = (
             "stopped" if str(error_message or "").strip() == "Calibration terminated by user" else "error"
         )
+        if normalized_status == "stopped":
+            self.calibrationStageChanged.emit("Calibration stopped", "orange")
+        else:
+            self.calibrationStageChanged.emit("Calibration error: " + error_message, "red")
+        self._finalize_process_recording(normalized_status, error_message=str(error_message))
+        if normalized_status == "stopped":
+            self._pending_process_verdict = None
+        else:
+            self._pending_process_verdict = self._build_pending_process_verdict_context(
+                process_obj,
+                default_outcome="failed",
+                error_message=str(error_message or ""),
+            )
         self._record_stream_capture_process_result(
             process_obj,
             outcome=normalized_status,
@@ -4973,16 +4996,80 @@ class BaseCalibrationProcess(QObject):
             return None
         return None
 
-    def _request_settings_with_recording(self, settings: dict, callback, *, context: str = ""):
+    def _request_settings_with_recording(
+        self,
+        settings: dict,
+        callback,
+        *,
+        context: str = "",
+        guard_timeout_ms: int | None = None,
+        on_timeout=None,
+    ):
         settings_obj = dict(settings or {})
         self._record_event("settings_requested", {"settings": settings_obj, "context": str(context or "")})
+        request_state = {"resolved": False, "timer": None}
+
+        def _cancel_pending():
+            if request_state["resolved"]:
+                return
+            request_state["resolved"] = True
+            self._cancel_timeout(request_state["timer"])
+            request_state["timer"] = None
+            self._record_event(
+                "settings_cancelled",
+                {"settings": settings_obj, "context": str(context or "")},
+                level="warning",
+            )
 
         def _wrapped(*args, **kwargs):
+            if request_state["resolved"]:
+                self._record_event(
+                    "settings_completed_ignored",
+                    {"settings": settings_obj, "context": str(context or "")},
+                    level="warning",
+                )
+                return
+            request_state["resolved"] = True
+            self._cancel_timeout(request_state["timer"])
+            request_state["timer"] = None
             self._record_event("settings_completed", {"settings": settings_obj, "context": str(context or "")})
             if callback is not None:
                 callback(*args, **kwargs)
 
-        self.calibration_manager.changeSettingsRequested.emit(settings_obj, _wrapped)
+        if guard_timeout_ms is not None:
+            timeout_ms = int(guard_timeout_ms)
+            if timeout_ms > 0:
+                def _handle_timeout():
+                    if request_state["resolved"]:
+                        return
+                    request_state["resolved"] = True
+                    request_state["timer"] = None
+                    self._record_event(
+                        "settings_timeout",
+                        {
+                            "settings": settings_obj,
+                            "context": str(context or ""),
+                            "guard_timeout_ms": int(timeout_ms),
+                        },
+                        level="warning",
+                    )
+                    if on_timeout is not None:
+                        on_timeout()
+
+                request_state["timer"] = self._start_timeout(
+                    timeout_ms,
+                    err_msg=None,
+                    on_timeout=_handle_timeout,
+                )
+
+        try:
+            self.calibration_manager.changeSettingsRequested.emit(settings_obj, _wrapped)
+        except Exception:
+            self._cancel_timeout(request_state["timer"])
+            request_state["timer"] = None
+            raise
+
+        return _cancel_pending
 
     def _capture_with_policy(
         self,
@@ -5267,6 +5354,7 @@ class BaseCalibrationProcess(QObject):
 class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     phase_name = "online_stream_calibration"
     supports_operator_verdict = False
+    SETTINGS_ACK_TIMEOUT_MS = 10_000
 
     flowPlanReady = Signal()
     flowFrameAnalyzed = Signal()
@@ -5289,11 +5377,6 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 missing.append("Record Calibration Runs enabled")
         except Exception:
             missing.append("Record Calibration Runs enabled")
-        try:
-            if cm.get_nozzle_center() is None:
-                missing.append("Nozzle center (machine coords)")
-        except Exception:
-            missing.append("Nozzle center (machine coords)")
         try:
             if cm.get_pressure_scan_nozzle_center_image_position() is None:
                 missing.append("Emergence-derived nozzle center (image coords)")
@@ -5347,6 +5430,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._stop_requested = False
         self._stop_reason = None
         self._background_capture_completed = False
+        self._settings_wait_cancel = None
+        self._pending_terminal_status = None
+        self._pending_terminal_error_message = ""
+        self._restore_in_progress = False
+        self._restore_settings_confirmed = None
 
         self.background_image = None
         self.flow_frame_image = None
@@ -5545,6 +5633,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.calibration_manager.settingsChangeCompleted,
             self.state_final,
         )
+        self.state_restore.addTransition(self.finalize, self.state_final)
 
         for st in (
             self.state_prepare,
@@ -5599,6 +5688,65 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             "stock_solution": str(self.stock_solution),
             "printer_head_id": str(self.printer_head_id),
         }
+
+    def _set_pending_terminal_outcome(self, status: str, error_message: str = ""):
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "stopped":
+            self._pending_terminal_status = "stopped"
+            self._pending_terminal_error_message = str(error_message or "Calibration terminated by user")
+            return
+        if normalized_status == "error" and self._pending_terminal_status != "stopped":
+            self._pending_terminal_status = "error"
+            self._pending_terminal_error_message = str(
+                error_message or "Online stream calibration terminated with an error."
+            )
+
+    def _clear_settings_wait_guard(self, *, cancel_pending: bool = False):
+        cancel_fn = getattr(self, "_settings_wait_cancel", None)
+        self._settings_wait_cancel = None
+        if cancel_pending and callable(cancel_fn):
+            cancel_fn()
+
+    def _request_guarded_settings_update(
+        self,
+        settings: dict,
+        callback,
+        *,
+        context: str,
+        timeout_message: str,
+        on_timeout=None,
+    ):
+        self._clear_settings_wait_guard(cancel_pending=True)
+        settings_obj = dict(settings or {})
+
+        def _wrapped(*args, **kwargs):
+            self._settings_wait_cancel = None
+            if callback is not None:
+                callback(*args, **kwargs)
+
+        def _handle_timeout():
+            self._settings_wait_cancel = None
+            self._record_error(
+                timeout_message,
+                {
+                    "context": str(context or ""),
+                    "settings": settings_obj,
+                },
+            )
+            if on_timeout is not None:
+                on_timeout()
+
+        self._settings_wait_cancel = self._request_settings_with_recording(
+            settings_obj,
+            _wrapped,
+            context=context,
+            guard_timeout_ms=int(self.SETTINGS_ACK_TIMEOUT_MS),
+            on_timeout=_handle_timeout,
+        )
+
+    def _queue_terminal_outcome_after_restore(self, status: str, error_message: str):
+        self._set_pending_terminal_outcome(status, error_message)
+        self.finalize.emit()
 
     def _ensure_flow_paths(self):
         run_dir = getattr(self, "_recorder_run_dir", None)
@@ -5872,10 +6020,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
         self.stageChanged.emit("Online stream calibration: preparing background capture")
-        self._request_settings_with_recording(
+        self._request_guarded_settings_update(
             {"num_droplets": 0},
             self.calibration_manager.emitSettingsChangeCompleted,
             context="online_stream_prepare_background",
+            timeout_message="Timed out waiting for online stream background-prepare settings.",
+            on_timeout=lambda: self._queue_terminal_outcome_after_restore(
+                "error",
+                "Timed out waiting for online stream background-prepare settings.",
+            ),
         )
 
     def _on_background_capture_success(self, _frame):
@@ -5885,8 +6038,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if self._stop_requested:
             self.finalize.emit()
             return
-        self._restore_original_settings_best_effort()
-        self.calibrationError.emit("Failed to capture online stream calibration background image.")
+        self._queue_terminal_outcome_after_restore(
+            "error",
+            "Failed to capture online stream calibration background image.",
+        )
 
     @Slot()
     def onCaptureBackground(self):
@@ -5915,7 +6070,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._write_prior_resolution_artifact()
             self._write_plan_snapshot()
         except Exception as e:
-            self.calibrationError.emit(f"Failed to initialize online stream flow artifacts: {e}")
+            self._queue_terminal_outcome_after_restore(
+                "error",
+                f"Failed to initialize online stream flow artifacts: {e}",
+            )
             return
 
         self.flow_frame_image = None
@@ -5987,13 +6145,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             f"delay={int(self._current_delay_us)} us, "
             f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
         )
-        self._request_settings_with_recording(
+        self._request_guarded_settings_update(
             {
                 "flash_delay": int(self._current_delay_us),
                 "num_droplets": 1,
             },
             self.calibration_manager.emitSettingsChangeCompleted,
             context=f"online_stream_apply_flow_delay_{int(self._current_delay_us)}",
+            timeout_message=(
+                f"Timed out waiting for online stream flow-delay settings @ {int(self._current_delay_us)} us."
+            ),
+            on_timeout=lambda: self._queue_terminal_outcome_after_restore(
+                "error",
+                f"Timed out waiting for online stream flow-delay settings @ {int(self._current_delay_us)} us.",
+            ),
         )
 
     @Slot()
@@ -6387,13 +6552,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             f"{phase_label} delay={int(self._tail_current_delay_us)} us, "
             f"rep {int(self._tail_replicate_index + 1)}/{int(self._current_tail_replicates())}"
         )
-        self._request_settings_with_recording(
+        self._request_guarded_settings_update(
             {
                 "flash_delay": int(self._tail_current_delay_us),
                 "num_droplets": 1,
             },
             self.calibration_manager.emitSettingsChangeCompleted,
             context=f"online_stream_apply_{phase_label}_{int(self._tail_current_delay_us)}",
+            timeout_message=(
+                f"Timed out waiting for online stream {phase_label} settings @ {int(self._tail_current_delay_us)} us."
+            ),
+            on_timeout=lambda: self._queue_terminal_outcome_after_restore(
+                "error",
+                f"Timed out waiting for online stream {phase_label} settings @ {int(self._tail_current_delay_us)} us.",
+            ),
         )
 
     @Slot()
@@ -6715,28 +6887,60 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._restored_settings = True
         restore = self._build_restore_settings()
         try:
-            self._request_settings_with_recording(
+            self._request_guarded_settings_update(
                 restore,
                 callback or (lambda *args, **kwargs: None),
                 context=context,
+                timeout_message="Timed out waiting for online stream restore settings.",
+                on_timeout=self._on_restore_settings_timeout,
             )
         except Exception:
             if callable(callback):
                 callback()
 
+    def _on_restore_settings_timeout(self):
+        self._restore_settings_confirmed = False
+        self._record_event(
+            "restore_settings_unconfirmed",
+            {
+                "context": "online_stream_restore_settings",
+                "settings": self._build_restore_settings(),
+            },
+            level="warning",
+        )
+        self.finalize.emit()
+
     @Slot()
     def onRestoreSettings(self):
+        self._restore_in_progress = True
         self.stageChanged.emit("Online stream calibration: restoring imaging settings")
         self._restore_original_settings_best_effort(
-            self.calibration_manager.emitSettingsChangeCompleted,
+            self._on_restore_settings_completed,
             context="online_stream_restore_settings",
         )
 
+    def _on_restore_settings_completed(self, *args, **kwargs):
+        self._restore_settings_confirmed = True
+        self._restore_in_progress = False
+        self.calibration_manager.emitSettingsChangeCompleted(*args, **kwargs)
+
     @Slot()
     def onCompleted(self):
-        if self._stop_requested:
+        self._restore_in_progress = False
+        self._clear_settings_wait_guard(cancel_pending=False)
+        if str(self._pending_terminal_status or "") == "stopped":
             self.stageChanged.emit("Online stream calibration stopped")
-            self.calibrationError.emit("Calibration terminated by user")
+            self.calibrationError.emit(
+                str(self._pending_terminal_error_message or "Calibration terminated by user")
+            )
+            return
+        if str(self._pending_terminal_status or "") == "error":
+            self.calibrationError.emit(
+                str(
+                    self._pending_terminal_error_message
+                    or "Online stream calibration terminated with an error."
+                )
+            )
             return
         if not self._background_capture_completed:
             self.calibrationError.emit("Online stream calibration completed without background capture.")
@@ -6821,7 +7025,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def requestGracefulStop(self, reason: str = "User requested stop"):
         self._stop_requested = True
         self._stop_reason = str(reason)
+        self._set_pending_terminal_outcome("stopped", "Calibration terminated by user")
+        self._clear_settings_wait_guard(cancel_pending=True)
         self.stageChanged.emit("Online stream calibration: graceful stop requested")
+        self.finalize.emit()
+
+    def release_runtime_resources(self):
+        self._clear_settings_wait_guard(cancel_pending=True)
+        self._restore_in_progress = False
+        super().release_runtime_resources()
 
 class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
     """

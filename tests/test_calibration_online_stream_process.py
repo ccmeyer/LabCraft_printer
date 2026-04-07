@@ -60,6 +60,11 @@ def _flow_proc(tmp_path: Path):
     proc._stop_requested = False
     proc._stop_reason = None
     proc._background_capture_completed = True
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = None
+    proc._pending_terminal_error_message = ""
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
     proc._orig_settings = {
         "num_droplets": 1,
         "flash_delay": 4300,
@@ -210,7 +215,6 @@ def _flow_proc(tmp_path: Path):
 def test_online_stream_missing_requirements_reports_all_dependencies():
     cm = _ready_cm()
     cm.get_record_mode_enabled = lambda: False
-    cm.get_nozzle_center = lambda: None
     cm.get_pressure_scan_nozzle_center_image_position = lambda: None
     cm.get_emergence_time = lambda: None
     cm._safe_get_stock_solution = lambda: ""
@@ -221,7 +225,6 @@ def test_online_stream_missing_requirements_reports_all_dependencies():
 
     joined = " | ".join(missing).lower()
     assert "record calibration runs enabled" in joined
-    assert "machine coords" in joined
     assert "image coords" in joined
     assert "emergence time" in joined
     assert "droplet camera" in joined
@@ -231,6 +234,13 @@ def test_online_stream_missing_requirements_reports_all_dependencies():
 
 def test_online_stream_missing_requirements_ready_case_is_empty():
     assert OnlineStreamCalibrationProcess.missing_requirements(_ready_cm()) == []
+
+
+def test_online_stream_missing_requirements_do_not_require_machine_coords():
+    cm = _ready_cm()
+    cm.get_nozzle_center = lambda: None
+
+    assert OnlineStreamCalibrationProcess.missing_requirements(cm) == []
 
 
 def test_start_online_stream_calibration_uses_try_start_process():
@@ -278,15 +288,18 @@ def test_emit_readiness_includes_online_stream_calibration():
 def test_online_stream_on_prepare_requests_only_num_droplets_zero():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._stop_requested = False
+    proc._settings_wait_cancel = None
     proc.stageChanged = Recorder()
     proc.finalize = Recorder()
     proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
-    captured = {"settings": None, "context": None, "callback": None}
+    captured = {"settings": None, "context": None, "callback": None, "guard_timeout_ms": None}
 
-    def _stub(settings, callback, *, context=""):
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
         captured["settings"] = dict(settings)
         captured["context"] = str(context)
         captured["callback"] = callback
+        captured["guard_timeout_ms"] = guard_timeout_ms
+        return lambda: None
 
     proc._request_settings_with_recording = _stub
 
@@ -294,6 +307,96 @@ def test_online_stream_on_prepare_requests_only_num_droplets_zero():
 
     assert captured["settings"] == {"num_droplets": 0}
     assert captured["context"] == "online_stream_prepare_background"
+    assert captured["guard_timeout_ms"] == 10_000
+
+
+def test_online_stream_prepare_timeout_restores_before_terminal_error():
+    proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
+    proc._stop_requested = False
+    proc._stop_reason = None
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = None
+    proc._pending_terminal_error_message = ""
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
+    proc._restored_settings = False
+    proc._background_capture_completed = False
+    proc._orig_settings = {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_width": 1350,
+    }
+    proc.stageChanged = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
+    phase = {"name": "prepare"}
+    captured = {}
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured[phase["name"]] = {
+            "settings": dict(settings),
+            "context": str(context),
+            "guard_timeout_ms": guard_timeout_ms,
+            "on_timeout": on_timeout,
+        }
+        if phase["name"] == "restore":
+            callback()
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+
+    proc.onPrepare()
+    captured["prepare"]["on_timeout"]()
+
+    assert proc.finalize.calls
+    assert proc._pending_terminal_status == "error"
+    assert proc.calibrationError.calls == []
+
+    phase["name"] = "restore"
+    proc.onRestoreSettings()
+    proc.onCompleted()
+
+    assert captured["restore"]["settings"] == {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_pulse_width": 1350,
+    }
+    assert proc.calibrationCompleted.calls == []
+    assert proc.calibrationError.calls[-1][0][0] == (
+        "Timed out waiting for online stream background-prepare settings."
+    )
+
+
+def test_online_stream_graceful_stop_cancels_pending_prepare_wait():
+    proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
+    proc._stop_requested = False
+    proc._stop_reason = None
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = None
+    proc._pending_terminal_error_message = ""
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
+    proc.stageChanged = Recorder()
+    proc.finalize = Recorder()
+    proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
+    cancelled = {"value": False}
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        return lambda: cancelled.__setitem__("value", True)
+
+    proc._request_settings_with_recording = _stub
+
+    proc.onPrepare()
+    proc.requestGracefulStop("User requested stop")
+
+    assert cancelled["value"] is True
+    assert proc.finalize.calls
+    assert proc._pending_terminal_status == "stopped"
 
 
 def test_online_stream_on_capture_background_uses_background_capture_attr():
@@ -309,6 +412,57 @@ def test_online_stream_on_capture_background_uses_background_capture_attr():
     assert captured["kwargs"]["set_attr"] == "background_image"
 
 
+def test_online_stream_background_capture_failure_restores_before_terminal_error():
+    proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
+    proc._stop_requested = False
+    proc._stop_reason = None
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = None
+    proc._pending_terminal_error_message = ""
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
+    proc._restored_settings = False
+    proc._background_capture_completed = False
+    proc._orig_settings = {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_width": 1350,
+    }
+    proc.stageChanged = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
+    captured = {"settings": None}
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured["settings"] = dict(settings)
+        callback()
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+
+    proc._on_background_capture_final_failure()
+
+    assert proc.finalize.calls
+    assert proc.calibrationError.calls == []
+
+    proc.onRestoreSettings()
+    proc.onCompleted()
+
+    assert captured["settings"] == {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_pulse_width": 1350,
+    }
+    assert proc.calibrationError.calls[-1][0][0] == (
+        "Failed to capture online stream calibration background image."
+    )
+
+
 def test_online_stream_plan_flow_phase_writes_plan_snapshot(tmp_path):
     proc = _flow_proc(tmp_path)
 
@@ -322,6 +476,38 @@ def test_online_stream_plan_flow_phase_writes_plan_snapshot(tmp_path):
     assert snapshot["priors"]["lookup"]["candidate_found"] is False
     assert snapshot["flow_plan"]["delays_us"] == [3850, 4050]
     assert snapshot["analysis_config"]["attached_bottom_guard_px"] == 96
+
+
+def test_online_stream_plan_flow_phase_failure_restores_before_terminal_error(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._ensure_flow_paths = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    captured = {"settings": None}
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured["settings"] = dict(settings)
+        callback()
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+
+    proc.onPlanFlowPhase()
+
+    assert proc.finalize.calls
+    assert proc.calibrationError.calls == []
+    assert proc._pending_terminal_status == "error"
+
+    proc.onRestoreSettings()
+    proc.onCompleted()
+
+    assert captured["settings"] == {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_pulse_width": 1350,
+    }
+    assert proc.calibrationError.calls[-1][0][0] == (
+        "Failed to initialize online stream flow artifacts: boom"
+    )
 
 
 def test_online_stream_capture_flow_frame_uses_one_printed_attempt_and_consumes_budget_once(tmp_path):
@@ -862,13 +1048,18 @@ def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width
         "print_width": 1350,
     }
     proc._restored_settings = False
+    proc._settings_wait_cancel = None
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
     proc.stageChanged = Recorder()
     proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
-    captured = {"settings": None, "context": None}
+    captured = {"settings": None, "context": None, "guard_timeout_ms": None}
 
-    def _stub(settings, callback, *, context=""):
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
         captured["settings"] = dict(settings)
         captured["context"] = str(context)
+        captured["guard_timeout_ms"] = guard_timeout_ms
+        return lambda: None
 
     proc._request_settings_with_recording = _stub
 
@@ -881,12 +1072,59 @@ def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width
         "print_pulse_width": 1350,
     }
     assert captured["context"] == "online_stream_restore_settings"
+    assert captured["guard_timeout_ms"] == 10_000
+
+
+def test_online_stream_restore_timeout_advances_final_without_clobbering_pending_stop():
+    proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
+    proc._orig_settings = {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_width": 1350,
+    }
+    proc._restored_settings = False
+    proc._stop_requested = True
+    proc._stop_reason = "User requested stop"
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = "stopped"
+    proc._pending_terminal_error_message = "Calibration terminated by user"
+    proc._restore_in_progress = False
+    proc._restore_settings_confirmed = None
+    proc.stageChanged = Recorder()
+    proc.finalize = Recorder()
+    proc.calibrationDataUpdated = Recorder()
+    proc.calibrationCompleted = Recorder()
+    proc.calibrationError = Recorder()
+    proc.calibration_manager = SimpleNamespace(emitSettingsChangeCompleted=lambda *args, **kwargs: None)
+    captured = {"on_timeout": None}
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured["on_timeout"] = on_timeout
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+
+    proc.onRestoreSettings()
+    captured["on_timeout"]()
+
+    assert proc.finalize.calls
+    assert proc._restore_settings_confirmed is False
+
+    proc.onCompleted()
+
+    assert proc.calibrationCompleted.calls == []
+    assert proc.calibrationError.calls[-1][0][0] == "Calibration terminated by user"
 
 
 def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._stop_requested = False
     proc._background_capture_completed = True
+    proc._settings_wait_cancel = None
+    proc._pending_terminal_status = None
+    proc._pending_terminal_error_message = ""
+    proc._restore_in_progress = False
     proc._orig_settings = {
         "print_pressure": 0.42,
         "print_width": 1350,
@@ -1035,6 +1273,7 @@ def test_online_stream_graceful_stop_does_not_emit_success_payload():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._stop_requested = False
     proc._stop_reason = None
+    proc._settings_wait_cancel = None
     proc.stageChanged = Recorder()
     proc.finalize = Recorder()
     proc.calibrationDataUpdated = Recorder()

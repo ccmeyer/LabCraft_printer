@@ -53,3 +53,82 @@ def test_finalize_process_recording_finalizes_active_run_even_when_disabled():
     assert fake.finalized == [("completed", "")]
     # No new event appended while recording is disabled.
     assert fake.events == []
+
+
+def test_finalize_process_recording_is_idempotent_for_same_run():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr.record_mode_enabled = True
+    fake = _FakeRecorder(active=True)
+    mgr._process_recorder = fake
+    mgr.activeCalibration = type(
+        "_Proc",
+        (),
+        {
+            "_recorder_run_dir": "run_dir",
+            "_process_recording_finalized": False,
+        },
+    )()
+
+    mgr._finalize_process_recording("stopped", error_message="Calibration terminated by user")
+    mgr._finalize_process_recording("error", error_message="Calibration terminated by user")
+
+    assert fake.finalized == [("stopped", "Calibration terminated by user")]
+    assert fake.verdicts == []
+
+
+def test_stop_requests_graceful_stop_without_finalizing_inline():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._pw_sweep_active = False
+    mgr._pw_values = []
+    mgr._pw_index = -1
+    mgr._cancel_pw_apply_wait = lambda: None
+    mgr.clear_pending_process_verdict = lambda **kwargs: None
+    mgr.calibration_queue = []
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr.has_open_stream_gravimetric_capture = lambda: False
+    fake = _FakeRecorder(active=True)
+    mgr._process_recorder = fake
+    called = {"reason": None}
+
+    class _Proc:
+        def requestGracefulStop(self, reason):
+            called["reason"] = reason
+
+    mgr.activeCalibration = _Proc()
+
+    CalibrationManager.stop(mgr)
+
+    assert called["reason"] == "User requested graceful stop"
+    assert fake.finalized == []
+
+
+def test_on_calibration_error_normalizes_user_stop_to_stopped_without_failed_verdict():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr.record_mode_enabled = True
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._process_recorder = _FakeRecorder(active=True)
+    mgr._pending_process_verdict = {"stale": True}
+    mgr._build_pending_process_verdict_context = lambda *args, **kwargs: {"unexpected": True}
+    mgr._record_stream_capture_process_result = lambda *args, **kwargs: None
+    mgr._cleanup_finished_process = lambda process_obj: None
+    mgr.has_open_stream_gravimetric_capture = lambda: False
+    mgr._mark_stream_capture_terminal_state = lambda **kwargs: None
+    mgr.calibration_queue = []
+    mgr.activeCalibration = type(
+        "_Proc",
+        (),
+        {
+            "_recorder_run_dir": "run_dir",
+            "_process_recording_finalized": False,
+        },
+    )()
+
+    CalibrationManager.onCalibrationError(mgr, "Calibration terminated by user")
+
+    assert mgr._process_recorder.finalized == [("stopped", "Calibration terminated by user")]
+    assert mgr._process_recorder.verdicts == []
+    assert mgr._pending_process_verdict is None
+    assert mgr.activeCalibration is None
+    assert mgr.calibrationStageChanged.calls[-1][0][0] == "Calibration stopped"
