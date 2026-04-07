@@ -891,11 +891,20 @@ class Controller(QObject):
         
     def open_gripper(self,handler=None):
         """Open the gripper."""
-        self.machine.open_gripper(handler=handler)
+        return self.machine.open_gripper(handler=handler)
 
     def close_gripper(self,handler=None):
         """Close the gripper."""
-        self.machine.close_gripper(handler=handler)
+        return self.machine.close_gripper(handler=handler)
+
+    def set_gripper_params(self, refresh_period_ms, pulse_duration_ms, handler=None, manual=False):
+        """Update the firmware gripper refresh timing."""
+        return self.machine.set_gripper_params(
+            int(refresh_period_ms),
+            int(pulse_duration_ms),
+            handler=handler,
+            manual=manual,
+        )
 
     def wait_command(self):
         """Tells the machine to wait a specified amount of time in milliseconds."""
@@ -1598,6 +1607,93 @@ class Controller(QObject):
             rep_override=rep_override,
             notes=notes,
         )
+
+    def begin_stream_gravimetric_capture_gripper_preamble(self):
+        manager = self.model.calibration_manager
+        result = manager.begin_stream_gravimetric_capture_gripper_refresh()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return result
+
+        state = manager.get_stream_gravimetric_capture_state()
+        pulse_duration_ms = int(state.get("gripper_pulse_duration_snapshot_ms") or 0)
+        gripper_was_open = bool(state.get("gripper_was_open"))
+        if pulse_duration_ms <= 0:
+            manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+                "Current gripper pulse duration is unavailable; cannot pause auto-refresh.",
+            )
+            return False, "Current gripper pulse duration is unavailable; cannot pause auto-refresh."
+
+        def _after_gripper_suspend():
+            finish_result = manager.mark_stream_gravimetric_capture_gripper_suspended()
+            if isinstance(finish_result, tuple) and finish_result and (finish_result[0] is False):
+                manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+                    str(finish_result[1] or "Failed to finalize gripper refresh suspension."),
+                )
+
+        def _after_gripper_refresh():
+            suspend_result = manager.begin_stream_gravimetric_capture_gripper_suspend()
+            if isinstance(suspend_result, tuple) and suspend_result and (suspend_result[0] is False):
+                manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+                    str(suspend_result[1] or "Failed to pause gripper auto-refresh."),
+                )
+                return
+            parked_ok = self.set_gripper_params(
+                manager.STREAM_CAPTURE_PARKED_GRIPPER_REFRESH_MS,
+                pulse_duration_ms,
+                handler=_after_gripper_suspend,
+                manual=False,
+            )
+            if parked_ok is False:
+                manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+                    "Failed to send gripper auto-refresh pause command.",
+                )
+
+        refresh_ok = (
+            self.open_gripper(handler=_after_gripper_refresh)
+            if gripper_was_open
+            else self.close_gripper(handler=_after_gripper_refresh)
+        )
+        if refresh_ok is False:
+            manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+                "Failed to enqueue the initial gripper refresh pulse.",
+            )
+            return False, "Failed to enqueue the initial gripper refresh pulse."
+        return True, ""
+
+    def begin_stream_gravimetric_capture_gripper_restore(self):
+        manager = self.model.calibration_manager
+        result = manager.begin_stream_gravimetric_capture_gripper_restore()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return result
+
+        state = manager.get_stream_gravimetric_capture_state()
+        refresh_period_ms = int(state.get("gripper_refresh_period_snapshot_ms") or 0)
+        pulse_duration_ms = int(state.get("gripper_pulse_duration_snapshot_ms") or 0)
+        if refresh_period_ms <= 0 or pulse_duration_ms <= 0:
+            manager.report_stream_gravimetric_capture_gripper_restore_failure(
+                "Original gripper refresh settings are unavailable; cannot restore auto-refresh.",
+            )
+            return False, "Original gripper refresh settings are unavailable; cannot restore auto-refresh."
+
+        def _after_gripper_restore():
+            finish_result = manager.mark_stream_gravimetric_capture_gripper_restored()
+            if isinstance(finish_result, tuple) and finish_result and (finish_result[0] is False):
+                manager.report_stream_gravimetric_capture_gripper_restore_failure(
+                    str(finish_result[1] or "Failed to finalize gripper refresh restore."),
+                )
+
+        restore_ok = self.set_gripper_params(
+            refresh_period_ms,
+            pulse_duration_ms,
+            handler=_after_gripper_restore,
+            manual=False,
+        )
+        if restore_ok is False:
+            manager.report_stream_gravimetric_capture_gripper_restore_failure(
+                "Failed to send gripper auto-refresh restore command.",
+            )
+            return False, "Failed to send gripper auto-refresh restore command."
+        return True, ""
 
     def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
         return self.model.calibration_manager.finalize_stream_gravimetric_capture(

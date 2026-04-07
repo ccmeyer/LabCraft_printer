@@ -33,6 +33,7 @@ def test_shared_command_codes_match_firmware_header():
         "WAIT": "CMD_WAIT",
         "ENABLE_PRINT_PROFILE": "CMD_ENABLE_PRINT_PROFILE",
         "DISABLE_PRINT_PROFILE": "CMD_DISABLE_PRINT_PROFILE",
+        "SET_GRIPPER_PARAMS": "CMD_SET_GRIPPER_PARAMS",
     }
 
     for py_name, fw_name in shared.items():

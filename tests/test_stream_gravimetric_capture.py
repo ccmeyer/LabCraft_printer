@@ -144,20 +144,30 @@ class _StreamCaptureManagerStub:
 
     def is_stream_gravimetric_capture_busy(self):
         return str(self.state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
         }
 
     def should_suppress_process_verdict(self):
         return str(self.state.get("status") or "idle") in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
             "error",
@@ -178,6 +188,8 @@ class _ViewControllerStub:
         self.print_only_calls = []
         self.print_droplet_calls = []
         self.refuel_pulse_width_updates = []
+        self.gripper_refresh_calls = []
+        self.gripper_param_updates = []
         self.auto_complete_moves = False
 
     def start_read_camera(self):
@@ -202,21 +214,60 @@ class _ViewControllerStub:
         return None
 
     def start_stream_gravimetric_capture(self, *args, **kwargs):
+        self.manager.state["status"] = "pending_gripper_refresh"
+        self.manager.state["status_message"] = "Refreshing gripper vacuum before stream gravimetric capture."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_gravimetric_capture_gripper_preamble(self):
+        self.gripper_refresh_calls.append(bool(self.manager.state.get("gripper_was_open")))
+        self.manager.state["status"] = "running"
+        self.manager.state["status_message"] = "Running nozzle, focus, emergence, and timecourse capture sequence."
+        self.manager.state["gripper_refresh_suspended"] = True
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
 
     def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
-        self.manager.state["status"] = "pending_camera_return"
+        self.manager.state["status"] = "pending_gripper_restore"
         self.manager.state["ending_mass_mg"] = float(ending_mass_mg)
         self.manager.state["rep"] = int(rep_override or self.manager.state.get("rep") or 1)
         self.manager.state["notes"] = str(notes or "")
         self.manager.state["saved_dataset_name"] = str(self.manager.state.get("timecourse_run_id") or "run_timecourse_demo")
-        self.manager.state["status_message"] = "Saved stream metadata row. Return printer head to camera."
+        self.manager.state["session_outcome"] = "saved"
+        self.manager.state["post_restore_action"] = "saved_camera_return"
+        self.manager.state["gripper_refresh_suspended"] = True
+        self.manager.state["status_message"] = "Restoring gripper auto-refresh settings before returning to camera."
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
 
     def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
-        self.manager.state["status"] = "idle"
-        self.manager.state["status_message"] = "Discarded stream gravimetric capture."
+        if str(self.manager.state.get("status") or "") == "awaiting_mass_entry":
+            self.manager.state["status"] = "pending_gripper_restore"
+            self.manager.state["status_message"] = "Discarding this run and restoring gripper auto-refresh settings."
+            self.manager.state["session_outcome"] = "discarded"
+            self.manager.state["post_restore_action"] = "discard_camera_return"
+            self.manager.state["gripper_refresh_suspended"] = True
+        else:
+            self.manager.state["status"] = "idle"
+            self.manager.state["status_message"] = "Discarded stream gravimetric capture."
+        self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
+        return True, ""
+
+    def begin_stream_gravimetric_capture_gripper_restore(self):
+        self.gripper_param_updates.append(
+            (
+                int(self.manager.state.get("gripper_refresh_period_snapshot_ms") or 25000),
+                int(self.manager.state.get("gripper_pulse_duration_snapshot_ms") or 1500),
+            )
+        )
+        action = str(self.manager.state.get("post_restore_action") or "")
+        if action in {"saved_camera_return", "discard_camera_return"}:
+            self.manager.state["status"] = "pending_camera_return"
+        elif action == "terminal":
+            self.manager.state["status"] = str(self.manager.state.get("session_outcome") or "error")
+        else:
+            self.manager.state["status"] = "idle"
+        self.manager.state["gripper_refresh_suspended"] = False
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
 
@@ -313,6 +364,10 @@ def _make_manager_model(tmp_path, *, experiment_dir_name="experiment", num_flash
         get_refuel_pulse_width=lambda: 5000,
         get_current_print_pressure=lambda: 0.65,
         get_current_refuel_pressure=lambda: 0.80,
+        get_gripper_settings=lambda: (25000, 1500),
+        gripper_refresh_period=25000,
+        gripper_pulse_duration=1500,
+        gripper_open=False,
     )
     model = SimpleNamespace(
         machine_state_updated=SignalStub(),
@@ -333,6 +388,22 @@ def _make_manager(tmp_path, *, experiment_dir_name="experiment", num_flashes=100
     manager = CalibrationManager(model)
     manager._emit_readiness = lambda: None
     return model, manager
+
+
+def _start_stream_capture_with_gripper_suspend(manager):
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_refresh()
+    assert (ok, message) == (True, "")
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_suspend()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_gravimetric_capture_gripper_suspended()
+    assert (ok, message) == (True, "")
+
+
+def _restore_stream_capture_gripper(manager):
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_restore()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_gravimetric_capture_gripper_restored()
+    assert (ok, message) == (True, "")
 
 
 def _write_jsonl(path: Path, rows):
@@ -462,6 +533,10 @@ def _build_view_dialog(monkeypatch, qapp, *, manager=None, model=None, controlle
                 get_print_pulse_width=lambda: 1400,
                 get_refuel_pulse_width=lambda: 3000,
                 get_current_print_pressure=lambda: 0.80,
+                get_gripper_settings=lambda: (25000, 1500),
+                gripper_refresh_period=25000,
+                gripper_pulse_duration=1500,
+                gripper_open=False,
             ),
             experiment_model=SimpleNamespace(experiment_dir_path="C:/tmp/example-experiment"),
         )
@@ -567,6 +642,10 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
 
     ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=2, notes="capture start")
     assert (ok, message) == (True, "")
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_gripper_refresh"
+    assert queued == []
+
+    _start_stream_capture_with_gripper_suspend(manager)
     assert queued == [list(manager.STREAM_CAPTURE_QUEUE)]
     assert manager.calibration_queue == list(manager.STREAM_CAPTURE_QUEUE)
 
@@ -655,7 +734,9 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
         notes="saved row",
     )
     assert (save_ok, save_message) == (True, "")
-    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_camera_return"
+    save_state = manager.get_stream_gravimetric_capture_state()
+    assert save_state["status"] == "pending_gripper_restore"
+    assert save_state["session_outcome"] == "saved"
 
     metadata_path = Path(model.experiment_model.experiment_dir_path) / "stream_metadata.csv"
     rows = _read_csv_rows(metadata_path)
@@ -684,6 +765,9 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
         "run_timecourse",
     ]
 
+    _restore_stream_capture_gripper(manager)
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_camera_return"
+
     return_ok, return_message = manager.begin_stream_gravimetric_capture_camera_return()
     assert (return_ok, return_message) == (True, "")
     camera_ok, camera_message = manager.mark_stream_gravimetric_capture_camera_reached()
@@ -699,7 +783,7 @@ def test_stream_capture_discard_before_queue_start_only_writes_sidecar(tmp_path,
 
     ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=1, notes="discard me")
     assert (ok, message) == (True, "")
-    assert str(manager.get_stream_gravimetric_capture_state()["status"]) == "running"
+    assert str(manager.get_stream_gravimetric_capture_state()["status"]) == "pending_gripper_refresh"
 
     discard_ok, discard_message = manager.discard_stream_gravimetric_capture()
     assert (discard_ok, discard_message) == (True, "")
@@ -712,6 +796,25 @@ def test_stream_capture_discard_before_queue_start_only_writes_sidecar(tmp_path,
     assert sidecar_rows[0]["outcome"] == "discarded"
     assert sidecar_rows[0]["error_message"] == "operator_discarded"
     assert manager.get_stream_gravimetric_capture_state()["status"] == "idle"
+
+
+def test_stream_capture_gripper_preamble_failure_blocks_queue_start(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path, num_flashes=75)
+    queued = []
+    monkeypatch.setattr(manager, "start_calibration_queue", lambda: queued.append(list(manager.calibration_queue)))
+
+    ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=1, notes="preamble fail")
+    assert (ok, message) == (True, "")
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_gripper_refresh"
+
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_refresh()
+    assert (ok, message) == (True, "")
+    fail_ok, fail_message = manager.report_stream_gravimetric_capture_gripper_preamble_failure(
+        "Failed to send gripper auto-refresh pause command.",
+    )
+    assert (fail_ok, fail_message) == (True, "")
+    assert queued == []
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "error"
 
 
 @pytest.mark.parametrize(
@@ -732,6 +835,7 @@ def test_stream_capture_terminal_sessions_write_only_sidecar(
 
     ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=1, notes="terminal")
     assert (ok, message) == (True, "")
+    _start_stream_capture_with_gripper_suspend(manager)
 
     error_run = _write_run_dir(
         Path(model.experiment_model.experiment_dir_path) / "calibration_recordings",
@@ -756,6 +860,10 @@ def test_stream_capture_terminal_sessions_write_only_sidecar(
         status=terminal_status,
         error_message=error_message,
     )
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_gripper_restore"
+
+    _restore_stream_capture_gripper(manager)
+    assert manager.get_stream_gravimetric_capture_state()["status"] == terminal_status
 
     save_ok, save_message = manager.finalize_stream_gravimetric_capture(1.0)
     assert save_ok is False
@@ -769,6 +877,88 @@ def test_stream_capture_terminal_sessions_write_only_sidecar(
     assert sidecar_rows[0]["outcome"] == terminal_status
     assert sidecar_rows[0]["error_message"] == error_message
     assert sidecar_rows[0]["printed_capture_count"] == 1
+
+
+def test_stream_capture_popup_discard_returns_to_camera_without_saving(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_discard_popup",
+            "timecourse_run_id": "run_discard_demo",
+            "starting_flash": 100,
+            "ending_flash": 111,
+            "raw_flash_delta": 11,
+            "background_capture_count": 1,
+            "printed_capture_count": 10,
+            "rep": 3,
+            "suggested_rep": 3,
+            "notes": "discard me",
+            "gripper_refresh_period_snapshot_ms": 25000,
+            "gripper_pulse_duration_snapshot_ms": 1500,
+            "gripper_refresh_suspended": True,
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    assert dialog._stream_capture_mass_dialog is not None
+    dialog._stream_capture_mass_dialog.discard_button.click()
+    qapp.processEvents()
+
+    assert controller.moves[-1] == "camera"
+    assert manager.state["status"] == "returning_to_camera"
+
+    controller.on_stream_gravimetric_capture_camera_reached()
+    qapp.processEvents()
+
+    assert manager.state["status"] == "idle"
+    assert dialog.stream_capture_starting_mass_spin.value() == pytest.approx(0.0)
+
+
+def test_stream_capture_popup_click_away_restores_shortcuts(monkeypatch, qapp):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_focus_demo",
+            "timecourse_run_id": "run_focus_demo",
+            "starting_flash": 100,
+            "ending_flash": 113,
+            "raw_flash_delta": 13,
+            "background_capture_count": 2,
+            "printed_capture_count": 11,
+            "rep": 2,
+            "suggested_rep": 2,
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    popup = dialog._stream_capture_mass_dialog
+    assert popup is not None
+    assert popup.isVisible() is True
+    assert popup.ending_mass_spin.hasFocus() is False
+
+    popup.ending_mass_spin.setFocus()
+    qapp.processEvents()
+    assert popup.ending_mass_spin.hasFocus() is True
+
+    popup.ending_mass_spin.lineEdit().setText("5.5")
+    QTest.mouseClick(popup.summary_label, Qt.LeftButton)
+    qapp.processEvents()
+    assert popup.ending_mass_spin.hasFocus() is False
+    assert popup.ending_mass_spin.value() == pytest.approx(5.5)
+
+    QTest.keyClick(popup, Qt.Key_Equal)
+    QTest.keyClick(popup, Qt.Key_1)
+    qapp.processEvents()
+    assert controller.refuel_pulse_width_updates[-1] == 3500
+    assert controller.refuel_pressure_steps[-1] == -1.0
 
 
 def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict(monkeypatch, qapp):

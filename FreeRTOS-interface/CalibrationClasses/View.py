@@ -174,10 +174,12 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         self.controller = controller
         self.model = model
         self._shortcut_handles = []
+        self._app_event_filter_installed = False
 
         self.setWindowTitle("Stream Capture Mass Entry")
         self.setModal(True)
         self.resize(460, 320)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -203,15 +205,27 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         self.ending_mass_spin.setRange(-100000.0, 100000.0)
         self.ending_mass_spin.setSingleStep(0.01)
         self.ending_mass_spin.setValue(0.0)
+        self.ending_mass_spin.setKeyboardTracking(False)
         form.addRow("Ending Mass (mg):", self.ending_mass_spin)
         layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.discard_button = QtWidgets.QPushButton("Discard Run")
+        self.discard_button.setMinimumHeight(32)
+        self.discard_button.clicked.connect(self._discard)
+        button_row.addWidget(self.discard_button)
 
         self.complete_button = QtWidgets.QPushButton("Save Row And Return To Camera")
         self.complete_button.setMinimumHeight(32)
         self.complete_button.clicked.connect(self._complete)
-        layout.addWidget(self.complete_button)
+        button_row.addWidget(self.complete_button)
+        layout.addLayout(button_row)
 
         self._install_shortcuts()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._app_event_filter_installed = True
 
     def _install_shortcuts(self):
         for key_sequence, callback in (
@@ -254,8 +268,70 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
             f"Rep: {int(rep_value)} | Notes: {notes or '-'}"
         )
         ending_mass = state.get("ending_mass_mg")
-        if ending_mass is not None and not self.ending_mass_spin.hasFocus():
+        if ending_mass is not None and not self._mass_editor_has_focus():
             self.ending_mass_spin.setValue(float(ending_mass))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, lambda: self.complete_button.setFocus(Qt.OtherFocusReason))
+
+    def closeEvent(self, event):
+        self._remove_app_event_filter()
+        super().closeEvent(event)
+
+    def _remove_app_event_filter(self):
+        if not self._app_event_filter_installed:
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._app_event_filter_installed = False
+
+    def _mass_editor_widgets(self):
+        widgets = [self.ending_mass_spin]
+        try:
+            line_edit = self.ending_mass_spin.lineEdit()
+        except Exception:
+            line_edit = None
+        if line_edit is not None:
+            widgets.append(line_edit)
+        return tuple(widget for widget in widgets if widget is not None)
+
+    def _mass_editor_has_focus(self):
+        focus_widget = QApplication.focusWidget()
+        return any(focus_widget is widget for widget in self._mass_editor_widgets())
+
+    def _widget_is_inside_mass_editor(self, obj):
+        current = obj
+        while current is not None:
+            if any(current is widget for widget in self._mass_editor_widgets()):
+                return True
+            current = getattr(current, "parentWidget", lambda: None)()
+        return False
+
+    def _commit_and_clear_mass_editor_focus(self):
+        try:
+            self.ending_mass_spin.interpretText()
+        except Exception:
+            pass
+        try:
+            line_edit = self.ending_mass_spin.lineEdit()
+        except Exception:
+            line_edit = None
+        if line_edit is not None:
+            line_edit.clearFocus()
+        self.ending_mass_spin.clearFocus()
+
+    def eventFilter(self, obj, event):
+        if (
+            self.isVisible()
+            and event is not None
+            and event.type() == QtCore.QEvent.MouseButtonPress
+            and self._mass_editor_has_focus()
+            and not self._widget_is_inside_mass_editor(obj)
+        ):
+            self._commit_and_clear_mass_editor_focus()
+        return super().eventFilter(obj, event)
 
     def _complete(self):
         parent = self.parent()
@@ -263,6 +339,14 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
             return
         handler = getattr(parent, "_complete_stream_gravimetric_capture_from_popup", None)
         if callable(handler) and handler(float(self.ending_mass_spin.value())):
+            self.accept()
+
+    def _discard(self):
+        parent = self.parent()
+        if parent is None:
+            return
+        handler = getattr(parent, "_discard_stream_gravimetric_capture_from_popup", None)
+        if callable(handler) and handler():
             self.accept()
 
 SUMMARY_RAW_ROW_ROLE = Qt.UserRole + 100
@@ -694,6 +778,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_capture_last_status = None
         self._stream_capture_mass_dialog = None
         self._stream_capture_dialog_closing = False
+        self._stream_capture_gripper_preamble_attempted = False
+        self._stream_capture_gripper_restore_attempted = False
         self._stream_capture_loading_move_attempted = False
         self._stream_capture_camera_return_attempted = False
         try:
@@ -1974,6 +2060,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         return True
 
+    def _begin_stream_capture_gripper_preamble(self):
+        result = self.controller.begin_stream_gravimetric_capture_gripper_preamble()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return False
+        return True
+
+    def _begin_stream_capture_gripper_restore(self):
+        result = self.controller.begin_stream_gravimetric_capture_gripper_restore()
+        if isinstance(result, tuple) and result and (result[0] is False):
+            return False
+        return True
+
     def _ensure_stream_capture_followup_state(self, *_args):
         if getattr(self, "_stream_capture_dialog_closing", False):
             return
@@ -1981,10 +2079,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
         state = self._get_stream_capture_state()
         status = str(state.get("status") or "idle")
 
+        if status == "pending_gripper_refresh":
+            if not self._stream_capture_gripper_preamble_attempted:
+                self._stream_capture_gripper_preamble_attempted = True
+                self._begin_stream_capture_gripper_preamble()
+            self._close_stream_capture_mass_dialog()
+            return
+
         if status == "pending_loading_move":
             if not self._stream_capture_loading_move_attempted:
                 self._stream_capture_loading_move_attempted = True
                 self._begin_stream_capture_loading_move()
+            self._close_stream_capture_mass_dialog()
+            return
+
+        if status == "pending_gripper_restore":
+            if not self._stream_capture_gripper_restore_attempted:
+                self._stream_capture_gripper_restore_attempted = True
+                self._begin_stream_capture_gripper_restore()
             self._close_stream_capture_mass_dialog()
             return
 
@@ -2000,8 +2112,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self._close_stream_capture_mass_dialog()
 
+        if status not in {"pending_gripper_refresh", "refreshing_gripper", "suspending_gripper_refresh"}:
+            self._stream_capture_gripper_preamble_attempted = False
         if status not in {"pending_loading_move", "moving_to_loading"}:
             self._stream_capture_loading_move_attempted = False
+        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
+            self._stream_capture_gripper_restore_attempted = False
         if status not in {"pending_camera_return", "returning_to_camera"}:
             self._stream_capture_camera_return_attempted = False
 
@@ -2016,6 +2132,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self,
                 "Stream Capture",
                 str(result[1] or "Failed to save stream gravimetric capture row."),
+            )
+            return False
+        self._close_stream_capture_mass_dialog()
+        return True
+
+    def _discard_stream_gravimetric_capture_from_popup(self):
+        result = self.controller.discard_stream_gravimetric_capture(
+            reason="operator_discarded",
+        )
+        if isinstance(result, tuple) and result and (result[0] is False):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Stream Capture",
+                str(result[1] or "Failed to discard stream gravimetric capture."),
             )
             return False
         self._close_stream_capture_mass_dialog()
@@ -2037,11 +2167,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
         raw_flash_delta = state.get("raw_flash_delta")
 
         self.stream_capture_status_label.setText(status_message)
-        if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return"}:
+        if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return", "pending_gripper_restore"}:
             self.stream_capture_status_label.setStyleSheet("color: darkred; font-weight: 600;")
         elif status in {"awaiting_mass", "awaiting_mass_entry", "pending_camera_return", "returning_to_camera"}:
             self.stream_capture_status_label.setStyleSheet("color: darkgreen; font-weight: 600;")
-        elif status in {"pending_loading_move", "moving_to_loading"}:
+        elif status in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "pending_loading_move",
+            "moving_to_loading",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
+        }:
             self.stream_capture_status_label.setStyleSheet("color: darkblue; font-weight: 600;")
         else:
             self.stream_capture_status_label.setStyleSheet("")
@@ -2073,19 +2211,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 stream_busy = bool(busy_getter())
             except Exception:
                 stream_busy = status in {
+                    "pending_gripper_refresh",
+                    "refreshing_gripper",
+                    "suspending_gripper_refresh",
                     "running",
                     "pending_loading_move",
                     "moving_to_loading",
                     "awaiting_mass_entry",
+                    "pending_gripper_restore",
+                    "restoring_gripper_refresh",
                     "pending_camera_return",
                     "returning_to_camera",
                 }
         else:
             stream_busy = status in {
+                "pending_gripper_refresh",
+                "refreshing_gripper",
+                "suspending_gripper_refresh",
                 "running",
                 "pending_loading_move",
                 "moving_to_loading",
                 "awaiting_mass_entry",
+                "pending_gripper_restore",
+                "restoring_gripper_refresh",
                 "pending_camera_return",
                 "returning_to_camera",
             }
@@ -2098,10 +2246,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.stream_capture_starting_mass_spin.setValue(0.0)
                 self.stream_capture_notes_edit.clear()
         elif status in {
+            "pending_gripper_refresh",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "pending_gripper_restore",
+            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
             "error",
