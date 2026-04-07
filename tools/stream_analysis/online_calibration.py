@@ -103,8 +103,8 @@ def _unique_strings(values) -> list[str]:
     return output
 
 
-def normalize_online_stream_prior(prior: dict | None) -> dict:
-    policy = _resolved_policy()
+def normalize_online_stream_prior(prior: dict | None, policy: dict | None = None) -> dict:
+    policy = _resolved_policy(policy)
     prior_obj = dict(prior or {})
     had_prior = bool(prior_obj)
     return {
@@ -141,7 +141,7 @@ def build_online_stream_flow_plan(
     policy: dict | None = None,
 ) -> dict:
     resolved_policy = _resolved_policy(policy)
-    normalized_prior = normalize_online_stream_prior(prior)
+    normalized_prior = normalize_online_stream_prior(prior, policy=resolved_policy)
     start_offset_us = _to_int(
         normalized_prior.get("flow_start_offset_us"),
         resolved_policy["flow_start_offset_us"],
@@ -181,24 +181,23 @@ def build_online_stream_tail_plan(
     policy: dict | None = None,
 ) -> dict:
     resolved_policy = _resolved_policy(policy)
-    normalized_prior = normalize_online_stream_prior(prior)
-    coarse_start_offset_us = _to_int(
-        normalized_prior.get("tail_start_offset_us"),
-        resolved_policy["tail_fallback_start_offset_us"],
-    )
+    normalized_prior = normalize_online_stream_prior(prior, policy=resolved_policy)
     coarse_step_us = _to_int(
         normalized_prior.get("tail_coarse_step_us"),
         resolved_policy["tail_coarse_step_us"],
     )
-    coarse_start_delay_us = int(emergence_time_us) + int(coarse_start_offset_us)
-    plan_source = (
-        "prior_adjusted"
-        if (
-            int(coarse_start_offset_us) != int(resolved_policy["tail_fallback_start_offset_us"])
-            or int(coarse_step_us) != int(resolved_policy["tail_coarse_step_us"])
+    coarse_start_offset_us = int(resolved_policy["tail_fallback_start_offset_us"])
+    plan_source = "default"
+    if str(normalized_prior.get("condition_match") or "") == "exact":
+        coarse_start_offset_us = int(
+            _to_int(
+                normalized_prior.get("tail_start_offset_us"),
+                resolved_policy["tail_fallback_start_offset_us"],
+            )
+            - 300
         )
-        else "default"
-    )
+        plan_source = "exact_prior_minus_lead"
+    coarse_start_delay_us = int(emergence_time_us) + int(coarse_start_offset_us)
     return {
         "emergence_time_us": int(emergence_time_us),
         "coarse_start_offset_us": int(coarse_start_offset_us),
@@ -294,6 +293,9 @@ def build_online_stream_measurement_row(
     visible_volume_nl: float | int | None,
     qc_pass: bool,
     image_ref: dict | None = None,
+    nozzle_qc_pass: bool | None = None,
+    silhouette_qc_pass: bool | None = None,
+    attached_bottom_clearance_px: float | int | None = None,
 ) -> dict:
     return {
         "phase": str(phase),
@@ -304,6 +306,13 @@ def build_online_stream_measurement_row(
         "visible_volume_nl": None if visible_volume_nl is None else float(visible_volume_nl),
         "qc_pass": bool(qc_pass),
         "image_ref": dict(image_ref or {}),
+        "nozzle_qc_pass": None if nozzle_qc_pass is None else bool(nozzle_qc_pass),
+        "silhouette_qc_pass": None if silhouette_qc_pass is None else bool(silhouette_qc_pass),
+        "attached_bottom_clearance_px": (
+            None
+            if attached_bottom_clearance_px is None
+            else float(attached_bottom_clearance_px)
+        ),
     }
 
 
@@ -327,6 +336,29 @@ def build_online_stream_plan_snapshot(
         "tail_plan": _copy_jsonish(tail_plan or {}),
         "capture_budget": _copy_jsonish(capture_budget or {}),
         "analysis_config": _copy_jsonish(_resolved_analysis_config(analysis_config)),
+    }
+
+
+def build_online_stream_prior_resolution_artifact(
+    *,
+    condition: dict | None = None,
+    lookup: dict | None = None,
+    candidate_prior: dict | None = None,
+    applied_prior: dict | None = None,
+    fallback_reason: str | None = None,
+    warnings: list[str] | None = None,
+    schema_version: int = 1,
+    phase: str = "online_stream_calibration",
+) -> dict:
+    return {
+        "schema_version": int(schema_version),
+        "phase": str(phase),
+        "condition": _copy_jsonish(condition or {}),
+        "lookup": _copy_jsonish(lookup or {}),
+        "candidate_prior": _copy_jsonish(candidate_prior or {}),
+        "applied_prior": _copy_jsonish(applied_prior or {}),
+        "fallback_reason": None if fallback_reason in (None, "") else str(fallback_reason),
+        "warnings": _copy_warnings(warnings),
     }
 
 

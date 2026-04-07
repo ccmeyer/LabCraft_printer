@@ -552,6 +552,19 @@ class CalibrationMemoryStore:
             target_volume_nl=target_volume_nl,
         )
 
+    def get_best_online_stream_prior(self, context, *, target_pulse_width_us=None, target_print_pressure_psi=None):
+        self.ensure_initialized()
+        if self.is_derived_memory_dirty():
+            try:
+                self.refresh_derived_memory()
+            except Exception as e:
+                self._warn("refresh_derived_memory", e)
+        return self.aggregator.get_best_online_stream_prior(
+            context,
+            target_pulse_width_us=target_pulse_width_us,
+            target_print_pressure_psi=target_print_pressure_psi,
+        )
+
     def load_runtime_config(self):
         self.ensure_initialized()
         cached = getattr(self, "_runtime_config_cache", None)
@@ -1099,6 +1112,7 @@ class CalibrationMemoryStore:
                 "qualification_reasons": ["feature_extraction_failed"],
             }
         prior_runtime_summary = {}
+        online_stream_prior_runtime_summary = {}
         ui_recommendation_summary = {}
         try:
             runtime_getter = getattr(calibration_manager, "get_calibration_memory_prior_runtime_summary", None)
@@ -1107,6 +1121,17 @@ class CalibrationMemoryStore:
         except Exception as e:
             self._warn("get_prior_runtime_summary", e)
             prior_runtime_summary = {}
+        try:
+            online_stream_runtime_getter = getattr(
+                calibration_manager,
+                "get_online_stream_prior_runtime_summary",
+                None,
+            )
+            if callable(online_stream_runtime_getter):
+                online_stream_prior_runtime_summary = dict(online_stream_runtime_getter() or {})
+        except Exception as e:
+            self._warn("get_online_stream_prior_runtime_summary", e)
+            online_stream_prior_runtime_summary = {}
         try:
             ui_getter = getattr(calibration_manager, "get_calibration_memory_ui_recommendation_summary", None)
             if callable(ui_getter):
@@ -1131,6 +1156,25 @@ class CalibrationMemoryStore:
         summary["prior_fallback_reason"] = prior_runtime_summary.get("fallback_reason")
         summary["prior_usefulness_summary"] = dict(prior_runtime_summary.get("usefulness_summary") or {})
         summary["prior_qualification"] = dict(prior_runtime_summary.get("qualification") or {})
+        summary["online_stream_prior_runtime"] = online_stream_prior_runtime_summary
+        summary["online_stream_prior_lookup_performed"] = bool(
+            online_stream_prior_runtime_summary.get("looked_up")
+        )
+        summary["online_stream_prior_candidate_found"] = bool(
+            online_stream_prior_runtime_summary.get("candidate_found")
+        )
+        summary["online_stream_prior_applied"] = bool(
+            online_stream_prior_runtime_summary.get("applied")
+        )
+        summary["online_stream_prior_fallback_reason"] = online_stream_prior_runtime_summary.get(
+            "fallback_reason"
+        )
+        summary["online_stream_prior_candidate"] = dict(
+            online_stream_prior_runtime_summary.get("candidate") or {}
+        )
+        summary["online_stream_prior_applied_prior"] = dict(
+            online_stream_prior_runtime_summary.get("applied_prior") or {}
+        )
         summary["ui_recommendation"] = ui_recommendation_summary
         if not summary.get("advisory_prior") and summary["prior_candidate"]:
             summary["advisory_prior"] = dict(summary["prior_candidate"])

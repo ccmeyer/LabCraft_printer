@@ -1209,6 +1209,8 @@ class CalibrationManager(QObject):
         self._pressure_traj_result = None
         self._calibration_memory_prior_candidate = None
         self._calibration_memory_prior_runtime = {}
+        self._calibration_memory_online_stream_prior_candidate = None
+        self._calibration_memory_online_stream_prior_runtime = {}
         self._calibration_memory_ui_recommendation = {}
         self._pending_process_verdict = None
         self._stream_capture_state = {}
@@ -1337,6 +1339,37 @@ class CalibrationManager(QObject):
         state = getattr(self, "_calibration_memory_prior_runtime", None)
         if not isinstance(state, dict) or not state:
             state = self._reset_calibration_memory_prior_runtime()
+        return state
+
+    def _new_online_stream_prior_runtime(self):
+        return {
+            "memory_enabled": bool(self._calibration_memory_enabled()),
+            "capture_level": str(self._get_calibration_memory_capture_level() or "compact"),
+            "mode": str(self._get_calibration_memory_mode() or "advisory"),
+            "looked_up": False,
+            "lookup_skipped_reason": None,
+            "candidate_found": False,
+            "candidate": None,
+            "applied": False,
+            "applied_prior": None,
+            "application_reason": None,
+            "fallback_reason": None,
+            "condition_match": None,
+            "source": None,
+            "target_pulse_width_us": None,
+            "target_print_pressure_psi": None,
+            "warnings": [],
+        }
+
+    def _reset_online_stream_prior_runtime(self):
+        self._calibration_memory_online_stream_prior_candidate = None
+        self._calibration_memory_online_stream_prior_runtime = self._new_online_stream_prior_runtime()
+        return self._calibration_memory_online_stream_prior_runtime
+
+    def _get_online_stream_prior_runtime(self):
+        state = getattr(self, "_calibration_memory_online_stream_prior_runtime", None)
+        if not isinstance(state, dict) or not state:
+            state = self._reset_online_stream_prior_runtime()
         return state
 
     def _reset_calibration_memory_ui_recommendation_state(self):
@@ -1909,6 +1942,179 @@ class CalibrationManager(QObject):
         runtime["usefulness_summary"] = usefulness
         return runtime
 
+    def resolve_online_stream_calibration_prior(self, *, condition: dict | None = None):
+        runtime = self._reset_online_stream_prior_runtime()
+        runtime["memory_enabled"] = bool(self._calibration_memory_enabled())
+        runtime["capture_level"] = str(self._get_calibration_memory_capture_level() or "compact")
+        runtime["mode"] = str(self._get_calibration_memory_mode() or "advisory")
+
+        condition_obj = dict(condition or {})
+
+        def _to_int(value):
+            try:
+                if value in (None, ""):
+                    return None
+                return int(value)
+            except Exception:
+                return None
+
+        def _to_float(value):
+            try:
+                if value in (None, ""):
+                    return None
+                return float(value)
+            except Exception:
+                return None
+
+        target_pulse_width_us = _to_int(condition_obj.get("print_pulse_width_us"))
+        target_print_pressure_psi = _to_float(condition_obj.get("print_pressure_psi"))
+        runtime["target_pulse_width_us"] = target_pulse_width_us
+        runtime["target_print_pressure_psi"] = target_print_pressure_psi
+
+        candidate = None
+        store = self._get_calibration_memory_store()
+        if store is None:
+            runtime["lookup_skipped_reason"] = "store_unavailable"
+        elif not bool(runtime.get("memory_enabled")):
+            runtime["lookup_skipped_reason"] = "memory_disabled"
+        elif str(runtime.get("mode") or "advisory") == "off":
+            runtime["lookup_skipped_reason"] = "mode_off"
+        elif target_pulse_width_us is None or target_print_pressure_psi is None:
+            runtime["lookup_skipped_reason"] = "missing_condition_target"
+        else:
+            try:
+                context = store.context_builder.build(
+                    model=self.model,
+                    calibration_file_path=self.calibration_file_path,
+                )
+                candidate = store.get_best_online_stream_prior(
+                    context,
+                    target_pulse_width_us=target_pulse_width_us,
+                    target_print_pressure_psi=target_print_pressure_psi,
+                )
+                runtime["looked_up"] = True
+                runtime["candidate_found"] = bool(candidate)
+                runtime["candidate"] = dict(candidate or {}) if candidate else None
+                self._calibration_memory_online_stream_prior_candidate = dict(candidate or {}) if candidate else None
+            except Exception as e:
+                self._warn_calibration_memory("get_best_online_stream_prior", e)
+                runtime["lookup_skipped_reason"] = "lookup_error"
+                candidate = None
+
+        candidate_obj = dict(candidate or {}) if isinstance(candidate, dict) else {}
+        normalized_default = online_cal_mod.normalize_online_stream_prior(None)
+        warnings = []
+        fallback_reason = runtime.get("lookup_skipped_reason")
+
+        required_keys = ("flow_start_offset_us", "tail_start_offset_us")
+        malformed_candidate = bool(candidate_obj) and any(candidate_obj.get(key) in (None, "") for key in required_keys)
+        if malformed_candidate:
+            warnings.append("malformed_prior")
+            fallback_reason = "malformed_prior"
+            candidate_obj = dict(candidate_obj)
+
+        if candidate_obj and not malformed_candidate:
+            normalized_prior = online_cal_mod.normalize_online_stream_prior(candidate_obj)
+            applied_prior = dict(candidate_obj)
+            applied_prior.update(normalized_prior)
+            runtime["applied"] = True
+            runtime["applied_prior"] = dict(applied_prior)
+            runtime["application_reason"] = "online_stream_schedule_prior_applied"
+            runtime["fallback_reason"] = None
+            runtime["condition_match"] = normalized_prior.get("condition_match")
+            runtime["source"] = normalized_prior.get("source")
+            warnings.extend(list(normalized_prior.get("warnings") or []))
+        else:
+            normalized_prior = dict(normalized_default)
+            applied_prior = dict(normalized_default)
+            runtime["applied"] = False
+            runtime["applied_prior"] = dict(applied_prior)
+            runtime["application_reason"] = None
+            runtime["fallback_reason"] = str(fallback_reason or ("no_prior" if not candidate_obj else "malformed_prior"))
+            runtime["condition_match"] = normalized_prior.get("condition_match")
+            runtime["source"] = normalized_prior.get("source")
+
+        warnings = [str(item) for item in warnings if str(item or "").strip()]
+        runtime["warnings"] = list(dict.fromkeys(warnings))
+
+        lookup_payload = {
+            "target_pulse_width_us": target_pulse_width_us,
+            "target_print_pressure_psi": target_print_pressure_psi,
+            "looked_up": bool(runtime.get("looked_up")),
+            "lookup_skipped_reason": runtime.get("lookup_skipped_reason"),
+            "candidate_found": bool(runtime.get("candidate_found")),
+            "candidate_prior": dict(runtime.get("candidate") or {}),
+        }
+        try:
+            self._append_calibration_memory_observation(
+                "online_stream_prior_lookup",
+                lookup_payload,
+                phase_name="online_stream_calibration",
+            )
+            if bool(runtime.get("applied")):
+                self._append_calibration_memory_observation(
+                    "online_stream_prior_applied",
+                    {
+                        "condition": condition_obj,
+                        "prior": dict(candidate_obj or {}),
+                        "applied_prior": dict(applied_prior or {}),
+                    },
+                    phase_name="online_stream_calibration",
+                )
+            elif runtime.get("fallback_reason"):
+                self._append_calibration_memory_observation(
+                    "online_stream_prior_fallback",
+                    {
+                        "condition": condition_obj,
+                        "fallback_reason": runtime.get("fallback_reason"),
+                        "candidate_prior": dict(candidate_obj or {}),
+                        "applied_prior": dict(applied_prior or {}),
+                    },
+                    phase_name="online_stream_calibration",
+                )
+        except Exception as e:
+            self._warn_calibration_memory("record_online_stream_prior_resolution", e)
+
+        result_priors = {
+            "lookup_performed": bool(runtime.get("looked_up")),
+            "candidate_found": bool(runtime.get("candidate_found")),
+            "source": str(applied_prior.get("source") or "default"),
+            "aggregation_level": candidate_obj.get("aggregation_level"),
+            "pulse_match_type": candidate_obj.get("pulse_match_type"),
+            "condition_match": str(applied_prior.get("condition_match") or "none"),
+            "source_run_ids": list(candidate_obj.get("source_run_ids") or []),
+            "applied_flow_start_offset_us": _to_int(applied_prior.get("flow_start_offset_us")),
+            "applied_flow_step_us": _to_int(applied_prior.get("flow_step_us")),
+            "applied_flow_delay_count": _to_int(applied_prior.get("flow_delay_count")),
+            "applied_tail_start_offset_us": _to_int(applied_prior.get("tail_start_offset_us")),
+            "applied_tail_coarse_step_us": _to_int(applied_prior.get("tail_coarse_step_us")),
+            "fallback_reason": runtime.get("fallback_reason"),
+            "warnings": list(runtime.get("warnings") or []),
+        }
+
+        artifact = online_cal_mod.build_online_stream_prior_resolution_artifact(
+            condition=condition_obj,
+            lookup=lookup_payload,
+            candidate_prior=dict(candidate_obj or {}),
+            applied_prior=dict(applied_prior or {}),
+            fallback_reason=runtime.get("fallback_reason"),
+            warnings=list(runtime.get("warnings") or []),
+        )
+        return {
+            "normalized_prior": dict(applied_prior or {}),
+            "artifact": artifact,
+            "result_priors": result_priors,
+            "candidate_prior": dict(candidate_obj or {}),
+            "applied_prior": dict(applied_prior or {}),
+        }
+
+    def get_online_stream_prior_runtime_summary(self):
+        runtime = dict(self._get_online_stream_prior_runtime() or {})
+        runtime["candidate"] = dict(runtime.get("candidate") or {})
+        runtime["applied_prior"] = dict(runtime.get("applied_prior") or {})
+        runtime["warnings"] = [str(item) for item in list(runtime.get("warnings") or [])]
+        return runtime
+
     def get_calibration_memory_ui_recommendation_summary(self):
         summary = dict(self._get_calibration_memory_ui_recommendation_state() or {})
         summary["prior"] = dict(summary.get("prior") or {}) if summary.get("prior") else None
@@ -2279,6 +2485,7 @@ class CalibrationManager(QObject):
             self._warn_calibration_memory("set_memory_enabled", e)
             return False
         self._reset_calibration_memory_prior_runtime()
+        self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()
         state = "enabled" if bool(enabled) else "disabled"
         self.calibrationStageChanged.emit(f"Calibration memory {state}.", "dark_blue")
@@ -2381,6 +2588,7 @@ class CalibrationManager(QObject):
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
         self._reset_calibration_memory_prior_runtime()
+        self._reset_online_stream_prior_runtime()
         print(f"Calibration file path: {self.calibration_file_path}")
         # Load if exists
         if os.path.exists(self.calibration_file_path):
@@ -2433,6 +2641,7 @@ class CalibrationManager(QObject):
         self._run_id = None
         self._run_idx = None
         self._reset_calibration_memory_prior_runtime()
+        self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()
 
     # Back-compat: keep these, but redirect through session I/O
@@ -5144,7 +5353,34 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.stock_solution = str(self.calibration_manager._safe_get_stock_solution() or "")
         self.printer_head_id = str(self.calibration_manager._safe_get_printer_head_id() or "")
         self.emergence_time_us = int(self.calibration_manager.get_emergence_time())
-        self.priors = online_cal_mod.normalize_online_stream_prior(None)
+        self._prior_resolution = {}
+        self._prior_resolution_artifact = {}
+        self._prior_resolution_path = None
+        condition = self._build_condition()
+        prior_resolver = getattr(self.calibration_manager, "resolve_online_stream_calibration_prior", None)
+        if callable(prior_resolver):
+            resolved_prior = dict(prior_resolver(condition=condition) or {})
+        else:
+            resolved_prior = {}
+        self.priors = dict(
+            resolved_prior.get("normalized_prior")
+            or online_cal_mod.normalize_online_stream_prior(None)
+        )
+        self._prior_resolution = dict(
+            resolved_prior.get("result_priors")
+            or self.priors
+        )
+        self._prior_resolution_artifact = dict(
+            resolved_prior.get("artifact")
+            or online_cal_mod.build_online_stream_prior_resolution_artifact(
+                condition=condition,
+                lookup={},
+                candidate_prior=resolved_prior.get("candidate_prior") or {},
+                applied_prior=resolved_prior.get("applied_prior") or self.priors,
+                fallback_reason=(resolved_prior.get("result_priors") or {}).get("fallback_reason"),
+                warnings=(resolved_prior.get("result_priors") or {}).get("warnings") or [],
+            )
+        )
         self.flow_plan = online_cal_mod.build_online_stream_flow_plan(
             emergence_time_us=self.emergence_time_us,
             prior=self.priors,
@@ -5199,6 +5435,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._run_dir = None
         self._frames_path = None
         self._plan_snapshot_path = None
+        self._prior_resolution_path = None
         self._flow_fit_path = None
         self._tail_fit_path = None
         self._plan_snapshot_written = False
@@ -5370,6 +5607,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._run_dir = str(run_dir)
         self._frames_path = os.path.join(self._run_dir, "frames.jsonl")
         self._plan_snapshot_path = os.path.join(self._run_dir, "plan_snapshot.json")
+        self._prior_resolution_path = os.path.join(self._run_dir, "prior_resolution.json")
         self._flow_fit_path = os.path.join(self._run_dir, "flow_fit.json")
         self._tail_fit_path = os.path.join(self._run_dir, "tail_fit.json")
 
@@ -5378,14 +5616,23 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, default=numpy_encoder) + "\n")
 
-    def _write_plan_snapshot(self):
-        if self._plan_snapshot_written or not self._plan_snapshot_path:
+    def _write_plan_snapshot(self, *, force: bool = False):
+        if (self._plan_snapshot_written and not force) or not self._plan_snapshot_path:
             return
+        active_tail_plan = dict(
+            getattr(self, "_tail_plan", None)
+            or getattr(self, "tail_plan", None)
+            or {}
+        )
         snapshot = online_cal_mod.build_online_stream_plan_snapshot(
             condition=self._build_condition(),
-            priors=dict(self.priors),
+            priors=dict(
+                getattr(self, "_prior_resolution_artifact", None)
+                or getattr(self, "_prior_resolution", None)
+                or self.priors
+            ),
             flow_plan=dict(self.flow_plan),
-            tail_plan=dict(self.tail_plan),
+            tail_plan=active_tail_plan,
             capture_budget=dict(self.capture_budget),
             analysis_config=dict(self.analysis_config),
         )
@@ -5393,6 +5640,40 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         with open(self._plan_snapshot_path, "w", encoding="utf-8") as handle:
             json.dump(snapshot, handle, indent=2, default=numpy_encoder)
         self._plan_snapshot_written = True
+
+    def _write_prior_resolution_artifact(self):
+        if not self._prior_resolution_path:
+            return
+        artifact = dict(
+            getattr(self, "_prior_resolution_artifact", None)
+            or online_cal_mod.build_online_stream_prior_resolution_artifact(
+                condition=self._build_condition(),
+                lookup={},
+                candidate_prior={},
+                applied_prior=dict(self.priors or {}),
+                fallback_reason=(getattr(self, "_prior_resolution", {}) or {}).get("fallback_reason"),
+                warnings=(getattr(self, "_prior_resolution", {}) or {}).get("warnings") or [],
+            )
+        )
+        os.makedirs(os.path.dirname(self._prior_resolution_path), exist_ok=True)
+        with open(self._prior_resolution_path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2, default=numpy_encoder)
+
+    def _append_online_stream_memory_observation(self, observation_type: str, payload: dict | None = None):
+        calibration_manager = getattr(self, "calibration_manager", None)
+        if calibration_manager is None:
+            return None
+        try:
+            return calibration_manager._append_calibration_memory_observation(
+                str(observation_type),
+                payload or {},
+                phase_name=self.phase_name,
+            )
+        except Exception as e:
+            warn = getattr(calibration_manager, "_warn_calibration_memory", None)
+            if callable(warn):
+                warn(f"append_online_stream_observation:{observation_type}", e)
+            return None
 
     def _append_flow_warning(self, warning: str):
         warning_label = str(warning or "")
@@ -5631,6 +5912,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return
         try:
             self._ensure_flow_paths()
+            self._write_prior_resolution_artifact()
             self._write_plan_snapshot()
         except Exception as e:
             self.calibrationError.emit(f"Failed to initialize online stream flow artifacts: {e}")
@@ -5850,6 +6132,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     visible_volume_nl=summary.get("visible_volume_nl"),
                     qc_pass=True,
                     image_ref=capture_ref,
+                    nozzle_qc_pass=summary.get("nozzle_qc_pass"),
+                    silhouette_qc_pass=summary.get("silhouette_qc_pass"),
+                    attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
                 )
             )
 
@@ -6037,6 +6322,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_tail_analysis_summary = {}
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
+        try:
+            self._write_plan_snapshot(force=True)
+        except Exception as e:
+            self.calibrationError.emit(f"Failed to update online stream plan snapshot: {e}")
+            return
 
         if not bool(self._tail_plan.get("run_tail")):
             self._tail_phase_status = "unresolved_missing_flow_baseline"
@@ -6256,6 +6546,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     visible_volume_nl=summary.get("visible_volume_nl"),
                     qc_pass=True,
                     image_ref=capture_ref,
+                    nozzle_qc_pass=summary.get("nozzle_qc_pass"),
+                    silhouette_qc_pass=summary.get("silhouette_qc_pass"),
+                    attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
                 )
             )
 
@@ -6496,12 +6789,24 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 result_warnings.append(warning_label)
         result = online_cal_mod.build_online_stream_result_stub(
             condition=condition,
-            priors=dict(self.priors),
+            priors=dict(getattr(self, "_prior_resolution", None) or self.priors),
             flow_phase=flow_phase,
             tail_phase=tail_phase,
             predicted_stream_duration_us=self._predicted_stream_duration_us,
             predicted_volume_nl=self._predicted_volume_nl,
             warnings=result_warnings,
+        )
+        self._append_online_stream_memory_observation(
+            "online_stream_result",
+            {
+                "condition": condition,
+                "priors": dict(getattr(self, "_prior_resolution", None) or self.priors),
+                "flow_phase": dict(flow_phase or {}),
+                "tail_phase": dict(tail_phase or {}),
+                "predicted_stream_duration_us": self._predicted_stream_duration_us,
+                "predicted_volume_nl": self._predicted_volume_nl,
+                "warnings": list(result_warnings),
+            },
         )
         self.calibrationDataUpdated.emit(
             {

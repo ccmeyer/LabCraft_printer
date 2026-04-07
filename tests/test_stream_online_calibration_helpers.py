@@ -78,6 +78,48 @@ def test_build_online_stream_tail_plan_without_prior_matches_frozen_defaults():
     assert plan["plan_source"] == "default"
 
 
+def test_build_online_stream_tail_plan_exact_prior_starts_coarse_search_300us_early():
+    plan = mod.build_online_stream_tail_plan(
+        emergence_time_us=1000,
+        prior={
+            "condition_match": "exact",
+            "tail_start_offset_us": 3950,
+            "tail_coarse_step_us": 100,
+        },
+    )
+
+    assert plan["coarse_start_offset_us"] == 3650
+    assert plan["coarse_start_delay_us"] == 4650
+    assert plan["coarse_step_us"] == 100
+    assert plan["plan_source"] == "exact_prior_minus_lead"
+
+
+def test_build_online_stream_flow_plan_partial_prior_respects_custom_policy_defaults():
+    plan = mod.build_online_stream_flow_plan(
+        emergence_time_us=1000,
+        prior={"flow_start_offset_us": 700},
+        policy={"flow_step_us": 150, "flow_delay_count": 4},
+    )
+
+    assert plan["delay_offsets_from_emergence_us"] == [700, 850, 1000, 1150]
+    assert plan["delays_us"] == [1700, 1850, 2000, 2150]
+    assert plan["point_count"] == 4
+    assert plan["plan_source"] == "prior_adjusted"
+
+
+def test_build_online_stream_tail_plan_partial_prior_respects_custom_policy_defaults():
+    plan = mod.build_online_stream_tail_plan(
+        emergence_time_us=1000,
+        prior={"source": "provided"},
+        policy={"tail_fallback_start_offset_us": 4200, "tail_coarse_step_us": 125},
+    )
+
+    assert plan["coarse_start_offset_us"] == 4200
+    assert plan["coarse_start_delay_us"] == 5200
+    assert plan["coarse_step_us"] == 125
+    assert plan["plan_source"] == "default"
+
+
 def test_online_stream_budget_creation_and_consumption_is_non_mutating():
     budget = mod.new_online_stream_budget()
 
@@ -167,6 +209,9 @@ def test_build_online_stream_measurement_row_returns_exact_required_keys():
         visible_volume_nl=12.3,
         qc_pass=True,
         image_ref={"capture_id": "cap_02"},
+        nozzle_qc_pass=True,
+        silhouette_qc_pass=True,
+        attached_bottom_clearance_px=150,
     )
 
     assert set(row.keys()) == {
@@ -178,6 +223,9 @@ def test_build_online_stream_measurement_row_returns_exact_required_keys():
         "visible_volume_nl",
         "qc_pass",
         "image_ref",
+        "nozzle_qc_pass",
+        "silhouette_qc_pass",
+        "attached_bottom_clearance_px",
     }
 
 
@@ -286,6 +334,29 @@ def test_build_online_stream_plan_snapshot_returns_exact_top_level_shape():
     assert snapshot["phase"] == "online_stream_calibration"
     assert snapshot["analysis_config"]["nozzle_guard_px"] == 2
     assert snapshot["analysis_config"]["attached_bottom_guard_px"] == 96
+
+
+def test_build_online_stream_prior_resolution_artifact_returns_exact_top_level_shape():
+    artifact = mod.build_online_stream_prior_resolution_artifact(
+        condition={"print_pressure_psi": 0.42},
+        lookup={"looked_up": True, "candidate_found": True},
+        candidate_prior={"source": "calibration_memory"},
+        applied_prior={"source": "calibration_memory", "flow_start_offset_us": 700},
+        fallback_reason=None,
+        warnings=["prior_applied"],
+    )
+
+    assert set(artifact.keys()) == {
+        "schema_version",
+        "phase",
+        "condition",
+        "lookup",
+        "candidate_prior",
+        "applied_prior",
+        "fallback_reason",
+        "warnings",
+    }
+    assert artifact["lookup"]["candidate_found"] is True
 
 
 def test_summarize_online_stream_flow_delay_computes_medians_and_counts():

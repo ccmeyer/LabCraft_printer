@@ -985,33 +985,40 @@ The implementation should be split into small milestones that each end in a runn
 As of `2026-04-06`, the staged plan has progressed as follows:
 
 - Stage 1: implemented
-  - `tools/stream_analysis/online_calibration.py` now contains the frozen policy defaults, prior normalization, schedule builders, budget helpers, and JSON-safe payload builders.
+  - `tools/stream_analysis/online_calibration.py` now contains the frozen policy defaults, prior normalization, schedule builders, budget helpers, prior-resolution artifact builders, and JSON-safe payload builders.
 - Stage 2: implemented
-  - `Controller.start_online_stream_calibration(...)`, `CalibrationManager.start_online_stream_calibration(...)`, and `OnlineStreamCalibrationProcess` now exist and can launch the process through the existing calibration framework without UI work.
+  - `Controller.start_online_stream_calibration(...)`, `CalibrationManager.start_online_stream_calibration(...)`, and `OnlineStreamCalibrationProcess` now exist and can launch the process through the existing calibration framework.
 - Stage 3: implemented
   - the process now performs flow-phase acquisition, per-frame QC, replay-friendly artifact writing, and sparse flow stop logic.
 - Stage 4: implemented
   - the process now performs a sparse post-acquisition flow-rate fit, writes `flow_fit.json`, and emits a partial calibration result with flow-fit diagnostics.
-- Stage 5: not implemented yet
-  - tail coarse search and refinement are still pending.
-- Stage 6: not implemented yet
-  - the droplet-imager UI entry point and operator-facing readiness/button integration are still pending.
-- Stage 7: not implemented yet
-  - explicit prior lookup/writeback and broader hardening work are still pending.
+- Stage 5: implemented
+  - the process now performs the tail coarse search and interior refinement, writes `tail_fit.json`, and emits non-null predicted duration and predicted volume for captured runs.
+- Stage 6: implemented
+  - the droplet-imager now exposes `Calibrate Stream Volume`, and the button follows the existing readiness, flash-fault, and stream-capture safety rules.
+- Stage 7: implemented
+  - exact-condition online-stream priors are now looked up from calibration memory, recorded into run artifacts/results, exported in run summaries, and validated through replay tooling.
 
 Current implemented behavior:
 
-- the online stream calibration can now complete a developer-facing flow-only run end-to-end
-- the final payload includes accepted flow measurements plus a fitted `flow_rate_nl_per_us`
-- `tail_phase` still remains `not_run`
-- queue integration, UI launch, prior seeding, and tail timing are still deferred
+- the online stream calibration can now run end-to-end from the droplet imager through flow fit, tail detection, and final predicted stream volume
+- successful runs now write:
+  - `prior_resolution.json`
+  - `plan_snapshot.json`
+  - `frames.jsonl`
+  - `flow_fit.json`
+  - `tail_fit.json`
+- exact pulse-width and exact print-pressure online-stream priors are reused automatically for matching reagent/head conditions
+- unresolved or stopped runs fall back safely and do not become reusable priors
+- replay tooling now supports recomputing stored online-stream results from recorder artifacts for validation and audit
+- queue integration and cross-pressure prior borrowing remain intentionally deferred from v1
 
 Latest automated validation completed for the implemented stages:
 
-- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_fit.py tests/test_stream_online_fit_replay.py tests/test_stream_online_calibration_helpers.py tests/test_calibration_online_stream_process.py tests/test_calibration_phase_aliases.py tests/test_calibration_process_recorder.py tests/test_calibration_recorder_toggle.py`
-  - `54 passed`
-- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_runtime.py tests/test_calibration_droplet_emergence_process.py tests/test_calibration_prebreakup_dataset_acquisition_process.py tests/test_controller_calibration_move_handlers.py`
-  - `31 passed`
+- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_calibration_helpers.py tests/test_stream_online_prior_lookup.py tests/test_stream_online_replay.py tests/test_calibration_online_stream_process.py tests/test_calibration_memory_export_tools.py`
+  - `59 passed`
+- `.\env\Scripts\python.exe -m pytest -q tests/test_stream_online_fit.py tests/test_stream_online_fit_replay.py tests/test_stream_online_tail.py tests/test_stream_online_tail_replay.py tests/test_calibration_memory_integration.py tests/test_calibration_phase_aliases.py tests/test_calibration_process_recorder.py tests/test_calibration_recorder_toggle.py tests/test_calibration_online_stream_process.py`
+  - `60 passed`
 
 ### Stage 1: Pure Helper And Schema Layer
 

@@ -70,6 +70,43 @@ def _flow_proc(tmp_path: Path):
     proc.printer_head_id = "head_A"
     proc.emergence_time_us = 3200
     proc.priors = {"source": "default"}
+    proc._prior_resolution = {
+        "lookup_performed": False,
+        "candidate_found": False,
+        "source": "default",
+        "aggregation_level": None,
+        "pulse_match_type": None,
+        "condition_match": "none",
+        "source_run_ids": [],
+        "applied_flow_start_offset_us": 650,
+        "applied_flow_step_us": 200,
+        "applied_flow_delay_count": 5,
+        "applied_tail_start_offset_us": 3800,
+        "applied_tail_coarse_step_us": 100,
+        "fallback_reason": "no_prior",
+        "warnings": [],
+    }
+    proc._prior_resolution_artifact = calibration_model.online_cal_mod.build_online_stream_prior_resolution_artifact(
+        condition={
+            "print_pressure_psi": 0.42,
+            "print_pulse_width_us": 1350,
+            "emergence_time_us": 3200,
+            "stock_solution": "water",
+            "printer_head_id": "head_A",
+        },
+        lookup={
+            "target_pulse_width_us": 1350,
+            "target_print_pressure_psi": 0.42,
+            "looked_up": False,
+            "lookup_skipped_reason": "no_prior",
+            "candidate_found": False,
+            "candidate_prior": {},
+        },
+        candidate_prior={},
+        applied_prior={"source": "default", "flow_start_offset_us": 650, "tail_start_offset_us": 3800},
+        fallback_reason="no_prior",
+        warnings=[],
+    )
     proc.flow_plan = {
         "delays_us": [3850, 4050],
         "replicates_per_delay": 3,
@@ -148,6 +185,7 @@ def _flow_proc(tmp_path: Path):
     proc._run_dir = None
     proc._frames_path = None
     proc._plan_snapshot_path = None
+    proc._prior_resolution_path = None
     proc._flow_fit_path = None
     proc._tail_fit_path = None
     proc._plan_snapshot_written = False
@@ -277,8 +315,11 @@ def test_online_stream_plan_flow_phase_writes_plan_snapshot(tmp_path):
     proc.onPlanFlowPhase()
 
     assert proc.flowPlanReady.calls
+    prior_resolution = json.loads(Path(proc._prior_resolution_path).read_text(encoding="utf-8"))
+    assert prior_resolution["fallback_reason"] == "no_prior"
     snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
     assert snapshot["phase"] == "online_stream_calibration"
+    assert snapshot["priors"]["lookup"]["candidate_found"] is False
     assert snapshot["flow_plan"]["delays_us"] == [3850, 4050]
     assert snapshot["analysis_config"]["attached_bottom_guard_px"] == 96
 
@@ -344,6 +385,9 @@ def test_online_stream_analyze_flow_frame_appends_measurement_for_accepted_frame
 
     assert proc.flowFrameAnalyzed.calls
     assert len(proc._measurement_rows) == 1
+    assert proc._measurement_rows[0]["nozzle_qc_pass"] is True
+    assert proc._measurement_rows[0]["silhouette_qc_pass"] is True
+    assert proc._measurement_rows[0]["attached_bottom_clearance_px"] == 150.0
     lines = Path(proc._frames_path).read_text(encoding="utf-8").strip().splitlines()
     payload = json.loads(lines[0])
     assert payload["status"] == "accepted"
@@ -513,19 +557,24 @@ def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monke
 
 def test_online_stream_plan_tail_phase_skips_when_flow_baseline_is_missing(tmp_path):
     proc = _flow_proc(tmp_path)
-    proc._flow_fit_result = {"fit_status": "unresolved_insufficient_delays", "steady_width_baseline_px": None}
     proc._tail_fit_path = str(tmp_path / "tail_fit.json")
+    proc.onPlanFlowPhase()
+    proc._flow_fit_result = {"fit_status": "unresolved_insufficient_delays", "steady_width_baseline_px": None}
 
     proc.onPlanTailPhase()
 
     assert proc.tailPhaseFinished.calls
     assert proc._tail_phase_status == "unresolved_missing_flow_baseline"
+    snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
+    assert snapshot["tail_plan"]["run_tail"] is False
+    assert snapshot["tail_plan"]["skip_reason"] == "missing_flow_baseline"
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "unresolved_missing_flow_baseline"
 
 
 def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_path):
     proc = _flow_proc(tmp_path)
+    proc.onPlanFlowPhase()
     proc._flow_fit_result = {
         "fit_status": "warning_quality_thresholds",
         "steady_width_baseline_px": 74.0,
@@ -539,6 +588,8 @@ def test_online_stream_plan_tail_phase_runs_for_warning_quality_flow_fit(tmp_pat
     assert proc._tail_plan["run_tail"] is True
     assert proc._tail_delay_sequence
     assert proc._tail_mode == "coarse"
+    snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
+    assert snapshot["tail_plan"] == proc._tail_plan
 
 
 def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_would_reject(tmp_path, monkeypatch):
@@ -582,6 +633,9 @@ def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_w
 
     assert proc.tailFrameAnalyzed.calls
     assert proc._measurement_rows[-1]["phase"] == "tail_coarse"
+    assert proc._measurement_rows[-1]["nozzle_qc_pass"] is True
+    assert proc._measurement_rows[-1]["silhouette_qc_pass"] is True
+    assert proc._measurement_rows[-1]["attached_bottom_clearance_px"] == 80.0
     lines = Path(proc._frames_path).read_text(encoding="utf-8").strip().splitlines()
     payload = json.loads(lines[0])
     assert payload["status"] == "accepted"
@@ -841,6 +895,22 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     proc.printer_head_id = "head_A"
     proc.emergence_time_us = 3200
     proc.priors = {"source": "default"}
+    proc._prior_resolution = {
+        "lookup_performed": True,
+        "candidate_found": True,
+        "source": "calibration_memory",
+        "aggregation_level": "exact_pair",
+        "pulse_match_type": "exact",
+        "condition_match": "exact",
+        "source_run_ids": ["seed_run_01"],
+        "applied_flow_start_offset_us": 700,
+        "applied_flow_step_us": 200,
+        "applied_flow_delay_count": 5,
+        "applied_tail_start_offset_us": 3950,
+        "applied_tail_coarse_step_us": 100,
+        "fallback_reason": None,
+        "warnings": [],
+    }
     proc.flow_plan = {"delays_us": [3850, 4050], "replicates_per_delay": 3}
     proc.tail_plan = {"coarse_start_delay_us": 7000, "coarse_step_us": 100}
     proc._measurement_rows = [
@@ -853,6 +923,9 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
             "visible_volume_nl": 12.3,
             "qc_pass": True,
             "image_ref": {"capture_id": "cap_flow_01"},
+            "nozzle_qc_pass": True,
+            "silhouette_qc_pass": True,
+            "attached_bottom_clearance_px": 150.0,
         }
     ]
     proc._flow_delay_summaries = [
@@ -937,7 +1010,13 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     assert proc.calibrationCompleted.calls
     payload = proc.calibrationDataUpdated.calls[-1][0][0]
     assert len(payload["measurements"]) == 1
+    assert payload["measurements"][0]["nozzle_qc_pass"] is True
+    assert payload["measurements"][0]["silhouette_qc_pass"] is True
+    assert payload["measurements"][0]["attached_bottom_clearance_px"] == 150.0
     result = payload["result"]
+    assert result["priors"]["source"] == "calibration_memory"
+    assert result["priors"]["aggregation_level"] == "exact_pair"
+    assert result["priors"]["applied_flow_start_offset_us"] == 700
     assert result["flow_phase"]["status"] == "insufficient_data"
     assert result["flow_phase"]["attempted_capture_count"] == 6
     assert result["flow_phase"]["accepted_delay_count"] == 1

@@ -67,6 +67,17 @@ RUN_SUMMARY_COLUMNS = [
     "expected_mean_volume_nL",
     "expected_cv_pct",
     "volume_source",
+    "online_stream_flow_rate_nl_per_us",
+    "online_stream_flow_fit_status",
+    "online_stream_tail_status",
+    "online_stream_tail_start_delay_from_emergence_us",
+    "online_stream_predicted_volume_nl",
+    "online_stream_print_pressure_psi",
+    "online_stream_prior_condition_match",
+    "online_stream_prior_source",
+    "online_stream_prior_aggregation_level",
+    "online_stream_prior_candidate_found",
+    "online_stream_prior_fallback_reason",
     "pressure_sweep_row_count",
     "pressure_sweep_valid_row_count",
     "pressure_sweep_valid_band_low_psi",
@@ -566,6 +577,42 @@ def flatten_run_summary(summary):
     row["expected_mean_volume_nL"] = _float_or_none(derived.get("expected_mean_volume_nL"))
     row["expected_cv_pct"] = _float_or_none(derived.get("expected_cv_pct"))
     row["volume_source"] = _clean_text(derived.get("volume_source"))
+    row["online_stream_flow_rate_nl_per_us"] = _float_or_none(
+        derived.get("online_stream_flow_rate_nl_per_us")
+    )
+    row["online_stream_flow_fit_status"] = _clean_text(
+        derived.get("online_stream_flow_fit_status")
+    )
+    row["online_stream_tail_status"] = _clean_text(
+        derived.get("online_stream_tail_status")
+    )
+    row["online_stream_tail_start_delay_from_emergence_us"] = _int_or_none(
+        derived.get("online_stream_tail_start_delay_from_emergence_us")
+    )
+    row["online_stream_predicted_volume_nl"] = _float_or_none(
+        derived.get("online_stream_predicted_volume_nL")
+    )
+    row["online_stream_print_pressure_psi"] = _float_or_none(
+        derived.get("online_stream_print_pressure_psi")
+    )
+    online_stream_prior = dict(summary.get("online_stream_prior_applied_prior") or {})
+    if not online_stream_prior:
+        online_stream_prior = dict(summary.get("online_stream_prior_candidate") or {})
+    row["online_stream_prior_condition_match"] = _clean_text(
+        online_stream_prior.get("condition_match")
+    )
+    row["online_stream_prior_source"] = _clean_text(
+        online_stream_prior.get("source")
+    )
+    row["online_stream_prior_aggregation_level"] = _clean_text(
+        online_stream_prior.get("aggregation_level")
+    )
+    row["online_stream_prior_candidate_found"] = _bool_or_none(
+        summary.get("online_stream_prior_candidate_found")
+    )
+    row["online_stream_prior_fallback_reason"] = _clean_text(
+        summary.get("online_stream_prior_fallback_reason")
+    )
     row["pressure_sweep_row_count"] = _int_or_none(pressure_sweep.get("row_count"))
     row["pressure_sweep_valid_row_count"] = _int_or_none(pressure_sweep.get("valid_row_count"))
     row["pressure_sweep_valid_band_low_psi"] = sweep_lo

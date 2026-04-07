@@ -111,6 +111,26 @@ def _coalesce(*values):
     return None
 
 
+def _float_matches(a, b, tol=1e-6):
+    left = _float_or_none(a)
+    right = _float_or_none(b)
+    if left is None or right is None:
+        return False
+    return abs(float(left) - float(right)) <= float(tol)
+
+
+def _sequence_step_or_none(values):
+    parsed = [_int_or_none(value) for value in list(values or [])]
+    parsed = [value for value in parsed if value is not None]
+    if len(parsed) < 2:
+        return None
+    diffs = [int(parsed[idx + 1]) - int(parsed[idx]) for idx in range(len(parsed) - 1)]
+    diffs = [value for value in diffs if value != 0]
+    if not diffs:
+        return None
+    return _int_or_none(_median_or_none(diffs))
+
+
 def _json_default(obj):
     try:
         import numpy as _np
@@ -139,7 +159,7 @@ class CalibrationMemoryAggregator:
     AGGREGATION_LEVEL_REAGENT_ONLY = "reagent_only"
     AGGREGATION_LEVEL_HEAD_TYPE_ONLY = "head_type_only"
 
-    FEATURE_EXTRACTION_VERSION = 2
+    FEATURE_EXTRACTION_VERSION = 3
 
     def __init__(self, root_dir):
         self.root_dir = os.path.abspath(root_dir)
@@ -332,6 +352,7 @@ class CalibrationMemoryAggregator:
         pressure_trajectory = cls._latest_phase_result(summary, authoritative_run, ("pressure_trajectory", "trajectory"))
         droplet_search = cls._latest_phase_result(summary, authoritative_run, ("droplet_search",))
         pre_breakup = cls._latest_phase_result(summary, authoritative_run, ("pre_breakup_morphology",))
+        online_stream = cls._latest_phase_result(summary, authoritative_run, ("online_stream_calibration",))
         pressure_sweep_rows = cls._extract_pressure_sweep_rows(summary, authoritative_run)
         preferred_sweep_row = cls._preferred_sweep_row(pressure_sweep_rows)
 
@@ -339,8 +360,77 @@ class CalibrationMemoryAggregator:
         pressure_scan_settings = cls._latest_phase_settings(summary, authoritative_run, ("pressure_scan",))
         pressure_sweep_settings = cls._latest_phase_settings(summary, authoritative_run, ("pressure_sweep_characterization",))
         pre_breakup_settings = cls._latest_phase_settings(summary, authoritative_run, ("pre_breakup_morphology",))
+        online_stream_settings = cls._latest_phase_settings(summary, authoritative_run, ("online_stream_calibration",))
+
+        online_stream_condition = dict(online_stream.get("condition") or {})
+        online_stream_priors = dict(online_stream.get("priors") or {})
+        online_stream_flow_phase = dict(online_stream.get("flow_phase") or {})
+        online_stream_tail_phase = dict(online_stream.get("tail_phase") or {})
+        online_stream_flow_plan = dict(online_stream_flow_phase.get("plan") or {})
+        online_stream_tail_plan = dict(online_stream_tail_phase.get("plan") or {})
+
+        online_stream_print_pressure_psi = _coalesce(
+            _float_or_none(online_stream_condition.get("print_pressure_psi")),
+            _float_or_none(online_stream_settings.get("print_pressure")),
+        )
+        online_stream_pulse_width_us = _coalesce(
+            _int_or_none(online_stream_condition.get("print_pulse_width_us")),
+            _int_or_none(online_stream_settings.get("print_width")),
+        )
+        online_stream_emergence_time_us = _int_or_none(online_stream_condition.get("emergence_time_us"))
+        online_stream_flow_fit_status = _clean_str(online_stream_flow_phase.get("fit_status"))
+        online_stream_flow_rate_nl_per_us = _float_or_none(online_stream_flow_phase.get("flow_rate_nl_per_us"))
+        online_stream_flow_fit_delay_start_from_emergence_us = _int_or_none(
+            online_stream_flow_phase.get("flow_fit_delay_start_from_emergence_us")
+        )
+        online_stream_tail_status = _clean_str(online_stream_tail_phase.get("status"))
+        online_stream_tail_start_delay_from_emergence_us = _int_or_none(
+            online_stream_tail_phase.get("tail_start_delay_from_emergence_us")
+        )
+        online_stream_predicted_volume_nl = _float_or_none(online_stream.get("predicted_volume_nl"))
+        online_stream_flow_delay_offsets = list(online_stream_flow_plan.get("delay_offsets_from_emergence_us") or [])
+        online_stream_flow_step_us = _coalesce(
+            _int_or_none(online_stream_priors.get("applied_flow_step_us")),
+            _int_or_none(online_stream_priors.get("flow_step_us")),
+            _sequence_step_or_none(online_stream_flow_delay_offsets),
+        )
+        online_stream_flow_delay_count = _coalesce(
+            _int_or_none(online_stream_priors.get("applied_flow_delay_count")),
+            _int_or_none(online_stream_priors.get("flow_delay_count")),
+            _int_or_none(online_stream_flow_plan.get("point_count")),
+            len(online_stream_flow_delay_offsets) if online_stream_flow_delay_offsets else None,
+        )
+        online_stream_tail_coarse_step_us = _coalesce(
+            _int_or_none(online_stream_priors.get("applied_tail_coarse_step_us")),
+            _int_or_none(online_stream_priors.get("tail_coarse_step_us")),
+            _int_or_none(online_stream_tail_plan.get("coarse_step_us")),
+        )
+        online_stream_prior_flow_start_offset_us = _coalesce(
+            _int_or_none(online_stream_priors.get("applied_flow_start_offset_us")),
+            online_stream_flow_fit_delay_start_from_emergence_us,
+            _int_or_none(online_stream_priors.get("flow_start_offset_us")),
+            _int_or_none(online_stream_flow_delay_offsets[0]) if online_stream_flow_delay_offsets else None,
+        )
+        online_stream_prior_tail_start_offset_us = _coalesce(
+            _int_or_none(online_stream_priors.get("applied_tail_start_offset_us")),
+            online_stream_tail_start_delay_from_emergence_us,
+            _int_or_none(online_stream_priors.get("tail_start_offset_us")),
+            _int_or_none(online_stream_tail_plan.get("coarse_start_offset_us")),
+        )
+        online_stream_prior_source = _clean_str(online_stream_priors.get("source"))
+        online_stream_prior_condition_match = _clean_str(online_stream_priors.get("condition_match"))
+        online_stream_usable_for_prior = bool(
+            cls._run_status(summary) == "completed"
+            and online_stream_pulse_width_us is not None
+            and online_stream_print_pressure_psi is not None
+            and online_stream_flow_rate_nl_per_us is not None
+            and online_stream_tail_status == "captured"
+            and online_stream_tail_start_delay_from_emergence_us is not None
+            and online_stream_prior_flow_start_offset_us is not None
+        )
 
         pulse_width_us = _coalesce(
+            online_stream_pulse_width_us,
             _int_or_none(droplet_search.get("print_pulse_width_us")),
             _int_or_none(droplet_search_settings.get("print_width")),
             _int_or_none(pressure_scan.get("pulse_width_us")),
@@ -388,6 +478,9 @@ class CalibrationMemoryAggregator:
         elif preferred_sweep_row is not None and preferred_sweep_row.get("pressure") is not None:
             recommended_pressure_psi = _float_or_none(preferred_sweep_row.get("pressure"))
             recommended_pressure_source = "pressure_sweep_characterization"
+        elif online_stream_print_pressure_psi is not None:
+            recommended_pressure_psi = float(online_stream_print_pressure_psi)
+            recommended_pressure_source = "online_stream_calibration"
         elif trajectory_band is not None:
             recommended_pressure_psi = _midpoint(trajectory_band)
             recommended_pressure_source = "pressure_trajectory_band_midpoint"
@@ -409,8 +502,13 @@ class CalibrationMemoryAggregator:
             expected_mean_volume_nl = _float_or_none(preferred_sweep_row.get("mean_volume"))
             expected_cv_pct = _float_or_none(preferred_sweep_row.get("cv_volume_percent"))
             volume_source = "pressure_sweep_characterization"
+        elif online_stream_predicted_volume_nl is not None:
+            expected_mean_volume_nl = float(online_stream_predicted_volume_nl)
+            expected_cv_pct = None
+            volume_source = "online_stream_calibration"
 
         emergence_time_us = _coalesce(
+            online_stream_emergence_time_us,
             _int_or_none(pressure_trajectory.get("emergence_time_us")),
             _int_or_none(pre_breakup.get("emergence_time_us")),
             _int_or_none((preferred_sweep_row or {}).get("emergence_time_us")),
@@ -420,7 +518,9 @@ class CalibrationMemoryAggregator:
         )
         emergence_time_source = None
         if emergence_time_us is not None:
-            if _int_or_none(pressure_trajectory.get("emergence_time_us")) is not None:
+            if online_stream_emergence_time_us is not None:
+                emergence_time_source = "online_stream_calibration"
+            elif _int_or_none(pressure_trajectory.get("emergence_time_us")) is not None:
                 emergence_time_source = "pressure_trajectory"
             elif _int_or_none(pre_breakup.get("emergence_time_us")) is not None:
                 emergence_time_source = "pre_breakup_morphology"
@@ -502,6 +602,26 @@ class CalibrationMemoryAggregator:
             "expected_mean_volume_nL": expected_mean_volume_nl,
             "expected_cv_pct": expected_cv_pct,
             "volume_source": volume_source,
+            "online_stream_usable_for_prior": bool(online_stream_usable_for_prior),
+            "online_stream_print_pressure_psi": online_stream_print_pressure_psi,
+            "online_stream_pulse_width_us": online_stream_pulse_width_us,
+            "online_stream_flow_rate_nl_per_us": online_stream_flow_rate_nl_per_us,
+            "online_stream_flow_fit_status": online_stream_flow_fit_status,
+            "online_stream_flow_fit_delay_start_from_emergence_us": (
+                online_stream_flow_fit_delay_start_from_emergence_us
+            ),
+            "online_stream_tail_status": online_stream_tail_status,
+            "online_stream_tail_start_delay_from_emergence_us": (
+                online_stream_tail_start_delay_from_emergence_us
+            ),
+            "online_stream_predicted_volume_nL": online_stream_predicted_volume_nl,
+            "online_stream_prior_flow_start_offset_us": online_stream_prior_flow_start_offset_us,
+            "online_stream_prior_tail_start_offset_us": online_stream_prior_tail_start_offset_us,
+            "online_stream_flow_step_us": online_stream_flow_step_us,
+            "online_stream_flow_delay_count": online_stream_flow_delay_count,
+            "online_stream_tail_coarse_step_us": online_stream_tail_coarse_step_us,
+            "online_stream_prior_source": online_stream_prior_source,
+            "online_stream_prior_condition_match": online_stream_prior_condition_match,
             "pressure_sweep": {
                 "row_count": int(len(pressure_sweep_rows)),
                 "valid_row_count": int(len(valid_sweep_rows)),
@@ -1165,6 +1285,174 @@ class CalibrationMemoryAggregator:
             }
             prior["advisory_only"] = True
             prior["applied"] = False
+            return prior
+
+        return None
+
+    def get_best_online_stream_prior(self, context, *, target_pulse_width_us=None, target_print_pressure_psi=None):
+        context = normalize_legacy_context(context or {})
+        target_pulse_width_us = _int_or_none(target_pulse_width_us)
+        target_print_pressure_psi = _float_or_none(target_print_pressure_psi)
+        if target_pulse_width_us is None or target_print_pressure_psi is None:
+            return None
+
+        run_records = self._build_run_records()
+        if not run_records:
+            return None
+
+        level_order = (
+            self.AGGREGATION_LEVEL_EXACT_PAIR,
+            self.AGGREGATION_LEVEL_REAGENT_HEAD_TYPE,
+            self.AGGREGATION_LEVEL_REAGENT_FAMILY_HEAD_TYPE,
+            self.AGGREGATION_LEVEL_REAGENT_ONLY,
+            self.AGGREGATION_LEVEL_HEAD_TYPE_ONLY,
+        )
+        dataset_latest_ts = max(
+            (
+                _parse_ts(record.get("updated_at_utc"))
+                for record in run_records
+                if _parse_ts(record.get("updated_at_utc")) is not None
+            ),
+            default=None,
+        )
+
+        for level_rank, aggregation_level in enumerate(level_order, start=1):
+            matches = []
+            for record in run_records:
+                derived = dict(record.get("derived_metrics") or {})
+                if not bool(derived.get("online_stream_usable_for_prior")):
+                    continue
+                if aggregation_level not in list(derived.get("eligible_aggregation_levels") or []):
+                    continue
+                if not self._entry_matches_context(
+                    {"identity_keys": record.get("context") or {}},
+                    context,
+                    aggregation_level,
+                ):
+                    continue
+                if _int_or_none(derived.get("online_stream_pulse_width_us")) != int(target_pulse_width_us):
+                    continue
+                if not _float_matches(
+                    derived.get("online_stream_print_pressure_psi"),
+                    target_print_pressure_psi,
+                ):
+                    continue
+                matches.append(record)
+
+            if not matches:
+                continue
+
+            flow_start_offsets = [
+                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_flow_start_offset_us"))
+                for record in matches
+            ]
+            flow_start_offsets = [value for value in flow_start_offsets if value is not None]
+            tail_start_offsets = [
+                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_tail_start_offset_us"))
+                for record in matches
+            ]
+            tail_start_offsets = [value for value in tail_start_offsets if value is not None]
+            if not flow_start_offsets or not tail_start_offsets:
+                continue
+
+            flow_step_values = [
+                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_flow_step_us"))
+                for record in matches
+            ]
+            flow_step_values = [value for value in flow_step_values if value is not None]
+            flow_delay_count_values = [
+                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_flow_delay_count"))
+                for record in matches
+            ]
+            flow_delay_count_values = [value for value in flow_delay_count_values if value is not None]
+            tail_coarse_step_values = [
+                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_tail_coarse_step_us"))
+                for record in matches
+            ]
+            tail_coarse_step_values = [value for value in tail_coarse_step_values if value is not None]
+            predicted_volume_values = [
+                _float_or_none((record.get("derived_metrics") or {}).get("online_stream_predicted_volume_nL"))
+                for record in matches
+            ]
+            predicted_volume_values = [value for value in predicted_volume_values if value is not None]
+
+            latest_updated_at = max(
+                (
+                    _parse_ts(record.get("updated_at_utc"))
+                    for record in matches
+                    if _parse_ts(record.get("updated_at_utc")) is not None
+                ),
+                default=None,
+            )
+            bucket = {
+                "expected_mean_volume_nL": _median_or_none(predicted_volume_values),
+                "run_to_run_volume_cv_pct": _cv_percent(predicted_volume_values),
+                "updated_at_utc": _iso_or_none(latest_updated_at),
+            }
+            confidence = self._confidence_for_bucket(
+                aggregation_level,
+                matches,
+                bucket,
+                dataset_latest_ts,
+            )
+            selection_kind = self._selection_kind_for_level(aggregation_level, 0)
+
+            prior = {
+                "schema_version": int(SCHEMA_VERSION),
+                "aggregation_level": aggregation_level,
+                "match_type": selection_kind,
+                "pulse_match_type": "exact",
+                "pulse_distance_us": 0,
+                "selection_order": int(level_rank),
+                "selection_reason": (
+                    f"{aggregation_level} online-stream prior selected at pulse {int(target_pulse_width_us)} us "
+                    f"and pressure {float(target_print_pressure_psi):.4f} psi from {len(matches)} completed runs"
+                ),
+                "pulse_width_us": int(target_pulse_width_us),
+                "print_pressure_psi": float(target_print_pressure_psi),
+                "flow_start_offset_us": int(round(_median_or_none(flow_start_offsets))),
+                "flow_step_us": _coalesce(
+                    _int_or_none(_median_or_none(flow_step_values)),
+                    200,
+                ),
+                "flow_delay_count": _coalesce(
+                    _int_or_none(_median_or_none(flow_delay_count_values)),
+                    5,
+                ),
+                "tail_start_offset_us": int(round(_median_or_none(tail_start_offsets))),
+                "tail_coarse_step_us": _coalesce(
+                    _int_or_none(_median_or_none(tail_coarse_step_values)),
+                    100,
+                ),
+                "condition_match": (
+                    "exact"
+                    if aggregation_level == self.AGGREGATION_LEVEL_EXACT_PAIR
+                    else "grouped"
+                ),
+                "source": "calibration_memory",
+                "warnings": [],
+                "contributing_runs": int(len(matches)),
+                "sample_count": int(len(matches)),
+                "source_run_ids": _sorted_unique(
+                    [record.get("run_id") for record in matches if record.get("run_id")]
+                ),
+                "source_run_refs": self._source_run_refs(matches),
+                "identity_quality_summary": self._identity_quality_summary(matches),
+                "recommendation_confidence": _float_or_none(confidence.get("score")),
+                "recommendation_confidence_adjusted": _float_or_none(confidence.get("score")),
+                "confidence_components": dict(confidence.get("components") or {}),
+                "updated_at_utc": _iso_or_none(latest_updated_at),
+                "requested_context": {
+                    "reagent_id": context.get("reagent_id"),
+                    "reagent_family": context.get("reagent_family"),
+                    "printer_head_id": context.get("printer_head_id"),
+                    "head_type_id": context.get("head_type_id"),
+                    "target_pulse_width_us": int(target_pulse_width_us),
+                    "target_print_pressure_psi": float(target_print_pressure_psi),
+                },
+                "advisory_only": True,
+                "applied": False,
+            }
             return prior
 
         return None

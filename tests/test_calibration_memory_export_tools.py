@@ -351,6 +351,83 @@ def test_export_handles_missing_optional_fields_and_legacy_identity(tmp_path):
     assert legacy_row["identity_quality_printer_head_id"] == "unknown"
 
 
+def test_run_summary_export_includes_online_stream_fields(tmp_path):
+    store = CalibrationMemoryStore(root_dir=str(tmp_path / "CalibrationMemory"))
+    context = _make_context()
+    paths = store.create_run("stream_run", context=context, notes="online stream")
+    summary = {
+        "context": context,
+        "run_status": "completed",
+        "run_timing": {
+            "started_at_utc": "2026-04-01T09:00:00Z",
+            "ended_at_utc": "2026-04-01T09:05:00Z",
+        },
+        "notes": "online stream",
+        "phase_counts": {"online_stream_calibration": 1},
+        "process_results": {
+            "online_stream_calibration": {
+                "step_count": 1,
+                "latest_settings": {"print_width": 1500, "print_pressure": 1.61},
+                "latest_result": {
+                    "condition": {
+                        "print_pressure_psi": 1.61,
+                        "print_pulse_width_us": 1500,
+                        "emergence_time_us": 3200,
+                    },
+                    "priors": {
+                        "source": "calibration_memory",
+                        "condition_match": "exact",
+                        "aggregation_level": "exact_pair",
+                        "applied_flow_start_offset_us": 700,
+                        "applied_tail_start_offset_us": 3950,
+                    },
+                    "flow_phase": {
+                        "status": "captured",
+                        "plan": {"delay_offsets_from_emergence_us": [700, 900, 1100, 1300, 1500], "point_count": 5},
+                        "fit_status": "ok",
+                        "flow_rate_nl_per_us": 0.0187,
+                        "flow_fit_delay_start_from_emergence_us": 700,
+                    },
+                    "tail_phase": {
+                        "status": "captured",
+                        "plan": {"coarse_start_offset_us": 3950, "coarse_step_us": 100},
+                        "tail_start_delay_from_emergence_us": 3950,
+                    },
+                    "predicted_stream_duration_us": 3950,
+                    "predicted_volume_nl": 72.6,
+                },
+            }
+        },
+        "artifact_refs": {},
+        "source_refs": paths,
+        "authoritative_refs": {},
+        "online_stream_prior_candidate_found": True,
+        "online_stream_prior_fallback_reason": None,
+        "online_stream_prior_applied_prior": {
+            "source": "calibration_memory",
+            "condition_match": "exact",
+            "aggregation_level": "exact_pair",
+        },
+        "last_updated_at_utc": "2026-04-01T09:05:00Z",
+    }
+    summary["derived_metrics"] = store.aggregator.extract_run_features(summary)
+    store.write_run_summary("stream_run", summary)
+
+    rows, errors = cma.build_run_summary_export_rows(store.root_dir)
+
+    assert errors == []
+    row = next(item for item in rows if item["run_id"] == "stream_run")
+    assert row["online_stream_flow_rate_nl_per_us"] == 0.0187
+    assert row["online_stream_flow_fit_status"] == "ok"
+    assert row["online_stream_tail_status"] == "captured"
+    assert row["online_stream_tail_start_delay_from_emergence_us"] == 3950
+    assert row["online_stream_predicted_volume_nl"] == 72.6
+    assert row["online_stream_print_pressure_psi"] == 1.61
+    assert row["online_stream_prior_source"] == "calibration_memory"
+    assert row["online_stream_prior_aggregation_level"] == "exact_pair"
+    assert row["online_stream_prior_candidate_found"] is True
+
+
 def test_trend_tables_and_audit_report_stay_deterministic(tmp_path):
     store = CalibrationMemoryStore(root_dir=str(tmp_path / "CalibrationMemory"))
     water_context = _make_context()
