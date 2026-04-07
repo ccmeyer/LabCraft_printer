@@ -33,6 +33,13 @@ import queue
 
 import os, json, time, uuid, tempfile, threading
 import numpy as np
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
