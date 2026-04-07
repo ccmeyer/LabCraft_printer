@@ -75,6 +75,23 @@ def test_model_update_state_applies_regulator_activity_flags(qapp):
     assert emissions == [True]
 
 
+def test_model_update_state_maps_gripper_refresh_and_pulse_fields(qapp):
+    model = Model.__new__(Model)
+    model.machine_model = MachineModel()
+    model.droplet_camera_model = SimpleNamespace(
+        update_num_flashes=lambda *_: None,
+        update_flash_duration=lambda *_: None,
+        update_flash_delay=lambda *_: None,
+        update_num_droplets=lambda *_: None,
+        update_trigger_counter=lambda *_: None,
+    )
+    model.machine_state_updated = SimpleNamespace(emit=lambda: None)
+
+    model.update_state({"Grip_refresh": 30000, "Grip_pulse": 1500})
+
+    assert model.machine_model.get_gripper_settings() == (30000, 1500)
+
+
 def test_model_update_flash_session_state_updates_droplet_camera_and_emits(qapp):
     model = Model.__new__(Model)
     captured = []

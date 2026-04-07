@@ -7309,7 +7309,9 @@ class Model(QObject):
 
         if 'Grip_pulse' in status_keys:
             self.machine_model.update_gripper_pulse_duration(status_dict['Grip_pulse'])
-        if 'Grip_period' in status_keys:
+        if 'Grip_refresh' in status_keys:
+            self.machine_model.update_gripper_refresh_period(status_dict['Grip_refresh'])
+        elif 'Grip_period' in status_keys:
             self.machine_model.update_gripper_refresh_period(status_dict['Grip_period'])
 
         self.machine_model.update_command_numbers(status_dict.get('Current_command', self.machine_model.current_command_num),
