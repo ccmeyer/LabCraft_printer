@@ -2628,6 +2628,8 @@ class CalibrationManager(QObject):
             "run_id": self._run_id,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "ended_at": None,
+            "outcome": None,
+            "error_message": "",
             "printer_head_id": self._safe_get_printer_head_id(),
             "stock_solution": self._safe_get_stock_solution(),
             "notes": notes or "",
@@ -2648,13 +2650,16 @@ class CalibrationManager(QObject):
         self.characterizationSummaryUpdated.emit()
         self._emit_readiness()
 
-    def end_session(self):
+    def end_session(self, *, outcome: str = "completed", error_message: str = "", emit_stage: bool = True):
         """Stamp end time for the current run."""
         if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
             self.data["runs"][self._run_idx]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self.data["runs"][self._run_idx]["outcome"] = str(outcome or "completed")
+            self.data["runs"][self._run_idx]["error_message"] = str(error_message or "")
             self._save_atomic()
             self._write_calibration_memory_summary()
-            self.calibrationStageChanged.emit("Calibration session ended", "purple")
+            if emit_stage:
+                self.calibrationStageChanged.emit("Calibration session ended", "purple")
 
         self._run_id = None
         self._run_idx = None
@@ -2826,6 +2831,11 @@ class CalibrationManager(QObject):
             proc = self.activeCalibration
             self.activeCalibration.stop()
             self._cleanup_finished_process(proc)
+            self._close_process_owned_calibration_memory_session(
+                proc,
+                outcome="stopped",
+                error_message="Calibration terminated by user",
+            )
             self.activeCalibration = None
         if len(self.calibration_queue) > 0:
             self.clear_calibration_queue()
@@ -4454,6 +4464,10 @@ class CalibrationManager(QObject):
             process_obj,
             outcome="completed",
         )
+        self._close_process_owned_calibration_memory_session(
+            process_obj,
+            outcome="completed",
+        )
         self._cleanup_finished_process(process_obj)
         self.activeCalibration = None
         self._emit_readiness()
@@ -4486,6 +4500,11 @@ class CalibrationManager(QObject):
                 error_message=str(error_message or ""),
             )
         self._record_stream_capture_process_result(
+            process_obj,
+            outcome=normalized_status,
+            error_message=str(error_message or ""),
+        )
+        self._close_process_owned_calibration_memory_session(
             process_obj,
             outcome=normalized_status,
             error_message=str(error_message or ""),
@@ -4651,6 +4670,39 @@ class CalibrationManager(QObject):
                 return list(fn(self)) or []
         return []
 
+    @staticmethod
+    def _process_owns_calibration_memory_session(proc_or_cls) -> bool:
+        return bool(getattr(proc_or_cls, "owns_calibration_memory_session", False))
+
+    def _close_process_owned_calibration_memory_session(
+        self,
+        process_obj,
+        *,
+        outcome: str,
+        error_message: str = "",
+    ) -> bool:
+        if process_obj is None:
+            return False
+        if not self._process_owns_calibration_memory_session(process_obj):
+            return False
+        if not bool(getattr(process_obj, "_calibration_memory_session_started_by_manager", False)):
+            return False
+        session_run_id = getattr(process_obj, "_calibration_memory_session_run_id", None)
+        if session_run_id and self._run_id and str(session_run_id) != str(self._run_id):
+            return False
+        try:
+            self.end_session(
+                outcome=str(outcome or "completed"),
+                error_message=str(error_message or ""),
+                emit_stage=False,
+            )
+        except Exception as e:
+            self._warn_calibration_memory("end_process_owned_session", e)
+            return False
+        process_obj._calibration_memory_session_started_by_manager = False
+        process_obj._calibration_memory_session_run_id = None
+        return True
+
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
         stream_capture_open = False
         has_open_stream_capture = getattr(self, "has_open_stream_gravimetric_capture", None)
@@ -4677,9 +4729,36 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(msg)
             return False
 
+        session_started = False
+        if self._process_owns_calibration_memory_session(proc_cls) and self._run_idx is None:
+            self.begin_session(
+                self.model.experiment_model.get_calibration_file_path(),
+                notes=f"auto-started {phase_name}",
+            )
+            session_started = self._run_idx is not None
+
         kwargs = dict(kwargs or {})
         kwargs.setdefault("parent", self)
-        self.activeCalibration = proc_cls(self, self.model, *args, **kwargs)
+        try:
+            self.activeCalibration = proc_cls(self, self.model, *args, **kwargs)
+        except Exception as e:
+            if session_started:
+                try:
+                    self.end_session(
+                        outcome="error",
+                        error_message=f"{phase_name} startup failed: {e}",
+                        emit_stage=False,
+                    )
+                except Exception as end_exc:
+                    self._warn_calibration_memory("end_session_after_startup_failure", end_exc)
+            msg = f"{phase_name.replace('_',' ').title()} failed to start: {e}"
+            self.calibrationStageChanged.emit(msg, "red")
+            self.calibrationError.emit(msg)
+            return False
+        self.activeCalibration._calibration_memory_session_started_by_manager = bool(session_started)
+        self.activeCalibration._calibration_memory_session_run_id = (
+            str(self._run_id) if session_started and self._run_id else None
+        )
         self.start_active_calibration()
         return True
 
@@ -4870,6 +4949,7 @@ class CalibrationManager(QObject):
     
 class BaseCalibrationProcess(QObject):
     supports_operator_verdict = True
+    owns_calibration_memory_session = False
 
     # Signal to update the current stage text.
     stageChanged = Signal(str)
@@ -5361,6 +5441,7 @@ class BaseCalibrationProcess(QObject):
 class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     phase_name = "online_stream_calibration"
     supports_operator_verdict = False
+    owns_calibration_memory_session = True
     SETTINGS_ACK_TIMEOUT_MS = 10_000
 
     flowPlanReady = Signal()
@@ -6493,6 +6574,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "status": "not_run",
                 "plan": dict(self.tail_plan),
             }
+        learned_flow_start_offset_us = None
+        try:
+            learned_flow_start_offset_us = int(
+                flow_phase.get("flow_fit_delay_start_from_emergence_us")
+            )
+        except Exception:
+            learned_flow_start_offset_us = None
+        learned_tail_start_offset_us = None
+        try:
+            learned_tail_start_offset_us = int(
+                resolved_tail_phase.get("tail_start_delay_from_emergence_us")
+            )
+        except Exception:
+            learned_tail_start_offset_us = None
         result_warnings = self._merged_online_stream_warnings(
             self._flow_warnings,
             self._flow_fit_warnings,
@@ -6505,6 +6600,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             tail_phase=resolved_tail_phase,
             predicted_stream_duration_us=predicted_stream_duration_us,
             predicted_volume_nl=predicted_volume_nl,
+            learned_flow_start_offset_us=learned_flow_start_offset_us,
+            learned_tail_start_offset_us=learned_tail_start_offset_us,
             warnings=result_warnings,
         )
         return {
@@ -7122,6 +7219,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "tail_phase": dict(result.get("tail_phase") or {}),
                 "predicted_stream_duration_us": self._predicted_stream_duration_us,
                 "predicted_volume_nl": self._predicted_volume_nl,
+                "learned_flow_start_offset_us": result.get("learned_flow_start_offset_us"),
+                "learned_tail_start_offset_us": result.get("learned_tail_start_offset_us"),
                 "warnings": list(result.get("warnings") or []),
             },
         )

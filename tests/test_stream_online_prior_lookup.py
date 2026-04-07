@@ -98,9 +98,15 @@ def _write_online_stream_summary_run(
     context: dict,
     pressure: float = 1.61,
     pulse_width_us: int = 1500,
-    flow_start_offset_us: int = 700,
-    tail_start_offset_us: int = 3950,
+    applied_flow_start_offset_us: int = 700,
+    learned_flow_start_offset_us: int | None = None,
+    applied_tail_start_offset_us: int = 3950,
+    learned_tail_start_offset_us: int | None = None,
 ):
+    if learned_flow_start_offset_us is None:
+        learned_flow_start_offset_us = int(applied_flow_start_offset_us)
+    if learned_tail_start_offset_us is None:
+        learned_tail_start_offset_us = int(applied_tail_start_offset_us)
     paths = store.create_run(run_id, context=context, notes=f"online-stream {run_id}")
     result = {
         "condition": {
@@ -113,10 +119,10 @@ def _write_online_stream_summary_run(
         "priors": {
             "source": "default",
             "condition_match": "none",
-            "applied_flow_start_offset_us": int(flow_start_offset_us),
+            "applied_flow_start_offset_us": int(applied_flow_start_offset_us),
             "applied_flow_step_us": 200,
             "applied_flow_delay_count": 5,
-            "applied_tail_start_offset_us": int(tail_start_offset_us),
+            "applied_tail_start_offset_us": int(applied_tail_start_offset_us),
             "applied_tail_coarse_step_us": 100,
             "fallback_reason": "no_prior",
             "warnings": [],
@@ -129,18 +135,20 @@ def _write_online_stream_summary_run(
             },
             "fit_status": "ok",
             "flow_rate_nl_per_us": 0.0187,
-            "flow_fit_delay_start_from_emergence_us": int(flow_start_offset_us),
+            "flow_fit_delay_start_from_emergence_us": int(learned_flow_start_offset_us),
         },
         "tail_phase": {
             "status": "captured",
             "plan": {
-                "coarse_start_offset_us": int(tail_start_offset_us),
+                "coarse_start_offset_us": int(applied_tail_start_offset_us),
                 "coarse_step_us": 100,
             },
-            "tail_start_delay_from_emergence_us": int(tail_start_offset_us),
+            "tail_start_delay_from_emergence_us": int(learned_tail_start_offset_us),
         },
-        "predicted_stream_duration_us": int(tail_start_offset_us),
+        "predicted_stream_duration_us": int(learned_tail_start_offset_us),
         "predicted_volume_nl": 72.6,
+        "learned_flow_start_offset_us": int(learned_flow_start_offset_us),
+        "learned_tail_start_offset_us": int(learned_tail_start_offset_us),
     }
     summary = {
         "context": context,
@@ -191,6 +199,33 @@ def test_store_returns_exact_condition_online_stream_prior(tmp_path):
     assert prior["tail_start_offset_us"] == 3950
     assert prior["source"] == "calibration_memory"
     assert prior["source_run_ids"] == ["stream_run_01"]
+
+
+def test_store_prefers_learned_online_stream_timings_over_applied_seed_schedule(tmp_path):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    _write_online_stream_summary_run(
+        store,
+        run_id="stream_run_01",
+        context=context,
+        applied_flow_start_offset_us=700,
+        learned_flow_start_offset_us=850,
+        applied_tail_start_offset_us=3950,
+        learned_tail_start_offset_us=4100,
+    )
+
+    prior = store.get_best_online_stream_prior(
+        context,
+        target_pulse_width_us=1500,
+        target_print_pressure_psi=1.61,
+    )
+
+    assert prior["flow_start_offset_us"] == 850
+    assert prior["tail_start_offset_us"] == 4100
 
 
 def test_store_does_not_reuse_online_stream_prior_across_pressure_mismatch(tmp_path):

@@ -319,6 +319,92 @@ def test_try_start_process_blocks_when_stream_capture_session_is_open():
     assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
 
 
+def test_try_start_process_opens_session_before_online_stream_init(monkeypatch):
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {}
+    mgr._run_id = None
+    mgr._run_idx = None
+    mgr.model = SimpleNamespace(
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json")
+    )
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+    mgr.start_active_calibration = lambda: None
+    started_session = {}
+
+    def _begin_session(path, notes=None):
+        started_session["path"] = path
+        started_session["notes"] = notes
+        mgr._run_id = "run_auto"
+        mgr._run_idx = 0
+
+    def _fake_init(self, calibration_manager, model, *args, **kwargs):
+        assert calibration_manager._run_id == "run_auto"
+        self.calibration_manager = calibration_manager
+        self.model = model
+        self.phase_name = "online_stream_calibration"
+
+    mgr.begin_session = _begin_session
+    monkeypatch.setattr(OnlineStreamCalibrationProcess, "__init__", _fake_init)
+
+    started = CalibrationManager._try_start_process(mgr, OnlineStreamCalibrationProcess)
+
+    assert started is True
+    assert started_session["path"] == "C:/tmp/calibration.json"
+    assert "online_stream_calibration" in started_session["notes"]
+    assert mgr.activeCalibration._calibration_memory_session_started_by_manager is True
+    assert mgr.activeCalibration._calibration_memory_session_run_id == "run_auto"
+
+
+def test_try_start_process_closes_auto_started_session_when_online_stream_init_fails(monkeypatch):
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {}
+    mgr._run_id = None
+    mgr._run_idx = None
+    mgr.model = SimpleNamespace(
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json")
+    )
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+    mgr.start_active_calibration = lambda: None
+    end_calls = []
+
+    def _begin_session(path, notes=None):
+        mgr._run_id = "run_auto"
+        mgr._run_idx = 0
+
+    def _end_session(*, outcome="completed", error_message="", emit_stage=True):
+        end_calls.append(
+            {
+                "outcome": outcome,
+                "error_message": error_message,
+                "emit_stage": emit_stage,
+            }
+        )
+        mgr._run_id = None
+        mgr._run_idx = None
+
+    def _boom(self, calibration_manager, model, *args, **kwargs):
+        raise RuntimeError("constructor failed")
+
+    mgr.begin_session = _begin_session
+    mgr.end_session = _end_session
+    mgr._warn_calibration_memory = lambda *args, **kwargs: None
+    monkeypatch.setattr(OnlineStreamCalibrationProcess, "__init__", _boom)
+
+    started = CalibrationManager._try_start_process(mgr, OnlineStreamCalibrationProcess)
+
+    assert started is False
+    assert end_calls[-1]["outcome"] == "error"
+    assert end_calls[-1]["emit_stage"] is False
+    assert "failed to start" in mgr.calibrationError.calls[-1][0][0].lower()
+    assert mgr._run_id is None
+
+
 def test_online_stream_on_prepare_requests_only_num_droplets_zero():
     proc = OnlineStreamCalibrationProcess.__new__(OnlineStreamCalibrationProcess)
     proc._stop_requested = False

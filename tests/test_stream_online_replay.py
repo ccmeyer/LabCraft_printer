@@ -207,7 +207,22 @@ def _build_consistent_run(run_dir: Path):
         run_dir / "plan_snapshot.json",
         online_cal_mod.build_online_stream_plan_snapshot(
             condition=condition,
-            priors=priors,
+            priors=online_cal_mod.build_online_stream_prior_resolution_artifact(
+                condition=condition,
+                lookup={"looked_up": True, "candidate_found": True},
+                candidate_prior={
+                    "source": "calibration_memory",
+                    "flow_start_offset_us": 650,
+                    "tail_start_offset_us": 3950,
+                },
+                applied_prior={
+                    "source": "calibration_memory",
+                    "flow_start_offset_us": 650,
+                    "tail_start_offset_us": 3950,
+                },
+                fallback_reason=None,
+                warnings=[],
+            ),
             flow_plan=flow_plan,
             tail_plan=tail_plan,
             capture_budget=online_cal_mod.new_online_stream_budget(),
@@ -353,6 +368,36 @@ def test_replay_online_stream_run_reports_mismatch_for_tampered_tail_warnings(tm
     assert report["comparison"]["tail_warnings"]["matches"] is False
 
 
+def test_replay_online_stream_run_reports_mismatch_for_tampered_prior_applied_offset(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    prior_resolution_path = run_dir / "prior_resolution.json"
+    prior_resolution = json.loads(prior_resolution_path.read_text(encoding="utf-8"))
+    prior_resolution["applied_prior"]["flow_start_offset_us"] = 999
+    prior_resolution_path.write_text(json.dumps(prior_resolution, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["prior_applied_prior"]["matches"] is False
+
+
+def test_replay_online_stream_run_reports_mismatch_for_tampered_prior_fallback_reason(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    prior_resolution_path = run_dir / "prior_resolution.json"
+    prior_resolution = json.loads(prior_resolution_path.read_text(encoding="utf-8"))
+    prior_resolution["fallback_reason"] = "no_prior"
+    prior_resolution_path.write_text(json.dumps(prior_resolution, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["prior_fallback_reason"]["matches"] is False
+
+
 def test_replay_online_stream_run_skips_missing_optional_flow_fit_diagnostics(tmp_path):
     run_dir = tmp_path / "run_01"
     _build_consistent_run(run_dir)
@@ -387,6 +432,26 @@ def test_replay_online_stream_run_skips_missing_optional_tail_diagnostics(tmp_pa
     assert report["comparison"]["predicted_stream_duration_us"]["skipped"] is True
     assert report["comparison"]["tail_trigger_reason"]["skipped"] is True
     assert report["comparison"]["tail_warnings"]["skipped"] is True
+
+
+def test_replay_online_stream_run_skips_missing_prior_resolution_contract_in_legacy_snapshot(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    snapshot_path = run_dir / "plan_snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["priors"] = {
+        "lookup_performed": True,
+        "candidate_found": True,
+        "source": "calibration_memory",
+    }
+    snapshot_path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is True
+    assert report["comparison"]["prior_lookup_looked_up"]["skipped"] is True
+    assert report["comparison"]["prior_applied_prior"]["skipped"] is True
 
 
 def test_replay_accepted_measurements_include_qc_and_clearance_fields():

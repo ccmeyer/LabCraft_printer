@@ -294,6 +294,73 @@ def _compare_optional_warning_set(stored_obj: dict, key: str, replayed):
     return comparison
 
 
+def _compare_jsonish(stored, replayed):
+    return {
+        "matches": stored == replayed,
+        "stored": stored,
+        "replayed": replayed,
+        "abs_diff": None,
+    }
+
+
+def _compare_optional_contract_field(stored_obj: dict, replayed_obj: dict, key: str, *, tol=1e-9):
+    stored_record = dict(stored_obj or {})
+    replayed_record = dict(replayed_obj or {})
+    if str(key) not in stored_record or str(key) not in replayed_record:
+        return {
+            "matches": True,
+            "stored": stored_record.get(str(key)),
+            "replayed": replayed_record.get(str(key)),
+            "abs_diff": None,
+            "skipped": True,
+        }
+    comparison = _compare_values(
+        stored_record.get(str(key)),
+        replayed_record.get(str(key)),
+        tol=tol,
+    )
+    comparison["skipped"] = False
+    return comparison
+
+
+def _compare_optional_contract_jsonish(stored_obj: dict, replayed_obj: dict, key: str):
+    stored_record = dict(stored_obj or {})
+    replayed_record = dict(replayed_obj or {})
+    if str(key) not in stored_record or str(key) not in replayed_record:
+        return {
+            "matches": True,
+            "stored": stored_record.get(str(key)),
+            "replayed": replayed_record.get(str(key)),
+            "abs_diff": None,
+            "skipped": True,
+        }
+    comparison = _compare_jsonish(
+        stored_record.get(str(key)),
+        replayed_record.get(str(key)),
+    )
+    comparison["skipped"] = False
+    return comparison
+
+
+def _compare_optional_contract_warning_set(stored_obj: dict, replayed_obj: dict, key: str):
+    stored_record = dict(stored_obj or {})
+    replayed_record = dict(replayed_obj or {})
+    if str(key) not in stored_record or str(key) not in replayed_record:
+        return {
+            "matches": True,
+            "stored": stored_record.get(str(key)),
+            "replayed": replayed_record.get(str(key)),
+            "abs_diff": None,
+            "skipped": True,
+        }
+    comparison = _compare_warning_sets(
+        stored_record.get(str(key)),
+        replayed_record.get(str(key)),
+    )
+    comparison["skipped"] = False
+    return comparison
+
+
 def replay_online_stream_run(run_dir: str | Path) -> dict:
     run_path = Path(run_dir).resolve()
     plan_snapshot = _load_json(run_path / "plan_snapshot.json")
@@ -340,7 +407,40 @@ def replay_online_stream_run(run_dir: str | Path) -> dict:
     stored_tail_result = dict(tail_fit_artifact.get("result") or {})
     stored_tail_phase = dict(stored_tail_result.get("tail_phase") or {})
     replay_tail_phase = dict(replay_tail_result.get("tail_phase") or {})
+    stored_prior_contract = dict(plan_snapshot.get("priors") or {})
+    stored_prior_lookup = dict(prior_resolution.get("lookup") or {})
+    replay_prior_lookup = dict(stored_prior_contract.get("lookup") or {})
     comparison = {
+        "prior_lookup_looked_up": _compare_optional_contract_field(
+            stored_prior_lookup,
+            replay_prior_lookup,
+            "looked_up",
+        ),
+        "prior_lookup_candidate_found": _compare_optional_contract_field(
+            stored_prior_lookup,
+            replay_prior_lookup,
+            "candidate_found",
+        ),
+        "prior_candidate_prior": _compare_optional_contract_jsonish(
+            prior_resolution,
+            stored_prior_contract,
+            "candidate_prior",
+        ),
+        "prior_applied_prior": _compare_optional_contract_jsonish(
+            prior_resolution,
+            stored_prior_contract,
+            "applied_prior",
+        ),
+        "prior_fallback_reason": _compare_optional_contract_field(
+            prior_resolution,
+            stored_prior_contract,
+            "fallback_reason",
+        ),
+        "prior_warnings": _compare_optional_contract_warning_set(
+            prior_resolution,
+            stored_prior_contract,
+            "warnings",
+        ),
         "flow_rate_nl_per_us": _compare_values(
             stored_flow_fit.get("flow_rate_nl_per_us"),
             replay_flow_fit.get("flow_rate_nl_per_us"),

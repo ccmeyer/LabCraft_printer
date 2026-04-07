@@ -1063,7 +1063,9 @@ class CalibrationMemoryStore:
                 result_entry["latest_payload"] = latest
             process_results[phase_name] = result_entry
 
-        run_status = "completed" if self._clean_str(run.get("ended_at")) else "in_progress"
+        run_status = self._clean_str(run.get("outcome"))
+        if run_status is None:
+            run_status = "completed" if self._clean_str(run.get("ended_at")) else "in_progress"
         advisory_prior = getattr(calibration_manager, "_calibration_memory_prior_candidate", None)
 
         manager_meta = {}

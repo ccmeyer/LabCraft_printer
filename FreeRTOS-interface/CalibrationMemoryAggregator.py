@@ -383,9 +383,17 @@ class CalibrationMemoryAggregator:
         online_stream_flow_fit_delay_start_from_emergence_us = _int_or_none(
             online_stream_flow_phase.get("flow_fit_delay_start_from_emergence_us")
         )
+        online_stream_learned_flow_start_offset_us = _coalesce(
+            _int_or_none(online_stream.get("learned_flow_start_offset_us")),
+            online_stream_flow_fit_delay_start_from_emergence_us,
+        )
         online_stream_tail_status = _clean_str(online_stream_tail_phase.get("status"))
         online_stream_tail_start_delay_from_emergence_us = _int_or_none(
             online_stream_tail_phase.get("tail_start_delay_from_emergence_us")
+        )
+        online_stream_learned_tail_start_offset_us = _coalesce(
+            _int_or_none(online_stream.get("learned_tail_start_offset_us")),
+            online_stream_tail_start_delay_from_emergence_us,
         )
         online_stream_predicted_volume_nl = _float_or_none(online_stream.get("predicted_volume_nl"))
         online_stream_flow_delay_offsets = list(online_stream_flow_plan.get("delay_offsets_from_emergence_us") or [])
@@ -406,12 +414,14 @@ class CalibrationMemoryAggregator:
             _int_or_none(online_stream_tail_plan.get("coarse_step_us")),
         )
         online_stream_prior_flow_start_offset_us = _coalesce(
+            online_stream_learned_flow_start_offset_us,
             _int_or_none(online_stream_priors.get("applied_flow_start_offset_us")),
             online_stream_flow_fit_delay_start_from_emergence_us,
             _int_or_none(online_stream_priors.get("flow_start_offset_us")),
             _int_or_none(online_stream_flow_delay_offsets[0]) if online_stream_flow_delay_offsets else None,
         )
         online_stream_prior_tail_start_offset_us = _coalesce(
+            online_stream_learned_tail_start_offset_us,
             _int_or_none(online_stream_priors.get("applied_tail_start_offset_us")),
             online_stream_tail_start_delay_from_emergence_us,
             _int_or_none(online_stream_priors.get("tail_start_offset_us")),
@@ -610,10 +620,12 @@ class CalibrationMemoryAggregator:
             "online_stream_flow_fit_delay_start_from_emergence_us": (
                 online_stream_flow_fit_delay_start_from_emergence_us
             ),
+            "online_stream_learned_flow_start_offset_us": online_stream_learned_flow_start_offset_us,
             "online_stream_tail_status": online_stream_tail_status,
             "online_stream_tail_start_delay_from_emergence_us": (
                 online_stream_tail_start_delay_from_emergence_us
             ),
+            "online_stream_learned_tail_start_offset_us": online_stream_learned_tail_start_offset_us,
             "online_stream_predicted_volume_nL": online_stream_predicted_volume_nl,
             "online_stream_prior_flow_start_offset_us": online_stream_prior_flow_start_offset_us,
             "online_stream_prior_tail_start_offset_us": online_stream_prior_tail_start_offset_us,
@@ -1343,12 +1355,18 @@ class CalibrationMemoryAggregator:
                 continue
 
             flow_start_offsets = [
-                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_flow_start_offset_us"))
+                _coalesce(
+                    _int_or_none((record.get("derived_metrics") or {}).get("online_stream_learned_flow_start_offset_us")),
+                    _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_flow_start_offset_us")),
+                )
                 for record in matches
             ]
             flow_start_offsets = [value for value in flow_start_offsets if value is not None]
             tail_start_offsets = [
-                _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_tail_start_offset_us"))
+                _coalesce(
+                    _int_or_none((record.get("derived_metrics") or {}).get("online_stream_learned_tail_start_offset_us")),
+                    _int_or_none((record.get("derived_metrics") or {}).get("online_stream_prior_tail_start_offset_us")),
+                )
                 for record in matches
             ]
             tail_start_offsets = [value for value in tail_start_offsets if value is not None]

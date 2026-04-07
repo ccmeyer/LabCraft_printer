@@ -10,7 +10,7 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 ensure_calibration_import_stubs(force=True)
 
 from CalibrationMemoryStore import CalibrationMemoryStore
-from CalibrationClasses.Model import BaseCalibrationProcess, CalibrationManager
+from CalibrationClasses.Model import BaseCalibrationProcess, CalibrationManager, OnlineStreamCalibrationProcess
 
 
 class _DummyStockSolution:
@@ -128,6 +128,101 @@ def _seed_completed_prior_run(store, run_id, context, *, pressure=1.61, pulse_wi
             "last_updated_at_utc": "2026-03-06T18:10:00Z",
         },
     )
+
+
+def _online_stream_result_payload(
+    *,
+    pressure: float = 1.62,
+    pulse_width_us: int = 1500,
+    applied_flow_start_offset_us: int = 700,
+    learned_flow_start_offset_us: int = 850,
+    applied_tail_start_offset_us: int = 3950,
+    learned_tail_start_offset_us: int = 4100,
+):
+    return {
+        "result": {
+            "condition": {
+                "print_pressure_psi": float(pressure),
+                "print_pulse_width_us": int(pulse_width_us),
+                "emergence_time_us": 3200,
+                "stock_solution": "Water",
+                "printer_head_id": "PH-001",
+            },
+            "priors": {
+                "source": "default",
+                "condition_match": "none",
+                "applied_flow_start_offset_us": int(applied_flow_start_offset_us),
+                "applied_flow_step_us": 200,
+                "applied_flow_delay_count": 5,
+                "applied_tail_start_offset_us": int(applied_tail_start_offset_us),
+                "applied_tail_coarse_step_us": 100,
+                "fallback_reason": "no_prior",
+                "warnings": [],
+            },
+            "flow_phase": {
+                "status": "captured",
+                "plan": {
+                    "delay_offsets_from_emergence_us": [700, 900, 1100, 1300, 1500],
+                    "point_count": 5,
+                },
+                "fit_status": "ok",
+                "flow_rate_nl_per_us": 0.0187,
+                "flow_fit_delay_start_from_emergence_us": int(learned_flow_start_offset_us),
+            },
+            "tail_phase": {
+                "status": "captured",
+                "plan": {
+                    "coarse_start_offset_us": int(applied_tail_start_offset_us),
+                    "coarse_step_us": 100,
+                },
+                "tail_start_delay_from_emergence_us": int(learned_tail_start_offset_us),
+            },
+            "predicted_stream_duration_us": int(learned_tail_start_offset_us),
+            "predicted_volume_nl": 72.6,
+            "learned_flow_start_offset_us": int(learned_flow_start_offset_us),
+            "learned_tail_start_offset_us": int(learned_tail_start_offset_us),
+            "warnings": [],
+        }
+    }
+
+
+def _seed_completed_online_stream_prior_run(
+    store,
+    *,
+    run_id: str,
+    context: dict,
+    pressure: float = 1.61,
+    pulse_width_us: int = 1500,
+):
+    paths = store.create_run(run_id, context=context, notes=f"seed {run_id}")
+    summary = {
+        "context": context,
+        "run_status": "completed",
+        "run_timing": {
+            "started_at_utc": "2026-04-01T10:00:00Z",
+            "ended_at_utc": "2026-04-01T10:05:00Z",
+        },
+        "notes": f"seed {run_id}",
+        "phase_counts": {
+            "online_stream_calibration": 1,
+        },
+        "process_results": {
+            "online_stream_calibration": {
+                "step_count": 1,
+                "latest_settings": {"print_width": int(pulse_width_us), "print_pressure": float(pressure)},
+                "latest_result": _online_stream_result_payload(
+                    pressure=pressure,
+                    pulse_width_us=pulse_width_us,
+                )["result"],
+            }
+        },
+        "artifact_refs": {},
+        "source_refs": paths,
+        "authoritative_refs": {},
+        "last_updated_at_utc": "2026-04-01T10:05:00Z",
+    }
+    summary["derived_metrics"] = store.aggregator.extract_run_features(summary)
+    store.write_run_summary(run_id, summary)
 
 
 def test_calibration_manager_writes_sidecar_summary_and_observations(tmp_path):
@@ -460,3 +555,168 @@ def test_ui_recommendation_events_are_flushed_into_sidecar_run(tmp_path):
     assert ui_summary["confidence"] == pytest.approx(
         preview["prior"]["recommendation_confidence_adjusted"]
     )
+
+
+def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuses_learned_prior(tmp_path, monkeypatch):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    manager = CalibrationManager(model)
+
+    class _OwnedOnlineStreamStub:
+        phase_name = "online_stream_calibration"
+        owns_calibration_memory_session = True
+        supports_operator_verdict = False
+
+        @staticmethod
+        def missing_requirements(cm):
+            return []
+
+        def __init__(self, calibration_manager, model, *args, **kwargs):
+            self.calibration_manager = calibration_manager
+            self.model = model
+
+    monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_complete_stream_capture_queue_success", lambda: None)
+    monkeypatch.setattr(manager, "_emit_readiness", lambda: None)
+
+    started = manager._try_start_process(_OwnedOnlineStreamStub)
+
+    assert started is True
+    first_run_id = manager._run_id
+    manager.onCalibrationDataUpdated(_online_stream_result_payload())
+    manager.onCalibrationCompleted()
+
+    assert manager._run_id is None
+    assert manager._run_idx is None
+
+    run_dir = Path(store.get_run_paths(first_run_id)["run_dir"])
+    summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["run_status"] == "completed"
+
+    manager_b = CalibrationManager(model)
+    manager_b.begin_session(model.experiment_model.calibration_file_path, notes="reuse learned prior")
+    resolved = manager_b.resolve_online_stream_calibration_prior(
+        condition={"print_pressure_psi": 1.62, "print_pulse_width_us": 1500, "emergence_time_us": 3200}
+    )
+    manager_b.end_session()
+
+    assert resolved["result_priors"]["candidate_found"] is True
+    assert resolved["result_priors"]["applied_flow_start_offset_us"] == 850
+    assert resolved["result_priors"]["applied_tail_start_offset_us"] == 4100
+    assert resolved["result_priors"]["source_run_ids"] == [first_run_id]
+
+
+def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_path, monkeypatch):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    manager = CalibrationManager(model)
+
+    class _OwnedOnlineStreamStub:
+        phase_name = "online_stream_calibration"
+        owns_calibration_memory_session = True
+        supports_operator_verdict = False
+
+        @staticmethod
+        def missing_requirements(cm):
+            return []
+
+        def __init__(self, calibration_manager, model, *args, **kwargs):
+            self.calibration_manager = calibration_manager
+            self.model = model
+
+    monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_emit_readiness", lambda: None)
+
+    started = manager._try_start_process(_OwnedOnlineStreamStub)
+    assert started is True
+    stopped_run_id = manager._run_id
+    manager.onCalibrationError("Calibration terminated by user")
+
+    stopped_summary = json.loads(
+        Path(store.get_run_paths(stopped_run_id)["run_dir"], "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert stopped_summary["run_status"] == "stopped"
+
+    manager_b = CalibrationManager(model)
+    monkeypatch.setattr(manager_b, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager_b, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager_b, "_complete_stream_capture_queue_success", lambda: None)
+    monkeypatch.setattr(manager_b, "_emit_readiness", lambda: None)
+
+    started = manager_b._try_start_process(_OwnedOnlineStreamStub)
+    assert started is True
+    completed_run_id = manager_b._run_id
+    manager_b.onCalibrationDataUpdated(
+        _online_stream_result_payload(
+            learned_flow_start_offset_us=900,
+            learned_tail_start_offset_us=4200,
+        )
+    )
+    manager_b.onCalibrationCompleted()
+
+    manager_c = CalibrationManager(model)
+    manager_c.begin_session(model.experiment_model.calibration_file_path, notes="after stopped + completed")
+    resolved = manager_c.resolve_online_stream_calibration_prior(
+        condition={"print_pressure_psi": 1.62, "print_pulse_width_us": 1500, "emergence_time_us": 3200}
+    )
+    manager_c.end_session()
+
+    assert resolved["result_priors"]["candidate_found"] is True
+    assert resolved["result_priors"]["applied_flow_start_offset_us"] == 900
+    assert resolved["result_priors"]["applied_tail_start_offset_us"] == 4200
+    assert resolved["result_priors"]["source_run_ids"] == [completed_run_id]
+
+
+def test_online_stream_auto_started_session_preserves_prior_runtime_in_summary(tmp_path, monkeypatch):
+    model = _make_model(tmp_path)
+    store = model.calibration_memory_store
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+    _seed_completed_online_stream_prior_run(
+        store,
+        run_id="seed_online_stream",
+        context=context,
+    )
+
+    manager = CalibrationManager(model)
+    monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manager, "_complete_stream_capture_queue_success", lambda: None)
+    monkeypatch.setattr(manager, "_emit_readiness", lambda: None)
+    monkeypatch.setattr(manager, "_process_missing", lambda proc_cls, *args, **kwargs: [])
+
+    def _fake_online_stream_init(self, calibration_manager, model, *args, **kwargs):
+        self.calibration_manager = calibration_manager
+        self.model = model
+        self.phase_name = "online_stream_calibration"
+        calibration_manager.resolve_online_stream_calibration_prior(
+            condition={"print_pressure_psi": 1.61, "print_pulse_width_us": 1500, "emergence_time_us": 3200}
+        )
+
+    monkeypatch.setattr(OnlineStreamCalibrationProcess, "__init__", _fake_online_stream_init)
+
+    started = manager._try_start_process(OnlineStreamCalibrationProcess)
+    assert started is True
+    run_id = manager._run_id
+    manager.onCalibrationDataUpdated(_online_stream_result_payload(pressure=1.61))
+    manager.onCalibrationCompleted()
+
+    run_dir = Path(store.get_run_paths(run_id)["run_dir"])
+    observations = [
+        json.loads(line)
+        for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+
+    observation_types = {row["observation_type"] for row in observations}
+    assert "online_stream_prior_lookup" in observation_types
+    assert "online_stream_prior_applied" in observation_types
+    assert summary["online_stream_prior_lookup_performed"] is True
+    assert summary["online_stream_prior_candidate_found"] is True
+    assert summary["online_stream_prior_applied"] is True
+    assert summary["online_stream_prior_applied_prior"]["source"] == "calibration_memory"

@@ -477,6 +477,8 @@ def build_online_stream_result_stub(
     tail_phase: dict | None = None,
     predicted_stream_duration_us: int | None = None,
     predicted_volume_nl: float | int | None = None,
+    learned_flow_start_offset_us: int | None = None,
+    learned_tail_start_offset_us: int | None = None,
     warnings: list[str] | None = None,
 ) -> dict:
     return {
@@ -488,6 +490,12 @@ def build_online_stream_result_stub(
             None if predicted_stream_duration_us is None else int(predicted_stream_duration_us)
         ),
         "predicted_volume_nl": None if predicted_volume_nl is None else float(predicted_volume_nl),
+        "learned_flow_start_offset_us": (
+            None if learned_flow_start_offset_us is None else int(learned_flow_start_offset_us)
+        ),
+        "learned_tail_start_offset_us": (
+            None if learned_tail_start_offset_us is None else int(learned_tail_start_offset_us)
+        ),
         "warnings": _copy_warnings(warnings),
     }
 
