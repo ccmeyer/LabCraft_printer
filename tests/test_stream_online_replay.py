@@ -277,6 +277,53 @@ def test_replay_online_stream_run_reports_mismatches_for_tampered_artifact(tmp_p
     assert report["comparison"]["predicted_volume_nl"]["matches"] is False
 
 
+def test_replay_online_stream_run_reports_mismatch_for_tampered_flow_baseline(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    flow_fit_path = run_dir / "flow_fit.json"
+    flow_fit = json.loads(flow_fit_path.read_text(encoding="utf-8"))
+    flow_fit["fit"]["steady_width_baseline_px"] = 999.0
+    flow_fit_path.write_text(json.dumps(flow_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["steady_width_baseline_px"]["matches"] is False
+
+
+def test_replay_online_stream_run_reports_mismatch_for_tampered_outlier_status(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    flow_fit_path = run_dir / "flow_fit.json"
+    flow_fit = json.loads(flow_fit_path.read_text(encoding="utf-8"))
+    flow_fit["fit"]["flow_fit_outlier_prune_status"] = "dropped_isolated_point"
+    flow_fit_path.write_text(json.dumps(flow_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is False
+    assert report["comparison"]["flow_fit_outlier_prune_status"]["matches"] is False
+
+
+def test_replay_online_stream_run_skips_missing_optional_flow_fit_diagnostics(tmp_path):
+    run_dir = tmp_path / "run_01"
+    _build_consistent_run(run_dir)
+
+    flow_fit_path = run_dir / "flow_fit.json"
+    flow_fit = json.loads(flow_fit_path.read_text(encoding="utf-8"))
+    flow_fit["fit"].pop("steady_width_baseline_px", None)
+    flow_fit["fit"].pop("flow_fit_outlier_prune_status", None)
+    flow_fit_path.write_text(json.dumps(flow_fit, indent=2), encoding="utf-8")
+
+    report = online_replay_mod.replay_online_stream_run(run_dir)
+
+    assert report["comparison"]["all_match"] is True
+    assert report["comparison"]["steady_width_baseline_px"]["skipped"] is True
+    assert report["comparison"]["flow_fit_outlier_prune_status"]["skipped"] is True
+
+
 def test_replay_accepted_measurements_include_qc_and_clearance_fields():
     frame_rows = [
         online_cal_mod.build_online_stream_frame_row(

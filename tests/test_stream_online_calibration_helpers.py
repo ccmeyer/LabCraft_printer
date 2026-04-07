@@ -469,11 +469,16 @@ def test_decide_online_stream_flow_next_action_stops_for_attached_bottom_guard()
     }
 
 
-def test_decide_online_stream_flow_next_action_stops_for_repeated_failed_delays():
+def test_decide_online_stream_flow_next_action_stops_for_fully_failed_delay():
     decision = mod.decide_online_stream_flow_next_action(
-        delay_summary={"attached_bottom_guard_hit": False},
+        delay_summary={
+            "attached_bottom_guard_hit": False,
+            "attempted_replicates": 3,
+            "accepted_replicates": 0,
+            "delay_accepted": False,
+        },
         capture_budget=mod.new_online_stream_budget(),
-        consecutive_failed_delays=2,
+        consecutive_failed_delays=0,
         attempted_delay_count=2,
         planned_delay_count=5,
     )
@@ -481,6 +486,28 @@ def test_decide_online_stream_flow_next_action_stops_for_repeated_failed_delays(
     assert decision == {
         "action": "stop",
         "termination_reason": "repeated_qc_failure",
+    }
+
+
+def test_decide_online_stream_flow_next_action_stops_for_insufficient_accepted_delays():
+    decision = mod.decide_online_stream_flow_next_action(
+        delay_summary={
+            "attached_bottom_guard_hit": False,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "delay_accepted": True,
+        },
+        capture_budget=mod.new_online_stream_budget(),
+        consecutive_failed_delays=0,
+        attempted_delay_count=4,
+        planned_delay_count=5,
+        accepted_delay_count=1,
+        remaining_delay_count=1,
+    )
+
+    assert decision == {
+        "action": "stop",
+        "termination_reason": "insufficient_accepted_delays",
     }
 
 
@@ -505,11 +532,18 @@ def test_decide_online_stream_flow_next_action_stops_for_budget_exhaustion():
 
 def test_decide_online_stream_flow_next_action_stops_when_planned_delays_exhausted():
     decision = mod.decide_online_stream_flow_next_action(
-        delay_summary={"attached_bottom_guard_hit": False},
+        delay_summary={
+            "attached_bottom_guard_hit": False,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "delay_accepted": True,
+        },
         capture_budget=mod.new_online_stream_budget(),
         consecutive_failed_delays=0,
         attempted_delay_count=5,
         planned_delay_count=5,
+        accepted_delay_count=3,
+        remaining_delay_count=0,
     )
 
     assert decision == {

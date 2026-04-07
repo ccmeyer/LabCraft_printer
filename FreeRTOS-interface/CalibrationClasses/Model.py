@@ -5848,6 +5848,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _current_flow_delay_count(self) -> int:
         return int(len(list(self.flow_plan.get("delays_us") or [])))
 
+    def _refresh_plan_snapshot(self):
+        self._write_plan_snapshot(force=True)
+
     def _get_capture_ref(self, attr_name: str) -> dict:
         try:
             return dict(self._last_capture_refs.get(str(attr_name), {}) or {})
@@ -6136,6 +6139,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         delays = list(self.flow_plan.get("delays_us") or [])
         if self._flow_delay_index >= len(delays):
             self._flow_termination_reason = self._flow_termination_reason or "planned_delays_exhausted"
+            self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
 
@@ -6169,6 +6173,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if self.capture_budget.get("exhausted"):
             self._flow_termination_reason = self._flow_termination_reason or "capture_budget_exhausted"
             self._append_flow_warning("capture_budget_exhausted")
+            self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
         if self._current_delay_us is None:
@@ -6181,6 +6186,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             count=1,
         )
         self._attempted_capture_count += 1
+        self._sync_flow_budget_warnings()
+        self._refresh_plan_snapshot()
         self._start_single_flow_capture(
             set_attr="flow_frame_image",
             stage_text=(
@@ -6342,22 +6349,26 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if bool(delay_summary.get("detached_near_bottom_warning")):
             self._append_flow_warning("detached_near_bottom_warning")
 
-        if bool(delay_summary.get("delay_accepted")):
-            self._consecutive_failed_delays = 0
-        else:
-            self._consecutive_failed_delays += 1
+        attempted_delay_count = int(len(self._flow_delay_summaries))
+        accepted_delay_count = int(
+            sum(1 for row in self._flow_delay_summaries if bool((row or {}).get("delay_accepted")))
+        )
+        remaining_delay_count = int(max(0, self._current_flow_delay_count() - attempted_delay_count))
 
         decision = online_cal_mod.decide_online_stream_flow_next_action(
             delay_summary=delay_summary,
             capture_budget=self.capture_budget,
             consecutive_failed_delays=int(self._consecutive_failed_delays),
-            attempted_delay_count=int(len(self._flow_delay_summaries)),
+            attempted_delay_count=attempted_delay_count,
             planned_delay_count=int(self._current_flow_delay_count()),
+            accepted_delay_count=accepted_delay_count,
+            remaining_delay_count=remaining_delay_count,
         )
         if str(decision.get("action") or "") == "stop":
             self._flow_termination_reason = str(decision.get("termination_reason") or "")
             if self._flow_termination_reason:
                 self._append_flow_warning(self._flow_termination_reason)
+            self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
 
@@ -6376,11 +6387,107 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             flow_plan=dict(self.flow_plan),
             accepted_delay_points=list(self._flow_fit_result.get("accepted_delay_points") or []),
             fit=dict(self._flow_fit_result or {}),
-            warnings=list(self._flow_fit_warnings),
+            warnings=self._merged_online_stream_warnings(
+                self._flow_warnings,
+                self._flow_fit_warnings,
+            ),
         )
         os.makedirs(os.path.dirname(self._flow_fit_path), exist_ok=True)
         with open(self._flow_fit_path, "w", encoding="utf-8") as handle:
             json.dump(artifact, handle, indent=2, default=numpy_encoder)
+
+    def _merged_online_stream_warnings(self, *warning_groups) -> list[str]:
+        merged = []
+        seen = set()
+        for group in warning_groups:
+            for warning in list(group or []):
+                label = str(warning or "").strip()
+                if not label or label in seen:
+                    continue
+                seen.add(label)
+                merged.append(label)
+        return merged
+
+    def _sync_flow_budget_warnings(self):
+        try:
+            nominal_limit = int(
+                (dict(self.capture_budget or {}).get("nominal_limit"))
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["nominal_capture_budget"]
+            )
+        except Exception:
+            nominal_limit = int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["nominal_capture_budget"])
+        if int(self._attempted_capture_count or 0) >= max(0, nominal_limit):
+            self._append_flow_warning("capture_budget_nominal_exhausted")
+
+    def _build_online_stream_flow_phase_payload(self):
+        self._sync_flow_budget_warnings()
+        accepted_delay_count = int(
+            sum(1 for row in self._flow_delay_summaries if bool((row or {}).get("delay_accepted")))
+        )
+        flow_measurements = [
+            dict(row or {})
+            for row in list(self._measurement_rows or [])
+            if str((row or {}).get("phase") or "") == "flow_rate"
+        ]
+        accepted_measurement_count = int(len(flow_measurements))
+        rejected_capture_count = int(max(0, self._attempted_capture_count - accepted_measurement_count))
+        flow_status = "captured" if accepted_delay_count >= 3 else "insufficient_data"
+        if flow_status == "insufficient_data":
+            self._append_flow_warning("insufficient_accepted_delays")
+        return online_cal_mod.build_online_stream_flow_phase_payload(
+            status=flow_status,
+            plan=dict(self.flow_plan),
+            attempted_delay_count=int(len(self._flow_delay_summaries)),
+            attempted_capture_count=int(self._attempted_capture_count),
+            accepted_delay_count=int(accepted_delay_count),
+            accepted_measurement_count=int(accepted_measurement_count),
+            rejected_capture_count=int(rejected_capture_count),
+            termination_reason=str(self._flow_termination_reason or "planned_delays_exhausted"),
+            delay_summaries=[dict(row) for row in self._flow_delay_summaries],
+            warnings=self._merged_online_stream_warnings(
+                self._flow_warnings,
+                self._flow_fit_warnings,
+            ),
+            fit=dict(self._flow_fit_result or {}),
+        )
+
+    def _build_online_stream_result_payload(
+        self,
+        *,
+        tail_phase: dict | None = None,
+        predicted_stream_duration_us=None,
+        predicted_volume_nl=None,
+        include_tail_warnings: bool = False,
+    ) -> dict:
+        condition = self._build_condition()
+        priors = dict(getattr(self, "_prior_resolution", None) or self.priors)
+        flow_phase = self._build_online_stream_flow_phase_payload()
+        resolved_tail_phase = dict(tail_phase or {})
+        if not resolved_tail_phase:
+            resolved_tail_phase = dict((dict(self._tail_fit_result or {}).get("tail_phase") or {}))
+        if not resolved_tail_phase:
+            resolved_tail_phase = {
+                "status": "not_run",
+                "plan": dict(self.tail_plan),
+            }
+        result_warnings = self._merged_online_stream_warnings(
+            self._flow_warnings,
+            self._flow_fit_warnings,
+            self._tail_fit_warnings if include_tail_warnings else [],
+        )
+        result = online_cal_mod.build_online_stream_result_stub(
+            condition=condition,
+            priors=priors,
+            flow_phase=flow_phase,
+            tail_phase=resolved_tail_phase,
+            predicted_stream_duration_us=predicted_stream_duration_us,
+            predicted_volume_nl=predicted_volume_nl,
+            warnings=result_warnings,
+        )
+        return {
+            "measurements": list(self._measurement_rows),
+            "result": result,
+        }
 
     @Slot()
     def onFitFlowRate(self):
@@ -6398,9 +6505,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 or {}
             )
             self._flow_fit_warnings = list(self._flow_fit_result.get("warnings") or [])
+            self._sync_flow_budget_warnings()
             self._write_flow_fit_artifact()
+            self.calibrationDataUpdated.emit(
+                self._build_online_stream_result_payload(
+                    tail_phase={"status": "not_run", "plan": {}},
+                    predicted_stream_duration_us=None,
+                    predicted_volume_nl=None,
+                    include_tail_warnings=False,
+                )
+            )
         except Exception as e:
-            self.calibrationError.emit(f"Failed to fit online stream flow rate: {e}")
+            self._queue_terminal_outcome_after_restore(
+                "error",
+                f"Failed to fit online stream flow rate: {e}",
+            )
             return
 
         self.flowFitReady.emit()
@@ -6946,78 +7065,25 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.calibrationError.emit("Online stream calibration completed without background capture.")
             return
 
-        condition = self._build_condition()
-        accepted_delay_count = int(
-            sum(1 for row in self._flow_delay_summaries if bool(row.get("delay_accepted")))
-        )
-        flow_measurements = [
-            dict(row or {})
-            for row in list(self._measurement_rows or [])
-            if str((row or {}).get("phase") or "") == "flow_rate"
-        ]
-        accepted_measurement_count = int(len(flow_measurements))
-        rejected_capture_count = int(max(0, self._attempted_capture_count - accepted_measurement_count))
-        flow_status = "captured" if accepted_delay_count >= 3 else "insufficient_data"
-        if flow_status == "insufficient_data":
-            self._append_flow_warning("insufficient_accepted_delays")
-
-        flow_phase = online_cal_mod.build_online_stream_flow_phase_payload(
-            status=flow_status,
-            plan=dict(self.flow_plan),
-            attempted_delay_count=int(len(self._flow_delay_summaries)),
-            attempted_capture_count=int(self._attempted_capture_count),
-            accepted_delay_count=int(accepted_delay_count),
-            accepted_measurement_count=int(accepted_measurement_count),
-            rejected_capture_count=int(rejected_capture_count),
-            termination_reason=str(self._flow_termination_reason or "planned_delays_exhausted"),
-            delay_summaries=[dict(row) for row in self._flow_delay_summaries],
-            warnings=list(self._flow_warnings),
-            fit=dict(self._flow_fit_result or {}),
-        )
-        tail_phase = dict(
-            (dict(self._tail_fit_result or {}).get("tail_phase") or {})
-        )
-        if not tail_phase:
-            tail_phase = {
-                "status": "not_run",
-                "plan": dict(self.tail_plan),
-            }
-        result_warnings = []
-        for warning in (
-            list(self._flow_warnings)
-            + list(self._flow_fit_warnings)
-            + list(self._tail_fit_warnings)
-        ):
-            warning_label = str(warning or "").strip()
-            if warning_label and warning_label not in result_warnings:
-                result_warnings.append(warning_label)
-        result = online_cal_mod.build_online_stream_result_stub(
-            condition=condition,
-            priors=dict(getattr(self, "_prior_resolution", None) or self.priors),
-            flow_phase=flow_phase,
-            tail_phase=tail_phase,
+        payload = self._build_online_stream_result_payload(
             predicted_stream_duration_us=self._predicted_stream_duration_us,
             predicted_volume_nl=self._predicted_volume_nl,
-            warnings=result_warnings,
+            include_tail_warnings=True,
         )
+        result = dict(payload.get("result") or {})
         self._append_online_stream_memory_observation(
             "online_stream_result",
             {
-                "condition": condition,
-                "priors": dict(getattr(self, "_prior_resolution", None) or self.priors),
-                "flow_phase": dict(flow_phase or {}),
-                "tail_phase": dict(tail_phase or {}),
+                "condition": dict(result.get("condition") or {}),
+                "priors": dict(result.get("priors") or {}),
+                "flow_phase": dict(result.get("flow_phase") or {}),
+                "tail_phase": dict(result.get("tail_phase") or {}),
                 "predicted_stream_duration_us": self._predicted_stream_duration_us,
                 "predicted_volume_nl": self._predicted_volume_nl,
-                "warnings": list(result_warnings),
+                "warnings": list(result.get("warnings") or []),
             },
         )
-        self.calibrationDataUpdated.emit(
-            {
-                "measurements": list(self._measurement_rows),
-                "result": result,
-            }
-        )
+        self.calibrationDataUpdated.emit(payload)
         self.stageChanged.emit("Online stream calibration complete")
         self.calibrationCompleted.emit()
 

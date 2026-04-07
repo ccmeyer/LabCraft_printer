@@ -523,6 +523,20 @@ def test_online_stream_capture_flow_frame_uses_one_printed_attempt_and_consumes_
     assert proc.capture_budget["captures_remaining_hard"] == 35
 
 
+def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_use(tmp_path):
+    proc = _flow_proc(tmp_path)
+    capture_signal = _capture_signal(None)
+    proc.calibration_manager.captureImageRequested = capture_signal
+    proc._ensure_flow_paths()
+    proc._write_plan_snapshot()
+
+    proc.onCaptureFlowFrame()
+
+    snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
+    assert snapshot["capture_budget"]["captures_used"] == 1
+    assert snapshot["capture_budget"]["captures_remaining_hard"] == 35
+
+
 def test_online_stream_apply_flow_delay_routes_to_fit_when_delays_are_exhausted(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._flow_delay_index = len(proc.flow_plan["delays_us"])
@@ -654,6 +668,191 @@ def test_online_stream_advance_flow_phase_stops_on_bottom_guard_and_routes_to_fi
     assert proc._flow_termination_reason == "attached_bottom_guard_hit"
 
 
+def test_online_stream_advance_flow_phase_stops_after_one_fully_failed_delay(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._ensure_flow_paths()
+    proc._write_plan_snapshot()
+    proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
+        proc.capture_budget,
+        phase="flow_phase",
+        count=3,
+    )
+    proc._attempted_capture_count = 3
+    proc._flow_replicate_index = 2
+    proc._current_delay_us = 4050
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="rejected_measurement_qc",
+            delay_us=4050,
+            delay_from_emergence_us=850,
+            replicate_index=1,
+            qc={"measurement_qc_pass": False},
+            image_ref={"capture_id": "cap_flow_01"},
+            warnings=["measurement_qc_failed"],
+            attached_width_px=None,
+            visible_volume_nl=None,
+            attached_bottom_clearance_px=None,
+            min_accepted_fluid_distance_from_bottom_px=None,
+            accepted_component_count=0,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="rejected_measurement_qc",
+            delay_us=4050,
+            delay_from_emergence_us=850,
+            replicate_index=2,
+            qc={"measurement_qc_pass": False},
+            image_ref={"capture_id": "cap_flow_02"},
+            warnings=["measurement_qc_failed"],
+            attached_width_px=None,
+            visible_volume_nl=None,
+            attached_bottom_clearance_px=None,
+            min_accepted_fluid_distance_from_bottom_px=None,
+            accepted_component_count=0,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="rejected_measurement_qc",
+            delay_us=4050,
+            delay_from_emergence_us=850,
+            replicate_index=3,
+            qc={"measurement_qc_pass": False},
+            image_ref={"capture_id": "cap_flow_03"},
+            warnings=["measurement_qc_failed"],
+            attached_width_px=None,
+            visible_volume_nl=None,
+            attached_bottom_clearance_px=None,
+            min_accepted_fluid_distance_from_bottom_px=None,
+            accepted_component_count=0,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+    ]
+    proc._current_analysis_summary = {"status": "rejected_measurement_qc"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc.flowAcquisitionFinished.calls
+    assert proc.nextDelay.calls == []
+    assert proc._flow_termination_reason == "repeated_qc_failure"
+    snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
+    assert snapshot["capture_budget"]["captures_used"] == 3
+
+
+def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_become_impossible(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc.flow_plan = {
+        "delays_us": [3850, 4050, 4250, 4450],
+        "replicates_per_delay": 3,
+        "point_count": 4,
+    }
+    proc._flow_delay_index = 2
+    proc._flow_replicate_index = 2
+    proc._current_delay_us = 4250
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "attempted_replicates": 3,
+            "accepted_replicates": 0,
+            "rejected_replicates": 3,
+            "median_visible_volume_nl": None,
+            "median_width_px": None,
+            "min_attached_bottom_clearance_px": None,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": False,
+            "attached_bottom_guard_hit": False,
+            "warnings": [],
+        },
+        {
+            "delay_us": 4050,
+            "delay_from_emergence_us": 850,
+            "attempted_replicates": 3,
+            "accepted_replicates": 0,
+            "rejected_replicates": 3,
+            "median_visible_volume_nl": None,
+            "median_width_px": None,
+            "min_attached_bottom_clearance_px": None,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": False,
+            "attached_bottom_guard_hit": False,
+            "warnings": [],
+        },
+    ]
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=4250,
+            delay_from_emergence_us=1050,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_11"},
+            warnings=[],
+            attached_width_px=91.2,
+            visible_volume_nl=12.1,
+            attached_bottom_clearance_px=150,
+            min_accepted_fluid_distance_from_bottom_px=150,
+            accepted_component_count=1,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="rejected_measurement_qc",
+            delay_us=4250,
+            delay_from_emergence_us=1050,
+            replicate_index=2,
+            qc={"measurement_qc_pass": False},
+            image_ref={"capture_id": "cap_flow_12"},
+            warnings=["measurement_qc_failed"],
+            attached_width_px=None,
+            visible_volume_nl=None,
+            attached_bottom_clearance_px=None,
+            min_accepted_fluid_distance_from_bottom_px=None,
+            accepted_component_count=0,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="rejected_measurement_qc",
+            delay_us=4250,
+            delay_from_emergence_us=1050,
+            replicate_index=3,
+            qc={"measurement_qc_pass": False},
+            image_ref={"capture_id": "cap_flow_13"},
+            warnings=["measurement_qc_failed"],
+            attached_width_px=None,
+            visible_volume_nl=None,
+            attached_bottom_clearance_px=None,
+            min_accepted_fluid_distance_from_bottom_px=None,
+            accepted_component_count=0,
+            accepted_detached_component_count=0,
+            detached_near_bottom_warning=False,
+            attached_bottom_guard_hit=False,
+        ),
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc.flowAcquisitionFinished.calls
+    assert proc.nextDelay.calls == []
+    assert proc._flow_termination_reason == "insufficient_accepted_delays"
+    assert "insufficient_accepted_delays" in proc._flow_warnings
+
+
 def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monkeypatch):
     proc = _flow_proc(tmp_path)
     proc._flow_fit_path = str(tmp_path / "flow_fit.json")
@@ -736,9 +935,153 @@ def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monke
     proc.onFitFlowRate()
 
     assert proc.flowFitReady.calls
+    assert proc.calibrationCompleted.calls == []
     artifact = json.loads(Path(proc._flow_fit_path).read_text(encoding="utf-8"))
     assert artifact["fit"]["flow_rate_nl_per_us"] == 0.0187
     assert artifact["warnings"] == ["flow_fit_min_points_only"]
+    payload = proc.calibrationDataUpdated.calls[-1][0][0]
+    assert payload["result"]["flow_phase"]["fit_status"] == "warning_min_points_only"
+    assert payload["result"]["tail_phase"] == {"status": "not_run", "plan": {}}
+    assert payload["result"]["predicted_stream_duration_us"] is None
+    assert payload["result"]["predicted_volume_nl"] is None
+    assert payload["result"]["warnings"] == ["flow_fit_min_points_only"]
+
+
+def test_online_stream_fit_flow_rate_failure_restores_before_terminal_error(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_path = str(tmp_path / "flow_fit.json")
+    captured = {"settings": None}
+
+    monkeypatch.setattr(
+        calibration_model.online_fit_mod,
+        "fit_online_stream_flow_phase",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured["settings"] = dict(settings)
+        callback()
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+
+    proc.onFitFlowRate()
+
+    assert proc.finalize.calls
+    assert proc.calibrationError.calls == []
+    assert not Path(proc._flow_fit_path).exists()
+
+    proc.onRestoreSettings()
+    proc.onCompleted()
+
+    assert captured["settings"] == {
+        "num_droplets": 1,
+        "flash_delay": 4300,
+        "print_pressure": 0.42,
+        "print_pulse_width": 1350,
+    }
+    assert proc.calibrationCompleted.calls == []
+    assert proc.calibrationError.calls[-1][0][0] == "Failed to fit online stream flow rate: boom"
+
+
+def test_online_stream_on_fit_flow_rate_surfaces_nominal_budget_warning_without_stopping(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_path = str(tmp_path / "flow_fit.json")
+    proc._attempted_capture_count = int(proc.capture_budget["nominal_limit"])
+    proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
+        proc.capture_budget,
+        phase="flow_phase",
+        count=proc.capture_budget["nominal_limit"],
+    )
+    proc._measurement_rows = [
+        {
+            "phase": "flow_rate",
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "replicate_index": 1,
+            "width_px": 91.5,
+            "visible_volume_nl": 12.3,
+            "qc_pass": True,
+            "image_ref": {"capture_id": "cap_flow_01"},
+        }
+    ]
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 12.3,
+            "median_width_px": 91.5,
+            "min_attached_bottom_clearance_px": 150.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 4050,
+            "delay_from_emergence_us": 850,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 16.1,
+            "median_width_px": 91.0,
+            "min_attached_bottom_clearance_px": 145.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 4250,
+            "delay_from_emergence_us": 1050,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 20.0,
+            "median_width_px": 90.5,
+            "min_attached_bottom_clearance_px": 140.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+    ]
+
+    monkeypatch.setattr(
+        calibration_model.online_fit_mod,
+        "fit_online_stream_flow_phase",
+        lambda **kwargs: {
+            "fit_status": "warning_min_points_only",
+            "accepted_delay_points": [
+                {"delay_us": 3850, "delay_from_emergence_us": 650, "median_visible_volume_nl": 12.3}
+            ],
+            "flow_fit_point_count": 3,
+            "flow_rate_nl_per_us": 0.0187,
+            "flow_intercept_nl": -1.2,
+            "flow_fit_delay_start_from_emergence_us": 650,
+            "flow_fit_delay_end_from_emergence_us": 1050,
+            "steady_width_baseline_px": 91.0,
+            "steady_r2": 0.999,
+            "steady_nrmse": 0.01,
+            "steady_rate_ci95_low_nl_per_us": 0.0185,
+            "steady_rate_ci95_high_nl_per_us": 0.0189,
+            "steady_rate_ci95_relative_width": 0.02,
+            "flow_fit_outlier_prune_status": "not_needed_too_few_points",
+            "flow_fit_dropped_outlier_delay_from_emergence_us": None,
+            "warnings": ["flow_fit_min_points_only"],
+        },
+    )
+
+    proc.onFitFlowRate()
+
+    assert proc.flowFitReady.calls
+    assert "capture_budget_nominal_exhausted" in proc._flow_warnings
+    artifact = json.loads(Path(proc._flow_fit_path).read_text(encoding="utf-8"))
+    assert set(artifact["warnings"]) == {
+        "capture_budget_nominal_exhausted",
+        "flow_fit_min_points_only",
+    }
+    payload = proc.calibrationDataUpdated.calls[-1][0][0]
+    assert "capture_budget_nominal_exhausted" in payload["result"]["flow_phase"]["warnings"]
+    assert payload["result"]["flow_phase"]["fit_warnings"] == ["flow_fit_min_points_only"]
+    assert proc.calibrationCompleted.calls == []
 
 
 def test_online_stream_plan_tail_phase_skips_when_flow_baseline_is_missing(tmp_path):
@@ -1267,6 +1610,128 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     assert result["predicted_stream_duration_us"] == 3950
     assert result["predicted_volume_nl"] == 72.665
     assert "insufficient_accepted_delays" in result["warnings"]
+
+
+def test_online_stream_end_to_end_emits_stage4_partial_then_final_payload(tmp_path, monkeypatch):
+    proc = _flow_proc(tmp_path)
+    proc._flow_fit_path = str(tmp_path / "flow_fit.json")
+    proc._measurement_rows = [
+        {
+            "phase": "flow_rate",
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "replicate_index": 1,
+            "width_px": 91.5,
+            "visible_volume_nl": 12.3,
+            "qc_pass": True,
+            "image_ref": {"capture_id": "cap_flow_01"},
+            "nozzle_qc_pass": True,
+            "silhouette_qc_pass": True,
+            "attached_bottom_clearance_px": 150.0,
+        }
+    ]
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 12.3,
+            "median_width_px": 91.5,
+            "min_attached_bottom_clearance_px": 150.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 4050,
+            "delay_from_emergence_us": 850,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 16.1,
+            "median_width_px": 91.0,
+            "min_attached_bottom_clearance_px": 145.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+        {
+            "delay_us": 4250,
+            "delay_from_emergence_us": 1050,
+            "attempted_replicates": 3,
+            "accepted_replicates": 1,
+            "rejected_replicates": 2,
+            "median_visible_volume_nl": 20.0,
+            "median_width_px": 90.5,
+            "min_attached_bottom_clearance_px": 140.0,
+            "detached_near_bottom_warning": False,
+            "delay_accepted": True,
+        },
+    ]
+    proc._attempted_capture_count = 3
+
+    monkeypatch.setattr(
+        calibration_model.online_fit_mod,
+        "fit_online_stream_flow_phase",
+        lambda **kwargs: {
+            "fit_status": "warning_min_points_only",
+            "accepted_delay_points": [
+                {"delay_us": 3850, "delay_from_emergence_us": 650, "median_visible_volume_nl": 12.3}
+            ],
+            "flow_fit_point_count": 3,
+            "flow_rate_nl_per_us": 0.0187,
+            "flow_intercept_nl": -1.2,
+            "flow_fit_delay_start_from_emergence_us": 650,
+            "flow_fit_delay_end_from_emergence_us": 1050,
+            "steady_width_baseline_px": 91.0,
+            "steady_r2": 0.999,
+            "steady_nrmse": 0.01,
+            "steady_rate_ci95_low_nl_per_us": 0.0185,
+            "steady_rate_ci95_high_nl_per_us": 0.0189,
+            "steady_rate_ci95_relative_width": 0.02,
+            "flow_fit_outlier_prune_status": "not_needed_too_few_points",
+            "flow_fit_dropped_outlier_delay_from_emergence_us": None,
+            "warnings": ["flow_fit_min_points_only"],
+        },
+    )
+
+    proc.onFitFlowRate()
+
+    proc._tail_fit_warnings = ["refine_trigger"]
+    proc._tail_fit_result = {
+        "tail_phase": {
+            "status": "captured",
+            "plan": {"coarse_start_delay_us": 7000},
+            "attempted_delay_count": 3,
+            "attempted_capture_count": 6,
+            "accepted_delay_count": 3,
+            "accepted_measurement_count": 4,
+            "termination_reason": "refine_trigger",
+            "coarse_delay_summaries": [{"delay_us": 7000}],
+            "refine_delay_summaries": [{"delay_us": 7150}],
+            "trigger_delay_from_emergence_us": 4000,
+            "trigger_reason": "refine_width_frac_le_0.95",
+            "last_nontrigger_delay_from_emergence_us": 3800,
+            "tail_start_delay_from_emergence_us": 3950,
+            "warnings": ["refine_trigger"],
+        },
+        "predicted_stream_duration_us": 3950,
+        "predicted_volume_nl": 72.665,
+        "warnings": ["refine_trigger"],
+    }
+    proc._predicted_stream_duration_us = 3950
+    proc._predicted_volume_nl = 72.665
+
+    proc.onCompleted()
+
+    assert len(proc.calibrationDataUpdated.calls) == 2
+    stage4_payload = proc.calibrationDataUpdated.calls[0][0][0]
+    final_payload = proc.calibrationDataUpdated.calls[1][0][0]
+    assert stage4_payload["result"]["tail_phase"] == {"status": "not_run", "plan": {}}
+    assert stage4_payload["result"]["predicted_stream_duration_us"] is None
+    assert final_payload["result"]["tail_phase"]["status"] == "captured"
+    assert final_payload["result"]["predicted_stream_duration_us"] == 3950
+    assert proc.calibrationCompleted.calls
 
 
 def test_online_stream_graceful_stop_does_not_emit_success_payload():

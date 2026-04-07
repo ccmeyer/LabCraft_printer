@@ -189,6 +189,21 @@ def _compare_values(stored, replayed, *, tol=1e-9):
     }
 
 
+def _compare_optional_stored_field(stored_obj: dict, key: str, replayed, *, tol=1e-9):
+    record = dict(stored_obj or {})
+    if str(key) not in record:
+        return {
+            "matches": True,
+            "stored": None,
+            "replayed": replayed,
+            "abs_diff": None,
+            "skipped": True,
+        }
+    comparison = _compare_values(record.get(str(key)), replayed, tol=tol)
+    comparison["skipped"] = False
+    return comparison
+
+
 def replay_online_stream_run(run_dir: str | Path) -> dict:
     run_path = Path(run_dir).resolve()
     plan_snapshot = _load_json(run_path / "plan_snapshot.json")
@@ -238,6 +253,49 @@ def replay_online_stream_run(run_dir: str | Path) -> dict:
         "flow_fit_status": _compare_values(
             stored_flow_fit.get("fit_status"),
             replay_flow_fit.get("fit_status"),
+        ),
+        "steady_width_baseline_px": _compare_optional_stored_field(
+            stored_flow_fit,
+            "steady_width_baseline_px",
+            replay_flow_fit.get("steady_width_baseline_px"),
+            tol=1e-6,
+        ),
+        "flow_fit_delay_start_from_emergence_us": _compare_optional_stored_field(
+            stored_flow_fit,
+            "flow_fit_delay_start_from_emergence_us",
+            replay_flow_fit.get("flow_fit_delay_start_from_emergence_us"),
+        ),
+        "flow_fit_delay_end_from_emergence_us": _compare_optional_stored_field(
+            stored_flow_fit,
+            "flow_fit_delay_end_from_emergence_us",
+            replay_flow_fit.get("flow_fit_delay_end_from_emergence_us"),
+        ),
+        "flow_fit_point_count": _compare_optional_stored_field(
+            stored_flow_fit,
+            "flow_fit_point_count",
+            replay_flow_fit.get("flow_fit_point_count"),
+        ),
+        "steady_r2": _compare_optional_stored_field(
+            stored_flow_fit,
+            "steady_r2",
+            replay_flow_fit.get("steady_r2"),
+            tol=1e-6,
+        ),
+        "steady_nrmse": _compare_optional_stored_field(
+            stored_flow_fit,
+            "steady_nrmse",
+            replay_flow_fit.get("steady_nrmse"),
+            tol=1e-6,
+        ),
+        "flow_fit_outlier_prune_status": _compare_optional_stored_field(
+            stored_flow_fit,
+            "flow_fit_outlier_prune_status",
+            replay_flow_fit.get("flow_fit_outlier_prune_status"),
+        ),
+        "flow_fit_dropped_outlier_delay_from_emergence_us": _compare_optional_stored_field(
+            stored_flow_fit,
+            "flow_fit_dropped_outlier_delay_from_emergence_us",
+            replay_flow_fit.get("flow_fit_dropped_outlier_delay_from_emergence_us"),
         ),
         "tail_start_delay_from_emergence_us": _compare_values(
             (stored_tail_result.get("tail_phase") or {}).get("tail_start_delay_from_emergence_us"),

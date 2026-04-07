@@ -424,9 +424,12 @@ def decide_online_stream_flow_next_action(
     *,
     delay_summary: dict | None,
     capture_budget: dict | None,
-    consecutive_failed_delays: int,
+    consecutive_failed_delays: int = 0,
     attempted_delay_count: int,
     planned_delay_count: int,
+    accepted_delay_count: int = 0,
+    remaining_delay_count: int | None = None,
+    min_required_accepted_delays: int = 3,
 ) -> dict:
     summary = dict(delay_summary or {})
     budget = dict(capture_budget or {})
@@ -440,10 +443,20 @@ def decide_online_stream_flow_next_action(
             "action": "stop",
             "termination_reason": "capture_budget_exhausted",
         }
-    if int(consecutive_failed_delays) >= 2:
+    attempted_replicates = int(summary.get("attempted_replicates") or 0)
+    if attempted_replicates > 0 and not bool(summary.get("delay_accepted")):
         return {
             "action": "stop",
             "termination_reason": "repeated_qc_failure",
+        }
+    if remaining_delay_count is None:
+        remaining_delay_count = max(0, int(planned_delay_count) - int(attempted_delay_count))
+    if int(accepted_delay_count) + int(max(0, remaining_delay_count)) < int(
+        max(0, min_required_accepted_delays)
+    ):
+        return {
+            "action": "stop",
+            "termination_reason": "insufficient_accepted_delays",
         }
     if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
         return {
