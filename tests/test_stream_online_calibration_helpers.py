@@ -39,7 +39,7 @@ def test_normalize_online_stream_prior_partial_input_fills_missing_defaults():
     assert prior["warnings"] == ["used prior"]
 
 
-def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changing_shape():
+def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changing_adaptive_policy():
     plan = mod.build_online_stream_flow_plan(
         emergence_time_us=1000,
         prior={
@@ -49,84 +49,36 @@ def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changi
         },
     )
 
-    assert plan["delay_offsets_from_emergence_us"] == [
-        700,
-        757,
-        814,
-        871,
-        928,
-        985,
-        1042,
-        1099,
-        1156,
-        1213,
-        1270,
-        1327,
-        1384,
-        1441,
-        1498,
-    ]
-    assert plan["delays_us"] == [
-        1700,
-        1757,
-        1814,
-        1871,
-        1928,
-        1985,
-        2042,
-        2099,
-        2156,
-        2213,
-        2270,
-        2327,
-        2384,
-        2441,
-        2498,
-    ]
+    assert plan["search_method"] == "adaptive_visible_span_v1"
+    assert plan["start_offset_from_emergence_us"] == 700
+    assert plan["start_delay_us"] == 1700
+    assert plan["delay_offsets_from_emergence_us"] == [700]
+    assert plan["delays_us"] == [1700]
     assert plan["replicates_per_delay"] == 1
     assert plan["point_count"] == 15
+    assert plan["scout_step_us"] == 100
+    assert plan["min_accepted_delays"] == 12
+    assert plan["max_capture_count"] == 30
+    assert plan["reserved_tail_capture_count"] == 16
     assert plan["plan_source"] == "prior_adjusted"
 
 
-def test_build_online_stream_flow_plan_without_prior_matches_frozen_defaults():
+def test_build_online_stream_flow_plan_without_prior_matches_adaptive_defaults():
     plan = mod.build_online_stream_flow_plan(emergence_time_us=1000)
 
-    assert plan["delay_offsets_from_emergence_us"] == [
-        650,
-        707,
-        764,
-        821,
-        878,
-        935,
-        992,
-        1049,
-        1106,
-        1163,
-        1220,
-        1277,
-        1334,
-        1391,
-        1448,
-    ]
-    assert plan["delays_us"] == [
-        1650,
-        1707,
-        1764,
-        1821,
-        1878,
-        1935,
-        1992,
-        2049,
-        2106,
-        2163,
-        2220,
-        2277,
-        2334,
-        2391,
-        2448,
-    ]
+    assert plan["search_method"] == "adaptive_visible_span_v1"
+    assert plan["start_offset_from_emergence_us"] == 650
+    assert plan["start_delay_us"] == 1650
+    assert plan["delay_offsets_from_emergence_us"] == [650]
+    assert plan["delays_us"] == [1650]
     assert plan["replicates_per_delay"] == 1
     assert plan["point_count"] == 15
+    assert plan["scout_step_us"] == 100
+    assert plan["min_accepted_delays"] == 12
+    assert plan["max_capture_count"] == 30
+    assert plan["soft_bottom_clearance_px"] == 150
+    assert plan["ci95_relative_width_target"] == 0.12
+    assert plan["reserved_tail_capture_count"] == 16
     assert plan["plan_source"] == "default"
 
 
@@ -141,23 +93,8 @@ def test_build_online_stream_flow_plan_ignores_legacy_prior_shape_and_keeps_only
         },
     )
 
-    assert plan["delay_offsets_from_emergence_us"] == [
-        700,
-        757,
-        814,
-        871,
-        928,
-        985,
-        1042,
-        1099,
-        1156,
-        1213,
-        1270,
-        1327,
-        1384,
-        1441,
-        1498,
-    ]
+    assert plan["start_offset_from_emergence_us"] == 700
+    assert plan["delay_offsets_from_emergence_us"] == [700]
     assert plan["replicates_per_delay"] == 1
     assert plan["point_count"] == 15
 
@@ -194,12 +131,20 @@ def test_build_online_stream_flow_plan_partial_prior_respects_custom_policy_defa
     plan = mod.build_online_stream_flow_plan(
         emergence_time_us=1000,
         prior={"flow_start_offset_us": 700},
-        policy={"flow_step_us": 150, "flow_delay_count": 4},
+        policy={
+            "flow_target_delay_count": 4,
+            "flow_scout_step_us": 150,
+            "flow_min_accepted_delays": 3,
+            "flow_max_capture_count": 8,
+        },
     )
 
-    assert plan["delay_offsets_from_emergence_us"] == [700, 850, 1000, 1150]
-    assert plan["delays_us"] == [1700, 1850, 2000, 2150]
+    assert plan["delay_offsets_from_emergence_us"] == [700]
+    assert plan["delays_us"] == [1700]
     assert plan["point_count"] == 4
+    assert plan["scout_step_us"] == 150
+    assert plan["min_accepted_delays"] == 3
+    assert plan["max_capture_count"] == 8
     assert plan["plan_source"] == "prior_adjusted"
 
 
@@ -222,13 +167,13 @@ def test_online_stream_budget_creation_and_consumption_is_non_mutating():
     consumed = mod.consume_online_stream_budget(budget, phase="flow_rate", count=3)
 
     assert budget["captures_used"] == 0
-    assert budget["captures_remaining_nominal"] == 30
-    assert budget["captures_remaining_hard"] == 36
+    assert budget["captures_remaining_nominal"] == 40
+    assert budget["captures_remaining_hard"] == 46
     assert budget["history"] == []
 
     assert consumed["captures_used"] == 3
-    assert consumed["captures_remaining_nominal"] == 27
-    assert consumed["captures_remaining_hard"] == 33
+    assert consumed["captures_remaining_nominal"] == 37
+    assert consumed["captures_remaining_hard"] == 43
     assert consumed["exhausted"] is False
     assert consumed["history"][-1]["phase"] == "flow_rate"
     assert consumed["history"][-1]["count"] == 3
@@ -237,9 +182,9 @@ def test_online_stream_budget_creation_and_consumption_is_non_mutating():
 def test_online_stream_budget_marks_exhausted_at_hard_limit():
     budget = mod.new_online_stream_budget()
 
-    exhausted = mod.consume_online_stream_budget(budget, phase="tail_start", count=36)
+    exhausted = mod.consume_online_stream_budget(budget, phase="tail_start", count=46)
 
-    assert exhausted["captures_used"] == 36
+    assert exhausted["captures_used"] == 46
     assert exhausted["captures_remaining_nominal"] == 0
     assert exhausted["captures_remaining_hard"] == 0
     assert exhausted["exhausted"] is True
@@ -546,25 +491,26 @@ def test_decide_online_stream_flow_next_action_continue_case():
         capture_budget=mod.new_online_stream_budget(),
         consecutive_failed_delays=0,
         attempted_delay_count=2,
-        planned_delay_count=5,
+        planned_delay_count=15,
+        accepted_delay_count=10,
+        remaining_delay_count=5,
     )
 
     assert decision == {"action": "continue", "termination_reason": None}
 
 
-def test_decide_online_stream_flow_next_action_stops_for_attached_bottom_guard():
+def test_decide_online_stream_flow_next_action_does_not_stop_for_attached_bottom_guard_on_its_own():
     decision = mod.decide_online_stream_flow_next_action(
         delay_summary={"attached_bottom_guard_hit": True},
         capture_budget=mod.new_online_stream_budget(),
         consecutive_failed_delays=0,
         attempted_delay_count=1,
-        planned_delay_count=5,
+        planned_delay_count=15,
+        accepted_delay_count=11,
+        remaining_delay_count=4,
     )
 
-    assert decision == {
-        "action": "stop",
-        "termination_reason": "attached_bottom_guard_hit",
-    }
+    assert decision == {"action": "continue", "termination_reason": None}
 
 
 def test_decide_online_stream_flow_next_action_continues_after_single_failed_delay_when_budget_allows():
@@ -614,7 +560,7 @@ def test_decide_online_stream_flow_next_action_stops_for_budget_exhaustion():
         capture_budget=mod.consume_online_stream_budget(
             mod.new_online_stream_budget(),
             phase="flow_rate",
-            count=36,
+            count=46,
         ),
         consecutive_failed_delays=0,
         attempted_delay_count=2,
@@ -623,7 +569,7 @@ def test_decide_online_stream_flow_next_action_stops_for_budget_exhaustion():
 
     assert decision == {
         "action": "stop",
-        "termination_reason": "capture_budget_exhausted",
+        "termination_reason": "hard_budget_exhausted",
     }
 
 
@@ -639,7 +585,7 @@ def test_decide_online_stream_flow_next_action_stops_when_planned_delays_exhaust
         consecutive_failed_delays=0,
         attempted_delay_count=5,
         planned_delay_count=5,
-        accepted_delay_count=3,
+        accepted_delay_count=12,
         remaining_delay_count=0,
     )
 
@@ -647,6 +593,58 @@ def test_decide_online_stream_flow_next_action_stops_when_planned_delays_exhaust
         "action": "stop",
         "termination_reason": "planned_delays_exhausted",
     }
+
+
+def test_build_online_stream_flow_target_offsets_evenly_spreads_across_visible_span():
+    offsets = mod.build_online_stream_flow_target_offsets(
+        start_offset_us=650,
+        end_offset_us=1450,
+        target_delay_count=15,
+    )
+
+    assert offsets[0] == 650
+    assert offsets[-1] == 1450
+    assert len(offsets) == 15
+    assert offsets == sorted(set(offsets))
+
+
+def test_build_online_stream_flow_missing_offsets_reuses_already_sampled_points():
+    missing = mod.build_online_stream_flow_missing_offsets(
+        target_offsets_from_emergence_us=[650, 750, 850, 950],
+        existing_offsets_from_emergence_us=[650, 850],
+    )
+
+    assert missing == [750, 950]
+
+
+def test_select_online_stream_flow_gap_midpoint_picks_largest_safe_gap():
+    midpoint = mod.select_online_stream_flow_gap_midpoint(
+        sampled_offsets_from_emergence_us=[650, 850, 1050, 1250],
+        start_offset_us=650,
+        end_offset_us=1450,
+    )
+
+    assert midpoint == 750
+
+
+def test_online_stream_flow_boundary_helpers_distinguish_soft_and_hard_boundaries():
+    soft_summary = {
+        "delay_accepted": True,
+        "detached_near_bottom_warning": False,
+        "min_attached_bottom_clearance_px": 145,
+        "attached_bottom_guard_hit": False,
+    }
+    hard_summary = {
+        "delay_accepted": False,
+        "detached_near_bottom_warning": False,
+        "min_attached_bottom_clearance_px": 96,
+        "attached_bottom_guard_hit": True,
+    }
+
+    assert mod.is_online_stream_flow_soft_boundary(soft_summary) is True
+    assert mod.is_online_stream_flow_hard_boundary(soft_summary) is False
+    assert mod.is_online_stream_flow_soft_boundary(hard_summary) is False
+    assert mod.is_online_stream_flow_hard_boundary(hard_summary) is True
 
 
 def test_online_stream_helper_outputs_are_json_serializable():

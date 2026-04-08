@@ -116,20 +116,32 @@ def _flow_proc(tmp_path: Path):
         fallback_reason="no_prior",
         warnings=[],
     )
-    proc.flow_plan = {
-        "delays_us": [3850, 4050],
-        "replicates_per_delay": 1,
-        "point_count": 2,
-    }
+    proc.flow_plan = calibration_model.online_cal_mod.build_online_stream_flow_plan(
+        emergence_time_us=3200,
+        prior={"source": "default"},
+    )
     proc.tail_plan = {"coarse_start_delay_us": 7000, "coarse_step_us": 100}
     proc.analysis_config = dict(calibration_model.online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
     proc.capture_budget = calibration_model.online_cal_mod.new_online_stream_budget()
     proc._measurement_rows = []
     proc._flow_delay_summaries = []
+    proc._flow_mode = "scout"
+    proc._flow_delay_sequence = list(proc.flow_plan.get("delays_us") or [])
+    proc._flow_target_delay_offsets_from_emergence_us = list(
+        proc.flow_plan.get("delay_offsets_from_emergence_us") or []
+    )
+    proc._flow_captured_delay_offsets_from_emergence_us = []
+    proc._flow_scout_boundary_reason = None
+    proc._flow_right_boundary_delay_from_emergence_us = None
+    proc._flow_right_boundary_fixed = False
+    proc._flow_hard_boundary_delay_from_emergence_us = None
+    proc._flow_ci_refinement_count = 0
+    proc._flow_fit_stop_reason = None
+    proc._flow_preview_fit_result = {}
     proc._current_delay_frame_rows = []
     proc._flow_delay_index = 0
     proc._flow_replicate_index = 0
-    proc._current_delay_us = 4050
+    proc._current_delay_us = int(proc.flow_plan.get("start_delay_us") or 3850)
     proc._attempted_capture_count = 0
     proc._consecutive_failed_delays = 0
     proc._flow_termination_reason = None
@@ -220,6 +232,31 @@ def _flow_proc(tmp_path: Path):
         captureImageRequested=_capture_signal(np.full((320, 220), 230, dtype=np.uint8)),
     )
     return proc
+
+
+def _set_flow_sequence(proc, offsets_from_emergence_us):
+    offsets = [int(value) for value in list(offsets_from_emergence_us or [])]
+    start_offset_us = int(offsets[0]) if offsets else int(
+        (proc.flow_plan or {}).get("start_offset_from_emergence_us") or 650
+    )
+    proc.flow_plan = {
+        **dict(proc.flow_plan or {}),
+        "delay_offsets_from_emergence_us": [start_offset_us],
+        "delays_us": [int(proc.emergence_time_us) + int(start_offset_us)],
+        "start_offset_from_emergence_us": int(start_offset_us),
+        "start_delay_us": int(proc.emergence_time_us) + int(start_offset_us),
+        "target_delay_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 15)),
+        "point_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 15)),
+        "min_accepted_delays": int((proc.flow_plan or {}).get("min_accepted_delays") or 12),
+        "max_capture_count": int((proc.flow_plan or {}).get("max_capture_count") or 30),
+        "soft_bottom_clearance_px": int((proc.flow_plan or {}).get("soft_bottom_clearance_px") or 150),
+        "ci95_relative_width_target": float((proc.flow_plan or {}).get("ci95_relative_width_target") or 0.12),
+        "reserved_tail_capture_count": int((proc.flow_plan or {}).get("reserved_tail_capture_count") or 16),
+        "ci_extension_step_us": int((proc.flow_plan or {}).get("ci_extension_step_us") or 50),
+    }
+    proc._flow_delay_sequence = [int(proc.emergence_time_us) + int(offset_us) for offset_us in offsets]
+    proc._flow_target_delay_offsets_from_emergence_us = list(offsets)
+    proc._flow_delay_index = 0
 
 
 def _seed_tail_flow_context(proc, *, fit_status: str = "ok", steady_width_baseline_px: float = 74.0):
@@ -734,7 +771,9 @@ def test_online_stream_plan_flow_phase_writes_plan_snapshot(tmp_path):
     snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
     assert snapshot["phase"] == "online_stream_calibration"
     assert snapshot["priors"]["lookup"]["candidate_found"] is False
-    assert snapshot["flow_plan"]["delays_us"] == [3850, 4050]
+    assert snapshot["flow_plan"]["search_method"] == "adaptive_visible_span_v1"
+    assert snapshot["flow_plan"]["delays_us"] == [3850]
+    assert snapshot["flow_plan"]["target_delay_count"] == 15
     assert snapshot["analysis_config"]["attached_bottom_guard_px"] == 96
 
 
@@ -780,7 +819,7 @@ def test_online_stream_capture_flow_frame_uses_one_printed_attempt_and_consumes_
     assert capture_signal.count == 1
     assert proc._attempted_capture_count == 1
     assert proc.capture_budget["captures_used"] == 1
-    assert proc.capture_budget["captures_remaining_hard"] == 35
+    assert proc.capture_budget["captures_remaining_hard"] == 45
 
 
 def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_use(tmp_path):
@@ -794,17 +833,17 @@ def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_u
 
     snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
     assert snapshot["capture_budget"]["captures_used"] == 1
-    assert snapshot["capture_budget"]["captures_remaining_hard"] == 35
+    assert snapshot["capture_budget"]["captures_remaining_hard"] == 45
 
 
 def test_online_stream_apply_flow_delay_routes_to_fit_when_delays_are_exhausted(tmp_path):
     proc = _flow_proc(tmp_path)
-    proc._flow_delay_index = len(proc.flow_plan["delays_us"])
+    proc._flow_delay_index = len(proc._flow_delay_sequence)
 
     proc.onApplyFlowDelay()
 
     assert proc.flowAcquisitionFinished.calls
-    assert proc._flow_termination_reason == "planned_delays_exhausted"
+    assert proc._flow_termination_reason == "candidate_delays_exhausted"
 
 
 def test_online_stream_stage_text_uses_operator_facing_flow_and_tail_labels(tmp_path):
@@ -824,7 +863,7 @@ def test_online_stream_stage_text_uses_operator_facing_flow_and_tail_labels(tmp_
     proc._request_guarded_settings_update = _stub
 
     proc.onApplyFlowDelay()
-    assert "flow delay=" in proc.stageChanged.calls[-1][0][0]
+    assert "flow scout delay=" in proc.stageChanged.calls[-1][0][0]
 
     proc._tail_plan = {
         "scout_first_delay_us": 4750,
@@ -939,7 +978,7 @@ def test_online_stream_analyze_flow_frame_records_rejected_frame_without_measure
     assert payload["warnings"] == ["silhouette_qc_failed"]
 
 
-def test_online_stream_advance_flow_phase_stops_on_bottom_guard_and_routes_to_fit(tmp_path):
+def test_online_stream_advance_flow_phase_uses_bottom_guard_as_right_boundary_signal(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._current_delay_frame_rows = [
         calibration_model.online_cal_mod.build_online_stream_frame_row(
@@ -965,17 +1004,17 @@ def test_online_stream_advance_flow_phase_stops_on_bottom_guard_and_routes_to_fi
 
     proc.onAdvanceFlowPhase()
 
-    assert proc.flowAcquisitionFinished.calls
-    assert proc._flow_termination_reason == "attached_bottom_guard_hit"
+    assert proc.flowAcquisitionFinished.calls == []
+    assert proc.nextDelay.calls
+    assert proc._flow_termination_reason is None
+    assert proc._flow_right_boundary_fixed is True
+    assert proc._flow_right_boundary_delay_from_emergence_us == 650
+    assert proc._flow_delay_sequence == [3850]
 
 
 def test_online_stream_advance_flow_phase_advances_after_one_fully_failed_delay_when_enough_points_remain(tmp_path):
     proc = _flow_proc(tmp_path)
-    proc.flow_plan = {
-        "delays_us": [3850, 4050, 4250, 4450],
-        "replicates_per_delay": 1,
-        "point_count": 4,
-    }
+    _set_flow_sequence(proc, [650, 850, 1050, 1250])
     proc._ensure_flow_paths()
     proc._write_plan_snapshot()
     proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
@@ -1014,16 +1053,12 @@ def test_online_stream_advance_flow_phase_advances_after_one_fully_failed_delay_
     assert proc.nextDelay.calls
     assert proc.repeatReplicate.calls == []
     assert proc._flow_termination_reason is None
+    assert proc._flow_delay_sequence == [4150]
 
 
-def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_become_impossible(tmp_path):
+def test_online_stream_advance_flow_phase_keeps_sampling_when_twelve_accepted_delays_are_not_yet_available(tmp_path):
     proc = _flow_proc(tmp_path)
-    proc.flow_plan = {
-        "delays_us": [3850, 4050, 4250, 4450],
-        "replicates_per_delay": 1,
-        "point_count": 4,
-    }
-    proc._flow_delay_index = 2
+    _set_flow_sequence(proc, [650, 850, 1050, 1250])
     proc._flow_replicate_index = 0
     proc._current_delay_us = 4250
     proc._flow_delay_summaries = [
@@ -1080,10 +1115,9 @@ def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_becom
 
     proc.onAdvanceFlowPhase()
 
-    assert proc.flowAcquisitionFinished.calls
-    assert proc.nextDelay.calls == []
-    assert proc._flow_termination_reason == "insufficient_accepted_delays"
-    assert "insufficient_accepted_delays" in proc._flow_warnings
+    assert proc.flowAcquisitionFinished.calls == []
+    assert proc.nextDelay.calls
+    assert proc._flow_termination_reason is None
 
 
 def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monkeypatch):
@@ -1177,7 +1211,10 @@ def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monke
     assert payload["result"]["tail_phase"] == {"status": "not_run", "plan": {}}
     assert payload["result"]["predicted_stream_duration_us"] is None
     assert payload["result"]["predicted_volume_nl"] is None
-    assert payload["result"]["warnings"] == ["flow_fit_min_points_only"]
+    assert payload["result"]["warnings"] == [
+        "insufficient_accepted_delays",
+        "flow_fit_min_points_only",
+    ]
 
 
 def test_online_stream_fit_flow_rate_failure_restores_before_terminal_error(tmp_path, monkeypatch):
@@ -1366,7 +1403,7 @@ def test_online_stream_plan_tail_phase_reserves_backtrack_budget_for_tail_search
     assert proc._tail_plan["reserved_backtrack_capture_count"] == 10
     assert proc._tail_plan["reserved_refine_capture_count"] == 10
     assert proc._tail_plan["reserved_refine_delay_count"] == 10
-    assert len(proc._tail_delay_sequence) == 11
+    assert len(proc._tail_delay_sequence) == 21
     assert (
         len(proc._tail_delay_sequence) * int(proc._tail_plan["scout_replicates"])
         + int(proc._tail_plan["reserved_backtrack_capture_count"])
@@ -1599,7 +1636,7 @@ def test_online_stream_capture_tail_frame_stops_on_budget_exhaustion(tmp_path):
     proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
         calibration_model.online_cal_mod.new_online_stream_budget(),
         phase="flow_phase",
-        count=36,
+        count=46,
     )
 
     proc.onCaptureTailFrame()
@@ -1888,7 +1925,10 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
         "fallback_reason": None,
         "warnings": [],
     }
-    proc.flow_plan = {"delays_us": [3850, 4050], "replicates_per_delay": 1}
+    proc.flow_plan = calibration_model.online_cal_mod.build_online_stream_flow_plan(
+        emergence_time_us=3200,
+        prior={"flow_start_offset_us": 650},
+    )
     proc.tail_plan = {"coarse_start_delay_us": 7000, "coarse_step_us": 100}
     proc._measurement_rows = [
         {
@@ -1931,6 +1971,17 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
             "delay_accepted": False,
         },
     ]
+    proc._flow_mode = "ci_refine"
+    proc._flow_delay_sequence = [3850, 4050]
+    proc._flow_target_delay_offsets_from_emergence_us = [650, 850]
+    proc._flow_captured_delay_offsets_from_emergence_us = [650, 850]
+    proc._flow_scout_boundary_reason = "scout_cap_reached"
+    proc._flow_right_boundary_delay_from_emergence_us = 850
+    proc._flow_right_boundary_fixed = False
+    proc._flow_hard_boundary_delay_from_emergence_us = None
+    proc._flow_ci_refinement_count = 0
+    proc._flow_fit_stop_reason = "candidate_delays_exhausted"
+    proc._flow_preview_fit_result = {}
     proc._attempted_capture_count = 2
     proc._flow_termination_reason = "insufficient_accepted_delays"
     proc._flow_warnings = ["insufficient_accepted_delays"]
@@ -1980,6 +2031,7 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     proc.calibrationDataUpdated = Recorder()
     proc.calibrationCompleted = Recorder()
     proc.calibrationError = Recorder()
+    proc.capture_budget = calibration_model.online_cal_mod.new_online_stream_budget()
 
     proc.onCompleted()
 
@@ -1999,6 +2051,7 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     assert result["flow_phase"]["accepted_delay_count"] == 1
     assert result["flow_phase"]["delay_summaries"][0]["delay_us"] == 3850
     assert result["flow_phase"]["termination_reason"] == "insufficient_accepted_delays"
+    assert result["flow_phase"]["fit_stop_reason"] == "candidate_delays_exhausted"
     assert result["flow_phase"]["fit_status"] == "warning_min_points_only"
     assert result["flow_phase"]["flow_rate_nl_per_us"] == 0.0187
     assert result["flow_phase"]["fit_warnings"] == ["flow_fit_min_points_only"]
@@ -2065,6 +2118,17 @@ def test_online_stream_end_to_end_emits_stage4_partial_then_final_payload(tmp_pa
         },
     ]
     proc._attempted_capture_count = 3
+    proc._flow_mode = "ci_refine"
+    proc._flow_delay_sequence = [3850, 4050, 4250]
+    proc._flow_target_delay_offsets_from_emergence_us = [650, 850, 1050]
+    proc._flow_captured_delay_offsets_from_emergence_us = [650, 850, 1050]
+    proc._flow_scout_boundary_reason = "scout_cap_reached"
+    proc._flow_right_boundary_delay_from_emergence_us = 1050
+    proc._flow_right_boundary_fixed = False
+    proc._flow_hard_boundary_delay_from_emergence_us = None
+    proc._flow_ci_refinement_count = 0
+    proc._flow_fit_stop_reason = "candidate_delays_exhausted"
+    proc._flow_preview_fit_result = {}
 
     monkeypatch.setattr(
         calibration_model.online_fit_mod,

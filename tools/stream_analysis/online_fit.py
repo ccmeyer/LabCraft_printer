@@ -5,7 +5,7 @@ from scipy import stats
 
 
 DEFAULT_ONLINE_FLOW_FIT_POLICY = {
-    "min_accepted_delays": 3,
+    "min_accepted_delays": 12,
     "steady_fit_r2_min": 0.98,
     "steady_fit_nrmse_max": 0.05,
     "steady_rate_ci95_relative_width_warn": 0.12,

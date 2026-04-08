@@ -3,6 +3,14 @@ from __future__ import annotations
 
 DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_start_offset_us": 650,
+    "flow_scout_step_us": 100,
+    "flow_target_delay_count": 15,
+    "flow_min_accepted_delays": 12,
+    "flow_max_capture_count": 30,
+    "flow_soft_bottom_clearance_px": 150,
+    "flow_ci95_relative_width_target": 0.12,
+    "reserved_tail_capture_count": 16,
+    "flow_ci_extension_step_us": 50,
     "flow_step_us": 57,
     "flow_delay_count": 15,
     "flow_replicates": 1,
@@ -12,8 +20,8 @@ DEFAULT_ONLINE_STREAM_POLICY = {
     "tail_coarse_replicates": 2,
     "tail_refine_step_us": 50,
     "tail_refine_replicates": 2,
-    "nominal_capture_budget": 30,
-    "hard_capture_budget": 36,
+    "nominal_capture_budget": 40,
+    "hard_capture_budget": 46,
     "bottom_of_fov_guard_px": 96,
 }
 
@@ -65,7 +73,13 @@ def _resolved_policy(policy: dict | None = None) -> dict:
     merged = dict(DEFAULT_ONLINE_STREAM_POLICY)
     for key, default_value in DEFAULT_ONLINE_STREAM_POLICY.items():
         if isinstance(policy, dict) and key in policy:
-            merged[key] = _to_int(policy.get(key), default_value)
+            if isinstance(default_value, float):
+                try:
+                    merged[key] = float(policy.get(key))
+                except Exception:
+                    merged[key] = float(default_value)
+            else:
+                merged[key] = _to_int(policy.get(key), default_value)
     return merged
 
 
@@ -147,23 +161,151 @@ def build_online_stream_flow_plan(
         normalized_prior.get("flow_start_offset_us"),
         resolved_policy["flow_start_offset_us"],
     )
-    step_us = int(resolved_policy["flow_step_us"])
-    delay_count = max(1, int(resolved_policy["flow_delay_count"]))
-    offsets = [int(start_offset_us + (idx * step_us)) for idx in range(delay_count)]
-    delays = [int(emergence_time_us) + int(offset) for offset in offsets]
-    default_offsets = [
-        int(resolved_policy["flow_start_offset_us"] + (idx * resolved_policy["flow_step_us"]))
-        for idx in range(int(resolved_policy["flow_delay_count"]))
-    ]
-    plan_source = "prior_adjusted" if offsets != default_offsets else "default"
+    start_delay_us = int(emergence_time_us) + int(start_offset_us)
+    default_start_offset_us = int(resolved_policy["flow_start_offset_us"])
+    plan_source = "prior_adjusted" if int(start_offset_us) != int(default_start_offset_us) else "default"
     return {
         "emergence_time_us": int(emergence_time_us),
-        "delay_offsets_from_emergence_us": offsets,
-        "delays_us": delays,
+        "search_method": "adaptive_visible_span_v1",
+        "start_offset_from_emergence_us": int(start_offset_us),
+        "start_delay_us": int(start_delay_us),
+        "delay_offsets_from_emergence_us": [int(start_offset_us)],
+        "delays_us": [int(start_delay_us)],
         "replicates_per_delay": int(resolved_policy["flow_replicates"]),
-        "point_count": int(len(delays)),
+        "point_count": int(resolved_policy["flow_target_delay_count"]),
+        "scout_step_us": int(resolved_policy["flow_scout_step_us"]),
+        "target_delay_count": int(resolved_policy["flow_target_delay_count"]),
+        "min_accepted_delays": int(resolved_policy["flow_min_accepted_delays"]),
+        "max_capture_count": int(resolved_policy["flow_max_capture_count"]),
+        "soft_bottom_clearance_px": int(resolved_policy["flow_soft_bottom_clearance_px"]),
+        "ci95_relative_width_target": float(resolved_policy["flow_ci95_relative_width_target"]),
+        "reserved_tail_capture_count": int(resolved_policy["reserved_tail_capture_count"]),
+        "ci_extension_step_us": int(resolved_policy["flow_ci_extension_step_us"]),
+        "legacy_flow_step_us": int(resolved_policy["flow_step_us"]),
+        "legacy_flow_delay_count": int(resolved_policy["flow_delay_count"]),
         "plan_source": str(plan_source),
     }
+
+
+def _sorted_unique_ints(values) -> list[int]:
+    unique = []
+    seen = set()
+    for value in list(values or []):
+        parsed = _to_int(value, None)
+        if parsed is None:
+            continue
+        parsed = int(parsed)
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        unique.append(parsed)
+    unique.sort()
+    return unique
+
+
+def is_online_stream_flow_hard_boundary(delay_summary: dict | None) -> bool:
+    summary = dict(delay_summary or {})
+    return bool(summary.get("attached_bottom_guard_hit"))
+
+
+def is_online_stream_flow_soft_boundary(
+    delay_summary: dict | None,
+    *,
+    policy: dict | None = None,
+) -> bool:
+    summary = dict(delay_summary or {})
+    resolved_policy = _resolved_policy(policy)
+    if not bool(summary.get("delay_accepted")):
+        return False
+    clearance_px = _to_float_or_none(summary.get("min_attached_bottom_clearance_px"))
+    if bool(summary.get("detached_near_bottom_warning")):
+        return True
+    if clearance_px is None:
+        return False
+    return float(clearance_px) <= float(resolved_policy["flow_soft_bottom_clearance_px"])
+
+
+def build_online_stream_flow_target_offsets(
+    *,
+    start_offset_us: int,
+    end_offset_us: int,
+    target_delay_count: int,
+) -> list[int]:
+    start_offset_us = int(start_offset_us)
+    end_offset_us = int(end_offset_us)
+    if end_offset_us < start_offset_us:
+        end_offset_us = int(start_offset_us)
+    target_delay_count = max(1, int(target_delay_count))
+    max_unique_count = int(max(1, (end_offset_us - start_offset_us) + 1))
+    if max_unique_count <= 1 or target_delay_count <= 1:
+        return [int(start_offset_us)]
+    if max_unique_count < target_delay_count:
+        return [int(start_offset_us + idx) for idx in range(max_unique_count)]
+
+    span = float(end_offset_us - start_offset_us)
+    raw_offsets = [
+        int(round(float(start_offset_us) + (span * float(idx) / float(target_delay_count - 1))))
+        for idx in range(target_delay_count)
+    ]
+    offsets = []
+    for idx, raw_offset_us in enumerate(raw_offsets):
+        min_allowed = int(start_offset_us if idx == 0 else offsets[-1] + 1)
+        remaining = int(target_delay_count - idx - 1)
+        max_allowed = int(end_offset_us - remaining)
+        offsets.append(int(max(min_allowed, min(int(raw_offset_us), max_allowed))))
+    return offsets
+
+
+def build_online_stream_flow_missing_offsets(
+    *,
+    target_offsets_from_emergence_us: list[int] | None,
+    existing_offsets_from_emergence_us: list[int] | None,
+) -> list[int]:
+    target_offsets = _sorted_unique_ints(target_offsets_from_emergence_us)
+    existing_offsets = set(_sorted_unique_ints(existing_offsets_from_emergence_us))
+    return [int(offset_us) for offset_us in target_offsets if int(offset_us) not in existing_offsets]
+
+
+def select_online_stream_flow_gap_midpoint(
+    *,
+    sampled_offsets_from_emergence_us: list[int] | None,
+    start_offset_us: int,
+    end_offset_us: int,
+) -> int | None:
+    start_offset_us = int(start_offset_us)
+    end_offset_us = int(end_offset_us)
+    if end_offset_us <= start_offset_us:
+        return None
+
+    sampled_offsets = _sorted_unique_ints(sampled_offsets_from_emergence_us)
+    safe_offsets = [int(offset_us) for offset_us in sampled_offsets if start_offset_us <= int(offset_us) <= end_offset_us]
+    if start_offset_us not in safe_offsets:
+        safe_offsets.insert(0, int(start_offset_us))
+    if end_offset_us not in safe_offsets:
+        safe_offsets.append(int(end_offset_us))
+    safe_offsets = _sorted_unique_ints(safe_offsets)
+
+    best_gap = None
+    best_midpoint = None
+    sampled_set = set(_sorted_unique_ints(sampled_offsets_from_emergence_us))
+    for left_offset_us, right_offset_us in zip(safe_offsets, safe_offsets[1:]):
+        gap = int(right_offset_us - left_offset_us)
+        if gap <= 1:
+            continue
+        midpoint = int((int(left_offset_us) + int(right_offset_us)) // 2)
+        if midpoint in sampled_set:
+            if int(midpoint - left_offset_us) > int(right_offset_us - midpoint):
+                midpoint = int(midpoint - 1)
+            else:
+                midpoint = int(midpoint + 1)
+        if midpoint in sampled_set or midpoint <= left_offset_us or midpoint >= right_offset_us:
+            continue
+        if best_gap is None or int(gap) > int(best_gap) or (
+            int(gap) == int(best_gap) and int(midpoint) < int(best_midpoint)
+        ):
+            best_gap = int(gap)
+            best_midpoint = int(midpoint)
+    return None if best_midpoint is None else int(best_midpoint)
 
 
 def build_online_stream_tail_plan(
@@ -421,19 +563,14 @@ def decide_online_stream_flow_next_action(
     planned_delay_count: int,
     accepted_delay_count: int = 0,
     remaining_delay_count: int | None = None,
-    min_required_accepted_delays: int = 3,
+    min_required_accepted_delays: int = 12,
 ) -> dict:
     summary = dict(delay_summary or {})
     budget = dict(capture_budget or {})
-    if bool(summary.get("attached_bottom_guard_hit")):
-        return {
-            "action": "stop",
-            "termination_reason": "attached_bottom_guard_hit",
-        }
     if bool(budget.get("exhausted")):
         return {
             "action": "stop",
-            "termination_reason": "capture_budget_exhausted",
+            "termination_reason": "hard_budget_exhausted",
         }
     if remaining_delay_count is None:
         remaining_delay_count = max(0, int(planned_delay_count) - int(attempted_delay_count))
@@ -527,6 +664,13 @@ def build_online_stream_flow_phase_payload(
     delay_summaries: list[dict] | None = None,
     warnings: list[str] | None = None,
     fit: dict | None = None,
+    flow_mode: str | None = None,
+    scout_boundary_reason: str | None = None,
+    right_boundary_delay_from_emergence_us: int | None = None,
+    captured_delay_offsets_from_emergence_us: list[int] | None = None,
+    target_delay_offsets_from_emergence_us: list[int] | None = None,
+    ci_refinement_count: int = 0,
+    fit_stop_reason: str | None = None,
 ) -> dict:
     fit_obj = dict(fit or {})
     return {
@@ -540,6 +684,20 @@ def build_online_stream_flow_phase_payload(
         "termination_reason": str(termination_reason or ""),
         "delay_summaries": _copy_jsonish(delay_summaries or []),
         "warnings": _copy_warnings(warnings),
+        "flow_mode": None if flow_mode in (None, "") else str(flow_mode),
+        "scout_boundary_reason": None if scout_boundary_reason in (None, "") else str(scout_boundary_reason),
+        "right_boundary_delay_from_emergence_us": _to_int(
+            right_boundary_delay_from_emergence_us,
+            None,
+        ),
+        "captured_delay_offsets_from_emergence_us": _copy_jsonish(
+            _sorted_unique_ints(captured_delay_offsets_from_emergence_us)
+        ),
+        "target_delay_offsets_from_emergence_us": _copy_jsonish(
+            _sorted_unique_ints(target_delay_offsets_from_emergence_us)
+        ),
+        "ci_refinement_count": int(max(0, _to_int(ci_refinement_count, 0))),
+        "fit_stop_reason": None if fit_stop_reason in (None, "") else str(fit_stop_reason),
         "fit_status": str(fit_obj.get("fit_status") or "unresolved_fit_failed"),
         "flow_rate_nl_per_us": _to_float_or_none(fit_obj.get("flow_rate_nl_per_us")),
         "flow_intercept_nl": _to_float_or_none(fit_obj.get("flow_intercept_nl")),

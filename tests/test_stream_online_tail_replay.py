@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_tail as online_tail_mod
+from tests.stream_online_replay_helpers import build_adaptive_flow_replay_inputs
+from tests.stream_online_replay_helpers import to_float as _to_float
+from tests.stream_online_replay_helpers import to_int as _to_int
+from tools.stream_analysis import online_calibration as online_cal_mod
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -23,34 +26,6 @@ SUMMARY_CSV = EXPERIMENT_ROOT / "analysis" / "stream_characterization" / "experi
 def _read_csv_rows(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
-
-
-def _to_int(value):
-    try:
-        if value in (None, ""):
-            return None
-        return int(float(value))
-    except Exception:
-        return None
-
-
-def _to_float(value):
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
-def _feature_row_is_flow_accepted(row: dict) -> bool:
-    return bool(
-        str(row.get("silhouette_status") or "") == "ok"
-        and _to_float(row.get("attached_near_nozzle_width_median_px")) is not None
-        and _to_float(row.get("total_visible_volume_nl")) is not None
-        and (_to_float(row.get("min_accepted_fluid_distance_from_bottom_px")) or 0.0) > 96.0
-    )
-
 
 def _feature_row_is_tail_width_usable(row: dict) -> bool:
     return bool(
@@ -92,116 +67,11 @@ def _phase_features_by_delay(run_id: str) -> dict[int, dict]:
 
 
 def _build_sparse_flow_fit(rows_by_delay: dict[int, dict]):
-    schedule_offsets_us = online_cal_mod.build_online_stream_flow_plan(
-        emergence_time_us=0
-    )["delay_offsets_from_emergence_us"]
-    measurements = []
-    delay_summaries = []
-    available_offsets = sorted(int(offset_us) for offset_us in rows_by_delay.keys())
-
-    def _select_feature_row(target_offset_us: int, *, minimum_offset_us: int | None) -> tuple[int | None, dict | None]:
-        exact_row = rows_by_delay.get(int(target_offset_us))
-        if exact_row is not None:
-            exact_offset_us = int(target_offset_us)
-            if minimum_offset_us is None or exact_offset_us > int(minimum_offset_us):
-                return exact_offset_us, exact_row
-
-        candidate_offsets = []
-        for offset_us in available_offsets:
-            if minimum_offset_us is not None and int(offset_us) <= int(minimum_offset_us):
-                continue
-            if abs(int(offset_us) - int(target_offset_us)) <= 35:
-                candidate_offsets.append(int(offset_us))
-        if not candidate_offsets:
-            return None, None
-        best_offset_us = min(
-            candidate_offsets,
-            key=lambda offset_us: (abs(int(offset_us) - int(target_offset_us)), int(offset_us)),
-        )
-        return int(best_offset_us), rows_by_delay.get(int(best_offset_us))
-
-    previous_selected_offset_us = None
-    for offset_us in list(schedule_offsets_us):
-        selected_offset_us, feature_row = _select_feature_row(
-            int(offset_us),
-            minimum_offset_us=previous_selected_offset_us,
-        )
-        if feature_row is None or selected_offset_us is None:
-            continue
-        previous_selected_offset_us = int(selected_offset_us)
-        delay_us = _to_int(feature_row.get("flash_delay_us"))
-        if delay_us is None:
-            continue
-        capture_id = str(feature_row.get("capture_id") or f"replay_{selected_offset_us}")
-        if _feature_row_is_flow_accepted(feature_row):
-            frame_rows = [
-                online_cal_mod.build_online_stream_frame_row(
-                    phase="flow_rate",
-                    status="accepted",
-                    delay_us=delay_us,
-                    delay_from_emergence_us=int(selected_offset_us),
-                    replicate_index=1,
-                    qc={"measurement_qc_pass": True},
-                    image_ref={"capture_id": capture_id},
-                    warnings=[],
-                    attached_width_px=_to_float(feature_row.get("attached_near_nozzle_width_median_px")),
-                    visible_volume_nl=_to_float(feature_row.get("total_visible_volume_nl")),
-                    attached_bottom_clearance_px=_to_float(
-                        feature_row.get("min_accepted_fluid_distance_from_bottom_px")
-                    ),
-                    min_accepted_fluid_distance_from_bottom_px=_to_float(
-                        feature_row.get("min_accepted_fluid_distance_from_bottom_px")
-                    ),
-                    accepted_component_count=_to_int(feature_row.get("accepted_component_count")) or 0,
-                    accepted_detached_component_count=_to_int(
-                        feature_row.get("accepted_detached_component_count")
-                    )
-                    or 0,
-                    detached_near_bottom_warning=False,
-                    attached_bottom_guard_hit=False,
-                )
-            ]
-            measurements.append(
-                online_cal_mod.build_online_stream_measurement_row(
-                    phase="flow_rate",
-                    delay_us=delay_us,
-                    delay_from_emergence_us=int(selected_offset_us),
-                    replicate_index=1,
-                    width_px=_to_float(feature_row.get("attached_near_nozzle_width_median_px")),
-                    visible_volume_nl=_to_float(feature_row.get("total_visible_volume_nl")),
-                    qc_pass=True,
-                    image_ref={"capture_id": capture_id},
-                )
-            )
-        else:
-            frame_rows = [
-                online_cal_mod.build_online_stream_frame_row(
-                    phase="flow_rate",
-                    status="rejected_replay_qc",
-                    delay_us=delay_us,
-                    delay_from_emergence_us=int(selected_offset_us),
-                    replicate_index=1,
-                    qc={"measurement_qc_pass": False},
-                    image_ref={"capture_id": capture_id},
-                    warnings=["replay_qc_failed"],
-                    attached_width_px=_to_float(feature_row.get("attached_near_nozzle_width_median_px")),
-                    visible_volume_nl=_to_float(feature_row.get("total_visible_volume_nl")),
-                    attached_bottom_clearance_px=_to_float(
-                        feature_row.get("min_accepted_fluid_distance_from_bottom_px")
-                    ),
-                    min_accepted_fluid_distance_from_bottom_px=_to_float(
-                        feature_row.get("min_accepted_fluid_distance_from_bottom_px")
-                    ),
-                    accepted_component_count=_to_int(feature_row.get("accepted_component_count")) or 0,
-                    accepted_detached_component_count=_to_int(
-                        feature_row.get("accepted_detached_component_count")
-                    )
-                    or 0,
-                    detached_near_bottom_warning=False,
-                    attached_bottom_guard_hit=False,
-                )
-            ]
-        delay_summaries.append(online_cal_mod.summarize_online_stream_flow_delay(frame_rows))
+    measurements, delay_summaries = build_adaptive_flow_replay_inputs(
+        rows_by_delay,
+        fit_module=online_fit_mod,
+        capture_id_prefix="replay",
+    )
 
     fit_result = online_fit_mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -302,10 +172,11 @@ def _build_tail_delay_summary(
 
 def _replay_tail_result(rows_by_delay: dict[int, dict]):
     flow_fit_result, flow_delay_summaries = _build_sparse_flow_fit(rows_by_delay)
+    flow_capture_count = int(len(flow_delay_summaries))
     capture_budget = online_cal_mod.consume_online_stream_budget(
         online_cal_mod.new_online_stream_budget(),
         phase="flow_phase",
-        count=15,
+        count=int(flow_capture_count),
     )
     tail_plan = online_tail_mod.plan_online_stream_tail_phase(
         flow_fit_result=flow_fit_result,
@@ -410,6 +281,27 @@ def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmar
             "total_visible_volume_nl": 12.0,
             "min_accepted_fluid_distance_from_bottom_px": 180.0,
         },
+        700: {
+            "flash_delay_us": 700,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 74.0,
+            "total_visible_volume_nl": 12.8,
+            "min_accepted_fluid_distance_from_bottom_px": 178.0,
+        },
+        750: {
+            "flash_delay_us": 750,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 74.0,
+            "total_visible_volume_nl": 13.6,
+            "min_accepted_fluid_distance_from_bottom_px": 176.0,
+        },
+        800: {
+            "flash_delay_us": 800,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 74.0,
+            "total_visible_volume_nl": 14.4,
+            "min_accepted_fluid_distance_from_bottom_px": 174.0,
+        },
         850: {
             "flash_delay_us": 850,
             "silhouette_status": "ok",
@@ -417,12 +309,138 @@ def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmar
             "total_visible_volume_nl": 15.0,
             "min_accepted_fluid_distance_from_bottom_px": 170.0,
         },
+        900: {
+            "flash_delay_us": 900,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.9,
+            "total_visible_volume_nl": 15.8,
+            "min_accepted_fluid_distance_from_bottom_px": 168.0,
+        },
+        950: {
+            "flash_delay_us": 950,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.9,
+            "total_visible_volume_nl": 16.6,
+            "min_accepted_fluid_distance_from_bottom_px": 166.0,
+        },
+        1000: {
+            "flash_delay_us": 1000,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.8,
+            "total_visible_volume_nl": 17.4,
+            "min_accepted_fluid_distance_from_bottom_px": 163.0,
+        },
         1050: {
             "flash_delay_us": 1050,
             "silhouette_status": "ok",
             "attached_near_nozzle_width_median_px": 73.8,
             "total_visible_volume_nl": 18.5,
             "min_accepted_fluid_distance_from_bottom_px": 160.0,
+        },
+        1100: {
+            "flash_delay_us": 1100,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.8,
+            "total_visible_volume_nl": 20.0,
+            "min_accepted_fluid_distance_from_bottom_px": 158.0,
+        },
+        1150: {
+            "flash_delay_us": 1150,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.7,
+            "total_visible_volume_nl": 21.5,
+            "min_accepted_fluid_distance_from_bottom_px": 155.0,
+        },
+        1200: {
+            "flash_delay_us": 1200,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.7,
+            "total_visible_volume_nl": 22.2,
+            "min_accepted_fluid_distance_from_bottom_px": 154.0,
+        },
+        1250: {
+            "flash_delay_us": 1250,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.7,
+            "total_visible_volume_nl": 23.0,
+            "min_accepted_fluid_distance_from_bottom_px": 152.0,
+        },
+        1300: {
+            "flash_delay_us": 1300,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.6,
+            "total_visible_volume_nl": 23.8,
+            "min_accepted_fluid_distance_from_bottom_px": 151.5,
+        },
+        1350: {
+            "flash_delay_us": 1350,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.6,
+            "total_visible_volume_nl": 24.6,
+            "min_accepted_fluid_distance_from_bottom_px": 151.0,
+        },
+        1400: {
+            "flash_delay_us": 1400,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.6,
+            "total_visible_volume_nl": 25.4,
+            "min_accepted_fluid_distance_from_bottom_px": 150.8,
+        },
+        1450: {
+            "flash_delay_us": 1450,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.6,
+            "total_visible_volume_nl": 26.1,
+            "min_accepted_fluid_distance_from_bottom_px": 150.5,
+        },
+        1650: {
+            "flash_delay_us": 1650,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.5,
+            "total_visible_volume_nl": 29.2,
+            "min_accepted_fluid_distance_from_bottom_px": 149.5,
+        },
+        1750: {
+            "flash_delay_us": 1750,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.5,
+            "total_visible_volume_nl": 30.7,
+            "min_accepted_fluid_distance_from_bottom_px": 148.0,
+        },
+        1850: {
+            "flash_delay_us": 1850,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.4,
+            "total_visible_volume_nl": 32.2,
+            "min_accepted_fluid_distance_from_bottom_px": 147.0,
+        },
+        1950: {
+            "flash_delay_us": 1950,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.4,
+            "total_visible_volume_nl": 33.8,
+            "min_accepted_fluid_distance_from_bottom_px": 146.0,
+        },
+        2050: {
+            "flash_delay_us": 2050,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.3,
+            "total_visible_volume_nl": 35.3,
+            "min_accepted_fluid_distance_from_bottom_px": 145.5,
+        },
+        2150: {
+            "flash_delay_us": 2150,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.3,
+            "total_visible_volume_nl": 36.8,
+            "min_accepted_fluid_distance_from_bottom_px": 145.0,
+        },
+        2250: {
+            "flash_delay_us": 2250,
+            "silhouette_status": "ok",
+            "attached_near_nozzle_width_median_px": 73.2,
+            "total_visible_volume_nl": 38.4,
+            "min_accepted_fluid_distance_from_bottom_px": 144.0,
         },
         1550: {
             "flash_delay_us": 1550,

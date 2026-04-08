@@ -5857,6 +5857,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         self._measurement_rows = []
         self._flow_delay_summaries = []
+        self._flow_mode = "scout"
+        self._flow_delay_sequence = list(self.flow_plan.get("delays_us") or [])
+        self._flow_target_delay_offsets_from_emergence_us = list(
+            self.flow_plan.get("delay_offsets_from_emergence_us") or []
+        )
+        self._flow_captured_delay_offsets_from_emergence_us = []
+        self._flow_scout_boundary_reason = None
+        self._flow_right_boundary_delay_from_emergence_us = None
+        self._flow_right_boundary_fixed = False
+        self._flow_hard_boundary_delay_from_emergence_us = None
+        self._flow_ci_refinement_count = 0
+        self._flow_fit_stop_reason = None
+        self._flow_preview_fit_result = {}
         self._current_delay_frame_rows = []
         self._flow_delay_index = 0
         self._flow_replicate_index = 0
@@ -6230,7 +6243,306 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         return "tail backtrack" if str(self._tail_mode or "scout") == "backtrack" else "tail scout"
 
     def _current_flow_delay_count(self) -> int:
+        active_sequence = getattr(self, "_flow_delay_sequence", None)
+        if active_sequence is not None:
+            return int(len(list(active_sequence or [])))
         return int(len(list(self.flow_plan.get("delays_us") or [])))
+
+    def _flow_start_offset_from_emergence_us(self) -> int:
+        try:
+            return int(self.flow_plan.get("start_offset_from_emergence_us"))
+        except Exception:
+            delays = list(self.flow_plan.get("delays_us") or [])
+            if delays:
+                return int(int(delays[0]) - int(self.emergence_time_us))
+        return int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_start_offset_us"])
+
+    def _flow_soft_boundary_policy(self) -> dict:
+        return {
+            "flow_soft_bottom_clearance_px": int(
+                self.flow_plan.get("soft_bottom_clearance_px")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_soft_bottom_clearance_px"]
+            )
+        }
+
+    def _flow_min_accepted_delays(self) -> int:
+        return int(
+            self.flow_plan.get("min_accepted_delays")
+            or online_fit_mod.DEFAULT_ONLINE_FLOW_FIT_POLICY["min_accepted_delays"]
+        )
+
+    def _flow_target_delay_count(self) -> int:
+        return int(self.flow_plan.get("target_delay_count") or self.flow_plan.get("point_count") or 0)
+
+    def _flow_effective_capture_limit(self) -> int:
+        try:
+            hard_limit = int(
+                (dict(self.capture_budget or {}).get("hard_limit"))
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["hard_capture_budget"]
+            )
+        except Exception:
+            hard_limit = int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["hard_capture_budget"])
+        max_capture_count = int(
+            self.flow_plan.get("max_capture_count")
+            or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_max_capture_count"]
+        )
+        reserved_tail_capture_count = int(
+            self.flow_plan.get("reserved_tail_capture_count")
+            or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["reserved_tail_capture_count"]
+        )
+        return int(max(0, min(int(max_capture_count), int(hard_limit - reserved_tail_capture_count))))
+
+    def _flow_delay_offset_from_emergence_us(self, delay_us) -> int | None:
+        try:
+            return int(int(delay_us) - int(self.emergence_time_us))
+        except Exception:
+            return None
+
+    def _flow_attempted_offsets_from_emergence_us(self) -> list[int]:
+        offsets = []
+        seen = set()
+        for value in list(getattr(self, "_flow_captured_delay_offsets_from_emergence_us", []) or []):
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed in seen:
+                continue
+            seen.add(parsed)
+            offsets.append(parsed)
+        return offsets
+
+    def _flow_accepted_offsets_from_emergence_us(self, *, include_soft: bool = True) -> list[int]:
+        offsets = []
+        seen = set()
+        for summary in list(self._flow_delay_summaries or []):
+            row = dict(summary or {})
+            if not bool(row.get("delay_accepted")):
+                continue
+            if not include_soft and online_cal_mod.is_online_stream_flow_soft_boundary(
+                row,
+                policy=self._flow_soft_boundary_policy(),
+            ):
+                continue
+            try:
+                parsed = int(row.get("delay_from_emergence_us"))
+            except Exception:
+                continue
+            if parsed in seen:
+                continue
+            seen.add(parsed)
+            offsets.append(parsed)
+        return offsets
+
+    def _flow_last_accepted_offset_from_emergence_us(self, *, include_soft: bool = True) -> int | None:
+        offsets = self._flow_accepted_offsets_from_emergence_us(include_soft=include_soft)
+        return None if not offsets else int(offsets[-1])
+
+    def _set_flow_delay_sequence_from_offsets(self, offsets_from_emergence_us: list[int] | None):
+        sequence_offsets = []
+        seen = set()
+        for value in list(offsets_from_emergence_us or []):
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed in seen:
+                continue
+            seen.add(parsed)
+            sequence_offsets.append(parsed)
+        sequence_offsets.sort()
+        self._flow_delay_sequence = [
+            int(self.emergence_time_us) + int(offset_us) for offset_us in sequence_offsets
+        ]
+        self._flow_delay_index = 0
+
+    def _merge_flow_target_offsets(self, offsets_from_emergence_us: list[int] | None):
+        merged = []
+        seen = set()
+        for value in list(self._flow_target_delay_offsets_from_emergence_us or []) + list(offsets_from_emergence_us or []):
+            try:
+                parsed = int(value)
+            except Exception:
+                continue
+            if parsed in seen:
+                continue
+            seen.add(parsed)
+            merged.append(parsed)
+        merged.sort()
+        self._flow_target_delay_offsets_from_emergence_us = merged
+
+    def _compute_flow_preview_fit_result(self) -> dict:
+        try:
+            return dict(
+                online_fit_mod.fit_online_stream_flow_phase(
+                    measurements=list(self._measurement_rows),
+                    delay_summaries=list(self._flow_delay_summaries),
+                )
+                or {}
+            )
+        except Exception:
+            return {}
+
+    def _flow_ci_target_met(self, fit_result: dict | None) -> bool:
+        result = dict(fit_result or {})
+        if str(result.get("fit_status") or "").startswith("unresolved"):
+            return False
+        try:
+            ci_relative_width = float(result.get("steady_rate_ci95_relative_width"))
+        except Exception:
+            return False
+        target = float(
+            self.flow_plan.get("ci95_relative_width_target")
+            or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_ci95_relative_width_target"]
+        )
+        return bool(ci_relative_width <= target)
+
+    def _build_flow_span_fill_sequence(self) -> list[int]:
+        start_offset_us = int(self._flow_start_offset_from_emergence_us())
+        right_boundary_offset_us = self._flow_right_boundary_delay_from_emergence_us
+        if right_boundary_offset_us is None:
+            right_boundary_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
+        if right_boundary_offset_us is None:
+            right_boundary_offset_us = int(start_offset_us)
+        target_offsets = online_cal_mod.build_online_stream_flow_target_offsets(
+            start_offset_us=int(start_offset_us),
+            end_offset_us=int(right_boundary_offset_us),
+            target_delay_count=int(self._flow_target_delay_count()),
+        )
+        self._flow_target_delay_offsets_from_emergence_us = list(target_offsets)
+        return list(
+            online_cal_mod.build_online_stream_flow_missing_offsets(
+                target_offsets_from_emergence_us=target_offsets,
+                existing_offsets_from_emergence_us=self._flow_attempted_offsets_from_emergence_us(),
+            )
+        )
+
+    def _select_next_flow_ci_candidate_offset(self) -> int | None:
+        sampled_offsets = self._flow_attempted_offsets_from_emergence_us()
+        sampled_set = set(sampled_offsets)
+        start_offset_us = int(self._flow_start_offset_from_emergence_us())
+        if not bool(self._flow_right_boundary_fixed):
+            if sampled_offsets:
+                candidate_offset_us = int(
+                    max(sampled_offsets)
+                    + int(
+                        self.flow_plan.get("ci_extension_step_us")
+                        or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_ci_extension_step_us"]
+                    )
+                )
+            else:
+                candidate_offset_us = int(start_offset_us)
+            while candidate_offset_us in sampled_set:
+                candidate_offset_us += int(
+                    self.flow_plan.get("ci_extension_step_us")
+                    or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_ci_extension_step_us"]
+                )
+            return int(candidate_offset_us)
+
+        right_boundary_offset_us = self._flow_right_boundary_delay_from_emergence_us
+        if right_boundary_offset_us is None:
+            return None
+        return online_cal_mod.select_online_stream_flow_gap_midpoint(
+            sampled_offsets_from_emergence_us=sampled_offsets,
+            start_offset_us=int(start_offset_us),
+            end_offset_us=int(right_boundary_offset_us),
+        )
+
+    def _flow_prepare_next_sequence(self, *, delay_summary: dict | None = None) -> dict:
+        summary = dict(delay_summary or {})
+        current_offset_us = self._flow_delay_offset_from_emergence_us(summary.get("delay_us"))
+        if current_offset_us is None:
+            current_offset_us = self._flow_delay_offset_from_emergence_us(self._current_delay_us)
+        if current_offset_us is not None:
+            self._merge_flow_target_offsets([int(current_offset_us)])
+
+        hard_boundary = online_cal_mod.is_online_stream_flow_hard_boundary(summary)
+        soft_boundary = online_cal_mod.is_online_stream_flow_soft_boundary(
+            summary,
+            policy=self._flow_soft_boundary_policy(),
+        )
+        if hard_boundary and not bool(self._flow_right_boundary_fixed):
+            self._flow_hard_boundary_delay_from_emergence_us = int(current_offset_us or 0)
+            self._flow_right_boundary_fixed = True
+            self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "attached_bottom_guard_hit"
+            safe_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=False)
+            if safe_offset_us is None:
+                safe_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
+            if safe_offset_us is None:
+                safe_offset_us = int(self._flow_start_offset_from_emergence_us())
+            self._flow_right_boundary_delay_from_emergence_us = int(safe_offset_us)
+        elif soft_boundary and not bool(self._flow_right_boundary_fixed):
+            self._flow_right_boundary_fixed = True
+            self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "soft_bottom_clearance"
+            self._flow_right_boundary_delay_from_emergence_us = int(current_offset_us or 0)
+
+        accepted_delay_count = int(
+            sum(1 for row in self._flow_delay_summaries if bool((row or {}).get("delay_accepted")))
+        )
+        preview_fit = {}
+        if accepted_delay_count >= int(self._flow_min_accepted_delays()):
+            preview_fit = self._compute_flow_preview_fit_result()
+        self._flow_preview_fit_result = dict(preview_fit or {})
+        if self._flow_ci_target_met(preview_fit):
+            self._flow_fit_stop_reason = "ci_target_met"
+            return {"action": "stop", "termination_reason": "ci_target_met"}
+
+        if bool(dict(self.capture_budget or {}).get("exhausted")):
+            self._flow_fit_stop_reason = "hard_budget_exhausted"
+            return {"action": "stop", "termination_reason": "hard_budget_exhausted"}
+
+        if int(self._attempted_capture_count or 0) >= int(self._flow_effective_capture_limit()):
+            self._flow_fit_stop_reason = "flow_max_captures_reached"
+            if preview_fit and not self._flow_ci_target_met(preview_fit):
+                self._append_flow_warning("flow_fit_ci95_wide_after_max_captures")
+            return {"action": "stop", "termination_reason": "flow_max_captures_reached"}
+
+        if str(self._flow_mode or "scout") == "scout":
+            scout_limit = int(min(self._flow_target_delay_count(), self._flow_effective_capture_limit()))
+            attempted_count = int(len(self._flow_delay_summaries))
+            if hard_boundary or soft_boundary or attempted_count >= scout_limit:
+                if not hard_boundary and not soft_boundary and self._flow_scout_boundary_reason is None:
+                    self._flow_scout_boundary_reason = "scout_cap_reached"
+                    self._flow_right_boundary_delay_from_emergence_us = (
+                        self._flow_last_accepted_offset_from_emergence_us(include_soft=False)
+                        or self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
+                        or int(self._flow_start_offset_from_emergence_us())
+                    )
+                span_fill_offsets = self._build_flow_span_fill_sequence()
+                self._flow_mode = "span_fill"
+                if span_fill_offsets:
+                    self._set_flow_delay_sequence_from_offsets(span_fill_offsets)
+                    self._merge_flow_target_offsets(span_fill_offsets)
+                    return {"action": "continue", "termination_reason": None}
+            else:
+                next_offset_us = int(
+                    (current_offset_us or self._flow_start_offset_from_emergence_us())
+                    + int(
+                        self.flow_plan.get("scout_step_us")
+                        or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_scout_step_us"]
+                    )
+                )
+                self._set_flow_delay_sequence_from_offsets([next_offset_us])
+                self._merge_flow_target_offsets([next_offset_us])
+                return {"action": "continue", "termination_reason": None}
+
+        if str(self._flow_mode or "") == "span_fill":
+            span_fill_offsets = self._build_flow_span_fill_sequence()
+            if span_fill_offsets:
+                self._set_flow_delay_sequence_from_offsets(span_fill_offsets)
+                self._merge_flow_target_offsets(span_fill_offsets)
+                return {"action": "continue", "termination_reason": None}
+            self._flow_mode = "ci_refine"
+
+        next_candidate_offset_us = self._select_next_flow_ci_candidate_offset()
+        if next_candidate_offset_us is None:
+            self._flow_fit_stop_reason = self._flow_fit_stop_reason or "candidate_delays_exhausted"
+            return {"action": "stop", "termination_reason": "candidate_delays_exhausted"}
+        self._flow_mode = "ci_refine"
+        self._flow_ci_refinement_count += 1
+        self._set_flow_delay_sequence_from_offsets([int(next_candidate_offset_us)])
+        self._merge_flow_target_offsets([int(next_candidate_offset_us)])
+        return {"action": "continue", "termination_reason": None}
 
     def _planned_tail_delay_count(self) -> int:
         if str(self._tail_mode or "scout") == "backtrack":
@@ -6517,6 +6829,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self.flow_frame_image = None
         self._measurement_rows = []
         self._flow_delay_summaries = []
+        self._flow_mode = "scout"
+        self._flow_delay_sequence = list(self.flow_plan.get("delays_us") or [])
+        self._flow_target_delay_offsets_from_emergence_us = list(
+            self.flow_plan.get("delay_offsets_from_emergence_us") or []
+        )
+        self._flow_captured_delay_offsets_from_emergence_us = []
+        self._flow_scout_boundary_reason = None
+        self._flow_right_boundary_delay_from_emergence_us = None
+        self._flow_right_boundary_fixed = False
+        self._flow_hard_boundary_delay_from_emergence_us = None
+        self._flow_ci_refinement_count = 0
+        self._flow_fit_stop_reason = None
+        self._flow_preview_fit_result = {}
         self._current_delay_frame_rows = []
         self._flow_delay_index = 0
         self._flow_replicate_index = 0
@@ -6560,13 +6885,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_tail_capture_ref = {}
         self._current_tail_capture_failure = None
 
-        if not list(self.flow_plan.get("delays_us") or []):
+        if not list(self._flow_delay_sequence or []):
             self.calibrationError.emit("Online stream calibration has no planned flow delays.")
             return
 
         self.stageChanged.emit(
             "Online stream calibration: "
-            f"flow phase planned {int(self.flow_plan.get('point_count') or 0)} delays"
+            f"adaptive flow planned target={int(self.flow_plan.get('target_delay_count') or self.flow_plan.get('point_count') or 0)} "
+            f"min={int(self.flow_plan.get('min_accepted_delays') or 0)}"
         )
         self.flowPlanReady.emit()
 
@@ -6576,17 +6902,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.finalize.emit()
             return
 
-        delays = list(self.flow_plan.get("delays_us") or [])
+        delays = list(self._flow_delay_sequence or [])
         if self._flow_delay_index >= len(delays):
-            self._flow_termination_reason = self._flow_termination_reason or "planned_delays_exhausted"
+            self._flow_termination_reason = self._flow_termination_reason or str(
+                self._flow_fit_stop_reason or "candidate_delays_exhausted"
+            )
             self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
 
         self._current_delay_us = int(delays[self._flow_delay_index])
+        flow_mode = str(self._flow_mode or "scout")
         self.stageChanged.emit(
             "Online stream calibration: "
-            f"flow delay={int(self._current_delay_us)} us, "
+            f"flow {flow_mode} delay={int(self._current_delay_us)} us, "
             f"rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)}"
         )
         self._request_guarded_settings_update(
@@ -6595,7 +6924,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "num_droplets": 1,
             },
             self.calibration_manager.emitSettingsChangeCompleted,
-            context=f"online_stream_apply_flow_delay_{int(self._current_delay_us)}",
+            context=f"online_stream_apply_flow_{flow_mode}_{int(self._current_delay_us)}",
             timeout_message=(
                 f"Timed out waiting for online stream flow-delay settings @ {int(self._current_delay_us)} us."
             ),
@@ -6610,9 +6939,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if self._stop_requested:
             self.finalize.emit()
             return
+        if int(self._attempted_capture_count or 0) >= int(self._flow_effective_capture_limit()):
+            self._flow_termination_reason = self._flow_termination_reason or "flow_max_captures_reached"
+            self._refresh_plan_snapshot()
+            self.flowAcquisitionFinished.emit()
+            return
         if self.capture_budget.get("exhausted"):
-            self._flow_termination_reason = self._flow_termination_reason or "capture_budget_exhausted"
-            self._append_flow_warning("capture_budget_exhausted")
+            self._flow_termination_reason = self._flow_termination_reason or "hard_budget_exhausted"
+            self._append_flow_warning("hard_budget_exhausted")
             self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
@@ -6632,7 +6966,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             set_attr="flow_frame_image",
             stage_text=(
                 "Capturing online stream flow frame "
-                f"@ {int(self._current_delay_us)} us "
+                f"({str(self._flow_mode or 'scout')}) @ {int(self._current_delay_us)} us "
                 f"(rep {int(self._flow_replicate_index + 1)}/{int(self.flow_plan.get('replicates_per_delay') or 1)})"
             ),
             guard_timeout_ms=10_000,
@@ -6786,6 +7120,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         delay_summary = online_cal_mod.summarize_online_stream_flow_delay(self._current_delay_frame_rows)
         self._flow_delay_summaries.append(delay_summary)
+        try:
+            delay_offset_us = int(delay_summary.get("delay_from_emergence_us"))
+        except Exception:
+            delay_offset_us = self._flow_delay_offset_from_emergence_us(self._current_delay_us)
+        if delay_offset_us is not None:
+            self._flow_captured_delay_offsets_from_emergence_us.append(int(delay_offset_us))
         for warning in list(delay_summary.get("warnings") or []):
             self._append_flow_warning(str(warning))
         if bool(delay_summary.get("attached_bottom_guard_hit")):
@@ -6793,30 +7133,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if bool(delay_summary.get("detached_near_bottom_warning")):
             self._append_flow_warning("detached_near_bottom_warning")
 
-        attempted_delay_count = int(len(self._flow_delay_summaries))
-        accepted_delay_count = int(
-            sum(1 for row in self._flow_delay_summaries if bool((row or {}).get("delay_accepted")))
-        )
-        remaining_delay_count = int(max(0, self._current_flow_delay_count() - attempted_delay_count))
-
-        decision = online_cal_mod.decide_online_stream_flow_next_action(
-            delay_summary=delay_summary,
-            capture_budget=self.capture_budget,
-            consecutive_failed_delays=int(self._consecutive_failed_delays),
-            attempted_delay_count=attempted_delay_count,
-            planned_delay_count=int(self._current_flow_delay_count()),
-            accepted_delay_count=accepted_delay_count,
-            remaining_delay_count=remaining_delay_count,
-        )
+        decision = self._flow_prepare_next_sequence(delay_summary=delay_summary)
         if str(decision.get("action") or "") == "stop":
-            self._flow_termination_reason = str(decision.get("termination_reason") or "")
-            if self._flow_termination_reason:
-                self._append_flow_warning(self._flow_termination_reason)
+            self._flow_termination_reason = str(
+                decision.get("termination_reason")
+                or self._flow_fit_stop_reason
+                or "candidate_delays_exhausted"
+            )
+            if self._flow_termination_reason == "hard_budget_exhausted":
+                self._append_flow_warning("hard_budget_exhausted")
             self._refresh_plan_snapshot()
             self.flowAcquisitionFinished.emit()
             return
 
-        self._flow_delay_index += 1
         self._flow_replicate_index = 0
         self._current_delay_us = None
         self._current_delay_frame_rows = []
@@ -6875,7 +7204,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         ]
         accepted_measurement_count = int(len(flow_measurements))
         rejected_capture_count = int(max(0, self._attempted_capture_count - accepted_measurement_count))
-        flow_status = "captured" if accepted_delay_count >= 3 else "insufficient_data"
+        min_accepted_delays = int(self._flow_min_accepted_delays())
+        fit_status = str((dict(self._flow_fit_result or {})).get("fit_status") or "")
+        flow_status = (
+            "captured"
+            if accepted_delay_count >= min_accepted_delays and not fit_status.startswith("unresolved")
+            else "insufficient_data"
+        )
         if flow_status == "insufficient_data":
             self._append_flow_warning("insufficient_accepted_delays")
         return online_cal_mod.build_online_stream_flow_phase_payload(
@@ -6886,13 +7221,28 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             accepted_delay_count=int(accepted_delay_count),
             accepted_measurement_count=int(accepted_measurement_count),
             rejected_capture_count=int(rejected_capture_count),
-            termination_reason=str(self._flow_termination_reason or "planned_delays_exhausted"),
+            termination_reason=str(
+                self._flow_termination_reason
+                or self._flow_fit_stop_reason
+                or "candidate_delays_exhausted"
+            ),
             delay_summaries=[dict(row) for row in self._flow_delay_summaries],
             warnings=self._merged_online_stream_warnings(
                 self._flow_warnings,
                 self._flow_fit_warnings,
             ),
             fit=dict(self._flow_fit_result or {}),
+            flow_mode=str(self._flow_mode or ""),
+            scout_boundary_reason=self._flow_scout_boundary_reason,
+            right_boundary_delay_from_emergence_us=self._flow_right_boundary_delay_from_emergence_us,
+            captured_delay_offsets_from_emergence_us=list(
+                self._flow_captured_delay_offsets_from_emergence_us
+            ),
+            target_delay_offsets_from_emergence_us=list(
+                self._flow_target_delay_offsets_from_emergence_us
+            ),
+            ci_refinement_count=int(self._flow_ci_refinement_count),
+            fit_stop_reason=self._flow_fit_stop_reason,
         )
 
     def _build_online_stream_result_payload(
