@@ -97,21 +97,49 @@ def _build_sparse_flow_fit(rows_by_delay: dict[int, dict]):
     )["delay_offsets_from_emergence_us"]
     measurements = []
     delay_summaries = []
+    available_offsets = sorted(int(offset_us) for offset_us in rows_by_delay.keys())
+
+    def _select_feature_row(target_offset_us: int, *, minimum_offset_us: int | None) -> tuple[int | None, dict | None]:
+        exact_row = rows_by_delay.get(int(target_offset_us))
+        if exact_row is not None:
+            exact_offset_us = int(target_offset_us)
+            if minimum_offset_us is None or exact_offset_us > int(minimum_offset_us):
+                return exact_offset_us, exact_row
+
+        candidate_offsets = []
+        for offset_us in available_offsets:
+            if minimum_offset_us is not None and int(offset_us) <= int(minimum_offset_us):
+                continue
+            if abs(int(offset_us) - int(target_offset_us)) <= 35:
+                candidate_offsets.append(int(offset_us))
+        if not candidate_offsets:
+            return None, None
+        best_offset_us = min(
+            candidate_offsets,
+            key=lambda offset_us: (abs(int(offset_us) - int(target_offset_us)), int(offset_us)),
+        )
+        return int(best_offset_us), rows_by_delay.get(int(best_offset_us))
+
+    previous_selected_offset_us = None
     for offset_us in list(schedule_offsets_us):
-        feature_row = rows_by_delay.get(int(offset_us))
-        if feature_row is None:
+        selected_offset_us, feature_row = _select_feature_row(
+            int(offset_us),
+            minimum_offset_us=previous_selected_offset_us,
+        )
+        if feature_row is None or selected_offset_us is None:
             continue
+        previous_selected_offset_us = int(selected_offset_us)
         delay_us = _to_int(feature_row.get("flash_delay_us"))
         if delay_us is None:
             continue
-        capture_id = str(feature_row.get("capture_id") or f"replay_{offset_us}")
+        capture_id = str(feature_row.get("capture_id") or f"replay_{selected_offset_us}")
         if _feature_row_is_flow_accepted(feature_row):
             frame_rows = [
                 online_cal_mod.build_online_stream_frame_row(
                     phase="flow_rate",
                     status="accepted",
                     delay_us=delay_us,
-                    delay_from_emergence_us=int(offset_us),
+                    delay_from_emergence_us=int(selected_offset_us),
                     replicate_index=1,
                     qc={"measurement_qc_pass": True},
                     image_ref={"capture_id": capture_id},
@@ -137,7 +165,7 @@ def _build_sparse_flow_fit(rows_by_delay: dict[int, dict]):
                 online_cal_mod.build_online_stream_measurement_row(
                     phase="flow_rate",
                     delay_us=delay_us,
-                    delay_from_emergence_us=int(offset_us),
+                    delay_from_emergence_us=int(selected_offset_us),
                     replicate_index=1,
                     width_px=_to_float(feature_row.get("attached_near_nozzle_width_median_px")),
                     visible_volume_nl=_to_float(feature_row.get("total_visible_volume_nl")),
@@ -151,7 +179,7 @@ def _build_sparse_flow_fit(rows_by_delay: dict[int, dict]):
                     phase="flow_rate",
                     status="rejected_replay_qc",
                     delay_us=delay_us,
-                    delay_from_emergence_us=int(offset_us),
+                    delay_from_emergence_us=int(selected_offset_us),
                     replicate_index=1,
                     qc={"measurement_qc_pass": False},
                     image_ref={"capture_id": capture_id},

@@ -2028,6 +2028,8 @@ class CalibrationManager(QObject):
 
         candidate_obj = dict(candidate or {}) if isinstance(candidate, dict) else {}
         normalized_default = online_cal_mod.normalize_online_stream_prior(None)
+        standardized_flow_step_us = int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_step_us"])
+        standardized_flow_delay_count = int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_delay_count"])
         warnings = []
         fallback_reason = runtime.get("lookup_skipped_reason")
 
@@ -2042,6 +2044,8 @@ class CalibrationManager(QObject):
             normalized_prior = online_cal_mod.normalize_online_stream_prior(candidate_obj)
             applied_prior = dict(candidate_obj)
             applied_prior.update(normalized_prior)
+            applied_prior["flow_step_us"] = int(standardized_flow_step_us)
+            applied_prior["flow_delay_count"] = int(standardized_flow_delay_count)
             runtime["applied"] = True
             runtime["applied_prior"] = dict(applied_prior)
             runtime["application_reason"] = "online_stream_schedule_prior_applied"
@@ -2052,6 +2056,8 @@ class CalibrationManager(QObject):
         else:
             normalized_prior = dict(normalized_default)
             applied_prior = dict(normalized_default)
+            applied_prior["flow_step_us"] = int(standardized_flow_step_us)
+            applied_prior["flow_delay_count"] = int(standardized_flow_delay_count)
             runtime["applied"] = False
             runtime["applied_prior"] = dict(applied_prior)
             runtime["application_reason"] = None

@@ -88,8 +88,8 @@ def _flow_proc(tmp_path: Path):
         "condition_match": "none",
         "source_run_ids": [],
         "applied_flow_start_offset_us": 650,
-        "applied_flow_step_us": 200,
-        "applied_flow_delay_count": 5,
+        "applied_flow_step_us": 57,
+        "applied_flow_delay_count": 15,
         "applied_tail_start_offset_us": 3800,
         "applied_tail_coarse_step_us": 100,
         "fallback_reason": "no_prior",
@@ -118,7 +118,7 @@ def _flow_proc(tmp_path: Path):
     )
     proc.flow_plan = {
         "delays_us": [3850, 4050],
-        "replicates_per_delay": 3,
+        "replicates_per_delay": 1,
         "point_count": 2,
     }
     proc.tail_plan = {"coarse_start_delay_us": 7000, "coarse_step_us": 100}
@@ -969,17 +969,22 @@ def test_online_stream_advance_flow_phase_stops_on_bottom_guard_and_routes_to_fi
     assert proc._flow_termination_reason == "attached_bottom_guard_hit"
 
 
-def test_online_stream_advance_flow_phase_stops_after_one_fully_failed_delay(tmp_path):
+def test_online_stream_advance_flow_phase_advances_after_one_fully_failed_delay_when_enough_points_remain(tmp_path):
     proc = _flow_proc(tmp_path)
+    proc.flow_plan = {
+        "delays_us": [3850, 4050, 4250, 4450],
+        "replicates_per_delay": 1,
+        "point_count": 4,
+    }
     proc._ensure_flow_paths()
     proc._write_plan_snapshot()
     proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
         proc.capture_budget,
         phase="flow_phase",
-        count=3,
+        count=1,
     )
-    proc._attempted_capture_count = 3
-    proc._flow_replicate_index = 2
+    proc._attempted_capture_count = 1
+    proc._flow_replicate_index = 0
     proc._current_delay_us = 4050
     proc._current_delay_frame_rows = [
         calibration_model.online_cal_mod.build_online_stream_frame_row(
@@ -1000,71 +1005,34 @@ def test_online_stream_advance_flow_phase_stops_after_one_fully_failed_delay(tmp
             detached_near_bottom_warning=False,
             attached_bottom_guard_hit=False,
         ),
-        calibration_model.online_cal_mod.build_online_stream_frame_row(
-            phase="flow_rate",
-            status="rejected_measurement_qc",
-            delay_us=4050,
-            delay_from_emergence_us=850,
-            replicate_index=2,
-            qc={"measurement_qc_pass": False},
-            image_ref={"capture_id": "cap_flow_02"},
-            warnings=["measurement_qc_failed"],
-            attached_width_px=None,
-            visible_volume_nl=None,
-            attached_bottom_clearance_px=None,
-            min_accepted_fluid_distance_from_bottom_px=None,
-            accepted_component_count=0,
-            accepted_detached_component_count=0,
-            detached_near_bottom_warning=False,
-            attached_bottom_guard_hit=False,
-        ),
-        calibration_model.online_cal_mod.build_online_stream_frame_row(
-            phase="flow_rate",
-            status="rejected_measurement_qc",
-            delay_us=4050,
-            delay_from_emergence_us=850,
-            replicate_index=3,
-            qc={"measurement_qc_pass": False},
-            image_ref={"capture_id": "cap_flow_03"},
-            warnings=["measurement_qc_failed"],
-            attached_width_px=None,
-            visible_volume_nl=None,
-            attached_bottom_clearance_px=None,
-            min_accepted_fluid_distance_from_bottom_px=None,
-            accepted_component_count=0,
-            accepted_detached_component_count=0,
-            detached_near_bottom_warning=False,
-            attached_bottom_guard_hit=False,
-        ),
     ]
     proc._current_analysis_summary = {"status": "rejected_measurement_qc"}
 
     proc.onAdvanceFlowPhase()
 
-    assert proc.flowAcquisitionFinished.calls
-    assert proc.nextDelay.calls == []
-    assert proc._flow_termination_reason == "repeated_qc_failure"
-    snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
-    assert snapshot["capture_budget"]["captures_used"] == 3
+    assert proc.flowAcquisitionFinished.calls == []
+    assert proc.nextDelay.calls
+    assert proc.repeatReplicate.calls == []
+    assert proc._flow_termination_reason is None
 
 
 def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_become_impossible(tmp_path):
     proc = _flow_proc(tmp_path)
     proc.flow_plan = {
         "delays_us": [3850, 4050, 4250, 4450],
-        "replicates_per_delay": 3,
+        "replicates_per_delay": 1,
         "point_count": 4,
     }
     proc._flow_delay_index = 2
-    proc._flow_replicate_index = 2
+    proc._flow_replicate_index = 0
     proc._current_delay_us = 4250
     proc._flow_delay_summaries = [
         {
             "delay_us": 3850,
             "delay_from_emergence_us": 650,
-            "attempted_replicates": 3,
+            "attempted_replicates": 1,
             "accepted_replicates": 0,
-            "rejected_replicates": 3,
+            "rejected_replicates": 1,
             "median_visible_volume_nl": None,
             "median_width_px": None,
             "min_attached_bottom_clearance_px": None,
@@ -1076,9 +1044,9 @@ def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_becom
         {
             "delay_us": 4050,
             "delay_from_emergence_us": 850,
-            "attempted_replicates": 3,
+            "attempted_replicates": 1,
             "accepted_replicates": 0,
-            "rejected_replicates": 3,
+            "rejected_replicates": 1,
             "median_visible_volume_nl": None,
             "median_width_px": None,
             "min_attached_bottom_clearance_px": None,
@@ -1103,42 +1071,6 @@ def test_online_stream_advance_flow_phase_stops_when_three_accepted_delays_becom
             attached_bottom_clearance_px=150,
             min_accepted_fluid_distance_from_bottom_px=150,
             accepted_component_count=1,
-            accepted_detached_component_count=0,
-            detached_near_bottom_warning=False,
-            attached_bottom_guard_hit=False,
-        ),
-        calibration_model.online_cal_mod.build_online_stream_frame_row(
-            phase="flow_rate",
-            status="rejected_measurement_qc",
-            delay_us=4250,
-            delay_from_emergence_us=1050,
-            replicate_index=2,
-            qc={"measurement_qc_pass": False},
-            image_ref={"capture_id": "cap_flow_12"},
-            warnings=["measurement_qc_failed"],
-            attached_width_px=None,
-            visible_volume_nl=None,
-            attached_bottom_clearance_px=None,
-            min_accepted_fluid_distance_from_bottom_px=None,
-            accepted_component_count=0,
-            accepted_detached_component_count=0,
-            detached_near_bottom_warning=False,
-            attached_bottom_guard_hit=False,
-        ),
-        calibration_model.online_cal_mod.build_online_stream_frame_row(
-            phase="flow_rate",
-            status="rejected_measurement_qc",
-            delay_us=4250,
-            delay_from_emergence_us=1050,
-            replicate_index=3,
-            qc={"measurement_qc_pass": False},
-            image_ref={"capture_id": "cap_flow_13"},
-            warnings=["measurement_qc_failed"],
-            attached_width_px=None,
-            visible_volume_nl=None,
-            attached_bottom_clearance_px=None,
-            min_accepted_fluid_distance_from_bottom_px=None,
-            accepted_component_count=0,
             accepted_detached_component_count=0,
             detached_near_bottom_warning=False,
             attached_bottom_guard_hit=False,
@@ -1949,14 +1881,14 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
         "condition_match": "exact",
         "source_run_ids": ["seed_run_01"],
         "applied_flow_start_offset_us": 700,
-        "applied_flow_step_us": 200,
-        "applied_flow_delay_count": 5,
+        "applied_flow_step_us": 57,
+        "applied_flow_delay_count": 15,
         "applied_tail_start_offset_us": 3950,
         "applied_tail_coarse_step_us": 100,
         "fallback_reason": None,
         "warnings": [],
     }
-    proc.flow_plan = {"delays_us": [3850, 4050], "replicates_per_delay": 3}
+    proc.flow_plan = {"delays_us": [3850, 4050], "replicates_per_delay": 1}
     proc.tail_plan = {"coarse_start_delay_us": 7000, "coarse_step_us": 100}
     proc._measurement_rows = [
         {
@@ -1977,9 +1909,9 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
         {
             "delay_us": 3850,
             "delay_from_emergence_us": 650,
-            "attempted_replicates": 3,
+            "attempted_replicates": 1,
             "accepted_replicates": 1,
-            "rejected_replicates": 2,
+            "rejected_replicates": 0,
             "median_visible_volume_nl": 12.3,
             "median_width_px": 91.5,
             "min_attached_bottom_clearance_px": 150.0,
@@ -1989,9 +1921,9 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
         {
             "delay_us": 4050,
             "delay_from_emergence_us": 850,
-            "attempted_replicates": 3,
+            "attempted_replicates": 1,
             "accepted_replicates": 0,
-            "rejected_replicates": 3,
+            "rejected_replicates": 1,
             "median_visible_volume_nl": None,
             "median_width_px": None,
             "min_attached_bottom_clearance_px": None,
@@ -1999,9 +1931,9 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
             "delay_accepted": False,
         },
     ]
-    proc._attempted_capture_count = 6
-    proc._flow_termination_reason = "repeated_qc_failure"
-    proc._flow_warnings = ["repeated_qc_failure"]
+    proc._attempted_capture_count = 2
+    proc._flow_termination_reason = "insufficient_accepted_delays"
+    proc._flow_warnings = ["insufficient_accepted_delays"]
     proc._flow_fit_warnings = ["flow_fit_min_points_only"]
     proc._flow_fit_result = {
         "fit_status": "warning_min_points_only",
@@ -2063,10 +1995,10 @@ def test_online_stream_on_completed_emits_stage5_payload_with_tail_result():
     assert result["priors"]["aggregation_level"] == "exact_pair"
     assert result["priors"]["applied_flow_start_offset_us"] == 700
     assert result["flow_phase"]["status"] == "insufficient_data"
-    assert result["flow_phase"]["attempted_capture_count"] == 6
+    assert result["flow_phase"]["attempted_capture_count"] == 2
     assert result["flow_phase"]["accepted_delay_count"] == 1
     assert result["flow_phase"]["delay_summaries"][0]["delay_us"] == 3850
-    assert result["flow_phase"]["termination_reason"] == "repeated_qc_failure"
+    assert result["flow_phase"]["termination_reason"] == "insufficient_accepted_delays"
     assert result["flow_phase"]["fit_status"] == "warning_min_points_only"
     assert result["flow_phase"]["flow_rate_nl_per_us"] == 0.0187
     assert result["flow_phase"]["fit_warnings"] == ["flow_fit_min_points_only"]

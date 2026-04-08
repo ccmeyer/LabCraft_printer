@@ -3,9 +3,9 @@ from __future__ import annotations
 
 DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_start_offset_us": 650,
-    "flow_step_us": 200,
-    "flow_delay_count": 5,
-    "flow_replicates": 3,
+    "flow_step_us": 57,
+    "flow_delay_count": 15,
+    "flow_replicates": 1,
     "tail_fallback_start_offset_us": 3600,
     "tail_exact_prior_start_lead_us": 400,
     "tail_coarse_step_us": 100,
@@ -147,17 +147,8 @@ def build_online_stream_flow_plan(
         normalized_prior.get("flow_start_offset_us"),
         resolved_policy["flow_start_offset_us"],
     )
-    step_us = _to_int(
-        normalized_prior.get("flow_step_us"),
-        resolved_policy["flow_step_us"],
-    )
-    delay_count = max(
-        1,
-        _to_int(
-            normalized_prior.get("flow_delay_count"),
-            resolved_policy["flow_delay_count"],
-        ),
-    )
+    step_us = int(resolved_policy["flow_step_us"])
+    delay_count = max(1, int(resolved_policy["flow_delay_count"]))
     offsets = [int(start_offset_us + (idx * step_us)) for idx in range(delay_count)]
     delays = [int(emergence_time_us) + int(offset) for offset in offsets]
     default_offsets = [
@@ -443,12 +434,6 @@ def decide_online_stream_flow_next_action(
         return {
             "action": "stop",
             "termination_reason": "capture_budget_exhausted",
-        }
-    attempted_replicates = int(summary.get("attempted_replicates") or 0)
-    if attempted_replicates > 0 and not bool(summary.get("delay_accepted")):
-        return {
-            "action": "stop",
-            "termination_reason": "repeated_qc_failure",
         }
     if remaining_delay_count is None:
         remaining_delay_count = max(0, int(planned_delay_count) - int(attempted_delay_count))

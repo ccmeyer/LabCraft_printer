@@ -11,8 +11,8 @@ def test_normalize_online_stream_prior_none_returns_default_shape():
     assert prior == {
         "condition_match": "none",
         "flow_start_offset_us": 650,
-        "flow_step_us": 200,
-        "flow_delay_count": 5,
+        "flow_step_us": 57,
+        "flow_delay_count": 15,
         "tail_start_offset_us": 3600,
         "tail_coarse_step_us": 100,
         "source": "default",
@@ -31,8 +31,8 @@ def test_normalize_online_stream_prior_partial_input_fills_missing_defaults():
 
     assert prior["condition_match"] == "exact"
     assert prior["flow_start_offset_us"] == 700
-    assert prior["flow_step_us"] == 200
-    assert prior["flow_delay_count"] == 5
+    assert prior["flow_step_us"] == 57
+    assert prior["flow_delay_count"] == 15
     assert prior["tail_start_offset_us"] == 3600
     assert prior["tail_coarse_step_us"] == 100
     assert prior["source"] == "provided"
@@ -49,21 +49,117 @@ def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changi
         },
     )
 
-    assert plan["delay_offsets_from_emergence_us"] == [700, 900, 1100, 1300, 1500]
-    assert plan["delays_us"] == [1700, 1900, 2100, 2300, 2500]
-    assert plan["replicates_per_delay"] == 3
-    assert plan["point_count"] == 5
+    assert plan["delay_offsets_from_emergence_us"] == [
+        700,
+        757,
+        814,
+        871,
+        928,
+        985,
+        1042,
+        1099,
+        1156,
+        1213,
+        1270,
+        1327,
+        1384,
+        1441,
+        1498,
+    ]
+    assert plan["delays_us"] == [
+        1700,
+        1757,
+        1814,
+        1871,
+        1928,
+        1985,
+        2042,
+        2099,
+        2156,
+        2213,
+        2270,
+        2327,
+        2384,
+        2441,
+        2498,
+    ]
+    assert plan["replicates_per_delay"] == 1
+    assert plan["point_count"] == 15
     assert plan["plan_source"] == "prior_adjusted"
 
 
 def test_build_online_stream_flow_plan_without_prior_matches_frozen_defaults():
     plan = mod.build_online_stream_flow_plan(emergence_time_us=1000)
 
-    assert plan["delay_offsets_from_emergence_us"] == [650, 850, 1050, 1250, 1450]
-    assert plan["delays_us"] == [1650, 1850, 2050, 2250, 2450]
-    assert plan["replicates_per_delay"] == 3
-    assert plan["point_count"] == 5
+    assert plan["delay_offsets_from_emergence_us"] == [
+        650,
+        707,
+        764,
+        821,
+        878,
+        935,
+        992,
+        1049,
+        1106,
+        1163,
+        1220,
+        1277,
+        1334,
+        1391,
+        1448,
+    ]
+    assert plan["delays_us"] == [
+        1650,
+        1707,
+        1764,
+        1821,
+        1878,
+        1935,
+        1992,
+        2049,
+        2106,
+        2163,
+        2220,
+        2277,
+        2334,
+        2391,
+        2448,
+    ]
+    assert plan["replicates_per_delay"] == 1
+    assert plan["point_count"] == 15
     assert plan["plan_source"] == "default"
+
+
+def test_build_online_stream_flow_plan_ignores_legacy_prior_shape_and_keeps_only_start_offset():
+    plan = mod.build_online_stream_flow_plan(
+        emergence_time_us=1000,
+        prior={
+            "condition_match": "exact",
+            "flow_start_offset_us": 700,
+            "flow_step_us": 200,
+            "flow_delay_count": 5,
+        },
+    )
+
+    assert plan["delay_offsets_from_emergence_us"] == [
+        700,
+        757,
+        814,
+        871,
+        928,
+        985,
+        1042,
+        1099,
+        1156,
+        1213,
+        1270,
+        1327,
+        1384,
+        1441,
+        1498,
+    ]
+    assert plan["replicates_per_delay"] == 1
+    assert plan["point_count"] == 15
 
 
 def test_build_online_stream_tail_plan_without_prior_matches_frozen_defaults():
@@ -471,24 +567,23 @@ def test_decide_online_stream_flow_next_action_stops_for_attached_bottom_guard()
     }
 
 
-def test_decide_online_stream_flow_next_action_stops_for_fully_failed_delay():
+def test_decide_online_stream_flow_next_action_continues_after_single_failed_delay_when_budget_allows():
     decision = mod.decide_online_stream_flow_next_action(
         delay_summary={
             "attached_bottom_guard_hit": False,
-            "attempted_replicates": 3,
+            "attempted_replicates": 1,
             "accepted_replicates": 0,
             "delay_accepted": False,
         },
         capture_budget=mod.new_online_stream_budget(),
         consecutive_failed_delays=0,
         attempted_delay_count=2,
-        planned_delay_count=5,
+        planned_delay_count=15,
+        accepted_delay_count=1,
+        remaining_delay_count=13,
     )
 
-    assert decision == {
-        "action": "stop",
-        "termination_reason": "repeated_qc_failure",
-    }
+    assert decision == {"action": "continue", "termination_reason": None}
 
 
 def test_decide_online_stream_flow_next_action_stops_for_insufficient_accepted_delays():

@@ -1431,11 +1431,11 @@ class CalibrationMemoryAggregator:
                 "flow_start_offset_us": int(round(_median_or_none(flow_start_offsets))),
                 "flow_step_us": _coalesce(
                     _int_or_none(_median_or_none(flow_step_values)),
-                    200,
+                    57,
                 ),
                 "flow_delay_count": _coalesce(
                     _int_or_none(_median_or_none(flow_delay_count_values)),
-                    5,
+                    15,
                 ),
                 "tail_start_offset_us": int(round(_median_or_none(tail_start_offsets))),
                 "tail_coarse_step_us": _coalesce(

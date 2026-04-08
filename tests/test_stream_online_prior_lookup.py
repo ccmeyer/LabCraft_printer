@@ -120,8 +120,8 @@ def _write_online_stream_summary_run(
             "source": "default",
             "condition_match": "none",
             "applied_flow_start_offset_us": int(applied_flow_start_offset_us),
-            "applied_flow_step_us": 200,
-            "applied_flow_delay_count": 5,
+            "applied_flow_step_us": 57,
+            "applied_flow_delay_count": 15,
             "applied_tail_start_offset_us": int(applied_tail_start_offset_us),
             "applied_tail_coarse_step_us": 100,
             "fallback_reason": "no_prior",
@@ -130,8 +130,24 @@ def _write_online_stream_summary_run(
         "flow_phase": {
             "status": "captured",
             "plan": {
-                "delay_offsets_from_emergence_us": [700, 900, 1100, 1300, 1500],
-                "point_count": 5,
+                "delay_offsets_from_emergence_us": [
+                    700,
+                    757,
+                    814,
+                    871,
+                    928,
+                    985,
+                    1042,
+                    1099,
+                    1156,
+                    1213,
+                    1270,
+                    1327,
+                    1384,
+                    1441,
+                    1498,
+                ],
+                "point_count": 15,
             },
             "fit_status": "ok",
             "flow_rate_nl_per_us": 0.0187,
@@ -301,3 +317,38 @@ def test_new_manager_instance_can_resolve_same_online_stream_prior(tmp_path):
     assert second["result_priors"]["candidate_found"] is True
     assert second["result_priors"]["source"] == "calibration_memory"
     assert second["result_priors"]["applied_flow_start_offset_us"] == 700
+
+
+def test_manager_resolve_online_stream_prior_keeps_legacy_candidate_start_offset_but_standardizes_shape(
+    tmp_path, monkeypatch
+):
+    model = _make_model(tmp_path)
+    manager = CalibrationManager(model)
+    manager.begin_session(model.experiment_model.calibration_file_path, notes="legacy shape prior")
+
+    monkeypatch.setattr(
+        model.calibration_memory_store,
+        "get_best_online_stream_prior",
+        lambda *args, **kwargs: {
+            "source": "calibration_memory",
+            "condition_match": "exact",
+            "flow_start_offset_us": 725,
+            "flow_step_us": 200,
+            "flow_delay_count": 5,
+            "tail_start_offset_us": 3950,
+            "tail_coarse_step_us": 100,
+        },
+    )
+
+    resolved = manager.resolve_online_stream_calibration_prior(
+        condition={
+            "print_pressure_psi": 1.61,
+            "print_pulse_width_us": 1500,
+            "emergence_time_us": 3200,
+        }
+    )
+
+    assert resolved["result_priors"]["applied_flow_start_offset_us"] == 725
+    assert resolved["result_priors"]["applied_flow_step_us"] == 57
+    assert resolved["result_priors"]["applied_flow_delay_count"] == 15
+    manager.end_session()
