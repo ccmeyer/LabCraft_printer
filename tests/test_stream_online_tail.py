@@ -54,12 +54,12 @@ def test_plan_online_stream_tail_phase_uses_exact_prior_start_minus_lead():
     )
 
     assert plan["run_tail"] is True
-    assert plan["coarse_start_delay_us"] == 4900
+    assert plan["coarse_start_delay_us"] == 4800
     assert plan["coarse_step_us"] == 125
     assert plan["plan_source"] == "exact_prior_minus_lead"
 
 
-def test_plan_online_stream_tail_phase_falls_back_to_emergence_plus_3800():
+def test_plan_online_stream_tail_phase_falls_back_to_emergence_plus_3600():
     plan = mod.plan_online_stream_tail_phase(
         flow_fit_result=_flow_fit_result(),
         priors={"condition_match": "none"},
@@ -67,7 +67,7 @@ def test_plan_online_stream_tail_phase_falls_back_to_emergence_plus_3800():
         capture_budget={"captures_remaining_hard": 12},
     )
 
-    assert plan["coarse_start_delay_us"] == 4800
+    assert plan["coarse_start_delay_us"] == 4600
     assert plan["coarse_step_us"] == 100
     assert plan["refine_step_us"] == 50
     assert plan["plan_source"] == "fallback_default"
@@ -145,7 +145,38 @@ def test_summarize_online_stream_tail_delay_marks_coarse_and_refine_triggers():
     assert summary["triggered_refine"] is True
 
 
-def test_summarize_online_stream_tail_delay_triggers_on_morphology_without_width_collapse():
+def test_summarize_online_stream_tail_delay_triggers_on_near_nozzle_morphology_without_width_collapse():
+    summary = mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=7200,
+                delay_from_emergence_us=4000,
+                status="accepted",
+                width_px=73.0,
+                warnings=["near_nozzle_detached_warning"],
+                near_nozzle_detached_warning=True,
+            ),
+            _tail_frame_row(
+                delay_us=7200,
+                delay_from_emergence_us=4000,
+                status="accepted",
+                width_px=72.0,
+                warnings=["near_nozzle_detached_warning"],
+                near_nozzle_detached_warning=True,
+            ),
+        ],
+        baseline_width_px=74.0,
+    )
+
+    assert summary["width_ratio_to_baseline"] > 0.95
+    assert summary["near_nozzle_morphology_triggered_coarse"] is True
+    assert summary["near_nozzle_morphology_triggered_refine"] is True
+    assert summary["triggered_coarse"] is True
+    assert summary["triggered_refine"] is True
+    assert summary["trigger_reason"] == "coarse_near_nozzle_morphology_trigger"
+
+
+def test_summarize_online_stream_tail_delay_keeps_late_frame_warnings_out_of_trigger_logic():
     summary = mod.summarize_online_stream_tail_delay(
         [
             _tail_frame_row(
@@ -160,20 +191,18 @@ def test_summarize_online_stream_tail_delay_triggers_on_morphology_without_width
                 delay_us=7200,
                 delay_from_emergence_us=4000,
                 status="accepted",
-                width_px=72.0,
-                warnings=["detached_near_bottom_warning"],
-                detached_near_bottom_warning=True,
+                width_px=72.5,
+                warnings=["attached_bottom_guard_hit"],
+                attached_bottom_guard_hit=True,
             ),
         ],
         baseline_width_px=74.0,
     )
 
-    assert summary["width_ratio_to_baseline"] > 0.95
-    assert summary["morphology_triggered_coarse"] is True
-    assert summary["morphology_triggered_refine"] is True
-    assert summary["triggered_coarse"] is True
-    assert summary["triggered_refine"] is True
-    assert summary["trigger_reason"] == "coarse_morphology_trigger"
+    assert summary["late_frame_warning"] is True
+    assert summary["triggered_coarse"] is False
+    assert summary["triggered_refine"] is False
+    assert summary["trigger_reason"] is None
 
 
 def test_build_online_stream_tail_refine_plan_excludes_coarse_endpoints():
@@ -230,6 +259,58 @@ def test_decide_online_stream_tail_next_action_uses_synthetic_left_bracket_when_
         first_coarse_trigger_delay_us=7200,
         refine_step_us=50,
     ) == [7150]
+
+
+def test_decide_online_stream_tail_next_action_retargets_first_late_frame_delay():
+    decision = mod.decide_online_stream_tail_next_action(
+        mode="coarse",
+        delay_summary={
+            "delay_us": 7000,
+            "delay_accepted": True,
+            "triggered_coarse": False,
+            "late_frame_warning": True,
+        },
+        capture_budget={"exhausted": False},
+        consecutive_failed_delays=0,
+        attempted_delay_count=1,
+        planned_delay_count=5,
+        has_last_nontrigger=False,
+        current_delay_us=7000,
+        coarse_step_us=100,
+        coarse_start_delay_us=7000,
+        tail_retarget_count=0,
+        emergence_time_us=3200,
+    )
+
+    assert decision["action"] == "retarget_coarse"
+    assert decision["tail_retarget_count"] == 1
+    assert decision["retargeted_coarse_start_delay_us"] == 6800
+
+
+def test_decide_online_stream_tail_next_action_stops_when_late_start_persists_after_retarget_limit():
+    decision = mod.decide_online_stream_tail_next_action(
+        mode="coarse",
+        delay_summary={
+            "delay_us": 6200,
+            "delay_accepted": True,
+            "triggered_coarse": False,
+            "late_frame_warning": True,
+        },
+        capture_budget={"exhausted": False},
+        consecutive_failed_delays=0,
+        attempted_delay_count=1,
+        planned_delay_count=5,
+        has_last_nontrigger=False,
+        current_delay_us=6200,
+        coarse_step_us=100,
+        coarse_start_delay_us=6200,
+        tail_retarget_count=2,
+        emergence_time_us=3200,
+    )
+
+    assert decision["action"] == "stop"
+    assert decision["tail_phase_status"] == "unresolved_start_too_late"
+    assert decision["termination_reason"] == "start_too_late_no_bracket"
 
 
 def test_resolve_online_stream_tail_result_prefers_earliest_refine_qualifying_delay():
@@ -301,7 +382,7 @@ def test_resolve_online_stream_tail_result_prefers_earliest_refine_qualifying_de
     assert resolved["predicted_volume_nl"] is not None
 
 
-def test_resolve_online_stream_tail_result_falls_back_to_coarse_trigger_when_no_refine_point_qualifies():
+def test_resolve_online_stream_tail_result_marks_coarse_only_trigger_as_advisory():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),
         tail_plan={"steady_width_baseline_px": 74.0},
@@ -336,7 +417,7 @@ def test_resolve_online_stream_tail_result_falls_back_to_coarse_trigger_when_no_
             }
         ],
         trigger_bracket={
-            "tail_phase_status": "captured",
+            "tail_phase_status": "advisory_coarse_only",
             "termination_reason": "coarse_trigger_fallback",
             "trigger_delay_us": 7200,
             "last_nontrigger_delay_us": None,
@@ -344,7 +425,9 @@ def test_resolve_online_stream_tail_result_falls_back_to_coarse_trigger_when_no_
         },
     )
 
+    assert resolved["tail_phase"]["status"] == "advisory_coarse_only"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 4000
+    assert "tail_advisory_only" in resolved["tail_phase"]["warnings"]
 
 
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():

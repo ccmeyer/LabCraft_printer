@@ -6,7 +6,8 @@ DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_step_us": 200,
     "flow_delay_count": 5,
     "flow_replicates": 3,
-    "tail_fallback_start_offset_us": 3800,
+    "tail_fallback_start_offset_us": 3600,
+    "tail_exact_prior_start_lead_us": 400,
     "tail_coarse_step_us": 100,
     "tail_coarse_replicates": 2,
     "tail_refine_step_us": 50,
@@ -194,7 +195,7 @@ def build_online_stream_tail_plan(
                 normalized_prior.get("tail_start_offset_us"),
                 resolved_policy["tail_fallback_start_offset_us"],
             )
-            - 300
+            - int(resolved_policy["tail_exact_prior_start_lead_us"])
         )
         plan_source = "exact_prior_minus_lead"
     coarse_start_delay_us = int(emergence_time_us) + int(coarse_start_offset_us)

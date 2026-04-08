@@ -26,6 +26,13 @@ def _frame_with_detached_warning():
     return frame
 
 
+def _frame_with_near_nozzle_detached_warning():
+    frame = _blank_frame()
+    frame[62:108, 96:124] = 20
+    frame[116:150, 100:116] = 20
+    return frame
+
+
 def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stream():
     result = mod.analyze_online_stream_frame(
         frame_image=_frame_with_attached_stream(bottom_y=170),
@@ -95,6 +102,7 @@ def test_analyze_online_stream_frame_marks_attached_bottom_guard_hit():
     assert summary["measurement_qc_pass"] is False
     assert summary["status"] == "rejected_bottom_guard"
     assert summary["attached_bottom_guard_hit"] is True
+    assert summary["late_frame_warning"] is True
     assert summary["attached_bottom_clearance_px"] <= 96
 
 
@@ -129,7 +137,26 @@ def test_analyze_online_stream_frame_warns_for_detached_near_bottom_without_reje
     assert summary["status"] == "accepted"
     assert summary["measurement_qc_pass"] is True
     assert summary["detached_near_bottom_warning"] is True
+    assert summary["late_frame_warning"] is True
     assert "detached_near_bottom_warning" in summary["warnings"]
+
+
+def test_analyze_online_stream_frame_marks_near_nozzle_detached_warning():
+    result = mod.analyze_online_stream_frame(
+        frame_image=_frame_with_near_nozzle_detached_warning(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "accepted"
+    assert summary["measurement_qc_pass"] is True
+    assert summary["near_nozzle_detached_warning"] is True
+    assert summary["late_frame_warning"] is False
+    assert "near_nozzle_detached_warning" in summary["warnings"]
 
 
 def test_online_runtime_summary_is_json_serializable():

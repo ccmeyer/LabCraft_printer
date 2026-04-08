@@ -121,6 +121,30 @@ def _detached_near_bottom_warning(stage3_metric_row: dict, component_rows: list[
     return False
 
 
+def _near_nozzle_detached_warning(
+    stage3_metric_row: dict,
+    component_rows: list[dict],
+    *,
+    near_nozzle_band_top_px: int,
+    near_nozzle_band_height_px: int,
+):
+    cutoff_y_px = stage3_metric_row.get("cutoff_y_px")
+    if cutoff_y_px is None:
+        return False
+    band_y0_px = int(int(cutoff_y_px) + int(near_nozzle_band_top_px))
+    band_y1_px = int(band_y0_px + int(near_nozzle_band_height_px))
+    for row in list(component_rows or []):
+        if str(row.get("component_role") or "") != "detached_accepted":
+            continue
+        top_y_px = row.get("top_y_px")
+        if top_y_px is None:
+            continue
+        top_y_px = int(top_y_px)
+        if band_y0_px <= int(top_y_px) < band_y1_px:
+            return True
+    return False
+
+
 def _summary_status(
     *,
     silhouette_qc_pass: bool,
@@ -220,6 +244,17 @@ def analyze_online_stream_frame(
         component_rows,
         threshold_px=int(config["detached_near_bottom_warning_px"]),
     )
+    near_nozzle_detached_warning = _near_nozzle_detached_warning(
+        stage3_metric_row,
+        component_rows,
+        near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
+        near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
+    )
+    attached_bottom_guard_hit = bool(
+        attached_bottom_clearance_px is not None
+        and int(attached_bottom_clearance_px) <= int(config["attached_bottom_guard_px"])
+    )
+    late_frame_warning = bool(attached_bottom_guard_hit or detached_warning)
     status = _summary_status(
         silhouette_qc_pass=bool(silhouette_qc_pass),
         nozzle_qc_pass=bool(nozzle_qc_pass),
@@ -241,10 +276,12 @@ def analyze_online_stream_frame(
         warnings.append("visible_volume_unavailable")
     if attached_bottom_clearance_px is None:
         warnings.append("attached_bottom_clearance_unavailable")
-    elif int(attached_bottom_clearance_px) <= int(config["attached_bottom_guard_px"]):
+    elif attached_bottom_guard_hit:
         warnings.append("attached_bottom_guard_hit")
     if detached_warning:
         warnings.append("detached_near_bottom_warning")
+    if near_nozzle_detached_warning:
+        warnings.append("near_nozzle_detached_warning")
 
     if background_image is not None:
         try:
@@ -299,14 +336,13 @@ def analyze_online_stream_frame(
                 "accepted_detached_component_count"
             ),
             "detached_near_bottom_warning": bool(detached_warning),
+            "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
+            "late_frame_warning": bool(late_frame_warning),
             "warnings": online_cal_mod._copy_warnings(warnings),
             "selected_component_top_y_px": selected_component_top_y_px,
             "cutoff_y_px": cutoff_y_px,
             "width_valid_row_count": width_metrics.get("width_valid_row_count"),
-            "attached_bottom_guard_hit": bool(
-                attached_bottom_clearance_px is not None
-                and int(attached_bottom_clearance_px) <= int(config["attached_bottom_guard_px"])
-            ),
+            "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
         },
         "overlay": overlay,
     }

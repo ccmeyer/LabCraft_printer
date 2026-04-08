@@ -13,7 +13,7 @@ def test_normalize_online_stream_prior_none_returns_default_shape():
         "flow_start_offset_us": 650,
         "flow_step_us": 200,
         "flow_delay_count": 5,
-        "tail_start_offset_us": 3800,
+        "tail_start_offset_us": 3600,
         "tail_coarse_step_us": 100,
         "source": "default",
         "warnings": [],
@@ -33,7 +33,7 @@ def test_normalize_online_stream_prior_partial_input_fills_missing_defaults():
     assert prior["flow_start_offset_us"] == 700
     assert prior["flow_step_us"] == 200
     assert prior["flow_delay_count"] == 5
-    assert prior["tail_start_offset_us"] == 3800
+    assert prior["tail_start_offset_us"] == 3600
     assert prior["tail_coarse_step_us"] == 100
     assert prior["source"] == "provided"
     assert prior["warnings"] == ["used prior"]
@@ -69,8 +69,8 @@ def test_build_online_stream_flow_plan_without_prior_matches_frozen_defaults():
 def test_build_online_stream_tail_plan_without_prior_matches_frozen_defaults():
     plan = mod.build_online_stream_tail_plan(emergence_time_us=1000)
 
-    assert plan["coarse_start_offset_us"] == 3800
-    assert plan["coarse_start_delay_us"] == 4800
+    assert plan["coarse_start_offset_us"] == 3600
+    assert plan["coarse_start_delay_us"] == 4600
     assert plan["coarse_step_us"] == 100
     assert plan["coarse_replicates"] == 2
     assert plan["refine_step_us"] == 50
@@ -78,7 +78,7 @@ def test_build_online_stream_tail_plan_without_prior_matches_frozen_defaults():
     assert plan["plan_source"] == "default"
 
 
-def test_build_online_stream_tail_plan_exact_prior_starts_coarse_search_300us_early():
+def test_build_online_stream_tail_plan_exact_prior_starts_coarse_search_400us_early():
     plan = mod.build_online_stream_tail_plan(
         emergence_time_us=1000,
         prior={
@@ -88,8 +88,8 @@ def test_build_online_stream_tail_plan_exact_prior_starts_coarse_search_300us_ea
         },
     )
 
-    assert plan["coarse_start_offset_us"] == 3650
-    assert plan["coarse_start_delay_us"] == 4650
+    assert plan["coarse_start_offset_us"] == 3550
+    assert plan["coarse_start_delay_us"] == 4550
     assert plan["coarse_step_us"] == 100
     assert plan["plan_source"] == "exact_prior_minus_lead"
 
@@ -247,6 +247,8 @@ def test_build_online_stream_result_stub_returns_exact_top_level_shape():
         "tail_phase",
         "predicted_stream_duration_us",
         "predicted_volume_nl",
+        "learned_flow_start_offset_us",
+        "learned_tail_start_offset_us",
         "warnings",
     }
     assert result["warnings"] == ["stage2_skeleton_no_measurements"]

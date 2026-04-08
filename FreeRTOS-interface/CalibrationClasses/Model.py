@@ -5980,6 +5980,91 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _current_flow_delay_count(self) -> int:
         return int(len(list(self.flow_plan.get("delays_us") or [])))
 
+    def _active_tail_coarse_start_delay_us(self):
+        if not isinstance(getattr(self, "_tail_plan", None), dict):
+            return None
+        value = self._tail_plan.get("retargeted_coarse_start_delay_us")
+        if value is None:
+            value = self._tail_plan.get("coarse_start_delay_us")
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _planned_tail_delay_count(self) -> int:
+        if str(self._tail_mode or "coarse") == "refine":
+            return int(len(list(self._tail_delay_sequence or [])))
+        try:
+            planned_count = self._tail_plan.get("planned_coarse_delay_count")
+            if planned_count not in (None, "", 0):
+                return int(planned_count)
+        except Exception:
+            pass
+        return int(len(list(self._tail_delay_sequence or [])))
+
+    def _reset_tail_delay_cursor(self):
+        self._tail_delay_index = 0
+        self._tail_replicate_index = 0
+        self._tail_current_delay_us = None
+        self._tail_current_delay_frame_rows = []
+        self._current_tail_analysis_summary = {}
+
+    def _build_tail_coarse_delay_sequence(self, coarse_start_delay_us: int | None = None) -> list[int]:
+        planned_count = int(self._tail_plan.get("planned_coarse_delay_count") or 0)
+        coarse_step_us = int(self._tail_plan.get("coarse_step_us") or 100)
+        start_delay_us = coarse_start_delay_us
+        if start_delay_us is None:
+            start_delay_us = self._active_tail_coarse_start_delay_us()
+        try:
+            start_delay_us = int(start_delay_us)
+        except Exception:
+            return []
+        existing_delay_us = set()
+        for summary in list(getattr(self, "_tail_coarse_delay_summaries", []) or []):
+            try:
+                delay_us = int(dict(summary or {}).get("delay_us"))
+            except Exception:
+                continue
+            existing_delay_us.add(delay_us)
+        sequence = []
+        for idx in range(int(max(0, planned_count))):
+            delay_us = int(start_delay_us + (idx * coarse_step_us))
+            if delay_us in existing_delay_us:
+                continue
+            sequence.append(int(delay_us))
+        return sequence
+
+    def _recompute_tail_coarse_bracket(self):
+        trigger_candidates = []
+        nontrigger_delays = []
+        for row in list(getattr(self, "_tail_coarse_delay_summaries", []) or []):
+            summary = dict(row or {})
+            if not bool(summary.get("delay_accepted")):
+                continue
+            try:
+                delay_us = int(summary.get("delay_us"))
+            except Exception:
+                continue
+            if bool(summary.get("triggered_coarse")):
+                trigger_candidates.append((int(delay_us), dict(summary)))
+            else:
+                nontrigger_delays.append(int(delay_us))
+        if not trigger_candidates:
+            self._tail_trigger_delay_us = None
+            self._tail_trigger_reason = None
+            self._tail_last_nontrigger_delay_us = max(nontrigger_delays) if nontrigger_delays else None
+            return
+        trigger_candidates.sort(key=lambda item: item[0])
+        self._tail_trigger_delay_us = int(trigger_candidates[0][0])
+        trigger_summary = dict(trigger_candidates[0][1] or {})
+        self._tail_trigger_reason = str(trigger_summary.get("trigger_reason") or self._tail_trigger_reason or "")
+        eligible_nontriggers = [
+            int(delay_us)
+            for delay_us in nontrigger_delays
+            if int(delay_us) < int(self._tail_trigger_delay_us)
+        ]
+        self._tail_last_nontrigger_delay_us = max(eligible_nontriggers) if eligible_nontriggers else None
+
     def _refresh_plan_snapshot(self):
         self._write_plan_snapshot(force=True)
 
@@ -6369,6 +6454,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 accepted_component_count=0,
                 accepted_detached_component_count=0,
                 detached_near_bottom_warning=False,
+                near_nozzle_detached_warning=False,
+                late_frame_warning=False,
                 attached_bottom_guard_hit=False,
             )
             self._current_analysis_summary = {
@@ -6419,6 +6506,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             accepted_component_count=summary.get("accepted_component_count"),
             accepted_detached_component_count=summary.get("accepted_detached_component_count"),
             detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+            near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
+            late_frame_warning=bool(summary.get("late_frame_warning")),
             attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
         )
         self._current_analysis_summary = dict(summary)
@@ -6701,6 +6790,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "last_nontrigger_delay_us": self._tail_last_nontrigger_delay_us,
                 "trigger_reason": self._tail_trigger_reason,
                 "synthetic_left_bracket_used": bool(self._tail_synthetic_left_bracket_used),
+                "tail_retarget_count": int(self._tail_plan.get("tail_retarget_count") or 0),
+                "retargeted_coarse_start_delay_us": self._tail_plan.get("retargeted_coarse_start_delay_us"),
                 "warnings": list(self._tail_fit_warnings),
             },
         )
@@ -6781,10 +6872,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.tailPhaseFinished.emit()
             return
 
-        self._tail_delay_sequence = [
-            int(coarse_start_delay_us + (idx * coarse_step_us))
-            for idx in range(planned_coarse_delay_count)
-        ]
+        self._tail_delay_sequence = self._build_tail_coarse_delay_sequence(coarse_start_delay_us)
         self.tailPlanReady.emit()
 
     @Slot()
@@ -6804,7 +6892,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         delays = list(self._tail_delay_sequence or [])
         if self._tail_delay_index >= len(delays):
             if str(self._tail_mode or "coarse") == "refine" and self._tail_trigger_delay_us is not None:
-                self._tail_phase_status = "captured"
+                self._tail_phase_status = "advisory_coarse_only"
                 self._tail_termination_reason = "coarse_trigger_fallback"
                 self._tail_trigger_reason = self._tail_trigger_reason or "coarse_width_frac_le_0.90"
             else:
@@ -6913,6 +7001,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 accepted_component_count=0,
                 accepted_detached_component_count=0,
                 detached_near_bottom_warning=False,
+                near_nozzle_detached_warning=False,
+                late_frame_warning=False,
                 attached_bottom_guard_hit=False,
             )
             self._current_tail_analysis_summary = {
@@ -6968,6 +7058,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             accepted_component_count=summary.get("accepted_component_count"),
             accepted_detached_component_count=summary.get("accepted_detached_component_count"),
             detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+            near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
+            late_frame_warning=bool(summary.get("late_frame_warning")),
             attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
         )
         self._current_tail_analysis_summary = {
@@ -7035,15 +7127,9 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if str(self._tail_mode or "coarse") == "coarse":
             if bool(delay_summary.get("delay_accepted")):
                 self._tail_consecutive_failed_delays = 0
-                if bool(delay_summary.get("triggered_coarse")):
-                    if self._tail_trigger_delay_us is None:
-                        self._tail_trigger_delay_us = delay_summary.get("delay_us")
-                        if delay_summary.get("trigger_reason"):
-                            self._tail_trigger_reason = str(delay_summary.get("trigger_reason"))
-                else:
-                    self._tail_last_nontrigger_delay_us = delay_summary.get("delay_us")
             else:
                 self._tail_consecutive_failed_delays += 1
+            self._recompute_tail_coarse_bracket()
 
             decision = online_tail_mod.decide_online_stream_tail_next_action(
                 mode="coarse",
@@ -7051,15 +7137,37 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 capture_budget=self.capture_budget,
                 consecutive_failed_delays=int(self._tail_consecutive_failed_delays),
                 attempted_delay_count=int(len(self._tail_coarse_delay_summaries)),
-                planned_delay_count=int(len(self._tail_delay_sequence)),
+                planned_delay_count=int(self._planned_tail_delay_count()),
                 has_last_nontrigger=bool(self._tail_last_nontrigger_delay_us is not None),
                 current_delay_us=delay_summary.get("delay_us"),
                 coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
-                coarse_start_delay_us=int(self._tail_plan.get("coarse_start_delay_us") or 0),
+                coarse_start_delay_us=self._active_tail_coarse_start_delay_us(),
+                tail_retarget_count=int(self._tail_plan.get("tail_retarget_count") or 0),
+                emergence_time_us=int(self.emergence_time_us),
             )
             action = str(decision.get("action") or "")
             if action == "continue":
                 self._tail_delay_index += 1
+                self._tail_replicate_index = 0
+                self._tail_current_delay_us = None
+                self._tail_current_delay_frame_rows = []
+                self._current_tail_analysis_summary = {}
+                self.nextTailDelay.emit()
+                return
+            if action == "retarget_coarse":
+                retargeted_start_delay_us = decision.get("retargeted_coarse_start_delay_us")
+                if retargeted_start_delay_us is not None:
+                    self._tail_plan["tail_retarget_count"] = int(
+                        decision.get("tail_retarget_count")
+                        or (int(self._tail_plan.get("tail_retarget_count") or 0) + 1)
+                    )
+                    self._tail_plan["retargeted_coarse_start_delay_us"] = int(retargeted_start_delay_us)
+                    self._tail_delay_sequence = self._build_tail_coarse_delay_sequence(
+                        int(retargeted_start_delay_us)
+                    )
+                else:
+                    self._tail_delay_sequence = self._build_tail_coarse_delay_sequence()
+                self._tail_delay_index = 0
                 self._tail_replicate_index = 0
                 self._tail_current_delay_us = None
                 self._tail_current_delay_frame_rows = []
@@ -7080,10 +7188,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     first_coarse_trigger_delay_us=self._tail_trigger_delay_us,
                     refine_step_us=int(self._tail_plan.get("refine_step_us") or 50),
                     coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
-                    planned_coarse_start_delay_us=int(self._tail_plan.get("coarse_start_delay_us") or 0),
+                    planned_coarse_start_delay_us=self._active_tail_coarse_start_delay_us(),
                 )
                 if not refine_delays:
-                    self._tail_phase_status = "captured"
+                    self._tail_phase_status = "advisory_coarse_only"
                     self._tail_termination_reason = "coarse_trigger_fallback"
                     self._tail_trigger_reason = str(
                         decision.get("trigger_reason") or "coarse_width_frac_le_0.90"
