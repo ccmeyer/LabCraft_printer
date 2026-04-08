@@ -361,6 +361,7 @@ def _build_real_dialog_for_layout(monkeypatch, qapp):
     )
     calibration_manager = SimpleNamespace(
         analyzedImageUpdated=SignalStub(),
+        onlineStreamDebugUpdated=SignalStub(),
         calibrationStageChanged=SignalStub(),
         calibrationCompleted=SignalStub(),
         calibrationQueueCompleted=SignalStub(),
@@ -394,20 +395,22 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
 
     assert dialog.width() == 1600
     assert dialog.layout.count() == 3
-    assert dialog.layout.itemAt(0).widget() is dialog.control_panel
+    assert dialog.layout.itemAt(0).widget() is dialog.control_panel_scroll
     assert dialog.layout.itemAt(1).widget() is dialog.analysis_panel
     assert dialog.layout.itemAt(2).widget() is dialog.info_panel
     assert dialog.recommendation_group.parentWidget() is dialog.info_panel
     assert dialog.summary_group.parentWidget() is dialog.info_panel
     assert dialog.bridge_group.parentWidget() is dialog.info_panel
+    assert dialog.machine_position_group.parentWidget() is dialog.info_panel
     assert dialog.status_group.parentWidget() is dialog.info_panel
     assert dialog.manual_group.parentWidget() is dialog.control_panel
     assert dialog.calib_group.parentWidget() is dialog.control_panel
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
-    assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
-    assert dialog.control_panel.maximumWidth() == dialog.analysis_panel.maximumWidth()
-    assert dialog.analysis_panel.maximumWidth() == dialog.info_panel.maximumWidth()
+    assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
+    assert dialog.analysis_panel.minimumWidth() >= 560
+    assert dialog.control_panel.maximumWidth() <= 460
+    assert dialog.info_panel.maximumWidth() <= 460
     assert dialog.flash_button.minimumHeight() >= 32
     assert dialog.calibrate_all_button.minimumHeight() >= 32
     assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32

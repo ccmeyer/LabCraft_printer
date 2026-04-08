@@ -34,8 +34,9 @@ def _frame_with_near_nozzle_detached_warning():
 
 
 def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stream():
+    frame = _frame_with_attached_stream(bottom_y=170)
     result = mod.analyze_online_stream_frame(
-        frame_image=_frame_with_attached_stream(bottom_y=170),
+        frame_image=frame,
         background_image=_blank_frame(),
         nozzle_center_px=NOZZLE_CENTER_PX,
         delay_us=4050,
@@ -51,6 +52,31 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert summary["visible_volume_nl"] is not None
     assert summary["attached_bottom_clearance_px"] > 96
     assert result["overlay"] is not None
+    assert result["overlay"].shape == frame.shape + (3,)
+    assert np.any(result["overlay"][80:170, 96:124] != np.stack([frame[80:170, 96:124]] * 3, axis=-1))
+
+
+def test_online_stream_overlay_preserves_full_frame_and_distinguishes_component_roles():
+    frame = _frame_with_detached_warning()
+    result = mod.analyze_online_stream_frame(
+        frame_image=frame,
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    overlay = result["overlay"]
+    assert overlay is not None
+    assert overlay.shape == frame.shape + (3,)
+    assert np.array_equal(overlay[305, 200], np.array([230, 230, 230], dtype=np.uint8))
+
+    attached_pixel = overlay[120, 110]
+    detached_pixel = overlay[260, 108]
+    assert np.any(attached_pixel != np.array([20, 20, 20], dtype=np.uint8))
+    assert np.any(detached_pixel != np.array([20, 20, 20], dtype=np.uint8))
+    assert not np.array_equal(attached_pixel, detached_pixel)
 
 
 def test_analyze_online_stream_frame_rejects_blank_frame_without_geometry():

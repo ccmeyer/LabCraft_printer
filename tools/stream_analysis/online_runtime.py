@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from tools.stream_analysis import online_calibration as online_cal_mod
@@ -169,6 +170,173 @@ def _summary_status(
     return "accepted"
 
 
+def _coerce_display_frame(frame_image) -> np.ndarray:
+    arr = np.asarray(frame_image)
+    if arr.ndim == 2:
+        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        return cv2.cvtColor(arr[:, :, 0], cv2.COLOR_GRAY2BGR)
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        return arr[:, :, :3].copy()
+    raise ValueError(f"Unsupported frame shape for online stream overlay: {getattr(arr, 'shape', None)}")
+
+
+def _project_component_mask(component: dict, roi: dict, image_shape) -> np.ndarray | None:
+    final_mask = component.get("final_mask")
+    if final_mask is None:
+        return None
+    local_mask = np.asarray(final_mask)
+    if local_mask.ndim != 2 or local_mask.size <= 0 or not np.any(local_mask > 0):
+        return None
+
+    image_h, image_w = image_shape[:2]
+    x0 = max(0, min(int(roi.get("x0", 0)), image_w))
+    y0 = max(0, min(int(roi.get("y0", 0)), image_h))
+    x1 = max(x0, min(int(roi.get("x1", x0)), image_w))
+    y1 = max(y0, min(int(roi.get("y1", y0)), image_h))
+    target_h = max(0, y1 - y0)
+    target_w = max(0, x1 - x0)
+    if target_h <= 0 or target_w <= 0:
+        return None
+
+    copy_h = min(target_h, int(local_mask.shape[0]))
+    copy_w = min(target_w, int(local_mask.shape[1]))
+    if copy_h <= 0 or copy_w <= 0:
+        return None
+
+    full_mask = np.zeros((image_h, image_w), dtype=np.uint8)
+    full_mask[y0 : y0 + copy_h, x0 : x0 + copy_w] = np.where(
+        local_mask[:copy_h, :copy_w] > 0,
+        255,
+        0,
+    ).astype(np.uint8)
+    return full_mask
+
+
+def _blend_component_overlay(image: np.ndarray, component_mask: np.ndarray, color, *, alpha: float) -> np.ndarray:
+    if component_mask is None or not np.any(component_mask > 0):
+        return image
+
+    blended = image.copy()
+    color_arr = np.asarray(color, dtype=np.float32)
+    mask = component_mask > 0
+    if np.any(mask):
+        base = blended.astype(np.float32)
+        base[mask] = ((1.0 - float(alpha)) * base[mask]) + (float(alpha) * color_arr)
+        blended = np.clip(base, 0, 255).astype(np.uint8)
+
+    contours, _hierarchy = cv2.findContours(component_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        cv2.drawContours(blended, contours, -1, tuple(int(v) for v in color), 2)
+    return blended
+
+
+def _compact_warning_text(warnings: list[str]) -> str | None:
+    labels = [str(item or "").strip() for item in list(warnings or []) if str(item or "").strip()]
+    if not labels:
+        return None
+    if len(labels) > 3:
+        labels = [*labels[:3], "…"]
+    return ", ".join(labels)
+
+
+def _draw_online_stream_hud(image: np.ndarray, *, summary: dict, delay_us: int, emergence_time_us: int) -> np.ndarray:
+    hud = image.copy()
+    warning_text = _compact_warning_text(summary.get("warnings") or [])
+    lines = [
+        f"delay: {int(delay_us)} us ({int(delay_us - int(emergence_time_us)):+d} us from emergence)",
+        f"status: {str(summary.get('status') or 'unknown')}",
+        "visible volume: "
+        + (
+            "n/a"
+            if summary.get("visible_volume_nl") is None
+            else f"{float(summary['visible_volume_nl']):.3f} nL"
+        ),
+        "attached width: "
+        + (
+            "n/a"
+            if summary.get("attached_width_px") is None
+            else f"{float(summary['attached_width_px']):.2f} px"
+        ),
+    ]
+    if warning_text:
+        lines.append(f"warnings: {warning_text}")
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.48
+    thickness = 1
+    margin = 8
+    line_gap = 7
+    text_metrics = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
+    box_width = min(
+        int(hud.shape[1]) - (2 * margin),
+        max((size[0] for size in text_metrics), default=0) + (2 * margin),
+    )
+    line_height = max((size[1] for size in text_metrics), default=12)
+    box_height = (len(lines) * line_height) + (max(0, len(lines) - 1) * line_gap) + (2 * margin)
+
+    overlay = hud.copy()
+    cv2.rectangle(
+        overlay,
+        (margin, margin),
+        (max(margin, margin + box_width), max(margin, margin + box_height)),
+        (20, 20, 20),
+        -1,
+    )
+    hud = cv2.addWeighted(overlay, 0.75, hud, 0.25, 0.0)
+
+    status_color = (0, 200, 0) if str(summary.get("status") or "") == "accepted" else (0, 165, 255)
+    y = margin + line_height
+    for index, line in enumerate(lines):
+        color = status_color if index == 1 else (235, 235, 235)
+        cv2.putText(
+            hud,
+            line,
+            (margin + 6, y),
+            font,
+            font_scale,
+            color,
+            thickness,
+            lineType=cv2.LINE_AA,
+        )
+        y += line_height + line_gap
+    return hud
+
+
+def _build_online_stream_overlay(
+    frame_image,
+    *,
+    stage3_frame: dict,
+    summary: dict,
+    delay_us: int,
+    emergence_time_us: int,
+    alpha: float = 0.40,
+) -> np.ndarray:
+    overlay = _coerce_display_frame(frame_image)
+    roi = dict(stage3_frame.get("roi") or {})
+    for component in list(stage3_frame.get("accepted_components") or []):
+        component_mask = _project_component_mask(component, roi, overlay.shape)
+        color = silhouette_mod._component_color(component.get("component_role", "detached_accepted"))
+        overlay = _blend_component_overlay(overlay, component_mask, color, alpha=float(alpha))
+
+    tracked_row = dict(stage3_frame.get("tracked_row") or {})
+    metric_row = dict(stage3_frame.get("metric_row") or {})
+    overlay = silhouette_mod._draw_nozzle_context(
+        overlay,
+        nozzle_x_px=tracked_row.get("tracked_nozzle_x_px"),
+        nozzle_y_px=tracked_row.get("tracked_nozzle_y_px"),
+        cutoff_y_px=metric_row.get("cutoff_y_px"),
+        x0_px=0,
+        x1_px=max(0, overlay.shape[1] - 1),
+    )
+    return _draw_online_stream_hud(
+        overlay,
+        summary=summary,
+        delay_us=int(delay_us),
+        emergence_time_us=int(emergence_time_us),
+    )
+
+
 def analyze_online_stream_frame(
     *,
     frame_image,
@@ -318,50 +486,51 @@ def analyze_online_stream_frame(
     elif status == "rejected_bottom_guard":
         failure_reason = "attached primary reached bottom guard"
 
+    summary = {
+        "status": str(status),
+        "measurement_qc_pass": bool(measurement_qc_pass),
+        "nozzle_qc_pass": bool(nozzle_qc_pass),
+        "silhouette_qc_pass": bool(silhouette_qc_pass),
+        "silhouette_status": stage3_metric_row.get("silhouette_status"),
+        "failure_reason": failure_reason,
+        "attached_width_px": attached_width_px,
+        "visible_volume_nl": visible_volume_nl,
+        "attached_bottom_clearance_px": attached_bottom_clearance_px,
+        "min_accepted_fluid_distance_from_bottom_px": frame_metric_row.get(
+            "min_accepted_fluid_distance_from_bottom_px"
+        ),
+        "accepted_component_count": stage3_metric_row.get("accepted_component_count"),
+        "accepted_detached_component_count": stage3_metric_row.get(
+            "accepted_detached_component_count"
+        ),
+        "tail_width_usable": bool(tail_width_usable),
+        "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
+        "tail_landmark_usable": bool(tail_landmark_usable),
+        "landmark_reason": landmark_reason,
+        "detached_near_bottom_warning": bool(detached_warning),
+        "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
+        "late_frame_warning": bool(late_frame_warning),
+        "warnings": online_cal_mod._copy_warnings(warnings),
+        "selected_component_top_y_px": selected_component_top_y_px,
+        "cutoff_y_px": cutoff_y_px,
+        "width_valid_row_count": width_metrics.get("width_valid_row_count"),
+        "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
+    }
+
     overlay = None
     try:
-        sample_input = dict(stage3_frame)
-        sample_input["metric_row"] = dict(stage4_frame.get("labeled_stage3_row") or stage3_metric_row)
-        overlay = volume_mod._build_sample_panel(
-            stage3_frame["gray"],
-            sample_input=sample_input,
-            frame_metric_row=frame_metric_row,
-            component_volume_rows=list(stage4_frame.get("component_volume_rows") or []),
-            fov_report=dict(stage4_frame.get("fov_report") or {}),
+        overlay = _build_online_stream_overlay(
+            frame_image,
+            stage3_frame=stage3_frame,
+            summary=summary,
+            delay_us=int(delay_us),
+            emergence_time_us=int(emergence_time_us),
+            alpha=0.40,
         )
     except Exception:
         overlay = None
 
     return {
-        "summary": {
-            "status": str(status),
-            "measurement_qc_pass": bool(measurement_qc_pass),
-            "nozzle_qc_pass": bool(nozzle_qc_pass),
-            "silhouette_qc_pass": bool(silhouette_qc_pass),
-            "silhouette_status": stage3_metric_row.get("silhouette_status"),
-            "failure_reason": failure_reason,
-            "attached_width_px": attached_width_px,
-            "visible_volume_nl": visible_volume_nl,
-            "attached_bottom_clearance_px": attached_bottom_clearance_px,
-            "min_accepted_fluid_distance_from_bottom_px": frame_metric_row.get(
-                "min_accepted_fluid_distance_from_bottom_px"
-            ),
-            "accepted_component_count": stage3_metric_row.get("accepted_component_count"),
-            "accepted_detached_component_count": stage3_metric_row.get(
-                "accepted_detached_component_count"
-            ),
-            "tail_width_usable": bool(tail_width_usable),
-            "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
-            "tail_landmark_usable": bool(tail_landmark_usable),
-            "landmark_reason": landmark_reason,
-            "detached_near_bottom_warning": bool(detached_warning),
-            "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
-            "late_frame_warning": bool(late_frame_warning),
-            "warnings": online_cal_mod._copy_warnings(warnings),
-            "selected_component_top_y_px": selected_component_top_y_px,
-            "cutoff_y_px": cutoff_y_px,
-            "width_valid_row_count": width_metrics.get("width_valid_row_count"),
-            "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
-        },
+        "summary": summary,
         "overlay": overlay,
     }

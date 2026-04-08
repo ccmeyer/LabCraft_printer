@@ -1104,6 +1104,7 @@ class CalibrationManager(QObject):
     streamCaptureStateChanged = Signal(dict)
 
     analyzedImageUpdated = Signal(object)
+    onlineStreamDebugUpdated = Signal(dict)
 
     captureImageRequested = Signal(object)       # callback(image)
     moveRequested = Signal(object, object)       # (move_vector, callback)
@@ -2321,6 +2322,7 @@ class CalibrationManager(QObject):
             ("calibrationError", self.onCalibrationError),
             ("calibrationDataUpdated", self.onCalibrationDataUpdated),
             ("presentImageSignal", self.onPresentImage),
+            ("onlineStreamDebugUpdated", self.onOnlineStreamDebugUpdated),
         )
         for signal_name, slot in signal_pairs:
             try:
@@ -2849,6 +2851,9 @@ class CalibrationManager(QObject):
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
             self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
             self.activeCalibration.presentImageSignal.connect(self.onPresentImage)
+            debug_signal = getattr(self.activeCalibration, "onlineStreamDebugUpdated", None)
+            if debug_signal is not None:
+                debug_signal.connect(self.onOnlineStreamDebugUpdated)
             self._begin_process_recording(self.activeCalibration)
             self.activeCalibration.start()
 
@@ -3487,7 +3492,7 @@ class CalibrationManager(QObject):
         return state
 
     def has_open_stream_gravimetric_capture(self) -> bool:
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
@@ -3505,7 +3510,7 @@ class CalibrationManager(QObject):
         }
 
     def is_stream_gravimetric_capture_busy(self) -> bool:
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
@@ -4901,6 +4906,10 @@ class CalibrationManager(QObject):
     def onPresentImage(self, image):
         self.analyzedImageUpdated.emit(image)
 
+    @Slot(dict)
+    def onOnlineStreamDebugUpdated(self, payload):
+        self.onlineStreamDebugUpdated.emit(dict(payload or {}))
+
     # ------------- Small helpers -------------
 
     def _safe_get_stock_solution(self):
@@ -5731,6 +5740,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     nextTailDelay = Signal()
     tailPhaseFinished = Signal()
     finalize = Signal()
+    onlineStreamDebugUpdated = Signal(dict)
 
     @staticmethod
     def missing_requirements(cm) -> list[str]:
@@ -6383,6 +6393,211 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         except Exception:
             return {}
 
+    @staticmethod
+    def _debug_delay_us(value) -> int | None:
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _debug_float(value) -> float | None:
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _debug_summary_already_committed(self, summaries: list[dict], provisional_summary: dict | None) -> bool:
+        if not provisional_summary:
+            return False
+        provisional_delay_us = self._debug_delay_us(provisional_summary.get("delay_us"))
+        if provisional_delay_us is None:
+            return False
+        for row in list(summaries or []):
+            if self._debug_delay_us(dict(row or {}).get("delay_us")) == provisional_delay_us:
+                return True
+        return False
+
+    def _build_provisional_flow_delay_summary(self) -> dict | None:
+        rows = [dict(row or {}) for row in list(getattr(self, "_current_delay_frame_rows", []) or [])]
+        if not rows:
+            return None
+        try:
+            return dict(online_cal_mod.summarize_online_stream_flow_delay(rows) or {})
+        except Exception:
+            return None
+
+    def _build_provisional_tail_delay_summary(self) -> dict | None:
+        rows = [dict(row or {}) for row in list(getattr(self, "_tail_current_delay_frame_rows", []) or [])]
+        if not rows:
+            return None
+        baseline_width_px = (
+            (dict(getattr(self, "_tail_plan", {}) or {})).get("steady_width_baseline_px")
+            if isinstance(getattr(self, "_tail_plan", None), dict)
+            else None
+        )
+        if baseline_width_px is None:
+            baseline_width_px = (dict(getattr(self, "_flow_fit_result", {}) or {})).get("steady_width_baseline_px")
+        try:
+            return dict(
+                online_tail_mod.summarize_online_stream_tail_delay(
+                    rows,
+                    baseline_width_px,
+                )
+                or {}
+            )
+        except Exception:
+            return None
+
+    def _merged_flow_debug_delay_summaries(self, provisional_summary: dict | None = None) -> list[dict]:
+        merged = [dict(row or {}) for row in list(getattr(self, "_flow_delay_summaries", []) or [])]
+        if provisional_summary and not self._debug_summary_already_committed(merged, provisional_summary):
+            merged.append(dict(provisional_summary))
+        return merged
+
+    def _merged_tail_debug_delay_summaries(
+        self,
+        committed_summaries: list[dict] | None,
+        provisional_summary: dict | None = None,
+    ) -> list[dict]:
+        merged = [dict(row or {}) for row in list(committed_summaries or [])]
+        if provisional_summary and not self._debug_summary_already_committed(merged, provisional_summary):
+            merged.append(dict(provisional_summary))
+        return merged
+
+    def _build_flow_debug_points(self, provisional_summary: dict | None = None) -> list[dict]:
+        points = []
+        for row in list(getattr(self, "_flow_delay_summaries", []) or []):
+            x_us = self._debug_delay_us(dict(row or {}).get("delay_from_emergence_us"))
+            y_nl = self._debug_float(dict(row or {}).get("median_visible_volume_nl"))
+            if x_us is None or y_nl is None:
+                continue
+            points.append({"x_us": int(x_us), "y_nl": float(y_nl), "provisional": False})
+        if provisional_summary and not self._debug_summary_already_committed(
+            getattr(self, "_flow_delay_summaries", []) or [],
+            provisional_summary,
+        ):
+            x_us = self._debug_delay_us(provisional_summary.get("delay_from_emergence_us"))
+            y_nl = self._debug_float(provisional_summary.get("median_visible_volume_nl"))
+            if x_us is not None and y_nl is not None:
+                points.append({"x_us": int(x_us), "y_nl": float(y_nl), "provisional": True})
+        points.sort(key=lambda row: int(row["x_us"]))
+        return points
+
+    def _build_tail_debug_points(
+        self,
+        committed_summaries: list[dict] | None,
+        provisional_summary: dict | None = None,
+    ) -> list[dict]:
+        points = []
+        committed_rows = [dict(row or {}) for row in list(committed_summaries or [])]
+        for row in committed_rows:
+            x_us = self._debug_delay_us(row.get("delay_from_emergence_us"))
+            y_px = self._debug_float(row.get("median_width_px"))
+            if x_us is None or y_px is None:
+                continue
+            points.append({"x_us": int(x_us), "y_px": float(y_px), "provisional": False})
+        if provisional_summary and not self._debug_summary_already_committed(committed_rows, provisional_summary):
+            x_us = self._debug_delay_us(provisional_summary.get("delay_from_emergence_us"))
+            y_px = self._debug_float(provisional_summary.get("median_width_px"))
+            if x_us is not None and y_px is not None:
+                points.append({"x_us": int(x_us), "y_px": float(y_px), "provisional": True})
+        points.sort(key=lambda row: int(row["x_us"]))
+        return points
+
+    def _current_flow_frame_point_payload(self) -> dict | None:
+        summary = dict(getattr(self, "_current_analysis_summary", {}) or {})
+        x_us = self._flow_delay_offset_from_emergence_us(getattr(self, "_current_delay_us", None))
+        y_nl = self._debug_float(summary.get("visible_volume_nl"))
+        if x_us is None or y_nl is None:
+            return None
+        return {
+            "x_us": int(x_us),
+            "y_nl": float(y_nl),
+            "accepted": bool(summary.get("measurement_qc_pass")),
+        }
+
+    def _current_tail_frame_point_payload(self) -> dict | None:
+        summary = dict(getattr(self, "_current_tail_analysis_summary", {}) or {})
+        x_us = self._flow_delay_offset_from_emergence_us(getattr(self, "_tail_current_delay_us", None))
+        y_px = self._debug_float(summary.get("attached_width_px"))
+        if x_us is None or y_px is None:
+            return None
+        return {
+            "x_us": int(x_us),
+            "y_px": float(y_px),
+            "accepted": bool(summary.get("tail_width_usable")),
+            "mode": "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout",
+        }
+
+    def _build_flow_debug_fit_payload(self, provisional_summary: dict | None = None) -> dict | None:
+        fit_result = dict(getattr(self, "_flow_fit_result", {}) or {})
+        if not fit_result:
+            try:
+                fit_result = dict(
+                    online_fit_mod.fit_online_stream_flow_phase(
+                        measurements=list(getattr(self, "_measurement_rows", []) or []),
+                        delay_summaries=self._merged_flow_debug_delay_summaries(provisional_summary),
+                    )
+                    or {}
+                )
+            except Exception:
+                fit_result = {}
+        if not fit_result:
+            return None
+        return {
+            "status": str(fit_result.get("fit_status") or "unresolved_no_fit"),
+            "slope_nl_per_us": self._debug_float(fit_result.get("flow_rate_nl_per_us")),
+            "intercept_nl": self._debug_float(fit_result.get("flow_intercept_nl")),
+            "x_start_us": self._debug_delay_us(fit_result.get("flow_fit_delay_start_from_emergence_us")),
+            "x_end_us": self._debug_delay_us(fit_result.get("flow_fit_delay_end_from_emergence_us")),
+        }
+
+    def _tail_debug_baseline_width_px(self):
+        baseline = None
+        if isinstance(getattr(self, "_tail_plan", None), dict):
+            baseline = getattr(self, "_tail_plan", {}).get("steady_width_baseline_px")
+        if baseline is None:
+            baseline = (dict(getattr(self, "_flow_fit_result", {}) or {})).get("steady_width_baseline_px")
+        if baseline is None:
+            baseline = (dict(getattr(self, "_flow_preview_fit_result", {}) or {})).get("steady_width_baseline_px")
+        return self._debug_float(baseline)
+
+    def _emit_online_stream_debug_payload(self, subphase: str):
+        flow_provisional_summary = self._build_provisional_flow_delay_summary()
+        tail_provisional_summary = self._build_provisional_tail_delay_summary()
+        tail_mode = "backtrack" if str(getattr(self, "_tail_mode", "scout") or "scout") == "backtrack" else "scout"
+        tail_start_x_us = None
+        if getattr(self, "_tail_start_delay_from_emergence_us", None) is not None:
+            tail_start_x_us = self._debug_delay_us(getattr(self, "_tail_start_delay_from_emergence_us", None))
+
+        payload = {
+            "phase_name": "online_stream_calibration",
+            "subphase": str(subphase),
+            "flow_plot": {
+                "points": self._build_flow_debug_points(flow_provisional_summary),
+                "current_frame_point": self._current_flow_frame_point_payload(),
+                "fit": self._build_flow_debug_fit_payload(flow_provisional_summary),
+            },
+            "tail_plot": {
+                "baseline_width_px": self._tail_debug_baseline_width_px(),
+                "scout_points": self._build_tail_debug_points(
+                    getattr(self, "_tail_scout_delay_summaries", []) or [],
+                    tail_provisional_summary if tail_mode == "scout" else None,
+                ),
+                "backtrack_points": self._build_tail_debug_points(
+                    getattr(self, "_tail_backtrack_delay_summaries", []) or [],
+                    tail_provisional_summary if tail_mode == "backtrack" else None,
+                ),
+                "current_frame_point": self._current_tail_frame_point_payload(),
+                "tail_start_x_us": tail_start_x_us,
+            },
+        }
+        try:
+            self.onlineStreamDebugUpdated.emit(payload)
+        except Exception:
+            pass
+
     def _flow_ci_target_met(self, fit_result: dict | None) -> bool:
         result = dict(fit_result or {})
         if str(result.get("fit_status") or "").startswith("unresolved"):
@@ -6769,6 +6984,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if self._stop_requested:
             self.finalize.emit()
             return
+        self._emit_online_stream_debug_payload("prepare")
         self.stageChanged.emit("Online stream calibration: preparing background capture")
         self._request_guarded_settings_update(
             {"num_droplets": 0},
@@ -7023,6 +7239,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             }
             self._current_delay_frame_rows.append(frame_row)
             self._append_flow_jsonl(self._frames_path, frame_row)
+            self._emit_online_stream_debug_payload("flow_rate")
             self.flowFrameAnalyzed.emit()
             return
 
@@ -7099,6 +7316,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             except Exception:
                 pass
 
+        self._emit_online_stream_debug_payload("flow_rate")
         self.flowFrameAnalyzed.emit()
 
     @Slot()
@@ -7115,6 +7333,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         if not close_delay:
             self._flow_replicate_index += 1
+            self._emit_online_stream_debug_payload("flow_rate")
             self.repeatReplicate.emit()
             return
 
@@ -7143,6 +7362,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             if self._flow_termination_reason == "hard_budget_exhausted":
                 self._append_flow_warning("hard_budget_exhausted")
             self._refresh_plan_snapshot()
+            self._emit_online_stream_debug_payload("flow_rate")
             self.flowAcquisitionFinished.emit()
             return
 
@@ -7150,6 +7370,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._current_delay_us = None
         self._current_delay_frame_rows = []
         self._current_analysis_summary = {}
+        self._emit_online_stream_debug_payload("flow_rate")
         self.nextDelay.emit()
 
     def _write_flow_fit_artifact(self):
@@ -7326,6 +7547,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     include_tail_warnings=False,
                 )
             )
+            self._emit_online_stream_debug_payload("flow_fit")
         except Exception as e:
             self._queue_terminal_outcome_after_restore(
                 "error",
@@ -7595,6 +7817,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             }
             self._tail_current_delay_frame_rows.append(frame_row)
             self._append_flow_jsonl(self._frames_path, frame_row)
+            self._emit_online_stream_debug_payload(self._tail_phase_label())
             self.tailFrameAnalyzed.emit()
             return
 
@@ -7683,6 +7906,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             except Exception:
                 pass
 
+        self._emit_online_stream_debug_payload(self._tail_phase_label())
         self.tailFrameAnalyzed.emit()
 
     @Slot()
@@ -7695,6 +7919,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         close_delay = int(self._tail_replicate_index + 1) >= int(replicates_per_delay)
         if not close_delay:
             self._tail_replicate_index += 1
+            self._emit_online_stream_debug_payload(self._tail_phase_label())
             self.repeatTailReplicate.emit()
             return
 
@@ -7727,6 +7952,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             if action == "continue":
                 self._tail_delay_index += 1
                 self._reset_tail_delay_cursor()
+                self._emit_online_stream_debug_payload(self._tail_phase_label())
                 self.nextTailDelay.emit()
                 return
             if action == "switch_to_backtrack":
@@ -7761,8 +7987,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     self._tail_phase_status = ""
                     self._tail_termination_reason = ""
                     self._resolve_tail_phase()
+                    self._emit_online_stream_debug_payload("tail_backtrack")
                     self.tailPhaseFinished.emit()
                     return
+                self._emit_online_stream_debug_payload("tail_backtrack")
                 self.nextTailDelay.emit()
                 return
 
@@ -7771,6 +7999,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             if self._tail_termination_reason:
                 self._append_tail_warning(self._tail_termination_reason)
             self._resolve_tail_phase()
+            self._emit_online_stream_debug_payload(self._tail_phase_label())
             self.tailPhaseFinished.emit()
             return
 
@@ -7786,6 +8015,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if action == "continue":
             self._tail_delay_index += 1
             self._reset_tail_delay_cursor()
+            self._emit_online_stream_debug_payload(self._tail_phase_label())
             self.nextTailDelay.emit()
             return
 
@@ -7794,6 +8024,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if self._tail_termination_reason:
             self._append_tail_warning(self._tail_termination_reason)
         self._resolve_tail_phase()
+        self._emit_online_stream_debug_payload(self._tail_phase_label())
         self.tailPhaseFinished.emit()
 
     def _build_restore_settings(self) -> dict:
@@ -7910,6 +8141,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "warnings": list(result.get("warnings") or []),
             },
         )
+        self._emit_online_stream_debug_payload("completed")
         self.calibrationDataUpdated.emit(payload)
         self.stageChanged.emit("Online stream calibration complete")
         self.calibrationCompleted.emit()

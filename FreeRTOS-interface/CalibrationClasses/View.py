@@ -1311,6 +1311,43 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         info_panel_v.addWidget(self.bridge_group, 1)
 
+        self.diff_widget = QWidget()
+        self.diff_layout = QGridLayout(self.diff_widget)
+        self.diff_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        motor_label = QLabel('Motor')
+        current_label = QLabel('Current')
+        target_label = QLabel('Diff')
+        motor_label.setAlignment(Qt.AlignCenter)
+        current_label.setAlignment(Qt.AlignCenter)
+        target_label.setAlignment(Qt.AlignCenter)
+        self.diff_layout.addWidget(motor_label, 0, 0)
+        self.diff_layout.addWidget(current_label, 0, 1)
+        self.diff_layout.addWidget(target_label, 0, 2)
+
+        self.diff_labels = {
+            'X': {'current': QLabel('0'), 'diff': QLabel('0')},
+            'Y': {'current': QLabel('0'), 'diff': QLabel('0')},
+            'Z': {'current': QLabel('0'), 'diff': QLabel('0')},
+        }
+        r = 1
+        for motor, positions in self.diff_labels.items():
+            ml = QLabel(motor); ml.setAlignment(Qt.AlignCenter)
+            positions['current'].setAlignment(Qt.AlignCenter)
+            positions['diff'].setAlignment(Qt.AlignCenter)
+            self.diff_layout.addWidget(ml,                 r, 0)
+            self.diff_layout.addWidget(positions['current'], r, 1)
+            self.diff_layout.addWidget(positions['diff'],   r, 2)
+            r += 1
+
+        self.machine_position_group = QtWidgets.QGroupBox("Machine Position")
+        self.machine_position_group.setObjectName("machine_position_group")
+        machine_position_v = QtWidgets.QVBoxLayout(self.machine_position_group)
+        machine_position_v.setContentsMargins(8, 8, 8, 8)
+        machine_position_v.setSpacing(6)
+        machine_position_v.addWidget(self.diff_widget)
+        info_panel_v.addWidget(self.machine_position_group)
+
         # --- Group 5: Calibration Status ---
         self.status_group = QtWidgets.QGroupBox("Calibration Status")
         self.status_group.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
@@ -1342,53 +1379,59 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.info_panel.adjustSize()
         self.control_panel.adjustSize()
 
-        # ---------- MIDDLE PANEL (image + motor positions): expands ----------
+        # ---------- MIDDLE PANEL (image + online debug plots): expands ----------
         self.analysis_layout = QtWidgets.QVBoxLayout()
+        self.analysis_layout.setContentsMargins(0, 0, 0, 0)
+        self.analysis_layout.setSpacing(10)
 
         self.image_label = QLabel("No image captured yet.")
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setFixedHeight(640)
-        self.image_label.setFixedWidth(480)
-        self.analysis_layout.addWidget(self.image_label)
+        self.image_label.setMinimumSize(480, 360)
+        self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.image_label.setStyleSheet("background-color: black; border: 1px solid #444; padding: 8px;")
+        self.analysis_layout.addWidget(self.image_label, 1)
 
-        # Motor diffs table (unchanged)
-        self.diff_widget = QWidget()
-        self.diff_layout = QGridLayout(self.diff_widget)
-        self.diff_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.online_stream_plot_container = QtWidgets.QWidget()
+        self.online_stream_plot_container.setObjectName("online_stream_plot_container")
+        self.online_stream_plot_container.setMinimumHeight(220)
+        self.online_stream_plot_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.MinimumExpanding,
+        )
+        plot_row = QtWidgets.QHBoxLayout(self.online_stream_plot_container)
+        plot_row.setContentsMargins(0, 0, 0, 0)
+        plot_row.setSpacing(10)
 
-        motor_label = QLabel('Motor')
-        current_label = QLabel('Current')
-        target_label = QLabel('Diff')
-        motor_label.setAlignment(Qt.AlignCenter)
-        current_label.setAlignment(Qt.AlignCenter)
-        target_label.setAlignment(Qt.AlignCenter)
-        self.diff_layout.addWidget(motor_label, 0, 0)
-        self.diff_layout.addWidget(current_label, 0, 1)
-        self.diff_layout.addWidget(target_label, 0, 2)
+        self._online_stream_flow_chart_bundle = self._create_online_stream_chart_bundle(
+            title="Visible Volume vs Time",
+            y_title="Visible Volume (nL)",
+        )
+        self.online_stream_flow_chart_view = self._online_stream_flow_chart_bundle["view"]
+        self.online_stream_flow_chart_view.setObjectName("online_stream_flow_chart_view")
+        plot_row.addWidget(self.online_stream_flow_chart_view, 1)
 
-        self.diff_labels = {
-            'X': {'current': QLabel('0'), 'diff': QLabel('0')},
-            'Y': {'current': QLabel('0'), 'diff': QLabel('0')},
-            'Z': {'current': QLabel('0'), 'diff': QLabel('0')},
-        }
-        r = 1
-        for motor, positions in self.diff_labels.items():
-            ml = QLabel(motor); ml.setAlignment(Qt.AlignCenter)
-            positions['current'].setAlignment(Qt.AlignCenter)
-            positions['diff'].setAlignment(Qt.AlignCenter)
-            self.diff_layout.addWidget(ml,                 r, 0)
-            self.diff_layout.addWidget(positions['current'], r, 1)
-            self.diff_layout.addWidget(positions['diff'],   r, 2)
-            r += 1
+        self._online_stream_tail_chart_bundle = self._create_online_stream_chart_bundle(
+            title="Attached Width vs Time",
+            y_title="Attached Width (px)",
+        )
+        self._online_stream_tail_chart_bundle["reference_series"].setPen(
+            self._make_chart_pen("light_gray", "#cfd8dc", width=2, style=Qt.DashLine)
+        )
+        self.online_stream_tail_chart_view = self._online_stream_tail_chart_bundle["view"]
+        self.online_stream_tail_chart_view.setObjectName("online_stream_tail_chart_view")
+        plot_row.addWidget(self.online_stream_tail_chart_view, 1)
 
-        self.analysis_layout.addWidget(self.diff_widget, alignment=Qt.AlignTop | Qt.AlignLeft)
+        self.online_stream_plot_container.hide()
+        self._online_stream_debug_active = False
+        self.analysis_layout.addWidget(self.online_stream_plot_container, 0)
 
         self.analysis_layout.addStretch(1)
 
         # Add panels to the main layout: left controls, middle image, right results.
         self.analysis_panel = QtWidgets.QWidget()
         self.analysis_panel.setLayout(self.analysis_layout)
-        self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
+        self.analysis_panel.setMinimumWidth(560)
+        self.analysis_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.layout.addWidget(self.control_panel_scroll, 0)
         self.layout.setStretchFactor(self.control_panel_scroll, 0)
         self.layout.addWidget(self.analysis_panel, 1)
@@ -1401,6 +1444,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
         self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
+        online_stream_debug_signal = getattr(self.model.calibration_manager, "onlineStreamDebugUpdated", None)
+        if online_stream_debug_signal is not None:
+            online_stream_debug_signal.connect(self.on_online_stream_debug_updated)
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
@@ -1868,12 +1914,245 @@ class DropletImagingDialog(QtWidgets.QDialog):
             0,
             self.width() - margins.left() - margins.right() - (2 * spacing),
         )
-        panel_width = max(int(self.image_label.width()), available_width // 3)
+        side_width = max(380, min(460, available_width // 4 if available_width > 0 else 380))
 
-        self.control_panel.setMinimumWidth(panel_width)
-        self.control_panel.setMaximumWidth(panel_width)
-        for panel in (self.control_panel_scroll, self.analysis_panel, self.info_panel):
-            panel.setFixedWidth(panel_width)
+        self.control_panel.setMinimumWidth(side_width)
+        self.control_panel.setMaximumWidth(side_width)
+        self.control_panel_scroll.setMinimumWidth(side_width)
+        self.control_panel_scroll.setMaximumWidth(side_width)
+        self.info_panel.setMinimumWidth(side_width)
+        self.info_panel.setMaximumWidth(side_width)
+        self.analysis_panel.setMinimumWidth(560)
+        self.analysis_panel.setMaximumWidth(16777215)
+        self.analysis_panel.updateGeometry()
+
+    def _chart_color(self, key, fallback):
+        return QColor(self.color_dict.get(key, fallback))
+
+    def _make_chart_pen(self, color_key, fallback, *, width=2, style=Qt.SolidLine):
+        pen = QPen(self._chart_color(color_key, fallback))
+        pen.setWidth(width)
+        pen.setStyle(style)
+        return pen
+
+    def _create_online_stream_chart_bundle(self, *, title: str, y_title: str):
+        chart = QtCharts.QChart()
+        chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        chart.setTitle(title)
+        chart.setBackgroundBrush(QBrush(self._chart_color("darker_gray", "#242424")))
+        chart.legend().hide()
+
+        axis_x = QtCharts.QValueAxis()
+        axis_x.setTitleText("Delay From Emergence (us)")
+        axis_x.setLabelFormat("%.0f")
+        axis_y = QtCharts.QValueAxis()
+        axis_y.setTitleText(y_title)
+        axis_y.setLabelFormat("%.2f")
+        chart.addAxis(axis_x, Qt.AlignBottom)
+        chart.addAxis(axis_y, Qt.AlignLeft)
+
+        primary_series = QtCharts.QLineSeries()
+        primary_series.setPen(self._make_chart_pen("light_blue", "#6fb6ff", width=2))
+        secondary_series = QtCharts.QLineSeries()
+        secondary_series.setPen(self._make_chart_pen("teal", "#2aa198", width=2, style=Qt.DashLine))
+        current_series = QtCharts.QScatterSeries()
+        current_series.setMarkerSize(11.0)
+        current_series.setBorderColor(self._chart_color("light_gray", "#cfd8dc"))
+        current_series.setColor(self._chart_color("green", "#2ecc71"))
+        reference_series = QtCharts.QLineSeries()
+        reference_series.setPen(self._make_chart_pen("orange", "#f39c12", width=2))
+        marker_series = QtCharts.QLineSeries()
+        marker_series.setPen(self._make_chart_pen("yellow", "#f1c40f", width=2, style=Qt.DashLine))
+
+        for series in (primary_series, secondary_series, current_series, reference_series, marker_series):
+            chart.addSeries(series)
+            series.attachAxis(axis_x)
+            series.attachAxis(axis_y)
+
+        view = QtCharts.QChartView(chart)
+        view.setRenderHint(QPainter.Antialiasing)
+        view.setFocusPolicy(QtCore.Qt.NoFocus)
+        view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+
+        return {
+            "chart": chart,
+            "view": view,
+            "axis_x": axis_x,
+            "axis_y": axis_y,
+            "primary_series": primary_series,
+            "secondary_series": secondary_series,
+            "current_series": current_series,
+            "reference_series": reference_series,
+            "marker_series": marker_series,
+        }
+
+    @staticmethod
+    def _replace_xy_series(series, points):
+        series.clear()
+        for x_value, y_value in list(points or []):
+            series.append(float(x_value), float(y_value))
+
+    def _set_online_stream_axis_range(self, axis_x, axis_y, *, xs, ys):
+        x_values = [float(value) for value in list(xs or [])]
+        y_values = [float(value) for value in list(ys or [])]
+
+        if x_values:
+            x_min = min(x_values)
+            x_max = max(x_values)
+            if x_min == x_max:
+                x_pad = max(1.0, abs(x_min) * 0.10)
+            else:
+                x_pad = max(1.0, (x_max - x_min) * 0.08)
+            axis_x.setRange(float(x_min - x_pad), float(x_max + x_pad))
+        else:
+            axis_x.setRange(0.0, 1.0)
+
+        if y_values:
+            y_min = min(y_values)
+            y_max = max(y_values)
+            if y_min == y_max:
+                y_pad = max(0.5, abs(y_min) * 0.10 if y_min else 0.5)
+            else:
+                y_pad = max(0.5, (y_max - y_min) * 0.12)
+            axis_y.setRange(float(min(0.0, y_min - y_pad)), float(y_max + y_pad))
+        else:
+            axis_y.setRange(0.0, 1.0)
+
+    def _clear_online_stream_chart_bundle(self, bundle):
+        for key in ("primary_series", "secondary_series", "current_series", "reference_series", "marker_series"):
+            bundle[key].clear()
+        bundle["axis_x"].setRange(0.0, 1.0)
+        bundle["axis_y"].setRange(0.0, 1.0)
+
+    def _reset_online_stream_debug_view(self, *, hide=True):
+        if hasattr(self, "_online_stream_flow_chart_bundle"):
+            self._clear_online_stream_chart_bundle(self._online_stream_flow_chart_bundle)
+        if hasattr(self, "_online_stream_tail_chart_bundle"):
+            self._clear_online_stream_chart_bundle(self._online_stream_tail_chart_bundle)
+        self._online_stream_debug_active = False
+        if hide and hasattr(self, "online_stream_plot_container"):
+            self.online_stream_plot_container.hide()
+
+    def _update_online_stream_flow_chart(self, flow_plot: dict | None):
+        plot = dict(flow_plot or {})
+        bundle = self._online_stream_flow_chart_bundle
+        point_rows = [dict(row or {}) for row in list(plot.get("points") or [])]
+        committed_points = [
+            (float(row["x_us"]), float(row["y_nl"]))
+            for row in point_rows
+            if row.get("x_us") is not None and row.get("y_nl") is not None and not bool(row.get("provisional"))
+        ]
+        provisional_points = [
+            (float(row["x_us"]), float(row["y_nl"]))
+            for row in point_rows
+            if row.get("x_us") is not None and row.get("y_nl") is not None and bool(row.get("provisional"))
+        ]
+        current_point = dict(plot.get("current_frame_point") or {})
+        current_points = []
+        if current_point.get("x_us") is not None and current_point.get("y_nl") is not None:
+            current_points = [(float(current_point["x_us"]), float(current_point["y_nl"]))]
+            current_color = self._chart_color(
+                "green" if bool(current_point.get("accepted")) else "dark_red",
+                "#2ecc71" if bool(current_point.get("accepted")) else "#c0392b",
+            )
+            bundle["current_series"].setColor(current_color)
+            bundle["current_series"].setBorderColor(current_color)
+
+        fit = dict(plot.get("fit") or {})
+        fit_points = []
+        if (
+            fit.get("x_start_us") is not None
+            and fit.get("x_end_us") is not None
+            and fit.get("slope_nl_per_us") is not None
+            and fit.get("intercept_nl") is not None
+        ):
+            x_start = float(fit["x_start_us"])
+            x_end = float(fit["x_end_us"])
+            slope = float(fit["slope_nl_per_us"])
+            intercept = float(fit["intercept_nl"])
+            fit_points = [
+                (x_start, intercept + (slope * x_start)),
+                (x_end, intercept + (slope * x_end)),
+            ]
+
+        self._replace_xy_series(bundle["primary_series"], committed_points)
+        self._replace_xy_series(bundle["secondary_series"], provisional_points)
+        self._replace_xy_series(bundle["current_series"], current_points)
+        self._replace_xy_series(bundle["reference_series"], fit_points)
+        self._replace_xy_series(bundle["marker_series"], [])
+
+        all_xs = [x for x, _ in committed_points + provisional_points + current_points + fit_points]
+        all_ys = [y for _, y in committed_points + provisional_points + current_points + fit_points]
+        self._set_online_stream_axis_range(bundle["axis_x"], bundle["axis_y"], xs=all_xs, ys=all_ys)
+
+    def _update_online_stream_tail_chart(self, tail_plot: dict | None):
+        plot = dict(tail_plot or {})
+        bundle = self._online_stream_tail_chart_bundle
+        scout_points = [
+            (float(row["x_us"]), float(row["y_px"]))
+            for row in list(plot.get("scout_points") or [])
+            if dict(row or {}).get("x_us") is not None and dict(row or {}).get("y_px") is not None
+        ]
+        backtrack_points = [
+            (float(row["x_us"]), float(row["y_px"]))
+            for row in list(plot.get("backtrack_points") or [])
+            if dict(row or {}).get("x_us") is not None and dict(row or {}).get("y_px") is not None
+        ]
+        current_point = dict(plot.get("current_frame_point") or {})
+        current_points = []
+        if current_point.get("x_us") is not None and current_point.get("y_px") is not None:
+            current_points = [(float(current_point["x_us"]), float(current_point["y_px"]))]
+            current_color = self._chart_color(
+                "green" if bool(current_point.get("accepted")) else "dark_red",
+                "#2ecc71" if bool(current_point.get("accepted")) else "#c0392b",
+            )
+            bundle["current_series"].setColor(current_color)
+            bundle["current_series"].setBorderColor(current_color)
+
+        baseline_width_px = plot.get("baseline_width_px")
+        tail_start_x_us = plot.get("tail_start_x_us")
+        all_xs = [x for x, _ in scout_points + backtrack_points + current_points]
+        if tail_start_x_us is not None:
+            all_xs.append(float(tail_start_x_us))
+        all_ys = [y for _, y in scout_points + backtrack_points + current_points]
+        if baseline_width_px is not None:
+            all_ys.append(float(baseline_width_px))
+
+        self._set_online_stream_axis_range(bundle["axis_x"], bundle["axis_y"], xs=all_xs, ys=all_ys)
+
+        x_min = bundle["axis_x"].min()
+        x_max = bundle["axis_x"].max()
+        y_min = bundle["axis_y"].min()
+        y_max = bundle["axis_y"].max()
+
+        baseline_points = []
+        if baseline_width_px is not None:
+            baseline_points = [(x_min, float(baseline_width_px)), (x_max, float(baseline_width_px))]
+        tail_start_points = []
+        if tail_start_x_us is not None:
+            tail_start_points = [(float(tail_start_x_us), y_min), (float(tail_start_x_us), y_max)]
+
+        self._replace_xy_series(bundle["primary_series"], scout_points)
+        self._replace_xy_series(bundle["secondary_series"], backtrack_points)
+        self._replace_xy_series(bundle["current_series"], current_points)
+        self._replace_xy_series(bundle["reference_series"], baseline_points)
+        self._replace_xy_series(bundle["marker_series"], tail_start_points)
+
+    def on_online_stream_debug_updated(self, payload):
+        data = dict(payload or {})
+        if str(data.get("phase_name") or "") != "online_stream_calibration":
+            return
+        self._online_stream_debug_active = True
+        self.online_stream_plot_container.show()
+        if str(data.get("subphase") or "") == "prepare":
+            self._clear_online_stream_chart_bundle(self._online_stream_flow_chart_bundle)
+            self._clear_online_stream_chart_bundle(self._online_stream_tail_chart_bundle)
+        self._update_online_stream_flow_chart(data.get("flow_plot"))
+        self._update_online_stream_tail_chart(data.get("tail_plot"))
+
+    def _maybe_hide_online_stream_debug_for_nonstream_preview(self):
+        if getattr(self, "_online_stream_debug_active", False) and not self._is_online_stream_calibration_active():
+            self._reset_online_stream_debug_view(hide=True)
     
     def numpy_to_qimage(self,image):
         """
@@ -4135,6 +4414,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.image_label.setText("No image captured yet.")
             return
 
+        self._maybe_hide_online_stream_debug_for_nonstream_preview()
+
         # 2) Convert it to QImage
         qimage = self.numpy_to_qimage(image)
 
@@ -4156,6 +4437,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Display the analyzed image.
         """
+        self._maybe_hide_online_stream_debug_for_nonstream_preview()
         qimage = self.numpy_to_qimage(image)
         pixmap = QPixmap.fromImage(qimage)
         scaled_pixmap = pixmap.scaled(
@@ -4170,6 +4452,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """Handle the closing of the dialog."""
         self._stream_capture_dialog_closing = True
         self._close_stream_capture_mass_dialog()
+        self._reset_online_stream_debug_view(hide=True)
         self.camera_timer.stop()
         try:
             self.controller.set_droplet_capture_profile("default")

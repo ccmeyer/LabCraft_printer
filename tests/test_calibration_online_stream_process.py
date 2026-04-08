@@ -168,6 +168,7 @@ def _flow_proc(tmp_path: Path):
     proc.nextTailDelay = Recorder()
     proc.tailPhaseFinished = Recorder()
     proc.finalize = Recorder()
+    proc.onlineStreamDebugUpdated = Recorder()
     proc._restored_settings = False
     proc._flow_fit_result = {}
     proc._flow_fit_warnings = []
@@ -300,6 +301,79 @@ def _seed_tail_flow_context(proc, *, fit_status: str = "ok", steady_width_baseli
     ]
 
 
+def _accepted_flow_frame_row(proc, offset_us: int, *, visible_volume_nl: float, width_px: float = 74.0):
+    delay_us = int(proc.emergence_time_us) + int(offset_us)
+    return calibration_model.online_cal_mod.build_online_stream_frame_row(
+        phase="flow_rate",
+        status="accepted",
+        delay_us=delay_us,
+        delay_from_emergence_us=int(offset_us),
+        replicate_index=1,
+        qc={
+            "measurement_qc_pass": True,
+            "nozzle_qc_pass": True,
+            "silhouette_qc_pass": True,
+        },
+        warnings=[],
+        silhouette_status="ok",
+        failure_reason=None,
+        attached_width_px=float(width_px),
+        visible_volume_nl=float(visible_volume_nl),
+        attached_bottom_clearance_px=180.0,
+        min_accepted_fluid_distance_from_bottom_px=180.0,
+        accepted_component_count=1,
+        accepted_detached_component_count=0,
+        detached_near_bottom_warning=False,
+        near_nozzle_detached_warning=False,
+        late_frame_warning=False,
+        attached_bottom_guard_hit=False,
+    )
+
+
+def _accepted_tail_frame_row(
+    proc,
+    offset_us: int,
+    *,
+    phase: str,
+    width_px: float,
+    visible_volume_nl: float = 14.0,
+    landmark: bool = False,
+):
+    delay_us = int(proc.emergence_time_us) + int(offset_us)
+    return calibration_model.online_cal_mod.build_online_stream_frame_row(
+        phase=str(phase),
+        status="accepted",
+        delay_us=delay_us,
+        delay_from_emergence_us=int(offset_us),
+        replicate_index=1,
+        qc={
+            "measurement_qc_pass": True,
+            "nozzle_qc_pass": True,
+            "silhouette_qc_pass": True,
+            "tail_qc_pass": True,
+            "tail_width_usable": True,
+            "tail_landmark_usable": bool(landmark),
+        },
+        warnings=[],
+        silhouette_status="ok",
+        failure_reason=None,
+        attached_width_px=float(width_px),
+        visible_volume_nl=float(visible_volume_nl),
+        attached_bottom_clearance_px=180.0,
+        min_accepted_fluid_distance_from_bottom_px=180.0,
+        accepted_component_count=1,
+        accepted_detached_component_count=0,
+        tail_width_usable=True,
+        separated_from_nozzle_landmark=bool(landmark),
+        tail_landmark_usable=bool(landmark),
+        landmark_reason="separated_from_nozzle" if landmark else None,
+        detached_near_bottom_warning=False,
+        near_nozzle_detached_warning=False,
+        late_frame_warning=False,
+        attached_bottom_guard_hit=False,
+    )
+
+
 def test_online_stream_missing_requirements_reports_all_dependencies():
     cm = _ready_cm()
     cm.get_record_mode_enabled = lambda: False
@@ -368,6 +442,20 @@ def test_controller_start_online_stream_calibration_forwards_to_manager():
     Controller.start_online_stream_calibration(controller)
 
     assert called["count"] == 1
+
+
+def test_calibration_manager_rebroadcasts_online_stream_debug_payload():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr.onlineStreamDebugUpdated = Recorder()
+
+    CalibrationManager.onOnlineStreamDebugUpdated(
+        mgr,
+        {"phase_name": "online_stream_calibration", "subphase": "prepare"},
+    )
+
+    payload = mgr.onlineStreamDebugUpdated.calls[-1][0][0]
+    assert payload["phase_name"] == "online_stream_calibration"
+    assert payload["subphase"] == "prepare"
 
 
 def test_emit_readiness_includes_online_stream_calibration():
@@ -978,6 +1066,77 @@ def test_online_stream_analyze_flow_frame_records_rejected_frame_without_measure
     assert payload["warnings"] == ["silhouette_qc_failed"]
 
 
+def test_online_stream_debug_signal_emits_provisional_flow_point_and_fit(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_preview_fit_result = {"sentinel": True}
+
+    for offset_us in range(650, 1200, 50):
+        volume_nl = 0.01 * float(offset_us)
+        proc._flow_delay_summaries.append(
+            calibration_model.online_cal_mod.summarize_online_stream_flow_delay(
+                [_accepted_flow_frame_row(proc, offset_us, visible_volume_nl=volume_nl)]
+            )
+        )
+        proc._measurement_rows.append(
+            calibration_model.online_cal_mod.build_online_stream_measurement_row(
+                phase="flow_rate",
+                delay_us=int(proc.emergence_time_us) + int(offset_us),
+                delay_from_emergence_us=int(offset_us),
+                replicate_index=1,
+                width_px=74.0,
+                visible_volume_nl=volume_nl,
+                qc_pass=True,
+                image_ref={},
+                nozzle_qc_pass=True,
+                silhouette_qc_pass=True,
+                attached_bottom_clearance_px=180.0,
+            )
+        )
+
+    open_offset_us = 1200
+    open_volume_nl = 0.01 * float(open_offset_us)
+    proc._current_delay_us = int(proc.emergence_time_us) + int(open_offset_us)
+    proc._current_delay_frame_rows = [
+        _accepted_flow_frame_row(proc, open_offset_us, visible_volume_nl=open_volume_nl)
+    ]
+    proc._measurement_rows.append(
+        calibration_model.online_cal_mod.build_online_stream_measurement_row(
+            phase="flow_rate",
+            delay_us=int(proc.emergence_time_us) + int(open_offset_us),
+            delay_from_emergence_us=int(open_offset_us),
+            replicate_index=1,
+            width_px=74.0,
+            visible_volume_nl=open_volume_nl,
+            qc_pass=True,
+            image_ref={},
+            nozzle_qc_pass=True,
+            silhouette_qc_pass=True,
+            attached_bottom_clearance_px=180.0,
+        )
+    )
+    proc._current_analysis_summary = {
+        "visible_volume_nl": open_volume_nl,
+        "measurement_qc_pass": True,
+    }
+
+    proc._emit_online_stream_debug_payload("flow_rate")
+
+    payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+    flow_plot = payload["flow_plot"]
+    assert payload["phase_name"] == "online_stream_calibration"
+    assert payload["subphase"] == "flow_rate"
+    assert len(flow_plot["points"]) == 12
+    assert flow_plot["points"][-1]["x_us"] == open_offset_us
+    assert flow_plot["points"][-1]["provisional"] is True
+    assert flow_plot["current_frame_point"] == {
+        "x_us": open_offset_us,
+        "y_nl": open_volume_nl,
+        "accepted": True,
+    }
+    assert flow_plot["fit"] is not None
+    assert proc._flow_preview_fit_result == {"sentinel": True}
+
+
 def test_online_stream_advance_flow_phase_uses_bottom_guard_as_right_boundary_signal(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._current_delay_frame_rows = [
@@ -1462,6 +1621,65 @@ def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_w
     lines = Path(proc._frames_path).read_text(encoding="utf-8").strip().splitlines()
     payload = json.loads(lines[0])
     assert payload["status"] == "accepted"
+
+
+def test_online_stream_debug_signal_emits_provisional_tail_width_points(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=73.5)],
+            74.0,
+        )
+    ]
+    proc._tail_current_delay_us = int(proc.emergence_time_us) + 1750
+    proc._tail_current_delay_frame_rows = [
+        _accepted_tail_frame_row(proc, 1750, phase="tail_scout", width_px=69.5)
+    ]
+    proc._current_tail_analysis_summary = {
+        "attached_width_px": 69.5,
+        "tail_width_usable": True,
+    }
+
+    proc._emit_online_stream_debug_payload("tail_scout")
+
+    payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+    tail_plot = payload["tail_plot"]
+    assert payload["subphase"] == "tail_scout"
+    assert tail_plot["baseline_width_px"] == 74.0
+    assert len(tail_plot["scout_points"]) == 2
+    assert tail_plot["scout_points"][-1]["x_us"] == 1750
+    assert tail_plot["scout_points"][-1]["provisional"] is True
+    assert tail_plot["current_frame_point"] == {
+        "x_us": 1750,
+        "y_px": 69.5,
+        "accepted": True,
+        "mode": "scout",
+    }
+    assert tail_plot["tail_start_x_us"] is None
+
+
+def test_online_stream_debug_signal_publishes_final_tail_start_after_resolution(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_mode = "backtrack"
+    proc._tail_start_delay_from_emergence_us = 3950
+    proc._tail_backtrack_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 3550, phase="tail_backtrack", width_px=58.0)],
+            74.0,
+        )
+    ]
+
+    proc._emit_online_stream_debug_payload("completed")
+
+    payload = proc.onlineStreamDebugUpdated.calls[-1][0][0]
+    assert payload["subphase"] == "completed"
+    assert payload["tail_plot"]["tail_start_x_us"] == 3950
 
 
 def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_path):

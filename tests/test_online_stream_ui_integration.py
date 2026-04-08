@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import numpy as np
+
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
@@ -49,10 +51,14 @@ class _DropletCameraModelStub:
     def get_flash_fault_reason_display(self):
         return "None"
 
+    def get_original_image(self):
+        return np.full((120, 80), 180, dtype=np.uint8)
+
 
 class _CalibrationManagerStub:
     def __init__(self):
         self.analyzedImageUpdated = SignalStub()
+        self.onlineStreamDebugUpdated = SignalStub()
         self.calibrationStageChanged = SignalStub()
         self.calibrationCompleted = SignalStub()
         self.calibrationQueueCompleted = SignalStub()
@@ -271,5 +277,104 @@ def test_online_stream_running_process_keeps_stop_button_enabled_when_readiness_
 
     assert dialog.calibrate_online_stream_button.isEnabled() is True
     assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
+
+    dialog.deleteLater()
+
+
+def test_online_stream_debug_widgets_are_created_in_analysis_and_info_panels(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    assert dialog.online_stream_plot_container.objectName() == "online_stream_plot_container"
+    assert dialog.online_stream_flow_chart_view.objectName() == "online_stream_flow_chart_view"
+    assert dialog.online_stream_tail_chart_view.objectName() == "online_stream_tail_chart_view"
+    assert dialog.online_stream_plot_container.isHidden() is True
+    assert dialog.machine_position_group.objectName() == "machine_position_group"
+    assert dialog.machine_position_group.parentWidget() is dialog.info_panel
+
+    dialog.deleteLater()
+
+
+def test_online_stream_debug_payload_shows_plots_and_updates_chart_series(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "tail_backtrack",
+            "flow_plot": {
+                "points": [
+                    {"x_us": 650, "y_nl": 6.5, "provisional": False},
+                    {"x_us": 850, "y_nl": 8.5, "provisional": True},
+                ],
+                "current_frame_point": {"x_us": 850, "y_nl": 8.5, "accepted": True},
+                "fit": {
+                    "status": "ok",
+                    "slope_nl_per_us": 0.01,
+                    "intercept_nl": 0.0,
+                    "x_start_us": 650,
+                    "x_end_us": 850,
+                },
+            },
+            "tail_plot": {
+                "baseline_width_px": 74.0,
+                "scout_points": [{"x_us": 1550, "y_px": 73.0, "provisional": False}],
+                "backtrack_points": [{"x_us": 1750, "y_px": 61.0, "provisional": True}],
+                "current_frame_point": {
+                    "x_us": 1750,
+                    "y_px": 61.0,
+                    "accepted": True,
+                    "mode": "backtrack",
+                },
+                "tail_start_x_us": 1800,
+            },
+        }
+    )
+    qapp.processEvents()
+
+    assert dialog.online_stream_plot_container.isHidden() is False
+    assert dialog._online_stream_flow_chart_bundle["primary_series"].count() == 1
+    assert dialog._online_stream_flow_chart_bundle["secondary_series"].count() == 1
+    assert dialog._online_stream_flow_chart_bundle["current_series"].count() == 1
+    assert dialog._online_stream_flow_chart_bundle["reference_series"].count() == 2
+    assert dialog._online_stream_tail_chart_bundle["primary_series"].count() == 1
+    assert dialog._online_stream_tail_chart_bundle["secondary_series"].count() == 1
+    assert dialog._online_stream_tail_chart_bundle["reference_series"].count() == 2
+    assert dialog._online_stream_tail_chart_bundle["marker_series"].count() == 2
+
+    dialog.deleteLater()
+
+
+def test_online_stream_debug_plots_reset_when_nonstream_preview_replaces_center_image(monkeypatch, qapp):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "flow_rate",
+            "flow_plot": {
+                "points": [{"x_us": 650, "y_nl": 6.5, "provisional": False}],
+                "current_frame_point": {"x_us": 650, "y_nl": 6.5, "accepted": True},
+                "fit": None,
+            },
+            "tail_plot": {
+                "baseline_width_px": None,
+                "scout_points": [],
+                "backtrack_points": [],
+                "current_frame_point": None,
+                "tail_start_x_us": None,
+            },
+        }
+    )
+    qapp.processEvents()
+    assert dialog.online_stream_plot_container.isHidden() is False
+
+    manager.activeCalibration = None
+    dialog.display_analyzed_image(np.full((50, 50), 120, dtype=np.uint8))
+    qapp.processEvents()
+
+    assert dialog.online_stream_plot_container.isHidden() is True
+    assert dialog._online_stream_flow_chart_bundle["primary_series"].count() == 0
+    assert dialog._online_stream_tail_chart_bundle["primary_series"].count() == 0
 
     dialog.deleteLater()
