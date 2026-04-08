@@ -250,6 +250,21 @@ def analyze_online_stream_frame(
         near_nozzle_band_top_px=int(config["near_nozzle_band_top_px"]),
         near_nozzle_band_height_px=int(config["near_nozzle_band_height_px"]),
     )
+    tail_width_usable = bool(
+        silhouette_qc_pass
+        and nozzle_qc_pass
+        and attached_width_px is not None
+    )
+    separated_from_nozzle_landmark = bool(
+        silhouette_qc_pass
+        and cutoff_y_px is not None
+        and selected_component_top_y_px is not None
+        and int(selected_component_top_y_px) > int(cutoff_y_px) + int(config["near_nozzle_band_top_px"])
+    )
+    tail_landmark_usable = bool(
+        silhouette_qc_pass and separated_from_nozzle_landmark
+    )
+    landmark_reason = "separated_from_nozzle" if tail_landmark_usable else None
     attached_bottom_guard_hit = bool(
         attached_bottom_clearance_px is not None
         and int(attached_bottom_clearance_px) <= int(config["attached_bottom_guard_px"])
@@ -335,6 +350,10 @@ def analyze_online_stream_frame(
             "accepted_detached_component_count": stage3_metric_row.get(
                 "accepted_detached_component_count"
             ),
+            "tail_width_usable": bool(tail_width_usable),
+            "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
+            "tail_landmark_usable": bool(tail_landmark_usable),
+            "landmark_reason": landmark_reason,
             "detached_near_bottom_warning": bool(detached_warning),
             "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
             "late_frame_warning": bool(late_frame_warning),

@@ -5624,12 +5624,17 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
         self._tail_plan = {}
-        self._tail_mode = "coarse"
+        self._tail_mode = "scout"
         self._tail_delay_sequence = []
         self._tail_current_delay_us = None
         self._tail_delay_index = 0
         self._tail_replicate_index = 0
         self._tail_current_delay_frame_rows = []
+        self._tail_scout_delay_summaries = []
+        self._tail_backtrack_delay_summaries = []
+        self._tail_landmark_delay_us = None
+        self._tail_landmark_reason = None
+        self._tail_backtrack_left_delay_us = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -5967,60 +5972,48 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._tail_fit_warnings.append(warning_label)
 
     def _current_tail_replicates(self) -> int:
-        if str(self._tail_mode or "coarse") == "refine":
-            return int(self._tail_plan.get("refine_replicates") or 1)
-        return int(self._tail_plan.get("coarse_replicates") or 1)
+        if str(self._tail_mode or "scout") == "backtrack":
+            return int(self._tail_plan.get("backtrack_replicates") or 1)
+        return int(self._tail_plan.get("scout_replicates") or 1)
 
     def _tail_phase_label(self) -> str:
-        return "tail_refine" if str(self._tail_mode or "coarse") == "refine" else "tail_coarse"
+        return "tail_backtrack" if str(self._tail_mode or "scout") == "backtrack" else "tail_scout"
 
     def _tail_phase_display_label(self) -> str:
-        return "tail refine" if str(self._tail_mode or "coarse") == "refine" else "tail coarse"
+        return "tail backtrack" if str(self._tail_mode or "scout") == "backtrack" else "tail scout"
 
     def _current_flow_delay_count(self) -> int:
         return int(len(list(self.flow_plan.get("delays_us") or [])))
 
-    def _active_tail_coarse_start_delay_us(self):
-        if not isinstance(getattr(self, "_tail_plan", None), dict):
-            return None
-        value = self._tail_plan.get("retargeted_coarse_start_delay_us")
-        if value is None:
-            value = self._tail_plan.get("coarse_start_delay_us")
-        try:
-            return int(value)
-        except Exception:
-            return None
-
     def _planned_tail_delay_count(self) -> int:
-        if str(self._tail_mode or "coarse") == "refine":
+        if str(self._tail_mode or "scout") == "backtrack":
             return int(len(list(self._tail_delay_sequence or [])))
         try:
-            planned_count = self._tail_plan.get("planned_coarse_delay_count")
+            planned_count = self._tail_plan.get("planned_scout_delay_count")
             if planned_count not in (None, "", 0):
                 return int(planned_count)
         except Exception:
             pass
         return int(len(list(self._tail_delay_sequence or [])))
 
-    def _reset_tail_delay_cursor(self):
-        self._tail_delay_index = 0
+    def _reset_tail_delay_cursor(self, *, reset_index: bool = False):
+        if bool(reset_index):
+            self._tail_delay_index = 0
         self._tail_replicate_index = 0
         self._tail_current_delay_us = None
         self._tail_current_delay_frame_rows = []
         self._current_tail_analysis_summary = {}
 
-    def _build_tail_coarse_delay_sequence(self, coarse_start_delay_us: int | None = None) -> list[int]:
-        planned_count = int(self._tail_plan.get("planned_coarse_delay_count") or 0)
-        coarse_step_us = int(self._tail_plan.get("coarse_step_us") or 100)
-        start_delay_us = coarse_start_delay_us
-        if start_delay_us is None:
-            start_delay_us = self._active_tail_coarse_start_delay_us()
+    def _build_tail_scout_delay_sequence(self) -> list[int]:
+        planned_count = int(self._tail_plan.get("planned_scout_delay_count") or 0)
+        scout_step_us = int(self._tail_plan.get("scout_step_us") or 500)
+        start_delay_us = self._tail_plan.get("scout_first_delay_us")
         try:
             start_delay_us = int(start_delay_us)
         except Exception:
             return []
         existing_delay_us = set()
-        for summary in list(getattr(self, "_tail_coarse_delay_summaries", []) or []):
+        for summary in list(getattr(self, "_tail_scout_delay_summaries", []) or []):
             try:
                 delay_us = int(dict(summary or {}).get("delay_us"))
             except Exception:
@@ -6028,42 +6021,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             existing_delay_us.add(delay_us)
         sequence = []
         for idx in range(int(max(0, planned_count))):
-            delay_us = int(start_delay_us + (idx * coarse_step_us))
+            delay_us = int(start_delay_us + (idx * scout_step_us))
             if delay_us in existing_delay_us:
                 continue
             sequence.append(int(delay_us))
         return sequence
 
-    def _recompute_tail_coarse_bracket(self):
-        trigger_candidates = []
-        nontrigger_delays = []
-        for row in list(getattr(self, "_tail_coarse_delay_summaries", []) or []):
-            summary = dict(row or {})
-            if not bool(summary.get("delay_accepted")):
-                continue
-            try:
-                delay_us = int(summary.get("delay_us"))
-            except Exception:
-                continue
-            if bool(summary.get("triggered_coarse")):
-                trigger_candidates.append((int(delay_us), dict(summary)))
-            else:
-                nontrigger_delays.append(int(delay_us))
-        if not trigger_candidates:
-            self._tail_trigger_delay_us = None
-            self._tail_trigger_reason = None
-            self._tail_last_nontrigger_delay_us = max(nontrigger_delays) if nontrigger_delays else None
-            return
-        trigger_candidates.sort(key=lambda item: item[0])
-        self._tail_trigger_delay_us = int(trigger_candidates[0][0])
-        trigger_summary = dict(trigger_candidates[0][1] or {})
-        self._tail_trigger_reason = str(trigger_summary.get("trigger_reason") or self._tail_trigger_reason or "")
-        eligible_nontriggers = [
-            int(delay_us)
-            for delay_us in nontrigger_delays
-            if int(delay_us) < int(self._tail_trigger_delay_us)
-        ]
-        self._tail_last_nontrigger_delay_us = max(eligible_nontriggers) if eligible_nontriggers else None
+    def _build_tail_backtrack_delay_sequence(self) -> list[int]:
+        return list(
+            online_tail_mod.build_online_stream_tail_backtrack_plan(
+                left_endpoint_delay_us=self._tail_backtrack_left_delay_us,
+                landmark_delay_us=self._tail_landmark_delay_us,
+                backtrack_step_us=int(self._tail_plan.get("backtrack_step_us") or 50),
+            )
+        )
 
     def _refresh_plan_snapshot(self):
         self._write_plan_snapshot(force=True)
@@ -6162,7 +6133,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "delay_us": int(self._tail_current_delay_us or 0),
                 "replicate_index": int(self._tail_replicate_index + 1),
                 "printed_capture_index": int(self._tail_attempted_capture_count),
-                "tail_mode": str(self._tail_mode or "coarse"),
+                "tail_mode": str(self._tail_mode or "scout"),
             },
         )
         self._current_tail_capture_ref = {}
@@ -6185,7 +6156,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                         "failure_reason": self._current_tail_capture_failure,
                         "delay_us": int(self._tail_current_delay_us or 0),
                         "replicate_index": int(self._tail_replicate_index + 1),
-                        "tail_mode": str(self._tail_mode or "coarse"),
+                        "tail_mode": str(self._tail_mode or "scout"),
                     },
                     level="warning",
                 )
@@ -6205,7 +6176,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     "pair_id": str(bg_ref.get("pair_id") or bg_ref.get("capture_id") or uuid.uuid4()),
                     "subtract_background_capture_id": bg_ref.get("capture_id"),
                     "subtract_background_image_relpath": bg_ref.get("image_relpath"),
-                    "tail_mode": str(self._tail_mode or "coarse"),
+                    "tail_mode": str(self._tail_mode or "scout"),
                 },
             ) or {}
             self._current_tail_capture_ref = dict(capture_ref)
@@ -6219,7 +6190,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     "status": "success",
                     "delay_us": int(self._tail_current_delay_us or 0),
                     "replicate_index": int(self._tail_replicate_index + 1),
-                    "tail_mode": str(self._tail_mode or "coarse"),
+                    "tail_mode": str(self._tail_mode or "scout"),
                     "capture_ref": dict(capture_ref),
                 },
             )
@@ -6313,12 +6284,17 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._flow_fit_result = {}
         self._flow_fit_warnings = []
         self._tail_plan = {}
-        self._tail_mode = "coarse"
+        self._tail_mode = "scout"
         self._tail_delay_sequence = []
         self._tail_current_delay_us = None
         self._tail_delay_index = 0
         self._tail_replicate_index = 0
         self._tail_current_delay_frame_rows = []
+        self._tail_scout_delay_summaries = []
+        self._tail_backtrack_delay_summaries = []
+        self._tail_landmark_delay_us = None
+        self._tail_landmark_reason = None
+        self._tail_backtrack_left_delay_us = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -6700,9 +6676,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             learned_flow_start_offset_us = None
         learned_tail_start_offset_us = None
         try:
-            learned_tail_start_offset_us = int(
-                resolved_tail_phase.get("tail_start_delay_from_emergence_us")
-            )
+            if str(resolved_tail_phase.get("status") or "") == "captured":
+                learned_tail_start_offset_us = int(
+                    resolved_tail_phase.get("tail_start_delay_from_emergence_us")
+                )
         except Exception:
             learned_tail_start_offset_us = None
         result_warnings = self._merged_online_stream_warnings(
@@ -6768,8 +6745,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             condition=self._build_condition(),
             tail_plan=dict(self._tail_plan or {}),
             steady_width_baseline_px=self._tail_plan.get("steady_width_baseline_px"),
-            coarse_delay_summaries=list(self._tail_coarse_delay_summaries),
-            refine_delay_summaries=list(self._tail_refine_delay_summaries),
+            scout_delay_summaries=list(self._tail_scout_delay_summaries),
+            backtrack_delay_summaries=list(self._tail_backtrack_delay_summaries),
             result=dict(self._tail_fit_result or {}),
             warnings=list(self._tail_fit_warnings),
         )
@@ -6781,17 +6758,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         resolve_result = online_tail_mod.resolve_online_stream_tail_result(
             flow_fit_result=dict(self._flow_fit_result or {}),
             tail_plan=dict(self._tail_plan or {}),
-            coarse_summaries=list(self._tail_coarse_delay_summaries),
-            refine_summaries=list(self._tail_refine_delay_summaries),
+            scout_summaries=list(self._tail_scout_delay_summaries),
+            backtrack_summaries=list(self._tail_backtrack_delay_summaries),
+            flow_delay_summaries=list(self._flow_delay_summaries),
             trigger_bracket={
-                "tail_phase_status": str(self._tail_phase_status or "unresolved_no_trigger"),
+                "tail_phase_status": "" if self._tail_phase_status is None else str(self._tail_phase_status),
                 "termination_reason": str(self._tail_termination_reason or ""),
-                "trigger_delay_us": self._tail_trigger_delay_us,
-                "last_nontrigger_delay_us": self._tail_last_nontrigger_delay_us,
-                "trigger_reason": self._tail_trigger_reason,
-                "synthetic_left_bracket_used": bool(self._tail_synthetic_left_bracket_used),
-                "tail_retarget_count": int(self._tail_plan.get("tail_retarget_count") or 0),
-                "retargeted_coarse_start_delay_us": self._tail_plan.get("retargeted_coarse_start_delay_us"),
+                "landmark_delay_us": self._tail_landmark_delay_us,
+                "backtrack_left_delay_us": self._tail_backtrack_left_delay_us,
+                "landmark_reason": self._tail_landmark_reason,
                 "warnings": list(self._tail_fit_warnings),
             },
         )
@@ -6820,15 +6795,21 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 priors=dict(self.priors or {}),
                 emergence_time_us=int(self.emergence_time_us),
                 capture_budget=dict(self.capture_budget or {}),
+                flow_delay_summaries=list(self._flow_delay_summaries),
             )
             or {}
         )
-        self._tail_mode = "coarse"
+        self._tail_mode = "scout"
         self._tail_delay_sequence = []
         self._tail_current_delay_us = None
         self._tail_delay_index = 0
         self._tail_replicate_index = 0
         self._tail_current_delay_frame_rows = []
+        self._tail_scout_delay_summaries = []
+        self._tail_backtrack_delay_summaries = []
+        self._tail_landmark_delay_us = None
+        self._tail_landmark_reason = None
+        self._tail_backtrack_left_delay_us = None
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -6861,10 +6842,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.tailPhaseFinished.emit()
             return
 
-        coarse_start_delay_us = int(self._tail_plan.get("coarse_start_delay_us") or 0)
-        coarse_step_us = int(self._tail_plan.get("coarse_step_us") or 100)
-        planned_coarse_delay_count = int(self._tail_plan.get("planned_coarse_delay_count") or 0)
-        if planned_coarse_delay_count <= 0:
+        planned_scout_delay_count = int(self._tail_plan.get("planned_scout_delay_count") or 0)
+        if planned_scout_delay_count <= 0:
             self._tail_phase_status = "unresolved_budget_exhausted"
             self._tail_termination_reason = "capture_budget_exhausted"
             self._append_tail_warning("capture_budget_exhausted")
@@ -6872,7 +6851,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.tailPhaseFinished.emit()
             return
 
-        self._tail_delay_sequence = self._build_tail_coarse_delay_sequence(coarse_start_delay_us)
+        self._tail_delay_sequence = self._build_tail_scout_delay_sequence()
         self.tailPlanReady.emit()
 
     @Slot()
@@ -6891,13 +6870,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         delays = list(self._tail_delay_sequence or [])
         if self._tail_delay_index >= len(delays):
-            if str(self._tail_mode or "coarse") == "refine" and self._tail_trigger_delay_us is not None:
-                self._tail_phase_status = "advisory_coarse_only"
-                self._tail_termination_reason = "coarse_trigger_fallback"
-                self._tail_trigger_reason = self._tail_trigger_reason or "coarse_width_frac_le_0.90"
+            if str(self._tail_mode or "scout") == "backtrack" and self._tail_landmark_delay_us is not None:
+                self._tail_phase_status = ""
+                self._tail_termination_reason = ""
             else:
-                self._tail_phase_status = "unresolved_no_trigger"
-                self._tail_termination_reason = "no_coarse_trigger"
+                self._tail_phase_status = "unresolved_no_landmark"
+                self._tail_termination_reason = "no_scout_landmark"
             self._resolve_tail_phase()
             self.tailPhaseFinished.emit()
             return
@@ -6989,6 +6967,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     "nozzle_qc_pass": False,
                     "silhouette_qc_pass": False,
                     "tail_qc_pass": False,
+                    "tail_width_usable": False,
+                    "tail_landmark_usable": False,
                 },
                 image_ref=capture_ref,
                 warnings=[str(self._current_tail_capture_failure or "capture_failed")],
@@ -7000,6 +6980,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 min_accepted_fluid_distance_from_bottom_px=None,
                 accepted_component_count=0,
                 accepted_detached_component_count=0,
+                tail_width_usable=False,
+                separated_from_nozzle_landmark=False,
+                tail_landmark_usable=False,
+                landmark_reason=None,
                 detached_near_bottom_warning=False,
                 near_nozzle_detached_warning=False,
                 late_frame_warning=False,
@@ -7008,6 +6992,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._current_tail_analysis_summary = {
                 "status": status,
                 "tail_qc_pass": False,
+                "tail_width_usable": False,
+                "tail_landmark_usable": False,
                 "warnings": list(frame_row.get("warnings") or []),
             }
             self._tail_current_delay_frame_rows.append(frame_row)
@@ -7027,11 +7013,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         summary = dict(analysis.get("summary") or {})
         overlay = analysis.get("overlay")
-        tail_qc_pass = bool(
-            str(summary.get("silhouette_status") or "") == "ok"
-            and bool(summary.get("nozzle_qc_pass"))
-            and summary.get("attached_width_px") is not None
-        )
+        tail_qc_pass = bool(summary.get("tail_width_usable"))
         status = "accepted" if tail_qc_pass else str(summary.get("status") or "rejected_tail_qc")
         frame_row = online_cal_mod.build_online_stream_frame_row(
             phase=phase_label,
@@ -7044,6 +7026,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 "nozzle_qc_pass": bool(summary.get("nozzle_qc_pass")),
                 "silhouette_qc_pass": bool(summary.get("silhouette_qc_pass")),
                 "tail_qc_pass": bool(tail_qc_pass),
+                "tail_width_usable": bool(summary.get("tail_width_usable")),
+                "tail_landmark_usable": bool(summary.get("tail_landmark_usable")),
             },
             image_ref=capture_ref,
             warnings=list(summary.get("warnings") or []),
@@ -7057,6 +7041,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             ),
             accepted_component_count=summary.get("accepted_component_count"),
             accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+            tail_width_usable=bool(summary.get("tail_width_usable")),
+            separated_from_nozzle_landmark=bool(summary.get("separated_from_nozzle_landmark")),
+            tail_landmark_usable=bool(summary.get("tail_landmark_usable")),
+            landmark_reason=summary.get("landmark_reason"),
             detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
             near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
             late_frame_warning=bool(summary.get("late_frame_warning")),
@@ -7117,102 +7105,72 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._tail_current_delay_frame_rows,
             self._tail_plan.get("steady_width_baseline_px"),
         )
-        if str(self._tail_mode or "coarse") == "refine":
-            self._tail_refine_delay_summaries.append(delay_summary)
+        if str(self._tail_mode or "scout") == "backtrack":
+            self._tail_backtrack_delay_summaries.append(delay_summary)
         else:
-            self._tail_coarse_delay_summaries.append(delay_summary)
+            self._tail_scout_delay_summaries.append(delay_summary)
         for warning in list(delay_summary.get("warnings") or []):
             self._append_tail_warning(str(warning))
 
-        if str(self._tail_mode or "coarse") == "coarse":
+        if str(self._tail_mode or "scout") == "scout":
             if bool(delay_summary.get("delay_accepted")):
                 self._tail_consecutive_failed_delays = 0
             else:
                 self._tail_consecutive_failed_delays += 1
-            self._recompute_tail_coarse_bracket()
 
             decision = online_tail_mod.decide_online_stream_tail_next_action(
-                mode="coarse",
+                mode="scout",
                 delay_summary=delay_summary,
                 capture_budget=self.capture_budget,
                 consecutive_failed_delays=int(self._tail_consecutive_failed_delays),
-                attempted_delay_count=int(len(self._tail_coarse_delay_summaries)),
+                attempted_delay_count=int(len(self._tail_scout_delay_summaries)),
                 planned_delay_count=int(self._planned_tail_delay_count()),
-                has_last_nontrigger=bool(self._tail_last_nontrigger_delay_us is not None),
-                current_delay_us=delay_summary.get("delay_us"),
-                coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
-                coarse_start_delay_us=self._active_tail_coarse_start_delay_us(),
-                tail_retarget_count=int(self._tail_plan.get("tail_retarget_count") or 0),
-                emergence_time_us=int(self.emergence_time_us),
             )
             action = str(decision.get("action") or "")
             if action == "continue":
                 self._tail_delay_index += 1
-                self._tail_replicate_index = 0
-                self._tail_current_delay_us = None
-                self._tail_current_delay_frame_rows = []
-                self._current_tail_analysis_summary = {}
+                self._reset_tail_delay_cursor()
                 self.nextTailDelay.emit()
                 return
-            if action == "retarget_coarse":
-                retargeted_start_delay_us = decision.get("retargeted_coarse_start_delay_us")
-                if retargeted_start_delay_us is not None:
-                    self._tail_plan["tail_retarget_count"] = int(
-                        decision.get("tail_retarget_count")
-                        or (int(self._tail_plan.get("tail_retarget_count") or 0) + 1)
-                    )
-                    self._tail_plan["retargeted_coarse_start_delay_us"] = int(retargeted_start_delay_us)
-                    self._tail_delay_sequence = self._build_tail_coarse_delay_sequence(
-                        int(retargeted_start_delay_us)
-                    )
-                else:
-                    self._tail_delay_sequence = self._build_tail_coarse_delay_sequence()
-                self._tail_delay_index = 0
-                self._tail_replicate_index = 0
-                self._tail_current_delay_us = None
-                self._tail_current_delay_frame_rows = []
-                self._current_tail_analysis_summary = {}
-                self.nextTailDelay.emit()
-                return
-            if action == "switch_to_refine":
-                if bool(decision.get("synthetic_left_bracket_used")):
-                    self._tail_synthetic_left_bracket_used = True
-                    if decision.get("synthetic_last_nontrigger_delay_us") is not None:
-                        self._tail_last_nontrigger_delay_us = decision.get(
-                            "synthetic_last_nontrigger_delay_us"
-                        )
-                    self._tail_plan["synthetic_left_bracket_used"] = True
-                    self._tail_plan["synthetic_left_bracket_delay_us"] = self._tail_last_nontrigger_delay_us
-                refine_delays = online_tail_mod.build_online_stream_tail_refine_plan(
-                    last_coarse_nontrigger_delay_us=self._tail_last_nontrigger_delay_us,
-                    first_coarse_trigger_delay_us=self._tail_trigger_delay_us,
-                    refine_step_us=int(self._tail_plan.get("refine_step_us") or 50),
-                    coarse_step_us=int(self._tail_plan.get("coarse_step_us") or 100),
-                    planned_coarse_start_delay_us=self._active_tail_coarse_start_delay_us(),
+            if action == "switch_to_backtrack":
+                try:
+                    self._tail_landmark_delay_us = int(delay_summary.get("delay_us"))
+                except Exception:
+                    self._tail_landmark_delay_us = None
+                self._tail_landmark_reason = str(
+                    decision.get("landmark_reason")
+                    or delay_summary.get("landmark_reason")
+                    or ""
+                ) or None
+                prior_scout_delays = sorted(
+                    int(dict(row or {}).get("delay_us"))
+                    for row in list(self._tail_scout_delay_summaries or [])[:-1]
+                    if dict(row or {}).get("delay_us") not in (None, "")
                 )
-                if not refine_delays:
-                    self._tail_phase_status = "advisory_coarse_only"
-                    self._tail_termination_reason = "coarse_trigger_fallback"
-                    self._tail_trigger_reason = str(
-                        decision.get("trigger_reason") or "coarse_width_frac_le_0.90"
-                    )
+                if prior_scout_delays:
+                    self._tail_backtrack_left_delay_us = int(prior_scout_delays[-1])
+                else:
+                    try:
+                        self._tail_backtrack_left_delay_us = int(
+                            self._tail_plan.get("scout_anchor_delay_us")
+                        )
+                    except Exception:
+                        self._tail_backtrack_left_delay_us = None
+                self._tail_mode = "backtrack"
+                self._tail_delay_sequence = self._build_tail_backtrack_delay_sequence()
+                self._tail_consecutive_failed_delays = 0
+                self._reset_tail_delay_cursor(reset_index=True)
+                if not list(self._tail_delay_sequence or []):
+                    self._tail_phase_status = ""
+                    self._tail_termination_reason = ""
                     self._resolve_tail_phase()
                     self.tailPhaseFinished.emit()
                     return
-                self._tail_mode = "refine"
-                self._tail_delay_sequence = list(refine_delays)
-                self._tail_delay_index = 0
-                self._tail_replicate_index = 0
-                self._tail_current_delay_us = None
-                self._tail_current_delay_frame_rows = []
-                self._current_tail_analysis_summary = {}
                 self.nextTailDelay.emit()
                 return
 
-            self._tail_phase_status = str(decision.get("tail_phase_status") or "unresolved_no_trigger")
+            self._tail_phase_status = str(decision.get("tail_phase_status") or "unresolved_no_landmark")
             self._tail_termination_reason = str(decision.get("termination_reason") or "")
-            if decision.get("trigger_reason"):
-                self._tail_trigger_reason = str(decision.get("trigger_reason"))
             if self._tail_termination_reason:
                 self._append_tail_warning(self._tail_termination_reason)
             self._resolve_tail_phase()
@@ -7220,27 +7178,22 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return
 
         decision = online_tail_mod.decide_online_stream_tail_next_action(
-            mode="refine",
+            mode="backtrack",
             delay_summary=delay_summary,
             capture_budget=self.capture_budget,
-            attempted_delay_count=int(len(self._tail_refine_delay_summaries)),
+            consecutive_failed_delays=int(self._tail_consecutive_failed_delays),
+            attempted_delay_count=int(len(self._tail_backtrack_delay_summaries)),
             planned_delay_count=int(len(self._tail_delay_sequence)),
-            coarse_trigger_reason=self._tail_trigger_reason,
         )
         action = str(decision.get("action") or "")
         if action == "continue":
             self._tail_delay_index += 1
-            self._tail_replicate_index = 0
-            self._tail_current_delay_us = None
-            self._tail_current_delay_frame_rows = []
-            self._current_tail_analysis_summary = {}
+            self._reset_tail_delay_cursor()
             self.nextTailDelay.emit()
             return
 
-        self._tail_phase_status = str(decision.get("tail_phase_status") or "captured")
+        self._tail_phase_status = str(decision.get("tail_phase_status") or "")
         self._tail_termination_reason = str(decision.get("termination_reason") or "")
-        if decision.get("trigger_reason"):
-            self._tail_trigger_reason = str(decision.get("trigger_reason"))
         if self._tail_termination_reason:
             self._append_tail_warning(self._tail_termination_reason)
         self._resolve_tail_phase()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_tail as mod
 
 
@@ -17,31 +16,67 @@ def _flow_fit_result(**overrides):
     return result
 
 
+def _flow_delay_summary(
+    *,
+    delay_us: int,
+    delay_from_emergence_us: int,
+    width_px: float = 74.0,
+    accepted: bool = True,
+):
+    accepted_replicates = 1 if accepted else 0
+    return {
+        "delay_us": int(delay_us),
+        "delay_from_emergence_us": int(delay_from_emergence_us),
+        "attempted_replicates": 1,
+        "accepted_replicates": accepted_replicates,
+        "rejected_replicates": 1 - accepted_replicates,
+        "median_width_px": float(width_px) if accepted else None,
+        "delay_accepted": bool(accepted),
+        "warnings": [],
+    }
+
+
 def _tail_frame_row(
     *,
     delay_us: int,
     delay_from_emergence_us: int,
-    status: str,
+    phase: str = "tail_scout",
+    status: str = "accepted",
     width_px=None,
+    tail_width_usable: bool | None = None,
+    separated_from_nozzle_landmark: bool = False,
+    tail_landmark_usable: bool | None = None,
     warnings=None,
     **extra,
 ):
+    if tail_width_usable is None:
+        tail_width_usable = bool(status == "accepted" and width_px is not None)
+    if tail_landmark_usable is None:
+        tail_landmark_usable = bool(status == "accepted" and separated_from_nozzle_landmark)
     row = {
-        "phase": "tail_coarse",
-        "status": status,
+        "phase": str(phase),
+        "status": str(status),
         "delay_us": int(delay_us),
         "delay_from_emergence_us": int(delay_from_emergence_us),
         "replicate_index": 1,
-        "qc": {"tail_qc_pass": status == "accepted"},
+        "qc": {
+            "tail_qc_pass": bool(tail_width_usable),
+            "tail_width_usable": bool(tail_width_usable),
+            "tail_landmark_usable": bool(tail_landmark_usable),
+        },
         "image_ref": {"capture_id": f"cap_{delay_us}"},
         "warnings": list(warnings or []),
         "attached_width_px": width_px,
+        "tail_width_usable": bool(tail_width_usable),
+        "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
+        "tail_landmark_usable": bool(tail_landmark_usable),
+        "landmark_reason": "separated_from_nozzle" if tail_landmark_usable else None,
     }
     row.update(dict(extra or {}))
     return row
 
 
-def test_plan_online_stream_tail_phase_uses_exact_prior_start_minus_lead():
+def test_plan_online_stream_tail_phase_anchors_on_last_accepted_flow_delay():
     plan = mod.plan_online_stream_tail_phase(
         flow_fit_result=_flow_fit_result(),
         priors={
@@ -49,409 +84,325 @@ def test_plan_online_stream_tail_phase_uses_exact_prior_start_minus_lead():
             "tail_start_offset_us": 4200,
             "tail_coarse_step_us": 125,
         },
-        emergence_time_us=1000,
+        emergence_time_us=3200,
         capture_budget={"captures_remaining_hard": 12},
+        flow_delay_summaries=[
+            _flow_delay_summary(delay_us=3850, delay_from_emergence_us=650),
+            _flow_delay_summary(delay_us=4050, delay_from_emergence_us=850),
+            _flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050),
+        ],
     )
 
     assert plan["run_tail"] is True
-    assert plan["coarse_start_delay_us"] == 4800
-    assert plan["coarse_step_us"] == 125
-    assert plan["plan_source"] == "exact_prior_minus_lead"
-
-
-def test_plan_online_stream_tail_phase_falls_back_to_emergence_plus_3600():
-    plan = mod.plan_online_stream_tail_phase(
-        flow_fit_result=_flow_fit_result(),
-        priors={"condition_match": "none"},
-        emergence_time_us=1000,
-        capture_budget={"captures_remaining_hard": 12},
-    )
-
-    assert plan["coarse_start_delay_us"] == 4600
-    assert plan["coarse_step_us"] == 100
-    assert plan["refine_step_us"] == 50
-    assert plan["plan_source"] == "fallback_default"
+    assert plan["search_method"] == "separation_landmark_backtrack_v1"
+    assert plan["plan_source"] == "last_flow_delay_anchor"
+    assert plan["scout_anchor_delay_us"] == 4250
+    assert plan["scout_first_delay_us"] == 4750
+    assert plan["scout_step_us"] == 500
+    assert plan["backtrack_step_us"] == 50
+    assert plan["planned_scout_delay_count"] == 2
+    assert plan["reserved_backtrack_capture_count"] == 10
+    assert plan["recorded_tail_start_offset_us"] == 4200
 
 
 def test_plan_online_stream_tail_phase_skips_when_flow_fit_is_unresolved():
     plan = mod.plan_online_stream_tail_phase(
         flow_fit_result=_flow_fit_result(fit_status="unresolved_insufficient_delays"),
         priors=None,
-        emergence_time_us=1000,
+        emergence_time_us=3200,
         capture_budget={"captures_remaining_hard": 12},
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
     )
 
     assert plan["run_tail"] is False
     assert plan["skip_reason"] == "missing_flow_baseline"
 
 
-def test_plan_online_stream_tail_phase_allows_warning_quality_flow_fit():
-    plan = mod.plan_online_stream_tail_phase(
-        flow_fit_result=_flow_fit_result(fit_status="warning_quality_thresholds"),
-        priors=None,
-        emergence_time_us=1000,
-        capture_budget={"captures_remaining_hard": 12},
-    )
-
-    assert plan["run_tail"] is True
-    assert plan["planned_coarse_delay_count"] == 3
-
-
-def test_plan_online_stream_tail_phase_reserves_full_refine_bracket_budget():
-    capture_budget = online_cal_mod.consume_online_stream_budget(
-        online_cal_mod.new_online_stream_budget(),
-        phase="flow_phase",
-        count=15,
-    )
-
+def test_plan_online_stream_tail_phase_skips_without_accepted_flow_anchor():
     plan = mod.plan_online_stream_tail_phase(
         flow_fit_result=_flow_fit_result(),
         priors=None,
-        emergence_time_us=1000,
-        capture_budget=capture_budget,
+        emergence_time_us=3200,
+        capture_budget={"captures_remaining_hard": 12},
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050, accepted=False)],
     )
 
-    assert plan["reserved_refine_delay_count"] == 3
-    assert plan["reserved_refine_capture_count"] == 6
-    assert plan["planned_coarse_delay_count"] == 7
-    assert (
-        int(plan["planned_coarse_delay_count"]) * int(plan["coarse_replicates"])
-        + int(plan["reserved_refine_capture_count"])
-    ) <= int(capture_budget["captures_remaining_hard"])
+    assert plan["run_tail"] is False
+    assert plan["skip_reason"] == "missing_flow_tail_anchor"
 
 
-def test_summarize_online_stream_tail_delay_marks_coarse_and_refine_triggers():
+def test_summarize_online_stream_tail_delay_detects_separation_landmark():
     summary = mod.summarize_online_stream_tail_delay(
         [
             _tail_frame_row(
-                delay_us=7000,
-                delay_from_emergence_us=3800,
-                status="accepted",
-                width_px=66.0,
-            ),
-            _tail_frame_row(
-                delay_us=7000,
-                delay_from_emergence_us=3800,
-                status="accepted",
-                width_px=68.0,
-            ),
+                delay_us=4750,
+                delay_from_emergence_us=1550,
+                width_px=None,
+                tail_width_usable=False,
+                separated_from_nozzle_landmark=True,
+                tail_landmark_usable=True,
+            )
         ],
         baseline_width_px=74.0,
     )
 
     assert summary["delay_accepted"] is True
-    assert summary["median_width_px"] == 67.0
-    assert summary["width_ratio_to_baseline"] <= 0.95
-    assert summary["triggered_refine"] is True
+    assert summary["tail_width_usable"] is False
+    assert summary["tail_landmark_usable"] is True
+    assert summary["separated_from_nozzle_landmark"] is True
+    assert summary["landmark_detected"] is True
+    assert summary["landmark_reason"] == "separated_from_nozzle"
 
 
-def test_summarize_online_stream_tail_delay_triggers_on_near_nozzle_morphology_without_width_collapse():
+def test_summarize_online_stream_tail_delay_uses_width_collapse_backup_landmark():
     summary = mod.summarize_online_stream_tail_delay(
         [
             _tail_frame_row(
-                delay_us=7200,
-                delay_from_emergence_us=4000,
-                status="accepted",
-                width_px=73.0,
-                warnings=["near_nozzle_detached_warning"],
-                near_nozzle_detached_warning=True,
-            ),
-            _tail_frame_row(
-                delay_us=7200,
-                delay_from_emergence_us=4000,
-                status="accepted",
-                width_px=72.0,
-                warnings=["near_nozzle_detached_warning"],
-                near_nozzle_detached_warning=True,
-            ),
+                delay_us=4750,
+                delay_from_emergence_us=1550,
+                width_px=69.0,
+            )
         ],
         baseline_width_px=74.0,
     )
 
-    assert summary["width_ratio_to_baseline"] > 0.95
-    assert summary["near_nozzle_morphology_triggered_coarse"] is True
-    assert summary["near_nozzle_morphology_triggered_refine"] is True
-    assert summary["triggered_coarse"] is True
-    assert summary["triggered_refine"] is True
-    assert summary["trigger_reason"] == "coarse_near_nozzle_morphology_trigger"
+    assert summary["tail_width_usable"] is True
+    assert summary["width_ratio_to_baseline"] <= 0.95
+    assert summary["separated_from_nozzle_landmark"] is False
+    assert summary["backup_width_collapse_landmark"] is True
+    assert summary["landmark_detected"] is True
+    assert summary["landmark_reason"] == "strong_width_collapse_backup"
 
 
-def test_summarize_online_stream_tail_delay_keeps_late_frame_warnings_out_of_trigger_logic():
+def test_summarize_online_stream_tail_delay_keeps_bottom_warnings_out_of_landmark_logic():
     summary = mod.summarize_online_stream_tail_delay(
         [
             _tail_frame_row(
-                delay_us=7200,
-                delay_from_emergence_us=4000,
-                status="accepted",
+                delay_us=4750,
+                delay_from_emergence_us=1550,
                 width_px=73.0,
-                warnings=["detached_near_bottom_warning"],
-                detached_near_bottom_warning=True,
-            ),
-            _tail_frame_row(
-                delay_us=7200,
-                delay_from_emergence_us=4000,
-                status="accepted",
-                width_px=72.5,
                 warnings=["attached_bottom_guard_hit"],
                 attached_bottom_guard_hit=True,
+            ),
+            _tail_frame_row(
+                delay_us=4750,
+                delay_from_emergence_us=1550,
+                width_px=73.5,
+                warnings=["detached_near_bottom_warning"],
+                detached_near_bottom_warning=True,
             ),
         ],
         baseline_width_px=74.0,
     )
 
     assert summary["late_frame_warning"] is True
-    assert summary["triggered_coarse"] is False
-    assert summary["triggered_refine"] is False
-    assert summary["trigger_reason"] is None
+    assert summary["landmark_detected"] is False
+    assert summary["landmark_reason"] is None
 
 
-def test_build_online_stream_tail_refine_plan_excludes_coarse_endpoints():
-    plan = mod.build_online_stream_tail_refine_plan(
-        last_coarse_nontrigger_delay_us=7000,
-        first_coarse_trigger_delay_us=7200,
-        refine_step_us=50,
+def test_build_online_stream_tail_backtrack_plan_excludes_interval_endpoints():
+    plan = mod.build_online_stream_tail_backtrack_plan(
+        left_endpoint_delay_us=4250,
+        landmark_delay_us=4750,
+        backtrack_step_us=50,
     )
 
-    assert plan == [7050, 7100, 7150]
+    assert plan == [4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700]
 
 
-def test_decide_online_stream_tail_next_action_switches_to_refine_on_coarse_trigger():
+def test_decide_online_stream_tail_next_action_switches_to_backtrack_on_landmark():
     decision = mod.decide_online_stream_tail_next_action(
-        mode="coarse",
-        delay_summary={"delay_accepted": True, "triggered_coarse": True},
+        mode="scout",
+        delay_summary={"delay_accepted": True, "landmark_detected": True, "landmark_reason": "separated_from_nozzle"},
         capture_budget={"exhausted": False},
         consecutive_failed_delays=0,
-        attempted_delay_count=2,
-        planned_delay_count=5,
-        has_last_nontrigger=True,
+        attempted_delay_count=1,
+        planned_delay_count=3,
     )
 
-    assert decision["action"] == "switch_to_refine"
-    assert decision["trigger_reason"] == "coarse_width_frac_le_0.90"
+    assert decision["action"] == "switch_to_backtrack"
+    assert decision["landmark_reason"] == "separated_from_nozzle"
 
 
-def test_decide_online_stream_tail_next_action_uses_synthetic_left_bracket_when_needed():
+def test_decide_online_stream_tail_next_action_stops_when_scout_budget_ends_without_landmark():
     decision = mod.decide_online_stream_tail_next_action(
-        mode="coarse",
-        delay_summary={
-            "delay_us": 7200,
-            "delay_accepted": True,
-            "triggered_coarse": True,
-            "width_ratio_to_baseline": 0.89,
-            "morphology_triggered_coarse": False,
-        },
+        mode="scout",
+        delay_summary={"delay_accepted": True, "landmark_detected": False},
         capture_budget={"exhausted": False},
         consecutive_failed_delays=0,
         attempted_delay_count=3,
-        planned_delay_count=5,
-        has_last_nontrigger=False,
-        current_delay_us=7200,
-        coarse_step_us=100,
-        coarse_start_delay_us=7000,
-    )
-
-    assert decision["action"] == "switch_to_refine"
-    assert decision["synthetic_left_bracket_used"] is True
-    assert decision["synthetic_last_nontrigger_delay_us"] == 7100
-    assert decision["trigger_reason"] == "coarse_width_frac_le_0.90"
-    assert mod.build_online_stream_tail_refine_plan(
-        last_coarse_nontrigger_delay_us=decision["synthetic_last_nontrigger_delay_us"],
-        first_coarse_trigger_delay_us=7200,
-        refine_step_us=50,
-    ) == [7150]
-
-
-def test_decide_online_stream_tail_next_action_retargets_first_late_frame_delay():
-    decision = mod.decide_online_stream_tail_next_action(
-        mode="coarse",
-        delay_summary={
-            "delay_us": 7000,
-            "delay_accepted": True,
-            "triggered_coarse": False,
-            "late_frame_warning": True,
-        },
-        capture_budget={"exhausted": False},
-        consecutive_failed_delays=0,
-        attempted_delay_count=1,
-        planned_delay_count=5,
-        has_last_nontrigger=False,
-        current_delay_us=7000,
-        coarse_step_us=100,
-        coarse_start_delay_us=7000,
-        tail_retarget_count=0,
-        emergence_time_us=3200,
-    )
-
-    assert decision["action"] == "retarget_coarse"
-    assert decision["tail_retarget_count"] == 1
-    assert decision["retargeted_coarse_start_delay_us"] == 6800
-
-
-def test_decide_online_stream_tail_next_action_stops_when_late_start_persists_after_retarget_limit():
-    decision = mod.decide_online_stream_tail_next_action(
-        mode="coarse",
-        delay_summary={
-            "delay_us": 6200,
-            "delay_accepted": True,
-            "triggered_coarse": False,
-            "late_frame_warning": True,
-        },
-        capture_budget={"exhausted": False},
-        consecutive_failed_delays=0,
-        attempted_delay_count=1,
-        planned_delay_count=5,
-        has_last_nontrigger=False,
-        current_delay_us=6200,
-        coarse_step_us=100,
-        coarse_start_delay_us=6200,
-        tail_retarget_count=2,
-        emergence_time_us=3200,
+        planned_delay_count=3,
     )
 
     assert decision["action"] == "stop"
-    assert decision["tail_phase_status"] == "unresolved_start_too_late"
-    assert decision["termination_reason"] == "start_too_late_no_bracket"
+    assert decision["tail_phase_status"] == "unresolved_no_landmark"
+    assert decision["termination_reason"] == "no_scout_landmark"
 
 
-def test_resolve_online_stream_tail_result_prefers_earliest_refine_qualifying_delay():
-    tail_plan = {
-        "steady_width_baseline_px": 74.0,
-        "coarse_start_delay_us": 7000,
-    }
-    coarse_summaries = [
-        {
-            "delay_us": 7000,
-            "delay_from_emergence_us": 3800,
-            "attempted_replicates": 2,
-            "accepted_replicates": 2,
-            "rejected_replicates": 0,
-            "median_width_px": 71.0,
-            "width_ratio_to_baseline": 71.0 / 74.0,
-            "triggered_coarse": False,
-            "triggered_refine": True,
-            "warnings": [],
-            "delay_accepted": True,
-        },
-        {
-            "delay_us": 7200,
-            "delay_from_emergence_us": 4000,
-            "attempted_replicates": 2,
-            "accepted_replicates": 2,
-            "rejected_replicates": 0,
-            "median_width_px": 66.0,
-            "width_ratio_to_baseline": 66.0 / 74.0,
-            "triggered_coarse": True,
-            "triggered_refine": True,
-            "warnings": [],
-            "delay_accepted": True,
-        },
-    ]
-    refine_summaries = [
-        {
-            "delay_us": 7050,
-            "delay_from_emergence_us": 3850,
-            "attempted_replicates": 2,
-            "accepted_replicates": 2,
-            "rejected_replicates": 0,
-            "median_width_px": 70.0,
-            "width_ratio_to_baseline": 70.0 / 74.0,
-            "triggered_coarse": False,
-            "triggered_refine": True,
-            "warnings": [],
-            "delay_accepted": True,
-        }
-    ]
+def test_decide_online_stream_tail_next_action_finishes_after_backtrack_window():
+    decision = mod.decide_online_stream_tail_next_action(
+        mode="backtrack",
+        delay_summary={"delay_accepted": True},
+        capture_budget={"exhausted": False},
+        consecutive_failed_delays=0,
+        attempted_delay_count=9,
+        planned_delay_count=9,
+    )
 
+    assert decision["action"] == "finish_resolve"
+
+
+def test_resolve_online_stream_tail_result_prefers_earliest_pre_landmark_width_departure():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),
-        tail_plan=tail_plan,
-        coarse_summaries=coarse_summaries,
-        refine_summaries=refine_summaries,
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.9)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=73.0)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
         trigger_bracket={
-            "tail_phase_status": "captured",
-            "termination_reason": "refine_trigger",
-            "trigger_delay_us": 7200,
-            "last_nontrigger_delay_us": 7000,
-            "trigger_reason": "refine_width_frac_le_0.95",
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "separated_from_nozzle",
         },
     )
 
     assert resolved["tail_phase"]["status"] == "captured"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 3800
-    assert resolved["predicted_stream_duration_us"] == 3800
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1200
+    assert resolved["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
+    assert resolved["predicted_stream_duration_us"] == 1200
     assert resolved["predicted_volume_nl"] is not None
 
 
-def test_resolve_online_stream_tail_result_marks_coarse_only_trigger_as_advisory():
+def test_resolve_online_stream_tail_result_returns_advisory_landmark_only_without_prelandmark_departure():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),
-        tail_plan={"steady_width_baseline_px": 74.0},
-        coarse_summaries=[
-            {
-                "delay_us": 7200,
-                "delay_from_emergence_us": 4000,
-                "attempted_replicates": 2,
-                "accepted_replicates": 2,
-                "rejected_replicates": 0,
-                "median_width_px": 66.0,
-                "width_ratio_to_baseline": 66.0 / 74.0,
-                "triggered_coarse": True,
-                "triggered_refine": True,
-                "warnings": [],
-                "delay_accepted": True,
-            }
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
         ],
-        refine_summaries=[
-            {
-                "delay_us": 7150,
-                "delay_from_emergence_us": 3950,
-                "attempted_replicates": 2,
-                "accepted_replicates": 0,
-                "rejected_replicates": 2,
-                "median_width_px": None,
-                "width_ratio_to_baseline": None,
-                "triggered_coarse": False,
-                "triggered_refine": False,
-                "warnings": ["width_missing"],
-                "delay_accepted": False,
-            }
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.9)],
+                baseline_width_px=74.0,
+            ),
         ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
         trigger_bracket={
-            "tail_phase_status": "advisory_coarse_only",
-            "termination_reason": "coarse_trigger_fallback",
-            "trigger_delay_us": 7200,
-            "last_nontrigger_delay_us": None,
-            "trigger_reason": "coarse_width_frac_le_0.90",
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "separated_from_nozzle",
         },
     )
 
-    assert resolved["tail_phase"]["status"] == "advisory_coarse_only"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 4000
-    assert "tail_advisory_only" in resolved["tail_phase"]["warnings"]
+    assert resolved["tail_phase"]["status"] == "advisory_landmark_only"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
+    assert resolved["tail_phase"]["tail_start_evidence"] == "landmark_only"
+    assert "tail_landmark_only" in resolved["tail_phase"]["warnings"]
+
+
+def test_resolve_online_stream_tail_result_captures_backup_width_collapse_landmark():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, width_px=69.0)],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "strong_width_collapse_backup",
+        },
+    )
+
+    assert resolved["tail_phase"]["status"] == "captured"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
+    assert resolved["tail_phase"]["tail_start_evidence"] == "width_collapse_backup"
 
 
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():
     artifact = mod.build_online_stream_tail_fit_artifact(
         condition={"print_pressure_psi": 0.42},
-        tail_plan={"coarse_start_delay_us": 7000, "steady_width_baseline_px": 74.0},
+        tail_plan={"scout_first_delay_us": 4750, "steady_width_baseline_px": 74.0},
         steady_width_baseline_px=74.0,
-        coarse_delay_summaries=[{"delay_us": 7000}],
-        refine_delay_summaries=[{"delay_us": 7050}],
+        scout_delay_summaries=[{"delay_us": 4750}],
+        backtrack_delay_summaries=[{"delay_us": 4300}],
         result={"tail_phase": {"status": "captured"}, "warnings": ["tail_ok"]},
         warnings=["tail_ok"],
     )
 
-    encoded = json.dumps(
-        {
-            "plan": mod.plan_online_stream_tail_phase(
-                flow_fit_result=_flow_fit_result(),
-                priors=None,
-                emergence_time_us=1000,
-                capture_budget={"captures_remaining_hard": 12},
-            ),
-            "artifact": artifact,
-        }
-    )
+    encoded = json.dumps({"artifact": artifact})
 
     assert isinstance(encoded, str)
+    assert artifact["search_method"] == "separation_landmark_backtrack_v1"
     assert artifact["result"]["tail_phase"]["status"] == "captured"

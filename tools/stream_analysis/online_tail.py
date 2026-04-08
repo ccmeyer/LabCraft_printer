@@ -5,20 +5,18 @@ import math
 from tools.stream_analysis import online_calibration as online_cal_mod
 
 
+SEARCH_METHOD = "separation_landmark_backtrack_v1"
+
 DEFAULT_ONLINE_TAIL_POLICY = {
-    "coarse_trigger_width_frac": 0.90,
-    "refine_trigger_width_frac": 0.95,
+    "scout_landmark_width_frac": 0.95,
+    "plateau_width_frac": 0.995,
+    "departure_width_frac": 0.99,
     "consecutive_failed_tail_delays_stop": 2,
-    "exact_prior_start_lead_us": 400,
-    "fallback_start_offset_us": 3600,
-    "coarse_step_us": 100,
-    "coarse_replicates": 2,
-    "refine_step_us": 50,
-    "refine_replicates": 2,
-    "retarget_min_start_offset_us": 3000,
-    "max_coarse_retarget_count": 2,
-    "initial_retarget_shift_steps": 2,
-    "followup_retarget_shift_steps": 1,
+    "scout_step_us": 500,
+    "scout_replicates": 1,
+    "backtrack_step_us": 50,
+    "backtrack_replicates": 1,
+    "reserved_backtrack_capture_count": 10,
 }
 
 
@@ -89,13 +87,25 @@ def _median_or_none(values):
 
 def _resolved_policy(policy: dict | None = None) -> dict:
     merged = dict(DEFAULT_ONLINE_TAIL_POLICY)
+    alias_map = {
+        "coarse_trigger_width_frac": "scout_landmark_width_frac",
+        "coarse_step_us": "scout_step_us",
+        "coarse_replicates": "scout_replicates",
+        "refine_step_us": "backtrack_step_us",
+        "refine_replicates": "backtrack_replicates",
+        "reserved_refine_capture_count": "reserved_backtrack_capture_count",
+    }
+    provided = dict(policy or {})
+    for old_key, new_key in alias_map.items():
+        if old_key in provided and new_key not in provided:
+            provided[new_key] = provided.get(old_key)
     for key, default_value in DEFAULT_ONLINE_TAIL_POLICY.items():
-        if not isinstance(policy, dict) or key not in policy:
+        if key not in provided:
             continue
         if isinstance(default_value, int):
-            merged[key] = max(0, _to_int(policy.get(key), default_value))
+            merged[key] = max(0, _to_int(provided.get(key), default_value))
         else:
-            merged[key] = float(policy.get(key))
+            merged[key] = float(provided.get(key))
     return merged
 
 
@@ -125,118 +135,101 @@ def _summary_delay_from_emergence(summary: dict | None, delay_us: int | None) ->
     return None
 
 
-def _count_interior_delays(left_delay_us: int | None, right_delay_us: int | None, step_us: int) -> int:
-    left_delay_us = _to_int(left_delay_us)
-    right_delay_us = _to_int(right_delay_us)
-    step_us = max(1, _to_int(step_us, DEFAULT_ONLINE_TAIL_POLICY["refine_step_us"]))
-    if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
-        return 0
-    return int(len(range(int(left_delay_us) + int(step_us), int(right_delay_us), int(step_us))))
+def _legacy_tail_width_usable(row: dict) -> bool:
+    qc = dict(row.get("qc") or {})
+    if "tail_width_usable" in row:
+        return bool(row.get("tail_width_usable"))
+    if "tail_qc_pass" in row:
+        return bool(row.get("tail_qc_pass"))
+    if "tail_qc_pass" in qc:
+        return bool(qc.get("tail_qc_pass"))
+    return bool(str(row.get("status") or "") == "accepted" and row.get("attached_width_px") is not None)
 
 
-def _synthetic_left_bracket_delay_us(
-    *,
-    first_coarse_trigger_delay_us: int | None,
-    coarse_step_us: int | None,
-    coarse_start_delay_us: int | None,
-) -> int | None:
-    trigger_delay_us = _to_int(first_coarse_trigger_delay_us)
-    if trigger_delay_us is None:
+def _legacy_tail_landmark_usable(row: dict) -> bool:
+    if "tail_landmark_usable" in row:
+        return bool(row.get("tail_landmark_usable"))
+    return bool(row.get("separated_from_nozzle_landmark"))
+
+
+def _width_ratio_to_baseline(width_px, baseline_width_px):
+    width_value = _to_float_or_none(width_px)
+    baseline_value = _to_float_or_none(baseline_width_px)
+    if width_value in (None, 0.0) or baseline_value in (None, 0.0):
         return None
-    step_us = max(1, _to_int(coarse_step_us, DEFAULT_ONLINE_TAIL_POLICY["coarse_step_us"]))
-    candidate_delay_us = int(trigger_delay_us - step_us)
-    coarse_start_delay_us = _to_int(coarse_start_delay_us)
-    if coarse_start_delay_us is not None and int(candidate_delay_us) < int(coarse_start_delay_us):
-        return None
-    return int(candidate_delay_us)
+    return float(float(width_value) / float(baseline_value))
 
 
-def _tail_trigger_reason(summary: dict | None, *, mode: str, policy: dict | None = None) -> str | None:
+def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | int | None, *, phase_label: str):
+    summary = dict(flow_summary or {})
+    delay_us = _to_int(summary.get("delay_us"))
+    delay_from_emergence_us = _to_int(summary.get("delay_from_emergence_us"))
+    median_width_px = _to_float_or_none(summary.get("median_width_px"))
+    width_ratio_to_baseline = _width_ratio_to_baseline(median_width_px, baseline_width_px)
+    delay_accepted = bool(summary.get("delay_accepted"))
+    return {
+        "phase": str(phase_label),
+        "delay_us": delay_us,
+        "delay_from_emergence_us": delay_from_emergence_us,
+        "attempted_replicates": _to_int(summary.get("attempted_replicates"), 0),
+        "accepted_replicates": _to_int(summary.get("accepted_replicates"), 0),
+        "tail_width_usable_replicates": _to_int(summary.get("accepted_replicates"), 0),
+        "tail_landmark_usable_replicates": 0,
+        "rejected_replicates": _to_int(summary.get("rejected_replicates"), 0),
+        "median_width_px": median_width_px,
+        "width_ratio_to_baseline": width_ratio_to_baseline,
+        "tail_width_usable": bool(delay_accepted and median_width_px is not None),
+        "tail_landmark_usable": False,
+        "separated_from_nozzle_landmark": False,
+        "backup_width_collapse_landmark": False,
+        "landmark_detected": False,
+        "landmark_reason": None,
+        "plateau_candidate": False,
+        "tail_affected": False,
+        "tail_start_candidate": False,
+        "attached_bottom_guard_hit": bool(summary.get("attached_bottom_guard_hit")),
+        "detached_near_bottom_warning": bool(summary.get("detached_near_bottom_warning")),
+        "near_nozzle_detached_warning": False,
+        "late_frame_warning": False,
+        "warnings": _copy_warnings(summary.get("warnings")),
+        "delay_accepted": bool(delay_accepted),
+        "triggered_scout": False,
+        "triggered_backtrack": False,
+        "triggered_coarse": False,
+        "triggered_refine": False,
+    }
+
+
+def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> list[dict]:
     resolved_policy = _resolved_policy(policy)
-    record = dict(summary or {})
-    width_ratio_to_baseline = _to_float_or_none(record.get("width_ratio_to_baseline"))
-    delay_accepted = bool(record.get("delay_accepted"))
-    near_nozzle_morphology_triggered_coarse = bool(
-        record.get("near_nozzle_morphology_triggered_coarse")
-        or record.get("morphology_triggered_coarse")
-    )
-    near_nozzle_morphology_triggered_refine = bool(
-        record.get("near_nozzle_morphology_triggered_refine")
-        or record.get("morphology_triggered_refine")
-    )
-    mode_label = str(mode or "coarse")
-    if mode_label == "coarse":
-        if (
-            delay_accepted
+    classified = []
+    for row in list(rows or []):
+        summary = dict(row or {})
+        width_ratio_to_baseline = _to_float_or_none(summary.get("width_ratio_to_baseline"))
+        tail_width_usable = bool(summary.get("tail_width_usable"))
+        separated_from_nozzle_landmark = bool(summary.get("separated_from_nozzle_landmark"))
+        backup_width_collapse_landmark = bool(summary.get("backup_width_collapse_landmark"))
+        plateau_candidate = bool(
+            tail_width_usable
             and width_ratio_to_baseline is not None
-            and float(width_ratio_to_baseline) <= float(resolved_policy["coarse_trigger_width_frac"])
-        ):
-            return "coarse_width_frac_le_0.90"
-        if delay_accepted and near_nozzle_morphology_triggered_coarse:
-            return "coarse_near_nozzle_morphology_trigger"
-        if bool(record.get("triggered_coarse")):
-            return (
-                "coarse_near_nozzle_morphology_trigger"
-                if near_nozzle_morphology_triggered_coarse
-                else "coarse_width_frac_le_0.90"
-            )
-        return None
-    if (
-        delay_accepted
-        and width_ratio_to_baseline is not None
-        and float(width_ratio_to_baseline) <= float(resolved_policy["refine_trigger_width_frac"])
-    ):
-        return "refine_width_frac_le_0.95"
-    if delay_accepted and near_nozzle_morphology_triggered_refine:
-        return "refine_near_nozzle_morphology_trigger"
-    if bool(record.get("triggered_refine")):
-        return (
-            "refine_near_nozzle_morphology_trigger"
-            if near_nozzle_morphology_triggered_refine
-            else "refine_width_frac_le_0.95"
+            and float(width_ratio_to_baseline) >= float(resolved_policy["plateau_width_frac"])
+            and not separated_from_nozzle_landmark
         )
-    return None
-
-
-def _coarse_retarget_shift_steps(*, retarget_count: int, policy: dict | None = None) -> int | None:
-    resolved_policy = _resolved_policy(policy)
-    if int(retarget_count) <= 0:
-        return int(resolved_policy["initial_retarget_shift_steps"])
-    if int(retarget_count) == 1:
-        return int(resolved_policy["followup_retarget_shift_steps"])
-    return None
-
-
-def _retargeted_coarse_start_delay_us(
-    *,
-    current_coarse_start_delay_us: int | None,
-    coarse_step_us: int | None,
-    emergence_time_us: int | None,
-    tail_retarget_count: int = 0,
-    policy: dict | None = None,
-) -> int | None:
-    current_start_delay_us = _to_int(current_coarse_start_delay_us)
-    coarse_step_us = max(1, _to_int(coarse_step_us, DEFAULT_ONLINE_TAIL_POLICY["coarse_step_us"]))
-    emergence_time_us = _to_int(emergence_time_us)
-    if current_start_delay_us is None or emergence_time_us is None:
-        return None
-    shift_steps = _coarse_retarget_shift_steps(
-        retarget_count=int(tail_retarget_count),
-        policy=policy,
+        tail_affected = bool(
+            (tail_width_usable and width_ratio_to_baseline is not None and float(width_ratio_to_baseline) < float(resolved_policy["departure_width_frac"]))
+            or backup_width_collapse_landmark
+        )
+        summary["plateau_candidate"] = bool(plateau_candidate)
+        summary["tail_affected"] = bool(tail_affected)
+        summary["tail_start_candidate"] = bool(tail_affected)
+        classified.append(summary)
+    classified.sort(
+        key=lambda item: (
+            _to_int(item.get("delay_from_emergence_us"), 10**9),
+            _to_int(item.get("delay_us"), 10**9),
+        )
     )
-    if shift_steps is None:
-        return None
-    resolved_policy = _resolved_policy(policy)
-    min_start_delay_us = int(
-        int(emergence_time_us) + int(resolved_policy["retarget_min_start_offset_us"])
-    )
-    next_start_delay_us = max(
-        int(min_start_delay_us),
-        int(current_start_delay_us) - (int(shift_steps) * int(coarse_step_us)),
-    )
-    if int(next_start_delay_us) >= int(current_start_delay_us):
-        return None
-    return int(next_start_delay_us)
+    return classified
 
 
 def plan_online_stream_tail_phase(
@@ -245,88 +238,86 @@ def plan_online_stream_tail_phase(
     priors: dict | None,
     emergence_time_us: int,
     capture_budget: dict | None,
+    flow_delay_summaries: list[dict] | None = None,
     policy: dict | None = None,
 ) -> dict:
     fit = dict(flow_fit_result or {})
     normalized_priors = online_cal_mod.normalize_online_stream_prior(priors)
     resolved_policy = _resolved_policy(policy)
-    coarse_step_us = _to_int(
-        normalized_priors.get("tail_coarse_step_us"),
-        resolved_policy["coarse_step_us"],
-    )
-    refine_step_us = int(resolved_policy["refine_step_us"])
-    refine_replicates = int(resolved_policy["refine_replicates"])
-    max_trigger_window_steps = max(1, int(resolved_policy["consecutive_failed_tail_delays_stop"]))
-    reserved_refine_delay_count = _count_interior_delays(
-        0,
-        int(coarse_step_us) * int(max_trigger_window_steps),
-        int(refine_step_us),
-    )
-    reserved_refine_capture_count = int(reserved_refine_delay_count * refine_replicates)
-    fit_status = str(fit.get("fit_status") or "")
     steady_width_baseline_px = _to_float_or_none(fit.get("steady_width_baseline_px"))
+    fit_status = str(fit.get("fit_status") or "")
     if steady_width_baseline_px is None or fit_status.startswith("unresolved"):
         return {
             "run_tail": False,
             "skip_reason": "missing_flow_baseline",
             "steady_width_baseline_px": steady_width_baseline_px,
-            "coarse_start_delay_us": None,
-            "coarse_step_us": int(coarse_step_us),
-            "coarse_replicates": int(resolved_policy["coarse_replicates"]),
-            "refine_step_us": int(refine_step_us),
-            "refine_replicates": int(refine_replicates),
-            "planned_coarse_delay_count": 0,
-            "reserved_refine_delay_count": int(reserved_refine_delay_count),
-            "reserved_refine_capture_count": int(reserved_refine_capture_count),
-            "plan_source": "skipped_missing_flow_baseline",
-            "minimum_coarse_start_delay_us": int(
-                int(emergence_time_us) + int(resolved_policy["retarget_min_start_offset_us"])
-            ),
-            "max_coarse_retarget_count": int(resolved_policy["max_coarse_retarget_count"]),
             "tail_retarget_count": 0,
             "retargeted_coarse_start_delay_us": None,
         }
 
+    accepted_flow_summaries = [
+        dict(row or {})
+        for row in list(flow_delay_summaries or [])
+        if bool(dict(row or {}).get("delay_accepted")) and _to_int(dict(row or {}).get("delay_us")) is not None
+    ]
+    if not accepted_flow_summaries:
+        return {
+            "run_tail": False,
+            "skip_reason": "missing_flow_tail_anchor",
+            "steady_width_baseline_px": float(steady_width_baseline_px),
+            "tail_retarget_count": 0,
+            "retargeted_coarse_start_delay_us": None,
+        }
+
+    accepted_flow_summaries.sort(key=lambda item: _to_int(item.get("delay_us"), 0))
+    last_flow_summary = dict(accepted_flow_summaries[-1])
+    last_flow_delay_us = int(_to_int(last_flow_summary.get("delay_us"), 0))
+    last_flow_delay_from_emergence_us = int(
+        _to_int(last_flow_summary.get("delay_from_emergence_us"), int(last_flow_delay_us) - int(emergence_time_us))
+    )
+    scout_step_us = int(resolved_policy["scout_step_us"])
+    scout_replicates = int(resolved_policy["scout_replicates"])
+    backtrack_step_us = int(resolved_policy["backtrack_step_us"])
+    backtrack_replicates = int(resolved_policy["backtrack_replicates"])
+    reserved_backtrack_capture_count = int(resolved_policy["reserved_backtrack_capture_count"])
     remaining_hard = _remaining_hard_budget(capture_budget)
-    coarse_replicates = int(resolved_policy["coarse_replicates"])
-    planned_coarse_delay_count = max(
+    planned_scout_delay_count = max(
         0,
-        int((max(0, remaining_hard - reserved_refine_capture_count)) // max(1, coarse_replicates)),
+        int((max(0, remaining_hard - reserved_backtrack_capture_count)) // max(1, scout_replicates)),
     )
 
-    plan_source = "fallback_default"
-    coarse_start_delay_us = int(emergence_time_us) + int(resolved_policy["fallback_start_offset_us"])
-    if str(normalized_priors.get("condition_match") or "") == "exact":
-        prior_offset_us = _to_int(
-            normalized_priors.get("tail_start_offset_us"),
-            resolved_policy["fallback_start_offset_us"],
-        )
-        coarse_start_delay_us = int(
-            int(emergence_time_us)
-            + int(prior_offset_us)
-            - int(resolved_policy["exact_prior_start_lead_us"])
-        )
-        plan_source = "exact_prior_minus_lead"
+    scout_first_delay_us = int(last_flow_delay_us + scout_step_us)
+    scout_first_delay_from_emergence_us = int(last_flow_delay_from_emergence_us + scout_step_us)
 
     return {
         "run_tail": True,
         "skip_reason": None,
+        "search_method": SEARCH_METHOD,
         "steady_width_baseline_px": float(steady_width_baseline_px),
-        "coarse_start_delay_us": int(coarse_start_delay_us),
-        "coarse_step_us": int(coarse_step_us),
-        "coarse_replicates": int(coarse_replicates),
-        "refine_step_us": int(refine_step_us),
-        "refine_replicates": int(refine_replicates),
-        "planned_coarse_delay_count": int(planned_coarse_delay_count),
-        "reserved_refine_delay_count": int(reserved_refine_delay_count),
-        "reserved_refine_capture_count": int(reserved_refine_capture_count),
-        "plan_source": str(plan_source),
-        "minimum_coarse_start_delay_us": int(
-            int(emergence_time_us) + int(resolved_policy["retarget_min_start_offset_us"])
-        ),
-        "max_coarse_retarget_count": int(resolved_policy["max_coarse_retarget_count"]),
+        "plan_source": "last_flow_delay_anchor",
+        "prior_condition_match": str(normalized_priors.get("condition_match") or "none"),
+        "recorded_tail_start_offset_us": _to_int(normalized_priors.get("tail_start_offset_us")),
+        "recorded_tail_coarse_step_us": _to_int(normalized_priors.get("tail_coarse_step_us")),
+        "scout_anchor_delay_us": int(last_flow_delay_us),
+        "scout_anchor_delay_from_emergence_us": int(last_flow_delay_from_emergence_us),
+        "scout_first_delay_us": int(scout_first_delay_us),
+        "scout_first_delay_from_emergence_us": int(scout_first_delay_from_emergence_us),
+        "scout_step_us": int(scout_step_us),
+        "scout_replicates": int(scout_replicates),
+        "backtrack_step_us": int(backtrack_step_us),
+        "backtrack_replicates": int(backtrack_replicates),
+        "planned_scout_delay_count": int(planned_scout_delay_count),
+        "reserved_backtrack_capture_count": int(reserved_backtrack_capture_count),
         "tail_retarget_count": 0,
         "retargeted_coarse_start_delay_us": None,
+        "coarse_start_delay_us": int(scout_first_delay_us),
+        "coarse_step_us": int(scout_step_us),
+        "coarse_replicates": int(scout_replicates),
+        "refine_step_us": int(backtrack_step_us),
+        "refine_replicates": int(backtrack_replicates),
+        "planned_coarse_delay_count": int(planned_scout_delay_count),
+        "reserved_refine_delay_count": int(reserved_backtrack_capture_count),
+        "reserved_refine_capture_count": int(reserved_backtrack_capture_count),
     }
 
 
@@ -337,15 +328,20 @@ def summarize_online_stream_tail_delay(
     policy: dict | None = None,
 ) -> dict:
     rows = [dict(row or {}) for row in list(frame_rows or [])]
-    accepted_rows = [row for row in rows if str(row.get("status") or "") == "accepted"]
+    width_usable_rows = [row for row in rows if _legacy_tail_width_usable(row)]
+    landmark_usable_rows = [row for row in rows if _legacy_tail_landmark_usable(row)]
+    usable_rows = [
+        row
+        for row in rows
+        if _legacy_tail_width_usable(row) or _legacy_tail_landmark_usable(row)
+    ]
     attempted_replicates = int(len(rows))
-    accepted_replicates = int(len(accepted_rows))
+    accepted_replicates = int(len(usable_rows))
+    width_usable_replicates = int(len(width_usable_rows))
+    landmark_usable_replicates = int(len(landmark_usable_rows))
     rejected_replicates = int(max(0, attempted_replicates - accepted_replicates))
-    median_width_px = _median_or_none(row.get("attached_width_px") for row in accepted_rows)
-    baseline = _to_float_or_none(baseline_width_px)
-    width_ratio_to_baseline = None
-    if baseline not in (None, 0.0) and median_width_px is not None:
-        width_ratio_to_baseline = float(float(median_width_px) / float(baseline))
+    median_width_px = _median_or_none(row.get("attached_width_px") for row in width_usable_rows)
+    width_ratio_to_baseline = _width_ratio_to_baseline(median_width_px, baseline_width_px)
     resolved_policy = _resolved_policy(policy)
     warnings = _unique_strings(
         warning
@@ -373,68 +369,80 @@ def summarize_online_stream_tail_delay(
         or attached_bottom_guard_hit
         or detached_near_bottom_warning
     )
-    coarse_width_triggered = bool(
-        accepted_replicates > 0
+    separated_from_nozzle_landmark = any(
+        bool(row.get("separated_from_nozzle_landmark"))
+        for row in rows
+    )
+    backup_width_collapse_landmark = bool(
+        width_usable_replicates > 0
         and width_ratio_to_baseline is not None
-        and float(width_ratio_to_baseline) <= float(resolved_policy["coarse_trigger_width_frac"])
+        and float(width_ratio_to_baseline) <= float(resolved_policy["scout_landmark_width_frac"])
+        and not separated_from_nozzle_landmark
     )
-    refine_width_triggered = bool(
-        accepted_replicates > 0
-        and width_ratio_to_baseline is not None
-        and float(width_ratio_to_baseline) <= float(resolved_policy["refine_trigger_width_frac"])
-    )
-    near_nozzle_morphology_triggered_coarse = bool(
-        accepted_replicates > 0 and near_nozzle_detached_warning
-    )
-    near_nozzle_morphology_triggered_refine = bool(
-        accepted_replicates > 0 and near_nozzle_detached_warning
-    )
+    landmark_detected = bool(separated_from_nozzle_landmark or backup_width_collapse_landmark)
+    landmark_reason = None
+    if separated_from_nozzle_landmark:
+        landmark_reason = "separated_from_nozzle"
+    elif backup_width_collapse_landmark:
+        landmark_reason = "strong_width_collapse_backup"
+
     delay_us = None
     delay_from_emergence_us = None
+    phase = None
     if rows:
         delay_us = _to_int(rows[0].get("delay_us"))
         delay_from_emergence_us = _to_int(rows[0].get("delay_from_emergence_us"))
+        phase = str(rows[0].get("phase") or "")
 
-    return {
+    summary = {
+        "phase": phase,
         "delay_us": delay_us,
         "delay_from_emergence_us": delay_from_emergence_us,
         "attempted_replicates": int(attempted_replicates),
         "accepted_replicates": int(accepted_replicates),
+        "tail_width_usable_replicates": int(width_usable_replicates),
+        "tail_landmark_usable_replicates": int(landmark_usable_replicates),
         "rejected_replicates": int(rejected_replicates),
         "median_width_px": median_width_px,
         "width_ratio_to_baseline": width_ratio_to_baseline,
-        "triggered_coarse": bool(coarse_width_triggered or near_nozzle_morphology_triggered_coarse),
-        "triggered_refine": bool(refine_width_triggered or near_nozzle_morphology_triggered_refine),
-        "width_triggered_coarse": bool(coarse_width_triggered),
-        "width_triggered_refine": bool(refine_width_triggered),
+        "tail_width_usable": bool(width_usable_replicates > 0),
+        "tail_landmark_usable": bool(landmark_usable_replicates > 0),
+        "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
+        "backup_width_collapse_landmark": bool(backup_width_collapse_landmark),
+        "landmark_detected": bool(landmark_detected),
+        "landmark_reason": landmark_reason,
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
         "detached_near_bottom_warning": bool(detached_near_bottom_warning),
         "near_nozzle_detached_warning": bool(near_nozzle_detached_warning),
         "late_frame_warning": bool(late_frame_warning),
-        "near_nozzle_morphology_triggered_coarse": bool(near_nozzle_morphology_triggered_coarse),
-        "near_nozzle_morphology_triggered_refine": bool(near_nozzle_morphology_triggered_refine),
-        "morphology_triggered_coarse": bool(near_nozzle_morphology_triggered_coarse),
-        "morphology_triggered_refine": bool(near_nozzle_morphology_triggered_refine),
-        "trigger_reason": (
-            "coarse_width_frac_le_0.90"
-            if coarse_width_triggered
-            else (
-                "coarse_near_nozzle_morphology_trigger"
-                if near_nozzle_morphology_triggered_coarse
-                else (
-                    "refine_width_frac_le_0.95"
-                    if refine_width_triggered
-                    else (
-                        "refine_near_nozzle_morphology_trigger"
-                        if near_nozzle_morphology_triggered_refine
-                        else None
-                    )
-                )
-            )
-        ),
         "warnings": warnings,
         "delay_accepted": bool(accepted_replicates > 0),
+        "triggered_scout": bool(landmark_detected),
+        "triggered_backtrack": False,
+        "triggered_coarse": bool(landmark_detected),
+        "triggered_refine": False,
     }
+    classified = _classify_trace_rows([summary], policy=resolved_policy)
+    if classified:
+        summary.update(classified[0])
+    return summary
+
+
+def build_online_stream_tail_backtrack_plan(
+    *,
+    left_endpoint_delay_us: int | None,
+    landmark_delay_us: int | None,
+    backtrack_step_us: int,
+) -> list[int]:
+    left_delay_us = _to_int(left_endpoint_delay_us)
+    right_delay_us = _to_int(landmark_delay_us)
+    step_us = max(1, _to_int(backtrack_step_us, DEFAULT_ONLINE_TAIL_POLICY["backtrack_step_us"]))
+    if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
+        return []
+    return [
+        int(delay_us)
+        for delay_us in range(int(left_delay_us) + int(step_us), int(right_delay_us), int(step_us))
+    ]
 
 
 def build_online_stream_tail_refine_plan(
@@ -445,21 +453,12 @@ def build_online_stream_tail_refine_plan(
     coarse_step_us: int | None = None,
     planned_coarse_start_delay_us: int | None = None,
 ) -> list[int]:
-    left_delay_us = _to_int(last_coarse_nontrigger_delay_us)
-    right_delay_us = _to_int(first_coarse_trigger_delay_us)
-    step_us = max(1, _to_int(refine_step_us, DEFAULT_ONLINE_TAIL_POLICY["refine_step_us"]))
-    if left_delay_us is None:
-        left_delay_us = _synthetic_left_bracket_delay_us(
-            first_coarse_trigger_delay_us=right_delay_us,
-            coarse_step_us=coarse_step_us,
-            coarse_start_delay_us=planned_coarse_start_delay_us,
-        )
-    if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
-        return []
-    return [
-        int(delay_us)
-        for delay_us in range(int(left_delay_us) + int(step_us), int(right_delay_us), int(step_us))
-    ]
+    del coarse_step_us, planned_coarse_start_delay_us
+    return build_online_stream_tail_backtrack_plan(
+        left_endpoint_delay_us=last_coarse_nontrigger_delay_us,
+        landmark_delay_us=first_coarse_trigger_delay_us,
+        backtrack_step_us=refine_step_us,
+    )
 
 
 def decide_online_stream_tail_next_action(
@@ -470,140 +469,73 @@ def decide_online_stream_tail_next_action(
     consecutive_failed_delays: int = 0,
     attempted_delay_count: int = 0,
     planned_delay_count: int = 0,
-    has_last_nontrigger: bool = False,
-    current_delay_us: int | None = None,
-    coarse_step_us: int | None = None,
-    coarse_start_delay_us: int | None = None,
-    tail_retarget_count: int = 0,
-    emergence_time_us: int | None = None,
-    coarse_trigger_reason: str | None = None,
     policy: dict | None = None,
+    **unused,
 ) -> dict:
+    del unused
     summary = dict(delay_summary or {})
     budget = dict(capture_budget or {})
     resolved_policy = _resolved_policy(policy)
-
-    mode_label = str(mode or "coarse")
+    mode_label = str(mode or "scout")
     if mode_label == "coarse":
-        if bool(summary.get("delay_accepted")) and bool(summary.get("triggered_coarse")):
-            trigger_reason = _tail_trigger_reason(summary, mode="coarse", policy=resolved_policy)
-            if bool(has_last_nontrigger):
-                return {
-                    "action": "switch_to_refine",
-                    "tail_phase_status": None,
-                    "termination_reason": None,
-                    "trigger_reason": trigger_reason,
-                }
-            synthetic_last_nontrigger_delay_us = _synthetic_left_bracket_delay_us(
-                first_coarse_trigger_delay_us=_to_int(summary.get("delay_us"), _to_int(current_delay_us)),
-                coarse_step_us=coarse_step_us,
-                coarse_start_delay_us=coarse_start_delay_us,
-            )
-            if synthetic_last_nontrigger_delay_us is not None:
-                return {
-                    "action": "switch_to_refine",
-                    "tail_phase_status": None,
-                    "termination_reason": None,
-                    "trigger_reason": trigger_reason,
-                    "synthetic_left_bracket_used": True,
-                    "synthetic_last_nontrigger_delay_us": int(synthetic_last_nontrigger_delay_us),
-                }
+        mode_label = "scout"
+    if mode_label == "refine":
+        mode_label = "backtrack"
+
+    if mode_label == "scout":
+        if bool(summary.get("delay_accepted")) and bool(summary.get("landmark_detected")):
             return {
-                "action": "finish_using_coarse_trigger",
-                "tail_phase_status": "advisory_coarse_only",
-                "termination_reason": "coarse_trigger_fallback",
-                "trigger_reason": trigger_reason,
-                "synthetic_left_bracket_used": False,
-            }
-        is_first_coarse_delay = bool(
-            _to_int(summary.get("delay_us"), _to_int(current_delay_us)) is not None
-            and _to_int(coarse_start_delay_us) is not None
-            and _to_int(summary.get("delay_us"), _to_int(current_delay_us)) == int(_to_int(coarse_start_delay_us))
-        )
-        if (
-            is_first_coarse_delay
-            and not bool(summary.get("triggered_coarse"))
-            and bool(summary.get("late_frame_warning"))
-        ):
-            next_start_delay_us = _retargeted_coarse_start_delay_us(
-                current_coarse_start_delay_us=coarse_start_delay_us,
-                coarse_step_us=coarse_step_us,
-                emergence_time_us=emergence_time_us,
-                tail_retarget_count=int(tail_retarget_count),
-                policy=resolved_policy,
-            )
-            if (
-                int(tail_retarget_count) < int(resolved_policy["max_coarse_retarget_count"])
-                and next_start_delay_us is not None
-            ):
-                return {
-                    "action": "retarget_coarse",
-                    "tail_phase_status": None,
-                    "termination_reason": None,
-                    "trigger_reason": None,
-                    "tail_retarget_count": int(tail_retarget_count) + 1,
-                    "retargeted_coarse_start_delay_us": int(next_start_delay_us),
-                }
-            return {
-                "action": "stop",
-                "tail_phase_status": "unresolved_start_too_late",
-                "termination_reason": "start_too_late_no_bracket",
-                "trigger_reason": None,
+                "action": "switch_to_backtrack",
+                "tail_phase_status": None,
+                "termination_reason": None,
+                "landmark_reason": str(summary.get("landmark_reason") or ""),
             }
         if int(consecutive_failed_delays) >= int(resolved_policy["consecutive_failed_tail_delays_stop"]):
             return {
                 "action": "stop",
                 "tail_phase_status": "unresolved_qc_failure",
                 "termination_reason": "repeated_tail_qc_failure",
-                "trigger_reason": None,
             }
         if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
             return {
                 "action": "stop",
-                "tail_phase_status": "unresolved_no_trigger",
-                "termination_reason": "no_coarse_trigger",
-                "trigger_reason": None,
+                "tail_phase_status": "unresolved_no_landmark",
+                "termination_reason": "no_scout_landmark",
             }
         if bool(budget.get("exhausted")):
             return {
                 "action": "stop",
                 "tail_phase_status": "unresolved_budget_exhausted",
                 "termination_reason": "capture_budget_exhausted",
-                "trigger_reason": None,
             }
         return {
             "action": "continue",
             "tail_phase_status": None,
             "termination_reason": None,
-            "trigger_reason": None,
         }
 
-    if bool(summary.get("delay_accepted")) and bool(summary.get("triggered_refine")):
+    if int(consecutive_failed_delays) >= int(resolved_policy["consecutive_failed_tail_delays_stop"]):
         return {
-            "action": "finish_captured",
-            "tail_phase_status": "captured",
-            "termination_reason": "refine_trigger",
-            "trigger_reason": _tail_trigger_reason(summary, mode="refine", policy=resolved_policy),
-        }
-    if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
-        return {
-            "action": "finish_using_coarse_trigger",
-            "tail_phase_status": "advisory_coarse_only",
-            "termination_reason": "coarse_trigger_fallback",
-            "trigger_reason": coarse_trigger_reason,
+            "action": "stop",
+            "tail_phase_status": "unresolved_qc_failure",
+            "termination_reason": "repeated_tail_qc_failure",
         }
     if bool(budget.get("exhausted")):
         return {
             "action": "stop",
             "tail_phase_status": "unresolved_budget_exhausted",
             "termination_reason": "capture_budget_exhausted",
-            "trigger_reason": None,
+        }
+    if int(attempted_delay_count) >= int(max(0, planned_delay_count)):
+        return {
+            "action": "finish_resolve",
+            "tail_phase_status": None,
+            "termination_reason": None,
         }
     return {
         "action": "continue",
         "tail_phase_status": None,
         "termination_reason": None,
-        "trigger_reason": None,
     }
 
 
@@ -611,132 +543,203 @@ def resolve_online_stream_tail_result(
     *,
     flow_fit_result: dict | None,
     tail_plan: dict | None,
-    coarse_summaries: list[dict] | None,
-    refine_summaries: list[dict] | None,
+    scout_summaries: list[dict] | None = None,
+    backtrack_summaries: list[dict] | None = None,
+    coarse_summaries: list[dict] | None = None,
+    refine_summaries: list[dict] | None = None,
     trigger_bracket: dict | None,
+    flow_delay_summaries: list[dict] | None = None,
     phase: str = "online_stream_calibration",
 ) -> dict:
     fit = dict(flow_fit_result or {})
     plan = dict(tail_plan or {})
-    coarse_rows = [dict(row or {}) for row in list(coarse_summaries or [])]
-    refine_rows = [dict(row or {}) for row in list(refine_summaries or [])]
+    scout_rows = [
+        dict(row or {})
+        for row in list(scout_summaries if scout_summaries is not None else coarse_summaries or [])
+    ]
+    backtrack_rows = [
+        dict(row or {})
+        for row in list(backtrack_summaries if backtrack_summaries is not None else refine_summaries or [])
+    ]
     bracket = dict(trigger_bracket or {})
-    tail_phase_status = str(bracket.get("tail_phase_status") or bracket.get("status") or "unresolved_no_trigger")
-    termination_reason = str(bracket.get("termination_reason") or "")
-    trigger_reason = str(bracket.get("trigger_reason") or "")
-    synthetic_left_bracket_used = bool(bracket.get("synthetic_left_bracket_used"))
-    tail_retarget_count = max(
-        0,
-        _to_int(bracket.get("tail_retarget_count"), _to_int(plan.get("tail_retarget_count"), 0)),
-    )
-    retargeted_coarse_start_delay_us = _to_int(
-        bracket.get("retargeted_coarse_start_delay_us"),
-        _to_int(plan.get("retargeted_coarse_start_delay_us")),
+    resolved_policy = _resolved_policy(plan.get("policy") if isinstance(plan.get("policy"), dict) else None)
+
+    scout_rows = _classify_trace_rows(scout_rows, policy=resolved_policy)
+    backtrack_rows = _classify_trace_rows(backtrack_rows, policy=resolved_policy)
+
+    requested_status = str(bracket.get("tail_phase_status") or bracket.get("status") or "").strip()
+    termination_reason = str(bracket.get("termination_reason") or "").strip()
+    landmark_delay_us = _to_int(bracket.get("landmark_delay_us"), _to_int(bracket.get("trigger_delay_us")))
+    landmark_reason = str(bracket.get("landmark_reason") or bracket.get("trigger_reason") or "").strip() or None
+    backtrack_left_delay_us = _to_int(
+        bracket.get("backtrack_left_delay_us"),
+        _to_int(bracket.get("last_nontrigger_delay_us")),
     )
 
-    trigger_delay_us = _to_int(bracket.get("trigger_delay_us"))
-    last_nontrigger_delay_us = _to_int(bracket.get("last_nontrigger_delay_us"))
-    trigger_summary = _find_delay_summary(coarse_rows, trigger_delay_us)
-    last_nontrigger_summary = _find_delay_summary(coarse_rows, last_nontrigger_delay_us)
-    trigger_delay_from_emergence_us = _summary_delay_from_emergence(trigger_summary, trigger_delay_us)
-    last_nontrigger_delay_from_emergence_us = _summary_delay_from_emergence(
-        last_nontrigger_summary,
-        last_nontrigger_delay_us,
-    )
-    if (
-        synthetic_left_bracket_used
-        and last_nontrigger_delay_from_emergence_us is None
-        and trigger_summary
-        and trigger_delay_us is not None
-        and last_nontrigger_delay_us is not None
-    ):
-        trigger_delay_from_emergence_us = _summary_delay_from_emergence(trigger_summary, trigger_delay_us)
-        if trigger_delay_from_emergence_us is not None:
-            last_nontrigger_delay_from_emergence_us = int(
-                int(trigger_delay_from_emergence_us)
-                - int(trigger_delay_us)
-                + int(last_nontrigger_delay_us)
-            )
+    if landmark_delay_us is None:
+        for row in scout_rows:
+            if bool(row.get("landmark_detected")):
+                landmark_delay_us = _to_int(row.get("delay_us"))
+                landmark_reason = str(row.get("landmark_reason") or landmark_reason or "").strip() or None
+                break
+    landmark_summary = _find_delay_summary(scout_rows, landmark_delay_us)
+
+    if backtrack_left_delay_us is None and landmark_delay_us is not None:
+        scout_before_landmark = [
+            int(dict(row or {}).get("delay_us"))
+            for row in scout_rows
+            if _to_int(dict(row or {}).get("delay_us")) is not None
+            and _to_int(dict(row or {}).get("delay_us")) < int(landmark_delay_us)
+        ]
+        if scout_before_landmark:
+            backtrack_left_delay_us = max(scout_before_landmark)
+        else:
+            backtrack_left_delay_us = _to_int(plan.get("scout_anchor_delay_us"))
+
+    baseline_width_px = _to_float_or_none(fit.get("steady_width_baseline_px"))
+    left_endpoint_summary = _find_delay_summary(backtrack_rows, backtrack_left_delay_us)
+    if left_endpoint_summary is None:
+        left_endpoint_summary = _find_delay_summary(scout_rows, backtrack_left_delay_us)
+    if left_endpoint_summary is None:
+        left_endpoint_summary = _flow_anchor_summary(
+            _find_delay_summary(list(flow_delay_summaries or []), backtrack_left_delay_us),
+            baseline_width_px,
+            phase_label="flow_anchor",
+        )
+
+    local_trace = []
+    seen_delays = set()
+    for row in [left_endpoint_summary, *backtrack_rows, landmark_summary]:
+        if not row:
+            continue
+        summary = dict(row or {})
+        delay_value = _to_int(summary.get("delay_us"))
+        if delay_value is None or delay_value in seen_delays:
+            continue
+        seen_delays.add(delay_value)
+        local_trace.append(summary)
+    local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
+
+    separation_landmark_delay_from_emergence_us = None
+    for row in local_trace:
+        if bool(row.get("separated_from_nozzle_landmark")):
+            separation_landmark_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+            break
+
+    earliest_plateau_seen = False
+    captured_candidate = None
+    for row in local_trace:
+        row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+        if bool(row.get("plateau_candidate")):
+            earliest_plateau_seen = True
+        if not earliest_plateau_seen or not bool(row.get("tail_affected")):
+            continue
+        if (
+            separation_landmark_delay_from_emergence_us is not None
+            and row_delay_from_emergence_us is not None
+            and int(row_delay_from_emergence_us) >= int(separation_landmark_delay_from_emergence_us)
+        ):
+            continue
+        captured_candidate = dict(row)
+        break
 
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
         + list(bracket.get("warnings") or [])
-        + [warning for row in coarse_rows for warning in list(row.get("warnings") or [])]
-        + [warning for row in refine_rows for warning in list(row.get("warnings") or [])]
-    )
-    late_frame_warning = bool(
-        any(bool(row.get("late_frame_warning")) for row in coarse_rows)
-        or any(bool(row.get("late_frame_warning")) for row in refine_rows)
+        + [warning for row in scout_rows for warning in list(row.get("warnings") or [])]
+        + [warning for row in backtrack_rows for warning in list(row.get("warnings") or [])]
     )
 
-    final_tail_start_delay_us = None
-    final_tail_start_delay_from_emergence_us = None
-    if tail_phase_status == "captured":
-        eligible_candidates = []
+    late_frame_warning = bool(
+        any(bool(row.get("late_frame_warning")) for row in scout_rows)
+        or any(bool(row.get("late_frame_warning")) for row in backtrack_rows)
+    )
+
+    tail_phase_status = requested_status or ""
+    tail_start_delay_from_emergence_us = None
+    tail_start_evidence = None
+    if tail_phase_status in {
+        "unresolved_missing_flow_baseline",
+        "unresolved_budget_exhausted",
+        "unresolved_qc_failure",
+        "unresolved_no_landmark",
+    }:
+        pass
+    elif landmark_summary is None:
+        tail_phase_status = "unresolved_no_landmark"
+        if not termination_reason:
+            termination_reason = "no_scout_landmark"
+        if "unresolved_no_landmark" not in warnings:
+            warnings.append("unresolved_no_landmark")
+    elif captured_candidate is not None:
+        tail_phase_status = "captured"
+        termination_reason = termination_reason or "backtrack_width_departure"
+        tail_start_delay_from_emergence_us = _to_int(captured_candidate.get("delay_from_emergence_us"))
         if (
-            last_nontrigger_summary
-            and bool(last_nontrigger_summary.get("delay_accepted"))
-            and bool(last_nontrigger_summary.get("triggered_refine"))
+            _to_int(captured_candidate.get("delay_us")) == _to_int(landmark_summary.get("delay_us"))
+            and str(landmark_summary.get("landmark_reason") or "") == "strong_width_collapse_backup"
         ):
-            eligible_candidates.append(dict(last_nontrigger_summary))
-        for row in refine_rows:
-            if bool(row.get("delay_accepted")) and bool(row.get("triggered_refine")):
-                eligible_candidates.append(dict(row))
-        if trigger_summary and bool(trigger_summary.get("delay_accepted")):
-            eligible_candidates.append(dict(trigger_summary))
-        eligible_candidates.sort(
-            key=lambda row: (
-                _to_int(row.get("delay_from_emergence_us"), 10**9),
-                _to_int(row.get("delay_us"), 10**9),
-            )
-        )
-        if eligible_candidates:
-            final_row = dict(eligible_candidates[0])
-            final_tail_start_delay_us = _to_int(final_row.get("delay_us"))
-            final_tail_start_delay_from_emergence_us = _to_int(
-                final_row.get("delay_from_emergence_us")
-            )
-        elif trigger_summary:
-            final_tail_start_delay_us = _to_int(trigger_summary.get("delay_us"))
-            final_tail_start_delay_from_emergence_us = _to_int(
-                trigger_summary.get("delay_from_emergence_us")
-            )
+            tail_start_evidence = "width_collapse_backup"
         else:
-            tail_phase_status = "unresolved_no_trigger"
-            if "tail_resolution_failed" not in warnings:
-                warnings.append("tail_resolution_failed")
-    elif tail_phase_status == "advisory_coarse_only":
-        if trigger_summary and bool(trigger_summary.get("delay_accepted")):
-            final_tail_start_delay_us = _to_int(trigger_summary.get("delay_us"))
-            final_tail_start_delay_from_emergence_us = _to_int(
-                trigger_summary.get("delay_from_emergence_us")
-            )
-        else:
-            tail_phase_status = "unresolved_no_trigger"
-            if "tail_resolution_failed" not in warnings:
-                warnings.append("tail_resolution_failed")
+            tail_start_evidence = "backtrack_width_departure"
+    elif str(landmark_summary.get("landmark_reason") or "") == "separated_from_nozzle":
+        tail_phase_status = "advisory_landmark_only"
+        termination_reason = termination_reason or "landmark_only"
+        tail_start_delay_from_emergence_us = _to_int(landmark_summary.get("delay_from_emergence_us"))
+        tail_start_evidence = "landmark_only"
+        if "tail_landmark_only" not in warnings:
+            warnings.append("tail_landmark_only")
+    elif (
+        str(landmark_summary.get("landmark_reason") or "") == "strong_width_collapse_backup"
+        and any(bool(row.get("plateau_candidate")) for row in local_trace)
+    ):
+        tail_phase_status = "captured"
+        termination_reason = termination_reason or "backtrack_width_departure"
+        tail_start_delay_from_emergence_us = _to_int(landmark_summary.get("delay_from_emergence_us"))
+        tail_start_evidence = "width_collapse_backup"
+    else:
+        tail_phase_status = "unresolved_no_landmark"
+        termination_reason = termination_reason or "no_scout_landmark"
+        if "unresolved_no_landmark" not in warnings:
+            warnings.append("unresolved_no_landmark")
 
     predicted_stream_duration_us = None
     predicted_volume_nl = None
     flow_rate = _to_float_or_none(fit.get("flow_rate_nl_per_us"))
     flow_intercept = _to_float_or_none(fit.get("flow_intercept_nl"))
     if (
-        tail_phase_status in {"captured", "advisory_coarse_only"}
-        and final_tail_start_delay_from_emergence_us is not None
+        tail_phase_status in {"captured", "advisory_landmark_only"}
+        and tail_start_delay_from_emergence_us is not None
         and flow_rate is not None
         and flow_intercept is not None
     ):
-        predicted_stream_duration_us = int(final_tail_start_delay_from_emergence_us)
+        predicted_stream_duration_us = int(tail_start_delay_from_emergence_us)
         predicted_volume_nl = float(
             float(flow_intercept) + (float(flow_rate) * float(predicted_stream_duration_us))
         )
-    if tail_phase_status == "advisory_coarse_only" and "tail_advisory_only" not in warnings:
-        warnings.append("tail_advisory_only")
 
-    all_summaries = list(coarse_rows) + list(refine_rows)
+    landmark_delay_from_emergence_us = _summary_delay_from_emergence(landmark_summary, landmark_delay_us)
+    backtrack_window_start_delay_from_emergence_us = _summary_delay_from_emergence(
+        left_endpoint_summary,
+        backtrack_left_delay_us,
+    )
+    if (
+        backtrack_window_start_delay_from_emergence_us is None
+        and landmark_delay_from_emergence_us is not None
+        and landmark_delay_us is not None
+        and backtrack_left_delay_us is not None
+    ):
+        backtrack_window_start_delay_from_emergence_us = int(
+            int(landmark_delay_from_emergence_us)
+            - int(landmark_delay_us)
+            + int(backtrack_left_delay_us)
+        )
+
+    all_summaries = list(scout_rows) + list(backtrack_rows)
     tail_phase = {
-        "status": str(tail_phase_status),
+        "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
+        "search_method": SEARCH_METHOD,
         "attempted_delay_count": int(len(all_summaries)),
         "attempted_capture_count": int(
             sum(max(0, _to_int(row.get("attempted_replicates"), 0)) for row in all_summaries)
@@ -746,21 +749,24 @@ def resolve_online_stream_tail_result(
             sum(max(0, _to_int(row.get("accepted_replicates"), 0)) for row in all_summaries)
         ),
         "termination_reason": str(termination_reason),
-        "coarse_delay_summaries": _copy_jsonish(coarse_rows),
-        "refine_delay_summaries": _copy_jsonish(refine_rows),
-        "trigger_delay_from_emergence_us": trigger_delay_from_emergence_us,
-        "trigger_reason": str(trigger_reason),
-        "last_nontrigger_delay_from_emergence_us": last_nontrigger_delay_from_emergence_us,
-        "synthetic_left_bracket_used": bool(synthetic_left_bracket_used),
+        "scout_delay_summaries": _copy_jsonish(scout_rows),
+        "backtrack_delay_summaries": _copy_jsonish(backtrack_rows),
+        "coarse_delay_summaries": _copy_jsonish(scout_rows),
+        "refine_delay_summaries": _copy_jsonish(backtrack_rows),
+        "landmark_delay_from_emergence_us": landmark_delay_from_emergence_us,
+        "landmark_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
+        "backtrack_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
+        "backtrack_window_end_delay_from_emergence_us": landmark_delay_from_emergence_us,
+        "tail_start_evidence": tail_start_evidence,
+        "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
+        "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
+        "last_nontrigger_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
+        "synthetic_left_bracket_used": False,
         "late_frame_warning": bool(late_frame_warning),
-        "tail_retarget_count": int(tail_retarget_count),
-        "retargeted_coarse_start_delay_us": (
-            None if retargeted_coarse_start_delay_us is None else int(retargeted_coarse_start_delay_us)
-        ),
+        "tail_retarget_count": 0,
+        "retargeted_coarse_start_delay_us": None,
         "tail_start_delay_from_emergence_us": (
-            None
-            if final_tail_start_delay_from_emergence_us is None
-            else int(final_tail_start_delay_from_emergence_us)
+            None if tail_start_delay_from_emergence_us is None else int(tail_start_delay_from_emergence_us)
         ),
         "warnings": _copy_warnings(warnings),
     }
@@ -780,6 +786,8 @@ def build_online_stream_tail_fit_artifact(
     condition: dict | None = None,
     tail_plan: dict | None = None,
     steady_width_baseline_px: float | int | None = None,
+    scout_delay_summaries: list[dict] | None = None,
+    backtrack_delay_summaries: list[dict] | None = None,
     coarse_delay_summaries: list[dict] | None = None,
     refine_delay_summaries: list[dict] | None = None,
     result: dict | None = None,
@@ -788,6 +796,10 @@ def build_online_stream_tail_fit_artifact(
     phase: str = "online_stream_calibration",
 ) -> dict:
     result_obj = dict(result or {})
+    resolved_scout_rows = scout_delay_summaries if scout_delay_summaries is not None else coarse_delay_summaries or []
+    resolved_backtrack_rows = (
+        backtrack_delay_summaries if backtrack_delay_summaries is not None else refine_delay_summaries or []
+    )
     return {
         "schema_version": int(schema_version),
         "phase": str(phase),
@@ -798,8 +810,11 @@ def build_online_stream_tail_fit_artifact(
             if steady_width_baseline_px is not None
             else (tail_plan or {}).get("steady_width_baseline_px")
         ),
-        "coarse_delay_summaries": _copy_jsonish(coarse_delay_summaries or []),
-        "refine_delay_summaries": _copy_jsonish(refine_delay_summaries or []),
+        "search_method": SEARCH_METHOD,
+        "scout_delay_summaries": _copy_jsonish(resolved_scout_rows),
+        "backtrack_delay_summaries": _copy_jsonish(resolved_backtrack_rows),
+        "coarse_delay_summaries": _copy_jsonish(resolved_scout_rows),
+        "refine_delay_summaries": _copy_jsonish(resolved_backtrack_rows),
         "result": _copy_jsonish(result_obj),
         "warnings": _copy_warnings(
             warnings if warnings is not None else result_obj.get("warnings")
