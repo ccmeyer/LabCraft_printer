@@ -657,15 +657,62 @@ def test_stream_capture_queue_can_start_droplet_timecourse(tmp_path, monkeypatch
     started = []
 
     def _capture_start(proc_cls, *args, **kwargs):
-        started.append(proc_cls)
+        started.append((proc_cls, dict(kwargs)))
         return True
 
     monkeypatch.setattr(manager, "_try_start_process", _capture_start)
     manager.calibration_queue = ["droplet_timecourse"]
+    manager._stream_capture_state = {"status": "running"}
 
     manager.start_calibration_queue()
 
-    assert started == [DropletTimecourseProcess]
+    assert started == [
+        (DropletTimecourseProcess, {"_allow_stream_capture_session": True}),
+    ]
+
+
+def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+
+    class _QueueStartStubProcess:
+        phase_name = "nozzle_position"
+        owns_calibration_memory_session = False
+        supports_operator_verdict = False
+
+        def __init__(self, calibration_manager, model, *args, **kwargs):
+            self.calibration_manager = calibration_manager
+            self.model = model
+            self.args = args
+            self.kwargs = dict(kwargs)
+            self.stageChanged = SignalStub()
+            self.calibrationCompleted = SignalStub()
+            self.calibrationError = SignalStub()
+            self.calibrationDataUpdated = SignalStub()
+            self.presentImageSignal = SignalStub()
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", _QueueStartStubProcess)
+
+    ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=1, notes="queue launch")
+    assert (ok, message) == (True, "")
+
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_refresh()
+    assert (ok, message) == (True, "")
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_suspend()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_gravimetric_capture_gripper_suspended()
+    assert (ok, message) == (True, "")
+
+    assert isinstance(manager.activeCalibration, _QueueStartStubProcess)
+    assert manager.activeCalibration.started is True
+    assert manager.calibration_queue == list(manager.STREAM_CAPTURE_QUEUE[1:])
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "running"
 
 
 def test_start_droplet_timecourse_process_passes_camera_archive_flag(tmp_path, monkeypatch):

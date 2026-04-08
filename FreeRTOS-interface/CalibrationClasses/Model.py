@@ -2791,7 +2791,14 @@ class CalibrationManager(QObject):
             self.start_calibration_queue()  # try next
             return
 
-        if not self._try_start_process(proc_cls):
+        start_kwargs = {}
+        stream_status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if stream_status == "running" and next_cal in self.STREAM_CAPTURE_QUEUE:
+            # Allow the stream-capture-owned queue to start its internal steps
+            # without weakening the guard for unrelated calibrations.
+            start_kwargs["_allow_stream_capture_session"] = True
+
+        if not self._try_start_process(proc_cls, **start_kwargs):
             # Stop the queue on error to avoid cascading failures.
             self.calibrationStageChanged.emit("Calibration queue stopped due to missing prerequisites.", "red")
             self.clear_calibration_queue()
@@ -4707,6 +4714,8 @@ class CalibrationManager(QObject):
         return True
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
+        kwargs = dict(kwargs or {})
+        allow_stream_capture_session = bool(kwargs.pop("_allow_stream_capture_session", False))
         stream_capture_open = False
         has_open_stream_capture = getattr(self, "has_open_stream_gravimetric_capture", None)
         if callable(has_open_stream_capture):
@@ -4714,7 +4723,15 @@ class CalibrationManager(QObject):
                 stream_capture_open = bool(has_open_stream_capture())
             except Exception:
                 stream_capture_open = False
-        if stream_capture_open:
+        phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
+        stream_capture_status = str((self._stream_capture_state or {}).get("status") or "idle")
+        stream_capture_internal_process = phase_name in set(self.STREAM_CAPTURE_QUEUE)
+        allow_internal_stream_capture_start = (
+            allow_stream_capture_session
+            and stream_capture_status == "running"
+            and stream_capture_internal_process
+        )
+        if stream_capture_open and not allow_internal_stream_capture_start:
             msg = "Save or discard the current stream gravimetric capture session before starting another calibration."
             self.calibrationStageChanged.emit(msg, "red")
             self.calibrationError.emit(msg)
@@ -4724,7 +4741,6 @@ class CalibrationManager(QObject):
         except Exception as e:
             self._warn_calibration_memory("prepare_prior_application", e)
         missing = self._process_missing(proc_cls, *args, **kwargs)
-        phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
 
         if missing:
             msg = f"{phase_name.replace('_',' ').title()} prerequisites missing: {', '.join(missing)}"

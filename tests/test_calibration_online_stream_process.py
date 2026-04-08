@@ -319,6 +319,77 @@ def test_try_start_process_blocks_when_stream_capture_session_is_open():
     assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
 
 
+def test_try_start_process_allows_stream_capture_internal_queue_step():
+    class _StreamCaptureQueueProcess:
+        phase_name = "nozzle_position"
+        owns_calibration_memory_session = False
+
+        def __init__(self, manager, model, *args, **kwargs):
+            self.manager = manager
+            self.model = model
+            self.args = args
+            self.kwargs = dict(kwargs)
+            self.stageChanged = SignalStub()
+            self.calibrationCompleted = SignalStub()
+            self.calibrationError = SignalStub()
+            self.calibrationDataUpdated = SignalStub()
+            self.presentImageSignal = SignalStub()
+
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "running"}
+    mgr._run_id = None
+    mgr._run_idx = None
+    mgr.model = SimpleNamespace()
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+    started = []
+    mgr.start_active_calibration = lambda: started.append(mgr.activeCalibration)
+
+    started_ok = CalibrationManager._try_start_process(
+        mgr,
+        _StreamCaptureQueueProcess,
+        _allow_stream_capture_session=True,
+    )
+
+    assert started_ok is True
+    assert len(started) == 1
+    assert isinstance(mgr.activeCalibration, _StreamCaptureQueueProcess)
+    assert mgr.activeCalibration.kwargs.get("parent") is mgr
+    assert mgr.calibrationError.calls == []
+
+
+def test_try_start_process_bypass_still_blocks_non_queue_or_non_running_states():
+    mgr = CalibrationManager.__new__(CalibrationManager)
+    mgr._stream_capture_state = {"status": "running"}
+    mgr.calibrationStageChanged = SignalStub()
+    mgr.calibrationError = SignalStub()
+    mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
+    mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+
+    started = CalibrationManager._try_start_process(
+        mgr,
+        OnlineStreamCalibrationProcess,
+        _allow_stream_capture_session=True,
+    )
+    assert started is False
+    assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
+
+    class _StreamCaptureQueueProcess:
+        phase_name = "nozzle_position"
+
+    mgr._stream_capture_state = {"status": "awaiting_mass_entry"}
+    started = CalibrationManager._try_start_process(
+        mgr,
+        _StreamCaptureQueueProcess,
+        _allow_stream_capture_session=True,
+    )
+
+    assert started is False
+    assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
+
+
 def test_try_start_process_opens_session_before_online_stream_init(monkeypatch):
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._stream_capture_state = {}
