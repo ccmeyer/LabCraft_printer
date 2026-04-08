@@ -2797,6 +2797,7 @@ class CalibrationManager(QObject):
             # Allow the stream-capture-owned queue to start its internal steps
             # without weakening the guard for unrelated calibrations.
             start_kwargs["_allow_stream_capture_session"] = True
+            start_kwargs["_stream_capture_queue_phase"] = str(next_cal)
 
         if not self._try_start_process(proc_cls, **start_kwargs):
             # Stop the queue on error to avoid cascading failures.
@@ -4716,6 +4717,7 @@ class CalibrationManager(QObject):
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
         kwargs = dict(kwargs or {})
         allow_stream_capture_session = bool(kwargs.pop("_allow_stream_capture_session", False))
+        stream_capture_queue_phase = str(kwargs.pop("_stream_capture_queue_phase", "") or "").strip()
         stream_capture_open = False
         has_open_stream_capture = getattr(self, "has_open_stream_gravimetric_capture", None)
         if callable(has_open_stream_capture):
@@ -4724,8 +4726,15 @@ class CalibrationManager(QObject):
             except Exception:
                 stream_capture_open = False
         phase_name = getattr(proc_cls, "phase_name", None) or getattr(proc_cls, "__name__", "unknown")
+        canonical_phase_name = str(self.PHASE_ALIASES.get(str(phase_name), str(phase_name)))
+        canonical_stream_capture_queue_phase = str(
+            self.PHASE_ALIASES.get(stream_capture_queue_phase, stream_capture_queue_phase)
+        )
         stream_capture_status = str((self._stream_capture_state or {}).get("status") or "idle")
-        stream_capture_internal_process = phase_name in set(self.STREAM_CAPTURE_QUEUE)
+        stream_capture_internal_process = (
+            canonical_stream_capture_queue_phase in set(self.STREAM_CAPTURE_QUEUE)
+            or canonical_phase_name in set(self.STREAM_CAPTURE_QUEUE)
+        )
         allow_internal_stream_capture_start = (
             allow_stream_capture_session
             and stream_capture_status == "running"

@@ -667,7 +667,13 @@ def test_stream_capture_queue_can_start_droplet_timecourse(tmp_path, monkeypatch
     manager.start_calibration_queue()
 
     assert started == [
-        (DropletTimecourseProcess, {"_allow_stream_capture_session": True}),
+        (
+            DropletTimecourseProcess,
+            {
+                "_allow_stream_capture_session": True,
+                "_stream_capture_queue_phase": "droplet_timecourse",
+            },
+        ),
     ]
 
 
@@ -675,7 +681,6 @@ def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp
     _model, manager = _make_manager(tmp_path)
 
     class _QueueStartStubProcess:
-        phase_name = "nozzle_position"
         owns_calibration_memory_session = False
         supports_operator_verdict = False
 

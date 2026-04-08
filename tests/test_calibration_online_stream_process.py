@@ -321,7 +321,6 @@ def test_try_start_process_blocks_when_stream_capture_session_is_open():
 
 def test_try_start_process_allows_stream_capture_internal_queue_step():
     class _StreamCaptureQueueProcess:
-        phase_name = "nozzle_position"
         owns_calibration_memory_session = False
 
         def __init__(self, manager, model, *args, **kwargs):
@@ -351,6 +350,7 @@ def test_try_start_process_allows_stream_capture_internal_queue_step():
         mgr,
         _StreamCaptureQueueProcess,
         _allow_stream_capture_session=True,
+        _stream_capture_queue_phase="nozzle_position",
     )
 
     assert started_ok is True
@@ -372,18 +372,20 @@ def test_try_start_process_bypass_still_blocks_non_queue_or_non_running_states()
         mgr,
         OnlineStreamCalibrationProcess,
         _allow_stream_capture_session=True,
+        _stream_capture_queue_phase="online_stream_calibration",
     )
     assert started is False
     assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
 
     class _StreamCaptureQueueProcess:
-        phase_name = "nozzle_position"
+        pass
 
     mgr._stream_capture_state = {"status": "awaiting_mass_entry"}
     started = CalibrationManager._try_start_process(
         mgr,
         _StreamCaptureQueueProcess,
         _allow_stream_capture_session=True,
+        _stream_capture_queue_phase="nozzle_position",
     )
 
     assert started is False
