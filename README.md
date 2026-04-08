@@ -125,6 +125,23 @@ powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
   -ProcessName NozzlePositionCalibrationProcess `
   -RunId run_20260304_111716_24e5f347
 
+# Copy a whole stream experiment into the repo Experiments directory
+# `-ExperimentMatch` accepts substrings and wildcard patterns such as Stream_100um_*
+# Whole-experiment pulls resume by copy unit on rerun and skip droplet_imager_captures by default
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -ExperimentMatch Stream_100um_* `
+  -LocalRoot FreeRTOS-interface/Experiments `
+  -PreserveExperimentName
+
+# Include droplet_imager_captures if you explicitly need the duplicate image archive
+powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
+  -PiHost 192.168.0.29 `
+  -ExperimentMatch Stream_100um_* `
+  -LocalRoot FreeRTOS-interface/Experiments `
+  -PreserveExperimentName `
+  -IncludeDropletImagerCaptures
+
 # Preview the resolved remote/local paths without copying
 powershell -ExecutionPolicy Bypass -File tools/pull_pi_calibration_records.ps1 `
   -PiHost 192.168.0.29 `
@@ -139,6 +156,8 @@ After a copy, the script writes `pull_summary.json` into the pulled experiment d
 ```
 
 If you pass `-Replay`, the script will try to run `tools/replay_calibration_run.py` locally after copying. If no preferred local interpreter is found, it will print the replay command instead.
+
+Whole-experiment pulls also write `pull_state.json` into the destination experiment directory. If a large transfer is interrupted, rerun the same command and the script will compare the local contents against the remote manifest, skip completed copy units, and continue with the remaining files/directories.
 
 ## Getting Started - PlatformIO
 
