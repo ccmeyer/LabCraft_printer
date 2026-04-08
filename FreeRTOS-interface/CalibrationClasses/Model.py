@@ -1137,11 +1137,27 @@ class CalibrationManager(QObject):
         "droplet_timecourse": "droplet_timecourse",
         "online_stream_calibration": "online_stream_calibration",
     }
-    STREAM_CAPTURE_QUEUE = (
+    STREAM_CAPTURE_PREREQ_QUEUE = (
         "nozzle_position",
         "nozzle_focus",
         "droplet_emergence",
+    )
+    STREAM_CAPTURE_MODE_CONFIG = {
+        "timecourse": {
+            "queue_tail": ("droplet_timecourse",),
+            "phase_name": "droplet_timecourse",
+            "process_name": "DropletTimecourseProcess",
+        },
+        "online_stream": {
+            "queue_tail": ("online_stream_calibration",),
+            "phase_name": "online_stream_calibration",
+            "process_name": "OnlineStreamCalibrationProcess",
+        },
+    }
+    STREAM_CAPTURE_QUEUE = STREAM_CAPTURE_PREREQ_QUEUE + ("droplet_timecourse",)
+    STREAM_CAPTURE_INTERNAL_PHASES = STREAM_CAPTURE_PREREQ_QUEUE + (
         "droplet_timecourse",
+        "online_stream_calibration",
     )
     STREAM_CAPTURE_PARKED_GRIPPER_REFRESH_MS = 1_000_000
     STREAM_METADATA_HEADERS = [
@@ -1160,6 +1176,15 @@ class CalibrationManager(QObject):
         "Mass/print",
         "CV",
         "Notes",
+        "Capture Mode",
+        "Capture Process",
+        "Flow Fit Status",
+        "Tail Phase Status",
+        "Flow Rate (nL/us)",
+        "Tail Start From Emergence (us)",
+        "Predicted Stream Duration (us)",
+        "Predicted Volume (nL)",
+        "Analysis Warnings",
     ]
 
     def __init__(self, model, parent=None):
@@ -2778,6 +2803,7 @@ class CalibrationManager(QObject):
             'nozzle_focus': NozzleFocusCalibrationProcess,
             'droplet_emergence': DropletEmergenceCalibrationProcess,
             'droplet_timecourse': DropletTimecourseProcess,
+            'online_stream_calibration': OnlineStreamCalibrationProcess,
             'pressure': PressureCalibrationProcess,
             'pressure_scan': PressureBandCalibrationProcess,
             'trajectory': TrajectoryCalibrationProcess,
@@ -2793,7 +2819,7 @@ class CalibrationManager(QObject):
 
         start_kwargs = {}
         stream_status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if stream_status == "running" and next_cal in self.STREAM_CAPTURE_QUEUE:
+        if stream_status == "running" and next_cal in self.STREAM_CAPTURE_INTERNAL_PHASES:
             # Allow the stream-capture-owned queue to start its internal steps
             # without weakening the guard for unrelated calibrations.
             start_kwargs["_allow_stream_capture_session"] = True
@@ -3300,6 +3326,37 @@ class CalibrationManager(QObject):
             "refuel_pressure": self._normalize_stream_capture_pressure(payload.get("refuel_pressure")),
         }
 
+    @classmethod
+    def _normalize_stream_capture_mode(cls, capture_mode) -> str:
+        mode = str(capture_mode or "timecourse").strip().lower()
+        if mode not in cls.STREAM_CAPTURE_MODE_CONFIG:
+            return "timecourse"
+        return mode
+
+    @classmethod
+    def _get_stream_capture_mode_config(cls, capture_mode="timecourse") -> dict:
+        mode = cls._normalize_stream_capture_mode(capture_mode)
+        return dict(cls.STREAM_CAPTURE_MODE_CONFIG.get(mode) or cls.STREAM_CAPTURE_MODE_CONFIG["timecourse"])
+
+    @classmethod
+    def _build_stream_capture_queue_for_mode(cls, capture_mode="timecourse") -> tuple[str, ...]:
+        config = cls._get_stream_capture_mode_config(capture_mode)
+        queue_tail = tuple(config.get("queue_tail") or ())
+        return tuple(cls.STREAM_CAPTURE_PREREQ_QUEUE) + queue_tail
+
+    @staticmethod
+    def _stream_capture_warning_list(value) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value).strip()
+        return [text] if text else []
+
+    @staticmethod
+    def _format_stream_capture_warning_text(value) -> str:
+        return "; ".join(CalibrationManager._stream_capture_warning_list(value))
+
     def _stream_capture_condition_matches_row(self, row: dict, condition_snapshot: dict):
         return (
             self._stream_capture_int_or_none(row.get("Print PW")) == self._stream_capture_int_or_none(condition_snapshot.get("print_width"))
@@ -3336,6 +3393,7 @@ class CalibrationManager(QObject):
             settings = {}
         condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
         suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
+        mode_config = self._get_stream_capture_mode_config("timecourse")
         return {
             "status": "idle",
             "status_message": str(status_message or "Ready to begin stream gravimetric capture."),
@@ -3350,11 +3408,23 @@ class CalibrationManager(QObject):
             "suggested_rep": int(suggested_rep),
             "rep": int(suggested_rep),
             "notes": "",
+            "capture_mode": "timecourse",
+            "capture_phase_name": str(mode_config.get("phase_name") or ""),
+            "capture_process_name": str(mode_config.get("process_name") or ""),
             "timecourse_run_id": None,
+            "dataset_run_id": None,
+            "dataset_process_name": None,
             "child_processes": [],
             "background_capture_count": None,
             "printed_capture_count": None,
             "printed_capture_event_count": None,
+            "flow_fit_status": "",
+            "tail_phase_status": "",
+            "flow_rate_nl_per_us": None,
+            "tail_start_delay_from_emergence_us": None,
+            "predicted_stream_duration_us": None,
+            "predicted_volume_nl": None,
+            "analysis_warnings": [],
             "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
             "sidecar_written": False,
@@ -3532,8 +3602,73 @@ class CalibrationManager(QObject):
         child_processes = list((self._stream_capture_state or {}).get("child_processes") or [])
         child_processes.append(entry)
         self._stream_capture_state["child_processes"] = child_processes
-        if str(process_name) == "DropletTimecourseProcess" and run_id:
-            self._stream_capture_state["timecourse_run_id"] = str(run_id)
+        configured_mode = self._normalize_stream_capture_mode((self._stream_capture_state or {}).get("capture_mode"))
+        configured_phase_name = str((self._stream_capture_state or {}).get("capture_phase_name") or "")
+        configured_process_name = str((self._stream_capture_state or {}).get("capture_process_name") or "")
+        canonical_phase_name = str(self.PHASE_ALIASES.get(str(phase_name), str(phase_name)))
+        canonical_configured_phase_name = str(
+            self.PHASE_ALIASES.get(configured_phase_name, configured_phase_name)
+        )
+        if run_id and (
+            (configured_process_name and str(process_name) == configured_process_name)
+            or (
+                canonical_phase_name
+                and canonical_configured_phase_name
+                and canonical_phase_name == canonical_configured_phase_name
+            )
+        ):
+            self._stream_capture_state["dataset_run_id"] = str(run_id)
+            self._stream_capture_state["dataset_process_name"] = str(process_name)
+            if configured_mode == "timecourse":
+                self._stream_capture_state["timecourse_run_id"] = str(run_id)
+
+    def _update_stream_capture_online_summary_from_payload(self, payload: dict | None, *, phase_key: str = ""):
+        if not self.has_open_stream_gravimetric_capture():
+            return
+        if self._normalize_stream_capture_mode((self._stream_capture_state or {}).get("capture_mode")) != "online_stream":
+            return
+        if str(phase_key or "") != "online_stream_calibration":
+            return
+
+        result = dict((payload or {}).get("result") or {})
+        if not result:
+            return
+
+        flow_phase = dict(result.get("flow_phase") or {})
+        tail_phase = dict(result.get("tail_phase") or {})
+        self._stream_capture_state["flow_fit_status"] = str(
+            flow_phase.get("fit_status")
+            or (self._stream_capture_state or {}).get("flow_fit_status")
+            or ""
+        )
+        self._stream_capture_state["tail_phase_status"] = str(
+            tail_phase.get("status")
+            or (self._stream_capture_state or {}).get("tail_phase_status")
+            or ""
+        )
+
+        flow_rate = self._stream_capture_float_or_none(flow_phase.get("flow_rate_nl_per_us"))
+        if flow_rate is not None:
+            self._stream_capture_state["flow_rate_nl_per_us"] = float(flow_rate)
+
+        tail_start_delay = self._stream_capture_int_or_none(
+            tail_phase.get("tail_start_delay_from_emergence_us")
+        )
+        if tail_start_delay is not None:
+            self._stream_capture_state["tail_start_delay_from_emergence_us"] = int(tail_start_delay)
+
+        predicted_duration = self._stream_capture_int_or_none(result.get("predicted_stream_duration_us"))
+        if predicted_duration is not None:
+            self._stream_capture_state["predicted_stream_duration_us"] = int(predicted_duration)
+
+        predicted_volume = self._stream_capture_float_or_none(result.get("predicted_volume_nl"))
+        if predicted_volume is not None:
+            self._stream_capture_state["predicted_volume_nl"] = float(predicted_volume)
+
+        self._stream_capture_state["analysis_warnings"] = self._stream_capture_warning_list(
+            result.get("warnings")
+        )
+        self._emit_stream_capture_state_changed()
 
     def _derive_stream_capture_counts_for_run(self, run_dir: str):
         events_path = os.path.join(str(run_dir), "events.jsonl")
@@ -3712,13 +3847,16 @@ class CalibrationManager(QObject):
         self._stream_capture_state["gripper_refresh_suspended"] = True
         self._stream_capture_state["status"] = "running"
         self._stream_capture_state["status_message"] = (
-            "Running nozzle, focus, emergence, and timecourse capture sequence."
+            "Running nozzle, focus, emergence, and stream capture sequence."
         )
         self._stream_capture_state["error_message"] = ""
         self._emit_stream_capture_state_changed()
 
+        queue = self._build_stream_capture_queue_for_mode(
+            (self._stream_capture_state or {}).get("capture_mode")
+        )
         self.clear_calibration_queue()
-        self.add_calibration_queue(list(self.STREAM_CAPTURE_QUEUE))
+        self.add_calibration_queue(list(queue))
         self.start_calibration_queue()
 
         if self.activeCalibration is None and len(self.calibration_queue) == 0 and str(self._stream_capture_state.get("status")) == "running":
@@ -3940,10 +4078,14 @@ class CalibrationManager(QObject):
         return False, "Stream gravimetric capture is not waiting on that move."
 
     def _build_stream_capture_metadata_row(self, *, ending_mass_mg: float, rep_value: int, notes: str):
-        timecourse_run_id = str((self._stream_capture_state or {}).get("timecourse_run_id") or "").strip()
+        dataset_run_id = str(
+            (self._stream_capture_state or {}).get("dataset_run_id")
+            or (self._stream_capture_state or {}).get("timecourse_run_id")
+            or ""
+        ).strip()
         printed_count = self._stream_capture_int_or_none((self._stream_capture_state or {}).get("printed_capture_count"))
-        if not timecourse_run_id:
-            raise ValueError("Timecourse run id is missing; cannot save stream metadata row.")
+        if not dataset_run_id:
+            raise ValueError("Capture run id is missing; cannot save stream metadata row.")
         if printed_count is None or int(printed_count) <= 0:
             raise ValueError("Printed droplet count must be positive before saving.")
 
@@ -3952,9 +4094,16 @@ class CalibrationManager(QObject):
         ending_mass = float(ending_mass_mg)
         mass_change = float(ending_mass - starting_mass)
         mass_per_print = float(mass_change / int(printed_count))
+        capture_mode = self._normalize_stream_capture_mode((self._stream_capture_state or {}).get("capture_mode"))
+        capture_process = str(
+            (self._stream_capture_state or {}).get("dataset_process_name")
+            or (self._stream_capture_state or {}).get("capture_process_name")
+            or ""
+        )
+        is_online_capture = capture_mode == "online_stream"
 
         row = {
-            "Dataset name": str(timecourse_run_id),
+            "Dataset name": str(dataset_run_id),
             "Print PW": str(self._stream_capture_int_or_none(condition.get("print_width")) or ""),
             "Print Pressure": self._format_stream_capture_decimal(condition.get("print_pressure"), 2),
             "Refuel PW": str(self._stream_capture_int_or_none(condition.get("refuel_width")) or ""),
@@ -3969,6 +4118,67 @@ class CalibrationManager(QObject):
             "Mass/print": self._format_stream_capture_decimal(mass_per_print, 4),
             "CV": "",
             "Notes": str(notes or ""),
+            "Capture Mode": str(capture_mode),
+            "Capture Process": capture_process,
+            "Flow Fit Status": (
+                str((self._stream_capture_state or {}).get("flow_fit_status") or "")
+                if is_online_capture
+                else ""
+            ),
+            "Tail Phase Status": (
+                str((self._stream_capture_state or {}).get("tail_phase_status") or "")
+                if is_online_capture
+                else ""
+            ),
+            "Flow Rate (nL/us)": (
+                self._format_stream_capture_decimal(
+                    (self._stream_capture_state or {}).get("flow_rate_nl_per_us"),
+                    6,
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Tail Start From Emergence (us)": (
+                (
+                    str(tail_start_value)
+                    if (
+                        tail_start_value := self._stream_capture_int_or_none(
+                            (self._stream_capture_state or {}).get("tail_start_delay_from_emergence_us")
+                        )
+                    ) is not None
+                    else ""
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Predicted Stream Duration (us)": (
+                (
+                    str(predicted_duration_value)
+                    if (
+                        predicted_duration_value := self._stream_capture_int_or_none(
+                            (self._stream_capture_state or {}).get("predicted_stream_duration_us")
+                        )
+                    ) is not None
+                    else ""
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Predicted Volume (nL)": (
+                self._format_stream_capture_decimal(
+                    (self._stream_capture_state or {}).get("predicted_volume_nl"),
+                    4,
+                )
+                if is_online_capture
+                else ""
+            ),
+            "Analysis Warnings": (
+                self._format_stream_capture_warning_text(
+                    (self._stream_capture_state or {}).get("analysis_warnings")
+                )
+                if is_online_capture
+                else ""
+            ),
         }
         return row
 
@@ -3979,15 +4189,27 @@ class CalibrationManager(QObject):
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         if os.path.exists(path):
+            existing_rows = []
             with open(path, "r", encoding="utf-8", newline="") as handle:
                 reader = csv.DictReader(handle)
                 existing_headers = list(reader.fieldnames or [])
                 for existing in reader:
+                    existing_rows.append(dict(existing))
                     if str(existing.get("Dataset name") or "").strip() == str(row.get("Dataset name") or "").strip():
                         raise ValueError(f"Dataset row already exists for {row.get('Dataset name')}.")
             if existing_headers and existing_headers != list(self.STREAM_METADATA_HEADERS):
-                required = set(self.STREAM_METADATA_HEADERS)
-                if not required.issubset(set(existing_headers)):
+                if set(existing_headers).issubset(set(self.STREAM_METADATA_HEADERS)):
+                    with open(path, "w", encoding="utf-8", newline="") as handle:
+                        writer = csv.DictWriter(handle, fieldnames=list(self.STREAM_METADATA_HEADERS))
+                        writer.writeheader()
+                        for existing in existing_rows:
+                            writer.writerow(
+                                {
+                                    key: existing.get(key, "")
+                                    for key in self.STREAM_METADATA_HEADERS
+                                }
+                            )
+                else:
                     raise ValueError("Existing stream_metadata.csv header is incompatible with the stream capture writer.")
 
         write_header = not os.path.exists(path) or os.path.getsize(path) == 0
@@ -3999,7 +4221,7 @@ class CalibrationManager(QObject):
         self._stream_capture_state["metadata_csv_path"] = path
         return path
 
-    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes=""):
+    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes="", capture_mode="timecourse"):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
             return False, "Stop the current calibration before starting a stream gravimetric capture."
         if self.has_open_stream_gravimetric_capture():
@@ -4026,6 +4248,8 @@ class CalibrationManager(QObject):
         condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
         suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
         rep_value = self._stream_capture_int_or_none(rep_override)
+        normalized_capture_mode = self._normalize_stream_capture_mode(capture_mode)
+        capture_mode_config = self._get_stream_capture_mode_config(normalized_capture_mode)
         if rep_value is None or rep_value <= 0:
             rep_value = int(suggested_rep)
 
@@ -4050,11 +4274,23 @@ class CalibrationManager(QObject):
             "suggested_rep": int(suggested_rep),
             "rep": int(rep_value),
             "notes": str(notes or ""),
+            "capture_mode": str(normalized_capture_mode),
+            "capture_phase_name": str(capture_mode_config.get("phase_name") or ""),
+            "capture_process_name": str(capture_mode_config.get("process_name") or ""),
             "timecourse_run_id": None,
+            "dataset_run_id": None,
+            "dataset_process_name": None,
             "child_processes": [],
             "background_capture_count": None,
             "printed_capture_count": None,
             "printed_capture_event_count": None,
+            "flow_fit_status": "",
+            "tail_phase_status": "",
+            "flow_rate_nl_per_us": None,
+            "tail_start_delay_from_emergence_us": None,
+            "predicted_stream_duration_us": None,
+            "predicted_volume_nl": None,
+            "analysis_warnings": [],
             "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
             "sidecar_written": False,
@@ -4565,6 +4801,11 @@ class CalibrationManager(QObject):
         payload["meta"] = meta
         payload["phase"] = phase_key
 
+        self._update_stream_capture_online_summary_from_payload(
+            payload,
+            phase_key=phase_key,
+        )
+
         # Append to steps
         run = self.data["runs"][self._run_idx]
         run["steps"].setdefault(phase_key, []).append(payload)
@@ -4732,8 +4973,8 @@ class CalibrationManager(QObject):
         )
         stream_capture_status = str((self._stream_capture_state or {}).get("status") or "idle")
         stream_capture_internal_process = (
-            canonical_stream_capture_queue_phase in set(self.STREAM_CAPTURE_QUEUE)
-            or canonical_phase_name in set(self.STREAM_CAPTURE_QUEUE)
+            canonical_stream_capture_queue_phase in set(self.STREAM_CAPTURE_INTERNAL_PHASES)
+            or canonical_phase_name in set(self.STREAM_CAPTURE_INTERNAL_PHASES)
         )
         allow_internal_stream_capture_start = (
             allow_stream_capture_session

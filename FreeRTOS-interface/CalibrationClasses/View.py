@@ -256,17 +256,33 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
 
     def update_state(self, state: dict, *, rep_value: int, notes: str):
         status_message = str(state.get("status_message") or "")
-        timecourse_run_id = str(state.get("timecourse_run_id") or "-")
+        dataset_run_id = str(state.get("dataset_run_id") or state.get("timecourse_run_id") or "-")
+        capture_mode = str(state.get("capture_mode") or "timecourse")
+        capture_process = str(state.get("dataset_process_name") or state.get("capture_process_name") or "-")
         printed_count = state.get("printed_capture_count")
         background_count = state.get("background_capture_count")
+        flow_rate = state.get("flow_rate_nl_per_us")
+        tail_start = state.get("tail_start_delay_from_emergence_us")
+        predicted_duration = state.get("predicted_stream_duration_us")
+        predicted_volume = state.get("predicted_volume_nl")
         self.status_label.setText(status_message or "Enter ending mass and inspect the printer head.")
-        self.summary_label.setText(
+        summary_text = (
             f"Session: {state.get('session_id') or '-'}\n"
-            f"Timecourse: {timecourse_run_id}\n"
+            f"Capture Run: {dataset_run_id}\n"
+            f"Mode: {capture_mode} | Process: {capture_process}\n"
             f"Num printed: {printed_count if printed_count is not None else '-'} | "
             f"Background captures: {background_count if background_count is not None else '-'}\n"
             f"Rep: {int(rep_value)} | Notes: {notes or '-'}"
         )
+        if capture_mode == "online_stream":
+            summary_text += (
+                "\n"
+                f"Flow rate: {flow_rate if flow_rate is not None else '-'} nL/us | "
+                f"Tail start: {tail_start if tail_start is not None else '-'} us | "
+                f"Duration: {predicted_duration if predicted_duration is not None else '-'} us | "
+                f"Volume: {predicted_volume if predicted_volume is not None else '-'} nL"
+            )
+        self.summary_label.setText(summary_text)
         ending_mass = state.get("ending_mass_mg")
         if ending_mass is not None and not self._mass_editor_has_focus():
             self.ending_mass_spin.setValue(float(ending_mass))
@@ -1112,6 +1128,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_capture_notes_edit.setMinimumHeight(72)
         stream_grid.addWidget(self.stream_capture_notes_label, srow, 0, QtCore.Qt.AlignTop)
         stream_grid.addWidget(self.stream_capture_notes_edit, srow, 1); srow += 1
+
+        self.stream_capture_online_mode_checkbox = QtWidgets.QCheckBox("Use Online Stream Analysis")
+        self.stream_capture_online_mode_checkbox.setChecked(False)
+        stream_grid.addWidget(self.stream_capture_online_mode_checkbox, srow, 0, 1, 2); srow += 1
 
         self.stream_capture_begin_button = QtWidgets.QPushButton("Begin Session")
         self.stream_capture_begin_button.clicked.connect(self.begin_stream_gravimetric_capture)
@@ -2043,7 +2063,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "raw_flash_delta": None,
             "background_capture_count": None,
             "printed_capture_count": None,
+            "capture_mode": "timecourse",
+            "capture_process_name": "DropletTimecourseProcess",
             "timecourse_run_id": None,
+            "dataset_run_id": None,
+            "dataset_process_name": None,
+            "flow_fit_status": "",
+            "tail_phase_status": "",
+            "flow_rate_nl_per_us": None,
+            "tail_start_delay_from_emergence_us": None,
+            "predicted_stream_duration_us": None,
+            "predicted_volume_nl": None,
+            "analysis_warnings": [],
             "rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
             "suggested_rep": int(self.stream_capture_rep_spin.value()) if hasattr(self, "stream_capture_rep_spin") else 1,
             "notes": "",
@@ -2220,12 +2251,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
         status_message = str(state.get("status_message") or "Ready to begin stream gravimetric capture.")
         error_message = str(state.get("error_message") or "")
         session_id = str(state.get("session_id") or "-")
-        timecourse_run_id = str(state.get("timecourse_run_id") or "-")
+        dataset_run_id = str(state.get("dataset_run_id") or state.get("timecourse_run_id") or "-")
+        capture_mode = str(state.get("capture_mode") or "timecourse")
+        capture_process = str(state.get("dataset_process_name") or state.get("capture_process_name") or "-")
         background_count = state.get("background_capture_count")
         printed_count = state.get("printed_capture_count")
         starting_flash = state.get("starting_flash")
         ending_flash = state.get("ending_flash")
         raw_flash_delta = state.get("raw_flash_delta")
+        flow_fit_status = str(state.get("flow_fit_status") or "-")
+        tail_phase_status = str(state.get("tail_phase_status") or "-")
+        flow_rate = state.get("flow_rate_nl_per_us")
+        tail_start = state.get("tail_start_delay_from_emergence_us")
+        predicted_duration = state.get("predicted_stream_duration_us")
+        predicted_volume = state.get("predicted_volume_nl")
+        analysis_warnings = state.get("analysis_warnings") or []
+        if isinstance(analysis_warnings, (list, tuple)):
+            warning_text = "; ".join(str(item) for item in analysis_warnings if str(item).strip())
+        else:
+            warning_text = str(analysis_warnings or "")
 
         self.stream_capture_status_label.setText(status_message)
         if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return", "pending_gripper_restore"}:
@@ -2245,14 +2289,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self.stream_capture_status_label.setStyleSheet("")
 
-        self.stream_capture_summary_label.setText(
+        summary_text = (
             "Session: "
             f"{session_id}\n"
-            f"Timecourse: {timecourse_run_id} | Start flash: {starting_flash if starting_flash is not None else '-'} | "
+            f"Capture Run: {dataset_run_id} | Mode: {capture_mode} | Process: {capture_process}\n"
+            f"Start flash: {starting_flash if starting_flash is not None else '-'} | "
             f"End flash: {ending_flash if ending_flash is not None else '-'} | Delta: {raw_flash_delta if raw_flash_delta is not None else '-'}\n"
             f"Background captures: {background_count if background_count is not None else '-'} | "
             f"Num printed: {printed_count if printed_count is not None else '-'}"
         )
+        if capture_mode == "online_stream":
+            summary_text += (
+                "\n"
+                f"Flow fit: {flow_fit_status} | Tail: {tail_phase_status} | "
+                f"Flow rate: {flow_rate if flow_rate is not None else '-'} nL/us | "
+                f"Tail start: {tail_start if tail_start is not None else '-'} us | "
+                f"Duration: {predicted_duration if predicted_duration is not None else '-'} us | "
+                f"Volume: {predicted_volume if predicted_volume is not None else '-'} nL"
+            )
+            if warning_text:
+                summary_text += f"\nWarnings: {warning_text}"
+        self.stream_capture_summary_label.setText(summary_text)
 
         record_mode_enabled = True
         try:
@@ -2344,6 +2401,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_capture_starting_mass_spin.setEnabled(status == "idle")
         self.stream_capture_rep_spin.setEnabled(status in {"idle", "awaiting_mass_entry"})
         self.stream_capture_notes_edit.setEnabled(status in {"idle", "awaiting_mass_entry"})
+        if hasattr(self, "stream_capture_online_mode_checkbox"):
+            self.stream_capture_online_mode_checkbox.setEnabled(status == "idle")
 
         block_new_starts = self._stream_capture_blocks_new_starts(state)
         for widget_name in (
@@ -2377,10 +2436,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._stream_capture_last_status = status
 
     def begin_stream_gravimetric_capture(self):
+        capture_mode = (
+            "online_stream"
+            if bool(getattr(self, "stream_capture_online_mode_checkbox", None) and self.stream_capture_online_mode_checkbox.isChecked())
+            else "timecourse"
+        )
         result = self.controller.start_stream_gravimetric_capture(
             float(self.stream_capture_starting_mass_spin.value()),
             rep_override=int(self.stream_capture_rep_spin.value()),
             notes=self.stream_capture_notes_edit.toPlainText().strip(),
+            capture_mode=capture_mode,
         )
         if isinstance(result, tuple) and result and (result[0] is False):
             QtWidgets.QMessageBox.warning(self, "Stream Capture", str(result[1] or "Failed to start stream gravimetric capture."))

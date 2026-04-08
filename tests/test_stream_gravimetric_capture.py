@@ -12,7 +12,12 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 
 ensure_calibration_import_stubs(force=True)
 
-from CalibrationClasses.Model import BaseCalibrationProcess, CalibrationManager, DropletTimecourseProcess
+from CalibrationClasses.Model import (
+    BaseCalibrationProcess,
+    CalibrationManager,
+    DropletTimecourseProcess,
+    OnlineStreamCalibrationProcess,
+)
 from CalibrationClasses.View import DropletImagingDialog
 
 
@@ -197,6 +202,7 @@ class _ViewControllerStub:
         self.manager = manager
         self.model = model
         self.moves = []
+        self.stream_capture_start_calls = []
         self.refuel_pressure_steps = []
         self.refuel_only_calls = []
         self.print_only_calls = []
@@ -228,15 +234,24 @@ class _ViewControllerStub:
         return None
 
     def start_stream_gravimetric_capture(self, *args, **kwargs):
+        self.stream_capture_start_calls.append({"args": args, "kwargs": dict(kwargs)})
+        capture_mode = str(kwargs.get("capture_mode") or "timecourse")
+        capture_process = (
+            "OnlineStreamCalibrationProcess"
+            if capture_mode == "online_stream"
+            else "DropletTimecourseProcess"
+        )
         self.manager.state["status"] = "pending_gripper_refresh"
         self.manager.state["status_message"] = "Refreshing gripper vacuum before stream gravimetric capture."
+        self.manager.state["capture_mode"] = capture_mode
+        self.manager.state["capture_process_name"] = capture_process
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
 
     def begin_stream_gravimetric_capture_gripper_preamble(self):
         self.gripper_refresh_calls.append(bool(self.manager.state.get("gripper_was_open")))
         self.manager.state["status"] = "running"
-        self.manager.state["status_message"] = "Running nozzle, focus, emergence, and timecourse capture sequence."
+        self.manager.state["status_message"] = "Running nozzle, focus, emergence, and stream capture sequence."
         self.manager.state["gripper_refresh_suspended"] = True
         self.manager.streamCaptureStateChanged.emit(dict(self.manager.state))
         return True, ""
@@ -246,7 +261,11 @@ class _ViewControllerStub:
         self.manager.state["ending_mass_mg"] = float(ending_mass_mg)
         self.manager.state["rep"] = int(rep_override or self.manager.state.get("rep") or 1)
         self.manager.state["notes"] = str(notes or "")
-        self.manager.state["saved_dataset_name"] = str(self.manager.state.get("timecourse_run_id") or "run_timecourse_demo")
+        self.manager.state["saved_dataset_name"] = str(
+            self.manager.state.get("dataset_run_id")
+            or self.manager.state.get("timecourse_run_id")
+            or "run_timecourse_demo"
+        )
         self.manager.state["session_outcome"] = "saved"
         self.manager.state["post_restore_action"] = "saved_camera_return"
         self.manager.state["gripper_refresh_suspended"] = True
@@ -317,7 +336,18 @@ class _ViewControllerStub:
                 "raw_flash_delta": None,
                 "background_capture_count": None,
                 "printed_capture_count": None,
+                "capture_mode": "timecourse",
+                "capture_process_name": "DropletTimecourseProcess",
                 "timecourse_run_id": None,
+                "dataset_run_id": None,
+                "dataset_process_name": None,
+                "flow_fit_status": "",
+                "tail_phase_status": "",
+                "flow_rate_nl_per_us": None,
+                "tail_start_delay_from_emergence_us": None,
+                "predicted_stream_duration_us": None,
+                "predicted_volume_nl": None,
+                "analysis_warnings": [],
                 "rep": 2,
                 "suggested_rep": 2,
                 "notes": "",
@@ -473,6 +503,24 @@ def _capture_result_event(*, stage_text: str, status="success", role="droplet"):
     }
 
 
+def _online_stream_result_payload():
+    return {
+        "result": {
+            "flow_phase": {
+                "fit_status": "warning",
+                "flow_rate_nl_per_us": 0.123456,
+            },
+            "tail_phase": {
+                "status": "resolved",
+                "tail_start_delay_from_emergence_us": 5200,
+            },
+            "predicted_stream_duration_us": 6400,
+            "predicted_volume_nl": 0.7901,
+            "warnings": ["tail advisory", "budget low"],
+        }
+    }
+
+
 def _write_run_dir(
     root: Path,
     *,
@@ -557,7 +605,18 @@ def _build_view_dialog(monkeypatch, qapp, *, manager=None, model=None, controlle
                 "raw_flash_delta": None,
                 "background_capture_count": None,
                 "printed_capture_count": None,
+                "capture_mode": "timecourse",
+                "capture_process_name": "DropletTimecourseProcess",
                 "timecourse_run_id": None,
+                "dataset_run_id": None,
+                "dataset_process_name": None,
+                "flow_fit_status": "",
+                "tail_phase_status": "",
+                "flow_rate_nl_per_us": None,
+                "tail_start_delay_from_emergence_us": None,
+                "predicted_stream_duration_us": None,
+                "predicted_volume_nl": None,
+                "analysis_warnings": [],
                 "rep": 1,
                 "suggested_rep": 1,
                 "notes": "",
@@ -677,6 +736,31 @@ def test_stream_capture_queue_can_start_droplet_timecourse(tmp_path, monkeypatch
     ]
 
 
+def test_stream_capture_queue_can_start_online_stream_calibration(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    started = []
+
+    def _capture_start(proc_cls, *args, **kwargs):
+        started.append((proc_cls, dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(manager, "_try_start_process", _capture_start)
+    manager.calibration_queue = ["online_stream_calibration"]
+    manager._stream_capture_state = {"status": "running"}
+
+    manager.start_calibration_queue()
+
+    assert started == [
+        (
+            OnlineStreamCalibrationProcess,
+            {
+                "_allow_stream_capture_session": True,
+                "_stream_capture_queue_phase": "online_stream_calibration",
+            },
+        ),
+    ]
+
+
 def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp_path, monkeypatch):
     _model, manager = _make_manager(tmp_path)
 
@@ -716,7 +800,56 @@ def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp
 
     assert isinstance(manager.activeCalibration, _QueueStartStubProcess)
     assert manager.activeCalibration.started is True
-    assert manager.calibration_queue == list(manager.STREAM_CAPTURE_QUEUE[1:])
+    assert manager.calibration_queue == list(manager._build_stream_capture_queue_for_mode("timecourse")[1:])
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "running"
+
+
+def test_stream_capture_gripper_suspend_queues_online_stream_mode(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+
+    class _QueueStartStubProcess:
+        owns_calibration_memory_session = False
+        supports_operator_verdict = False
+
+        def __init__(self, calibration_manager, model, *args, **kwargs):
+            self.calibration_manager = calibration_manager
+            self.model = model
+            self.args = args
+            self.kwargs = dict(kwargs)
+            self.stageChanged = SignalStub()
+            self.calibrationCompleted = SignalStub()
+            self.calibrationError = SignalStub()
+            self.calibrationDataUpdated = SignalStub()
+            self.presentImageSignal = SignalStub()
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", _QueueStartStubProcess)
+
+    ok, message = manager.start_stream_gravimetric_capture(
+        0.0,
+        rep_override=1,
+        notes="queue launch",
+        capture_mode="online_stream",
+    )
+    assert (ok, message) == (True, "")
+
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_refresh()
+    assert (ok, message) == (True, "")
+    ok, message = manager.begin_stream_gravimetric_capture_gripper_suspend()
+    assert (ok, message) == (True, "")
+    ok, message = manager.mark_stream_gravimetric_capture_gripper_suspended()
+    assert (ok, message) == (True, "")
+
+    assert isinstance(manager.activeCalibration, _QueueStartStubProcess)
+    assert manager.activeCalibration.started is True
+    assert manager.calibration_queue == list(manager._build_stream_capture_queue_for_mode("online_stream")[1:])
+    assert manager.get_stream_gravimetric_capture_state()["capture_mode"] == "online_stream"
     assert manager.get_stream_gravimetric_capture_state()["status"] == "running"
 
 
@@ -944,6 +1077,15 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
     assert rows[0]["Num printed"] == "11"
     assert rows[0]["Mass/print"] == "0.5"
     assert rows[0]["Notes"] == "saved row"
+    assert rows[0]["Capture Mode"] == "timecourse"
+    assert rows[0]["Capture Process"] == "DropletTimecourseProcess"
+    assert rows[0]["Flow Fit Status"] == ""
+    assert rows[0]["Tail Phase Status"] == ""
+    assert rows[0]["Flow Rate (nL/us)"] == ""
+    assert rows[0]["Tail Start From Emergence (us)"] == ""
+    assert rows[0]["Predicted Stream Duration (us)"] == ""
+    assert rows[0]["Predicted Volume (nL)"] == ""
+    assert rows[0]["Analysis Warnings"] == ""
 
     sidecar_path = Path(model.experiment_model.experiment_dir_path) / "stream_capture_log.jsonl"
     sidecar_rows = _read_jsonl_rows(sidecar_path)
@@ -952,6 +1094,9 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
     assert sidecar_rows[0]["raw_flash_delta"] == 13
     assert sidecar_rows[0]["background_capture_count"] == 2
     assert sidecar_rows[0]["printed_capture_count"] == 11
+    assert sidecar_rows[0]["dataset_run_id"] == "run_timecourse"
+    assert sidecar_rows[0]["dataset_process_name"] == "DropletTimecourseProcess"
+    assert sidecar_rows[0]["capture_mode"] == "timecourse"
     assert sidecar_rows[0]["timecourse_run_id"] == "run_timecourse"
     assert [child["run_id"] for child in sidecar_rows[0]["child_processes"]] == [
         "run_nozzle",
@@ -970,6 +1115,181 @@ def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypa
     final_state = manager.get_stream_gravimetric_capture_state()
     assert final_state["status"] == "idle"
     assert final_state["starting_mass_mg"] == 0.0
+
+
+def test_stream_capture_finalize_online_mode_appends_metadata_and_sidecar(tmp_path, monkeypatch):
+    model, manager = _make_manager(tmp_path, num_flashes=200)
+    queued = []
+    recordings_root = Path(model.experiment_model.experiment_dir_path) / "calibration_recordings"
+
+    monkeypatch.setattr(
+        manager,
+        "start_calibration_queue",
+        lambda: queued.append(list(manager.calibration_queue)),
+    )
+
+    ok, message = manager.start_stream_gravimetric_capture(
+        1.0,
+        rep_override=4,
+        notes="online capture start",
+        capture_mode="online_stream",
+    )
+    assert (ok, message) == (True, "")
+    start_state = manager.get_stream_gravimetric_capture_state()
+    assert start_state["capture_mode"] == "online_stream"
+    assert start_state["capture_process_name"] == "OnlineStreamCalibrationProcess"
+
+    _start_stream_capture_with_gripper_suspend(manager)
+    expected_queue = list(manager._build_stream_capture_queue_for_mode("online_stream"))
+    assert queued == [expected_queue]
+    assert manager.calibration_queue == expected_queue
+
+    nozzle_run = _write_run_dir(
+        recordings_root,
+        process_name="NozzlePositionCalibrationProcess",
+        run_id="run_nozzle",
+        phase_name="nozzle_position",
+        settings_num_droplets=1,
+        events=[
+            _settings_event("settings_requested", 0, context="background"),
+            _settings_event("settings_completed", 0, context="background"),
+            _capture_result_event(stage_text="Background", role="background"),
+            _settings_event("settings_requested", 1, context="droplet"),
+            _settings_event("settings_completed", 1, context="droplet"),
+            _capture_result_event(stage_text="Droplet 1"),
+            _capture_result_event(stage_text="Droplet 2"),
+        ],
+    )
+    focus_run = _write_run_dir(
+        recordings_root,
+        process_name="NozzleFocusCalibrationProcess",
+        run_id="run_focus",
+        phase_name="nozzle_focus",
+        settings_num_droplets=1,
+        events=[
+            _capture_result_event(stage_text="Focus 1"),
+        ],
+    )
+    emergence_run = _write_run_dir(
+        recordings_root,
+        process_name="DropletEmergenceCalibrationProcess",
+        run_id="run_emergence",
+        phase_name="droplet_emergence",
+        settings_num_droplets=1,
+        events=[
+            _settings_event("settings_requested", 0, context="background"),
+            _settings_event("settings_completed", 0, context="background"),
+            _capture_result_event(stage_text="Emergence background", role="background"),
+            _settings_event("settings_requested", 1, context="scan"),
+            _settings_event("settings_completed", 1, context="scan"),
+            _capture_result_event(stage_text="Emergence 1"),
+            _capture_result_event(stage_text="Emergence 2"),
+        ],
+    )
+    online_run = _write_run_dir(
+        recordings_root,
+        process_name="OnlineStreamCalibrationProcess",
+        run_id="run_online_stream",
+        phase_name="online_stream_calibration",
+        settings_num_droplets=1,
+        events=[
+            _settings_event("settings_requested", 0, context="online_stream_prepare_background"),
+            _settings_event("settings_completed", 0, context="online_stream_prepare_background"),
+            _capture_result_event(stage_text="Online stream background @ 4700 us", role="background"),
+            _settings_event("settings_requested", 1, context="online_stream_apply_flow_delay_4800"),
+            _settings_event("settings_completed", 1, context="online_stream_apply_flow_delay_4800"),
+            _capture_result_event(stage_text="Online stream flow @ 4800 us"),
+            _settings_event("settings_requested", 1, context="online_stream_apply_tail_delay_5200"),
+            _settings_event("settings_completed", 1, context="online_stream_apply_tail_delay_5200"),
+            _capture_result_event(stage_text="Online stream tail @ 5200 us"),
+        ],
+    )
+
+    manager.activeCalibration = SimpleNamespace(phase_name="online_stream_calibration")
+    manager.onCalibrationDataUpdated(_online_stream_result_payload())
+    manager.activeCalibration = None
+
+    for process_name, phase_name, run_dir in (
+        ("NozzlePositionCalibrationProcess", "nozzle_position", nozzle_run),
+        ("NozzleFocusCalibrationProcess", "nozzle_focus", focus_run),
+        ("DropletEmergenceCalibrationProcess", "droplet_emergence", emergence_run),
+        ("OnlineStreamCalibrationProcess", "online_stream_calibration", online_run),
+    ):
+        manager._record_stream_capture_process_result(
+            _make_recorded_process(process_name, phase_name, run_dir),
+            outcome="completed",
+        )
+
+    manager.calibration_queue = []
+    model.droplet_camera_model.num_flashes = 214
+    manager._complete_stream_capture_queue_success()
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_loading_move"
+
+    move_ok, move_message = manager.begin_stream_gravimetric_capture_loading_move()
+    assert (move_ok, move_message) == (True, "")
+    reached_ok, reached_message = manager.mark_stream_gravimetric_capture_loading_reached()
+    assert (reached_ok, reached_message) == (True, "")
+
+    save_ok, save_message = manager.finalize_stream_gravimetric_capture(
+        4.5,
+        rep_override=5,
+        notes="saved online row",
+    )
+    assert (save_ok, save_message) == (True, "")
+    save_state = manager.get_stream_gravimetric_capture_state()
+    assert save_state["status"] == "pending_gripper_restore"
+    assert save_state["session_outcome"] == "saved"
+    assert save_state["dataset_run_id"] == "run_online_stream"
+    assert save_state["dataset_process_name"] == "OnlineStreamCalibrationProcess"
+
+    metadata_path = Path(model.experiment_model.experiment_dir_path) / "stream_metadata.csv"
+    rows = _read_csv_rows(metadata_path)
+    assert len(rows) == 1
+    assert rows[0]["Dataset name"] == "run_online_stream"
+    assert rows[0]["Rep"] == "5"
+    assert rows[0]["Starting flash"] == "200"
+    assert rows[0]["Ending flash"] == "214"
+    assert rows[0]["Mass Change"] == "3.5"
+    assert rows[0]["Num printed"] == "7"
+    assert rows[0]["Mass/print"] == "0.5"
+    assert rows[0]["Notes"] == "saved online row"
+    assert rows[0]["Capture Mode"] == "online_stream"
+    assert rows[0]["Capture Process"] == "OnlineStreamCalibrationProcess"
+    assert rows[0]["Flow Fit Status"] == "warning"
+    assert rows[0]["Tail Phase Status"] == "resolved"
+    assert rows[0]["Flow Rate (nL/us)"] == "0.123456"
+    assert rows[0]["Tail Start From Emergence (us)"] == "5200"
+    assert rows[0]["Predicted Stream Duration (us)"] == "6400"
+    assert rows[0]["Predicted Volume (nL)"] == "0.7901"
+    assert rows[0]["Analysis Warnings"] == "tail advisory; budget low"
+
+    sidecar_path = Path(model.experiment_model.experiment_dir_path) / "stream_capture_log.jsonl"
+    sidecar_rows = _read_jsonl_rows(sidecar_path)
+    assert len(sidecar_rows) == 1
+    assert sidecar_rows[0]["outcome"] == "saved"
+    assert sidecar_rows[0]["raw_flash_delta"] == 14
+    assert sidecar_rows[0]["background_capture_count"] == 3
+    assert sidecar_rows[0]["printed_capture_count"] == 7
+    assert sidecar_rows[0]["dataset_run_id"] == "run_online_stream"
+    assert sidecar_rows[0]["dataset_process_name"] == "OnlineStreamCalibrationProcess"
+    assert sidecar_rows[0]["capture_mode"] == "online_stream"
+    assert sidecar_rows[0]["timecourse_run_id"] is None
+    assert sidecar_rows[0]["flow_fit_status"] == "warning"
+    assert sidecar_rows[0]["tail_phase_status"] == "resolved"
+    assert sidecar_rows[0]["flow_rate_nl_per_us"] == pytest.approx(0.123456)
+    assert sidecar_rows[0]["tail_start_delay_from_emergence_us"] == 5200
+    assert sidecar_rows[0]["predicted_stream_duration_us"] == 6400
+    assert sidecar_rows[0]["predicted_volume_nl"] == pytest.approx(0.7901)
+    assert sidecar_rows[0]["analysis_warnings"] == ["tail advisory", "budget low"]
+    assert [child["run_id"] for child in sidecar_rows[0]["child_processes"]] == [
+        "run_nozzle",
+        "run_focus",
+        "run_emergence",
+        "run_online_stream",
+    ]
+
+    _restore_stream_capture_gripper(manager)
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_camera_return"
 
 
 def test_stream_capture_discard_before_queue_start_only_writes_sidecar(tmp_path, monkeypatch):
@@ -1074,6 +1394,64 @@ def test_stream_capture_terminal_sessions_write_only_sidecar(
     assert sidecar_rows[0]["printed_capture_count"] == 1
 
 
+def test_stream_capture_online_run_count_replay_uses_background_and_printed_events(tmp_path):
+    _model, manager = _make_manager(tmp_path)
+    recordings_root = Path(manager.model.experiment_model.experiment_dir_path) / "calibration_recordings"
+    online_run = _write_run_dir(
+        recordings_root,
+        process_name="OnlineStreamCalibrationProcess",
+        run_id="run_online_stream_counts",
+        phase_name="online_stream_calibration",
+        settings_num_droplets=1,
+        events=[
+            _settings_event("settings_requested", 0, context="online_stream_prepare_background"),
+            _settings_event("settings_completed", 0, context="online_stream_prepare_background"),
+            _capture_result_event(stage_text="Online stream background @ 4700 us", role="background"),
+            _settings_event("settings_requested", 1, context="online_stream_apply_flow_delay_4800"),
+            _settings_event("settings_completed", 1, context="online_stream_apply_flow_delay_4800"),
+            _capture_result_event(stage_text="Online stream flow @ 4800 us"),
+            _settings_event("settings_requested", 1, context="online_stream_apply_tail_delay_5200"),
+            _settings_event("settings_completed", 1, context="online_stream_apply_tail_delay_5200"),
+            _capture_result_event(stage_text="Online stream tail @ 5200 us"),
+        ],
+    )
+
+    counts = manager._derive_stream_capture_counts_for_run(str(online_run))
+
+    assert counts["background_capture_count"] == 1
+    assert counts["printed_capture_count"] == 2
+    assert counts["printed_capture_event_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("checked", "expected_mode", "expected_process"),
+    [
+        (False, "timecourse", "DropletTimecourseProcess"),
+        (True, "online_stream", "OnlineStreamCalibrationProcess"),
+    ],
+)
+def test_stream_capture_begin_uses_selected_capture_mode(
+    monkeypatch,
+    qapp,
+    checked,
+    expected_mode,
+    expected_process,
+):
+    dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
+
+    dialog.stream_capture_online_mode_checkbox.setChecked(checked)
+    dialog.stream_capture_starting_mass_spin.setValue(1.25)
+    dialog.stream_capture_rep_spin.setValue(3)
+    dialog.stream_capture_notes_edit.setPlainText("mode select")
+
+    dialog.begin_stream_gravimetric_capture()
+    qapp.processEvents()
+
+    assert controller.stream_capture_start_calls[-1]["kwargs"]["capture_mode"] == expected_mode
+    assert manager.state["capture_mode"] == expected_mode
+    assert manager.state["capture_process_name"] == expected_process
+
+
 def test_stream_capture_popup_discard_returns_to_camera_without_saving(monkeypatch, qapp):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
 
@@ -1156,6 +1534,56 @@ def test_stream_capture_popup_click_away_restores_shortcuts(monkeypatch, qapp):
     assert controller.refuel_pressure_steps[-1] == -1.0
 
 
+def test_stream_capture_online_summary_uses_generic_dataset_labels(monkeypatch, qapp):
+    dialog, manager, _controller = _build_view_dialog(monkeypatch, qapp)
+
+    manager.state.update(
+        {
+            "status": "awaiting_mass_entry",
+            "status_message": "Loading position reached. Enter ending mass and inspect the printer head.",
+            "session_id": "stream_capture_online_demo",
+            "capture_mode": "online_stream",
+            "capture_process_name": "OnlineStreamCalibrationProcess",
+            "dataset_run_id": "run_online_demo",
+            "dataset_process_name": "OnlineStreamCalibrationProcess",
+            "starting_flash": 200,
+            "ending_flash": 214,
+            "raw_flash_delta": 14,
+            "background_capture_count": 3,
+            "printed_capture_count": 7,
+            "rep": 5,
+            "suggested_rep": 5,
+            "notes": "online summary",
+            "flow_fit_status": "warning",
+            "tail_phase_status": "resolved",
+            "flow_rate_nl_per_us": 0.123456,
+            "tail_start_delay_from_emergence_us": 5200,
+            "predicted_stream_duration_us": 6400,
+            "predicted_volume_nl": 0.7901,
+            "analysis_warnings": ["tail advisory"],
+        }
+    )
+    manager.streamCaptureStateChanged.emit(dict(manager.state))
+    qapp.processEvents()
+
+    panel_text = dialog.stream_capture_summary_label.text()
+    assert "Capture Run: run_online_demo | Mode: online_stream | Process: OnlineStreamCalibrationProcess" in panel_text
+    assert "Timecourse:" not in panel_text
+    assert "Flow fit: warning | Tail: resolved" in panel_text
+    assert "Warnings: tail advisory" in panel_text
+
+    popup = dialog._stream_capture_mass_dialog
+    assert popup is not None
+    popup_text = popup.summary_label.text()
+    assert "Capture Run: run_online_demo" in popup_text
+    assert "Mode: online_stream | Process: OnlineStreamCalibrationProcess" in popup_text
+    assert "Flow rate: 0.123456 nL/us" in popup_text
+    assert "Tail start: 5200 us" in popup_text
+    assert "Duration: 6400 us" in popup_text
+    assert "Volume: 0.7901 nL" in popup_text
+    assert "Timecourse:" not in popup_text
+
+
 def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict(monkeypatch, qapp):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
     prompted = []
@@ -1173,6 +1601,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     manager.record_mode_enabled = True
     dialog._sync_stream_capture_panel_state()
     assert dialog.stream_capture_begin_button.isEnabled() is True
+    assert dialog.stream_capture_online_mode_checkbox.isEnabled() is True
     assert dialog.control_panel_scroll.widget() is dialog.control_panel
 
     dialog.on_readiness_changed(
@@ -1208,6 +1637,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.calibrate_timecourse_button.isEnabled() is False
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert dialog.record_calibration_checkbox.isEnabled() is False
+    assert dialog.stream_capture_online_mode_checkbox.isEnabled() is False
     assert dialog._stream_capture_mass_dialog is not None
     assert dialog._stream_capture_mass_dialog.isVisible() is True
 
@@ -1243,6 +1673,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.calibrate_online_stream_button.isEnabled() is False
     assert "Emergence time" in dialog.calibrate_online_stream_button.toolTip()
     assert dialog.stream_capture_begin_button.isEnabled() is True
+    assert dialog.stream_capture_online_mode_checkbox.isEnabled() is True
     assert dialog.stream_capture_starting_mass_spin.value() == pytest.approx(0.0)
 
 

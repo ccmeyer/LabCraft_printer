@@ -407,21 +407,42 @@ def test_try_start_process_allows_stream_capture_internal_queue_step():
 
 
 def test_try_start_process_bypass_still_blocks_non_queue_or_non_running_states():
+    class _OnlineStreamQueueProcess:
+        owns_calibration_memory_session = False
+        supports_operator_verdict = False
+
+        def __init__(self, calibration_manager, model, *args, **kwargs):
+            self.calibration_manager = calibration_manager
+            self.model = model
+            self.kwargs = dict(kwargs)
+            self.stageChanged = SignalStub()
+            self.calibrationCompleted = SignalStub()
+            self.calibrationError = SignalStub()
+            self.calibrationDataUpdated = SignalStub()
+            self.presentImageSignal = SignalStub()
+
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._stream_capture_state = {"status": "running"}
+    mgr._run_id = None
+    mgr._run_idx = None
+    mgr.model = SimpleNamespace()
     mgr.calibrationStageChanged = SignalStub()
     mgr.calibrationError = SignalStub()
     mgr._prepare_calibration_memory_prior_application = lambda proc_cls, kwargs: dict(kwargs or {})
     mgr._process_missing = lambda proc_cls, *args, **kwargs: []
+    started_processes = []
+    mgr.start_active_calibration = lambda: started_processes.append(mgr.activeCalibration)
 
     started = CalibrationManager._try_start_process(
         mgr,
-        OnlineStreamCalibrationProcess,
+        _OnlineStreamQueueProcess,
         _allow_stream_capture_session=True,
         _stream_capture_queue_phase="online_stream_calibration",
     )
-    assert started is False
-    assert "stream gravimetric capture session" in mgr.calibrationError.calls[-1][0][0].lower()
+    assert started is True
+    assert len(started_processes) == 1
+    assert isinstance(mgr.activeCalibration, _OnlineStreamQueueProcess)
+    assert mgr.calibrationError.calls == []
 
     class _StreamCaptureQueueProcess:
         pass

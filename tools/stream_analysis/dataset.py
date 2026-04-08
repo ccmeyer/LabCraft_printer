@@ -7,6 +7,8 @@ from pathlib import Path
 
 
 PROCESS_NAME = "DropletTimecourseProcess"
+ONLINE_STREAM_PROCESS_NAME = "OnlineStreamCalibrationProcess"
+SUPPORTED_PROCESS_NAMES = (PROCESS_NAME, ONLINE_STREAM_PROCESS_NAME)
 METADATA_FILENAME = "stream_metadata.csv"
 STREAM_CAPTURE_LOG_FILENAME = "stream_capture_log.jsonl"
 ANALYSIS_DIRNAME = "stream_characterization"
@@ -166,10 +168,23 @@ def _write_json(path: Path, payload):
     return path
 
 
+def _is_supported_process_name(name: str | None) -> bool:
+    return str(name or "") in SUPPORTED_PROCESS_NAMES
+
+
+def _discover_process_roots(calibration_root: Path):
+    return [
+        calibration_root / process_name
+        for process_name in SUPPORTED_PROCESS_NAMES
+        if (calibration_root / process_name).is_dir()
+    ]
+
+
 def _experiment_root_from_run_dir(run_dir: Path) -> Path:
     process_root = run_dir.parent
-    if process_root.name != PROCESS_NAME:
-        raise ValueError(f"Run directory is not inside {PROCESS_NAME}: {run_dir}")
+    if not _is_supported_process_name(process_root.name):
+        supported = ", ".join(SUPPORTED_PROCESS_NAMES)
+        raise ValueError(f"Run directory is not inside a supported process root ({supported}): {run_dir}")
     calibration_root = process_root.parent
     if calibration_root.name != "calibration_recordings":
         raise ValueError(f"Unexpected calibration root for run dir: {run_dir}")
@@ -188,15 +203,14 @@ def resolve_experiment_root(root: str | Path) -> Path:
             return _experiment_root_from_run_dir(root_path.parent)
         raise ValueError(f"Unsupported file input: {root_path}")
 
-    if (root_path / METADATA_FILENAME).exists() and (
-        root_path / "calibration_recordings" / PROCESS_NAME
-    ).is_dir():
+    process_roots = _discover_process_roots(root_path / "calibration_recordings")
+    if (root_path / METADATA_FILENAME).exists() and process_roots:
         return root_path
 
-    if root_path.name == "calibration_recordings" and (root_path / PROCESS_NAME).is_dir():
+    if root_path.name == "calibration_recordings" and _discover_process_roots(root_path):
         return root_path.parent
 
-    if root_path.name == PROCESS_NAME:
+    if _is_supported_process_name(root_path.name):
         calibration_root = root_path.parent
         if calibration_root.name != "calibration_recordings":
             raise ValueError(f"Unexpected process root: {root_path}")
@@ -214,10 +228,11 @@ def resolve_experiment_root(root: str | Path) -> Path:
 
 def process_root_for_experiment(experiment_root: str | Path) -> Path:
     root = resolve_experiment_root(experiment_root)
-    process_root = root / "calibration_recordings" / PROCESS_NAME
-    if not process_root.is_dir():
-        raise FileNotFoundError(f"Process root does not exist: {process_root}")
-    return process_root
+    calibration_root = root / "calibration_recordings"
+    process_roots = _discover_process_roots(calibration_root)
+    if not process_roots:
+        raise FileNotFoundError(f"No supported process roots exist under: {calibration_root}")
+    return process_roots[0]
 
 
 def metadata_path_for_experiment(experiment_root: str | Path) -> Path:
@@ -267,11 +282,13 @@ def load_stream_capture_rows(experiment_root: str | Path):
         return rows_by_run_id, str(log_path)
 
     for row in _iter_jsonl(log_path):
-        run_id = _clean_text((row or {}).get("timecourse_run_id"))
+        run_id = _clean_text((row or {}).get("dataset_run_id")) or _clean_text((row or {}).get("timecourse_run_id"))
         if not run_id:
             continue
         gripper_refresh_suspended = _bool_or_none((row or {}).get("gripper_refresh_suspended"))
         rows_by_run_id[run_id] = {
+            "capture_mode": _clean_text((row or {}).get("capture_mode")),
+            "dataset_process_name": _clean_text((row or {}).get("dataset_process_name")),
             "gripper_refresh_suspended": gripper_refresh_suspended,
             "tracking_mode": (
                 TRACKING_MODE_FIXED_EARLY
@@ -283,10 +300,12 @@ def load_stream_capture_rows(experiment_root: str | Path):
 
 
 def discover_run_dirs(experiment_root: str | Path):
-    process_root = process_root_for_experiment(experiment_root)
-    return sorted(
-        path for path in process_root.iterdir() if path.is_dir() and (path / "run_meta.json").exists()
-    )
+    run_dirs = []
+    for process_root in _discover_process_roots(resolve_experiment_root(experiment_root) / "calibration_recordings"):
+        run_dirs.extend(
+            path for path in process_root.iterdir() if path.is_dir() and (path / "run_meta.json").exists()
+        )
+    return sorted(run_dirs)
 
 
 def _parse_timecourse_summary(events):
@@ -466,6 +485,8 @@ def build_stage0_inventory(
             "run_dir": str(run_dir),
             "process_name": _clean_text(run_meta.get("process_name")),
             "phase_name": _clean_text(run_meta.get("phase_name")),
+            "capture_mode": stream_capture_row.get("capture_mode"),
+            "dataset_process_name": stream_capture_row.get("dataset_process_name"),
             "outcome": _clean_text(run_meta.get("outcome")),
             "error_message": _clean_text(run_meta.get("error_message")),
             "started_at_utc": _clean_text(run_meta.get("started_at_utc")),
@@ -512,6 +533,8 @@ def build_stage0_inventory(
             "run_dir": str(run_dir),
             "process_name": _clean_text(run_meta.get("process_name")),
             "phase_name": _clean_text(run_meta.get("phase_name")),
+            "capture_mode": stream_capture_row.get("capture_mode"),
+            "dataset_process_name": stream_capture_row.get("dataset_process_name"),
             "outcome": _clean_text(run_meta.get("outcome")),
             "error_message": _clean_text(run_meta.get("error_message")),
             "started_at_utc": _clean_text(run_meta.get("started_at_utc")),
