@@ -6,7 +6,14 @@ from tools.stream_analysis import online_calibration as online_cal_mod
 from tools.stream_analysis import online_fit as mod
 
 
-def _accepted_frame(delay_us: int, delay_from_emergence_us: int, replicate_index: int, *, volume_nl: float, width_px: float):
+def _accepted_frame(
+    delay_us: int,
+    delay_from_emergence_us: int,
+    replicate_index: int,
+    *,
+    volume_nl: float,
+    width_px: float,
+):
     return online_cal_mod.build_online_stream_frame_row(
         phase="flow_rate",
         status="accepted",
@@ -27,7 +34,14 @@ def _accepted_frame(delay_us: int, delay_from_emergence_us: int, replicate_index
     )
 
 
-def _accepted_measurement(delay_us: int, delay_from_emergence_us: int, replicate_index: int, *, volume_nl: float, width_px: float):
+def _accepted_measurement(
+    delay_us: int,
+    delay_from_emergence_us: int,
+    replicate_index: int,
+    *,
+    volume_nl: float,
+    width_px: float,
+):
     return online_cal_mod.build_online_stream_measurement_row(
         phase="flow_rate",
         delay_us=delay_us,
@@ -40,7 +54,12 @@ def _accepted_measurement(delay_us: int, delay_from_emergence_us: int, replicate
     )
 
 
-def _delay_block(delay_us: int, delay_from_emergence_us: int, volumes: list[float], widths: list[float] | None = None):
+def _delay_block(
+    delay_us: int,
+    delay_from_emergence_us: int,
+    volumes: list[float],
+    widths: list[float] | None = None,
+):
     widths = list(widths or [74.0 for _ in volumes])
     frame_rows = []
     measurements = []
@@ -66,40 +85,15 @@ def _delay_block(delay_us: int, delay_from_emergence_us: int, volumes: list[floa
     return measurements, online_cal_mod.summarize_online_stream_flow_delay(frame_rows)
 
 
-def test_fit_online_stream_flow_phase_returns_expected_rate_for_linear_sparse_schedule():
+def _delay_schedule(count: int, *, start_us: int = 650, step_us: int = 200) -> list[int]:
+    return [start_us + (offset * step_us) for offset in range(count)]
+
+
+def _flow_dataset_from_blocks(blocks: list[tuple[int, list[float], list[float] | None]]):
     measurements = []
     delay_summaries = []
-    for delay_from_emergence_us in [650, 850, 1050, 1250, 1450]:
+    for delay_from_emergence_us, volumes, widths in blocks:
         delay_us = 3200 + delay_from_emergence_us
-        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl, volume_nl + 0.1, volume_nl - 0.1],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
-
-    result = mod.fit_online_stream_flow_phase(
-        measurements=measurements,
-        delay_summaries=delay_summaries,
-    )
-
-    assert result["fit_status"] == "ok"
-    assert result["flow_rate_nl_per_us"] == pytest.approx(0.02, rel=0.02)
-    assert result["flow_fit_point_count"] == 5
-    assert result["steady_width_baseline_px"] == 74.0
-
-
-def test_fit_online_stream_flow_phase_uses_per_delay_medians_not_raw_measurement_weighting():
-    measurements = []
-    delay_summaries = []
-    blocks = [
-        (3850, 650, [10.0], [74.0]),
-        (4050, 850, [20.0, 200.0, 20.0], [74.0, 74.0, 74.0]),
-        (4250, 1050, [30.0], [74.0]),
-    ]
-    for delay_us, delay_from_emergence_us, volumes, widths in blocks:
         block_measurements, delay_summary = _delay_block(
             delay_us,
             delay_from_emergence_us,
@@ -108,6 +102,42 @@ def test_fit_online_stream_flow_phase_uses_per_delay_medians_not_raw_measurement
         )
         measurements.extend(block_measurements)
         delay_summaries.append(delay_summary)
+    return measurements, delay_summaries
+
+
+def test_fit_online_stream_flow_phase_returns_expected_rate_above_minimum_delay_count():
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(13):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append(
+            (
+                delay_from_emergence_us,
+                [volume_nl, volume_nl + 0.1, volume_nl - 0.1],
+                None,
+            )
+        )
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
+
+    result = mod.fit_online_stream_flow_phase(
+        measurements=measurements,
+        delay_summaries=delay_summaries,
+    )
+
+    assert result["fit_status"] == "ok"
+    assert result["flow_rate_nl_per_us"] == pytest.approx(0.02, rel=0.02)
+    assert result["flow_fit_point_count"] == 13
+    assert result["steady_width_baseline_px"] == 74.0
+
+
+def test_fit_online_stream_flow_phase_uses_per_delay_medians_at_minimum_delay_count():
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(12):
+        volume_nl = 0.05 * delay_from_emergence_us
+        volumes = [volume_nl]
+        if delay_from_emergence_us == 850:
+            volumes = [volume_nl, volume_nl + 180.0, volume_nl]
+        blocks.append((delay_from_emergence_us, volumes, [74.0 for _ in volumes]))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -118,18 +148,12 @@ def test_fit_online_stream_flow_phase_uses_per_delay_medians_not_raw_measurement
     assert result["flow_rate_nl_per_us"] == pytest.approx(0.05, rel=0.05)
 
 
-def test_fit_online_stream_flow_phase_warns_when_only_three_delays_are_available():
-    measurements = []
-    delay_summaries = []
-    for delay_from_emergence_us, volume_nl in [(650, 12.0), (850, 16.0), (1050, 20.0)]:
-        delay_us = 3200 + delay_from_emergence_us
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+def test_fit_online_stream_flow_phase_warns_when_only_twelve_delays_are_available():
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(12):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -137,21 +161,16 @@ def test_fit_online_stream_flow_phase_warns_when_only_three_delays_are_available
     )
 
     assert result["fit_status"] == "warning_min_points_only"
+    assert result["flow_fit_point_count"] == 12
     assert "flow_fit_min_points_only" in result["warnings"]
 
 
-def test_fit_online_stream_flow_phase_returns_unresolved_for_fewer_than_three_delays():
-    measurements = []
-    delay_summaries = []
-    for delay_from_emergence_us, volume_nl in [(650, 12.0), (850, 16.0)]:
-        delay_us = 3200 + delay_from_emergence_us
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+def test_fit_online_stream_flow_phase_returns_unresolved_for_eleven_delays():
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(11):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -159,58 +178,43 @@ def test_fit_online_stream_flow_phase_returns_unresolved_for_fewer_than_three_de
     )
 
     assert result["fit_status"] == "unresolved_insufficient_delays"
+    assert result["accepted_delay_point_count"] == 11
     assert result["flow_rate_nl_per_us"] is None
     assert "insufficient_accepted_delays" in result["warnings"]
 
 
 def test_fit_online_stream_flow_phase_prunes_one_isolated_interior_outlier():
-    measurements = []
-    delay_summaries = []
-    for delay_from_emergence_us, volume_nl in [
-        (650, 12.0),
-        (850, 16.0),
-        (1050, 40.0),
-        (1250, 24.0),
-        (1450, 28.0),
-    ]:
-        delay_us = 3200 + delay_from_emergence_us
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+    blocks = []
+    outlier_delay_from_emergence_us = _delay_schedule(13)[6]
+    for delay_from_emergence_us in _delay_schedule(13):
+        volume_nl = (0.02 * delay_from_emergence_us) - 1.0
+        if delay_from_emergence_us == outlier_delay_from_emergence_us:
+            volume_nl += 18.0
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
         delay_summaries=delay_summaries,
     )
 
+    assert result["fit_status"] == "warning_min_points_only"
     assert result["flow_fit_outlier_prune_status"] == "dropped_isolated_point"
-    assert result["flow_fit_dropped_outlier_delay_from_emergence_us"] == 1050
+    assert result["flow_fit_dropped_outlier_delay_from_emergence_us"] == outlier_delay_from_emergence_us
+    assert result["flow_fit_point_count"] == 12
     assert result["flow_rate_nl_per_us"] == pytest.approx(0.02, rel=0.05)
     assert "flow_fit_outlier_pruned" in result["warnings"]
 
 
 def test_fit_online_stream_flow_phase_does_not_prune_endpoint_outlier():
-    measurements = []
-    delay_summaries = []
-    for delay_from_emergence_us, volume_nl in [
-        (650, 45.0),
-        (850, 16.0),
-        (1050, 20.0),
-        (1250, 24.0),
-        (1450, 28.0),
-    ]:
-        delay_us = 3200 + delay_from_emergence_us
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+    blocks = []
+    schedule = _delay_schedule(13)
+    for delay_from_emergence_us in schedule:
+        volume_nl = (0.02 * delay_from_emergence_us) - 1.0
+        if delay_from_emergence_us == schedule[0]:
+            volume_nl += 18.0
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -218,26 +222,16 @@ def test_fit_online_stream_flow_phase_does_not_prune_endpoint_outlier():
     )
 
     assert result["flow_fit_outlier_prune_status"] != "dropped_isolated_point"
-    assert result["flow_fit_point_count"] == 5
+    assert result["flow_fit_point_count"] == 13
 
 
 def test_fit_online_stream_flow_phase_width_baseline_uses_all_measurements():
-    measurements = []
-    delay_summaries = []
-    blocks = [
-        (3850, 650, [12.0, 12.1], [70.0, 74.0]),
-        (4050, 850, [16.0, 16.1], [76.0, 78.0]),
-        (4250, 1050, [20.0], [80.0]),
-    ]
-    for delay_us, delay_from_emergence_us, volumes, widths in blocks:
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            volumes,
-            widths,
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+    blocks = []
+    widths = [70.0, 71.0, 72.0, 73.0, 74.0, 75.0, 77.0, 78.0, 79.0, 80.0, 81.0, 82.0]
+    for delay_from_emergence_us, width_px in zip(_delay_schedule(12), widths):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append((delay_from_emergence_us, [volume_nl], [width_px]))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     result = mod.fit_online_stream_flow_phase(
         measurements=measurements,
@@ -248,17 +242,11 @@ def test_fit_online_stream_flow_phase_width_baseline_uses_all_measurements():
 
 
 def test_fit_online_stream_flow_phase_is_json_serializable():
-    measurements = []
-    delay_summaries = []
-    for delay_from_emergence_us, volume_nl in [(650, 12.0), (850, 16.0), (1050, 20.0)]:
-        delay_us = 3200 + delay_from_emergence_us
-        block_measurements, delay_summary = _delay_block(
-            delay_us,
-            delay_from_emergence_us,
-            [volume_nl],
-        )
-        measurements.extend(block_measurements)
-        delay_summaries.append(delay_summary)
+    blocks = []
+    for delay_from_emergence_us in _delay_schedule(12):
+        volume_nl = (0.02 * delay_from_emergence_us) + 1.5
+        blocks.append((delay_from_emergence_us, [volume_nl], None))
+    measurements, delay_summaries = _flow_dataset_from_blocks(blocks)
 
     encoded = json.dumps(
         mod.fit_online_stream_flow_phase(

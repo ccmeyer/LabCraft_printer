@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
-ensure_calibration_import_stubs(force=True)
+ensure_calibration_import_stubs()
 
 from CalibrationClasses.Model import CalibrationManager
 from CalibrationMemoryStore import CalibrationMemoryStore

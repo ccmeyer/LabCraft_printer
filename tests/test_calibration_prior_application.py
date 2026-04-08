@@ -7,7 +7,7 @@ import pytest
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
-ensure_calibration_import_stubs(force=True)
+ensure_calibration_import_stubs()
 
 import CalibrationClasses.Model as calibration_model
 from CalibrationClasses.Model import CalibrationManager, PressureBandCalibrationProcess

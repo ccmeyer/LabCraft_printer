@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QLabel, QPushButton
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
-ensure_calibration_import_stubs(force=True)
+ensure_calibration_import_stubs()
 
 from CalibrationClasses.View import DropletImagingDialog, NozzlePositionDatasetCaptureWindow
 

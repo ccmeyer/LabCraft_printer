@@ -5,6 +5,8 @@ import types
 import numpy as np
 import cv2
 
+_CALIBRATION_STUB_SENTINEL = "__calibration_stub__"
+
 
 def _find_spec_or_none(name: str):
     try:
@@ -13,27 +15,62 @@ def _find_spec_or_none(name: str):
         return None
 
 
+def _stub_module(name: str, *, package: bool = False):
+    module = types.ModuleType(name)
+    setattr(module, _CALIBRATION_STUB_SENTINEL, True)
+    if package:
+        module.__path__ = []
+    return module
+
+
+def _register_stub_module(name: str, module):
+    setattr(module, _CALIBRATION_STUB_SENTINEL, True)
+    sys.modules[name] = module
+    return module
+
+
+def _is_helper_stub(name: str) -> bool:
+    module = sys.modules.get(name)
+    return bool(getattr(module, _CALIBRATION_STUB_SENTINEL, False))
+
+
+def _clear_helper_stubs(*module_names: str) -> None:
+    for module_name in module_names:
+        if _is_helper_stub(module_name):
+            sys.modules.pop(module_name, None)
+
+
 def ensure_calibration_import_stubs(*, force: bool = False) -> None:
     """
     Provide minimal optional-module stubs so CalibrationClasses.Model can import
     in lean test environments.
     """
-    if (force or _find_spec_or_none("pyDOE3") is None) and "pyDOE3" not in sys.modules:
-        sys.modules["pyDOE3"] = types.ModuleType("pyDOE3")
-
     if force:
-        sys.modules.pop("matplotlib", None)
-        sys.modules.pop("matplotlib.pyplot", None)
-        sys.modules.pop("matplotlib.figure", None)
-        sys.modules.pop("matplotlib.backends", None)
-        sys.modules.pop("matplotlib.backends.backend_qt5agg", None)
+        _clear_helper_stubs(
+            "pyDOE3",
+            "matplotlib",
+            "matplotlib.pyplot",
+            "matplotlib.figure",
+            "matplotlib.backends",
+            "matplotlib.backends.backend_qt5agg",
+            "scipy",
+            "scipy.optimize",
+            "scipy.signal",
+            "scipy.stats",
+            "scipy.ndimage",
+            "skimage",
+            "skimage.metrics",
+        )
 
-    if (force or _find_spec_or_none("matplotlib") is None) and "matplotlib" not in sys.modules:
-        mpl = types.ModuleType("matplotlib")
-        plt = types.ModuleType("matplotlib.pyplot")
-        figure_mod = types.ModuleType("matplotlib.figure")
-        backends = types.ModuleType("matplotlib.backends")
-        backend_qt5agg = types.ModuleType("matplotlib.backends.backend_qt5agg")
+    if _find_spec_or_none("pyDOE3") is None and "pyDOE3" not in sys.modules:
+        _register_stub_module("pyDOE3", _stub_module("pyDOE3"))
+
+    if _find_spec_or_none("matplotlib") is None and "matplotlib" not in sys.modules:
+        mpl = _stub_module("matplotlib", package=True)
+        plt = _stub_module("matplotlib.pyplot")
+        figure_mod = _stub_module("matplotlib.figure")
+        backends = _stub_module("matplotlib.backends", package=True)
+        backend_qt5agg = _stub_module("matplotlib.backends.backend_qt5agg")
 
         class _FigureCanvasQTAgg:
             pass
@@ -130,14 +167,14 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
         mpl.pyplot = plt
         mpl.figure = figure_mod
         mpl.backends = backends
-        sys.modules["matplotlib"] = mpl
-        sys.modules["matplotlib.pyplot"] = plt
-        sys.modules["matplotlib.figure"] = figure_mod
-        sys.modules["matplotlib.backends"] = backends
-        sys.modules["matplotlib.backends.backend_qt5agg"] = backend_qt5agg
-    elif (force or _find_spec_or_none("matplotlib.pyplot") is None) and "matplotlib.pyplot" not in sys.modules:
-        plt = types.ModuleType("matplotlib.pyplot")
-        sys.modules["matplotlib.pyplot"] = plt
+        _register_stub_module("matplotlib", mpl)
+        _register_stub_module("matplotlib.pyplot", plt)
+        _register_stub_module("matplotlib.figure", figure_mod)
+        _register_stub_module("matplotlib.backends", backends)
+        _register_stub_module("matplotlib.backends.backend_qt5agg", backend_qt5agg)
+    elif _find_spec_or_none("matplotlib.pyplot") is None and "matplotlib.pyplot" not in sys.modules:
+        plt = _stub_module("matplotlib.pyplot")
+        _register_stub_module("matplotlib.pyplot", plt)
         if "matplotlib" in sys.modules:
             sys.modules["matplotlib"].pyplot = plt
             if not hasattr(sys.modules["matplotlib"], "use"):
@@ -231,40 +268,34 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
                 return fig, grid
 
             plt.subplots = _subplots
-    if (force or _find_spec_or_none("matplotlib.backends") is None) and "matplotlib.backends" not in sys.modules:
-        sys.modules["matplotlib.backends"] = types.ModuleType("matplotlib.backends")
-    if (force or _find_spec_or_none("matplotlib.figure") is None) and "matplotlib.figure" not in sys.modules:
-        figure_mod = types.ModuleType("matplotlib.figure")
+    if _find_spec_or_none("matplotlib.backends") is None and "matplotlib.backends" not in sys.modules:
+        _register_stub_module(
+            "matplotlib.backends",
+            _stub_module("matplotlib.backends", package=True),
+        )
+    if _find_spec_or_none("matplotlib.figure") is None and "matplotlib.figure" not in sys.modules:
+        figure_mod = _stub_module("matplotlib.figure")
 
         class _Figure:
             pass
 
         figure_mod.Figure = _Figure
-        sys.modules["matplotlib.figure"] = figure_mod
-    if (
-        force or _find_spec_or_none("matplotlib.backends.backend_qt5agg") is None
-    ) and "matplotlib.backends.backend_qt5agg" not in sys.modules:
-        backend_qt5agg = types.ModuleType("matplotlib.backends.backend_qt5agg")
+        _register_stub_module("matplotlib.figure", figure_mod)
+    if _find_spec_or_none("matplotlib.backends.backend_qt5agg") is None and "matplotlib.backends.backend_qt5agg" not in sys.modules:
+        backend_qt5agg = _stub_module("matplotlib.backends.backend_qt5agg")
 
         class _FigureCanvasQTAgg:
             pass
 
         backend_qt5agg.FigureCanvasQTAgg = _FigureCanvasQTAgg
-        sys.modules["matplotlib.backends.backend_qt5agg"] = backend_qt5agg
+        _register_stub_module("matplotlib.backends.backend_qt5agg", backend_qt5agg)
 
-    if force:
-        sys.modules.pop("scipy", None)
-        sys.modules.pop("scipy.optimize", None)
-        sys.modules.pop("scipy.signal", None)
-        sys.modules.pop("scipy.stats", None)
-        sys.modules.pop("scipy.ndimage", None)
-
-    if (force or _find_spec_or_none("scipy") is None) and "scipy" not in sys.modules:
-        scipy = types.ModuleType("scipy")
-        optimize = types.ModuleType("scipy.optimize")
-        signal = types.ModuleType("scipy.signal")
-        stats = types.ModuleType("scipy.stats")
-        ndimage = types.ModuleType("scipy.ndimage")
+    if _find_spec_or_none("scipy") is None and "scipy" not in sys.modules:
+        scipy = _stub_module("scipy", package=True)
+        optimize = _stub_module("scipy.optimize")
+        signal = _stub_module("scipy.signal")
+        stats = _stub_module("scipy.stats")
+        ndimage = _stub_module("scipy.ndimage")
         optimize.minimize = lambda *a, **k: None
         optimize.fsolve = lambda *a, **k: None
         signal.find_peaks = lambda *a, **k: ([], {})
@@ -275,30 +306,30 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
         scipy.signal = signal
         scipy.stats = stats
         scipy.ndimage = ndimage
-        sys.modules["scipy"] = scipy
-        sys.modules["scipy.optimize"] = optimize
-        sys.modules["scipy.signal"] = signal
-        sys.modules["scipy.stats"] = stats
-        sys.modules["scipy.ndimage"] = ndimage
+        _register_stub_module("scipy", scipy)
+        _register_stub_module("scipy.optimize", optimize)
+        _register_stub_module("scipy.signal", signal)
+        _register_stub_module("scipy.stats", stats)
+        _register_stub_module("scipy.ndimage", ndimage)
     else:
-        if (force or _find_spec_or_none("scipy.optimize") is None) and "scipy.optimize" not in sys.modules:
-            optimize = types.ModuleType("scipy.optimize")
+        if _find_spec_or_none("scipy.optimize") is None and "scipy.optimize" not in sys.modules:
+            optimize = _stub_module("scipy.optimize")
             optimize.minimize = lambda *a, **k: None
             optimize.fsolve = lambda *a, **k: None
-            sys.modules["scipy.optimize"] = optimize
-        if (force or _find_spec_or_none("scipy.signal") is None) and "scipy.signal" not in sys.modules:
-            signal = types.ModuleType("scipy.signal")
+            _register_stub_module("scipy.optimize", optimize)
+        if _find_spec_or_none("scipy.signal") is None and "scipy.signal" not in sys.modules:
+            signal = _stub_module("scipy.signal")
             signal.find_peaks = lambda *a, **k: ([], {})
-            sys.modules["scipy.signal"] = signal
-        if (force or _find_spec_or_none("scipy.stats") is None) and "scipy.stats" not in sys.modules:
-            stats = types.ModuleType("scipy.stats")
+            _register_stub_module("scipy.signal", signal)
+        if _find_spec_or_none("scipy.stats") is None and "scipy.stats" not in sys.modules:
+            stats = _stub_module("scipy.stats")
             stats.theilslopes = lambda y, x, *a, **k: (0.0, 0.0, 0.0, 0.0)
-            sys.modules["scipy.stats"] = stats
-        if (force or _find_spec_or_none("scipy.ndimage") is None) and "scipy.ndimage" not in sys.modules:
-            ndimage = types.ModuleType("scipy.ndimage")
+            _register_stub_module("scipy.stats", stats)
+        if _find_spec_or_none("scipy.ndimage") is None and "scipy.ndimage" not in sys.modules:
+            ndimage = _stub_module("scipy.ndimage")
             ndimage.binary_fill_holes = lambda arr, *a, **k: arr
             ndimage.label = lambda arr, *a, **k: (arr, 1)
-            sys.modules["scipy.ndimage"] = ndimage
+            _register_stub_module("scipy.ndimage", ndimage)
         if "scipy" in sys.modules:
             if "scipy.optimize" in sys.modules:
                 sys.modules["scipy"].optimize = sys.modules["scipy.optimize"]
@@ -309,21 +340,17 @@ def ensure_calibration_import_stubs(*, force: bool = False) -> None:
             if "scipy.ndimage" in sys.modules:
                 sys.modules["scipy"].ndimage = sys.modules["scipy.ndimage"]
 
-    if force:
-        sys.modules.pop("skimage", None)
-        sys.modules.pop("skimage.metrics", None)
-
-    if (force or _find_spec_or_none("skimage") is None) and "skimage" not in sys.modules:
-        skimage = types.ModuleType("skimage")
-        metrics = types.ModuleType("skimage.metrics")
+    if _find_spec_or_none("skimage") is None and "skimage" not in sys.modules:
+        skimage = _stub_module("skimage", package=True)
+        metrics = _stub_module("skimage.metrics")
         metrics.structural_similarity = lambda *a, **k: 1.0
         skimage.metrics = metrics
-        sys.modules["skimage"] = skimage
-        sys.modules["skimage.metrics"] = metrics
-    elif (force or _find_spec_or_none("skimage.metrics") is None) and "skimage.metrics" not in sys.modules:
-        metrics = types.ModuleType("skimage.metrics")
+        _register_stub_module("skimage", skimage)
+        _register_stub_module("skimage.metrics", metrics)
+    elif _find_spec_or_none("skimage.metrics") is None and "skimage.metrics" not in sys.modules:
+        metrics = _stub_module("skimage.metrics")
         metrics.structural_similarity = lambda *a, **k: 1.0
-        sys.modules["skimage.metrics"] = metrics
+        _register_stub_module("skimage.metrics", metrics)
         if "skimage" in sys.modules:
             sys.modules["skimage"].metrics = metrics
 

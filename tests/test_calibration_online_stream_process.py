@@ -11,7 +11,7 @@ import numpy as np
 from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
 
-ensure_calibration_import_stubs(force=True)
+ensure_calibration_import_stubs()
 
 if "Model" not in sys.modules:
     fake_model = types.ModuleType("Model")
