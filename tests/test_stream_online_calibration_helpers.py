@@ -299,6 +299,7 @@ def test_build_online_stream_flow_fit_artifact_returns_exact_top_level_shape():
     artifact = mod.build_online_stream_flow_fit_artifact(
         condition={"print_pressure_psi": 0.42},
         flow_plan={"delays_us": [3850, 4050]},
+        delay_summaries=[{"delay_us": 3850, "flow_volume_geometry_ok": True}],
         accepted_delay_points=[{"delay_us": 3850, "median_visible_volume_nl": 12.3}],
         fit={"fit_status": "ok", "flow_rate_nl_per_us": 0.0187, "warnings": ["flow_fit_ok"]},
         warnings=["flow_fit_ok"],
@@ -309,6 +310,7 @@ def test_build_online_stream_flow_fit_artifact_returns_exact_top_level_shape():
         "phase",
         "condition",
         "flow_plan",
+        "delay_summaries",
         "accepted_delay_points",
         "fit",
         "warnings",
@@ -483,6 +485,48 @@ def test_summarize_online_stream_flow_delay_marks_bottom_guard_hits():
 
     assert summary["accepted_replicates"] == 0
     assert summary["attached_bottom_guard_hit"] is True
+
+
+def test_summarize_online_stream_flow_delay_excludes_geometry_rejected_rows_from_acceptance():
+    summary = mod.summarize_online_stream_flow_delay(
+        [
+            mod.build_online_stream_frame_row(
+                phase="flow_rate",
+                status="accepted",
+                delay_us=4250,
+                delay_from_emergence_us=1050,
+                replicate_index=1,
+                qc={"measurement_qc_pass": True},
+                image_ref={"capture_id": "cap_geom"},
+                warnings=["flow_volume_geometry_not_ok"],
+                attached_width_px=88.0,
+                visible_volume_nl=13.5,
+                attached_bottom_clearance_px=140,
+                detached_near_bottom_warning=False,
+                flow_volume_geometry_ok=False,
+                flow_volume_geometry_reasons=["attached_lower_centerline_span_high"],
+                flow_measurement_usable=False,
+            )
+        ]
+    )
+
+    assert summary["accepted_replicates"] == 0
+    assert summary["geometry_rejected_replicates"] == 1
+    assert summary["geometry_boundary_triggered"] is True
+    assert summary["flow_volume_geometry_ok"] is False
+    assert summary["flow_volume_geometry_reasons"] == ["attached_lower_centerline_span_high"]
+
+
+def test_online_stream_flow_geometry_boundary_helper_detects_geometry_failures():
+    assert mod.is_online_stream_flow_geometry_boundary(
+        {"geometry_boundary_triggered": True}
+    ) is True
+    assert mod.is_online_stream_flow_geometry_boundary(
+        {"flow_volume_geometry_ok": False}
+    ) is True
+    assert mod.is_online_stream_flow_geometry_boundary(
+        {"flow_volume_geometry_ok": True}
+    ) is False
 
 
 def test_decide_online_stream_flow_next_action_continue_case():
@@ -720,6 +764,7 @@ def test_online_stream_helper_outputs_are_json_serializable():
         "flow_fit_artifact": mod.build_online_stream_flow_fit_artifact(
             condition={"print_pressure_psi": 0.4},
             flow_plan={"delays_us": [3850, 4050]},
+            delay_summaries=[{"delay_us": 3850, "flow_volume_geometry_ok": True}],
             accepted_delay_points=[{"delay_us": 3850, "median_visible_volume_nl": 12.3}],
             fit={"fit_status": "ok", "flow_rate_nl_per_us": 0.0187},
             warnings=["flow_fit_ok"],

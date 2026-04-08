@@ -33,6 +33,45 @@ def _frame_with_near_nozzle_detached_warning():
     return frame
 
 
+def _edge_rows_from_centerline(*, y_start: int, y_end: int, center_fn, half_width: int = 10):
+    rows = []
+    for y_px in range(y_start, y_end):
+        center_x_px = float(center_fn(y_px))
+        rows.append(
+            {
+                "y_px": int(y_px),
+                "x_left_px": float(center_x_px - float(half_width)),
+                "x_right_px": float(center_x_px + float(half_width)),
+                "width_px": float(2 * half_width),
+                "center_x_px": float(center_x_px),
+            }
+        )
+    return rows
+
+
+def _component_from_mask(mask: np.ndarray, *, component_id: str, anchor_center_x_px: float):
+    edge_rows = []
+    occupied_rows = np.flatnonzero(np.any(mask > 0, axis=1))
+    for y_local in occupied_rows.tolist():
+        x_indices = np.flatnonzero(mask[y_local] > 0)
+        edge_rows.append(
+            {
+                "y_px": int(50 + y_local),
+                "x_left_px": float(100 + int(x_indices[0])),
+                "x_right_px": float(100 + int(x_indices[-1])),
+                "width_px": float(int(x_indices[-1]) - int(x_indices[0])),
+                "center_x_px": float(100 + ((int(x_indices[0]) + int(x_indices[-1])) / 2.0)),
+            }
+        )
+    return {
+        "component_id": str(component_id),
+        "component_role": "detached_accepted",
+        "anchor_center_x_px": float(anchor_center_x_px),
+        "final_mask": mask,
+        "edge_rows": edge_rows,
+    }
+
+
 def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stream():
     frame = _frame_with_attached_stream(bottom_y=170)
     result = mod.analyze_online_stream_frame(
@@ -51,6 +90,8 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert summary["attached_width_px"] is not None
     assert summary["visible_volume_nl"] is not None
     assert summary["attached_bottom_clearance_px"] > 96
+    assert summary["flow_volume_geometry_ok"] is True
+    assert summary["flow_measurement_usable"] is True
     assert result["overlay"] is not None
     assert result["overlay"].shape == frame.shape + (3,)
     assert np.any(result["overlay"][80:170, 96:124] != np.stack([frame[80:170, 96:124]] * 3, axis=-1))
@@ -164,6 +205,7 @@ def test_analyze_online_stream_frame_warns_for_detached_near_bottom_without_reje
     assert summary["measurement_qc_pass"] is True
     assert summary["detached_near_bottom_warning"] is True
     assert summary["late_frame_warning"] is True
+    assert summary["flow_volume_geometry_ok"] is True
     assert "detached_near_bottom_warning" in summary["warnings"]
 
 
@@ -183,6 +225,127 @@ def test_analyze_online_stream_frame_marks_near_nozzle_detached_warning():
     assert summary["near_nozzle_detached_warning"] is True
     assert summary["late_frame_warning"] is False
     assert "near_nozzle_detached_warning" in summary["warnings"]
+
+
+def test_attached_geometry_summary_passes_straight_but_angled_stream():
+    edge_rows = _edge_rows_from_centerline(
+        y_start=60,
+        y_end=180,
+        center_fn=lambda y_px: 100.0 + (0.20 * float(y_px - 60)),
+    )
+
+    geometry = mod._attached_geometry_summary(
+        edge_rows,
+        lower_row_fraction=0.35,
+        min_rows=12,
+        span_max_px=50,
+        geometry_assessable=True,
+    )
+
+    assert geometry["attached_volume_geometry_ok"] is True
+    assert geometry["attached_lower_centerline_span_px"] < 1.0
+
+
+def test_attached_geometry_summary_fails_connected_curl():
+    edge_rows = _edge_rows_from_centerline(
+        y_start=60,
+        y_end=180,
+        center_fn=lambda y_px: (
+            100.0
+            + (0.15 * float(y_px - 60))
+            + (
+                0.0
+                if y_px < 125
+                else (55.0 if y_px < 150 else -55.0)
+            )
+        ),
+    )
+
+    geometry = mod._attached_geometry_summary(
+        edge_rows,
+        lower_row_fraction=0.35,
+        min_rows=12,
+        span_max_px=50,
+        geometry_assessable=True,
+    )
+
+    assert geometry["attached_volume_geometry_ok"] is False
+    assert geometry["attached_lower_centerline_span_px"] > 50.0
+
+
+def test_detached_geometry_passes_compact_symmetric_body_with_moderate_axis_offset():
+    mask = np.zeros((50, 60), dtype=np.uint8)
+    mask[10:35, 22:38] = 1
+    component = _component_from_mask(mask, component_id="det_01", anchor_center_x_px=130.0)
+
+    detail = mod._detached_component_geometry_details(
+        detached_component=component,
+        component_volume_nl=1.2,
+        detached_visible_volume_nl=1.2,
+        roi={"x0": 100, "y0": 50},
+        tracked_nozzle_x_px=145.0,
+        config=mod._resolved_analysis_config(None),
+    )
+
+    assert detail["geometry_ok"] is True
+    assert detail["axis_symmetry_score"] >= 0.80
+    assert detail["local_centerline_span_px"] <= 20.0
+
+
+def test_detached_geometry_fails_hooked_asymmetric_body():
+    mask = np.zeros((50, 60), dtype=np.uint8)
+    mask[10:35, 22:38] = 1
+    mask[28:40, 38:52] = 1
+    component = _component_from_mask(mask, component_id="det_hook", anchor_center_x_px=130.0)
+
+    detail = mod._detached_component_geometry_details(
+        detached_component=component,
+        component_volume_nl=1.2,
+        detached_visible_volume_nl=1.2,
+        roi={"x0": 100, "y0": 50},
+        tracked_nozzle_x_px=130.0,
+        config=mod._resolved_analysis_config(None),
+    )
+
+    assert detail["geometry_ok"] is False
+    assert "detached_axis_symmetry_low" in detail["geometry_reasons"]
+
+
+def test_detached_geometry_large_axis_offset_warns_but_does_not_fail_when_shape_is_good():
+    mask = np.zeros((50, 60), dtype=np.uint8)
+    mask[10:35, 22:38] = 1
+    component = _component_from_mask(mask, component_id="det_far", anchor_center_x_px=170.0)
+
+    detail = mod._detached_component_geometry_details(
+        detached_component=component,
+        component_volume_nl=1.2,
+        detached_visible_volume_nl=1.2,
+        roi={"x0": 100, "y0": 50},
+        tracked_nozzle_x_px=130.0,
+        config=mod._resolved_analysis_config(None),
+    )
+
+    assert detail["geometry_ok"] is True
+    assert detail["axis_offset_px"] > 25.0
+    assert detail["geometry_reasons"] == []
+
+
+def test_detached_geometry_ignores_immaterial_specks():
+    mask = np.zeros((30, 30), dtype=np.uint8)
+    mask[10:14, 12:16] = 1
+    component = _component_from_mask(mask, component_id="det_speck", anchor_center_x_px=120.0)
+
+    detail = mod._detached_component_geometry_details(
+        detached_component=component,
+        component_volume_nl=0.1,
+        detached_visible_volume_nl=1.0,
+        roi={"x0": 100, "y0": 50},
+        tracked_nozzle_x_px=120.0,
+        config=mod._resolved_analysis_config(None),
+    )
+
+    assert detail["geometry_ok"] is True
+    assert detail["axis_symmetry_score"] is None
 
 
 def test_online_runtime_summary_is_json_serializable():

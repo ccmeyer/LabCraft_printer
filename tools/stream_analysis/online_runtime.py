@@ -18,10 +18,16 @@ def _resolved_analysis_config(config: dict | None = None) -> dict:
     merged = dict(online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
     for key, default_value in online_cal_mod.DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG.items():
         if isinstance(config, dict) and key in config:
-            try:
-                merged[key] = int(config.get(key))
-            except Exception:
-                merged[key] = int(default_value)
+            if isinstance(default_value, float):
+                try:
+                    merged[key] = float(config.get(key))
+                except Exception:
+                    merged[key] = float(default_value)
+            else:
+                try:
+                    merged[key] = int(config.get(key))
+                except Exception:
+                    merged[key] = int(default_value)
     return merged
 
 
@@ -144,6 +150,307 @@ def _near_nozzle_detached_warning(
         if band_y0_px <= int(top_y_px) < band_y1_px:
             return True
     return False
+
+
+def _component_volume_map(component_volume_rows: list[dict]) -> dict[str, dict]:
+    volume_map = {}
+    for row in list(component_volume_rows or []):
+        component_id = str(row.get("component_id") or "").strip()
+        if not component_id:
+            continue
+        volume_map[component_id] = dict(row)
+    return volume_map
+
+
+def _fit_centerline(edge_rows: list[dict]) -> tuple[float, float] | None:
+    rows = [dict(row or {}) for row in list(edge_rows or [])]
+    if len(rows) < 2:
+        return None
+    y_values = np.asarray([float(row["y_px"]) for row in rows], dtype=float)
+    x_values = np.asarray([float(row["center_x_px"]) for row in rows], dtype=float)
+    if np.any(~np.isfinite(y_values)) or np.any(~np.isfinite(x_values)):
+        return None
+    design = np.column_stack((y_values, np.ones_like(y_values)))
+    try:
+        slope, intercept = np.linalg.lstsq(design, x_values, rcond=None)[0]
+    except Exception:
+        return None
+    if not np.isfinite(slope) or not np.isfinite(intercept):
+        return None
+    return float(slope), float(intercept)
+
+
+def _centerline_residual_metrics(
+    edge_rows: list[dict],
+    *,
+    lower_fraction: float | None = None,
+) -> dict:
+    rows = [dict(row or {}) for row in list(edge_rows or [])]
+    rows.sort(key=lambda row: int(row["y_px"]))
+    if lower_fraction is not None and rows:
+        fraction = float(max(0.0, min(1.0, lower_fraction)))
+        keep_count = int(max(1, np.ceil(float(len(rows)) * fraction)))
+        rows = rows[-keep_count:]
+    fit = _fit_centerline(rows)
+    if fit is None:
+        return {
+            "row_count": int(len(rows)),
+            "span_px": None,
+            "rms_px": None,
+            "slope_px_per_row": None,
+            "intercept_px": None,
+        }
+    slope_px_per_row, intercept_px = fit
+    residuals = np.asarray(
+        [
+            float(row["center_x_px"]) - ((float(slope_px_per_row) * float(row["y_px"])) + float(intercept_px))
+            for row in rows
+        ],
+        dtype=float,
+    )
+    if residuals.size <= 0 or np.any(~np.isfinite(residuals)):
+        span_px = None
+        rms_px = None
+    else:
+        span_px = float(np.max(residuals) - np.min(residuals))
+        rms_px = float(np.sqrt(np.mean(residuals**2)))
+    return {
+        "row_count": int(len(rows)),
+        "span_px": span_px,
+        "rms_px": rms_px,
+        "slope_px_per_row": float(slope_px_per_row),
+        "intercept_px": float(intercept_px),
+    }
+
+
+def _axis_symmetry_score(
+    *,
+    final_mask,
+    roi: dict,
+    slope_px_per_row: float,
+    intercept_px: float,
+) -> float | None:
+    if final_mask is None:
+        return None
+    mask = np.asarray(final_mask)
+    if mask.ndim != 2 or mask.size <= 0:
+        return None
+    fg_mask = mask > 0
+    if not np.any(fg_mask):
+        return None
+
+    roi_x0 = int(roi.get("x0", 0) or 0)
+    roi_y0 = int(roi.get("y0", 0) or 0)
+    matched = 0
+    total = 0
+    occupied_rows = np.flatnonzero(np.any(fg_mask, axis=1))
+    for y_local in occupied_rows.tolist():
+        x_indices = np.flatnonzero(fg_mask[y_local])
+        if x_indices.size <= 0:
+            continue
+        y_global = int(roi_y0 + int(y_local))
+        x_fit_global = (float(slope_px_per_row) * float(y_global)) + float(intercept_px)
+        x_fit_local = float(x_fit_global) - float(roi_x0)
+        total += int(x_indices.size)
+        reflected = np.rint((2.0 * float(x_fit_local)) - x_indices.astype(float)).astype(int)
+        valid = (reflected >= 0) & (reflected < fg_mask.shape[1])
+        if np.any(valid):
+            matched += int(np.count_nonzero(fg_mask[y_local, reflected[valid]]))
+    if total <= 0:
+        return None
+    return float(matched / float(total))
+
+
+def _attached_geometry_summary(
+    attached_edge_rows: list[dict],
+    *,
+    lower_row_fraction: float,
+    min_rows: int,
+    span_max_px: float,
+    geometry_assessable: bool,
+) -> dict:
+    metrics = _centerline_residual_metrics(
+        attached_edge_rows,
+        lower_fraction=float(lower_row_fraction),
+    )
+    row_count = int(metrics.get("row_count") or 0)
+    span_px = metrics.get("span_px")
+    rms_px = metrics.get("rms_px")
+    reasons = []
+    geometry_ok = None
+    if geometry_assessable:
+        if row_count >= int(min_rows) and span_px is not None:
+            geometry_ok = bool(float(span_px) <= float(span_max_px))
+            if not geometry_ok:
+                reasons.append("attached_lower_centerline_span_high")
+    return {
+        "attached_lower_centerline_span_px": span_px,
+        "attached_lower_centerline_rms_px": rms_px,
+        "attached_volume_geometry_ok": geometry_ok,
+        "attached_geometry_reasons": reasons,
+        "attached_lower_centerline_row_count": row_count,
+    }
+
+
+def _detached_component_geometry_details(
+    *,
+    detached_component: dict,
+    component_volume_nl,
+    detached_visible_volume_nl,
+    roi: dict,
+    tracked_nozzle_x_px,
+    config: dict,
+) -> dict:
+    component_id = str(detached_component.get("component_id") or "")
+    volume_nl = None if component_volume_nl is None else float(component_volume_nl)
+    detached_total_nl = None if detached_visible_volume_nl is None else float(detached_visible_volume_nl)
+    material_min_nl = float(config["detached_material_volume_min_nl"])
+    material_fraction_min = float(config["detached_material_volume_fraction_min"])
+    material_component = bool(
+        volume_nl is not None
+        and (
+            float(volume_nl) >= float(material_min_nl)
+            or (
+                detached_total_nl not in (None, 0.0)
+                and float(volume_nl) >= (float(material_fraction_min) * float(detached_total_nl))
+            )
+        )
+    )
+    if not material_component:
+        return {
+            "component_id": component_id,
+            "component_volume_nl": volume_nl,
+            "local_centerline_span_px": None,
+            "axis_symmetry_score": None,
+            "axis_offset_px": None,
+            "geometry_ok": True,
+            "geometry_reasons": [],
+        }
+
+    edge_rows = [dict(row or {}) for row in list(detached_component.get("edge_rows") or [])]
+    metrics = _centerline_residual_metrics(edge_rows, lower_fraction=None)
+    span_px = metrics.get("span_px")
+    fit_available = (
+        metrics.get("slope_px_per_row") is not None and metrics.get("intercept_px") is not None
+    )
+    symmetry_score = None
+    if fit_available:
+        symmetry_score = _axis_symmetry_score(
+            final_mask=detached_component.get("final_mask"),
+            roi=roi,
+            slope_px_per_row=float(metrics["slope_px_per_row"]),
+            intercept_px=float(metrics["intercept_px"]),
+        )
+
+    axis_offset_px = None
+    if tracked_nozzle_x_px is not None and detached_component.get("anchor_center_x_px") is not None:
+        axis_offset_px = float(
+            abs(float(detached_component["anchor_center_x_px"]) - float(tracked_nozzle_x_px))
+        )
+
+    reasons = []
+    if symmetry_score is None or float(symmetry_score) < float(config["detached_axis_symmetry_min"]):
+        reasons.append("detached_axis_symmetry_low")
+    if span_px is None or float(span_px) > float(config["detached_local_centerline_span_max_px"]):
+        reasons.append("detached_local_centerline_span_high")
+    if reasons and axis_offset_px is not None and float(axis_offset_px) > float(config["detached_axis_offset_warn_px"]):
+        reasons.append("detached_axis_offset_high")
+
+    return {
+        "component_id": component_id,
+        "component_volume_nl": volume_nl,
+        "local_centerline_span_px": None if span_px is None else float(span_px),
+        "axis_symmetry_score": None if symmetry_score is None else float(symmetry_score),
+        "axis_offset_px": None if axis_offset_px is None else float(axis_offset_px),
+        "geometry_ok": bool(not reasons),
+        "geometry_reasons": reasons,
+    }
+
+
+def _detached_geometry_summary(
+    *,
+    accepted_components: list[dict],
+    component_volume_rows: list[dict],
+    detached_visible_volume_nl,
+    roi: dict,
+    tracked_nozzle_x_px,
+    config: dict,
+    geometry_assessable: bool,
+) -> dict:
+    if not geometry_assessable:
+        return {
+            "detached_volume_geometry_ok": None,
+            "detached_geometry_details": [],
+            "min_detached_axis_symmetry_score": None,
+            "max_detached_local_centerline_span_px": None,
+            "max_detached_axis_offset_px": None,
+            "detached_geometry_reasons": [],
+        }
+
+    volume_map = _component_volume_map(component_volume_rows)
+    details = []
+    for component in list(accepted_components or []):
+        if str(component.get("component_role") or "") != "detached_accepted":
+            continue
+        component_id = str(component.get("component_id") or "").strip()
+        component_volume_row = volume_map.get(component_id, {})
+        details.append(
+            _detached_component_geometry_details(
+                detached_component=dict(component),
+                component_volume_nl=component_volume_row.get("component_volume_nl"),
+                detached_visible_volume_nl=detached_visible_volume_nl,
+                roi=roi,
+                tracked_nozzle_x_px=tracked_nozzle_x_px,
+                config=config,
+            )
+        )
+
+    material_details = [
+        dict(detail)
+        for detail in details
+        if detail.get("component_volume_nl") is not None
+        and (
+            float(detail["component_volume_nl"]) >= float(config["detached_material_volume_min_nl"])
+            or (
+                detached_visible_volume_nl not in (None, 0.0)
+                and float(detail["component_volume_nl"])
+                >= (float(config["detached_material_volume_fraction_min"]) * float(detached_visible_volume_nl))
+            )
+        )
+    ]
+    symmetry_scores = [
+        float(detail["axis_symmetry_score"])
+        for detail in material_details
+        if detail.get("axis_symmetry_score") is not None
+    ]
+    local_spans = [
+        float(detail["local_centerline_span_px"])
+        for detail in material_details
+        if detail.get("local_centerline_span_px") is not None
+    ]
+    axis_offsets = [
+        float(detail["axis_offset_px"])
+        for detail in material_details
+        if detail.get("axis_offset_px") is not None
+    ]
+    geometry_reasons = []
+    detached_ok = True
+    for detail in material_details:
+        if not bool(detail.get("geometry_ok")):
+            detached_ok = False
+            component_id = str(detail.get("component_id") or "detached_component")
+            geometry_reasons.extend(
+                [f"{component_id}:{reason}" for reason in list(detail.get("geometry_reasons") or [])]
+            )
+
+    return {
+        "detached_volume_geometry_ok": bool(detached_ok),
+        "detached_geometry_details": details,
+        "min_detached_axis_symmetry_score": None if not symmetry_scores else float(min(symmetry_scores)),
+        "max_detached_local_centerline_span_px": None if not local_spans else float(max(local_spans)),
+        "max_detached_axis_offset_px": None if not axis_offsets else float(max(axis_offsets)),
+        "detached_geometry_reasons": online_cal_mod._unique_strings(geometry_reasons),
+    }
 
 
 def _summary_status(
@@ -374,6 +681,9 @@ def analyze_online_stream_frame(
     stage3_metric_row = dict(stage3_frame.get("metric_row") or {})
     frame_metric_row = dict(stage4_frame.get("frame_metric_row") or {})
     component_rows = [dict(row) for row in list(stage3_frame.get("component_rows") or [])]
+    component_volume_rows = [dict(row) for row in list(stage4_frame.get("component_volume_rows") or [])]
+    accepted_components = [dict(component) for component in list(stage3_frame.get("accepted_components") or [])]
+    roi = dict(stage3_frame.get("roi") or {})
     attached_component_row = next(
         (row for row in component_rows if str(row.get("component_role") or "") == "attached_primary"),
         None,
@@ -381,7 +691,7 @@ def analyze_online_stream_frame(
     attached_component = next(
         (
             dict(component)
-            for component in list(stage3_frame.get("accepted_components") or [])
+            for component in accepted_components
             if str(component.get("component_role") or "") == "attached_primary"
         ),
         None,
@@ -447,6 +757,38 @@ def analyze_online_stream_frame(
         attached_bottom_guard_px=int(config["attached_bottom_guard_px"]),
     )
     measurement_qc_pass = str(status) == "accepted"
+    geometry_assessable = bool(measurement_qc_pass)
+    attached_geometry = _attached_geometry_summary(
+        attached_edge_rows,
+        lower_row_fraction=float(config["attached_lower_centerline_row_fraction"]),
+        min_rows=int(config["attached_lower_centerline_min_rows"]),
+        span_max_px=float(config["attached_lower_centerline_span_max_px"]),
+        geometry_assessable=geometry_assessable,
+    )
+    detached_geometry = _detached_geometry_summary(
+        accepted_components=accepted_components,
+        component_volume_rows=component_volume_rows,
+        detached_visible_volume_nl=frame_metric_row.get("detached_visible_volume_nl"),
+        roi=roi,
+        tracked_nozzle_x_px=stage3_metric_row.get("tracked_nozzle_x_px"),
+        config=config,
+        geometry_assessable=geometry_assessable,
+    )
+    attached_geometry_ok = attached_geometry.get("attached_volume_geometry_ok")
+    detached_geometry_ok = detached_geometry.get("detached_volume_geometry_ok")
+    flow_volume_geometry_ok = None
+    flow_volume_geometry_reasons = []
+    if geometry_assessable:
+        flow_volume_geometry_reasons = online_cal_mod._unique_strings(
+            list(attached_geometry.get("attached_geometry_reasons") or [])
+            + list(detached_geometry.get("detached_geometry_reasons") or [])
+        )
+        flow_volume_geometry_ok = bool(
+            attached_geometry_ok is not False and detached_geometry_ok is not False
+        )
+    flow_measurement_usable = bool(
+        measurement_qc_pass and flow_volume_geometry_ok is not False
+    )
 
     warnings = []
     if not silhouette_qc_pass:
@@ -465,6 +807,8 @@ def analyze_online_stream_frame(
         warnings.append("detached_near_bottom_warning")
     if near_nozzle_detached_warning:
         warnings.append("near_nozzle_detached_warning")
+    if measurement_qc_pass and flow_volume_geometry_ok is False:
+        warnings.append("flow_volume_geometry_not_ok")
 
     if background_image is not None:
         try:
@@ -503,6 +847,25 @@ def analyze_online_stream_frame(
         "accepted_detached_component_count": stage3_metric_row.get(
             "accepted_detached_component_count"
         ),
+        "attached_lower_centerline_span_px": attached_geometry.get(
+            "attached_lower_centerline_span_px"
+        ),
+        "attached_lower_centerline_rms_px": attached_geometry.get(
+            "attached_lower_centerline_rms_px"
+        ),
+        "attached_volume_geometry_ok": attached_geometry_ok,
+        "detached_volume_geometry_ok": detached_geometry_ok,
+        "detached_geometry_details": detached_geometry.get("detached_geometry_details"),
+        "min_detached_axis_symmetry_score": detached_geometry.get(
+            "min_detached_axis_symmetry_score"
+        ),
+        "max_detached_local_centerline_span_px": detached_geometry.get(
+            "max_detached_local_centerline_span_px"
+        ),
+        "max_detached_axis_offset_px": detached_geometry.get("max_detached_axis_offset_px"),
+        "flow_volume_geometry_ok": flow_volume_geometry_ok,
+        "flow_volume_geometry_reasons": flow_volume_geometry_reasons,
+        "flow_measurement_usable": bool(flow_measurement_usable),
         "tail_width_usable": bool(tail_width_usable),
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
         "tail_landmark_usable": bool(tail_landmark_usable),

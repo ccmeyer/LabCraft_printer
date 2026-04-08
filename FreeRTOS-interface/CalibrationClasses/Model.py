@@ -6511,10 +6511,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         y_nl = self._debug_float(summary.get("visible_volume_nl"))
         if x_us is None or y_nl is None:
             return None
+        accepted = summary.get("flow_measurement_usable")
+        if accepted is None:
+            accepted = bool(summary.get("measurement_qc_pass"))
         return {
             "x_us": int(x_us),
             "y_nl": float(y_nl),
-            "accepted": bool(summary.get("measurement_qc_pass")),
+            "accepted": bool(accepted),
         }
 
     def _current_tail_frame_point_payload(self) -> dict | None:
@@ -6671,12 +6674,20 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if current_offset_us is not None:
             self._merge_flow_target_offsets([int(current_offset_us)])
 
+        geometry_boundary = online_cal_mod.is_online_stream_flow_geometry_boundary(summary)
         hard_boundary = online_cal_mod.is_online_stream_flow_hard_boundary(summary)
         soft_boundary = online_cal_mod.is_online_stream_flow_soft_boundary(
             summary,
             policy=self._flow_soft_boundary_policy(),
         )
-        if hard_boundary and not bool(self._flow_right_boundary_fixed):
+        if geometry_boundary and not bool(self._flow_right_boundary_fixed):
+            self._flow_right_boundary_fixed = True
+            self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "geometry_not_axisymmetric"
+            safe_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
+            if safe_offset_us is None:
+                safe_offset_us = int(self._flow_start_offset_from_emergence_us())
+            self._flow_right_boundary_delay_from_emergence_us = int(safe_offset_us)
+        elif hard_boundary and not bool(self._flow_right_boundary_fixed):
             self._flow_hard_boundary_delay_from_emergence_us = int(current_offset_us or 0)
             self._flow_right_boundary_fixed = True
             self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "attached_bottom_guard_hit"
@@ -6715,8 +6726,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if str(self._flow_mode or "scout") == "scout":
             scout_limit = int(min(self._flow_target_delay_count(), self._flow_effective_capture_limit()))
             attempted_count = int(len(self._flow_delay_summaries))
-            if hard_boundary or soft_boundary or attempted_count >= scout_limit:
-                if not hard_boundary and not soft_boundary and self._flow_scout_boundary_reason is None:
+            if geometry_boundary or hard_boundary or soft_boundary or attempted_count >= scout_limit:
+                if not geometry_boundary and not hard_boundary and not soft_boundary and self._flow_scout_boundary_reason is None:
                     self._flow_scout_boundary_reason = "scout_cap_reached"
                     self._flow_right_boundary_delay_from_emergence_us = (
                         self._flow_last_accepted_offset_from_emergence_us(include_soft=False)
@@ -6751,7 +6762,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
 
         next_candidate_offset_us = self._select_next_flow_ci_candidate_offset()
         if next_candidate_offset_us is None:
-            self._flow_fit_stop_reason = self._flow_fit_stop_reason or "candidate_delays_exhausted"
+            if str(self._flow_scout_boundary_reason or "") == "geometry_not_axisymmetric":
+                self._flow_fit_stop_reason = self._flow_fit_stop_reason or "geometry_boundary_reached"
+            else:
+                self._flow_fit_stop_reason = self._flow_fit_stop_reason or "candidate_delays_exhausted"
             return {"action": "stop", "termination_reason": "candidate_delays_exhausted"}
         self._flow_mode = "ci_refine"
         self._flow_ci_refinement_count += 1
@@ -7258,6 +7272,17 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         summary = dict(analysis.get("summary") or {})
         overlay = analysis.get("overlay")
+        flow_volume_geometry_ok = (
+            summary.get("flow_volume_geometry_ok")
+            if "flow_volume_geometry_ok" in summary
+            else (True if bool(summary.get("measurement_qc_pass")) else None)
+        )
+        flow_measurement_usable = summary.get("flow_measurement_usable")
+        if flow_measurement_usable is None:
+            flow_measurement_usable = bool(
+                bool(summary.get("measurement_qc_pass"))
+                and flow_volume_geometry_ok is not False
+            )
 
         frame_row = online_cal_mod.build_online_stream_frame_row(
             phase="flow_rate",
@@ -7286,12 +7311,23 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
             late_frame_warning=bool(summary.get("late_frame_warning")),
             attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+            attached_lower_centerline_span_px=summary.get("attached_lower_centerline_span_px"),
+            attached_lower_centerline_rms_px=summary.get("attached_lower_centerline_rms_px"),
+            attached_volume_geometry_ok=summary.get("attached_volume_geometry_ok"),
+            detached_volume_geometry_ok=summary.get("detached_volume_geometry_ok"),
+            flow_volume_geometry_ok=flow_volume_geometry_ok,
+            flow_volume_geometry_reasons=list(summary.get("flow_volume_geometry_reasons") or []),
+            detached_geometry_details=list(summary.get("detached_geometry_details") or []),
+            min_detached_axis_symmetry_score=summary.get("min_detached_axis_symmetry_score"),
+            max_detached_local_centerline_span_px=summary.get("max_detached_local_centerline_span_px"),
+            max_detached_axis_offset_px=summary.get("max_detached_axis_offset_px"),
+            flow_measurement_usable=bool(flow_measurement_usable),
         )
         self._current_analysis_summary = dict(summary)
         self._current_delay_frame_rows.append(frame_row)
         self._append_flow_jsonl(self._frames_path, frame_row)
 
-        if bool(summary.get("measurement_qc_pass")):
+        if bool(flow_measurement_usable):
             self._measurement_rows.append(
                 online_cal_mod.build_online_stream_measurement_row(
                     phase="flow_rate",
@@ -7354,6 +7390,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._append_flow_warning("attached_bottom_guard_hit")
         if bool(delay_summary.get("detached_near_bottom_warning")):
             self._append_flow_warning("detached_near_bottom_warning")
+        if bool(delay_summary.get("geometry_boundary_triggered")):
+            self._append_flow_warning("flow_geometry_boundary_triggered")
+        if delay_summary.get("flow_volume_geometry_ok") is False:
+            self._append_flow_warning("flow_volume_geometry_not_ok")
 
         decision = self._flow_prepare_next_sequence(delay_summary=delay_summary)
         if str(decision.get("action") or "") == "stop":
@@ -7383,6 +7423,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             condition=self._build_condition(),
             flow_plan=dict(self.flow_plan),
             accepted_delay_points=list(self._flow_fit_result.get("accepted_delay_points") or []),
+            delay_summaries=list(self._flow_delay_summaries or []),
             fit=dict(self._flow_fit_result or {}),
             warnings=self._merged_online_stream_warnings(
                 self._flow_warnings,

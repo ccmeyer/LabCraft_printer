@@ -33,6 +33,14 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "near_nozzle_band_top_px": 24,
     "near_nozzle_band_height_px": 40,
     "min_band_valid_rows": 24,
+    "attached_lower_centerline_row_fraction": 0.35,
+    "attached_lower_centerline_min_rows": 12,
+    "attached_lower_centerline_span_max_px": 50,
+    "detached_material_volume_min_nl": 0.5,
+    "detached_material_volume_fraction_min": 0.25,
+    "detached_axis_symmetry_min": 0.80,
+    "detached_local_centerline_span_max_px": 20,
+    "detached_axis_offset_warn_px": 25,
 }
 
 
@@ -87,7 +95,13 @@ def _resolved_analysis_config(config: dict | None = None) -> dict:
     merged = dict(DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG)
     for key, default_value in DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG.items():
         if isinstance(config, dict) and key in config:
-            merged[key] = _to_int(config.get(key), default_value)
+            if isinstance(default_value, float):
+                try:
+                    merged[key] = float(config.get(key))
+                except Exception:
+                    merged[key] = float(default_value)
+            else:
+                merged[key] = _to_int(config.get(key), default_value)
     return merged
 
 
@@ -498,7 +512,27 @@ def build_online_stream_prior_resolution_artifact(
 
 def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     rows = [dict(row or {}) for row in list(frame_rows or [])]
-    accepted_rows = [row for row in rows if str(row.get("status") or "") == "accepted"]
+    accepted_rows = []
+    geometry_rejected_replicates = 0
+    geometry_boundary_triggered = False
+    geometry_reasons = []
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status != "accepted":
+            continue
+        flow_measurement_usable = row.get("flow_measurement_usable")
+        if flow_measurement_usable is None:
+            flow_measurement_usable = (
+                bool(row.get("qc", {}).get("measurement_qc_pass"))
+                and row.get("flow_volume_geometry_ok") is not False
+            )
+        if bool(flow_measurement_usable):
+            accepted_rows.append(row)
+            continue
+        geometry_rejected_replicates += 1
+        if row.get("flow_volume_geometry_ok") is False:
+            geometry_boundary_triggered = True
+            geometry_reasons.extend(list(row.get("flow_volume_geometry_reasons") or []))
     attempted_replicates = int(len(rows))
     accepted_replicates = int(len(accepted_rows))
     rejected_replicates = int(max(0, attempted_replicates - accepted_replicates))
@@ -550,8 +584,23 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         "detached_near_bottom_warning": bool(detached_near_bottom_warning),
         "delay_accepted": bool(accepted_replicates > 0),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
+        "geometry_rejected_replicates": int(geometry_rejected_replicates),
+        "geometry_boundary_triggered": bool(geometry_boundary_triggered),
+        "flow_volume_geometry_ok": (
+            False
+            if geometry_boundary_triggered
+            else (True if accepted_replicates > 0 else None)
+        ),
+        "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
         "warnings": warnings,
     }
+
+
+def is_online_stream_flow_geometry_boundary(delay_summary: dict | None) -> bool:
+    summary = dict(delay_summary or {})
+    if bool(summary.get("geometry_boundary_triggered")):
+        return True
+    return summary.get("flow_volume_geometry_ok") is False
 
 
 def decide_online_stream_flow_next_action(
@@ -628,6 +677,7 @@ def build_online_stream_flow_fit_artifact(
     condition: dict | None = None,
     flow_plan: dict | None = None,
     accepted_delay_points: list[dict] | None = None,
+    delay_summaries: list[dict] | None = None,
     fit: dict | None = None,
     warnings: list[str] | None = None,
     schema_version: int = 1,
@@ -639,6 +689,7 @@ def build_online_stream_flow_fit_artifact(
         "phase": str(phase),
         "condition": _copy_jsonish(condition or {}),
         "flow_plan": _copy_jsonish(flow_plan or {}),
+        "delay_summaries": _copy_jsonish(delay_summaries or []),
         "accepted_delay_points": _copy_jsonish(
             accepted_delay_points
             if accepted_delay_points is not None
