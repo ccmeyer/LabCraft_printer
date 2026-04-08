@@ -12,7 +12,7 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 
 ensure_calibration_import_stubs(force=True)
 
-from CalibrationClasses.Model import CalibrationManager, DropletTimecourseProcess
+from CalibrationClasses.Model import BaseCalibrationProcess, CalibrationManager, DropletTimecourseProcess
 from CalibrationClasses.View import DropletImagingDialog
 
 
@@ -56,6 +56,9 @@ class _ManagerDropletCameraModel:
         self.flash_delay = int(flash_delay)
         self.num_droplets = int(num_droplets)
         self.exposure_time = int(exposure_time)
+        self.save_root_dir = None
+        self.start_saving_calls = []
+        self.stop_saving_calls = 0
 
     def get_image_metadata(self):
         return (
@@ -68,6 +71,17 @@ class _ManagerDropletCameraModel:
 
     def get_num_flashes(self):
         return self.num_flashes
+
+    def get_save_root_directory(self):
+        return self.save_root_dir
+
+    def start_saving(self, **kwargs):
+        self.start_saving_calls.append(dict(kwargs))
+        root_dir = kwargs.get("root_dir") or self.save_root_dir or "."
+        return str(Path(root_dir) / "droplet_timecourse_stub")
+
+    def stop_saving(self):
+        self.stop_saving_calls += 1
 
 
 class _ViewDropletCameraModelStub:
@@ -390,6 +404,24 @@ def _make_manager(tmp_path, *, experiment_dir_name="experiment", num_flashes=100
     return model, manager
 
 
+def _make_timecourse_process(tmp_path, monkeypatch, *, save_camera_archive=False):
+    model, manager = _make_manager(tmp_path)
+    manager.get_emergence_time = lambda quiet=True: 750
+    manager.get_background_image = lambda: object()
+    started = []
+    monkeypatch.setattr(
+        BaseCalibrationProcess,
+        "start",
+        lambda self: started.append(self),
+    )
+    proc = DropletTimecourseProcess(
+        manager,
+        model,
+        save_camera_archive=save_camera_archive,
+    )
+    return model, manager, proc, started
+
+
 def _start_stream_capture_with_gripper_suspend(manager):
     ok, message = manager.begin_stream_gravimetric_capture_gripper_refresh()
     assert (ok, message) == (True, "")
@@ -627,6 +659,69 @@ def test_stream_capture_queue_can_start_droplet_timecourse(tmp_path, monkeypatch
     manager.start_calibration_queue()
 
     assert started == [DropletTimecourseProcess]
+
+
+def test_start_droplet_timecourse_process_passes_camera_archive_flag(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    started = []
+
+    def _capture_start(proc_cls, *args, **kwargs):
+        started.append((proc_cls, dict(kwargs)))
+        return True
+
+    monkeypatch.setattr(manager, "_try_start_process", _capture_start)
+
+    manager.start_droplet_timecourse_process(save_camera_archive=True)
+
+    assert started == [
+        (DropletTimecourseProcess, {"save_camera_archive": True}),
+    ]
+
+
+def test_droplet_timecourse_skips_camera_archive_by_default(tmp_path, monkeypatch):
+    model, _manager, proc, started = _make_timecourse_process(tmp_path, monkeypatch)
+
+    proc.start()
+
+    assert started == [proc]
+    assert model.droplet_camera_model.start_saving_calls == []
+    assert model.droplet_camera_model.stop_saving_calls == 0
+    assert proc._camera_archive_enabled is False
+    assert proc._save_dir is None
+
+    proc.calibrationCompleted.emit()
+    assert model.droplet_camera_model.stop_saving_calls == 0
+
+
+@pytest.mark.parametrize("signal_name", ["calibrationCompleted", "calibrationError"])
+def test_droplet_timecourse_camera_archive_can_be_opted_in(tmp_path, monkeypatch, signal_name):
+    model, _manager, proc, started = _make_timecourse_process(
+        tmp_path,
+        monkeypatch,
+        save_camera_archive=True,
+    )
+    model.droplet_camera_model.save_root_dir = str(tmp_path / "droplet_imager_captures")
+
+    proc.start()
+
+    assert started == [proc]
+    assert len(model.droplet_camera_model.start_saving_calls) == 1
+    assert model.droplet_camera_model.start_saving_calls[0]["root_dir"] == str(
+        tmp_path / "droplet_imager_captures"
+    )
+    assert model.droplet_camera_model.start_saving_calls[0]["prefix"] == "droplet_timecourse"
+    assert proc._camera_archive_enabled is True
+    assert proc._save_dir is not None
+
+    signal = getattr(proc, signal_name)
+    if signal_name == "calibrationError":
+        signal.emit("boom")
+    else:
+        signal.emit()
+
+    assert model.droplet_camera_model.stop_saving_calls == 1
+    assert proc._camera_archive_enabled is False
+    assert proc._save_dir is None
 
 
 def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypatch):

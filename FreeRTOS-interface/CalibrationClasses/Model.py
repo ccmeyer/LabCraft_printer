@@ -3164,8 +3164,11 @@ class CalibrationManager(QObject):
             order=order
         )
 
-    def start_droplet_timecourse_process(self):
-        self._try_start_process(DropletTimecourseProcess)
+    def start_droplet_timecourse_process(self, *, save_camera_archive: bool = False):
+        self._try_start_process(
+            DropletTimecourseProcess,
+            save_camera_archive=bool(save_camera_archive),
+        )
 
     def start_online_stream_calibration(self):
         return self._try_start_process(OnlineStreamCalibrationProcess)
@@ -21968,10 +21971,13 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
                  *,
                  step_us: int = 50,
                  window_us: int = 6000,
+                 save_camera_archive: bool = False,
                  parent=None):
         super().__init__(calibration_manager, model, parent)
         self.phase_name = "droplet_timecourse"
         self._save_dir = None
+        self._save_camera_archive = bool(save_camera_archive)
+        self._camera_archive_enabled = False
 
         # ensure we stop saving on success or error
         self.calibrationCompleted.connect(self._cleanup_saving)
@@ -22028,6 +22034,10 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         self.state_machine.setInitialState(self.state_prepare)
 
     def start(self):
+        if not self._save_camera_archive:
+            super().start()  # run your existing FSM / logic
+            return
+
         # Pick a sensible default root: next to calibration.json, in droplet_imager_captures/
         root = self.model.droplet_camera_model.get_save_root_directory()
         if not root:
@@ -22047,6 +22057,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
             image_ext="jpg",
             jpeg_quality=95,
         )
+        self._camera_archive_enabled = True
 
         # Helpful UI log
         try:
@@ -22066,11 +22077,16 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         super().start()  # run your existing FSM / logic
 
     def _cleanup_saving(self, *args):
+        if not self._camera_archive_enabled:
+            return
         try:
             if self.model and getattr(self.model, "droplet_camera_model", None):
                 self.model.droplet_camera_model.stop_saving()
         except Exception:
             pass
+        finally:
+            self._camera_archive_enabled = False
+            self._save_dir = None
 
     def _cleanup_saving_on_error(self, *args):
         self._cleanup_saving()
