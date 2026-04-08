@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
@@ -216,6 +216,256 @@ def _make_nozzle_experiment(tmp_path: Path):
             }
         )
     return exp_dir, run_dir
+
+
+def _add_top_shadow_band(image: np.ndarray, *, y0: int = 38, y1: int = 60, intensity: int = 96):
+    shaded = image.copy()
+    cv2.rectangle(
+        shaded,
+        (0, int(y0)),
+        (int(shaded.shape[1]) - 1, int(y1)),
+        int(intensity),
+        thickness=-1,
+    )
+    return shaded
+
+
+def _make_fixed_early_reflection_frame(
+    width: int,
+    height: int,
+    *,
+    x_center: int,
+    nozzle_y: int,
+    droplet_radius: int,
+):
+    image = np.full((height, width), 245, dtype=np.uint8)
+    shadow_y0 = int(round(float(height) * 0.08))
+    shadow_y1 = int(shadow_y0 + 22)
+    image = _add_top_shadow_band(image, y0=shadow_y0, y1=shadow_y1, intensity=96)
+    cv2.rectangle(image, (x_center - 8, nozzle_y - 20), (x_center + 8, nozzle_y + 20), 35, thickness=-1)
+    cv2.ellipse(
+        image,
+        (x_center, nozzle_y),
+        (droplet_radius, int(round(droplet_radius * 1.25))),
+        0.0,
+        0.0,
+        360.0,
+        38,
+        thickness=-1,
+    )
+    return image
+
+
+def _write_stream_capture_log(exp_dir: Path, *, run_id: str, gripper_refresh_suspended: bool):
+    _write_jsonl(
+        exp_dir / dataset_mod.STREAM_CAPTURE_LOG_FILENAME,
+        [
+            {
+                "timecourse_run_id": run_id,
+                "gripper_refresh_suspended": bool(gripper_refresh_suspended),
+            }
+        ],
+    )
+
+
+def _make_fixed_early_nozzle_experiment(tmp_path: Path, *, variant: str = "happy"):
+    exp_dir = tmp_path / "Stream_characterization-20260327_225650"
+    process_root = exp_dir / "calibration_recordings" / dataset_mod.PROCESS_NAME
+    run_dir = process_root / "run_20260327_225848_fixed"
+    captures_dir = run_dir / "captures"
+    captures_dir.mkdir(parents=True, exist_ok=True)
+
+    run_meta = {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "process_name": dataset_mod.PROCESS_NAME,
+        "phase_name": "droplet_timecourse",
+        "started_at_utc": "2026-03-28T05:58:48.000000Z",
+        "ended_at_utc": "2026-03-28T05:59:10.000000Z",
+        "outcome": "completed",
+        "error_message": "",
+    }
+    (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+
+    frames = [
+        _make_fixed_early_reflection_frame(360, 480, x_center=176, nozzle_y=118, droplet_radius=10),
+        _make_fixed_early_reflection_frame(360, 480, x_center=176, nozzle_y=118, droplet_radius=14),
+        _make_fixed_early_reflection_frame(
+            360,
+            480,
+            x_center=200 if variant in {"rescue", "failure"} else 176,
+            nozzle_y=118,
+            droplet_radius=18,
+        ),
+        _make_fixed_early_reflection_frame(
+            360,
+            480,
+            x_center=200 if variant == "failure" else 176,
+            nozzle_y=118,
+            droplet_radius=22,
+        ),
+        _make_fixed_early_reflection_frame(
+            360,
+            480,
+            x_center=200 if variant == "failure" else 176,
+            nozzle_y=118,
+            droplet_radius=26,
+        ),
+        _make_visible_line_frame(360, 480, x_center=176, nozzle_y=108),
+    ]
+
+    events = [
+        {
+            "event_index": 1,
+            "event_type": "stage_changed",
+            "payload": {"message": "Timecourse: emergence=4250 us, start=4200 us, step=50 us, window=6000 us (6 frames)"},
+        }
+    ]
+    for idx, image in enumerate(frames, start=1):
+        image_name = f"cap_{idx:06d}_raw_frame.jpg"
+        image_relpath = f"captures/{image_name}"
+        cv2.imwrite(str(captures_dir / image_name), image)
+        flash_delay_us = 4200 + ((idx - 1) * 50)
+        events.extend(
+            [
+                {
+                    "event_index": (idx * 3) - 1,
+                    "event_type": "stage_changed",
+                    "payload": {"message": f"Setting flash_delay = {flash_delay_us} us"},
+                },
+                {
+                    "event_index": idx * 3,
+                    "event_type": "capture_saved",
+                    "payload": {
+                        "capture_id": f"cap_{idx:06d}",
+                        "capture_role": "raw_frame",
+                        "image_relpath": image_relpath,
+                        "metadata": {"stage_text": f"Capturing timecourse frame @ {flash_delay_us} us"},
+                    },
+                },
+                {
+                    "event_index": (idx * 3) + 1,
+                    "event_type": "capture_result",
+                    "payload": {
+                        "status": "success",
+                        "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
+                        "capture_ref": {
+                            "capture_id": f"cap_{idx:06d}",
+                            "capture_index": idx,
+                            "capture_role": "raw_frame",
+                            "image_relpath": image_relpath,
+                            "width": 360,
+                            "height": 480,
+                            "captured_at_utc": f"2026-03-28T05:58:{48 + idx:02d}.000000Z",
+                            "stage_text": f"Capturing timecourse frame @ {flash_delay_us} us",
+                        },
+                    },
+                },
+            ]
+        )
+
+    _write_jsonl(run_dir / "events.jsonl", events)
+    _write_jsonl(run_dir / "analysis.jsonl", [{"kind": "calibration_data_updated"}])
+
+    metadata_path = exp_dir / dataset_mod.METADATA_FILENAME
+    with metadata_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "Dataset name",
+                "Print PW",
+                "Print Pressure",
+                "Refuel PW",
+                "Refuel Pressure",
+                "Rep",
+                "Starting mass",
+                "Starting flash",
+                "Ending flash",
+                "Ending mass",
+                "Mass Change",
+                "Num printed",
+                "Mass/print",
+                "CV",
+                "Notes",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "Dataset name": run_dir.name,
+                "Print PW": "3000",
+                "Print Pressure": "0.65",
+                "Refuel PW": "5000",
+                "Refuel Pressure": "0.8",
+                "Rep": "1",
+                "Starting mass": "0",
+                "Starting flash": "1987",
+                "Ending flash": "2128",
+                "Ending mass": "10.03",
+                "Mass Change": "10.03",
+                "Num printed": "141",
+                "Mass/print": "0.0711",
+                "CV": "0.99%",
+                "Notes": f"fixed_early_{variant}",
+            }
+        )
+
+    _write_stream_capture_log(
+        exp_dir,
+        run_id=run_dir.name,
+        gripper_refresh_suspended=True,
+    )
+    return exp_dir, run_dir
+
+
+def test_fixed_early_rejection_reason_flags_upper_shadow_band_only():
+    shadow_band = {
+        "bbox_y": 0,
+        "bbox_x": 0,
+        "bbox_x1": 107,
+        "bbox_w": 108,
+        "bbox_h": 24,
+    }
+    lower_nozzle = {
+        "bbox_y": 78,
+        "bbox_x": 34,
+        "bbox_x1": 73,
+        "bbox_w": 40,
+        "bbox_h": 42,
+    }
+
+    assert mod._fixed_early_rejection_reason(shadow_band, search_width=108) == "upper_shadow_band"
+    assert mod._fixed_early_rejection_reason(lower_nozzle, search_width=108) is None
+
+
+def test_fixed_early_candidate_rows_rejects_top_shadow_band():
+    image = _make_fixed_early_reflection_frame(
+        360,
+        480,
+        x_center=176,
+        nozzle_y=118,
+        droplet_radius=14,
+    )
+    diagnostics = _detect(image)
+
+    bundle = mod._fixed_early_candidate_rows(
+        {
+            "capture_id": "cap_000001",
+            "capture_index": 1,
+            "image_relpath": "captures/cap_000001_raw_frame.jpg",
+        },
+        diagnostics,
+        early_frame_rank=1,
+        min_area_px=120,
+    )
+
+    assert bundle["raw_anchor_candidate_count"] == 2
+    assert bundle["shadow_band_rejected_count"] == 1
+    assert bundle["filtered_anchor_candidate_count"] == 1
+    assert len(bundle["candidates"]) == 1
+    candidate = bundle["candidates"][0]
+    assert int(candidate["bbox_w_px"]) < int(diagnostics["search"]["width"])
+    assert int(candidate["bbox_y_px"]) > int(diagnostics["search"]["y0"]) + 30
 
 
 def test_detect_raw_nozzle_prefers_centroid_for_black_attached_droplet():
@@ -2349,3 +2599,158 @@ def test_export_stage2_nozzle_writes_tracks_and_shift_report(tmp_path):
 
     shift_payload = json.loads(shift_json.read_text(encoding="utf-8"))
     assert "shift_events" in shift_payload
+
+
+def test_export_stage2_nozzle_auto_selects_fixed_early_from_metadata(tmp_path):
+    exp_dir, run_dir = _make_fixed_early_nozzle_experiment(tmp_path, variant="happy")
+    out_dir = tmp_path / "analysis" / "stream_characterization"
+
+    payload = mod.export_stage2_nozzle(
+        exp_dir,
+        output_root=out_dir,
+        sample_count=2,
+        search_width_frac=0.30,
+        search_top_frac=0.08,
+        search_bottom_frac=0.34,
+        shift_threshold_px=3.0,
+        confidence_threshold=0.48,
+    )
+
+    run_info = payload["runs"][0]
+    track_csv = Path(run_info["nozzle_track_csv"])
+    fixed_anchor_json = Path(run_info["fixed_anchor_json"])
+    fixed_anchor_frames_csv = Path(run_info["fixed_anchor_frames_csv"])
+    shift_json = Path(run_info["shift_events_json"])
+    stage_dir = out_dir / "runs" / run_dir.name / mod.NOZZLE_STAGE_DIRNAME
+
+    assert fixed_anchor_json.exists()
+    assert fixed_anchor_frames_csv.exists()
+    assert (stage_dir / "samples" / "frame_001_panel.png").exists()
+    assert (stage_dir / "samples" / "frame_005_panel.png").exists()
+
+    with track_csv.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    tracked_x = {row["tracked_nozzle_x_px"] for row in rows}
+    tracked_y = {row["tracked_nozzle_y_px"] for row in rows}
+    assert {row["tracking_mode"] for row in rows} == {dataset_mod.TRACKING_MODE_FIXED_EARLY}
+    assert {row["final_mode"] for row in rows} == {dataset_mod.TRACKING_MODE_FIXED_EARLY}
+    assert {row["detection_mode"] for row in rows} == {dataset_mod.TRACKING_MODE_FIXED_EARLY}
+    assert "fixed_early_anchor" in {row["raw_mode"] for row in rows}
+    assert "fixed_early_reuse" in {row["raw_mode"] for row in rows}
+    assert len(tracked_x) == 1
+    assert len(tracked_y) == 1
+    assert all(row["used_segment_fill"] == "False" for row in rows)
+    assert all(row["attached_continuity_hold_used"] == "False" for row in rows)
+    assert all(row["transition_fill_source"] == "" for row in rows)
+
+    anchor_payload = json.loads(fixed_anchor_json.read_text(encoding="utf-8"))
+    assert anchor_payload["anchor_status"] == "ok"
+    assert anchor_payload["selected_early_frame_ranks"] == [1, 2, 3]
+    assert anchor_payload["frames"][0]["raw_anchor_candidate_count"] == 2
+    assert anchor_payload["frames"][0]["shadow_band_rejected_count"] == 1
+    assert anchor_payload["frames"][0]["filtered_anchor_candidate_count"] == 1
+
+    with fixed_anchor_frames_csv.open("r", encoding="utf-8", newline="") as handle:
+        anchor_rows = list(csv.DictReader(handle))
+    assert anchor_rows[0]["raw_anchor_candidate_count"] == "2"
+    assert anchor_rows[0]["shadow_band_rejected_count"] == "1"
+    assert anchor_rows[0]["filtered_anchor_candidate_count"] == "1"
+
+    shift_payload = json.loads(shift_json.read_text(encoding="utf-8"))
+    assert shift_payload["shift_events"] == []
+
+
+def test_build_stage2_run_fixed_early_rescues_with_frame_4(tmp_path):
+    exp_dir, run_dir = _make_fixed_early_nozzle_experiment(tmp_path, variant="rescue")
+    inventory = dataset_mod.build_stage0_inventory(exp_dir)
+    frame_rows = list(inventory["frames_by_run_id"][run_dir.name])
+
+    stage2_run = mod._build_stage2_run(
+        run_dir.name,
+        frame_rows,
+        tracking_mode=dataset_mod.TRACKING_MODE_FIXED_EARLY,
+        search_width_frac=0.30,
+        search_top_frac=0.08,
+        search_bottom_frac=0.34,
+        blur_sigma=12.0,
+        residual_scale=2.5,
+        residual_threshold=18,
+        min_area_px=120,
+        top_band_slack_px=14,
+        shift_threshold_px=3.0,
+        confidence_threshold=0.48,
+    )
+
+    fixed_anchor = stage2_run["fixed_anchor"]
+    tracked_rows = stage2_run["tracked_rows"]
+    anchor_frame_rows = stage2_run["fixed_anchor_frame_rows"]
+
+    assert fixed_anchor["anchor_status"] == "ok"
+    assert fixed_anchor["selected_early_frame_ranks"] == [1, 2, 4]
+    assert anchor_frame_rows[0]["raw_anchor_candidate_count"] == 2
+    assert anchor_frame_rows[0]["shadow_band_rejected_count"] == 1
+    assert anchor_frame_rows[0]["filtered_anchor_candidate_count"] == 1
+    assert [row["raw_mode"] for row in tracked_rows[:4]] == [
+        "fixed_early_anchor",
+        "fixed_early_anchor",
+        "fixed_early_reuse",
+        "fixed_early_anchor",
+    ]
+    assert len({row["tracked_nozzle_y_px"] for row in tracked_rows}) == 1
+
+
+def test_build_stage2_run_fixed_early_fails_clearly_without_dynamic_fallback(tmp_path):
+    exp_dir, run_dir = _make_fixed_early_nozzle_experiment(tmp_path, variant="failure")
+    inventory = dataset_mod.build_stage0_inventory(exp_dir)
+    frame_rows = list(inventory["frames_by_run_id"][run_dir.name])
+
+    stage2_run = mod._build_stage2_run(
+        run_dir.name,
+        frame_rows,
+        tracking_mode=dataset_mod.TRACKING_MODE_FIXED_EARLY,
+        search_width_frac=0.30,
+        search_top_frac=0.08,
+        search_bottom_frac=0.34,
+        blur_sigma=12.0,
+        residual_scale=2.5,
+        residual_threshold=18,
+        min_area_px=120,
+        top_band_slack_px=14,
+        shift_threshold_px=3.0,
+        confidence_threshold=0.48,
+    )
+
+    fixed_anchor = stage2_run["fixed_anchor"]
+    tracked_rows = stage2_run["tracked_rows"]
+    anchor_frame_rows = stage2_run["fixed_anchor_frame_rows"]
+
+    assert fixed_anchor["anchor_status"] == "failed"
+    assert fixed_anchor["anchor_failure_reason"] == "no_valid_3_frame_anchor_family"
+    assert anchor_frame_rows[0]["raw_anchor_candidate_count"] == 2
+    assert anchor_frame_rows[0]["shadow_band_rejected_count"] == 1
+    assert anchor_frame_rows[0]["filtered_anchor_candidate_count"] == 1
+    assert stage2_run["shift_events"] == []
+    assert all(row["tracking_mode"] == dataset_mod.TRACKING_MODE_FIXED_EARLY for row in tracked_rows)
+    assert all(row["tracked_nozzle_x_px"] is None for row in tracked_rows)
+    assert all(row["tracked_nozzle_y_px"] is None for row in tracked_rows)
+    assert all(row["final_mode"] == mod.FIXED_EARLY_FAILURE_MODE for row in tracked_rows)
+    assert all(row["detection_mode"] == mod.FIXED_EARLY_FAILURE_MODE for row in tracked_rows)
+    assert all(bool(row["used_segment_fill"]) is False for row in tracked_rows)
+    assert all(bool(row["attached_continuity_hold_used"]) is False for row in tracked_rows)
+
+
+def test_export_stage2_nozzle_keeps_dynamic_mode_when_metadata_is_false_or_missing(tmp_path):
+    exp_dir, run_dir = _make_nozzle_experiment(tmp_path)
+    inventory_missing = dataset_mod.build_stage0_inventory(exp_dir)
+
+    assert inventory_missing["selected_runs"][0]["run_id"] == run_dir.name
+    assert inventory_missing["selected_runs"][0]["tracking_mode"] == dataset_mod.TRACKING_MODE_DYNAMIC
+
+    _write_stream_capture_log(
+        exp_dir,
+        run_id=run_dir.name,
+        gripper_refresh_suspended=False,
+    )
+    inventory_false = dataset_mod.build_stage0_inventory(exp_dir)
+    assert inventory_false["selected_runs"][0]["tracking_mode"] == dataset_mod.TRACKING_MODE_DYNAMIC

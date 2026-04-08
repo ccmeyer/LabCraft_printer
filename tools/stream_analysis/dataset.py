@@ -8,8 +8,11 @@ from pathlib import Path
 
 PROCESS_NAME = "DropletTimecourseProcess"
 METADATA_FILENAME = "stream_metadata.csv"
+STREAM_CAPTURE_LOG_FILENAME = "stream_capture_log.jsonl"
 ANALYSIS_DIRNAME = "stream_characterization"
 STAGE_DIRNAME = "stage_00_inventory"
+TRACKING_MODE_DYNAMIC = "dynamic"
+TRACKING_MODE_FIXED_EARLY = "fixed_early"
 
 RUN_COLUMNS = [
     "run_id",
@@ -35,6 +38,8 @@ RUN_COLUMNS = [
     "timecourse_step_us",
     "timecourse_window_us",
     "timecourse_planned_frame_count",
+    "gripper_refresh_suspended",
+    "tracking_mode",
     "missing_indexed_files",
     "frame_index_csv_path",
     "frame_index_json_path",
@@ -110,6 +115,19 @@ def _int_or_none(value):
         return int(round(float(value)))
     except Exception:
         return None
+
+
+def _bool_or_none(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(value)
 
 
 def _json_cell(value):
@@ -210,6 +228,10 @@ def metadata_path_for_experiment(experiment_root: str | Path) -> Path:
     return metadata_path
 
 
+def stream_capture_log_path_for_experiment(experiment_root: str | Path) -> Path:
+    return resolve_experiment_root(experiment_root) / STREAM_CAPTURE_LOG_FILENAME
+
+
 def default_output_root(experiment_root: str | Path) -> Path:
     return resolve_experiment_root(experiment_root) / "analysis" / ANALYSIS_DIRNAME
 
@@ -236,6 +258,28 @@ def load_metadata_rows(experiment_root: str | Path):
         rows.append(row)
 
     return rows, field_map
+
+
+def load_stream_capture_rows(experiment_root: str | Path):
+    log_path = stream_capture_log_path_for_experiment(experiment_root)
+    rows_by_run_id = {}
+    if not log_path.exists():
+        return rows_by_run_id, str(log_path)
+
+    for row in _iter_jsonl(log_path):
+        run_id = _clean_text((row or {}).get("timecourse_run_id"))
+        if not run_id:
+            continue
+        gripper_refresh_suspended = _bool_or_none((row or {}).get("gripper_refresh_suspended"))
+        rows_by_run_id[run_id] = {
+            "gripper_refresh_suspended": gripper_refresh_suspended,
+            "tracking_mode": (
+                TRACKING_MODE_FIXED_EARLY
+                if bool(gripper_refresh_suspended)
+                else TRACKING_MODE_DYNAMIC
+            ),
+        }
+    return rows_by_run_id, str(log_path)
 
 
 def discover_run_dirs(experiment_root: str | Path):
@@ -390,6 +434,7 @@ def build_stage0_inventory(
     experiment_path = resolve_experiment_root(experiment_root)
     process_root = process_root_for_experiment(experiment_path)
     metadata_rows, field_map = load_metadata_rows(experiment_path)
+    stream_capture_rows, stream_capture_log_path = load_stream_capture_rows(experiment_path)
     discovered_run_dirs = discover_run_dirs(experiment_path)
     run_dir_by_id = {path.name: path for path in discovered_run_dirs}
 
@@ -412,6 +457,7 @@ def build_stage0_inventory(
         frame_rows = list(frame_index["frames"])
         frames_by_run_id[run_id] = frame_rows
         matched_run_ids.append(run_id)
+        stream_capture_row = stream_capture_rows.get(run_id, {})
 
         row = {
             "run_id": run_id,
@@ -437,6 +483,8 @@ def build_stage0_inventory(
             "timecourse_step_us": frame_index["timecourse_step_us"],
             "timecourse_window_us": frame_index["timecourse_window_us"],
             "timecourse_planned_frame_count": frame_index["timecourse_planned_frame_count"],
+            "gripper_refresh_suspended": stream_capture_row.get("gripper_refresh_suspended"),
+            "tracking_mode": stream_capture_row.get("tracking_mode") or TRACKING_MODE_DYNAMIC,
             "missing_indexed_files": sum(1 for frame in frame_rows if not frame["image_exists"]),
             "frame_index_csv_path": None,
             "frame_index_json_path": None,
@@ -455,6 +503,7 @@ def build_stage0_inventory(
         frame_index = build_frame_index(run_dir, run_id=run_dir.name)
         frame_rows = list(frame_index["frames"])
         frames_by_run_id[run_dir.name] = frame_rows
+        stream_capture_row = stream_capture_rows.get(run_dir.name, {})
 
         row = {
             "run_id": run_dir.name,
@@ -480,6 +529,8 @@ def build_stage0_inventory(
             "timecourse_step_us": frame_index["timecourse_step_us"],
             "timecourse_window_us": frame_index["timecourse_window_us"],
             "timecourse_planned_frame_count": frame_index["timecourse_planned_frame_count"],
+            "gripper_refresh_suspended": stream_capture_row.get("gripper_refresh_suspended"),
+            "tracking_mode": stream_capture_row.get("tracking_mode") or TRACKING_MODE_DYNAMIC,
             "missing_indexed_files": sum(1 for frame in frame_rows if not frame["image_exists"]),
             "frame_index_csv_path": None,
             "frame_index_json_path": None,
@@ -509,6 +560,7 @@ def build_stage0_inventory(
         "experiment_root": str(experiment_path),
         "process_root": str(process_root),
         "metadata_path": str(metadata_path_for_experiment(experiment_path)),
+        "stream_capture_log_path": stream_capture_log_path,
         "metadata_field_map": field_map,
         "metadata_row_count": int(len(metadata_rows)),
         "discovered_run_dir_count": int(len(discovered_run_dirs)),
@@ -579,6 +631,7 @@ def export_stage0_inventory(
             "experiment_root": inventory["experiment_root"],
             "process_root": inventory["process_root"],
             "metadata_path": inventory["metadata_path"],
+            "stream_capture_log_path": inventory["stream_capture_log_path"],
             "selected_run_count": len(selected_rows),
             "matched_run_count": inventory["matched_run_count"],
             "unmatched_run_count": inventory["unmatched_run_count"],
@@ -594,6 +647,7 @@ def export_stage0_inventory(
         "experiment_root": inventory["experiment_root"],
         "process_root": inventory["process_root"],
         "metadata_path": inventory["metadata_path"],
+        "stream_capture_log_path": inventory["stream_capture_log_path"],
         "output_root": str(output_path),
         "metadata_row_count": inventory["metadata_row_count"],
         "discovered_run_dir_count": inventory["discovered_run_dir_count"],

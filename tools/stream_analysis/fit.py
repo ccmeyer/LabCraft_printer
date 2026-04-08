@@ -1841,6 +1841,143 @@ def _maybe_prune_flow_fit_outlier(
     }
 
 
+def _recomputed_steady_fit_result_for_window(
+    feature_rows: list[dict],
+    *,
+    base_result: dict,
+    plateau_positions: list[int],
+    plateau_metrics: dict,
+    flow_fit_eligible_positions: list[int],
+    backfilled_positions: list[int],
+    min_steady_frames: int,
+    steady_fit_r2_min: float,
+    steady_fit_nrmse_max: float,
+):
+    pruned_flow_fit = _maybe_prune_flow_fit_outlier(
+        feature_rows,
+        flow_fit_eligible_positions,
+        min_steady_frames=int(min_steady_frames),
+    )
+    flow_fit_positions = list(pruned_flow_fit["positions"])
+    flow_fit_metrics = _fit_window_metrics(
+        [feature_rows[int(position)] for position in flow_fit_positions]
+    )
+    flow_fit_meets_quality = bool(
+        flow_fit_metrics is not None
+        and _fit_metrics_within_quality_thresholds(
+            flow_fit_metrics,
+            steady_fit_r2_min=float(steady_fit_r2_min),
+            steady_fit_nrmse_max=float(steady_fit_nrmse_max),
+        )
+    )
+
+    plateau_start_row = feature_rows[int(plateau_positions[0])]
+    plateau_end_row = feature_rows[int(plateau_positions[-1])]
+    flow_fit_start_row = None if not flow_fit_positions else feature_rows[int(flow_fit_positions[0])]
+    flow_fit_end_row = None if not flow_fit_positions else feature_rows[int(flow_fit_positions[-1])]
+    window_fields = {
+        "positions": plateau_positions,
+        "plateau_positions": plateau_positions,
+        "flow_fit_positions": flow_fit_positions,
+        "steady_capture_indices": [
+            _int_or_none(feature_rows[int(position)].get("capture_index"))
+            for position in plateau_positions
+            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
+        ],
+        "plateau_capture_indices": [
+            _int_or_none(feature_rows[int(position)].get("capture_index"))
+            for position in plateau_positions
+            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
+        ],
+        "flow_fit_capture_indices": [
+            _int_or_none(feature_rows[int(position)].get("capture_index"))
+            for position in flow_fit_positions
+            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
+        ],
+        "steady_start_capture_index": _int_or_none(plateau_start_row.get("capture_index")),
+        "steady_end_capture_index": _int_or_none(plateau_end_row.get("capture_index")),
+        "plateau_point_count": int(len(plateau_positions)),
+        "flow_fit_start_capture_index": None
+        if flow_fit_start_row is None
+        else _int_or_none(flow_fit_start_row.get("capture_index")),
+        "flow_fit_end_capture_index": None
+        if flow_fit_end_row is None
+        else _int_or_none(flow_fit_end_row.get("capture_index")),
+        "flow_fit_point_count": int(len(flow_fit_positions)),
+        "flow_fit_eligible_point_count": int(len(flow_fit_eligible_positions)),
+        "flow_fit_backfill_point_count": int(len(backfilled_positions)),
+        "flow_fit_outlier_prune_status": pruned_flow_fit["outlier_prune_status"],
+        "flow_fit_dropped_outlier_capture_index": pruned_flow_fit["dropped_outlier_capture_index"],
+        "flow_fit_dropped_outlier_delay_from_emergence_us": pruned_flow_fit[
+            "dropped_outlier_delay_from_emergence_us"
+        ],
+        "flow_fit_dropped_outlier_local_deviation_nl": pruned_flow_fit[
+            "dropped_outlier_local_deviation_nl"
+        ],
+        "steady_width_plateau_px": plateau_metrics.get("steady_width_plateau_px"),
+        "steady_width_span_px": plateau_metrics.get("steady_width_span_px"),
+        "steady_width_tolerance_px": plateau_metrics.get("steady_width_tolerance_px"),
+        "steady_fit_selection_score": None,
+    }
+
+    if flow_fit_metrics is None or not flow_fit_meets_quality:
+        attempted_fit_diagnostics = {}
+        steady_fit_status = "unresolved"
+        steady_rate_confidence_status = "unresolved_no_steady_fit"
+        if flow_fit_metrics is not None:
+            attempted_fit_diagnostics = {
+                "steady_r2": flow_fit_metrics.get("steady_r2"),
+                "steady_nrmse": flow_fit_metrics.get("steady_nrmse"),
+                "steady_fit_first_last_residual_delta_nl": flow_fit_metrics.get(
+                    "steady_fit_first_last_residual_delta_nl"
+                ),
+                "steady_fit_max_abs_residual_nl": flow_fit_metrics.get(
+                    "steady_fit_max_abs_residual_nl"
+                ),
+                "steady_fit_residual_trend_nl_per_us": flow_fit_metrics.get(
+                    "steady_fit_residual_trend_nl_per_us"
+                ),
+            }
+            steady_fit_status = "unresolved_quality_thresholds"
+            steady_rate_confidence_status = "unresolved_quality_thresholds"
+        return {
+            "accepted": False,
+            "result": {
+                **base_result,
+                **attempted_fit_diagnostics,
+                "steady_fit_status": steady_fit_status,
+                **window_fields,
+                "steady_fit_point_count": int(len(flow_fit_positions)),
+                "steady_rate_nl_per_us": None,
+                "steady_intercept_nl": None,
+                "steady_rate_ci95_low_nl_per_us": None,
+                "steady_rate_ci95_high_nl_per_us": None,
+                "steady_rate_ci95_relative_width": None,
+                "steady_rate_ci95_contains_central": None,
+                "steady_rate_confidence_status": steady_rate_confidence_status,
+            },
+        }
+
+    recomputed_fit = {
+        **dict(flow_fit_metrics),
+        "steady_fit_status": "ok",
+        **window_fields,
+    }
+    steady_points = _steady_fit_time_volume_points(feature_rows, recomputed_fit)
+    confidence = _steady_fit_confidence_from_points(
+        steady_points,
+        central_rate=_float_or_none(recomputed_fit.get("steady_rate_nl_per_us")),
+    )
+    return {
+        "accepted": True,
+        "result": {
+            **base_result,
+            **recomputed_fit,
+            **confidence,
+        },
+    }
+
+
 def _recompute_steady_fit_from_feature_rows(
     feature_rows: list[dict],
     *,
@@ -1946,157 +2083,40 @@ def _recompute_steady_fit_from_feature_rows(
         flow_fit_backfill_width_delta_px=float(flow_fit_backfill_width_delta_px),
         flow_fit_backfill_monotonic_slack_px=float(flow_fit_backfill_monotonic_slack_px),
     )
-    flow_fit_eligible_positions = list(backfilled_positions) + list(
+    primary_flow_fit_positions = list(backfilled_positions) + list(
         selected_block[int(plateau_seed["start_offset"]) :]
     )
-    pruned_flow_fit = _maybe_prune_flow_fit_outlier(
+    primary_evaluation = _recomputed_steady_fit_result_for_window(
         feature_rows,
-        flow_fit_eligible_positions,
+        base_result=base_result,
+        plateau_positions=plateau_positions,
+        plateau_metrics=plateau_metrics,
+        flow_fit_eligible_positions=primary_flow_fit_positions,
+        backfilled_positions=backfilled_positions,
         min_steady_frames=int(min_steady_frames),
+        steady_fit_r2_min=float(steady_fit_r2_min),
+        steady_fit_nrmse_max=float(steady_fit_nrmse_max),
     )
-    flow_fit_positions = list(pruned_flow_fit["positions"])
-    flow_fit_metrics = _fit_window_metrics(
-        [feature_rows[int(position)] for position in flow_fit_positions]
-    )
-    flow_fit_meets_quality = bool(
-        flow_fit_metrics is not None
-        and _fit_metrics_within_quality_thresholds(
-            flow_fit_metrics,
+    if bool(primary_evaluation["accepted"]):
+        return primary_evaluation["result"]
+
+    if backfilled_positions:
+        retry_flow_fit_positions = list(selected_block[int(plateau_seed["start_offset"]) :])
+        retry_evaluation = _recomputed_steady_fit_result_for_window(
+            feature_rows,
+            base_result=base_result,
+            plateau_positions=plateau_positions,
+            plateau_metrics=plateau_metrics,
+            flow_fit_eligible_positions=retry_flow_fit_positions,
+            backfilled_positions=[],
+            min_steady_frames=int(min_steady_frames),
             steady_fit_r2_min=float(steady_fit_r2_min),
             steady_fit_nrmse_max=float(steady_fit_nrmse_max),
         )
-    )
-    if flow_fit_metrics is None or not flow_fit_meets_quality:
-        flow_fit_start_row = None if not flow_fit_positions else feature_rows[int(flow_fit_positions[0])]
-        flow_fit_end_row = None if not flow_fit_positions else feature_rows[int(flow_fit_positions[-1])]
-        attempted_fit_diagnostics = {}
-        steady_fit_status = "unresolved"
-        steady_rate_confidence_status = "unresolved_no_steady_fit"
-        if flow_fit_metrics is not None:
-            attempted_fit_diagnostics = {
-                "steady_r2": flow_fit_metrics.get("steady_r2"),
-                "steady_nrmse": flow_fit_metrics.get("steady_nrmse"),
-                "steady_fit_first_last_residual_delta_nl": flow_fit_metrics.get(
-                    "steady_fit_first_last_residual_delta_nl"
-                ),
-                "steady_fit_max_abs_residual_nl": flow_fit_metrics.get(
-                    "steady_fit_max_abs_residual_nl"
-                ),
-                "steady_fit_residual_trend_nl_per_us": flow_fit_metrics.get(
-                    "steady_fit_residual_trend_nl_per_us"
-                ),
-            }
-            steady_fit_status = "unresolved_quality_thresholds"
-            steady_rate_confidence_status = "unresolved_quality_thresholds"
-        return {
-            **base_result,
-            **attempted_fit_diagnostics,
-            "steady_fit_status": steady_fit_status,
-            "plateau_positions": plateau_positions,
-            "positions": plateau_positions,
-            "plateau_capture_indices": [
-                _int_or_none(feature_rows[int(position)].get("capture_index"))
-                for position in plateau_positions
-                if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-            ],
-            "steady_capture_indices": [
-                _int_or_none(feature_rows[int(position)].get("capture_index"))
-                for position in plateau_positions
-                if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-            ],
-            "plateau_point_count": int(len(plateau_positions)),
-            "flow_fit_positions": flow_fit_positions,
-            "flow_fit_start_capture_index": None
-            if flow_fit_start_row is None
-            else _int_or_none(flow_fit_start_row.get("capture_index")),
-            "flow_fit_end_capture_index": None
-            if flow_fit_end_row is None
-            else _int_or_none(flow_fit_end_row.get("capture_index")),
-            "flow_fit_capture_indices": [
-                _int_or_none(feature_rows[int(position)].get("capture_index"))
-                for position in flow_fit_positions
-                if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-            ],
-            "flow_fit_eligible_point_count": int(len(flow_fit_eligible_positions)),
-            "flow_fit_point_count": int(len(flow_fit_positions)),
-            "flow_fit_backfill_point_count": int(len(backfilled_positions)),
-            "flow_fit_outlier_prune_status": pruned_flow_fit["outlier_prune_status"],
-            "flow_fit_dropped_outlier_capture_index": pruned_flow_fit["dropped_outlier_capture_index"],
-            "flow_fit_dropped_outlier_delay_from_emergence_us": pruned_flow_fit[
-                "dropped_outlier_delay_from_emergence_us"
-            ],
-            "flow_fit_dropped_outlier_local_deviation_nl": pruned_flow_fit[
-                "dropped_outlier_local_deviation_nl"
-            ],
-            "steady_fit_point_count": int(len(flow_fit_positions)),
-            "steady_width_plateau_px": plateau_metrics.get("steady_width_plateau_px"),
-            "steady_width_span_px": plateau_metrics.get("steady_width_span_px"),
-            "steady_width_tolerance_px": plateau_metrics.get("steady_width_tolerance_px"),
-            "steady_rate_nl_per_us": None,
-            "steady_intercept_nl": None,
-            "steady_rate_ci95_low_nl_per_us": None,
-            "steady_rate_ci95_high_nl_per_us": None,
-            "steady_rate_ci95_relative_width": None,
-            "steady_rate_ci95_contains_central": None,
-            "steady_rate_confidence_status": steady_rate_confidence_status,
-        }
+        if bool(retry_evaluation["accepted"]):
+            return retry_evaluation["result"]
 
-    plateau_start_row = feature_rows[int(plateau_positions[0])]
-    plateau_end_row = feature_rows[int(plateau_positions[-1])]
-    flow_fit_start_row = feature_rows[int(flow_fit_positions[0])]
-    flow_fit_end_row = feature_rows[int(flow_fit_positions[-1])]
-    recomputed_fit = {
-        **dict(flow_fit_metrics),
-        "steady_fit_status": "ok",
-        "positions": plateau_positions,
-        "plateau_positions": plateau_positions,
-        "flow_fit_positions": flow_fit_positions,
-        "steady_capture_indices": [
-            _int_or_none(feature_rows[int(position)].get("capture_index"))
-            for position in plateau_positions
-            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-        ],
-        "plateau_capture_indices": [
-            _int_or_none(feature_rows[int(position)].get("capture_index"))
-            for position in plateau_positions
-            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-        ],
-        "flow_fit_capture_indices": [
-            _int_or_none(feature_rows[int(position)].get("capture_index"))
-            for position in flow_fit_positions
-            if _int_or_none(feature_rows[int(position)].get("capture_index")) is not None
-        ],
-        "steady_start_capture_index": _int_or_none(plateau_start_row.get("capture_index")),
-        "steady_end_capture_index": _int_or_none(plateau_end_row.get("capture_index")),
-        "plateau_point_count": int(len(plateau_positions)),
-        "flow_fit_start_capture_index": _int_or_none(flow_fit_start_row.get("capture_index")),
-        "flow_fit_end_capture_index": _int_or_none(flow_fit_end_row.get("capture_index")),
-        "flow_fit_point_count": int(len(flow_fit_positions)),
-        "flow_fit_eligible_point_count": int(len(flow_fit_eligible_positions)),
-        "flow_fit_backfill_point_count": int(len(backfilled_positions)),
-        "flow_fit_outlier_prune_status": pruned_flow_fit["outlier_prune_status"],
-        "flow_fit_dropped_outlier_capture_index": pruned_flow_fit["dropped_outlier_capture_index"],
-        "flow_fit_dropped_outlier_delay_from_emergence_us": pruned_flow_fit[
-            "dropped_outlier_delay_from_emergence_us"
-        ],
-        "flow_fit_dropped_outlier_local_deviation_nl": pruned_flow_fit[
-            "dropped_outlier_local_deviation_nl"
-        ],
-        "steady_width_plateau_px": plateau_metrics.get("steady_width_plateau_px"),
-        "steady_width_span_px": plateau_metrics.get("steady_width_span_px"),
-        "steady_width_tolerance_px": plateau_metrics.get("steady_width_tolerance_px"),
-        "steady_fit_selection_score": None,
-    }
-    steady_points = _steady_fit_time_volume_points(feature_rows, recomputed_fit)
-    confidence = _steady_fit_confidence_from_points(
-        steady_points,
-        central_rate=_float_or_none(recomputed_fit.get("steady_rate_nl_per_us")),
-    )
-    return {
-        **base_result,
-        **recomputed_fit,
-        **confidence,
-    }
+    return primary_evaluation["result"]
 
 
 def _steady_fit_time_volume_points(feature_rows: list[dict], steady_fit: dict):
@@ -3843,6 +3863,7 @@ def _build_stage5_run(
     run_id: str,
     frame_rows: list[dict],
     *,
+    tracking_mode: str = "dynamic",
     sample_count: int,
     extra_frame_indices: list[int] | None,
     search_width_frac: float,
@@ -3903,6 +3924,7 @@ def _build_stage5_run(
     stage4_run = volume_mod._build_stage4_run(
         run_id,
         frame_rows,
+        tracking_mode=tracking_mode,
         sample_count=sample_count,
         extra_frame_indices=extra_frame_indices,
         search_width_frac=search_width_frac,
@@ -4414,6 +4436,7 @@ def export_stage5_fit(
     run_manifests = []
     for run_row in inventory["selected_runs"]:
         run_id = str(run_row["run_id"])
+        tracking_mode = str(run_row.get("tracking_mode") or "dynamic")
         frame_rows = list(inventory["frames_by_run_id"][run_id])
         if not frame_rows:
             raise ValueError(f"No frame index rows available for run: {run_id}")
@@ -4421,6 +4444,7 @@ def export_stage5_fit(
         stage5_run = _build_stage5_run(
             run_id,
             frame_rows,
+            tracking_mode=tracking_mode,
             **parameter_payload,
         )
         output_paths = _write_stage5_outputs(

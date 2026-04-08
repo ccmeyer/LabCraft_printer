@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from tools.stream_analysis.dataset import (
+    TRACKING_MODE_DYNAMIC,
+    TRACKING_MODE_FIXED_EARLY,
     _clean_text,
     _int_or_none,
     _preferred_columns,
@@ -44,6 +46,13 @@ MODE_SCORE_THRESHOLDS = {
     "override_margin": 0.12,
 }
 
+FIXED_EARLY_FAILURE_MODE = "fixed_early_failed"
+FIXED_EARLY_FRAME_LIMIT = 5
+FIXED_EARLY_REQUIRED_FRAMES = 3
+FIXED_EARLY_CENTER_TOLERANCE_PX = 12.0
+FIXED_EARLY_AREA_SLACK_FRAC = 0.05
+FIXED_EARLY_NET_GROWTH_MIN_FRAC = 0.10
+
 TRACK_COLUMNS = [
     "run_id",
     "capture_id",
@@ -65,6 +74,10 @@ TRACK_COLUMNS = [
     "tracked_nozzle_y_px",
     "raw_confidence",
     "tracked_confidence",
+    "tracking_mode",
+    "anchor_status",
+    "anchor_failure_reason",
+    "anchor_frame_used",
     "detection_mode",
     "raw_mode",
     "final_mode",
@@ -162,6 +175,33 @@ TRACK_COLUMNS = [
     "attached_tracking_cap_reference_source",
     "attached_tracking_cap_bypassed_for_reacquisition",
     "sample_frame",
+]
+
+FIXED_ANCHOR_FRAME_COLUMNS = [
+    "run_id",
+    "capture_id",
+    "capture_index",
+    "early_frame_rank",
+    "anchor_frame_status",
+    "anchor_frame_used",
+    "anchor_failure_reason",
+    "raw_anchor_candidate_count",
+    "shadow_band_rejected_count",
+    "filtered_anchor_candidate_count",
+    "anchor_candidate_count",
+    "selected_candidate_rank",
+    "selected_centroid_x_px",
+    "selected_centroid_y_px",
+    "selected_area_px",
+    "selected_bbox_x_px",
+    "selected_bbox_y_px",
+    "selected_bbox_w_px",
+    "selected_bbox_h_px",
+    "search_x0",
+    "search_y0",
+    "search_x1",
+    "search_y1",
+    "image_relpath",
 ]
 
 
@@ -3780,10 +3820,506 @@ def _detect_run_raw_rows(
     return raw_rows, frame_diagnostics
 
 
+def _moment_centroid_for_mask(mask: np.ndarray):
+    moments = cv2.moments(mask, binaryImage=True)
+    mass = float(moments.get("m00") or 0.0)
+    if mass <= 0.0:
+        return None, None
+    return float(moments["m10"] / mass), float(moments["m01"] / mass)
+
+
+def _fixed_early_centered_components(
+    components: list[dict],
+    *,
+    search_width: int,
+    min_area_px: int,
+):
+    center_tolerance = max(24.0, float(search_width) * 0.24)
+    return [
+        row
+        for row in components
+        if int(row["area"]) >= int(min_area_px) and float(row["center_offset"]) <= center_tolerance
+    ]
+
+
+def _fixed_early_rejection_reason(component: dict, *, search_width: int):
+    bbox_y = int(component["bbox_y"])
+    bbox_x = int(component["bbox_x"])
+    bbox_x1 = int(component["bbox_x1"])
+    bbox_w = int(component["bbox_w"])
+    bbox_h = int(component["bbox_h"])
+    if (
+        bbox_y <= 2
+        and bbox_x == 0
+        and bbox_x1 >= (int(search_width) - 1)
+        and float(bbox_w) >= (0.90 * float(search_width))
+        and bbox_h <= 36
+    ):
+        return "upper_shadow_band"
+    return None
+
+
+def _fixed_early_candidate_rows(
+    frame_row: dict,
+    diagnostics: dict,
+    *,
+    early_frame_rank: int,
+    min_area_px: int,
+):
+    contour_mask = diagnostics.get("contour_mask")
+    components = list(diagnostics.get("components") or [])
+    search = diagnostics["search"]
+    centered_components = _fixed_early_centered_components(
+        components,
+        search_width=int(search["width"]),
+        min_area_px=int(min_area_px),
+    )
+    shadow_band_rejected_count = 0
+    filtered_components = []
+    for component in centered_components:
+        rejection_reason = _fixed_early_rejection_reason(
+            component,
+            search_width=int(search["width"]),
+        )
+        if rejection_reason == "upper_shadow_band":
+            shadow_band_rejected_count = int(shadow_band_rejected_count + 1)
+            continue
+        filtered_components.append(component)
+    filtered_components.sort(
+        key=lambda row: (int(row["bbox_y"]), float(row["center_offset"]), -int(row["area"]))
+    )
+    if contour_mask is None or contour_mask.size <= 0 or not filtered_components:
+        return {
+            "raw_anchor_candidate_count": int(len(centered_components)),
+            "shadow_band_rejected_count": int(shadow_band_rejected_count),
+            "filtered_anchor_candidate_count": int(len(filtered_components)),
+            "candidates": [],
+        }
+
+    _components, labels = _component_rows(contour_mask)
+    candidate_rows = []
+    for candidate_rank, component in enumerate(filtered_components, start=1):
+        raw_mask = _mask_for_label(labels, int(component["label"]))
+        filled_mask, _filled_contour = _filled_component_mask(raw_mask)
+        if not np.any(filled_mask > 0):
+            continue
+        centroid_x_local, centroid_y_local = _moment_centroid_for_mask(filled_mask)
+        if centroid_x_local is None or centroid_y_local is None:
+            continue
+        geometry = _component_geometry(filled_mask)
+        if geometry is None:
+            continue
+
+        candidate_rows.append(
+            {
+                "capture_id": frame_row.get("capture_id"),
+                "capture_index": _int_or_none(frame_row.get("capture_index")) or int(early_frame_rank),
+                "image_relpath": frame_row.get("image_relpath"),
+                "early_frame_rank": int(early_frame_rank),
+                "candidate_rank": int(candidate_rank),
+                "label": int(component["label"]),
+                "area_px": int(np.count_nonzero(filled_mask)),
+                "centroid_x_local": float(centroid_x_local),
+                "centroid_y_local": float(centroid_y_local),
+                "centroid_x_px": float(search["x0"] + centroid_x_local),
+                "centroid_y_px": float(search["y0"] + centroid_y_local),
+                "bbox_x_local": int(geometry["bbox_x0"]),
+                "bbox_y_local": int(geometry["bbox_y0"]),
+                "bbox_w": int(geometry["bbox_x1"] - geometry["bbox_x0"] + 1),
+                "bbox_h": int(geometry["bbox_y1"] - geometry["bbox_y0"] + 1),
+                "bbox_x_px": int(search["x0"] + geometry["bbox_x0"]),
+                "bbox_y_px": int(search["y0"] + geometry["bbox_y0"]),
+                "bbox_w_px": int(geometry["bbox_x1"] - geometry["bbox_x0"] + 1),
+                "bbox_h_px": int(geometry["bbox_y1"] - geometry["bbox_y0"] + 1),
+                "top_y_px": int(search["y0"] + geometry["bbox_y0"]),
+                "bottom_y_px": int(search["y0"] + geometry["bbox_y1"]),
+                "search_x0": int(search["x0"]),
+                "search_y0": int(search["y0"]),
+                "search_x1": int(search["x1"]),
+                "search_y1": int(search["y1"]),
+                "candidate_mask": filled_mask,
+                "geometry": geometry,
+            }
+        )
+    return {
+        "raw_anchor_candidate_count": int(len(centered_components)),
+        "shadow_band_rejected_count": int(shadow_band_rejected_count),
+        "filtered_anchor_candidate_count": int(len(filtered_components)),
+        "candidates": candidate_rows,
+    }
+
+
+def _fixed_early_frame_combos(frame_count: int):
+    combos = []
+    if int(frame_count) >= 3:
+        combos.append((1, 2, 3))
+    for replacement_rank in (4, 5):
+        if int(frame_count) < replacement_rank:
+            continue
+        combos.extend(
+            [
+                (1, 2, replacement_rank),
+                (1, 3, replacement_rank),
+                (2, 3, replacement_rank),
+            ]
+        )
+    seen = set()
+    ordered = []
+    for combo in combos:
+        if combo in seen:
+            continue
+        if max(combo) > int(frame_count):
+            continue
+        seen.add(combo)
+        ordered.append(combo)
+    return ordered
+
+
+def _summarize_fixed_early_family(selected_candidates: list[dict]):
+    ordered_candidates = sorted(
+        selected_candidates,
+        key=lambda row: (int(row["early_frame_rank"]), int(row["candidate_rank"])),
+    )
+    running_candidates = []
+    for candidate in ordered_candidates:
+        if running_candidates:
+            mean_x = float(
+                np.mean([float(row["centroid_x_px"]) for row in running_candidates], dtype=np.float32)
+            )
+            mean_y = float(
+                np.mean([float(row["centroid_y_px"]) for row in running_candidates], dtype=np.float32)
+            )
+            if abs(float(candidate["centroid_x_px"]) - mean_x) > FIXED_EARLY_CENTER_TOLERANCE_PX:
+                return None
+            if abs(float(candidate["centroid_y_px"]) - mean_y) > FIXED_EARLY_CENTER_TOLERANCE_PX:
+                return None
+        running_candidates.append(candidate)
+
+    mean_x = float(np.mean([float(row["centroid_x_px"]) for row in ordered_candidates], dtype=np.float32))
+    mean_y = float(np.mean([float(row["centroid_y_px"]) for row in ordered_candidates], dtype=np.float32))
+    max_dx = max(
+        abs(float(candidate["centroid_x_px"]) - mean_x) for candidate in ordered_candidates
+    )
+    max_dy = max(
+        abs(float(candidate["centroid_y_px"]) - mean_y) for candidate in ordered_candidates
+    )
+    if max_dx > FIXED_EARLY_CENTER_TOLERANCE_PX or max_dy > FIXED_EARLY_CENTER_TOLERANCE_PX:
+        return None
+
+    areas = [float(candidate["area_px"]) for candidate in ordered_candidates]
+    if areas[1] < areas[0] * (1.0 - FIXED_EARLY_AREA_SLACK_FRAC):
+        return None
+    if areas[2] < areas[1] * (1.0 - FIXED_EARLY_AREA_SLACK_FRAC):
+        return None
+    net_growth_ratio = float(areas[2] / max(1.0, areas[0]))
+    if net_growth_ratio < (1.0 + FIXED_EARLY_NET_GROWTH_MIN_FRAC):
+        return None
+
+    return {
+        "selected_candidates": ordered_candidates,
+        "fixed_nozzle_x_px": mean_x,
+        "fixed_nozzle_y_px": mean_y,
+        "max_center_dx_px": float(max_dx),
+        "max_center_dy_px": float(max_dy),
+        "net_area_growth_ratio": float(net_growth_ratio),
+        "sort_key": (
+            float(max_dx + max_dy),
+            -float(net_growth_ratio),
+            sum(int(candidate["candidate_rank"]) for candidate in ordered_candidates),
+        ),
+    }
+
+
+def _fixed_early_anchor_frame_row(
+    run_id: str,
+    frame_row: dict,
+    *,
+    early_frame_rank: int,
+    search: dict,
+    raw_anchor_candidate_count: int,
+    shadow_band_rejected_count: int,
+    filtered_anchor_candidate_count: int,
+    candidates: list[dict],
+    selected_candidate: dict | None,
+    anchor_failure_reason: str | None,
+):
+    return {
+        "run_id": run_id,
+        "capture_id": frame_row.get("capture_id"),
+        "capture_index": _int_or_none(frame_row.get("capture_index")),
+        "early_frame_rank": int(early_frame_rank),
+        "anchor_frame_status": (
+            "used"
+            if selected_candidate is not None
+            else ("candidate_available" if candidates else "no_candidate")
+        ),
+        "anchor_frame_used": bool(selected_candidate is not None),
+        "anchor_failure_reason": anchor_failure_reason,
+        "raw_anchor_candidate_count": int(raw_anchor_candidate_count),
+        "shadow_band_rejected_count": int(shadow_band_rejected_count),
+        "filtered_anchor_candidate_count": int(filtered_anchor_candidate_count),
+        "anchor_candidate_count": int(len(candidates)),
+        "selected_candidate_rank": None
+        if selected_candidate is None
+        else int(selected_candidate["candidate_rank"]),
+        "selected_centroid_x_px": None
+        if selected_candidate is None
+        else float(selected_candidate["centroid_x_px"]),
+        "selected_centroid_y_px": None
+        if selected_candidate is None
+        else float(selected_candidate["centroid_y_px"]),
+        "selected_area_px": None
+        if selected_candidate is None
+        else int(selected_candidate["area_px"]),
+        "selected_bbox_x_px": None
+        if selected_candidate is None
+        else int(selected_candidate["bbox_x_px"]),
+        "selected_bbox_y_px": None
+        if selected_candidate is None
+        else int(selected_candidate["bbox_y_px"]),
+        "selected_bbox_w_px": None
+        if selected_candidate is None
+        else int(selected_candidate["bbox_w_px"]),
+        "selected_bbox_h_px": None
+        if selected_candidate is None
+        else int(selected_candidate["bbox_h_px"]),
+        "search_x0": int(search["x0"]),
+        "search_y0": int(search["y0"]),
+        "search_x1": int(search["x1"]),
+        "search_y1": int(search["y1"]),
+        "image_relpath": frame_row.get("image_relpath"),
+    }
+
+
+def _diagnostics_with_fixed_candidate(diagnostics: dict, candidate: dict):
+    updated = dict(diagnostics)
+    updated["candidate_mask"] = candidate["candidate_mask"]
+    updated["geometry"] = candidate["geometry"]
+    updated["candidate_mask_area_px"] = int(candidate["area_px"])
+    updated["attached_component_centroid_x_local"] = float(candidate["centroid_x_local"])
+    updated["attached_component_centroid_y_local"] = float(candidate["centroid_y_local"])
+    return updated
+
+
+def _resolve_fixed_early_anchor(
+    run_id: str,
+    frame_rows: list[dict],
+    *,
+    search_width_frac: float,
+    search_top_frac: float,
+    search_bottom_frac: float,
+    blur_sigma: float,
+    residual_scale: float,
+    residual_threshold: int,
+    min_area_px: int,
+    top_band_slack_px: int,
+):
+    early_entries = []
+    for early_frame_rank, frame_row in enumerate(frame_rows[:FIXED_EARLY_FRAME_LIMIT], start=1):
+        gray = _load_gray_image(Path(str(frame_row["image_abs_path"])))
+        diagnostics = _detect_raw_nozzle(
+            gray,
+            search_width_frac=search_width_frac,
+            search_top_frac=search_top_frac,
+            search_bottom_frac=search_bottom_frac,
+            blur_sigma=blur_sigma,
+            residual_scale=residual_scale,
+            residual_threshold=residual_threshold,
+            min_area_px=min_area_px,
+            top_band_slack_px=top_band_slack_px,
+        )
+        candidate_bundle = _fixed_early_candidate_rows(
+            frame_row,
+            diagnostics,
+            early_frame_rank=int(early_frame_rank),
+            min_area_px=min_area_px,
+        )
+        early_entries.append(
+            {
+                "frame_row": frame_row,
+                "early_frame_rank": int(early_frame_rank),
+                "capture_index": _int_or_none(frame_row.get("capture_index")) or int(early_frame_rank),
+                "diagnostics": diagnostics,
+                "raw_anchor_candidate_count": int(
+                    candidate_bundle["raw_anchor_candidate_count"]
+                ),
+                "shadow_band_rejected_count": int(
+                    candidate_bundle["shadow_band_rejected_count"]
+                ),
+                "filtered_anchor_candidate_count": int(
+                    candidate_bundle["filtered_anchor_candidate_count"]
+                ),
+                "candidates": list(candidate_bundle["candidates"]),
+            }
+        )
+
+    best_family = None
+    entries_by_rank = {int(entry["early_frame_rank"]): entry for entry in early_entries}
+    for combo in _fixed_early_frame_combos(len(early_entries)):
+        frame_entries = [entries_by_rank.get(int(rank)) for rank in combo]
+        if any(entry is None or not entry["candidates"] for entry in frame_entries):
+            continue
+        valid_families = []
+        for first_candidate in frame_entries[0]["candidates"]:
+            for second_candidate in frame_entries[1]["candidates"]:
+                for third_candidate in frame_entries[2]["candidates"]:
+                    family = _summarize_fixed_early_family(
+                        [first_candidate, second_candidate, third_candidate]
+                    )
+                    if family is not None:
+                        valid_families.append(family)
+        if valid_families:
+            best_family = min(valid_families, key=lambda row: row["sort_key"])
+            best_family["selected_early_frame_ranks"] = list(combo)
+            break
+
+    success = best_family is not None
+    if success:
+        anchor_failure_reason = None
+    elif len(early_entries) < FIXED_EARLY_REQUIRED_FRAMES:
+        anchor_failure_reason = "insufficient_early_frames"
+    elif sum(1 for entry in early_entries if entry["candidates"]) < FIXED_EARLY_REQUIRED_FRAMES:
+        anchor_failure_reason = "insufficient_candidate_frames"
+    else:
+        anchor_failure_reason = "no_valid_3_frame_anchor_family"
+
+    selected_candidates_by_capture_index = {}
+    early_diagnostics_by_capture_index = {}
+    if success:
+        for candidate in best_family["selected_candidates"]:
+            selected_candidates_by_capture_index[int(candidate["capture_index"])] = candidate
+
+    anchor_frame_rows = []
+    for entry in early_entries:
+        capture_index = int(entry["capture_index"])
+        selected_candidate = selected_candidates_by_capture_index.get(capture_index)
+        diagnostics = entry["diagnostics"]
+        if selected_candidate is not None:
+            diagnostics = _diagnostics_with_fixed_candidate(diagnostics, selected_candidate)
+        early_diagnostics_by_capture_index[capture_index] = diagnostics
+        anchor_frame_rows.append(
+            _fixed_early_anchor_frame_row(
+                run_id,
+                entry["frame_row"],
+                early_frame_rank=int(entry["early_frame_rank"]),
+                search=dict(entry["diagnostics"]["search"]),
+                raw_anchor_candidate_count=int(entry["raw_anchor_candidate_count"]),
+                shadow_band_rejected_count=int(entry["shadow_band_rejected_count"]),
+                filtered_anchor_candidate_count=int(entry["filtered_anchor_candidate_count"]),
+                candidates=entry["candidates"],
+                selected_candidate=selected_candidate,
+                anchor_failure_reason=anchor_failure_reason,
+            )
+        )
+
+    return {
+        "tracking_mode": TRACKING_MODE_FIXED_EARLY,
+        "anchor_status": "ok" if success else "failed",
+        "anchor_failure_reason": anchor_failure_reason,
+        "fixed_nozzle_x_px": None if not success else float(best_family["fixed_nozzle_x_px"]),
+        "fixed_nozzle_y_px": None if not success else float(best_family["fixed_nozzle_y_px"]),
+        "selected_candidates": [] if not success else list(best_family["selected_candidates"]),
+        "selected_capture_indices": []
+        if not success
+        else [
+            int(candidate["capture_index"])
+            for candidate in best_family["selected_candidates"]
+        ],
+        "selected_early_frame_ranks": []
+        if not success
+        else list(best_family["selected_early_frame_ranks"]),
+        "max_center_dx_px": None if not success else float(best_family["max_center_dx_px"]),
+        "max_center_dy_px": None if not success else float(best_family["max_center_dy_px"]),
+        "net_area_growth_ratio": None
+        if not success
+        else float(best_family["net_area_growth_ratio"]),
+        "mean_anchor_area_px": None
+        if not success
+        else float(
+            np.mean(
+                [float(candidate["area_px"]) for candidate in best_family["selected_candidates"]],
+                dtype=np.float32,
+            )
+        ),
+        "anchor_frame_rows": anchor_frame_rows,
+        "early_diagnostics_by_capture_index": early_diagnostics_by_capture_index,
+    }
+
+
+def _apply_fixed_early_tracking(
+    base_rows: list[dict],
+    *,
+    fixed_anchor: dict,
+):
+    fixed_x = fixed_anchor.get("fixed_nozzle_x_px")
+    fixed_y = fixed_anchor.get("fixed_nozzle_y_px")
+    anchor_failure_reason = fixed_anchor.get("anchor_failure_reason")
+    selected_capture_indices = {
+        int(value) for value in fixed_anchor.get("selected_capture_indices") or []
+    }
+    selected_candidates_by_capture_index = {
+        int(candidate["capture_index"]): candidate
+        for candidate in fixed_anchor.get("selected_candidates") or []
+    }
+
+    tracked_rows = []
+    for row in base_rows:
+        capture_index = _int_or_none(row.get("capture_index")) or 0
+        tracked_row = dict(row)
+        tracked_row["tracking_mode"] = TRACKING_MODE_FIXED_EARLY
+        tracked_row["anchor_status"] = str(fixed_anchor.get("anchor_status") or "failed")
+        tracked_row["anchor_failure_reason"] = anchor_failure_reason
+        tracked_row["anchor_frame_used"] = bool(capture_index in selected_capture_indices)
+        tracked_row["segment_id"] = 1
+        tracked_row["shift_event_before"] = False
+        tracked_row["filled_from_segment"] = False
+        tracked_row["used_segment_fill"] = False
+        tracked_row["transition_fill_used"] = False
+        tracked_row["transition_fill_source"] = None
+        tracked_row["local_raw_fallback_rejected"] = False
+        tracked_row["local_raw_fallback_reference_y_px"] = None
+        tracked_row["attached_continuity_hold_used"] = False
+        tracked_row["attached_continuity_hold_count"] = 0
+        tracked_row["attached_tracking_cap_applied"] = False
+        tracked_row["attached_tracking_cap_reference_source"] = None
+        tracked_row["attached_tracking_cap_bypassed_for_reacquisition"] = False
+        tracked_row["anchor_rejected_as_reflection"] = False
+
+        if fixed_x is None or fixed_y is None:
+            tracked_row["raw_nozzle_x_px"] = None
+            tracked_row["raw_nozzle_y_px"] = None
+            tracked_row["tracked_nozzle_x_px"] = None
+            tracked_row["tracked_nozzle_y_px"] = None
+            tracked_row["raw_confidence"] = 0.0
+            tracked_row["tracked_confidence"] = 0.0
+            tracked_row["detection_mode"] = FIXED_EARLY_FAILURE_MODE
+            tracked_row["raw_mode"] = FIXED_EARLY_FAILURE_MODE
+            tracked_row["final_mode"] = FIXED_EARLY_FAILURE_MODE
+        else:
+            selected_candidate = selected_candidates_by_capture_index.get(capture_index)
+            if selected_candidate is not None:
+                tracked_row["raw_nozzle_x_px"] = float(selected_candidate["centroid_x_px"])
+                tracked_row["raw_nozzle_y_px"] = float(selected_candidate["centroid_y_px"])
+                tracked_row["raw_mode"] = "fixed_early_anchor"
+            else:
+                tracked_row["raw_nozzle_x_px"] = float(fixed_x)
+                tracked_row["raw_nozzle_y_px"] = float(fixed_y)
+                tracked_row["raw_mode"] = "fixed_early_reuse"
+            tracked_row["tracked_nozzle_x_px"] = float(fixed_x)
+            tracked_row["tracked_nozzle_y_px"] = float(fixed_y)
+            tracked_row["raw_confidence"] = 1.0
+            tracked_row["tracked_confidence"] = 1.0
+            tracked_row["detection_mode"] = TRACKING_MODE_FIXED_EARLY
+            tracked_row["final_mode"] = TRACKING_MODE_FIXED_EARLY
+        tracked_rows.append(tracked_row)
+    return tracked_rows, []
+
+
 def _build_stage2_run(
     run_id: str,
     frame_rows: list[dict],
     *,
+    tracking_mode: str = TRACKING_MODE_DYNAMIC,
     search_width_frac: float,
     search_top_frac: float,
     search_bottom_frac: float,
@@ -3807,16 +4343,53 @@ def _build_stage2_run(
         min_area_px=min_area_px,
         top_band_slack_px=top_band_slack_px,
     )
-    tracked_rows, shift_events = _apply_tracking(
-        raw_rows,
-        shift_threshold_px=shift_threshold_px,
-        confidence_threshold=confidence_threshold,
+    resolved_tracking_mode = (
+        TRACKING_MODE_FIXED_EARLY
+        if str(tracking_mode or TRACKING_MODE_DYNAMIC).strip() == TRACKING_MODE_FIXED_EARLY
+        else TRACKING_MODE_DYNAMIC
     )
+    fixed_anchor = None
+    fixed_anchor_frame_rows = []
+    if resolved_tracking_mode == TRACKING_MODE_FIXED_EARLY:
+        fixed_anchor = _resolve_fixed_early_anchor(
+            run_id,
+            frame_rows,
+            search_width_frac=search_width_frac,
+            search_top_frac=search_top_frac,
+            search_bottom_frac=search_bottom_frac,
+            blur_sigma=blur_sigma,
+            residual_scale=residual_scale,
+            residual_threshold=residual_threshold,
+            min_area_px=min_area_px,
+            top_band_slack_px=top_band_slack_px,
+        )
+        early_diagnostics_by_capture_index = dict(
+            fixed_anchor.get("early_diagnostics_by_capture_index") or {}
+        )
+        for index, frame_row in enumerate(frame_rows):
+            capture_index = _int_or_none(frame_row.get("capture_index")) or (index + 1)
+            diagnostics = early_diagnostics_by_capture_index.get(int(capture_index))
+            if diagnostics is not None:
+                frame_diagnostics[index] = diagnostics
+        tracked_rows, shift_events = _apply_fixed_early_tracking(
+            raw_rows,
+            fixed_anchor=fixed_anchor,
+        )
+        fixed_anchor_frame_rows = list(fixed_anchor.get("anchor_frame_rows") or [])
+    else:
+        tracked_rows, shift_events = _apply_tracking(
+            raw_rows,
+            shift_threshold_px=shift_threshold_px,
+            confidence_threshold=confidence_threshold,
+        )
     return {
         "raw_rows": raw_rows,
         "tracked_rows": tracked_rows,
         "shift_events": shift_events,
         "frame_diagnostics": frame_diagnostics,
+        "tracking_mode": resolved_tracking_mode,
+        "fixed_anchor": fixed_anchor,
+        "fixed_anchor_frame_rows": fixed_anchor_frame_rows,
     }
 
 
@@ -4252,11 +4825,17 @@ def _track_summary(rows: list[dict]):
     confidence = [float(row["tracked_confidence"]) for row in rows if row.get("tracked_confidence") is not None]
     raw_mode_counts = {}
     final_mode_counts = {}
+    tracking_mode_counts = {}
+    anchor_status_counts = {}
     for row in rows:
         raw_mode = _clean_text(row.get("raw_mode")) or "no_signal"
         final_mode = _clean_text(row.get("final_mode")) or "no_signal"
+        tracking_mode = _clean_text(row.get("tracking_mode")) or TRACKING_MODE_DYNAMIC
+        anchor_status = _clean_text(row.get("anchor_status")) or "not_applicable"
         raw_mode_counts[raw_mode] = int(raw_mode_counts.get(raw_mode, 0) + 1)
         final_mode_counts[final_mode] = int(final_mode_counts.get(final_mode, 0) + 1)
+        tracking_mode_counts[tracking_mode] = int(tracking_mode_counts.get(tracking_mode, 0) + 1)
+        anchor_status_counts[anchor_status] = int(anchor_status_counts.get(anchor_status, 0) + 1)
     return {
         "frame_count": len(rows),
         "tracked_x_min": min(tracked_x) if tracked_x else None,
@@ -4270,6 +4849,8 @@ def _track_summary(rows: list[dict]):
         "segment_count": int(max([int(row["segment_id"]) for row in rows], default=0)),
         "raw_mode_counts": raw_mode_counts,
         "final_mode_counts": final_mode_counts,
+        "tracking_mode_counts": tracking_mode_counts,
+        "anchor_status_counts": anchor_status_counts,
     }
 
 
@@ -4376,7 +4957,11 @@ def _build_sample_panel(gray: np.ndarray, diagnostics: dict, track_row: dict):
     full = _marker(full, (track_row.get("tracked_nozzle_x_px"), track_row.get("tracked_nozzle_y_px")), (0, 0, 255))
     full = _draw_label(
         full,
-        f"frame {track_row['capture_index']} raw={track_row['raw_mode']} final={track_row['final_mode']}",
+        (
+            f"frame {track_row['capture_index']} "
+            f"track={track_row.get('tracking_mode') or TRACKING_MODE_DYNAMIC} "
+            f"raw={track_row['raw_mode']} final={track_row['final_mode']}"
+        ),
     )
 
     search_gray = diagnostics["search_gray"]
@@ -4673,6 +5258,10 @@ def _raw_track_row(run_id: str, frame_row: dict, diagnostics: dict):
         "tracked_nozzle_y_px": None,
         "raw_confidence": float(diagnostics.get("confidence") or 0.0),
         "tracked_confidence": None,
+        "tracking_mode": TRACKING_MODE_DYNAMIC,
+        "anchor_status": "not_applicable",
+        "anchor_failure_reason": None,
+        "anchor_frame_used": False,
         "detection_mode": str(diagnostics.get("mode") or "no_signal"),
         "raw_mode": str(diagnostics.get("mode") or "no_signal"),
         "final_mode": str(diagnostics.get("mode") or "no_signal"),
@@ -4880,6 +5469,7 @@ def export_stage2_nozzle(
     run_manifests = []
     for run_row in inventory["selected_runs"]:
         run_id = str(run_row["run_id"])
+        tracking_mode = str(run_row.get("tracking_mode") or TRACKING_MODE_DYNAMIC)
         frame_rows = list(inventory["frames_by_run_id"][run_id])
         if not frame_rows:
             raise ValueError(f"No frame index rows available for run: {run_id}")
@@ -4887,6 +5477,7 @@ def export_stage2_nozzle(
         stage2_run = _build_stage2_run(
             run_id,
             frame_rows,
+            tracking_mode=tracking_mode,
             search_width_frac=search_width_frac,
             search_top_frac=search_top_frac,
             search_bottom_frac=search_bottom_frac,
@@ -4901,6 +5492,8 @@ def export_stage2_nozzle(
         tracked_rows = list(stage2_run["tracked_rows"])
         shift_events = list(stage2_run["shift_events"])
         frame_diagnostics = list(stage2_run["frame_diagnostics"])
+        fixed_anchor = stage2_run.get("fixed_anchor")
+        fixed_anchor_frame_rows = list(stage2_run.get("fixed_anchor_frame_rows") or [])
         sample_indices = set(
             _sample_indices(
                 len(frame_rows),
@@ -4910,6 +5503,11 @@ def export_stage2_nozzle(
         )
         sample_indices.update(int(event["previous_capture_index"]) for event in shift_events if event.get("previous_capture_index"))
         sample_indices.update(int(event["next_capture_index"]) for event in shift_events if event.get("next_capture_index"))
+        if tracking_mode == TRACKING_MODE_FIXED_EARLY:
+            sample_indices.update(
+                _int_or_none(frame_row.get("capture_index")) or (index + 1)
+                for index, frame_row in enumerate(frame_rows[:FIXED_EARLY_FRAME_LIMIT])
+            )
 
         stage_dir = output_path / "runs" / run_id / NOZZLE_STAGE_DIRNAME
         stage_dir.mkdir(parents=True, exist_ok=True)
@@ -4940,10 +5538,45 @@ def export_stage2_nozzle(
         summary_json = stage_dir / "nozzle_manifest.json"
         contact_sheet_png = stage_dir / "sample_contact_sheet.png"
         track_plot_png = stage_dir / "nozzle_track.png"
+        fixed_anchor_json = stage_dir / "fixed_anchor.json"
+        fixed_anchor_frames_csv = stage_dir / "fixed_anchor_frames.csv"
 
         _write_csv(track_csv, _preferred_columns(tracked_rows, TRACK_COLUMNS), tracked_rows)
         _write_json(track_json, {"rows": tracked_rows})
         _write_json(shift_json, {"shift_events": shift_events})
+        if tracking_mode == TRACKING_MODE_FIXED_EARLY:
+            _write_json(
+                fixed_anchor_json,
+                {
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "tracking_mode": tracking_mode,
+                    "anchor_status": None if fixed_anchor is None else fixed_anchor.get("anchor_status"),
+                    "anchor_failure_reason": None if fixed_anchor is None else fixed_anchor.get("anchor_failure_reason"),
+                    "fixed_nozzle_x_px": None if fixed_anchor is None else fixed_anchor.get("fixed_nozzle_x_px"),
+                    "fixed_nozzle_y_px": None if fixed_anchor is None else fixed_anchor.get("fixed_nozzle_y_px"),
+                    "selected_capture_indices": []
+                    if fixed_anchor is None
+                    else list(fixed_anchor.get("selected_capture_indices") or []),
+                    "selected_early_frame_ranks": []
+                    if fixed_anchor is None
+                    else list(fixed_anchor.get("selected_early_frame_ranks") or []),
+                    "max_center_dx_px": None if fixed_anchor is None else fixed_anchor.get("max_center_dx_px"),
+                    "max_center_dy_px": None if fixed_anchor is None else fixed_anchor.get("max_center_dy_px"),
+                    "net_area_growth_ratio": None
+                    if fixed_anchor is None
+                    else fixed_anchor.get("net_area_growth_ratio"),
+                    "mean_anchor_area_px": None
+                    if fixed_anchor is None
+                    else fixed_anchor.get("mean_anchor_area_px"),
+                    "frames": fixed_anchor_frame_rows,
+                },
+            )
+            _write_csv(
+                fixed_anchor_frames_csv,
+                _preferred_columns(fixed_anchor_frame_rows, FIXED_ANCHOR_FRAME_COLUMNS),
+                fixed_anchor_frame_rows,
+            )
         if sample_panels:
             contact_sheet = cv2.vconcat(sample_panels)
             cv2.imwrite(str(contact_sheet_png), contact_sheet)
@@ -4954,6 +5587,8 @@ def export_stage2_nozzle(
             "stage": "nozzle",
             "run_id": run_id,
             "run_dir": run_row["run_dir"],
+            "tracking_mode": tracking_mode,
+            "gripper_refresh_suspended": run_row.get("gripper_refresh_suspended"),
             "search": {
                 "width_frac": float(search_width_frac),
                 "top_frac": float(search_top_frac),
@@ -4972,20 +5607,47 @@ def export_stage2_nozzle(
                 "nozzle_track_csv": str(track_csv),
                 "nozzle_track_json": str(track_json),
                 "shift_events_json": str(shift_json),
+                "fixed_anchor_json": (
+                    str(fixed_anchor_json) if tracking_mode == TRACKING_MODE_FIXED_EARLY else None
+                ),
+                "fixed_anchor_frames_csv": (
+                    str(fixed_anchor_frames_csv)
+                    if tracking_mode == TRACKING_MODE_FIXED_EARLY
+                    else None
+                ),
                 "sample_contact_sheet_png": str(contact_sheet_png) if sample_panels else None,
                 "nozzle_track_png": str(track_plot_png),
             },
             "summary": _track_summary(tracked_rows),
             "shift_events": shift_events,
+            "fixed_anchor": None
+            if fixed_anchor is None
+            else {
+                "anchor_status": fixed_anchor.get("anchor_status"),
+                "anchor_failure_reason": fixed_anchor.get("anchor_failure_reason"),
+                "fixed_nozzle_x_px": fixed_anchor.get("fixed_nozzle_x_px"),
+                "fixed_nozzle_y_px": fixed_anchor.get("fixed_nozzle_y_px"),
+                "selected_capture_indices": list(fixed_anchor.get("selected_capture_indices") or []),
+                "selected_early_frame_ranks": list(
+                    fixed_anchor.get("selected_early_frame_ranks") or []
+                ),
+            },
         }
         _write_json(summary_json, summary)
         run_manifests.append(
             {
                 "run_id": run_id,
                 "run_dir": run_row["run_dir"],
+                "tracking_mode": tracking_mode,
                 "nozzle_track_csv": str(track_csv),
                 "nozzle_track_json": str(track_json),
                 "shift_events_json": str(shift_json),
+                "fixed_anchor_json": str(fixed_anchor_json)
+                if tracking_mode == TRACKING_MODE_FIXED_EARLY
+                else None,
+                "fixed_anchor_frames_csv": str(fixed_anchor_frames_csv)
+                if tracking_mode == TRACKING_MODE_FIXED_EARLY
+                else None,
                 "sample_contact_sheet_png": str(contact_sheet_png) if sample_panels else None,
                 "nozzle_track_png": str(track_plot_png),
                 "frame_count": len(tracked_rows),

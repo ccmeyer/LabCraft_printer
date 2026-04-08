@@ -1328,6 +1328,7 @@ def _build_stage3_run(
     run_id: str,
     frame_rows: list[dict],
     *,
+    tracking_mode: str,
     sample_count: int,
     extra_frame_indices: list[int] | None,
     search_width_frac: float,
@@ -1347,6 +1348,7 @@ def _build_stage3_run(
     stage2_run = _build_stage2_run(
         run_id,
         frame_rows,
+        tracking_mode=tracking_mode,
         search_width_frac=search_width_frac,
         search_top_frac=search_top_frac,
         search_bottom_frac=search_bottom_frac,
@@ -1459,12 +1461,14 @@ def export_stage3_silhouette(
     run_manifests = []
     for run_row in inventory["selected_runs"]:
         run_id = str(run_row["run_id"])
+        tracking_mode = str(run_row.get("tracking_mode") or "dynamic")
         frame_rows = list(inventory["frames_by_run_id"][run_id])
         if not frame_rows:
             raise ValueError(f"No frame index rows available for run: {run_id}")
         stage3_run = _build_stage3_run(
             run_id,
             frame_rows,
+            tracking_mode=tracking_mode,
             sample_count=sample_count,
             extra_frame_indices=extra_frame_indices,
             search_width_frac=search_width_frac,
@@ -1546,6 +1550,7 @@ def export_stage3_silhouette(
             "stage": "silhouette",
             "run_id": run_id,
             "run_dir": run_row["run_dir"],
+            "tracking_mode": tracking_mode,
             "input_policy": INPUT_POLICY,
             "nozzle_tracking": {
                 "search_width_frac": float(search_width_frac),
@@ -1581,6 +1586,7 @@ def export_stage3_silhouette(
             {
                 "run_id": run_id,
                 "run_dir": run_row["run_dir"],
+                "tracking_mode": tracking_mode,
                 "silhouette_metrics_csv": str(metrics_csv),
                 "component_metrics_csv": str(component_csv),
                 "edge_traces_csv": str(edge_csv),

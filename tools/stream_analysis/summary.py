@@ -1450,7 +1450,12 @@ def export_stage6_summary(
             frame_rows = list(inventory["frames_by_run_id"][run_id])
             if not frame_rows:
                 raise ValueError(f"No frame index rows available for run: {run_id}")
-            stage5_run = fit_mod._build_stage5_run(run_id, frame_rows, **parameter_payload)
+            stage5_run = fit_mod._build_stage5_run(
+                run_id,
+                frame_rows,
+                tracking_mode=str(run_row.get("tracking_mode") or "dynamic"),
+                **parameter_payload,
+            )
             artifact_refs = _artifact_references(experiment_root, output_path, run_id)
             stage5_paths = fit_mod._write_stage5_outputs(
                 output_path,

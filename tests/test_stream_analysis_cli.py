@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -14,7 +15,11 @@ from tools.stream_analysis import volume as volume_mod
 from tools.stream_analysis import cli
 from tests.test_stream_analysis_baseline import _make_baseline_experiment
 from tests.test_stream_analysis_dataset import _make_experiment
-from tests.test_stream_analysis_nozzle import _make_nozzle_experiment
+from tests.test_stream_analysis_nozzle import (
+    _make_fixed_early_nozzle_experiment,
+    _make_nozzle_experiment,
+    _write_stream_capture_log,
+)
 from tests.test_stream_analysis_silhouette import _fake_stage2_run, _make_silhouette_experiment
 
 
@@ -209,6 +214,43 @@ def test_cli_nozzle_main_writes_default_outputs(tmp_path, capsys):
     assert payload["run_ids"] == [run_dir.name]
 
 
+def test_cli_nozzle_main_auto_selects_fixed_early_from_metadata(tmp_path, capsys):
+    exp_dir, run_dir = _make_fixed_early_nozzle_experiment(tmp_path, variant="happy")
+
+    rc = cli.main(
+        [
+            "nozzle",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "2",
+            "--search-width-frac",
+            "0.30",
+            "--search-top-frac",
+            "0.08",
+            "--search-bottom-frac",
+            "0.34",
+        ]
+    )
+
+    assert rc == 0
+    output_root = Path(exp_dir) / "analysis" / "stream_characterization"
+    stage_dir = output_root / "runs" / run_dir.name / "stage_02_nozzle"
+    assert (stage_dir / "fixed_anchor.json").exists()
+    assert (stage_dir / "fixed_anchor_frames.csv").exists()
+
+    with (stage_dir / "nozzle_track.csv").open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert rows
+    assert {row["tracking_mode"] for row in rows} == {"fixed_early"}
+    assert {row["final_mode"] for row in rows} == {"fixed_early"}
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
+    assert payload["run_ids"] == [run_dir.name]
+
+
 def test_cli_silhouette_main_writes_default_outputs(tmp_path, capsys, monkeypatch):
     exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
     monkeypatch.setattr(silhouette_mod, "_build_stage2_run", _fake_stage2_run)
@@ -238,6 +280,43 @@ def test_cli_silhouette_main_writes_default_outputs(tmp_path, capsys, monkeypatc
     payload = json.loads(capsys.readouterr().out)
     assert payload["selected_run_count"] == 1
     assert payload["run_ids"] == [run_dir.name]
+
+
+def test_cli_silhouette_main_passes_fixed_early_tracking_mode_from_metadata(tmp_path, capsys, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    _write_stream_capture_log(
+        exp_dir,
+        run_id=run_dir.name,
+        gripper_refresh_suspended=True,
+    )
+    captured = {}
+
+    def _fake_fixed_stage2_run(run_id: str, frame_rows: list[dict], **kwargs):
+        captured["run_id"] = run_id
+        captured["tracking_mode"] = kwargs.get("tracking_mode")
+        return _fake_stage2_run(run_id, frame_rows, **kwargs)
+
+    monkeypatch.setattr(silhouette_mod, "_build_stage2_run", _fake_fixed_stage2_run)
+
+    rc = cli.main(
+        [
+            "silhouette",
+            "--experiment-root",
+            str(exp_dir),
+            "--sample-count",
+            "3",
+            "--nozzle-guard-px",
+            "2",
+            "--min-component-area-px",
+            "50",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["run_id"] == run_dir.name
+    assert captured["tracking_mode"] == "fixed_early"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["selected_run_count"] == 1
 
 
 def test_cli_volume_main_writes_default_outputs(tmp_path, capsys, monkeypatch):

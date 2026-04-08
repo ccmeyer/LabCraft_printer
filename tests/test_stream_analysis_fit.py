@@ -102,6 +102,20 @@ def _feature_row(
     }
 
 
+def _backfill_retry_feature_rows(*, backfill_volume_nl: float = 1.8):
+    return [
+        _feature_row(1, delay_from_emergence_us=100, volume_nl=backfill_volume_nl, width_px=76.0),
+        _feature_row(2, delay_from_emergence_us=200, volume_nl=2.0, width_px=72.0),
+        _feature_row(3, delay_from_emergence_us=300, volume_nl=3.0, width_px=70.0),
+        _feature_row(4, delay_from_emergence_us=400, volume_nl=4.0, width_px=69.0),
+        _feature_row(5, delay_from_emergence_us=500, volume_nl=5.0, width_px=69.0),
+        _feature_row(6, delay_from_emergence_us=600, volume_nl=6.0, width_px=69.0),
+        _feature_row(7, delay_from_emergence_us=700, volume_nl=7.0, width_px=69.0),
+        _feature_row(8, delay_from_emergence_us=800, volume_nl=8.1, width_px=69.0),
+        _feature_row(9, delay_from_emergence_us=900, volume_nl=9.3, width_px=69.0),
+    ]
+
+
 def test_near_nozzle_width_metrics_extracts_band_statistics():
     frame_row = {"tracked_nozzle_y_px": 100.0}
     attached_edge_rows = _edge_rows_for_capture(1, width_px=72)
@@ -516,6 +530,97 @@ def test_recompute_steady_fit_sources_central_rate_from_flow_fit_window_not_plat
     assert steady_fit["steady_nrmse"] != pytest.approx(
         plateau_metrics["steady_nrmse"], rel=1e-4
     )
+
+
+def test_recompute_steady_fit_retries_without_backfill_when_primary_window_fails_quality():
+    feature_rows = _backfill_retry_feature_rows(backfill_volume_nl=1.8)
+
+    steady_fit = mod._recompute_steady_fit_from_feature_rows(
+        feature_rows,
+        first_untrusted_capture_index=10,
+        exclude_last_trusted_frames=0,
+        min_steady_frames=4,
+        steady_width_tol_frac=0.08,
+        steady_width_tol_px=4.0,
+        flow_fit_backfill_max_frames=1,
+        flow_fit_backfill_width_delta_px=8.0,
+        flow_fit_backfill_monotonic_slack_px=0.75,
+        steady_fit_r2_min=0.985,
+        steady_fit_nrmse_max=0.03,
+    )
+
+    retry_metrics = mod._fit_window_metrics(feature_rows[1:])
+
+    assert steady_fit["steady_fit_status"] == "ok"
+    assert steady_fit["steady_start_capture_index"] == 2
+    assert steady_fit["steady_end_capture_index"] == 5
+    assert steady_fit["plateau_capture_indices"] == [2, 3, 4, 5]
+    assert steady_fit["flow_fit_capture_indices"] == [2, 3, 4, 5, 6, 7, 8, 9]
+    assert steady_fit["flow_fit_backfill_point_count"] == 0
+    assert steady_fit["flow_fit_start_capture_index"] == 2
+    assert steady_fit["flow_fit_end_capture_index"] == 9
+    assert steady_fit["steady_rate_nl_per_us"] == pytest.approx(
+        retry_metrics["steady_rate_nl_per_us"], rel=1e-9
+    )
+    assert steady_fit["steady_r2"] == pytest.approx(retry_metrics["steady_r2"], rel=1e-9)
+    assert steady_fit["steady_nrmse"] == pytest.approx(retry_metrics["steady_nrmse"], rel=1e-9)
+    assert steady_fit["steady_rate_ci95_low_nl_per_us"] is not None
+    assert steady_fit["steady_rate_ci95_high_nl_per_us"] is not None
+    assert steady_fit["steady_rate_confidence_status"] == "ok"
+
+
+def test_recompute_steady_fit_keeps_backfill_when_primary_window_already_passes_quality():
+    feature_rows = _backfill_retry_feature_rows(backfill_volume_nl=1.5)
+
+    steady_fit = mod._recompute_steady_fit_from_feature_rows(
+        feature_rows,
+        first_untrusted_capture_index=10,
+        exclude_last_trusted_frames=0,
+        min_steady_frames=4,
+        steady_width_tol_frac=0.08,
+        steady_width_tol_px=4.0,
+        flow_fit_backfill_max_frames=1,
+        flow_fit_backfill_width_delta_px=8.0,
+        flow_fit_backfill_monotonic_slack_px=0.75,
+        steady_fit_r2_min=0.985,
+        steady_fit_nrmse_max=0.03,
+    )
+
+    primary_metrics = mod._fit_window_metrics(feature_rows)
+
+    assert steady_fit["steady_fit_status"] == "ok"
+    assert steady_fit["flow_fit_capture_indices"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert steady_fit["flow_fit_backfill_point_count"] == 1
+    assert steady_fit["flow_fit_start_capture_index"] == 1
+    assert steady_fit["steady_rate_nl_per_us"] == pytest.approx(
+        primary_metrics["steady_rate_nl_per_us"], rel=1e-9
+    )
+    assert steady_fit["steady_nrmse"] == pytest.approx(primary_metrics["steady_nrmse"], rel=1e-9)
+
+
+def test_recompute_steady_fit_keeps_primary_failure_when_retry_without_backfill_also_fails():
+    feature_rows = _backfill_retry_feature_rows(backfill_volume_nl=1.8)
+
+    steady_fit = mod._recompute_steady_fit_from_feature_rows(
+        feature_rows,
+        first_untrusted_capture_index=10,
+        exclude_last_trusted_frames=0,
+        min_steady_frames=4,
+        steady_width_tol_frac=0.08,
+        steady_width_tol_px=4.0,
+        flow_fit_backfill_max_frames=1,
+        flow_fit_backfill_width_delta_px=8.0,
+        flow_fit_backfill_monotonic_slack_px=0.75,
+        steady_fit_r2_min=0.9999,
+        steady_fit_nrmse_max=0.0001,
+    )
+
+    assert steady_fit["steady_fit_status"] == "unresolved_quality_thresholds"
+    assert steady_fit["flow_fit_capture_indices"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert steady_fit["flow_fit_backfill_point_count"] == 1
+    assert steady_fit["steady_rate_nl_per_us"] is None
+    assert steady_fit["steady_rate_ci95_low_nl_per_us"] is None
+    assert steady_fit["steady_rate_confidence_status"] == "unresolved_quality_thresholds"
 
 
 def test_recompute_steady_fit_uses_first_qualifying_plateau_seed_and_extends_flow_fit():
@@ -2500,6 +2605,54 @@ def test_build_stage5_review_run_rejects_invalid_recomputed_flow_fit():
     assert stage5_run["tail_onset"]["tail_start_capture_index"] is None
     assert stage5_run["middle_extrapolation"]["middle_extrapolation_status"] == "unresolved_no_steady_fit"
     assert stage5_run["summary"]["predicted_volume_uncertainty_status"] == "unresolved_missing_rate_interval"
+    assert stage5_run["tail_start_candidate_rows"] == []
+
+
+def test_build_stage5_review_run_recovers_rate_by_retrying_without_backfill():
+    feature_rows = _backfill_retry_feature_rows(backfill_volume_nl=1.8) + [
+        {
+            **_feature_row(10, delay_from_emergence_us=1000, volume_nl=9.4, width_px=68.5),
+            "volume_trust_label": fov_mod.TRUST_LABEL_UNTRUSTED_FOV_EXIT,
+        },
+    ]
+    phase_input_rows = mod._phase_input_rows_from_feature_rows(feature_rows)
+
+    stage5_run = mod._build_stage5_review_run(
+        "run_retry_fit",
+        phase_input_rows,
+        steady_fit_payload={"steady_fit_status": "ok"},
+        fov_report={
+            "first_untrusted_capture_index": 10,
+            "first_fov_exit_delay_from_emergence_us": 1000,
+            "trigger_components": [],
+        },
+        trusted_visible_volume_nl=9.3,
+        first_untrusted_delay_from_emergence_us=1000,
+        width_smooth_window=1,
+        steady_fit_mode="recompute",
+        steady_fit_exclude_last_trusted_frames=0,
+        flow_fit_backfill_max_frames=1,
+        flow_fit_backfill_width_delta_px=8.0,
+        flow_fit_backfill_monotonic_slack_px=0.75,
+        tail_drop_frac=0.08,
+        tail_persist_frames=2,
+        steady_fit_r2_min=0.985,
+        steady_fit_nrmse_max=0.03,
+    )
+
+    assert stage5_run["steady_fit"]["steady_fit_status"] == "ok"
+    assert stage5_run["steady_fit"]["flow_fit_capture_indices"] == [2, 3, 4, 5, 6, 7, 8, 9]
+    assert stage5_run["steady_fit"]["flow_fit_backfill_point_count"] == 0
+    assert stage5_run["steady_fit"]["steady_rate_nl_per_us"] is not None
+    assert stage5_run["steady_fit"]["steady_rate_ci95_low_nl_per_us"] is not None
+    assert stage5_run["steady_fit"]["steady_rate_ci95_high_nl_per_us"] is not None
+    assert stage5_run["summary"]["steady_fit_status"] == "ok"
+    assert stage5_run["summary"]["steady_rate_confidence_status"] == "ok"
+    assert stage5_run["tail_onset"]["tail_onset_status"] == "unresolved"
+    assert stage5_run["tail_onset"]["tail_start_capture_index"] is None
+    assert stage5_run["middle_extrapolation"]["middle_extrapolation_status"] == "unresolved_no_tail_onset"
+    assert stage5_run["summary"]["middle_extrapolation_status"] == "unresolved_no_tail_onset"
+    assert stage5_run["summary"]["predicted_volume_uncertainty_status"] == "unresolved_missing_plausible_tail_candidates"
     assert stage5_run["tail_start_candidate_rows"] == []
 
 

@@ -10,6 +10,7 @@ import numpy as np
 from tools.stream_analysis import dataset as dataset_mod
 from tools.stream_analysis import silhouette as mod
 from tests.test_stream_analysis_baseline import _write_jsonl
+from tests.test_stream_analysis_nozzle import _write_stream_capture_log
 
 
 def _make_stream_frame(
@@ -247,6 +248,60 @@ def _fake_stage2_run(run_id: str, frame_rows: list[dict], **_kwargs):
                 "trigger_delta_px": 7.0,
             }
         ],
+        "frame_diagnostics": [],
+    }
+
+
+def _fake_fixed_stage2_run(run_id: str, frame_rows: list[dict], **_kwargs):
+    tracked_rows = []
+    for idx, frame_row in enumerate(frame_rows, start=1):
+        tracked_rows.append(
+            {
+                "run_id": run_id,
+                "capture_id": frame_row["capture_id"],
+                "capture_index": frame_row["capture_index"],
+                "flash_delay_us": frame_row["flash_delay_us"],
+                "tracked_nozzle_x_px": 180.0,
+                "tracked_nozzle_y_px": 110.0,
+                "tracked_confidence": 1.0,
+                "tracking_mode": "fixed_early",
+                "raw_mode": "fixed_early_anchor" if idx <= 3 else "fixed_early_reuse",
+                "final_mode": "fixed_early",
+                "segment_id": 1,
+                "shift_event_before": False,
+            }
+        )
+    return {
+        "raw_rows": [],
+        "tracked_rows": tracked_rows,
+        "shift_events": [],
+        "frame_diagnostics": [],
+    }
+
+
+def _fake_failed_fixed_stage2_run(run_id: str, frame_rows: list[dict], **_kwargs):
+    tracked_rows = []
+    for frame_row in frame_rows:
+        tracked_rows.append(
+            {
+                "run_id": run_id,
+                "capture_id": frame_row["capture_id"],
+                "capture_index": frame_row["capture_index"],
+                "flash_delay_us": frame_row["flash_delay_us"],
+                "tracked_nozzle_x_px": None,
+                "tracked_nozzle_y_px": None,
+                "tracked_confidence": 0.0,
+                "tracking_mode": "fixed_early",
+                "raw_mode": "fixed_early_failed",
+                "final_mode": "fixed_early_failed",
+                "segment_id": 1,
+                "shift_event_before": False,
+            }
+        )
+    return {
+        "raw_rows": [],
+        "tracked_rows": tracked_rows,
+        "shift_events": [],
         "frame_diagnostics": [],
     }
 
@@ -656,3 +711,70 @@ def test_export_stage3_silhouette_refines_detached_open_bottom_component(tmp_pat
     assert detached_row["fill_strategy"] == "row_envelope_fill"
     assert detached_row["open_bottom_interior_detected"] == "True"
     assert int(detached_row["row_fill_added_pixel_count"]) > 0
+
+
+def test_build_stage3_run_uses_constant_fixed_early_cutoff(tmp_path, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    inventory = dataset_mod.build_stage0_inventory(exp_dir)
+    frame_rows = list(inventory["frames_by_run_id"][run_dir.name])
+    captured = {}
+
+    def _capturing_fixed_stage2_run(run_id: str, frame_rows: list[dict], **kwargs):
+        captured["tracking_mode"] = kwargs.get("tracking_mode")
+        return _fake_fixed_stage2_run(run_id, frame_rows, **kwargs)
+
+    monkeypatch.setattr(mod, "_build_stage2_run", _capturing_fixed_stage2_run)
+
+    stage3_run = mod._build_stage3_run(
+        run_dir.name,
+        frame_rows,
+        tracking_mode="fixed_early",
+        sample_count=3,
+        extra_frame_indices=None,
+        search_width_frac=0.22,
+        search_top_frac=0.08,
+        search_bottom_frac=0.30,
+        blur_sigma=12.0,
+        residual_threshold=18,
+        shift_threshold_px=6.0,
+        confidence_threshold=0.55,
+        roi_width_frac=0.35,
+        roi_top_frac=0.10,
+        roi_bottom_frac=1.0,
+        corridor_width_frac=0.70,
+        nozzle_guard_px=2,
+        min_component_area_px=50,
+    )
+
+    metric_rows = list(stage3_run["metric_rows"])
+    assert captured["tracking_mode"] == "fixed_early"
+    assert {row["tracked_nozzle_x_px"] for row in metric_rows} == {180.0}
+    assert {row["tracked_nozzle_y_px"] for row in metric_rows} == {110.0}
+    assert {row["cutoff_y_px"] for row in metric_rows} == {112}
+
+
+def test_export_stage3_silhouette_reports_missing_nozzle_track_for_fixed_anchor_failure(tmp_path, monkeypatch):
+    exp_dir, run_dir = _make_silhouette_experiment(tmp_path)
+    _write_stream_capture_log(
+        exp_dir,
+        run_id=run_dir.name,
+        gripper_refresh_suspended=True,
+    )
+    out_dir = tmp_path / "analysis" / "stream_characterization"
+    monkeypatch.setattr(mod, "_build_stage2_run", _fake_failed_fixed_stage2_run)
+
+    payload = mod.export_stage3_silhouette(
+        exp_dir,
+        output_root=out_dir,
+        sample_count=3,
+        nozzle_guard_px=2,
+        min_component_area_px=50,
+    )
+
+    metrics_csv = Path(payload["runs"][0]["silhouette_metrics_csv"])
+    with metrics_csv.open("r", encoding="utf-8", newline="") as handle:
+        metric_rows = list(csv.DictReader(handle))
+
+    assert metric_rows
+    assert all(row["silhouette_status"] == "missing_nozzle_track" for row in metric_rows)
+    assert all(row["failure_reason"] == "tracked nozzle location unavailable" for row in metric_rows)

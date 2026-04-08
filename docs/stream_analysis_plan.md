@@ -3398,6 +3398,69 @@ Implemented:
   - it now dispatches into the canonical `summary --cache-root ...` implementation
   - it no longer owns a separate late-stage implementation or a distinct `stage_05_review/` output contract
 
+### 2026-04-07 - Metadata-Activated Fixed-Early Nozzle Mode
+
+What changed:
+
+- added a run-level Stage 2 nozzle tracking mode, `fixed_early`, for datasets where the gripper refresh is intentionally suspended and the nozzle stays fixed through the whole run
+- Stage 0 inventory now joins `stream_capture_log.jsonl` by `timecourse_run_id`
+  - when a run’s log row has `gripper_refresh_suspended = true`, the resolved run `tracking_mode` is now `fixed_early`
+  - otherwise the pipeline keeps the existing `dynamic` Stage 2 path
+- the reusable raw pipeline path now carries `tracking_mode` through:
+  - Stage 2 `nozzle`
+  - Stage 3 `silhouette`
+  - Stage 4 `volume`
+  - Stage 5 `fit`
+  - Stage 6 `summary`
+
+`fixed_early` Stage 2 behavior:
+
+- Stage 2 now uses only the first `5` frames to build a run-level fixed nozzle anchor
+- it prefers frames `1-3`
+- frame `4` or `5` may replace one unusable or ambiguous early frame, but no frame after `5` participates in anchor selection
+- for each candidate anchor frame:
+  - reuse the current top-search preprocessing
+  - keep the top centered contour family
+  - fill that contour
+  - compute the nozzle point from the filled-contour centroid using contour moments
+- accept an anchor family only when:
+  - the selected contour centers stay within `12 px` in both `x` and `y`
+  - contour area is nondecreasing with at most `5%` single-step slack
+  - net area growth from the first selected frame to the third is at least `10%`
+- when the anchor succeeds:
+  - Stage 2 writes one fixed `(x, y)` to `tracked_nozzle_x_px` / `tracked_nozzle_y_px` for every frame in the run
+  - per-frame `tracking_mode = fixed_early`
+  - anchor frames use `raw_mode = fixed_early_anchor`
+  - reused frames use `raw_mode = fixed_early_reuse`
+  - `detection_mode = final_mode = fixed_early`
+  - `segment_id = 1` for all frames
+  - `shift_events.json` is empty
+- when the anchor fails:
+  - Stage 2 does not fall back to dynamic tracking
+  - `tracked_nozzle_x_px` / `tracked_nozzle_y_px` stay null
+  - `detection_mode = final_mode = fixed_early_failed`
+  - Stage 3 then surfaces its existing `missing_nozzle_track` status
+
+New Stage 2 artifacts:
+
+- per-run `stage_02_nozzle/fixed_anchor.json`
+- per-run `stage_02_nozzle/fixed_anchor_frames.csv`
+- added per-frame Stage 2 columns:
+  - `tracking_mode`
+  - `anchor_status`
+  - `anchor_failure_reason`
+  - `anchor_frame_used`
+- fixed-mode review panels always include frames `1-5` plus the usual sampled frames, with the fixed nozzle marker rendered on every panel
+
+Validation:
+
+- focused fixed-mode / late-stage plumbing tests:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_nozzle.py tests\test_stream_analysis_cli.py tests\test_stream_analysis_silhouette.py`
+  - result: `94 passed`
+- additional metadata / late-stage regression checks:
+  - `.\env\Scripts\python.exe -m pytest -q tests\test_stream_analysis_dataset.py tests\test_stream_analysis_volume.py tests\test_stream_analysis_fit.py tests\test_stream_analysis_summary.py`
+  - result: `73 passed`
+
 How to analyze a new experiment with the current code:
 
 - place the experiment in the standard recorder layout:
