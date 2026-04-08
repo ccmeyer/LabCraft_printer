@@ -21966,6 +21966,7 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
     delayApplied   = Signal()
     nextDelay      = Signal()
     finalize       = Signal()
+    BASE_WINDOW_EXTENSION_THRESHOLD_US = 3000
 
     def __init__(self, calibration_manager, model,
                  *,
@@ -21994,7 +21995,8 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
 
         # --- schedule of delays ---
         self.step_us   = int(max(1, step_us))
-        self.window_us = int(max(self.step_us, window_us))
+        self.print_pulse_width_us = self._resolve_print_pulse_width_us()
+        self.window_us = self._compute_timecourse_window_us(window_us)
         self.start_delay_us = max(0, (int(self.emergence_time_us) // self.step_us) * self.step_us - self.step_us)
         stop = self.start_delay_us + self.window_us
         self.delays = list(range(self.start_delay_us, stop + 1, self.step_us))
@@ -22032,6 +22034,27 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         for s in (self.state_prepare, self.state_apply, self.state_capture, self.state_annot, self.state_final):
             self.state_machine.addState(s)
         self.state_machine.setInitialState(self.state_prepare)
+
+    def _resolve_print_pulse_width_us(self) -> int | None:
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "get_print_pulse_width", None)
+        try:
+            value = getter() if callable(getter) else getattr(machine_model, "print_pulse_width", None)
+        except Exception:
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _compute_timecourse_window_us(self, base_window_us: int) -> int:
+        base_window_us = int(max(self.step_us, int(base_window_us)))
+        try:
+            pw_us = int(self.print_pulse_width_us)
+        except Exception:
+            return base_window_us
+        extension_us = max(0, int(pw_us) - int(self.BASE_WINDOW_EXTENSION_THRESHOLD_US))
+        return int(max(self.step_us, int(base_window_us) + int(extension_us)))
 
     def start(self):
         if not self._save_camera_archive:

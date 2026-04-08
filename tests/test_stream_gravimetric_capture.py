@@ -404,8 +404,15 @@ def _make_manager(tmp_path, *, experiment_dir_name="experiment", num_flashes=100
     return model, manager
 
 
-def _make_timecourse_process(tmp_path, monkeypatch, *, save_camera_archive=False):
+def _make_timecourse_process(
+    tmp_path,
+    monkeypatch,
+    *,
+    save_camera_archive=False,
+    print_pulse_width=3000,
+):
     model, manager = _make_manager(tmp_path)
+    model.machine_model.get_print_pulse_width = lambda: print_pulse_width
     manager.get_emergence_time = lambda quiet=True: 750
     manager.get_background_image = lambda: object()
     started = []
@@ -722,6 +729,47 @@ def test_droplet_timecourse_camera_archive_can_be_opted_in(tmp_path, monkeypatch
     assert model.droplet_camera_model.stop_saving_calls == 1
     assert proc._camera_archive_enabled is False
     assert proc._save_dir is None
+
+
+@pytest.mark.parametrize(
+    ("print_pulse_width", "expected_window_us"),
+    [
+        (1400, 6000),
+        (3000, 6000),
+        (3500, 6500),
+        ("invalid", 6000),
+        (None, 6000),
+    ],
+)
+def test_droplet_timecourse_window_scales_with_print_pulse_width(
+    tmp_path,
+    monkeypatch,
+    print_pulse_width,
+    expected_window_us,
+):
+    _model, _manager, proc, _started = _make_timecourse_process(
+        tmp_path,
+        monkeypatch,
+        print_pulse_width=print_pulse_width,
+    )
+
+    assert proc.window_us == expected_window_us
+    assert proc.delays[0] == 700
+    assert proc.delays[-1] == 700 + expected_window_us
+
+
+def test_droplet_timecourse_prepare_stage_reports_derived_window(tmp_path, monkeypatch):
+    _model, _manager, proc, _started = _make_timecourse_process(
+        tmp_path,
+        monkeypatch,
+        print_pulse_width=3500,
+    )
+    messages = []
+    proc.stageChanged.connect(messages.append)
+
+    proc.onPrepare()
+
+    assert any("window=6500 us" in message for message in messages)
 
 
 def test_stream_capture_finalize_appends_metadata_and_sidecar(tmp_path, monkeypatch):
