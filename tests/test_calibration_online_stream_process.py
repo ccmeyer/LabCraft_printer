@@ -252,7 +252,7 @@ def _set_flow_sequence(proc, offsets_from_emergence_us):
         "max_capture_count": int((proc.flow_plan or {}).get("max_capture_count") or 30),
         "soft_bottom_clearance_px": int((proc.flow_plan or {}).get("soft_bottom_clearance_px") or 150),
         "ci95_relative_width_target": float((proc.flow_plan or {}).get("ci95_relative_width_target") or 0.12),
-        "reserved_tail_capture_count": int((proc.flow_plan or {}).get("reserved_tail_capture_count") or 16),
+        "reserved_tail_capture_count": int((proc.flow_plan or {}).get("reserved_tail_capture_count") or 25),
         "ci_extension_step_us": int((proc.flow_plan or {}).get("ci_extension_step_us") or 50),
     }
     proc._flow_delay_sequence = [int(proc.emergence_time_us) + int(offset_us) for offset_us in offsets]
@@ -907,7 +907,7 @@ def test_online_stream_capture_flow_frame_uses_one_printed_attempt_and_consumes_
     assert capture_signal.count == 1
     assert proc._attempted_capture_count == 1
     assert proc.capture_budget["captures_used"] == 1
-    assert proc.capture_budget["captures_remaining_hard"] == 45
+    assert proc.capture_budget["captures_remaining_hard"] == 60
 
 
 def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_use(tmp_path):
@@ -921,7 +921,7 @@ def test_online_stream_capture_flow_frame_refreshes_plan_snapshot_after_budget_u
 
     snapshot = json.loads(Path(proc._plan_snapshot_path).read_text(encoding="utf-8"))
     assert snapshot["capture_budget"]["captures_used"] == 1
-    assert snapshot["capture_budget"]["captures_remaining_hard"] == 45
+    assert snapshot["capture_budget"]["captures_remaining_hard"] == 60
 
 
 def test_online_stream_apply_flow_delay_routes_to_fit_when_delays_are_exhausted(tmp_path):
@@ -1559,14 +1559,34 @@ def test_online_stream_plan_tail_phase_reserves_backtrack_budget_for_tail_search
 
     proc.onPlanTailPhase()
 
-    assert proc._tail_plan["reserved_backtrack_capture_count"] == 10
-    assert proc._tail_plan["reserved_refine_capture_count"] == 10
-    assert proc._tail_plan["reserved_refine_delay_count"] == 10
-    assert len(proc._tail_delay_sequence) == 21
+    assert proc._tail_plan["max_scout_delay_count"] == 10
+    assert proc._tail_plan["fine_prepad_us"] == 100
+    assert proc._tail_plan["fine_postpad_us"] == 100
+    assert proc._tail_plan["reserved_backtrack_capture_count"] == 15
+    assert proc._tail_plan["reserved_refine_capture_count"] == 15
+    assert proc._tail_plan["reserved_refine_delay_count"] == 15
+    assert len(proc._tail_delay_sequence) == 10
     assert (
         len(proc._tail_delay_sequence) * int(proc._tail_plan["scout_replicates"])
         + int(proc._tail_plan["reserved_backtrack_capture_count"])
     ) <= int(proc.capture_budget["captures_remaining_hard"])
+
+
+def test_online_stream_plan_tail_phase_fails_when_less_than_dense_tail_budget_remains(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc.onPlanFlowPhase()
+    proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
+        calibration_model.online_cal_mod.new_online_stream_budget(),
+        phase="flow_phase",
+        count=37,
+    )
+    _seed_tail_flow_context(proc)
+
+    proc.onPlanTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_budget_exhausted"
+    assert proc._tail_termination_reason == "capture_budget_exhausted"
 
 
 def test_online_stream_analyze_tail_frame_accepts_late_width_even_when_flow_qc_would_reject(tmp_path, monkeypatch):
@@ -1729,6 +1749,8 @@ def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_la
         "backtrack_step_us": 50,
         "scout_replicates": 1,
         "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
         "planned_scout_delay_count": 2,
     }
     proc._tail_mode = "scout"
@@ -1762,7 +1784,59 @@ def test_online_stream_advance_tail_phase_switches_to_backtrack_on_separation_la
     assert proc._tail_landmark_delay_us == 4750
     assert proc._tail_landmark_reason == "separated_from_nozzle"
     assert proc._tail_backtrack_left_delay_us == 4250
-    assert proc._tail_delay_sequence == [4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700]
+    assert proc._tail_delay_sequence == [4250, 4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700, 4750, 4800, 4850]
+
+
+def test_online_stream_advance_tail_phase_switches_to_dense_full_window_after_later_scout_landmark(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+        "planned_scout_delay_count": 2,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250]
+    proc._tail_delay_index = 1
+    proc._tail_replicate_index = 0
+    proc._tail_scout_delay_summaries = [
+        calibration_model.online_tail_mod.summarize_online_stream_tail_delay(
+            [_accepted_tail_frame_row(proc, 1550, phase="tail_scout", width_px=74.0)],
+            74.0,
+        )
+    ]
+    proc._tail_current_delay_us = 5250
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_scout",
+            status="accepted",
+            delay_us=5250,
+            delay_from_emergence_us=2050,
+            replicate_index=1,
+            qc={"tail_qc_pass": False, "tail_width_usable": False, "tail_landmark_usable": True},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=None,
+            tail_width_usable=False,
+            tail_landmark_usable=True,
+            separated_from_nozzle_landmark=True,
+            landmark_reason="separated_from_nozzle",
+            attached_bottom_guard_hit=False,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "backtrack"
+    assert proc._tail_landmark_delay_us == 5250
+    assert proc._tail_backtrack_left_delay_us == 4750
+    assert proc._tail_delay_sequence == [4650, 4700, 4750, 4800, 4850, 4900, 4950, 5000, 5050, 5100, 5150, 5200, 5250, 5300, 5350]
 
 
 def test_online_stream_advance_tail_phase_stops_when_no_scout_landmark_occurs(tmp_path):
@@ -1854,7 +1928,7 @@ def test_online_stream_capture_tail_frame_stops_on_budget_exhaustion(tmp_path):
     proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
         calibration_model.online_cal_mod.new_online_stream_budget(),
         phase="flow_phase",
-        count=46,
+        count=61,
     )
 
     proc.onCaptureTailFrame()

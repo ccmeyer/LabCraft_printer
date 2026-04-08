@@ -243,9 +243,12 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
 
     backtrack_summaries = []
     for backtrack_delay_us in online_tail_mod.build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=int(tail_plan["scout_anchor_delay_us"]),
         left_endpoint_delay_us=backtrack_left_delay_us,
         landmark_delay_us=landmark_delay_us,
         backtrack_step_us=int(tail_plan["backtrack_step_us"]),
+        fine_prepad_us=int(tail_plan.get("fine_prepad_us") or 100),
+        fine_postpad_us=int(tail_plan.get("fine_postpad_us") or 100),
     ):
         backtrack_summaries.append(
             _build_tail_delay_summary(

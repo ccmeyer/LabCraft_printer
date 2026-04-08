@@ -6804,9 +6804,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _build_tail_backtrack_delay_sequence(self) -> list[int]:
         return list(
             online_tail_mod.build_online_stream_tail_backtrack_plan(
+                scout_anchor_delay_us=self._tail_plan.get("scout_anchor_delay_us"),
                 left_endpoint_delay_us=self._tail_backtrack_left_delay_us,
                 landmark_delay_us=self._tail_landmark_delay_us,
                 backtrack_step_us=int(self._tail_plan.get("backtrack_step_us") or 50),
+                fine_prepad_us=int(self._tail_plan.get("fine_prepad_us") or 100),
+                fine_postpad_us=int(self._tail_plan.get("fine_postpad_us") or 100),
             )
         )
 
@@ -7654,9 +7657,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return
 
         if not bool(self._tail_plan.get("run_tail")):
-            self._tail_phase_status = "unresolved_missing_flow_baseline"
-            self._tail_termination_reason = str(self._tail_plan.get("skip_reason") or "missing_flow_baseline")
-            self._append_tail_warning("unresolved_missing_flow_baseline")
+            skip_reason = str(self._tail_plan.get("skip_reason") or "missing_flow_baseline")
+            if skip_reason == "capture_budget_exhausted":
+                self._tail_phase_status = "unresolved_budget_exhausted"
+                self._tail_termination_reason = "capture_budget_exhausted"
+                self._append_tail_warning("capture_budget_exhausted")
+            else:
+                self._tail_phase_status = "unresolved_missing_flow_baseline"
+                self._tail_termination_reason = str(skip_reason)
+                self._append_tail_warning("unresolved_missing_flow_baseline")
             self._resolve_tail_phase()
             self.tailPhaseFinished.emit()
             return

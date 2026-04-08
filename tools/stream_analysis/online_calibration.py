@@ -9,7 +9,7 @@ DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_max_capture_count": 30,
     "flow_soft_bottom_clearance_px": 150,
     "flow_ci95_relative_width_target": 0.12,
-    "reserved_tail_capture_count": 16,
+    "reserved_tail_capture_count": 25,
     "flow_ci_extension_step_us": 50,
     "flow_step_us": 57,
     "flow_delay_count": 15,
@@ -20,8 +20,8 @@ DEFAULT_ONLINE_STREAM_POLICY = {
     "tail_coarse_replicates": 2,
     "tail_refine_step_us": 50,
     "tail_refine_replicates": 2,
-    "nominal_capture_budget": 40,
-    "hard_capture_budget": 46,
+    "nominal_capture_budget": 55,
+    "hard_capture_budget": 61,
     "bottom_of_fov_guard_px": 96,
 }
 

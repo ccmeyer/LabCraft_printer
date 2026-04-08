@@ -197,7 +197,7 @@ def _build_run(run_dir: Path, *, scout_phase: str = "tail_scout", backtrack_phas
         flow_fit_result=flow_fit,
         priors={"condition_match": "none"},
         emergence_time_us=3200,
-        capture_budget={"captures_remaining_hard": 12},
+        capture_budget={"captures_remaining_hard": 25},
         flow_delay_summaries=flow_delay_summaries,
     )
     tail_plan["planned_scout_delay_count"] = 1

@@ -59,7 +59,7 @@ def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changi
     assert plan["scout_step_us"] == 100
     assert plan["min_accepted_delays"] == 12
     assert plan["max_capture_count"] == 30
-    assert plan["reserved_tail_capture_count"] == 16
+    assert plan["reserved_tail_capture_count"] == 25
     assert plan["plan_source"] == "prior_adjusted"
 
 
@@ -78,7 +78,7 @@ def test_build_online_stream_flow_plan_without_prior_matches_adaptive_defaults()
     assert plan["max_capture_count"] == 30
     assert plan["soft_bottom_clearance_px"] == 150
     assert plan["ci95_relative_width_target"] == 0.12
-    assert plan["reserved_tail_capture_count"] == 16
+    assert plan["reserved_tail_capture_count"] == 25
     assert plan["plan_source"] == "default"
 
 
@@ -167,13 +167,13 @@ def test_online_stream_budget_creation_and_consumption_is_non_mutating():
     consumed = mod.consume_online_stream_budget(budget, phase="flow_rate", count=3)
 
     assert budget["captures_used"] == 0
-    assert budget["captures_remaining_nominal"] == 40
-    assert budget["captures_remaining_hard"] == 46
+    assert budget["captures_remaining_nominal"] == 55
+    assert budget["captures_remaining_hard"] == 61
     assert budget["history"] == []
 
     assert consumed["captures_used"] == 3
-    assert consumed["captures_remaining_nominal"] == 37
-    assert consumed["captures_remaining_hard"] == 43
+    assert consumed["captures_remaining_nominal"] == 52
+    assert consumed["captures_remaining_hard"] == 58
     assert consumed["exhausted"] is False
     assert consumed["history"][-1]["phase"] == "flow_rate"
     assert consumed["history"][-1]["count"] == 3
@@ -182,9 +182,9 @@ def test_online_stream_budget_creation_and_consumption_is_non_mutating():
 def test_online_stream_budget_marks_exhausted_at_hard_limit():
     budget = mod.new_online_stream_budget()
 
-    exhausted = mod.consume_online_stream_budget(budget, phase="tail_start", count=46)
+    exhausted = mod.consume_online_stream_budget(budget, phase="tail_start", count=61)
 
-    assert exhausted["captures_used"] == 46
+    assert exhausted["captures_used"] == 61
     assert exhausted["captures_remaining_nominal"] == 0
     assert exhausted["captures_remaining_hard"] == 0
     assert exhausted["exhausted"] is True
@@ -560,7 +560,7 @@ def test_decide_online_stream_flow_next_action_stops_for_budget_exhaustion():
         capture_budget=mod.consume_online_stream_budget(
             mod.new_online_stream_budget(),
             phase="flow_rate",
-            count=46,
+            count=61,
         ),
         consecutive_failed_delays=0,
         attempted_delay_count=2,

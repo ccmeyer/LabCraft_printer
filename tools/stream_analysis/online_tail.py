@@ -14,9 +14,12 @@ DEFAULT_ONLINE_TAIL_POLICY = {
     "consecutive_failed_tail_delays_stop": 2,
     "scout_step_us": 500,
     "scout_replicates": 1,
+    "max_scout_delay_count": 10,
     "backtrack_step_us": 50,
     "backtrack_replicates": 1,
-    "reserved_backtrack_capture_count": 10,
+    "fine_prepad_us": 100,
+    "fine_postpad_us": 100,
+    "reserved_backtrack_capture_count": 15,
 }
 
 
@@ -133,6 +136,26 @@ def _summary_delay_from_emergence(summary: dict | None, delay_us: int | None) ->
     if summary:
         return _to_int(summary.get("delay_from_emergence_us"))
     return None
+
+
+def _delay_from_emergence_from_plan(plan: dict | None, delay_us: int | None) -> int | None:
+    resolved_plan = dict(plan or {})
+    delay_value = _to_int(delay_us)
+    scout_anchor_delay_us = _to_int(resolved_plan.get("scout_anchor_delay_us"))
+    scout_anchor_delay_from_emergence_us = _to_int(
+        resolved_plan.get("scout_anchor_delay_from_emergence_us")
+    )
+    if (
+        delay_value is None
+        or scout_anchor_delay_us is None
+        or scout_anchor_delay_from_emergence_us is None
+    ):
+        return None
+    return int(
+        int(scout_anchor_delay_from_emergence_us)
+        + int(delay_value)
+        - int(scout_anchor_delay_us)
+    )
 
 
 def _legacy_tail_width_usable(row: dict) -> bool:
@@ -277,14 +300,33 @@ def plan_online_stream_tail_phase(
     )
     scout_step_us = int(resolved_policy["scout_step_us"])
     scout_replicates = int(resolved_policy["scout_replicates"])
+    max_scout_delay_count = int(resolved_policy["max_scout_delay_count"])
     backtrack_step_us = int(resolved_policy["backtrack_step_us"])
     backtrack_replicates = int(resolved_policy["backtrack_replicates"])
+    fine_prepad_us = int(resolved_policy["fine_prepad_us"])
+    fine_postpad_us = int(resolved_policy["fine_postpad_us"])
     reserved_backtrack_capture_count = int(resolved_policy["reserved_backtrack_capture_count"])
     remaining_hard = _remaining_hard_budget(capture_budget)
-    planned_scout_delay_count = max(
-        0,
-        int((max(0, remaining_hard - reserved_backtrack_capture_count)) // max(1, scout_replicates)),
+    required_capture_count = int(
+        max(0, max_scout_delay_count) * max(1, scout_replicates)
+        + max(0, reserved_backtrack_capture_count)
     )
+    if remaining_hard < int(required_capture_count):
+        return {
+            "run_tail": False,
+            "skip_reason": "capture_budget_exhausted",
+            "steady_width_baseline_px": float(steady_width_baseline_px),
+            "search_method": SEARCH_METHOD,
+            "planned_scout_delay_count": int(max_scout_delay_count),
+            "max_scout_delay_count": int(max_scout_delay_count),
+            "reserved_backtrack_capture_count": int(reserved_backtrack_capture_count),
+            "fine_prepad_us": int(fine_prepad_us),
+            "fine_postpad_us": int(fine_postpad_us),
+            "required_capture_count": int(required_capture_count),
+            "tail_retarget_count": 0,
+            "retargeted_coarse_start_delay_us": None,
+        }
+    planned_scout_delay_count = int(max(0, max_scout_delay_count))
 
     scout_first_delay_us = int(last_flow_delay_us + scout_step_us)
     scout_first_delay_from_emergence_us = int(last_flow_delay_from_emergence_us + scout_step_us)
@@ -304,8 +346,11 @@ def plan_online_stream_tail_phase(
         "scout_first_delay_from_emergence_us": int(scout_first_delay_from_emergence_us),
         "scout_step_us": int(scout_step_us),
         "scout_replicates": int(scout_replicates),
+        "max_scout_delay_count": int(max_scout_delay_count),
         "backtrack_step_us": int(backtrack_step_us),
         "backtrack_replicates": int(backtrack_replicates),
+        "fine_prepad_us": int(fine_prepad_us),
+        "fine_postpad_us": int(fine_postpad_us),
         "planned_scout_delay_count": int(planned_scout_delay_count),
         "reserved_backtrack_capture_count": int(reserved_backtrack_capture_count),
         "tail_retarget_count": 0,
@@ -430,18 +475,30 @@ def summarize_online_stream_tail_delay(
 
 def build_online_stream_tail_backtrack_plan(
     *,
+    scout_anchor_delay_us: int | None = None,
     left_endpoint_delay_us: int | None,
     landmark_delay_us: int | None,
     backtrack_step_us: int,
+    fine_prepad_us: int | None = None,
+    fine_postpad_us: int | None = None,
 ) -> list[int]:
+    scout_anchor_delay = _to_int(scout_anchor_delay_us)
     left_delay_us = _to_int(left_endpoint_delay_us)
     right_delay_us = _to_int(landmark_delay_us)
     step_us = max(1, _to_int(backtrack_step_us, DEFAULT_ONLINE_TAIL_POLICY["backtrack_step_us"]))
-    if left_delay_us is None or right_delay_us is None or int(left_delay_us) >= int(right_delay_us):
+    prepad_us = max(0, _to_int(fine_prepad_us, DEFAULT_ONLINE_TAIL_POLICY["fine_prepad_us"]))
+    postpad_us = max(0, _to_int(fine_postpad_us, DEFAULT_ONLINE_TAIL_POLICY["fine_postpad_us"]))
+    if left_delay_us is None or right_delay_us is None or int(left_delay_us) > int(right_delay_us):
+        return []
+    start_delay_us = int(left_delay_us) - int(prepad_us)
+    if scout_anchor_delay is not None:
+        start_delay_us = max(int(scout_anchor_delay), int(start_delay_us))
+    end_delay_us = int(right_delay_us) + int(postpad_us)
+    if int(start_delay_us) > int(end_delay_us):
         return []
     return [
         int(delay_us)
-        for delay_us in range(int(left_delay_us) + int(step_us), int(right_delay_us), int(step_us))
+        for delay_us in range(int(start_delay_us), int(end_delay_us) + int(step_us), int(step_us))
     ]
 
 
@@ -458,6 +515,8 @@ def build_online_stream_tail_refine_plan(
         left_endpoint_delay_us=last_coarse_nontrigger_delay_us,
         landmark_delay_us=first_coarse_trigger_delay_us,
         backtrack_step_us=refine_step_us,
+        fine_prepad_us=0,
+        fine_postpad_us=0,
     )
 
 
@@ -607,17 +666,22 @@ def resolve_online_stream_tail_result(
             phase_label="flow_anchor",
         )
 
-    local_trace = []
-    seen_delays = set()
-    for row in [left_endpoint_summary, *backtrack_rows, landmark_summary]:
+    local_trace_rows_by_delay = {}
+    for row in list(backtrack_rows or []):
+        summary = dict(row or {})
+        delay_value = _to_int(summary.get("delay_us"))
+        if delay_value is None:
+            continue
+        local_trace_rows_by_delay[int(delay_value)] = summary
+    for row in [left_endpoint_summary, landmark_summary]:
         if not row:
             continue
         summary = dict(row or {})
         delay_value = _to_int(summary.get("delay_us"))
-        if delay_value is None or delay_value in seen_delays:
+        if delay_value is None or int(delay_value) in local_trace_rows_by_delay:
             continue
-        seen_delays.add(delay_value)
-        local_trace.append(summary)
+        local_trace_rows_by_delay[int(delay_value)] = summary
+    local_trace = list(local_trace_rows_by_delay.values())
     local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
 
     separation_landmark_delay_from_emergence_us = None
@@ -719,20 +783,41 @@ def resolve_online_stream_tail_result(
         )
 
     landmark_delay_from_emergence_us = _summary_delay_from_emergence(landmark_summary, landmark_delay_us)
-    backtrack_window_start_delay_from_emergence_us = _summary_delay_from_emergence(
-        left_endpoint_summary,
-        backtrack_left_delay_us,
+    fine_window_delays_us = build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=_to_int(plan.get("scout_anchor_delay_us")),
+        left_endpoint_delay_us=backtrack_left_delay_us,
+        landmark_delay_us=landmark_delay_us,
+        backtrack_step_us=int(plan.get("backtrack_step_us") or DEFAULT_ONLINE_TAIL_POLICY["backtrack_step_us"]),
+        fine_prepad_us=_to_int(plan.get("fine_prepad_us"), DEFAULT_ONLINE_TAIL_POLICY["fine_prepad_us"]),
+        fine_postpad_us=_to_int(plan.get("fine_postpad_us"), DEFAULT_ONLINE_TAIL_POLICY["fine_postpad_us"]),
     )
-    if (
-        backtrack_window_start_delay_from_emergence_us is None
-        and landmark_delay_from_emergence_us is not None
-        and landmark_delay_us is not None
-        and backtrack_left_delay_us is not None
-    ):
-        backtrack_window_start_delay_from_emergence_us = int(
-            int(landmark_delay_from_emergence_us)
-            - int(landmark_delay_us)
-            + int(backtrack_left_delay_us)
+    if backtrack_rows:
+        sampled_backtrack_delays_us = sorted(
+            int(dict(row or {}).get("delay_us"))
+            for row in backtrack_rows
+            if _to_int(dict(row or {}).get("delay_us")) is not None
+        )
+        if sampled_backtrack_delays_us:
+            fine_window_delays_us = list(sampled_backtrack_delays_us)
+    fine_window_start_delay_us = fine_window_delays_us[0] if fine_window_delays_us else backtrack_left_delay_us
+    fine_window_end_delay_us = fine_window_delays_us[-1] if fine_window_delays_us else landmark_delay_us
+    backtrack_window_start_delay_from_emergence_us = _delay_from_emergence_from_plan(
+        plan,
+        fine_window_start_delay_us,
+    )
+    if backtrack_window_start_delay_from_emergence_us is None:
+        backtrack_window_start_delay_from_emergence_us = _summary_delay_from_emergence(
+            left_endpoint_summary,
+            fine_window_start_delay_us,
+        )
+    backtrack_window_end_delay_from_emergence_us = _delay_from_emergence_from_plan(
+        plan,
+        fine_window_end_delay_us,
+    )
+    if backtrack_window_end_delay_from_emergence_us is None:
+        backtrack_window_end_delay_from_emergence_us = _summary_delay_from_emergence(
+            landmark_summary,
+            fine_window_end_delay_us,
         )
 
     all_summaries = list(scout_rows) + list(backtrack_rows)
@@ -740,6 +825,10 @@ def resolve_online_stream_tail_result(
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
         "search_method": SEARCH_METHOD,
+        "max_scout_delay_count": _to_int(plan.get("max_scout_delay_count")),
+        "fine_prepad_us": _to_int(plan.get("fine_prepad_us")),
+        "fine_postpad_us": _to_int(plan.get("fine_postpad_us")),
+        "reserved_backtrack_capture_count": _to_int(plan.get("reserved_backtrack_capture_count")),
         "attempted_delay_count": int(len(all_summaries)),
         "attempted_capture_count": int(
             sum(max(0, _to_int(row.get("attempted_replicates"), 0)) for row in all_summaries)
@@ -756,7 +845,9 @@ def resolve_online_stream_tail_result(
         "landmark_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "landmark_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
         "backtrack_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
-        "backtrack_window_end_delay_from_emergence_us": landmark_delay_from_emergence_us,
+        "backtrack_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
+        "fine_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
+        "fine_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "tail_start_evidence": tail_start_evidence,
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
