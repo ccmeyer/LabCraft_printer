@@ -1052,8 +1052,29 @@ def analyze_online_stream_frame(
         flow_volume_geometry_ok = bool(
             attached_geometry_ok is not False and detached_geometry_ok is not False
         )
+    plausible_unaccepted_component_count = stage3_metric_row.get(
+        "plausible_unaccepted_component_count"
+    )
+    plausible_unaccepted_visible_volume_nl = frame_metric_row.get(
+        "plausible_unaccepted_visible_volume_nl"
+    )
+    flow_volume_complete_ok = None
+    flow_volume_completeness_reasons = []
+    if geometry_assessable:
+        flow_volume_complete_ok = True
+        if (
+            plausible_unaccepted_visible_volume_nl is not None
+            and float(plausible_unaccepted_visible_volume_nl)
+            >= float(config["flow_volume_incomplete_material_volume_nl"])
+        ):
+            flow_volume_complete_ok = False
+            flow_volume_completeness_reasons.append(
+                "material_plausible_unaccepted_detached"
+            )
     flow_measurement_usable = bool(
-        measurement_qc_pass and flow_volume_geometry_ok is not False
+        measurement_qc_pass
+        and flow_volume_geometry_ok is not False
+        and flow_volume_complete_ok is not False
     )
 
     warnings = []
@@ -1075,6 +1096,8 @@ def analyze_online_stream_frame(
         warnings.append("near_nozzle_detached_warning")
     if measurement_qc_pass and flow_volume_geometry_ok is False:
         warnings.append("flow_volume_geometry_not_ok")
+    if measurement_qc_pass and flow_volume_complete_ok is False:
+        warnings.append("flow_volume_incomplete")
 
     if background_image is not None:
         try:
@@ -1114,6 +1137,8 @@ def analyze_online_stream_frame(
         "accepted_detached_component_count": stage3_metric_row.get(
             "accepted_detached_component_count"
         ),
+        "plausible_unaccepted_component_count": plausible_unaccepted_component_count,
+        "plausible_unaccepted_visible_volume_nl": plausible_unaccepted_visible_volume_nl,
         "attached_lower_centerline_span_px": attached_geometry.get(
             "attached_lower_centerline_span_px"
         ),
@@ -1141,6 +1166,8 @@ def analyze_online_stream_frame(
         ),
         "flow_volume_geometry_ok": flow_volume_geometry_ok,
         "flow_volume_geometry_reasons": flow_volume_geometry_reasons,
+        "flow_volume_complete_ok": flow_volume_complete_ok,
+        "flow_volume_completeness_reasons": flow_volume_completeness_reasons,
         "flow_measurement_usable": bool(flow_measurement_usable),
         "tail_width_usable": bool(tail_width_usable),
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),

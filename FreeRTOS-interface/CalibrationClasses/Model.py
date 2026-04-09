@@ -6335,6 +6335,38 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         )
         return int(max(0, min(int(max_capture_count), int(hard_limit - reserved_tail_capture_count))))
 
+    def _flow_tail_preserve_margin_captures(self) -> int:
+        return int(
+            self.flow_plan.get("tail_preserve_margin_captures")
+            or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_tail_preserve_margin_captures"]
+        )
+
+    def _flow_remaining_hard_captures(self) -> int:
+        try:
+            return int(
+                (dict(self.capture_budget or {}).get("captures_remaining_hard"))
+                or 0
+            )
+        except Exception:
+            return 0
+
+    def _preview_required_tail_capture_count(self, flow_fit_result: dict | None = None) -> int:
+        fit_result = dict(flow_fit_result or self._flow_preview_fit_result or self._flow_fit_result or {})
+        tail_plan_preview = dict(
+            online_tail_mod.plan_online_stream_tail_phase(
+                flow_fit_result=fit_result,
+                priors=dict(self.priors or {}),
+                emergence_time_us=int(self.emergence_time_us),
+                capture_budget=dict(self.capture_budget or {}),
+                flow_delay_summaries=list(self._flow_delay_summaries or []),
+            )
+            or {}
+        )
+        try:
+            return int(tail_plan_preview.get("required_tail_capture_count") or 0)
+        except Exception:
+            return 0
+
     def _flow_delay_offset_from_emergence_us(self, delay_us) -> int | None:
         try:
             return int(int(delay_us) - int(self.emergence_time_us))
@@ -6963,6 +6995,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._flow_fit_stop_reason = "hard_budget_exhausted"
             return {"action": "stop", "termination_reason": "hard_budget_exhausted"}
 
+        remaining_hard_captures = int(self._flow_remaining_hard_captures())
+        required_tail_capture_count = int(self._preview_required_tail_capture_count(preview_fit))
+        if (
+            accepted_delay_count >= int(self._flow_min_accepted_delays())
+            and preview_fit
+            and required_tail_capture_count > 0
+            and remaining_hard_captures
+            <= int(required_tail_capture_count + self._flow_tail_preserve_margin_captures())
+        ):
+            self._append_flow_warning("tail_budget_preserved_early_finalize")
+            self._flow_fit_stop_reason = "tail_budget_preserved"
+            return {"action": "stop", "termination_reason": "tail_budget_preserved"}
+
         if int(self._attempted_capture_count or 0) >= int(self._flow_effective_capture_limit()):
             self._flow_fit_stop_reason = "flow_max_captures_reached"
             if preview_fit and not self._flow_ci_target_met(preview_fit):
@@ -7073,7 +7118,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             sequence.append(int(delay_us))
         return sequence
 
-    def _build_tail_backtrack_delay_sequence(self) -> list[int]:
+    def _build_tail_backtrack_delay_sequence_unbudgeted(self) -> list[int]:
         existing_delay_us = set()
         for summary in list(getattr(self, "_tail_backtrack_delay_summaries", []) or []):
             try:
@@ -7095,6 +7140,39 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             )
             if int(delay_us) not in existing_delay_us
         ]
+
+    def _build_tail_backtrack_delay_sequence(self) -> list[int]:
+        unbudgeted_sequence = self._build_tail_backtrack_delay_sequence_unbudgeted()
+        requested_capture_count = int(len(unbudgeted_sequence) * int(self._current_tail_replicates()))
+        available_capture_count = int(self._flow_remaining_hard_captures())
+        compression = dict(
+            online_tail_mod.compress_online_stream_tail_backtrack_plan(
+                delay_sequence=unbudgeted_sequence,
+                left_endpoint_delay_us=self._tail_backtrack_left_delay_us,
+                landmark_delay_us=self._tail_landmark_delay_us,
+                backtrack_step_us=int(self._tail_plan.get("backtrack_step_us") or 50),
+                backtrack_replicates=int(self._current_tail_replicates()),
+                fine_postpad_us=int(self._tail_plan.get("fine_postpad_us") or 100),
+                available_capture_count=int(available_capture_count),
+            )
+            or {}
+        )
+        applied_sequence = list(compression.get("delay_sequence") or [])
+        self._tail_plan["tail_backtrack_requested_capture_count"] = int(
+            compression.get("requested_capture_count")
+            or requested_capture_count
+        )
+        self._tail_plan["tail_backtrack_applied_capture_count"] = int(
+            compression.get("applied_capture_count")
+            or (len(applied_sequence) * int(self._current_tail_replicates()))
+        )
+        self._tail_plan["tail_backtrack_compressed"] = bool(compression.get("compressed"))
+        self._tail_plan["tail_backtrack_budget_impossible"] = bool(
+            requested_capture_count > 0 and not list(applied_sequence)
+        )
+        if bool(compression.get("compressed")):
+            self._append_tail_warning("tail_budget_compressed_backtrack")
+        return [int(delay_us) for delay_us in applied_sequence]
 
     def _refresh_plan_snapshot(self):
         self._write_plan_snapshot(force=True)
@@ -7579,6 +7657,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             ),
             accepted_component_count=summary.get("accepted_component_count"),
             accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+            plausible_unaccepted_component_count=summary.get("plausible_unaccepted_component_count"),
+            plausible_unaccepted_visible_volume_nl=summary.get(
+                "plausible_unaccepted_visible_volume_nl"
+            ),
             detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
             near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
             late_frame_warning=bool(summary.get("late_frame_warning")),
@@ -7604,6 +7686,10 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             ),
             late_coverage_candidate=summary.get("late_coverage_candidate"),
             late_coverage_metric=summary.get("late_coverage_metric"),
+            flow_volume_complete_ok=summary.get("flow_volume_complete_ok"),
+            flow_volume_completeness_reasons=list(
+                summary.get("flow_volume_completeness_reasons") or []
+            ),
             flow_measurement_usable=bool(flow_measurement_usable),
         )
         self._current_analysis_summary = dict(summary)
@@ -7963,6 +8049,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_left_bracket_confirmed = False
         self._tail_left_bracket_extended = True
         self._tail_delay_sequence = self._build_tail_backtrack_delay_sequence()
+        if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
+            self._tail_phase_status = "unresolved_budget_exhausted"
+            self._tail_termination_reason = "capture_budget_exhausted"
+            self._append_tail_warning("capture_budget_exhausted")
+            return False
         self._reset_tail_delay_cursor(reset_index=True)
         return bool(list(self._tail_delay_sequence or []))
 
@@ -8368,8 +8459,13 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 self._tail_consecutive_failed_delays = 0
                 self._reset_tail_delay_cursor(reset_index=True)
                 if not list(self._tail_delay_sequence or []):
-                    self._tail_phase_status = ""
-                    self._tail_termination_reason = ""
+                    if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
+                        self._tail_phase_status = "unresolved_budget_exhausted"
+                        self._tail_termination_reason = "capture_budget_exhausted"
+                        self._append_tail_warning("capture_budget_exhausted")
+                    else:
+                        self._tail_phase_status = ""
+                        self._tail_termination_reason = ""
                     self._resolve_tail_phase()
                     self._emit_online_stream_debug_payload("tail_backtrack")
                     self.tailPhaseFinished.emit()
@@ -8416,6 +8512,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             ):
                 self._emit_online_stream_debug_payload(self._tail_phase_label())
                 self.nextTailDelay.emit()
+                return
+            if bool(self._tail_plan.get("tail_backtrack_budget_impossible")):
+                self._tail_phase_status = "unresolved_budget_exhausted"
+                self._tail_termination_reason = "capture_budget_exhausted"
+                self._append_tail_warning("capture_budget_exhausted")
+                self._resolve_tail_phase()
+                self._emit_online_stream_debug_payload(self._tail_phase_label())
+                self.tailPhaseFinished.emit()
                 return
             self._resolve_tail_phase(resolve_result=preview_result)
         else:

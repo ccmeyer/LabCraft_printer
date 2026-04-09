@@ -15,6 +15,7 @@ DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_extension_confidence_floor": 0.55,
     "flow_safe_densify_window_us": 600,
     "flow_safe_densify_step_us": 50,
+    "flow_tail_preserve_margin_captures": 2,
     "flow_late_slope_window_points": 4,
     "flow_late_slope_max_relative_gap": 0.07,
     "flow_late_slope_residual_trend_max_nl_per_us": 0.00015,
@@ -63,6 +64,7 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "optical_edge_jitter_confidence_zero_px": 2.5,
     "optical_boundary_chroma_confidence_full": 12.0,
     "optical_boundary_chroma_confidence_zero": 32.0,
+    "flow_volume_incomplete_material_volume_nl": 0.5,
 }
 
 
@@ -227,6 +229,7 @@ def build_online_stream_flow_plan(
         ),
         "safe_densify_window_us": int(resolved_policy["flow_safe_densify_window_us"]),
         "safe_densify_step_us": int(resolved_policy["flow_safe_densify_step_us"]),
+        "tail_preserve_margin_captures": int(resolved_policy["flow_tail_preserve_margin_captures"]),
         "late_slope_window_points": int(resolved_policy["flow_late_slope_window_points"]),
         "late_slope_max_relative_gap": float(
             resolved_policy["flow_late_slope_max_relative_gap"]
@@ -595,6 +598,8 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     geometry_rejected_replicates = 0
     geometry_boundary_triggered = False
     geometry_reasons = []
+    volume_incomplete_rejected_replicates = 0
+    flow_volume_completeness_reasons = []
     for row in rows:
         status = str(row.get("status") or "")
         if status != "accepted":
@@ -608,10 +613,15 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         if bool(flow_measurement_usable):
             accepted_rows.append(row)
             continue
-        geometry_rejected_replicates += 1
         if row.get("flow_volume_geometry_ok") is False:
+            geometry_rejected_replicates += 1
             geometry_boundary_triggered = True
             geometry_reasons.extend(list(row.get("flow_volume_geometry_reasons") or []))
+        if row.get("flow_volume_complete_ok") is False:
+            volume_incomplete_rejected_replicates += 1
+            flow_volume_completeness_reasons.extend(
+                list(row.get("flow_volume_completeness_reasons") or [])
+            )
     attempted_replicates = int(len(rows))
     accepted_replicates = int(len(accepted_rows))
     rejected_replicates = int(max(0, attempted_replicates - accepted_replicates))
@@ -642,6 +652,22 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     median_boundary_chroma_aberration_score = _median_or_none(
         row.get("boundary_chroma_aberration_score") for row in accepted_rows
     )
+    max_plausible_unaccepted_component_count = max(
+        (
+            int(_to_int(row.get("plausible_unaccepted_component_count"), 0))
+            for row in rows
+            if _to_int(row.get("plausible_unaccepted_component_count"), None) is not None
+        ),
+        default=None,
+    )
+    plausible_unaccepted_visible_volume_nl = None
+    plausible_unaccepted_volumes = [
+        _to_float_or_none(row.get("plausible_unaccepted_visible_volume_nl"))
+        for row in rows
+        if _to_float_or_none(row.get("plausible_unaccepted_visible_volume_nl")) is not None
+    ]
+    if plausible_unaccepted_volumes:
+        plausible_unaccepted_visible_volume_nl = float(max(plausible_unaccepted_volumes))
     min_attached_bottom_clearance_px = None
     clearances = [
         _to_float_or_none(row.get("attached_bottom_clearance_px"))
@@ -701,6 +727,7 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         "delay_accepted": bool(accepted_replicates > 0),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
         "geometry_rejected_replicates": int(geometry_rejected_replicates),
+        "volume_incomplete_rejected_replicates": int(volume_incomplete_rejected_replicates),
         "geometry_boundary_triggered": bool(geometry_boundary_triggered),
         "flow_volume_geometry_ok": (
             False
@@ -708,6 +735,14 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
             else (True if accepted_replicates > 0 else None)
         ),
         "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
+        "flow_volume_complete_ok": (
+            False
+            if volume_incomplete_rejected_replicates > 0
+            else (True if accepted_replicates > 0 else None)
+        ),
+        "flow_volume_completeness_reasons": _unique_strings(flow_volume_completeness_reasons),
+        "plausible_unaccepted_component_count": max_plausible_unaccepted_component_count,
+        "plausible_unaccepted_visible_volume_nl": plausible_unaccepted_visible_volume_nl,
         "warnings": warnings,
     }
     late_coverage_candidate, late_coverage_metric = is_online_stream_flow_late_coverage_candidate(

@@ -597,6 +597,40 @@ def test_summarize_online_stream_flow_delay_excludes_geometry_rejected_rows_from
     assert summary["flow_volume_geometry_reasons"] == ["attached_lower_centerline_span_high"]
 
 
+def test_summarize_online_stream_flow_delay_excludes_volume_incomplete_rows_from_acceptance():
+    summary = mod.summarize_online_stream_flow_delay(
+        [
+            mod.build_online_stream_frame_row(
+                phase="flow_rate",
+                status="accepted",
+                delay_us=4250,
+                delay_from_emergence_us=1050,
+                replicate_index=1,
+                qc={"measurement_qc_pass": True},
+                image_ref={"capture_id": "cap_incomplete"},
+                warnings=["flow_volume_incomplete"],
+                attached_width_px=88.0,
+                visible_volume_nl=13.5,
+                attached_bottom_clearance_px=140,
+                detached_near_bottom_warning=False,
+                flow_volume_geometry_ok=True,
+                flow_volume_complete_ok=False,
+                flow_volume_completeness_reasons=["material_plausible_unaccepted_detached"],
+                plausible_unaccepted_component_count=1,
+                plausible_unaccepted_visible_volume_nl=1.4,
+                flow_measurement_usable=False,
+            )
+        ]
+    )
+
+    assert summary["accepted_replicates"] == 0
+    assert summary["volume_incomplete_rejected_replicates"] == 1
+    assert summary["flow_volume_complete_ok"] is False
+    assert summary["flow_volume_completeness_reasons"] == ["material_plausible_unaccepted_detached"]
+    assert summary["plausible_unaccepted_component_count"] == 1
+    assert summary["plausible_unaccepted_visible_volume_nl"] == 1.4
+
+
 def test_online_stream_flow_geometry_boundary_helper_detects_geometry_failures():
     assert mod.is_online_stream_flow_geometry_boundary(
         {"geometry_boundary_triggered": True}

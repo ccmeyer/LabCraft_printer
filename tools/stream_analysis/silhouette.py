@@ -20,6 +20,10 @@ from tools.stream_analysis.nozzle import _build_stage2_run
 
 SILHOUETTE_STAGE_DIRNAME = "stage_03_silhouette"
 INPUT_POLICY = "direct_threshold"
+DETACHED_CONTINUATION_BBOX_EXPAND_PX = 12
+DETACHED_PLAUSIBLE_BBOX_EXPAND_PX = 24
+DETACHED_PLAUSIBLE_ANCHOR_TOLERANCE_MIN_PX = 56.0
+DETACHED_PLAUSIBLE_ANCHOR_TOLERANCE_FRAC = 0.20
 
 SILHOUETTE_METRIC_COLUMNS = [
     "run_id",
@@ -61,8 +65,10 @@ SILHOUETTE_METRIC_COLUMNS = [
     "row_fill_added_pixel_count",
     "accepted_component_count",
     "accepted_detached_component_count",
+    "plausible_unaccepted_component_count",
     "attached_component_area_px",
     "detached_component_area_px_total",
+    "plausible_unaccepted_component_area_px_total",
     "accepted_total_area_px",
     "connected_component_count",
     "candidate_component_count",
@@ -677,6 +683,34 @@ def _mask_for_label(labels: np.ndarray, label: int):
     return np.where(labels == int(label), 255, 0).astype(np.uint8)
 
 
+def _bbox_x_overlap(candidate: dict, reference: dict, *, expand_px: int = 0) -> bool:
+    candidate_x0 = int(candidate["bbox_x_px"])
+    candidate_x1 = int(candidate["bbox_x_px"]) + int(candidate["bbox_w_px"]) - 1
+    reference_x0 = int(reference["bbox_x_px"]) - int(expand_px)
+    reference_x1 = int(reference["bbox_x_px"]) + int(reference["bbox_w_px"]) - 1 + int(expand_px)
+    return bool(candidate_x0 <= reference_x1 and candidate_x1 >= reference_x0)
+
+
+def _detached_is_below_selected(candidate: dict, selected: dict, *, slack_px: int = 0) -> bool:
+    return bool(int(candidate["top_y_px"]) >= int(selected["bottom_y_px"]) - int(slack_px))
+
+
+def _label_ranked_components(components: list[dict], *, component_id_prefix: str, component_role: str) -> list[dict]:
+    ordered = [dict(item) for item in list(components or [])]
+    ordered.sort(
+        key=lambda item: (
+            int(item["top_y_px"]),
+            float(item["anchor_center_x_px"]),
+            -int(item["area_px"]),
+        )
+    )
+    for rank, component in enumerate(ordered, start=1):
+        component["component_id"] = f"{component_id_prefix}{rank:02d}"
+        component["component_role"] = str(component_role)
+        component["component_rank"] = int(rank)
+    return ordered
+
+
 def _accepted_detached_components(selection: dict, roi: dict, *, cutoff_y_px: int):
     selected = selection.get("selected_component")
     if selected is None:
@@ -689,22 +723,76 @@ def _accepted_detached_components(selection: dict, roi: dict, *, cutoff_y_px: in
             continue
         if int(candidate["top_y_px"]) < int(cutoff_y_px) + 24:
             continue
-        if abs(float(candidate["anchor_center_x_px"]) - float(selected["anchor_center_x_px"])) > center_tolerance_px:
+        anchor_aligned = (
+            abs(float(candidate["anchor_center_x_px"]) - float(selected["anchor_center_x_px"]))
+            <= center_tolerance_px
+        )
+        continuation_overlap = (
+            _detached_is_below_selected(candidate, selected, slack_px=DETACHED_CONTINUATION_BBOX_EXPAND_PX)
+            and _bbox_x_overlap(
+                candidate,
+                selected,
+                expand_px=DETACHED_CONTINUATION_BBOX_EXPAND_PX,
+            )
+        )
+        if not anchor_aligned and not continuation_overlap:
             continue
         accepted.append(dict(candidate))
 
-    accepted.sort(
-        key=lambda item: (
-            int(item["top_y_px"]),
-            float(item["anchor_center_x_px"]),
-            -int(item["area_px"]),
-        )
+    return _label_ranked_components(
+        accepted,
+        component_id_prefix="detached_",
+        component_role="detached_accepted",
     )
-    for rank, component in enumerate(accepted, start=1):
-        component["component_id"] = f"detached_{rank:02d}"
-        component["component_role"] = "detached_accepted"
-        component["component_rank"] = int(rank)
-    return accepted
+
+
+def _plausible_unaccepted_detached_components(
+    selection: dict,
+    roi: dict,
+    *,
+    cutoff_y_px: int,
+    min_component_area_px: int,
+    accepted_labels: set[int] | None = None,
+):
+    selected = selection.get("selected_component")
+    if selected is None:
+        return []
+
+    accepted_labels = set(int(label) for label in list(accepted_labels or []))
+    anchor_tolerance_px = max(
+        float(DETACHED_PLAUSIBLE_ANCHOR_TOLERANCE_MIN_PX),
+        float(roi["width"]) * float(DETACHED_PLAUSIBLE_ANCHOR_TOLERANCE_FRAC),
+    )
+    plausible = []
+    for candidate in selection.get("candidates", []):
+        label = int(candidate["label"])
+        if label == int(selected["label"]) or label in accepted_labels:
+            continue
+        if int(candidate["top_y_px"]) < int(cutoff_y_px) + 24:
+            continue
+        if int(candidate["area_px"]) < int(min_component_area_px):
+            continue
+        anchor_aligned = (
+            abs(float(candidate["anchor_center_x_px"]) - float(selected["anchor_center_x_px"]))
+            <= anchor_tolerance_px
+        )
+        continuation_overlap = (
+            _detached_is_below_selected(candidate, selected, slack_px=DETACHED_PLAUSIBLE_BBOX_EXPAND_PX)
+            and _bbox_x_overlap(
+                candidate,
+                selected,
+                expand_px=DETACHED_PLAUSIBLE_BBOX_EXPAND_PX,
+            )
+        )
+        if not anchor_aligned and not continuation_overlap:
+            continue
+        plausible.append(dict(candidate))
+
+    return _label_ranked_components(
+        plausible,
+        component_id_prefix="plausible_detached_",
+        component_role="detached_plausible_unaccepted",
+    )
 
 
 def _trace_edges(
@@ -966,6 +1054,7 @@ def _silhouette_metric_row(
     fill_refinement: dict,
     edge_rows: list[dict],
     accepted_components: list[dict],
+    plausible_unaccepted_components: list[dict],
     silhouette_status: str,
     failure_reason: str | None,
 ):
@@ -979,12 +1068,20 @@ def _silhouette_metric_row(
     accepted_detached_component_count = int(
         sum(1 for component in accepted_components if component.get("component_role") == "detached_accepted")
     )
+    plausible_unaccepted_component_count = int(len(plausible_unaccepted_components))
     attached_component_area_px = None if selected is None else int(np.count_nonzero(final_selected_mask))
     detached_component_area_px_total = int(
         sum(
             int(np.count_nonzero(component.get("final_mask")))
             for component in accepted_components
             if component.get("component_role") == "detached_accepted" and component.get("final_mask") is not None
+        )
+    )
+    plausible_unaccepted_component_area_px_total = int(
+        sum(
+            int(np.count_nonzero(component.get("final_mask")))
+            for component in plausible_unaccepted_components
+            if component.get("final_mask") is not None
         )
     )
     accepted_total_area_px = int(
@@ -1034,8 +1131,10 @@ def _silhouette_metric_row(
         "row_fill_added_pixel_count": int(fill_refinement.get("row_fill_added_pixel_count") or 0),
         "accepted_component_count": accepted_component_count,
         "accepted_detached_component_count": accepted_detached_component_count,
+        "plausible_unaccepted_component_count": plausible_unaccepted_component_count,
         "attached_component_area_px": attached_component_area_px,
         "detached_component_area_px_total": detached_component_area_px_total,
+        "plausible_unaccepted_component_area_px_total": plausible_unaccepted_component_area_px_total,
         "accepted_total_area_px": accepted_total_area_px,
         "connected_component_count": int(selection.get("connected_component_count") or 0),
         "candidate_component_count": int(selection.get("candidate_component_count") or 0),
@@ -1188,6 +1287,7 @@ def _analyze_stage3_gray(
     }
     attached_edge_rows = []
     accepted_components = []
+    plausible_unaccepted_components = []
     component_rows = []
     edge_rows = []
 
@@ -1243,6 +1343,10 @@ def _analyze_stage3_gray(
                         roi,
                         cutoff_y_px=int(cutoff_y_px),
                     )
+                    accepted_detached_labels = {
+                        int(component["label"])
+                        for component in detached_components
+                    }
                     for component in detached_components:
                         detached_mask = _mask_for_label(selection["labels"], int(component["label"]))
                         accepted_components.append(
@@ -1255,10 +1359,30 @@ def _analyze_stage3_gray(
                                 cutoff_y_px=int(cutoff_y_px),
                             )
                         )
-                    component_rows = [component["component_row"] for component in accepted_components]
+                    plausible_detached_components = _plausible_unaccepted_detached_components(
+                        selection,
+                        roi,
+                        cutoff_y_px=int(cutoff_y_px),
+                        min_component_area_px=int(min_component_area_px),
+                        accepted_labels=accepted_detached_labels,
+                    )
+                    for component in plausible_detached_components:
+                        detached_mask = _mask_for_label(selection["labels"], int(component["label"]))
+                        plausible_unaccepted_components.append(
+                            _analyze_accepted_component(
+                                frame_row,
+                                roi,
+                                component,
+                                detached_mask,
+                                tracked_x_px=float(component["anchor_center_x_px"]),
+                                cutoff_y_px=int(cutoff_y_px),
+                            )
+                        )
+                    diagnostic_components = list(accepted_components) + list(plausible_unaccepted_components)
+                    component_rows = [component["component_row"] for component in diagnostic_components]
                     edge_rows = [
                         row
-                        for component in accepted_components
+                        for component in diagnostic_components
                         for row in component["edge_rows"]
                     ]
                     silhouette_status = "ok"
@@ -1278,6 +1402,7 @@ def _analyze_stage3_gray(
         fill_refinement=fill_refinement,
         edge_rows=attached_edge_rows,
         accepted_components=accepted_components,
+        plausible_unaccepted_components=plausible_unaccepted_components,
         silhouette_status=silhouette_status,
         failure_reason=failure_reason,
     )
@@ -1290,6 +1415,7 @@ def _analyze_stage3_gray(
         "component_rows": component_rows,
         "edge_rows": edge_rows,
         "accepted_components": accepted_components,
+        "plausible_unaccepted_components": plausible_unaccepted_components,
         "tracked_row": tracked_row,
     }
 

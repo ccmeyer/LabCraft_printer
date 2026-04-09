@@ -127,6 +127,204 @@ def _remaining_hard_budget(capture_budget: dict | None) -> int:
     return max(0, int(hard_limit - captures_used))
 
 
+def _sorted_unique_delays(values) -> list[int]:
+    delays = []
+    seen = set()
+    for value in list(values or []):
+        parsed = _to_int(value)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        delays.append(int(parsed))
+    delays.sort()
+    return delays
+
+
+def compress_online_stream_tail_backtrack_plan(
+    *,
+    delay_sequence: list[int] | None,
+    left_endpoint_delay_us: int | None,
+    landmark_delay_us: int | None,
+    backtrack_step_us: int,
+    backtrack_replicates: int = 1,
+    fine_postpad_us: int | None = None,
+    available_capture_count: int | None = None,
+    dense_window_us: int = 400,
+    preserved_postpad_us: int = 100,
+    plateau_coarse_step_us: int = 100,
+    force_compression: bool = False,
+) -> dict:
+    sequence = _sorted_unique_delays(delay_sequence)
+    left_delay_us = _to_int(left_endpoint_delay_us)
+    landmark_delay_value = _to_int(landmark_delay_us)
+    step_us = max(1, _to_int(backtrack_step_us, DEFAULT_ONLINE_TAIL_POLICY["backtrack_step_us"]))
+    replicate_count = max(1, _to_int(backtrack_replicates, 1))
+    requested_capture_count = int(len(sequence) * replicate_count)
+    if not sequence or left_delay_us is None or landmark_delay_value is None:
+        return {
+            "delay_sequence": sequence,
+            "requested_capture_count": int(requested_capture_count),
+            "applied_capture_count": int(requested_capture_count),
+            "compressed": False,
+        }
+
+    available_delay_slots = None
+    if available_capture_count is not None:
+        available_delay_slots = max(0, int(_to_int(available_capture_count, 0)) // int(replicate_count))
+        if int(len(sequence)) <= int(available_delay_slots) and not bool(force_compression):
+            return {
+                "delay_sequence": sequence,
+                "requested_capture_count": int(requested_capture_count),
+                "applied_capture_count": int(requested_capture_count),
+                "compressed": False,
+            }
+    elif not bool(force_compression):
+        return {
+            "delay_sequence": sequence,
+            "requested_capture_count": int(requested_capture_count),
+            "applied_capture_count": int(requested_capture_count),
+            "compressed": False,
+        }
+
+    keep_postpad_us = max(0, min(int(preserved_postpad_us), max(0, _to_int(fine_postpad_us, preserved_postpad_us))))
+    keep_end_delay_us = int(landmark_delay_value + keep_postpad_us)
+    trimmed_sequence = [
+        int(delay_us)
+        for delay_us in sequence
+        if int(delay_us) >= int(left_delay_us) and int(delay_us) <= int(keep_end_delay_us)
+    ]
+    dense_start_delay_us = int(landmark_delay_value - max(0, int(dense_window_us)))
+    dense_zone = [int(delay_us) for delay_us in trimmed_sequence if int(delay_us) >= int(dense_start_delay_us)]
+    coarse_zone = [int(delay_us) for delay_us in trimmed_sequence if int(delay_us) < int(dense_start_delay_us)]
+    coarse_step_us = max(int(plateau_coarse_step_us), int(step_us))
+    decimated_coarse = []
+    for delay_us in coarse_zone:
+        if int(delay_us) == int(left_delay_us):
+            decimated_coarse.append(int(delay_us))
+            continue
+        if ((int(delay_us) - int(left_delay_us)) % int(coarse_step_us)) == 0:
+            decimated_coarse.append(int(delay_us))
+    compressed_sequence = _sorted_unique_delays(decimated_coarse + dense_zone)
+
+    if available_delay_slots is not None:
+        essential_sequence = _sorted_unique_delays(
+            [int(left_delay_us)] + [int(delay_us) for delay_us in dense_zone]
+        )
+        if int(len(essential_sequence)) > int(available_delay_slots):
+            return {
+                "delay_sequence": [],
+                "requested_capture_count": int(requested_capture_count),
+                "applied_capture_count": 0,
+                "compressed": True,
+            }
+        if int(len(compressed_sequence)) > int(available_delay_slots):
+            removable = [
+                int(delay_us)
+                for delay_us in compressed_sequence
+                if int(delay_us) < int(dense_start_delay_us) and int(delay_us) != int(left_delay_us)
+            ]
+            trimmed = list(compressed_sequence)
+            while int(len(trimmed)) > int(available_delay_slots) and removable:
+                drop_delay_us = int(removable.pop(0))
+                trimmed = [int(delay_us) for delay_us in trimmed if int(delay_us) != int(drop_delay_us)]
+            compressed_sequence = _sorted_unique_delays(trimmed)
+
+    applied_capture_count = int(len(compressed_sequence) * replicate_count)
+    return {
+        "delay_sequence": compressed_sequence,
+        "requested_capture_count": int(requested_capture_count),
+        "applied_capture_count": int(applied_capture_count),
+        "compressed": True,
+    }
+
+
+def estimate_online_stream_tail_capture_requirements(
+    *,
+    scout_anchor_delay_us: int | None,
+    scout_first_delay_us: int | None,
+    scout_step_us: int,
+    scout_replicates: int,
+    max_scout_delay_count: int,
+    backtrack_step_us: int,
+    backtrack_replicates: int,
+    fine_prepad_us: int,
+    fine_postpad_us: int,
+) -> dict:
+    scout_anchor_delay = _to_int(scout_anchor_delay_us)
+    scout_first_delay = _to_int(scout_first_delay_us)
+    scout_step = max(1, _to_int(scout_step_us, DEFAULT_ONLINE_TAIL_POLICY["scout_step_us"]))
+    scout_rep_count = max(1, _to_int(scout_replicates, 1))
+    scout_delay_count = max(0, _to_int(max_scout_delay_count, 0))
+    backtrack_step = max(1, _to_int(backtrack_step_us, DEFAULT_ONLINE_TAIL_POLICY["backtrack_step_us"]))
+    backtrack_rep_count = max(1, _to_int(backtrack_replicates, 1))
+    fine_prepad = max(0, _to_int(fine_prepad_us, DEFAULT_ONLINE_TAIL_POLICY["fine_prepad_us"]))
+    fine_postpad = max(0, _to_int(fine_postpad_us, DEFAULT_ONLINE_TAIL_POLICY["fine_postpad_us"]))
+
+    scout_capture_count = int(scout_delay_count * scout_rep_count)
+    if scout_anchor_delay is None or scout_first_delay is None or scout_delay_count <= 0:
+        return {
+            "required_tail_capture_count": int(scout_capture_count),
+            "required_tail_scout_capture_count": int(scout_capture_count),
+            "required_tail_backtrack_capture_count": 0,
+            "required_tail_left_extension_capture_count": 0,
+            "minimum_tail_capture_count": int(scout_capture_count),
+        }
+
+    latest_landmark_delay_us = int(scout_first_delay + (max(0, scout_delay_count - 1) * scout_step))
+    if int(scout_delay_count) > 1:
+        initial_left_endpoint_delay_us = int(latest_landmark_delay_us - scout_step)
+    else:
+        initial_left_endpoint_delay_us = int(scout_anchor_delay)
+    initial_left_endpoint_delay_us = max(int(scout_anchor_delay), int(initial_left_endpoint_delay_us))
+    extended_left_endpoint_delay_us = max(
+        int(scout_anchor_delay),
+        int(initial_left_endpoint_delay_us) - int(scout_step),
+    )
+
+    initial_backtrack_sequence = build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=int(scout_anchor_delay),
+        left_endpoint_delay_us=int(initial_left_endpoint_delay_us),
+        landmark_delay_us=int(latest_landmark_delay_us),
+        backtrack_step_us=int(backtrack_step),
+        fine_prepad_us=int(fine_prepad),
+        fine_postpad_us=int(fine_postpad),
+    )
+    extended_backtrack_sequence = build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=int(scout_anchor_delay),
+        left_endpoint_delay_us=int(extended_left_endpoint_delay_us),
+        landmark_delay_us=int(latest_landmark_delay_us),
+        backtrack_step_us=int(backtrack_step),
+        fine_prepad_us=int(fine_prepad),
+        fine_postpad_us=int(fine_postpad),
+    )
+    minimum_backtrack = compress_online_stream_tail_backtrack_plan(
+        delay_sequence=extended_backtrack_sequence,
+        left_endpoint_delay_us=int(extended_left_endpoint_delay_us),
+        landmark_delay_us=int(latest_landmark_delay_us),
+        backtrack_step_us=int(backtrack_step),
+        backtrack_replicates=int(backtrack_rep_count),
+        fine_postpad_us=int(fine_postpad),
+        force_compression=True,
+    )
+    initial_backtrack_capture_count = int(len(initial_backtrack_sequence) * backtrack_rep_count)
+    left_extension_capture_count = int(
+        max(0, len(extended_backtrack_sequence) - len(initial_backtrack_sequence))
+        * int(backtrack_rep_count)
+    )
+    minimum_tail_capture_count = int(
+        scout_capture_count + int(minimum_backtrack.get("applied_capture_count") or 0)
+    )
+    return {
+        "required_tail_capture_count": int(
+            scout_capture_count + initial_backtrack_capture_count + left_extension_capture_count
+        ),
+        "required_tail_scout_capture_count": int(scout_capture_count),
+        "required_tail_backtrack_capture_count": int(initial_backtrack_capture_count),
+        "required_tail_left_extension_capture_count": int(left_extension_capture_count),
+        "minimum_tail_capture_count": int(minimum_tail_capture_count),
+    }
+
+
 def _find_delay_summary(summaries: list[dict], delay_us: int | None) -> dict | None:
     if delay_us is None:
         return None
@@ -473,12 +671,26 @@ def plan_online_stream_tail_phase(
     fine_prepad_us = int(resolved_policy["fine_prepad_us"])
     fine_postpad_us = int(resolved_policy["fine_postpad_us"])
     reserved_backtrack_capture_count = int(resolved_policy["reserved_backtrack_capture_count"])
-    remaining_hard = _remaining_hard_budget(capture_budget)
-    required_capture_count = int(
-        max(0, max_scout_delay_count) * max(1, scout_replicates)
-        + max(0, reserved_backtrack_capture_count)
+    scout_first_delay_us = int(last_flow_delay_us + scout_step_us)
+    scout_first_delay_from_emergence_us = int(last_flow_delay_from_emergence_us + scout_step_us)
+    budget_requirements = estimate_online_stream_tail_capture_requirements(
+        scout_anchor_delay_us=int(last_flow_delay_us),
+        scout_first_delay_us=int(scout_first_delay_us),
+        scout_step_us=int(scout_step_us),
+        scout_replicates=int(scout_replicates),
+        max_scout_delay_count=int(max_scout_delay_count),
+        backtrack_step_us=int(backtrack_step_us),
+        backtrack_replicates=int(backtrack_replicates),
+        fine_prepad_us=int(fine_prepad_us),
+        fine_postpad_us=int(fine_postpad_us),
     )
-    if remaining_hard < int(required_capture_count):
+    remaining_hard = _remaining_hard_budget(capture_budget)
+    minimum_tail_capture_count = int(
+        budget_requirements.get("minimum_tail_capture_count")
+        or budget_requirements.get("required_tail_capture_count")
+        or 0
+    )
+    if remaining_hard < int(minimum_tail_capture_count):
         return {
             "run_tail": False,
             "skip_reason": "capture_budget_exhausted",
@@ -489,14 +701,24 @@ def plan_online_stream_tail_phase(
             "reserved_backtrack_capture_count": int(reserved_backtrack_capture_count),
             "fine_prepad_us": int(fine_prepad_us),
             "fine_postpad_us": int(fine_postpad_us),
-            "required_capture_count": int(required_capture_count),
+            "required_capture_count": int(budget_requirements["required_tail_capture_count"]),
+            "required_tail_capture_count": int(budget_requirements["required_tail_capture_count"]),
+            "required_tail_scout_capture_count": int(
+                budget_requirements["required_tail_scout_capture_count"]
+            ),
+            "required_tail_backtrack_capture_count": int(
+                budget_requirements["required_tail_backtrack_capture_count"]
+            ),
+            "required_tail_left_extension_capture_count": int(
+                budget_requirements["required_tail_left_extension_capture_count"]
+            ),
+            "tail_backtrack_compressed": False,
+            "tail_backtrack_requested_capture_count": None,
+            "tail_backtrack_applied_capture_count": None,
             "tail_retarget_count": 0,
             "retargeted_coarse_start_delay_us": None,
         }
     planned_scout_delay_count = int(max(0, max_scout_delay_count))
-
-    scout_first_delay_us = int(last_flow_delay_us + scout_step_us)
-    scout_first_delay_from_emergence_us = int(last_flow_delay_from_emergence_us + scout_step_us)
 
     return {
         "run_tail": True,
@@ -520,6 +742,19 @@ def plan_online_stream_tail_phase(
         "fine_postpad_us": int(fine_postpad_us),
         "planned_scout_delay_count": int(planned_scout_delay_count),
         "reserved_backtrack_capture_count": int(reserved_backtrack_capture_count),
+        "required_tail_capture_count": int(budget_requirements["required_tail_capture_count"]),
+        "required_tail_scout_capture_count": int(
+            budget_requirements["required_tail_scout_capture_count"]
+        ),
+        "required_tail_backtrack_capture_count": int(
+            budget_requirements["required_tail_backtrack_capture_count"]
+        ),
+        "required_tail_left_extension_capture_count": int(
+            budget_requirements["required_tail_left_extension_capture_count"]
+        ),
+        "tail_backtrack_compressed": False,
+        "tail_backtrack_requested_capture_count": None,
+        "tail_backtrack_applied_capture_count": None,
         "tail_retarget_count": 0,
         "retargeted_coarse_start_delay_us": None,
         "coarse_start_delay_us": int(scout_first_delay_us),
@@ -1112,6 +1347,14 @@ def resolve_online_stream_tail_result(
         "fine_prepad_us": _to_int(plan.get("fine_prepad_us")),
         "fine_postpad_us": _to_int(plan.get("fine_postpad_us")),
         "reserved_backtrack_capture_count": _to_int(plan.get("reserved_backtrack_capture_count")),
+        "required_tail_capture_count": _to_int(plan.get("required_tail_capture_count")),
+        "required_tail_scout_capture_count": _to_int(plan.get("required_tail_scout_capture_count")),
+        "required_tail_backtrack_capture_count": _to_int(
+            plan.get("required_tail_backtrack_capture_count")
+        ),
+        "required_tail_left_extension_capture_count": _to_int(
+            plan.get("required_tail_left_extension_capture_count")
+        ),
         "attempted_delay_count": int(len(all_summaries)),
         "attempted_capture_count": int(
             sum(max(0, _to_int(row.get("attempted_replicates"), 0)) for row in all_summaries)
@@ -1134,6 +1377,13 @@ def resolve_online_stream_tail_result(
         "last_plateau_delay_from_emergence_us": last_plateau_delay_from_emergence_us,
         "left_bracket_extended": bool(left_bracket_extended),
         "left_bracket_confirmed": bool(last_plateau_row is not None),
+        "tail_backtrack_compressed": bool(plan.get("tail_backtrack_compressed")),
+        "tail_backtrack_requested_capture_count": _to_int(
+            plan.get("tail_backtrack_requested_capture_count")
+        ),
+        "tail_backtrack_applied_capture_count": _to_int(
+            plan.get("tail_backtrack_applied_capture_count")
+        ),
         "backtrack_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
         "backtrack_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "fine_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,

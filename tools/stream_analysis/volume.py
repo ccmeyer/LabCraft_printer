@@ -42,8 +42,10 @@ FRAME_METRIC_COLUMNS = [
     "failure_reason",
     "accepted_component_count",
     "accepted_detached_component_count",
+    "plausible_unaccepted_component_count",
     "attached_visible_volume_nl",
     "detached_visible_volume_nl",
+    "plausible_unaccepted_visible_volume_nl",
     "total_visible_volume_nl",
     "volume_is_trusted",
     "volume_trust_label",
@@ -385,6 +387,7 @@ def _frame_metric_rows(stage3_metric_rows: list[dict], component_volume_rows: li
         silhouette_status = _clean_text(stage3_row.get("silhouette_status"))
         attached_volume = None
         detached_volume = None
+        plausible_unaccepted_volume = None
         total_volume = None
         if silhouette_status == "ok":
             attached_volume = sum(
@@ -396,6 +399,11 @@ def _frame_metric_rows(stage3_metric_rows: list[dict], component_volume_rows: li
                 float(row["component_volume_nl"])
                 for row in frame_components
                 if _clean_text(row.get("component_role")) == "detached_accepted"
+            )
+            plausible_unaccepted_volume = sum(
+                float(row["component_volume_nl"])
+                for row in frame_components
+                if _clean_text(row.get("component_role")) == "detached_plausible_unaccepted"
             )
             total_volume = float(attached_volume + detached_volume)
         frame_rows.append(
@@ -419,8 +427,12 @@ def _frame_metric_rows(stage3_metric_rows: list[dict], component_volume_rows: li
                 "failure_reason": stage3_row.get("failure_reason"),
                 "accepted_component_count": _int_or_none(stage3_row.get("accepted_component_count")),
                 "accepted_detached_component_count": _int_or_none(stage3_row.get("accepted_detached_component_count")),
+                "plausible_unaccepted_component_count": _int_or_none(
+                    stage3_row.get("plausible_unaccepted_component_count")
+                ),
                 "attached_visible_volume_nl": attached_volume,
                 "detached_visible_volume_nl": detached_volume,
+                "plausible_unaccepted_visible_volume_nl": plausible_unaccepted_volume,
                 "total_visible_volume_nl": total_volume,
                 "volume_is_trusted": bool(stage3_row.get("volume_is_trusted")),
                 "volume_trust_label": stage3_row.get("volume_trust_label"),

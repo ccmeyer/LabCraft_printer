@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from tools.stream_analysis import online_runtime as mod
 
@@ -258,6 +259,89 @@ def test_online_stream_runtime_marks_late_coverage_candidate_when_detached_fluid
     else:
         assert summary["flow_point_confidence"] is not None
         assert summary["flow_point_confidence"] < 0.70
+
+
+def test_analyze_online_stream_frame_marks_material_plausible_unaccepted_volume_as_incomplete(monkeypatch):
+    attached_mask = np.zeros((220, 80), dtype=np.uint8)
+    attached_mask[12:128, 30:50] = 255
+    attached_component = _component_from_mask(
+        attached_mask,
+        component_id="attached_primary",
+        anchor_center_x_px=110.0,
+    )
+    attached_component["component_role"] = "attached_primary"
+    attached_component["component_rank"] = 0
+
+    stage3_frame = {
+        "metric_row": {
+            "silhouette_status": "ok",
+            "tracked_nozzle_x_px": 110.0,
+            "tracked_nozzle_y_px": 60.0,
+            "tracked_confidence": 1.0,
+            "raw_mode": "segment",
+            "final_mode": "segment",
+            "segment_id": 1,
+            "shift_event_before": False,
+            "cutoff_y_px": 62,
+            "selected_component_top_y_px": 62,
+            "selected_component_bottom_y_px": 177,
+            "roi_y1": 320,
+            "accepted_component_count": 1,
+            "accepted_detached_component_count": 0,
+            "plausible_unaccepted_component_count": 1,
+        },
+        "component_rows": [
+            {
+                "component_id": "attached_primary",
+                "component_role": "attached_primary",
+                "component_rank": 0,
+                "top_y_px": 62,
+                "bottom_y_px": 177,
+                "last_valid_y_px": 177,
+            },
+            {
+                "component_id": "plausible_detached_01",
+                "component_role": "detached_plausible_unaccepted",
+                "component_rank": 1,
+                "top_y_px": 190,
+                "bottom_y_px": 225,
+                "last_valid_y_px": 225,
+            },
+        ],
+        "accepted_components": [attached_component],
+        "roi": {"x0": 70, "y0": 50, "x1": 150, "y1": 320, "width": 80, "height": 270},
+    }
+    stage4_frame = {
+        "frame_metric_row": {
+            "total_visible_volume_nl": 18.0,
+            "detached_visible_volume_nl": 0.0,
+            "plausible_unaccepted_visible_volume_nl": 1.2,
+            "min_accepted_fluid_distance_from_bottom_px": 82,
+        },
+        "component_volume_rows": [],
+    }
+
+    monkeypatch.setattr(mod.silhouette_mod, "_analyze_stage3_gray", lambda *args, **kwargs: stage3_frame)
+    monkeypatch.setattr(mod.volume_mod, "_analyze_stage4_frame", lambda *args, **kwargs: stage4_frame)
+
+    result = mod.analyze_online_stream_frame(
+        frame_image=_blank_frame(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=4250,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["status"] == "accepted"
+    assert summary["measurement_qc_pass"] is True
+    assert summary["flow_volume_complete_ok"] is False
+    assert summary["flow_volume_completeness_reasons"] == ["material_plausible_unaccepted_detached"]
+    assert summary["plausible_unaccepted_component_count"] == 1
+    assert summary["plausible_unaccepted_visible_volume_nl"] == pytest.approx(1.2)
+    assert summary["flow_measurement_usable"] is False
+    assert "flow_volume_incomplete" in summary["warnings"]
 
 
 def test_analyze_online_stream_frame_marks_near_nozzle_detached_warning():

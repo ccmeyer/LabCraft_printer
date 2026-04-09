@@ -387,6 +387,52 @@ def test_accepted_detached_components_assigns_deterministic_component_ids():
     assert [int(row["top_y_px"]) for row in detached] == sorted(int(row["top_y_px"]) for row in detached)
 
 
+def test_accepted_detached_components_accepts_overlapping_lower_blob_as_continuation():
+    mask = np.zeros((160, 140), dtype=np.uint8)
+    mask[10:88, 40:100] = 255
+    cv2.ellipse(mask, (104, 116), (12, 18), 0.0, 0.0, 360.0, 255, thickness=-1)
+    roi = {"x0": 100, "y0": 200, "x1": 240, "y1": 360, "width": 140, "height": 160}
+
+    selection = mod._select_primary_component(
+        mask,
+        roi,
+        tracked_x_px=170.0,
+        cutoff_y_px=212,
+        min_component_area_px=20,
+    )
+    detached = mod._accepted_detached_components(selection, roi, cutoff_y_px=212)
+
+    assert selection["selected_component"] is not None
+    assert [row["component_id"] for row in detached] == ["detached_01"]
+
+
+def test_plausible_unaccepted_detached_components_flags_material_nearby_blob():
+    mask = np.zeros((160, 120), dtype=np.uint8)
+    mask[10:88, 56:64] = 255
+    cv2.ellipse(mask, (102, 120), (10, 16), 0.0, 0.0, 360.0, 255, thickness=-1)
+    roi = {"x0": 100, "y0": 200, "x1": 220, "y1": 360, "width": 120, "height": 160}
+
+    selection = mod._select_primary_component(
+        mask,
+        roi,
+        tracked_x_px=160.0,
+        cutoff_y_px=212,
+        min_component_area_px=20,
+    )
+    detached = mod._accepted_detached_components(selection, roi, cutoff_y_px=212)
+    plausible = mod._plausible_unaccepted_detached_components(
+        selection,
+        roi,
+        cutoff_y_px=212,
+        min_component_area_px=20,
+        accepted_labels={int(row["label"]) for row in detached},
+    )
+
+    assert detached == []
+    assert [row["component_role"] for row in plausible] == ["detached_plausible_unaccepted"]
+    assert [row["component_id"] for row in plausible] == ["plausible_detached_01"]
+
+
 def test_trace_edges_returns_rowwise_bounds_for_selected_component():
     mask = np.zeros((30, 40), dtype=np.uint8)
     mask[10:18, 6:16] = 255

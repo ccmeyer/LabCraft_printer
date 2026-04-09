@@ -85,7 +85,7 @@ def test_plan_online_stream_tail_phase_anchors_on_last_accepted_flow_delay():
             "tail_coarse_step_us": 125,
         },
         emergence_time_us=3200,
-        capture_budget={"captures_remaining_hard": 25},
+        capture_budget={"captures_remaining_hard": 35},
         flow_delay_summaries=[
             _flow_delay_summary(delay_us=3850, delay_from_emergence_us=650),
             _flow_delay_summary(delay_us=4050, delay_from_emergence_us=850),
@@ -126,7 +126,7 @@ def test_plan_online_stream_tail_phase_skips_when_remaining_hard_budget_cannot_f
         flow_fit_result=_flow_fit_result(),
         priors=None,
         emergence_time_us=3200,
-        capture_budget={"captures_remaining_hard": 24},
+        capture_budget={"captures_remaining_hard": 26},
         flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
     )
 
@@ -134,6 +134,30 @@ def test_plan_online_stream_tail_phase_skips_when_remaining_hard_budget_cannot_f
     assert plan["skip_reason"] == "capture_budget_exhausted"
     assert plan["reserved_backtrack_capture_count"] == 15
     assert plan["planned_scout_delay_count"] == 10
+    assert plan["required_tail_capture_count"] == 35
+    assert plan["required_tail_backtrack_capture_count"] == 15
+    assert plan["required_tail_left_extension_capture_count"] == 10
+
+
+def test_estimate_online_stream_tail_capture_requirements_exceeds_fixed_tail_reserve():
+    estimate = mod.estimate_online_stream_tail_capture_requirements(
+        scout_anchor_delay_us=4250,
+        scout_first_delay_us=4750,
+        scout_step_us=500,
+        scout_replicates=1,
+        max_scout_delay_count=10,
+        backtrack_step_us=50,
+        backtrack_replicates=1,
+        fine_prepad_us=100,
+        fine_postpad_us=100,
+    )
+
+    assert estimate["required_tail_scout_capture_count"] == 10
+    assert estimate["required_tail_backtrack_capture_count"] == 15
+    assert estimate["required_tail_left_extension_capture_count"] == 10
+    assert estimate["required_tail_capture_count"] == 35
+    assert estimate["required_tail_capture_count"] > 25
+    assert estimate["minimum_tail_capture_count"] == 27
 
 
 def test_plan_online_stream_tail_phase_skips_without_accepted_flow_anchor():
@@ -309,6 +333,34 @@ def test_build_online_stream_tail_backtrack_plan_clamps_dense_window_start_to_sc
     )
 
     assert plan == [4250, 4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700, 4750, 4800, 4850]
+
+
+def test_compress_online_stream_tail_backtrack_plan_preserves_dense_zone_near_landmark():
+    plan = mod.build_online_stream_tail_backtrack_plan(
+        scout_anchor_delay_us=4250,
+        left_endpoint_delay_us=4250,
+        landmark_delay_us=5250,
+        backtrack_step_us=50,
+        fine_prepad_us=100,
+        fine_postpad_us=100,
+    )
+
+    compressed = mod.compress_online_stream_tail_backtrack_plan(
+        delay_sequence=plan,
+        left_endpoint_delay_us=4250,
+        landmark_delay_us=5250,
+        backtrack_step_us=50,
+        backtrack_replicates=1,
+        fine_postpad_us=100,
+        available_capture_count=12,
+    )
+
+    assert compressed["compressed"] is True
+    assert compressed["requested_capture_count"] == len(plan)
+    assert compressed["applied_capture_count"] == 12
+    assert compressed["delay_sequence"][0] == 4250
+    assert compressed["delay_sequence"][-1] == 5350
+    assert compressed["delay_sequence"][1:] == [4850, 4900, 4950, 5000, 5050, 5100, 5150, 5200, 5250, 5300, 5350]
 
 
 def test_decide_online_stream_tail_next_action_switches_to_backtrack_on_landmark():

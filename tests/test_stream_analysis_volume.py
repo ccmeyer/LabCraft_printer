@@ -125,6 +125,53 @@ def test_component_volume_rows_sum_when_components_overlap_in_y():
     )
 
 
+def test_frame_metric_rows_keep_plausible_unaccepted_volume_out_of_total_visible_volume():
+    stage3_rows = [
+        {
+            "run_id": "run_a",
+            "capture_id": "cap_001",
+            "capture_index": 1,
+            "flash_delay_us": 4750,
+            "delay_from_emergence_us": 50,
+            "silhouette_status": "ok",
+            "failure_reason": None,
+            "accepted_component_count": 2,
+            "accepted_detached_component_count": 1,
+            "plausible_unaccepted_component_count": 1,
+        }
+    ]
+    component_volume_rows = [
+        {
+            "run_id": "run_a",
+            "capture_id": "cap_001",
+            "component_id": "attached_primary",
+            "component_role": "attached_primary",
+            "component_volume_nl": 10.0,
+        },
+        {
+            "run_id": "run_a",
+            "capture_id": "cap_001",
+            "component_id": "detached_01",
+            "component_role": "detached_accepted",
+            "component_volume_nl": 4.0,
+        },
+        {
+            "run_id": "run_a",
+            "capture_id": "cap_001",
+            "component_id": "plausible_detached_01",
+            "component_role": "detached_plausible_unaccepted",
+            "component_volume_nl": 3.0,
+        },
+    ]
+
+    frame_rows = mod._frame_metric_rows(stage3_rows, component_volume_rows)
+
+    assert frame_rows[0]["attached_visible_volume_nl"] == 10.0
+    assert frame_rows[0]["detached_visible_volume_nl"] == 4.0
+    assert frame_rows[0]["plausible_unaccepted_visible_volume_nl"] == 3.0
+    assert frame_rows[0]["total_visible_volume_nl"] == 14.0
+
+
 def test_fov_labeling_triggers_when_detached_component_is_within_32_px_of_bottom():
     rows = [
         _stage3_metric_row(1, last_valid_y_px=430, accepted_detached_component_count=1),

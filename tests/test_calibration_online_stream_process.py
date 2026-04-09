@@ -1484,6 +1484,46 @@ def test_online_stream_advance_flow_phase_warns_on_single_active_low_confidence_
     assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 850]
 
 
+def test_online_stream_advance_flow_phase_keeps_scouting_after_volume_incomplete_delay(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_mode = "scout"
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=3850,
+            delay_from_emergence_us=650,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_incomplete"},
+            warnings=["flow_volume_incomplete"],
+            attached_width_px=90.0,
+            visible_volume_nl=12.8,
+            attached_bottom_clearance_px=260,
+            min_accepted_fluid_distance_from_bottom_px=260,
+            flow_point_confidence=0.90,
+            flow_optical_confidence_active=True,
+            flow_volume_geometry_ok=True,
+            flow_volume_complete_ok=False,
+            flow_volume_completeness_reasons=["material_plausible_unaccepted_detached"],
+            plausible_unaccepted_component_count=1,
+            plausible_unaccepted_visible_volume_nl=1.4,
+            flow_measurement_usable=False,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_scout_boundary_reason is None
+    assert proc._flow_right_boundary_fixed is False
+    assert "flow_volume_incomplete" in proc._flow_warnings
+    assert proc._flow_delay_summaries[0]["volume_incomplete_rejected_replicates"] == 1
+    assert proc._flow_delay_sequence == [int(proc.emergence_time_us) + 750]
+
+
 def test_online_stream_advance_flow_phase_uses_confidence_floor_to_stop_extending_after_two_active_low_confidence_delays(tmp_path):
     proc = _flow_proc(tmp_path)
     proc._flow_mode = "scout"
@@ -1551,6 +1591,90 @@ def test_online_stream_advance_flow_phase_uses_confidence_floor_to_stop_extendin
     assert getattr(proc, "_flow_confidence_boundary_delay_from_emergence_us", None) == 950
     assert proc._flow_delay_sequence[0] == int(proc.emergence_time_us) + 650
     assert proc._flow_delay_sequence[-1] == int(proc.emergence_time_us) + 750
+
+
+def test_online_stream_advance_flow_phase_preserves_tail_budget_once_fit_is_usable(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_mode = "scout"
+    proc.capture_budget["captures_used"] = 34
+    proc.capture_budget["captures_remaining_nominal"] = 23
+    proc.capture_budget["captures_remaining_hard"] = 29
+    proc.capture_budget["exhausted"] = False
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 3850 + (50 * idx),
+            "delay_from_emergence_us": 650 + (50 * idx),
+            "delay_accepted": True,
+            "flow_point_confidence": 0.92,
+            "flow_optical_confidence_active": True,
+            "min_attached_bottom_clearance_px": 420,
+            "min_accepted_fluid_distance_from_bottom_px": 420,
+            "warnings": [],
+        }
+        for idx in range(11)
+    ]
+    proc._compute_flow_preview_fit_result = lambda: {
+        "fit_status": "ok",
+        "accepted_delay_point_count": 12,
+        "steady_rate_ci95_relative_width": 0.18,
+        "late_coverage_reached": False,
+        "late_slope_stable": False,
+    }
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=4400,
+            delay_from_emergence_us=1200,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_budget"},
+            warnings=[],
+            attached_width_px=90.0,
+            visible_volume_nl=17.8,
+            attached_bottom_clearance_px=260,
+            min_accepted_fluid_distance_from_bottom_px=260,
+            flow_point_confidence=0.88,
+            flow_optical_confidence_active=True,
+            flow_volume_geometry_ok=True,
+            flow_volume_complete_ok=True,
+            flow_measurement_usable=True,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+    proc._preview_required_tail_capture_count = lambda fit_result=None: 31
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_termination_reason == "tail_budget_preserved"
+    assert "tail_budget_preserved_early_finalize" in proc._flow_warnings
+    assert len(proc.flowAcquisitionFinished.calls) == 1
+
+
+def test_online_stream_build_tail_backtrack_sequence_compresses_to_fit_remaining_budget(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+    }
+    proc.capture_budget["captures_remaining_hard"] = 12
+    proc._tail_backtrack_left_delay_us = 4250
+    proc._tail_landmark_delay_us = 5250
+    proc._tail_backtrack_delay_summaries = []
+
+    sequence = proc._build_tail_backtrack_delay_sequence()
+
+    assert sequence == [4250, 4850, 4900, 4950, 5000, 5050, 5100, 5150, 5200, 5250, 5300, 5350]
+    assert proc._tail_plan["tail_backtrack_compressed"] is True
+    assert proc._tail_plan["tail_backtrack_requested_capture_count"] == 23
+    assert proc._tail_plan["tail_backtrack_applied_capture_count"] == 12
+    assert proc._tail_plan["tail_backtrack_budget_impossible"] is False
+    assert "tail_budget_compressed_backtrack" in proc._tail_fit_warnings
 
 
 def test_online_stream_advance_flow_phase_does_not_boundary_before_any_safe_late_window_point(tmp_path):
@@ -1909,7 +2033,7 @@ def test_online_stream_plan_tail_phase_fails_when_less_than_dense_tail_budget_re
     proc.capture_budget = calibration_model.online_cal_mod.consume_online_stream_budget(
         calibration_model.online_cal_mod.new_online_stream_budget(),
         phase="flow_phase",
-        count=37,
+        count=40,
     )
     _seed_tail_flow_context(proc)
 
