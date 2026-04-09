@@ -55,10 +55,13 @@ def test_build_online_stream_flow_plan_uses_exact_condition_prior_without_changi
     assert plan["delay_offsets_from_emergence_us"] == [700]
     assert plan["delays_us"] == [1700]
     assert plan["replicates_per_delay"] == 1
-    assert plan["point_count"] == 15
+    assert plan["point_count"] == 20
     assert plan["scout_step_us"] == 100
     assert plan["min_accepted_delays"] == 12
     assert plan["max_capture_count"] == 30
+    assert plan["late_coverage_min_delay_us"] == 2250
+    assert plan["late_coverage_min_visible_fluid_clearance_px"] == 300
+    assert plan["late_coverage_confidence_min"] == 0.70
     assert plan["reserved_tail_capture_count"] == 25
     assert plan["plan_source"] == "prior_adjusted"
 
@@ -72,12 +75,15 @@ def test_build_online_stream_flow_plan_without_prior_matches_adaptive_defaults()
     assert plan["delay_offsets_from_emergence_us"] == [650]
     assert plan["delays_us"] == [1650]
     assert plan["replicates_per_delay"] == 1
-    assert plan["point_count"] == 15
+    assert plan["point_count"] == 20
     assert plan["scout_step_us"] == 100
     assert plan["min_accepted_delays"] == 12
     assert plan["max_capture_count"] == 30
     assert plan["soft_bottom_clearance_px"] == 150
     assert plan["ci95_relative_width_target"] == 0.12
+    assert plan["late_coverage_min_delay_us"] == 2250
+    assert plan["late_coverage_min_visible_fluid_clearance_px"] == 300
+    assert plan["late_coverage_confidence_min"] == 0.70
     assert plan["reserved_tail_capture_count"] == 25
     assert plan["plan_source"] == "default"
 
@@ -96,7 +102,7 @@ def test_build_online_stream_flow_plan_ignores_legacy_prior_shape_and_keeps_only
     assert plan["start_offset_from_emergence_us"] == 700
     assert plan["delay_offsets_from_emergence_us"] == [700]
     assert plan["replicates_per_delay"] == 1
-    assert plan["point_count"] == 15
+    assert plan["point_count"] == 20
 
 
 def test_build_online_stream_tail_plan_without_prior_matches_frozen_defaults():
@@ -267,6 +273,12 @@ def test_build_online_stream_measurement_row_returns_exact_required_keys():
         "nozzle_qc_pass",
         "silhouette_qc_pass",
         "attached_bottom_clearance_px",
+        "min_accepted_fluid_distance_from_bottom_px",
+        "flow_geometry_confidence",
+        "flow_optical_confidence",
+        "flow_point_confidence",
+        "lower_edge_jitter_px",
+        "boundary_chroma_aberration_score",
     }
 
 
@@ -334,6 +346,7 @@ def test_build_online_stream_flow_phase_payload_appends_fit_fields():
             "fit_status": "ok",
             "flow_rate_nl_per_us": 0.0187,
             "flow_intercept_nl": -1.2,
+            "lag_equivalent_us": 64.2,
             "flow_fit_delay_start_from_emergence_us": 650,
             "flow_fit_delay_end_from_emergence_us": 1450,
             "steady_width_baseline_px": 74.0,
@@ -342,16 +355,28 @@ def test_build_online_stream_flow_phase_payload_appends_fit_fields():
             "steady_rate_ci95_low_nl_per_us": 0.0185,
             "steady_rate_ci95_high_nl_per_us": 0.0189,
             "steady_rate_ci95_relative_width": 0.02,
+            "late_slope_nl_per_us": 0.0188,
+            "late_slope_relative_gap": 0.03,
+            "late_slope_stable": True,
+            "late_coverage_reached": True,
+            "late_coverage_delay_from_emergence_us": 2350,
+            "late_coverage_metric": "visible_fluid_bottom_clearance",
+            "fit_weight_floor": 0.20,
             "flow_fit_point_count": 5,
             "flow_fit_outlier_prune_status": "kept_below_local_deviation_threshold",
             "flow_fit_dropped_outlier_delay_from_emergence_us": None,
             "warnings": ["flow_fit_min_points_only"],
         },
+        confidence_boundary_delay_from_emergence_us=2150,
     )
 
     assert payload["status"] == "captured"
     assert payload["flow_rate_nl_per_us"] == 0.0187
+    assert payload["lag_equivalent_us"] == 64.2
     assert payload["steady_width_baseline_px"] == 74.0
+    assert payload["late_slope_stable"] is True
+    assert payload["late_coverage_metric"] == "visible_fluid_bottom_clearance"
+    assert payload["confidence_boundary_delay_from_emergence_us"] == 2150
     assert payload["flow_fit_point_count"] == 5
     assert payload["fit_warnings"] == ["flow_fit_min_points_only"]
 
@@ -461,6 +486,55 @@ def test_summarize_online_stream_flow_delay_computes_medians_and_counts():
     assert summary["min_attached_bottom_clearance_px"] == 140.0
     assert summary["detached_near_bottom_warning"] is True
     assert summary["delay_accepted"] is True
+
+
+def test_summarize_online_stream_flow_delay_tracks_confidence_and_visible_fluid_clearance():
+    summary = mod.summarize_online_stream_flow_delay(
+        [
+            mod.build_online_stream_frame_row(
+                phase="flow_rate",
+                status="accepted",
+                delay_us=5450,
+                delay_from_emergence_us=2250,
+                replicate_index=1,
+                qc={"measurement_qc_pass": True},
+                image_ref={"capture_id": "cap_late_01"},
+                warnings=[],
+                attached_width_px=91.0,
+                visible_volume_nl=18.0,
+                attached_bottom_clearance_px=420,
+                min_accepted_fluid_distance_from_bottom_px=280,
+                detached_near_bottom_warning=False,
+                flow_geometry_confidence=0.88,
+                flow_optical_confidence=0.74,
+                flow_point_confidence=0.74,
+                lower_edge_jitter_px=0.8,
+                boundary_chroma_aberration_score=11.0,
+            )
+        ]
+    )
+
+    assert summary["min_accepted_fluid_distance_from_bottom_px"] == 280.0
+    assert summary["flow_geometry_confidence"] == 0.88
+    assert summary["flow_optical_confidence"] == 0.74
+    assert summary["flow_point_confidence"] == 0.74
+    assert summary["late_coverage_candidate"] is True
+    assert summary["late_coverage_metric"] == "delay_threshold"
+
+
+def test_online_stream_late_coverage_candidate_uses_visible_fluid_clearance_when_detached_fluid_reaches_bottom():
+    candidate, metric = mod.is_online_stream_flow_late_coverage_candidate(
+        {
+            "delay_accepted": True,
+            "delay_from_emergence_us": 2050,
+            "flow_point_confidence": 0.76,
+            "min_accepted_fluid_distance_from_bottom_px": 280,
+            "min_attached_bottom_clearance_px": 420,
+        }
+    )
+
+    assert candidate is True
+    assert metric == "visible_fluid_bottom_clearance"
 
 
 def test_summarize_online_stream_flow_delay_marks_bottom_guard_hits():

@@ -9,6 +9,13 @@ DEFAULT_ONLINE_FLOW_FIT_POLICY = {
     "steady_fit_r2_min": 0.98,
     "steady_fit_nrmse_max": 0.05,
     "steady_rate_ci95_relative_width_warn": 0.12,
+    "fit_weight_floor": 0.20,
+    "late_coverage_min_delay_us": 2250,
+    "late_coverage_min_visible_fluid_clearance_px": 300,
+    "late_coverage_confidence_min": 0.70,
+    "late_slope_window_points": 4,
+    "late_slope_max_relative_gap": 0.07,
+    "late_slope_residual_trend_max_nl_per_us": 0.00015,
     "min_delays_for_outlier_prune": 4,
     "outlier_local_deviation_floor_nl": 0.75,
     "outlier_improvement_fraction_min": 0.20,
@@ -108,14 +115,87 @@ def _accepted_delay_points_from_delay_summaries(delay_summaries: list[dict]) -> 
                 "min_attached_bottom_clearance_px": _to_float_or_none(
                     summary.get("min_attached_bottom_clearance_px")
                 ),
+                "min_accepted_fluid_distance_from_bottom_px": _to_float_or_none(
+                    summary.get("min_accepted_fluid_distance_from_bottom_px")
+                ),
                 "detached_near_bottom_warning": bool(summary.get("detached_near_bottom_warning")),
+                "flow_geometry_confidence": _to_float_or_none(summary.get("flow_geometry_confidence")),
+                "flow_optical_confidence": _to_float_or_none(summary.get("flow_optical_confidence")),
+                "flow_point_confidence": _to_float_or_none(summary.get("flow_point_confidence")),
+                "lower_edge_jitter_px": _to_float_or_none(summary.get("lower_edge_jitter_px")),
+                "boundary_chroma_aberration_score": _to_float_or_none(
+                    summary.get("boundary_chroma_aberration_score")
+                ),
+                "late_coverage_candidate": bool(summary.get("late_coverage_candidate")),
+                "late_coverage_metric": None
+                if summary.get("late_coverage_metric") in (None, "")
+                else str(summary.get("late_coverage_metric")),
             }
         )
     points.sort(key=lambda row: (int(row["delay_from_emergence_us"]), int(row["delay_us"])))
     return points
 
 
-def _fit_window_metrics(points: list[dict]) -> dict | None:
+def _point_fit_weight(point: dict, *, weight_floor: float) -> float:
+    confidence = _to_float_or_none(dict(point or {}).get("flow_point_confidence"))
+    if confidence is None:
+        confidence = 1.0
+    return float(max(float(weight_floor), float(confidence) ** 2))
+
+
+def _weighted_linear_fit(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    weights: np.ndarray,
+) -> dict | None:
+    if x_values.size < 2 or y_values.size < 2 or weights.size < 2:
+        return None
+    if np.any(~np.isfinite(x_values)) or np.any(~np.isfinite(y_values)) or np.any(~np.isfinite(weights)):
+        return None
+    if np.any(weights <= 0.0):
+        return None
+
+    design = np.column_stack((x_values, np.ones_like(x_values)))
+    sqrt_w = np.sqrt(weights)
+    weighted_design = design * sqrt_w[:, None]
+    weighted_y = y_values * sqrt_w
+    try:
+        slope, intercept = np.linalg.lstsq(weighted_design, weighted_y, rcond=None)[0]
+    except Exception:
+        return None
+    if not np.isfinite(slope) or not np.isfinite(intercept):
+        return None
+
+    predicted = (float(slope) * x_values) + float(intercept)
+    residuals = y_values - predicted
+    weighted_mean = float(np.average(y_values, weights=weights))
+    ss_res = float(np.sum(weights * (residuals**2)))
+    ss_tot = float(np.sum(weights * ((y_values - weighted_mean) ** 2)))
+    value_span = float(np.max(y_values) - np.min(y_values))
+    dof = int(max(0, x_values.size - 2))
+    slope_se = None
+    if dof > 0:
+        try:
+            xtwx = design.T @ (weights[:, None] * design)
+            cov = (ss_res / float(dof)) * np.linalg.inv(xtwx)
+            if np.isfinite(cov[0, 0]) and float(cov[0, 0]) >= 0.0:
+                slope_se = float(np.sqrt(cov[0, 0]))
+        except Exception:
+            slope_se = None
+    return {
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "predicted": predicted,
+        "residuals": residuals,
+        "ss_res": float(ss_res),
+        "ss_tot": float(ss_tot),
+        "value_span": float(value_span),
+        "dof": dof,
+        "slope_se": slope_se,
+    }
+
+
+def _fit_window_metrics(points: list[dict], *, policy: dict) -> dict | None:
     if len(points) < 2:
         return None
 
@@ -127,29 +207,28 @@ def _fit_window_metrics(points: list[dict]) -> dict | None:
         [float(point["median_visible_volume_nl"]) for point in points],
         dtype=float,
     )
-    if np.any(~np.isfinite(x_values)) or np.any(~np.isfinite(y_values)):
+    weights = np.asarray(
+        [_point_fit_weight(point, weight_floor=float(policy["fit_weight_floor"])) for point in points],
+        dtype=float,
+    )
+    fit = _weighted_linear_fit(x_values, y_values, weights)
+    if fit is None:
         return None
-
-    try:
-        slope, intercept, _lower, _upper = stats.theilslopes(y_values, x_values)
-    except Exception:
+    slope = float(fit["slope"])
+    intercept = float(fit["intercept"])
+    if float(slope) <= 0.0:
         return None
-
-    if not np.isfinite(slope) or not np.isfinite(intercept) or float(slope) <= 0.0:
-        return None
-
-    predicted = (float(slope) * x_values) + float(intercept)
-    residuals = y_values - predicted
-    ss_res = float(np.sum(residuals**2))
-    ss_tot = float(np.sum((y_values - np.mean(y_values)) ** 2))
+    predicted = fit["predicted"]
+    residuals = fit["residuals"]
+    ss_res = float(fit["ss_res"])
+    ss_tot = float(fit["ss_tot"])
     if ss_tot <= 0.0:
         return None
-
-    value_span = float(np.max(y_values) - np.min(y_values))
+    value_span = float(fit["value_span"])
     if value_span <= 0.0:
         return None
 
-    rmse = float(np.sqrt(np.mean(residuals**2)))
+    rmse = float(np.sqrt(np.average(residuals**2, weights=weights)))
     nrmse = float(rmse / value_span)
     r2 = float(1.0 - (ss_res / ss_tot))
     third_count = max(1, int(len(residuals)) // 3)
@@ -167,10 +246,28 @@ def _fit_window_metrics(points: list[dict]) -> dict | None:
         residual_trend_nl_per_us = float(
             np.sum((x_values - time_mean) * (residuals - residual_mean)) / denominator
         )
+    ci_low = None
+    ci_high = None
+    ci_relative_width = None
+    if fit.get("slope_se") is not None and int(fit.get("dof") or 0) > 0:
+        try:
+            t_crit = float(stats.t.ppf(0.975, int(fit["dof"])))
+            ci_low = float(slope - (t_crit * float(fit["slope_se"])))
+            ci_high = float(slope + (t_crit * float(fit["slope_se"])))
+            if float(slope) != 0.0:
+                ci_relative_width = float((ci_high - ci_low) / abs(float(slope)))
+        except Exception:
+            ci_low = None
+            ci_high = None
+            ci_relative_width = None
+    lag_equivalent_us = None
+    if float(slope) > 0.0:
+        lag_equivalent_us = float(-float(intercept) / float(slope))
 
     return {
         "flow_rate_nl_per_us": float(slope),
         "flow_intercept_nl": float(intercept),
+        "lag_equivalent_us": lag_equivalent_us,
         "steady_r2": float(r2),
         "steady_nrmse": float(nrmse),
         "steady_fit_first_last_residual_delta_nl": float(first_last_residual_delta_nl),
@@ -178,10 +275,19 @@ def _fit_window_metrics(points: list[dict]) -> dict | None:
         "steady_fit_residual_trend_nl_per_us": (
             None if residual_trend_nl_per_us is None else float(residual_trend_nl_per_us)
         ),
+        "steady_rate_ci95_low_nl_per_us": ci_low,
+        "steady_rate_ci95_high_nl_per_us": ci_high,
+        "steady_rate_ci95_relative_width": ci_relative_width,
+        "fit_weight_floor": float(policy["fit_weight_floor"]),
     }
 
 
-def _steady_fit_confidence_from_points(points: list[dict], *, central_rate: float | None) -> dict:
+def _steady_fit_confidence_from_points(
+    points: list[dict],
+    *,
+    central_rate: float | None,
+    policy: dict,
+) -> dict:
     if central_rate is None:
         return {
             "steady_rate_ci95_low_nl_per_us": None,
@@ -216,30 +322,30 @@ def _steady_fit_confidence_from_points(points: list[dict], *, central_rate: floa
             "steady_rate_confidence_status": "unresolved_missing_time_or_volume",
         }
 
+    weights = np.asarray(
+        [_point_fit_weight(point, weight_floor=float(policy["fit_weight_floor"])) for point in points],
+        dtype=float,
+    )
+    fit = _weighted_linear_fit(x_values, y_values, weights)
+    if fit is None or fit.get("slope_se") is None or int(fit.get("dof") or 0) <= 0:
+        return {
+            "steady_rate_ci95_low_nl_per_us": None,
+            "steady_rate_ci95_high_nl_per_us": None,
+            "steady_rate_ci95_relative_width": None,
+            "steady_rate_ci95_contains_central": None,
+            "steady_rate_confidence_status": "unresolved_weighted_fit_failed",
+        }
     try:
-        _slope, _intercept, lower_slope, upper_slope = stats.theilslopes(
-            y_values,
-            x_values,
-            alpha=0.95,
-        )
+        t_crit = float(stats.t.ppf(0.975, int(fit["dof"])))
+        rate_low = float(fit["slope"] - (t_crit * float(fit["slope_se"])))
+        rate_high = float(fit["slope"] + (t_crit * float(fit["slope_se"])))
     except Exception:
         return {
             "steady_rate_ci95_low_nl_per_us": None,
             "steady_rate_ci95_high_nl_per_us": None,
             "steady_rate_ci95_relative_width": None,
             "steady_rate_ci95_contains_central": None,
-            "steady_rate_confidence_status": "unresolved_theilsen_failed",
-        }
-
-    rate_low = _to_float_or_none(lower_slope)
-    rate_high = _to_float_or_none(upper_slope)
-    if rate_low is None or rate_high is None:
-        return {
-            "steady_rate_ci95_low_nl_per_us": None,
-            "steady_rate_ci95_high_nl_per_us": None,
-            "steady_rate_ci95_relative_width": None,
-            "steady_rate_ci95_contains_central": None,
-            "steady_rate_confidence_status": "unresolved_theilsen_failed",
+            "steady_rate_confidence_status": "unresolved_weighted_fit_failed",
         }
 
     rate_low, rate_high = sorted((float(rate_low), float(rate_high)))
@@ -259,6 +365,96 @@ def _steady_fit_confidence_from_points(points: list[dict], *, central_rate: floa
         "steady_rate_confidence_status": (
             "ok" if contains_central else "warning_central_rate_mismatch"
         ),
+    }
+
+
+def _late_coverage_summary(points: list[dict], *, policy: dict) -> dict:
+    confidence_min = float(policy["late_coverage_confidence_min"])
+    delay_threshold = int(policy["late_coverage_min_delay_us"])
+    clearance_threshold = float(policy["late_coverage_min_visible_fluid_clearance_px"])
+    for point in points:
+        confidence = _to_float_or_none(point.get("flow_point_confidence"))
+        if confidence is None or float(confidence) < confidence_min:
+            continue
+        delay_from_emergence_us = _to_int(point.get("delay_from_emergence_us"), None)
+        if delay_from_emergence_us is not None and int(delay_from_emergence_us) >= delay_threshold:
+            return {
+                "late_coverage_reached": True,
+                "late_coverage_delay_from_emergence_us": int(delay_from_emergence_us),
+                "late_coverage_metric": "delay_threshold",
+            }
+        clearance_px = _to_float_or_none(point.get("min_accepted_fluid_distance_from_bottom_px"))
+        if clearance_px is None:
+            clearance_px = _to_float_or_none(point.get("min_attached_bottom_clearance_px"))
+        if clearance_px is not None and float(clearance_px) <= clearance_threshold:
+            return {
+                "late_coverage_reached": True,
+                "late_coverage_delay_from_emergence_us": int(delay_from_emergence_us or 0),
+                "late_coverage_metric": "visible_fluid_bottom_clearance",
+            }
+    return {
+        "late_coverage_reached": False,
+        "late_coverage_delay_from_emergence_us": None,
+        "late_coverage_metric": None,
+    }
+
+
+def _late_slope_summary(
+    points: list[dict],
+    *,
+    global_slope: float | None,
+    residual_trend_nl_per_us: float | None,
+    policy: dict,
+) -> dict:
+    if global_slope is None or float(global_slope) <= 0.0:
+        return {
+            "late_slope_nl_per_us": None,
+            "late_slope_relative_gap": None,
+            "late_slope_stable": False,
+        }
+    min_confidence = float(policy["late_coverage_confidence_min"])
+    window_points = int(max(3, _to_int(policy.get("late_slope_window_points"), 4)))
+    high_conf_points = [
+        dict(point)
+        for point in list(points or [])
+        if _to_float_or_none(point.get("flow_point_confidence")) is not None
+        and float(point["flow_point_confidence"]) >= min_confidence
+    ]
+    if len(high_conf_points) < 3:
+        return {
+            "late_slope_nl_per_us": None,
+            "late_slope_relative_gap": None,
+            "late_slope_stable": False,
+        }
+    keep_count = int(min(window_points, len(high_conf_points)))
+    late_points = high_conf_points[-keep_count:]
+    if len(late_points) < 3:
+        late_points = high_conf_points[-3:]
+    late_metrics = _fit_window_metrics(late_points, policy=policy)
+    if late_metrics is None:
+        return {
+            "late_slope_nl_per_us": None,
+            "late_slope_relative_gap": None,
+            "late_slope_stable": False,
+        }
+    late_slope = _to_float_or_none(late_metrics.get("flow_rate_nl_per_us"))
+    relative_gap = None
+    if late_slope is not None and float(global_slope) != 0.0:
+        relative_gap = float(abs(float(late_slope) - float(global_slope)) / abs(float(global_slope)))
+    stable = bool(
+        late_slope is not None
+        and relative_gap is not None
+        and float(relative_gap) <= float(policy["late_slope_max_relative_gap"])
+        and (
+            residual_trend_nl_per_us is not None
+            and abs(float(residual_trend_nl_per_us))
+            <= float(policy["late_slope_residual_trend_max_nl_per_us"])
+        )
+    )
+    return {
+        "late_slope_nl_per_us": late_slope,
+        "late_slope_relative_gap": relative_gap,
+        "late_slope_stable": stable,
     }
 
 
@@ -381,8 +577,8 @@ def _maybe_prune_flow_fit_outlier(
             "flow_fit_dropped_outlier_local_deviation_nl": None,
         }
 
-    base_metrics = _fit_window_metrics(points)
-    pruned_metrics = _fit_window_metrics(pruned_points)
+    base_metrics = _fit_window_metrics(points, policy=policy)
+    pruned_metrics = _fit_window_metrics(pruned_points, policy=policy)
     if (
         base_metrics is None
         or pruned_metrics is None
@@ -449,6 +645,7 @@ def fit_online_stream_flow_phase(
         "flow_fit_point_count": 0,
         "flow_rate_nl_per_us": None,
         "flow_intercept_nl": None,
+        "lag_equivalent_us": None,
         "flow_fit_delay_start_from_emergence_us": None,
         "flow_fit_delay_end_from_emergence_us": None,
         "steady_width_baseline_px": steady_width_baseline_px,
@@ -462,6 +659,13 @@ def fit_online_stream_flow_phase(
         "steady_fit_first_last_residual_delta_nl": None,
         "steady_fit_max_abs_residual_nl": None,
         "steady_fit_residual_trend_nl_per_us": None,
+        "late_slope_nl_per_us": None,
+        "late_slope_relative_gap": None,
+        "late_slope_stable": False,
+        "late_coverage_reached": False,
+        "late_coverage_delay_from_emergence_us": None,
+        "late_coverage_metric": None,
+        "fit_weight_floor": float(policy["fit_weight_floor"]),
         "flow_fit_outlier_prune_status": "not_attempted",
         "flow_fit_dropped_outlier_delay_us": None,
         "flow_fit_dropped_outlier_delay_from_emergence_us": None,
@@ -482,7 +686,7 @@ def fit_online_stream_flow_phase(
         policy=policy,
     )
     fit_points = [dict(point) for point in prune_result["points"]]
-    fit_metrics = _fit_window_metrics(fit_points)
+    fit_metrics = _fit_window_metrics(fit_points, policy=policy)
     if fit_metrics is None:
         warnings = ["flow_fit_failed"]
         if str(prune_result.get("flow_fit_outlier_prune_status")) == "dropped_isolated_point":
@@ -509,6 +713,16 @@ def fit_online_stream_flow_phase(
     confidence = _steady_fit_confidence_from_points(
         fit_points,
         central_rate=_to_float_or_none(fit_metrics.get("flow_rate_nl_per_us")),
+        policy=policy,
+    )
+    late_coverage = _late_coverage_summary(fit_points, policy=policy)
+    late_slope = _late_slope_summary(
+        fit_points,
+        global_slope=_to_float_or_none(fit_metrics.get("flow_rate_nl_per_us")),
+        residual_trend_nl_per_us=_to_float_or_none(
+            fit_metrics.get("steady_fit_residual_trend_nl_per_us")
+        ),
+        policy=policy,
     )
     warnings = []
     fit_status = "ok"
@@ -533,11 +747,17 @@ def fit_online_stream_flow_phase(
         warnings.append("flow_fit_outlier_pruned")
     if str(confidence.get("steady_rate_confidence_status") or "") == "warning_central_rate_mismatch":
         warnings.append("flow_fit_ci95_central_rate_mismatch")
+    if not bool(late_coverage.get("late_coverage_reached")):
+        warnings.append("flow_fit_late_coverage_not_reached")
+    if not bool(late_slope.get("late_slope_stable")):
+        warnings.append("flow_fit_late_slope_unstable")
 
     return {
         **base_result,
         **fit_metrics,
         **confidence,
+        **late_coverage,
+        **late_slope,
         "fit_status": str(fit_status),
         "flow_fit_point_count": int(len(fit_points)),
         "flow_fit_delay_start_from_emergence_us": int(fit_points[0]["delay_from_emergence_us"]),

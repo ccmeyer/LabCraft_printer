@@ -92,6 +92,11 @@ def test_analyze_online_stream_frame_returns_measurement_for_valid_attached_stre
     assert summary["attached_bottom_clearance_px"] > 96
     assert summary["flow_volume_geometry_ok"] is True
     assert summary["flow_measurement_usable"] is True
+    assert summary["flow_geometry_confidence"] is not None
+    assert summary["flow_optical_confidence"] is not None
+    assert summary["flow_point_confidence"] is not None
+    assert summary["lower_edge_jitter_px"] is not None
+    assert summary["boundary_chroma_aberration_score"] == 0.0
     assert result["overlay"] is not None
     assert result["overlay"].shape == frame.shape + (3,)
     assert np.any(result["overlay"][80:170, 96:124] != np.stack([frame[80:170, 96:124]] * 3, axis=-1))
@@ -207,6 +212,26 @@ def test_analyze_online_stream_frame_warns_for_detached_near_bottom_without_reje
     assert summary["late_frame_warning"] is True
     assert summary["flow_volume_geometry_ok"] is True
     assert "detached_near_bottom_warning" in summary["warnings"]
+
+
+def test_online_stream_runtime_marks_late_coverage_candidate_when_detached_fluid_reaches_lower_fov():
+    result = mod.analyze_online_stream_frame(
+        frame_image=_frame_with_detached_warning(),
+        background_image=_blank_frame(),
+        nozzle_center_px=NOZZLE_CENTER_PX,
+        delay_us=5500,
+        emergence_time_us=3200,
+        analysis_config=None,
+    )
+
+    summary = result["summary"]
+    assert summary["min_accepted_fluid_distance_from_bottom_px"] is not None
+    assert "late_coverage_candidate" in summary
+    if summary["late_coverage_candidate"]:
+        assert summary["late_coverage_metric"] in {"delay_threshold", "visible_fluid_bottom_clearance"}
+    else:
+        assert summary["flow_point_confidence"] is not None
+        assert summary["flow_point_confidence"] < 0.70
 
 
 def test_analyze_online_stream_frame_marks_near_nozzle_detached_warning():

@@ -246,12 +246,21 @@ def _set_flow_sequence(proc, offsets_from_emergence_us):
         "delays_us": [int(proc.emergence_time_us) + int(start_offset_us)],
         "start_offset_from_emergence_us": int(start_offset_us),
         "start_delay_us": int(proc.emergence_time_us) + int(start_offset_us),
-        "target_delay_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 15)),
-        "point_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 15)),
+        "target_delay_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 20)),
+        "point_count": max(len(offsets), int((proc.flow_plan or {}).get("target_delay_count") or 20)),
         "min_accepted_delays": int((proc.flow_plan or {}).get("min_accepted_delays") or 12),
         "max_capture_count": int((proc.flow_plan or {}).get("max_capture_count") or 30),
         "soft_bottom_clearance_px": int((proc.flow_plan or {}).get("soft_bottom_clearance_px") or 150),
         "ci95_relative_width_target": float((proc.flow_plan or {}).get("ci95_relative_width_target") or 0.12),
+        "late_coverage_min_delay_us": int((proc.flow_plan or {}).get("late_coverage_min_delay_us") or 2250),
+        "late_coverage_min_visible_fluid_clearance_px": int((proc.flow_plan or {}).get("late_coverage_min_visible_fluid_clearance_px") or 300),
+        "late_coverage_confidence_min": float((proc.flow_plan or {}).get("late_coverage_confidence_min") or 0.70),
+        "extension_confidence_floor": float((proc.flow_plan or {}).get("extension_confidence_floor") or 0.55),
+        "safe_densify_window_us": int((proc.flow_plan or {}).get("safe_densify_window_us") or 600),
+        "safe_densify_step_us": int((proc.flow_plan or {}).get("safe_densify_step_us") or 50),
+        "late_slope_window_points": int((proc.flow_plan or {}).get("late_slope_window_points") or 4),
+        "late_slope_max_relative_gap": float((proc.flow_plan or {}).get("late_slope_max_relative_gap") or 0.07),
+        "late_slope_residual_trend_max_nl_per_us": float((proc.flow_plan or {}).get("late_slope_residual_trend_max_nl_per_us") or 0.00015),
         "reserved_tail_capture_count": int((proc.flow_plan or {}).get("reserved_tail_capture_count") or 25),
         "ci_extension_step_us": int((proc.flow_plan or {}).get("ci_extension_step_us") or 50),
     }
@@ -861,7 +870,7 @@ def test_online_stream_plan_flow_phase_writes_plan_snapshot(tmp_path):
     assert snapshot["priors"]["lookup"]["candidate_found"] is False
     assert snapshot["flow_plan"]["search_method"] == "adaptive_visible_span_v1"
     assert snapshot["flow_plan"]["delays_us"] == [3850]
-    assert snapshot["flow_plan"]["target_delay_count"] == 15
+    assert snapshot["flow_plan"]["target_delay_count"] == 20
     assert snapshot["analysis_config"]["attached_bottom_guard_px"] == 96
 
 
@@ -1384,6 +1393,103 @@ def test_online_stream_advance_flow_phase_keeps_sampling_when_twelve_accepted_de
     assert proc.flowAcquisitionFinished.calls == []
     assert proc.nextDelay.calls
     assert proc._flow_termination_reason is None
+
+
+def test_flow_ci_target_requires_target_count_late_coverage_and_late_slope_stability(tmp_path):
+    proc = _flow_proc(tmp_path)
+
+    assert proc._flow_ci_target_met(
+        {
+            "fit_status": "ok",
+            "accepted_delay_point_count": 12,
+            "steady_rate_ci95_relative_width": 0.05,
+            "late_coverage_reached": True,
+            "late_slope_stable": True,
+        }
+    ) is False
+    assert proc._flow_ci_target_met(
+        {
+            "fit_status": "ok",
+            "accepted_delay_point_count": 20,
+            "steady_rate_ci95_relative_width": 0.05,
+            "late_coverage_reached": False,
+            "late_slope_stable": True,
+        }
+    ) is False
+    assert proc._flow_ci_target_met(
+        {
+            "fit_status": "ok",
+            "accepted_delay_point_count": 20,
+            "steady_rate_ci95_relative_width": 0.05,
+            "late_coverage_reached": True,
+            "late_slope_stable": False,
+        }
+    ) is False
+    assert proc._flow_ci_target_met(
+        {
+            "fit_status": "ok",
+            "accepted_delay_point_count": 20,
+            "steady_rate_ci95_relative_width": 0.05,
+            "late_coverage_reached": True,
+            "late_slope_stable": True,
+        }
+    ) is True
+
+
+def test_online_stream_advance_flow_phase_uses_confidence_floor_to_stop_extending_and_fill_safe_window(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._flow_mode = "scout"
+    proc._flow_delay_summaries = [
+        {
+            "delay_us": 3850,
+            "delay_from_emergence_us": 650,
+            "delay_accepted": True,
+            "flow_point_confidence": 0.92,
+            "min_attached_bottom_clearance_px": 420,
+            "min_accepted_fluid_distance_from_bottom_px": 420,
+            "warnings": [],
+        },
+        {
+            "delay_us": 3950,
+            "delay_from_emergence_us": 750,
+            "delay_accepted": True,
+            "flow_point_confidence": 0.90,
+            "min_attached_bottom_clearance_px": 400,
+            "min_accepted_fluid_distance_from_bottom_px": 400,
+            "warnings": [],
+        },
+    ]
+    proc._current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="flow_rate",
+            status="accepted",
+            delay_us=4050,
+            delay_from_emergence_us=850,
+            replicate_index=1,
+            qc={"measurement_qc_pass": True},
+            image_ref={"capture_id": "cap_flow_conf"},
+            warnings=[],
+            attached_width_px=90.0,
+            visible_volume_nl=12.8,
+            attached_bottom_clearance_px=390,
+            min_accepted_fluid_distance_from_bottom_px=390,
+            flow_point_confidence=0.40,
+            flow_volume_geometry_ok=True,
+            flow_measurement_usable=True,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=False,
+        )
+    ]
+    proc._current_analysis_summary = {"status": "accepted"}
+
+    proc.onAdvanceFlowPhase()
+
+    assert proc._flow_scout_boundary_reason == "confidence_low"
+    assert proc._flow_right_boundary_fixed is True
+    assert proc._flow_right_boundary_delay_from_emergence_us == 750
+    assert getattr(proc, "_flow_confidence_boundary_delay_from_emergence_us", None) == 850
+    assert proc._flow_delay_sequence[0] == int(proc.emergence_time_us) + 650
+    assert proc._flow_delay_sequence[-1] == int(proc.emergence_time_us) + 750
 
 
 def test_online_stream_on_fit_flow_rate_writes_flow_fit_artifact(tmp_path, monkeypatch):

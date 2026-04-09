@@ -4,11 +4,20 @@ from __future__ import annotations
 DEFAULT_ONLINE_STREAM_POLICY = {
     "flow_start_offset_us": 650,
     "flow_scout_step_us": 100,
-    "flow_target_delay_count": 15,
+    "flow_target_delay_count": 20,
     "flow_min_accepted_delays": 12,
     "flow_max_capture_count": 30,
     "flow_soft_bottom_clearance_px": 150,
     "flow_ci95_relative_width_target": 0.12,
+    "flow_late_coverage_min_delay_us": 2250,
+    "flow_late_coverage_min_visible_fluid_clearance_px": 300,
+    "flow_late_coverage_confidence_min": 0.70,
+    "flow_extension_confidence_floor": 0.55,
+    "flow_safe_densify_window_us": 600,
+    "flow_safe_densify_step_us": 50,
+    "flow_late_slope_window_points": 4,
+    "flow_late_slope_max_relative_gap": 0.07,
+    "flow_late_slope_residual_trend_max_nl_per_us": 0.00015,
     "reserved_tail_capture_count": 25,
     "flow_ci_extension_step_us": 50,
     "flow_step_us": 57,
@@ -36,11 +45,22 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "attached_lower_centerline_row_fraction": 0.35,
     "attached_lower_centerline_min_rows": 12,
     "attached_lower_centerline_span_max_px": 50,
+    "attached_geometry_confidence_full_span_px": 25,
+    "attached_geometry_confidence_zero_span_px": 50,
     "detached_material_volume_min_nl": 0.5,
     "detached_material_volume_fraction_min": 0.25,
     "detached_axis_symmetry_min": 0.80,
     "detached_local_centerline_span_max_px": 20,
     "detached_axis_offset_warn_px": 25,
+    "detached_geometry_confidence_full_symmetry": 0.90,
+    "detached_geometry_confidence_zero_symmetry": 0.80,
+    "detached_geometry_confidence_full_span_px": 10,
+    "detached_geometry_confidence_zero_span_px": 20,
+    "optical_lower_row_fraction": 0.25,
+    "optical_edge_jitter_confidence_full_px": 0.75,
+    "optical_edge_jitter_confidence_zero_px": 2.5,
+    "optical_boundary_chroma_confidence_full": 12.0,
+    "optical_boundary_chroma_confidence_zero": 32.0,
 }
 
 
@@ -193,6 +213,25 @@ def build_online_stream_flow_plan(
         "max_capture_count": int(resolved_policy["flow_max_capture_count"]),
         "soft_bottom_clearance_px": int(resolved_policy["flow_soft_bottom_clearance_px"]),
         "ci95_relative_width_target": float(resolved_policy["flow_ci95_relative_width_target"]),
+        "late_coverage_min_delay_us": int(resolved_policy["flow_late_coverage_min_delay_us"]),
+        "late_coverage_min_visible_fluid_clearance_px": int(
+            resolved_policy["flow_late_coverage_min_visible_fluid_clearance_px"]
+        ),
+        "late_coverage_confidence_min": float(
+            resolved_policy["flow_late_coverage_confidence_min"]
+        ),
+        "extension_confidence_floor": float(
+            resolved_policy["flow_extension_confidence_floor"]
+        ),
+        "safe_densify_window_us": int(resolved_policy["flow_safe_densify_window_us"]),
+        "safe_densify_step_us": int(resolved_policy["flow_safe_densify_step_us"]),
+        "late_slope_window_points": int(resolved_policy["flow_late_slope_window_points"]),
+        "late_slope_max_relative_gap": float(
+            resolved_policy["flow_late_slope_max_relative_gap"]
+        ),
+        "late_slope_residual_trend_max_nl_per_us": float(
+            resolved_policy["flow_late_slope_residual_trend_max_nl_per_us"]
+        ),
         "reserved_tail_capture_count": int(resolved_policy["reserved_tail_capture_count"]),
         "ci_extension_step_us": int(resolved_policy["flow_ci_extension_step_us"]),
         "legacy_flow_step_us": int(resolved_policy["flow_step_us"]),
@@ -444,6 +483,12 @@ def build_online_stream_measurement_row(
     nozzle_qc_pass: bool | None = None,
     silhouette_qc_pass: bool | None = None,
     attached_bottom_clearance_px: float | int | None = None,
+    min_accepted_fluid_distance_from_bottom_px: float | int | None = None,
+    flow_geometry_confidence: float | int | None = None,
+    flow_optical_confidence: float | int | None = None,
+    flow_point_confidence: float | int | None = None,
+    lower_edge_jitter_px: float | int | None = None,
+    boundary_chroma_aberration_score: float | int | None = None,
 ) -> dict:
     return {
         "phase": str(phase),
@@ -460,6 +505,28 @@ def build_online_stream_measurement_row(
             None
             if attached_bottom_clearance_px is None
             else float(attached_bottom_clearance_px)
+        ),
+        "min_accepted_fluid_distance_from_bottom_px": (
+            None
+            if min_accepted_fluid_distance_from_bottom_px is None
+            else float(min_accepted_fluid_distance_from_bottom_px)
+        ),
+        "flow_geometry_confidence": (
+            None if flow_geometry_confidence is None else float(flow_geometry_confidence)
+        ),
+        "flow_optical_confidence": (
+            None if flow_optical_confidence is None else float(flow_optical_confidence)
+        ),
+        "flow_point_confidence": (
+            None if flow_point_confidence is None else float(flow_point_confidence)
+        ),
+        "lower_edge_jitter_px": (
+            None if lower_edge_jitter_px is None else float(lower_edge_jitter_px)
+        ),
+        "boundary_chroma_aberration_score": (
+            None
+            if boundary_chroma_aberration_score is None
+            else float(boundary_chroma_aberration_score)
         ),
     }
 
@@ -542,6 +609,21 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     median_width_px = _median_or_none(
         row.get("attached_width_px") for row in accepted_rows
     )
+    median_flow_geometry_confidence = _median_or_none(
+        row.get("flow_geometry_confidence") for row in accepted_rows
+    )
+    median_flow_optical_confidence = _median_or_none(
+        row.get("flow_optical_confidence") for row in accepted_rows
+    )
+    median_flow_point_confidence = _median_or_none(
+        row.get("flow_point_confidence") for row in accepted_rows
+    )
+    median_lower_edge_jitter_px = _median_or_none(
+        row.get("lower_edge_jitter_px") for row in accepted_rows
+    )
+    median_boundary_chroma_aberration_score = _median_or_none(
+        row.get("boundary_chroma_aberration_score") for row in accepted_rows
+    )
     min_attached_bottom_clearance_px = None
     clearances = [
         _to_float_or_none(row.get("attached_bottom_clearance_px"))
@@ -550,6 +632,14 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     ]
     if clearances:
         min_attached_bottom_clearance_px = float(min(clearances))
+    accepted_fluid_clearances = [
+        _to_float_or_none(row.get("min_accepted_fluid_distance_from_bottom_px"))
+        for row in accepted_rows
+        if _to_float_or_none(row.get("min_accepted_fluid_distance_from_bottom_px")) is not None
+    ]
+    min_accepted_fluid_distance_from_bottom_px = None
+    if accepted_fluid_clearances:
+        min_accepted_fluid_distance_from_bottom_px = float(min(accepted_fluid_clearances))
 
     warnings = _unique_strings(
         warning
@@ -572,7 +662,7 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         delay_us = _to_int(rows[0].get("delay_us"), 0)
         delay_from_emergence_us = _to_int(rows[0].get("delay_from_emergence_us"), 0)
 
-    return {
+    summary = {
         "delay_us": delay_us,
         "delay_from_emergence_us": delay_from_emergence_us,
         "attempted_replicates": attempted_replicates,
@@ -581,6 +671,12 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         "median_visible_volume_nl": median_visible_volume_nl,
         "median_width_px": median_width_px,
         "min_attached_bottom_clearance_px": min_attached_bottom_clearance_px,
+        "min_accepted_fluid_distance_from_bottom_px": min_accepted_fluid_distance_from_bottom_px,
+        "flow_geometry_confidence": median_flow_geometry_confidence,
+        "flow_optical_confidence": median_flow_optical_confidence,
+        "flow_point_confidence": median_flow_point_confidence,
+        "lower_edge_jitter_px": median_lower_edge_jitter_px,
+        "boundary_chroma_aberration_score": median_boundary_chroma_aberration_score,
         "detached_near_bottom_warning": bool(detached_near_bottom_warning),
         "delay_accepted": bool(accepted_replicates > 0),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
@@ -594,6 +690,47 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         "flow_volume_geometry_reasons": _unique_strings(geometry_reasons),
         "warnings": warnings,
     }
+    late_coverage_candidate, late_coverage_metric = is_online_stream_flow_late_coverage_candidate(
+        summary
+    )
+    summary["late_coverage_candidate"] = bool(late_coverage_candidate)
+    summary["late_coverage_metric"] = late_coverage_metric
+    return summary
+
+
+def is_online_stream_flow_late_coverage_candidate(
+    delay_summary: dict | None,
+    *,
+    policy: dict | None = None,
+) -> tuple[bool, str | None]:
+    summary = dict(delay_summary or {})
+    resolved_policy = _resolved_policy(policy)
+    if not bool(summary.get("delay_accepted")):
+        return False, None
+    confidence = _to_float_or_none(summary.get("flow_point_confidence"))
+    if (
+        confidence is None
+        or float(confidence) < float(resolved_policy["flow_late_coverage_confidence_min"])
+    ):
+        return False, None
+    delay_from_emergence_us = _to_int(summary.get("delay_from_emergence_us"), None)
+    if (
+        delay_from_emergence_us is not None
+        and int(delay_from_emergence_us) >= int(resolved_policy["flow_late_coverage_min_delay_us"])
+    ):
+        return True, "delay_threshold"
+    visible_fluid_clearance_px = _to_float_or_none(
+        summary.get("min_accepted_fluid_distance_from_bottom_px")
+    )
+    if visible_fluid_clearance_px is None:
+        visible_fluid_clearance_px = _to_float_or_none(summary.get("min_attached_bottom_clearance_px"))
+    if (
+        visible_fluid_clearance_px is not None
+        and float(visible_fluid_clearance_px)
+        <= float(resolved_policy["flow_late_coverage_min_visible_fluid_clearance_px"])
+    ):
+        return True, "visible_fluid_bottom_clearance"
+    return False, None
 
 
 def is_online_stream_flow_geometry_boundary(delay_summary: dict | None) -> bool:
@@ -722,6 +859,7 @@ def build_online_stream_flow_phase_payload(
     target_delay_offsets_from_emergence_us: list[int] | None = None,
     ci_refinement_count: int = 0,
     fit_stop_reason: str | None = None,
+    confidence_boundary_delay_from_emergence_us: int | None = None,
 ) -> dict:
     fit_obj = dict(fit or {})
     return {
@@ -749,9 +887,14 @@ def build_online_stream_flow_phase_payload(
         ),
         "ci_refinement_count": int(max(0, _to_int(ci_refinement_count, 0))),
         "fit_stop_reason": None if fit_stop_reason in (None, "") else str(fit_stop_reason),
+        "confidence_boundary_delay_from_emergence_us": _to_int(
+            confidence_boundary_delay_from_emergence_us,
+            None,
+        ),
         "fit_status": str(fit_obj.get("fit_status") or "unresolved_fit_failed"),
         "flow_rate_nl_per_us": _to_float_or_none(fit_obj.get("flow_rate_nl_per_us")),
         "flow_intercept_nl": _to_float_or_none(fit_obj.get("flow_intercept_nl")),
+        "lag_equivalent_us": _to_float_or_none(fit_obj.get("lag_equivalent_us")),
         "flow_fit_delay_start_from_emergence_us": _to_int(
             fit_obj.get("flow_fit_delay_start_from_emergence_us"),
             None,
@@ -772,6 +915,24 @@ def build_online_stream_flow_phase_payload(
         "steady_rate_ci95_relative_width": _to_float_or_none(
             fit_obj.get("steady_rate_ci95_relative_width")
         ),
+        "late_slope_nl_per_us": _to_float_or_none(fit_obj.get("late_slope_nl_per_us")),
+        "late_slope_relative_gap": _to_float_or_none(fit_obj.get("late_slope_relative_gap")),
+        "late_slope_stable": (
+            None if fit_obj.get("late_slope_stable") is None else bool(fit_obj.get("late_slope_stable"))
+        ),
+        "late_coverage_reached": (
+            None
+            if fit_obj.get("late_coverage_reached") is None
+            else bool(fit_obj.get("late_coverage_reached"))
+        ),
+        "late_coverage_delay_from_emergence_us": _to_int(
+            fit_obj.get("late_coverage_delay_from_emergence_us"),
+            None,
+        ),
+        "late_coverage_metric": None
+        if fit_obj.get("late_coverage_metric") in (None, "")
+        else str(fit_obj.get("late_coverage_metric")),
+        "fit_weight_floor": _to_float_or_none(fit_obj.get("fit_weight_floor")),
         "flow_fit_point_count": _to_int(fit_obj.get("flow_fit_point_count"), 0),
         "flow_fit_outlier_prune_status": str(
             fit_obj.get("flow_fit_outlier_prune_status") or "not_attempted"

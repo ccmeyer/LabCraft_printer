@@ -223,6 +223,78 @@ def _centerline_residual_metrics(
     }
 
 
+def _confidence_smaller_better(value, *, full_at, zero_at) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    full_at = float(full_at)
+    zero_at = float(zero_at)
+    if value <= full_at:
+        return 1.0
+    if value >= zero_at:
+        return 0.0
+    span = float(zero_at - full_at)
+    if span <= 0.0:
+        return 0.0
+    return float(max(0.0, min(1.0, 1.0 - ((value - full_at) / span))))
+
+
+def _confidence_larger_better(value, *, full_at, zero_at) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    full_at = float(full_at)
+    zero_at = float(zero_at)
+    if value >= full_at:
+        return 1.0
+    if value <= zero_at:
+        return 0.0
+    span = float(full_at - zero_at)
+    if span <= 0.0:
+        return 0.0
+    return float(max(0.0, min(1.0, (value - zero_at) / span)))
+
+
+def _min_confidence(*values) -> float | None:
+    clean = []
+    for value in values:
+        if value is None:
+            continue
+        clean.append(float(max(0.0, min(1.0, float(value)))))
+    if not clean:
+        return None
+    return float(min(clean))
+
+
+def _lower_rows(edge_rows: list[dict], *, lower_fraction: float) -> list[dict]:
+    rows = [dict(row or {}) for row in list(edge_rows or [])]
+    rows.sort(key=lambda row: int(row["y_px"]))
+    if not rows:
+        return []
+    fraction = float(max(0.0, min(1.0, lower_fraction)))
+    keep_count = int(max(1, np.ceil(float(len(rows)) * fraction)))
+    return rows[-keep_count:]
+
+
+def _fit_residual_rms(rows: list[dict], *, x_key: str) -> float | None:
+    if len(rows) < 2:
+        return None
+    y_values = np.asarray([float(row["y_px"]) for row in rows], dtype=float)
+    x_values = np.asarray([float(row[x_key]) for row in rows], dtype=float)
+    if np.any(~np.isfinite(y_values)) or np.any(~np.isfinite(x_values)):
+        return None
+    design = np.column_stack((y_values, np.ones_like(y_values)))
+    try:
+        slope, intercept = np.linalg.lstsq(design, x_values, rcond=None)[0]
+    except Exception:
+        return None
+    predicted = (float(slope) * y_values) + float(intercept)
+    residuals = x_values - predicted
+    if residuals.size <= 0 or np.any(~np.isfinite(residuals)):
+        return None
+    return float(np.sqrt(np.mean(residuals**2)))
+
+
 def _axis_symmetry_score(
     *,
     final_mask,
@@ -267,8 +339,10 @@ def _attached_geometry_summary(
     lower_row_fraction: float,
     min_rows: int,
     span_max_px: float,
+    config: dict | None = None,
     geometry_assessable: bool,
 ) -> dict:
+    config = _resolved_analysis_config(config)
     metrics = _centerline_residual_metrics(
         attached_edge_rows,
         lower_fraction=float(lower_row_fraction),
@@ -283,10 +357,18 @@ def _attached_geometry_summary(
             geometry_ok = bool(float(span_px) <= float(span_max_px))
             if not geometry_ok:
                 reasons.append("attached_lower_centerline_span_high")
+    geometry_confidence = None
+    if geometry_assessable:
+        geometry_confidence = _confidence_smaller_better(
+            span_px,
+            full_at=float(config.get("attached_geometry_confidence_full_span_px", 25)),
+            zero_at=float(config.get("attached_geometry_confidence_zero_span_px", span_max_px)),
+        )
     return {
         "attached_lower_centerline_span_px": span_px,
         "attached_lower_centerline_rms_px": rms_px,
         "attached_volume_geometry_ok": geometry_ok,
+        "attached_geometry_confidence": geometry_confidence,
         "attached_geometry_reasons": reasons,
         "attached_lower_centerline_row_count": row_count,
     }
@@ -323,6 +405,7 @@ def _detached_component_geometry_details(
             "local_centerline_span_px": None,
             "axis_symmetry_score": None,
             "axis_offset_px": None,
+            "geometry_confidence": None,
             "geometry_ok": True,
             "geometry_reasons": [],
         }
@@ -355,6 +438,18 @@ def _detached_component_geometry_details(
         reasons.append("detached_local_centerline_span_high")
     if reasons and axis_offset_px is not None and float(axis_offset_px) > float(config["detached_axis_offset_warn_px"]):
         reasons.append("detached_axis_offset_high")
+    geometry_confidence = _min_confidence(
+        _confidence_larger_better(
+            symmetry_score,
+            full_at=float(config["detached_geometry_confidence_full_symmetry"]),
+            zero_at=float(config["detached_geometry_confidence_zero_symmetry"]),
+        ),
+        _confidence_smaller_better(
+            span_px,
+            full_at=float(config["detached_geometry_confidence_full_span_px"]),
+            zero_at=float(config["detached_geometry_confidence_zero_span_px"]),
+        ),
+    )
 
     return {
         "component_id": component_id,
@@ -362,6 +457,7 @@ def _detached_component_geometry_details(
         "local_centerline_span_px": None if span_px is None else float(span_px),
         "axis_symmetry_score": None if symmetry_score is None else float(symmetry_score),
         "axis_offset_px": None if axis_offset_px is None else float(axis_offset_px),
+        "geometry_confidence": geometry_confidence,
         "geometry_ok": bool(not reasons),
         "geometry_reasons": reasons,
     }
@@ -384,6 +480,7 @@ def _detached_geometry_summary(
             "min_detached_axis_symmetry_score": None,
             "max_detached_local_centerline_span_px": None,
             "max_detached_axis_offset_px": None,
+            "detached_geometry_confidence": None,
             "detached_geometry_reasons": [],
         }
 
@@ -433,6 +530,11 @@ def _detached_geometry_summary(
         for detail in material_details
         if detail.get("axis_offset_px") is not None
     ]
+    geometry_confidences = [
+        float(detail["geometry_confidence"])
+        for detail in material_details
+        if detail.get("geometry_confidence") is not None
+    ]
     geometry_reasons = []
     detached_ok = True
     for detail in material_details:
@@ -449,7 +551,72 @@ def _detached_geometry_summary(
         "min_detached_axis_symmetry_score": None if not symmetry_scores else float(min(symmetry_scores)),
         "max_detached_local_centerline_span_px": None if not local_spans else float(max(local_spans)),
         "max_detached_axis_offset_px": None if not axis_offsets else float(max(axis_offsets)),
+        "detached_geometry_confidence": None if not geometry_confidences else float(min(geometry_confidences)),
         "detached_geometry_reasons": online_cal_mod._unique_strings(geometry_reasons),
+    }
+
+
+def _attached_optical_summary(
+    *,
+    frame_image,
+    attached_edge_rows: list[dict],
+    attached_component: dict | None,
+    roi: dict,
+    lower_row_fraction: float,
+    config: dict,
+    geometry_assessable: bool,
+) -> dict:
+    if not geometry_assessable or attached_component is None:
+        return {
+            "lower_edge_jitter_px": None,
+            "boundary_chroma_aberration_score": None,
+            "flow_optical_confidence": None,
+        }
+
+    lower_rows = _lower_rows(attached_edge_rows, lower_fraction=float(lower_row_fraction))
+    left_rms = _fit_residual_rms(lower_rows, x_key="x_left_px")
+    right_rms = _fit_residual_rms(lower_rows, x_key="x_right_px")
+    jitter_values = [
+        float(value)
+        for value in (left_rms, right_rms)
+        if value is not None
+    ]
+    lower_edge_jitter_px = None if not jitter_values else float(max(jitter_values))
+
+    boundary_chroma_aberration_score = None
+    try:
+        display_frame = _coerce_display_frame(frame_image)
+        component_mask = _project_component_mask(attached_component, roi, display_frame.shape)
+        if component_mask is not None and np.any(component_mask > 0) and lower_rows:
+            boundary_mask = component_mask > 0
+            eroded = cv2.erode(component_mask, np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+            boundary_mask = boundary_mask & ~eroded
+            y_threshold = int(lower_rows[0]["y_px"])
+            boundary_mask[: max(0, y_threshold), :] = False
+            if np.any(boundary_mask):
+                b_channel = display_frame[:, :, 0].astype(np.float32)
+                r_channel = display_frame[:, :, 2].astype(np.float32)
+                chroma = np.abs(r_channel - b_channel)
+                boundary_chroma_aberration_score = float(np.mean(chroma[boundary_mask]))
+    except Exception:
+        boundary_chroma_aberration_score = None
+
+    flow_optical_confidence = _min_confidence(
+        _confidence_smaller_better(
+            lower_edge_jitter_px,
+            full_at=float(config["optical_edge_jitter_confidence_full_px"]),
+            zero_at=float(config["optical_edge_jitter_confidence_zero_px"]),
+        ),
+        _confidence_smaller_better(
+            boundary_chroma_aberration_score,
+            full_at=float(config["optical_boundary_chroma_confidence_full"]),
+            zero_at=float(config["optical_boundary_chroma_confidence_zero"]),
+        ),
+    )
+    return {
+        "lower_edge_jitter_px": lower_edge_jitter_px,
+        "boundary_chroma_aberration_score": boundary_chroma_aberration_score,
+        "flow_optical_confidence": flow_optical_confidence,
     }
 
 
@@ -763,6 +930,7 @@ def analyze_online_stream_frame(
         lower_row_fraction=float(config["attached_lower_centerline_row_fraction"]),
         min_rows=int(config["attached_lower_centerline_min_rows"]),
         span_max_px=float(config["attached_lower_centerline_span_max_px"]),
+        config=config,
         geometry_assessable=geometry_assessable,
     )
     detached_geometry = _detached_geometry_summary(
@@ -776,6 +944,30 @@ def analyze_online_stream_frame(
     )
     attached_geometry_ok = attached_geometry.get("attached_volume_geometry_ok")
     detached_geometry_ok = detached_geometry.get("detached_volume_geometry_ok")
+    flow_geometry_confidence = None
+    if geometry_assessable:
+        flow_geometry_confidence = _min_confidence(
+            attached_geometry.get("attached_geometry_confidence"),
+            detached_geometry.get("detached_geometry_confidence"),
+        )
+        if flow_geometry_confidence is None:
+            flow_geometry_confidence = 1.0
+    optical_summary = _attached_optical_summary(
+        frame_image=frame_image,
+        attached_edge_rows=attached_edge_rows,
+        attached_component=attached_component,
+        roi=roi,
+        lower_row_fraction=float(config["optical_lower_row_fraction"]),
+        config=config,
+        geometry_assessable=geometry_assessable,
+    )
+    flow_optical_confidence = optical_summary.get("flow_optical_confidence")
+    flow_point_confidence = _min_confidence(
+        flow_geometry_confidence,
+        flow_optical_confidence,
+    )
+    if geometry_assessable and flow_point_confidence is None:
+        flow_point_confidence = 1.0
     flow_volume_geometry_ok = None
     flow_volume_geometry_reasons = []
     if geometry_assessable:
@@ -832,6 +1024,7 @@ def analyze_online_stream_frame(
 
     summary = {
         "status": str(status),
+        "delay_from_emergence_us": int(delay_us - int(emergence_time_us)),
         "measurement_qc_pass": bool(measurement_qc_pass),
         "nozzle_qc_pass": bool(nozzle_qc_pass),
         "silhouette_qc_pass": bool(silhouette_qc_pass),
@@ -863,6 +1056,13 @@ def analyze_online_stream_frame(
             "max_detached_local_centerline_span_px"
         ),
         "max_detached_axis_offset_px": detached_geometry.get("max_detached_axis_offset_px"),
+        "flow_geometry_confidence": flow_geometry_confidence,
+        "flow_optical_confidence": flow_optical_confidence,
+        "flow_point_confidence": flow_point_confidence,
+        "lower_edge_jitter_px": optical_summary.get("lower_edge_jitter_px"),
+        "boundary_chroma_aberration_score": optical_summary.get(
+            "boundary_chroma_aberration_score"
+        ),
         "flow_volume_geometry_ok": flow_volume_geometry_ok,
         "flow_volume_geometry_reasons": flow_volume_geometry_reasons,
         "flow_measurement_usable": bool(flow_measurement_usable),
@@ -879,6 +1079,11 @@ def analyze_online_stream_frame(
         "width_valid_row_count": width_metrics.get("width_valid_row_count"),
         "attached_bottom_guard_hit": bool(attached_bottom_guard_hit),
     }
+    late_coverage_candidate, late_coverage_metric = online_cal_mod.is_online_stream_flow_late_coverage_candidate(
+        {**summary, "delay_accepted": bool(flow_measurement_usable)}
+    )
+    summary["late_coverage_candidate"] = bool(late_coverage_candidate)
+    summary["late_coverage_metric"] = late_coverage_metric
 
     overlay = None
     try:

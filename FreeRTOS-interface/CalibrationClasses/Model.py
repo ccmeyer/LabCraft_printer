@@ -6286,6 +6286,36 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def _flow_target_delay_count(self) -> int:
         return int(self.flow_plan.get("target_delay_count") or self.flow_plan.get("point_count") or 0)
 
+    def _flow_fit_quality_policy(self) -> dict:
+        return dict(self.flow_plan or {})
+
+    def _flow_extension_confidence_floor(self) -> float:
+        try:
+            return float(
+                self.flow_plan.get("extension_confidence_floor")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_extension_confidence_floor"]
+            )
+        except Exception:
+            return float(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_extension_confidence_floor"])
+
+    def _flow_safe_densify_window_us(self) -> int:
+        try:
+            return int(
+                self.flow_plan.get("safe_densify_window_us")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_safe_densify_window_us"]
+            )
+        except Exception:
+            return int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_safe_densify_window_us"])
+
+    def _flow_safe_densify_step_us(self) -> int:
+        try:
+            return int(
+                self.flow_plan.get("safe_densify_step_us")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_safe_densify_step_us"]
+            )
+        except Exception:
+            return int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_safe_densify_step_us"])
+
     def _flow_effective_capture_limit(self) -> int:
         try:
             hard_limit = int(
@@ -6350,6 +6380,49 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         offsets = self._flow_accepted_offsets_from_emergence_us(include_soft=include_soft)
         return None if not offsets else int(offsets[-1])
 
+    def _flow_last_safe_confidence_offset_from_emergence_us(
+        self,
+        *,
+        before_offset_us: int | None = None,
+        include_soft: bool = True,
+    ) -> int | None:
+        confidence_floor = float(self._flow_extension_confidence_floor())
+        safe_offsets = []
+        seen = set()
+        for summary in list(self._flow_delay_summaries or []):
+            row = dict(summary or {})
+            if not bool(row.get("delay_accepted")):
+                continue
+            if not include_soft and online_cal_mod.is_online_stream_flow_soft_boundary(
+                row,
+                policy=self._flow_soft_boundary_policy(),
+            ):
+                continue
+            try:
+                offset_us = int(row.get("delay_from_emergence_us"))
+            except Exception:
+                continue
+            if before_offset_us is not None and int(offset_us) >= int(before_offset_us):
+                continue
+            try:
+                confidence = float(row.get("flow_point_confidence"))
+            except Exception:
+                continue
+            if float(confidence) < confidence_floor:
+                continue
+            if offset_us in seen:
+                continue
+            seen.add(offset_us)
+            safe_offsets.append(offset_us)
+        return None if not safe_offsets else int(safe_offsets[-1])
+
+    def _flow_confidence_fill_start_offset_from_emergence_us(self) -> int:
+        start_offset_us = int(self._flow_start_offset_from_emergence_us())
+        right_boundary_offset_us = self._flow_right_boundary_delay_from_emergence_us
+        if right_boundary_offset_us is None:
+            return int(start_offset_us)
+        return int(max(start_offset_us, int(right_boundary_offset_us) - int(self._flow_safe_densify_window_us())))
+
     def _set_flow_delay_sequence_from_offsets(self, offsets_from_emergence_us: list[int] | None):
         sequence_offsets = []
         seen = set()
@@ -6389,6 +6462,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 online_fit_mod.fit_online_stream_flow_phase(
                     measurements=list(self._measurement_rows),
                     delay_summaries=list(self._flow_delay_summaries),
+                    quality_policy=self._flow_fit_quality_policy(),
                 )
                 or {}
             )
@@ -6607,6 +6681,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         result = dict(fit_result or {})
         if str(result.get("fit_status") or "").startswith("unresolved"):
             return False
+        if int(result.get("accepted_delay_point_count") or 0) < int(self._flow_target_delay_count()):
+            return False
+        if not bool(result.get("late_coverage_reached")):
+            return False
+        if not bool(result.get("late_slope_stable")):
+            return False
         try:
             ci_relative_width = float(result.get("steady_rate_ci95_relative_width"))
         except Exception:
@@ -6624,6 +6704,23 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             right_boundary_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
         if right_boundary_offset_us is None:
             right_boundary_offset_us = int(start_offset_us)
+        if str(self._flow_scout_boundary_reason or "") == "confidence_low":
+            dense_start_offset_us = int(self._flow_confidence_fill_start_offset_from_emergence_us())
+            dense_step_us = int(self._flow_safe_densify_step_us())
+            dense_offsets = []
+            offset_us = int(dense_start_offset_us)
+            while offset_us <= int(right_boundary_offset_us):
+                dense_offsets.append(int(offset_us))
+                offset_us += int(dense_step_us)
+            if not dense_offsets or int(dense_offsets[-1]) != int(right_boundary_offset_us):
+                dense_offsets.append(int(right_boundary_offset_us))
+            self._flow_target_delay_offsets_from_emergence_us = list(dense_offsets)
+            return list(
+                online_cal_mod.build_online_stream_flow_missing_offsets(
+                    target_offsets_from_emergence_us=dense_offsets,
+                    existing_offsets_from_emergence_us=self._flow_attempted_offsets_from_emergence_us(),
+                )
+            )
         target_offsets = online_cal_mod.build_online_stream_flow_target_offsets(
             start_offset_us=int(start_offset_us),
             end_offset_us=int(right_boundary_offset_us),
@@ -6662,6 +6759,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         right_boundary_offset_us = self._flow_right_boundary_delay_from_emergence_us
         if right_boundary_offset_us is None:
             return None
+        if str(self._flow_scout_boundary_reason or "") == "confidence_low":
+            start_offset_us = int(self._flow_confidence_fill_start_offset_from_emergence_us())
         return online_cal_mod.select_online_stream_flow_gap_midpoint(
             sampled_offsets_from_emergence_us=sampled_offsets,
             start_offset_us=int(start_offset_us),
@@ -6682,6 +6781,16 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             summary,
             policy=self._flow_soft_boundary_policy(),
         )
+        confidence_boundary = False
+        try:
+            if (
+                not bool(self._flow_right_boundary_fixed)
+                and bool(summary.get("delay_accepted"))
+                and float(summary.get("flow_point_confidence")) < float(self._flow_extension_confidence_floor())
+            ):
+                confidence_boundary = True
+        except Exception:
+            confidence_boundary = False
         if geometry_boundary and not bool(self._flow_right_boundary_fixed):
             self._flow_right_boundary_fixed = True
             self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "geometry_not_axisymmetric"
@@ -6703,6 +6812,23 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._flow_right_boundary_fixed = True
             self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "soft_bottom_clearance"
             self._flow_right_boundary_delay_from_emergence_us = int(current_offset_us or 0)
+        elif confidence_boundary and not bool(self._flow_right_boundary_fixed):
+            self._flow_right_boundary_fixed = True
+            self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "confidence_low"
+            setattr(
+                self,
+                "_flow_confidence_boundary_delay_from_emergence_us",
+                None if current_offset_us is None else int(current_offset_us),
+            )
+            safe_offset_us = self._flow_last_safe_confidence_offset_from_emergence_us(
+                before_offset_us=current_offset_us,
+                include_soft=True,
+            )
+            if safe_offset_us is None:
+                safe_offset_us = self._flow_last_accepted_offset_from_emergence_us(include_soft=True)
+            if safe_offset_us is None:
+                safe_offset_us = int(self._flow_start_offset_from_emergence_us())
+            self._flow_right_boundary_delay_from_emergence_us = int(safe_offset_us)
 
         accepted_delay_count = int(
             sum(1 for row in self._flow_delay_summaries if bool((row or {}).get("delay_accepted")))
@@ -6723,13 +6849,23 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._flow_fit_stop_reason = "flow_max_captures_reached"
             if preview_fit and not self._flow_ci_target_met(preview_fit):
                 self._append_flow_warning("flow_fit_ci95_wide_after_max_captures")
+                if not bool(preview_fit.get("late_coverage_reached")):
+                    self._append_flow_warning("flow_fit_late_coverage_not_reached")
+                if not bool(preview_fit.get("late_slope_stable")):
+                    self._append_flow_warning("flow_fit_late_slope_unstable")
             return {"action": "stop", "termination_reason": "flow_max_captures_reached"}
 
         if str(self._flow_mode or "scout") == "scout":
             scout_limit = int(min(self._flow_target_delay_count(), self._flow_effective_capture_limit()))
             attempted_count = int(len(self._flow_delay_summaries))
-            if geometry_boundary or hard_boundary or soft_boundary or attempted_count >= scout_limit:
-                if not geometry_boundary and not hard_boundary and not soft_boundary and self._flow_scout_boundary_reason is None:
+            if geometry_boundary or hard_boundary or soft_boundary or confidence_boundary or attempted_count >= scout_limit:
+                if (
+                    not geometry_boundary
+                    and not hard_boundary
+                    and not soft_boundary
+                    and not confidence_boundary
+                    and self._flow_scout_boundary_reason is None
+                ):
                     self._flow_scout_boundary_reason = "scout_cap_reached"
                     self._flow_right_boundary_delay_from_emergence_us = (
                         self._flow_last_accepted_offset_from_emergence_us(include_soft=False)
@@ -6766,6 +6902,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         if next_candidate_offset_us is None:
             if str(self._flow_scout_boundary_reason or "") == "geometry_not_axisymmetric":
                 self._flow_fit_stop_reason = self._flow_fit_stop_reason or "geometry_boundary_reached"
+            elif str(self._flow_scout_boundary_reason or "") == "confidence_low":
+                self._flow_fit_stop_reason = self._flow_fit_stop_reason or "confidence_boundary_reached"
             else:
                 self._flow_fit_stop_reason = self._flow_fit_stop_reason or "candidate_delays_exhausted"
             return {"action": "stop", "termination_reason": "candidate_delays_exhausted"}
@@ -7336,6 +7474,15 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             min_detached_axis_symmetry_score=summary.get("min_detached_axis_symmetry_score"),
             max_detached_local_centerline_span_px=summary.get("max_detached_local_centerline_span_px"),
             max_detached_axis_offset_px=summary.get("max_detached_axis_offset_px"),
+            flow_geometry_confidence=summary.get("flow_geometry_confidence"),
+            flow_optical_confidence=summary.get("flow_optical_confidence"),
+            flow_point_confidence=summary.get("flow_point_confidence"),
+            lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
+            boundary_chroma_aberration_score=summary.get(
+                "boundary_chroma_aberration_score"
+            ),
+            late_coverage_candidate=summary.get("late_coverage_candidate"),
+            late_coverage_metric=summary.get("late_coverage_metric"),
             flow_measurement_usable=bool(flow_measurement_usable),
         )
         self._current_analysis_summary = dict(summary)
@@ -7356,6 +7503,16 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     nozzle_qc_pass=summary.get("nozzle_qc_pass"),
                     silhouette_qc_pass=summary.get("silhouette_qc_pass"),
                     attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
+                    min_accepted_fluid_distance_from_bottom_px=summary.get(
+                        "min_accepted_fluid_distance_from_bottom_px"
+                    ),
+                    flow_geometry_confidence=summary.get("flow_geometry_confidence"),
+                    flow_optical_confidence=summary.get("flow_optical_confidence"),
+                    flow_point_confidence=summary.get("flow_point_confidence"),
+                    lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
+                    boundary_chroma_aberration_score=summary.get(
+                        "boundary_chroma_aberration_score"
+                    ),
                 )
             )
 
@@ -7409,6 +7566,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._append_flow_warning("flow_geometry_boundary_triggered")
         if delay_summary.get("flow_volume_geometry_ok") is False:
             self._append_flow_warning("flow_volume_geometry_not_ok")
+        if str(self._flow_scout_boundary_reason or "") == "confidence_low":
+            self._append_flow_warning("flow_confidence_boundary_triggered")
 
         decision = self._flow_prepare_next_sequence(delay_summary=delay_summary)
         if str(decision.get("action") or "") == "stop":
@@ -7523,6 +7682,11 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             ),
             ci_refinement_count=int(self._flow_ci_refinement_count),
             fit_stop_reason=self._flow_fit_stop_reason,
+            confidence_boundary_delay_from_emergence_us=getattr(
+                self,
+                "_flow_confidence_boundary_delay_from_emergence_us",
+                None,
+            ),
         )
 
     def _build_online_stream_result_payload(
@@ -7592,6 +7756,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                 online_fit_mod.fit_online_stream_flow_phase(
                     measurements=list(self._measurement_rows),
                     delay_summaries=list(self._flow_delay_summaries),
+                    quality_policy=self._flow_fit_quality_policy(),
                 )
                 or {}
             )
