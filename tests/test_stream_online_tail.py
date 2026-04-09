@@ -222,14 +222,14 @@ def test_summarize_online_stream_tail_delay_keeps_bottom_warnings_out_of_landmar
             _tail_frame_row(
                 delay_us=4750,
                 delay_from_emergence_us=1550,
-                width_px=73.0,
+                width_px=74.0,
                 warnings=["attached_bottom_guard_hit"],
                 attached_bottom_guard_hit=True,
             ),
             _tail_frame_row(
                 delay_us=4750,
                 delay_from_emergence_us=1550,
-                width_px=73.5,
+                width_px=74.0,
                 warnings=["detached_near_bottom_warning"],
                 detached_near_bottom_warning=True,
             ),
@@ -360,7 +360,7 @@ def test_resolve_online_stream_tail_result_prefers_earliest_pre_landmark_width_d
     assert resolved["tail_phase"]["status"] == "captured"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1150
     assert resolved["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
-    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_strong_tail"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_right_bracket"
     assert resolved["predicted_stream_duration_us"] == 1150
     assert resolved["predicted_volume_nl"] is not None
 
@@ -437,10 +437,9 @@ def test_resolve_online_stream_tail_result_prefers_backtrack_rows_over_duplicate
     assert resolved["tail_phase"]["status"] == "captured"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
     assert resolved["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
-    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_strong_tail"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_right_bracket"
 
-
-def test_resolve_online_stream_tail_result_returns_advisory_landmark_only_without_prelandmark_departure():
+def test_resolve_online_stream_tail_result_uses_midpoint_without_prelandmark_departure():
     resolved = mod.resolve_online_stream_tail_result(
         flow_fit_result=_flow_fit_result(),
         tail_plan={
@@ -483,10 +482,59 @@ def test_resolve_online_stream_tail_result_returns_advisory_landmark_only_withou
         },
     )
 
-    assert resolved["tail_phase"]["status"] == "advisory_landmark_only"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
-    assert resolved["tail_phase"]["tail_start_evidence"] == "landmark_only"
-    assert "tail_landmark_only" in resolved["tail_phase"]["warnings"]
+    assert resolved["tail_phase"]["status"] == "captured"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1350
+    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_right_bracket_midpoint"
+
+
+def test_resolve_online_stream_tail_result_returns_missing_left_bracket_without_plateau():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        width_px=None,
+                        tail_width_usable=False,
+                        separated_from_nozzle_landmark=True,
+                        tail_landmark_usable=True,
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=73.0)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=72.0)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4300,
+            "landmark_reason": "separated_from_nozzle",
+        },
+    )
+
+    assert resolved["tail_phase"]["status"] == "unresolved_missing_left_bracket"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] is None
+    assert resolved["tail_phase"]["right_bracket_reason"] == "strong_tail_transition"
+    assert "unresolved_missing_left_bracket" in resolved["tail_phase"]["warnings"]
 
 
 def test_resolve_online_stream_tail_result_captures_backup_width_collapse_landmark():
@@ -521,8 +569,8 @@ def test_resolve_online_stream_tail_result_captures_backup_width_collapse_landma
 
     assert resolved["tail_phase"]["status"] == "captured"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1325
-    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
-    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
+    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_right_bracket_midpoint"
 
 
 def test_resolve_online_stream_tail_result_uses_midpoint_when_width_unavailable_is_first_right_bracket():
@@ -568,8 +616,8 @@ def test_resolve_online_stream_tail_result_uses_midpoint_when_width_unavailable_
 
     assert resolved["tail_phase"]["status"] == "captured"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1325
-    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
-    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
+    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_right_bracket_midpoint"
 
 
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():

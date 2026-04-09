@@ -2110,7 +2110,7 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     proc._tail_current_delay_us = 4400
     proc._tail_landmark_delay_us = 4750
     proc._tail_landmark_reason = "separated_from_nozzle"
-    proc._tail_backtrack_left_delay_us = 4250
+    proc._tail_backtrack_left_delay_us = 4300
     proc._tail_scout_delay_summaries = [
         {
             "delay_us": 4750,
@@ -2194,12 +2194,12 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     assert proc.tailPhaseFinished.calls
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "captured"
-    assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
-    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
+    assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
+    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_right_bracket_midpoint"
     assert artifact["result"]["predicted_stream_duration_us"] == 1175
 
 
-def test_online_stream_backtrack_landmark_only_resolves_advisory_tail(tmp_path):
+def test_online_stream_backtrack_separation_without_early_departure_resolves_midpoint_tail(tmp_path):
     proc = _flow_proc(tmp_path)
     _seed_tail_flow_context(proc)
     proc._tail_plan = {
@@ -2216,7 +2216,7 @@ def test_online_stream_backtrack_landmark_only_resolves_advisory_tail(tmp_path):
     proc._tail_current_delay_us = 4300
     proc._tail_landmark_delay_us = 4750
     proc._tail_landmark_reason = "separated_from_nozzle"
-    proc._tail_backtrack_left_delay_us = 4250
+    proc._tail_backtrack_left_delay_us = 4300
     proc._tail_scout_delay_summaries = [
         {
             "delay_us": 4750,
@@ -2258,9 +2258,74 @@ def test_online_stream_backtrack_landmark_only_resolves_advisory_tail(tmp_path):
     proc.onAdvanceTailPhase()
 
     assert proc.tailPhaseFinished.calls
-    assert proc._tail_phase_status == "advisory_landmark_only"
-    assert proc._tail_start_delay_from_emergence_us == 1550
-    assert "tail_landmark_only" in proc._tail_fit_warnings
+    assert proc._tail_phase_status == "captured"
+    assert proc._tail_start_delay_from_emergence_us == 1325
+    assert "tail_landmark_only" not in proc._tail_fit_warnings
+
+
+def test_online_stream_backtrack_without_plateau_resolves_missing_left_bracket(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+    }
+    proc._tail_mode = "backtrack"
+    proc._tail_delay_sequence = [4300]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4300
+    proc._tail_landmark_delay_us = 4750
+    proc._tail_landmark_reason = "separated_from_nozzle"
+    proc._tail_backtrack_left_delay_us = 4300
+    proc._tail_left_bracket_confirmed = False
+    proc._tail_left_bracket_extended = True
+    proc._tail_scout_delay_summaries = [
+        {
+            "delay_us": 4750,
+            "delay_from_emergence_us": 1550,
+            "attempted_replicates": 1,
+            "accepted_replicates": 1,
+            "tail_width_usable_replicates": 0,
+            "tail_landmark_usable_replicates": 1,
+            "rejected_replicates": 0,
+            "median_width_px": None,
+            "width_ratio_to_baseline": None,
+            "tail_width_usable": False,
+            "tail_landmark_usable": True,
+            "separated_from_nozzle_landmark": True,
+            "backup_width_collapse_landmark": False,
+            "landmark_detected": True,
+            "landmark_reason": "separated_from_nozzle",
+            "warnings": [],
+            "delay_accepted": True,
+        }
+    ]
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_backtrack",
+            status="accepted",
+            delay_us=4300,
+            delay_from_emergence_us=1100,
+            replicate_index=1,
+            qc={"tail_qc_pass": True, "tail_width_usable": True, "tail_landmark_usable": False},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=73.0,
+            tail_width_usable=True,
+            tail_landmark_usable=False,
+            separated_from_nozzle_landmark=False,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.tailPhaseFinished.calls
+    assert proc._tail_phase_status == "unresolved_missing_left_bracket"
+    assert proc._tail_start_delay_from_emergence_us is None
 
 
 def test_online_stream_on_restore_settings_maps_print_width_to_print_pulse_width():

@@ -138,6 +138,67 @@ def _summary_delay_from_emergence(summary: dict | None, delay_us: int | None) ->
     return None
 
 
+def _right_bracket_reason_for_summary(summary: dict | None) -> str | None:
+    row = dict(summary or {})
+    if bool(row.get("separated_from_nozzle_landmark")):
+        return "separated_from_nozzle"
+    if bool(row.get("attached_width_unavailable_landmark")):
+        return "attached_width_unavailable"
+    if bool(row.get("backup_width_collapse_landmark")):
+        return "strong_width_collapse_backup"
+    if bool(row.get("strong_tail_candidate")):
+        return "strong_tail_transition"
+    return None
+
+
+def select_online_stream_tail_left_anchor(
+    *,
+    scout_summaries: list[dict] | None,
+    scout_anchor_delay_us: int | None,
+    landmark_delay_us: int | None,
+    policy: dict | None = None,
+) -> dict:
+    resolved_policy = _resolved_policy(policy)
+    classified_scout_rows = _classify_trace_rows(list(scout_summaries or []), policy=resolved_policy)
+    landmark_delay_value = _to_int(landmark_delay_us)
+    prior_rows = [
+        dict(row or {})
+        for row in classified_scout_rows
+        if landmark_delay_value is None
+        or (
+            _to_int(dict(row or {}).get("delay_us")) is not None
+            and _to_int(dict(row or {}).get("delay_us")) < int(landmark_delay_value)
+        )
+    ]
+    last_plateau_row = None
+    for row in reversed(prior_rows):
+        if bool(row.get("plateau_candidate")):
+            last_plateau_row = dict(row)
+            break
+    if last_plateau_row is not None:
+        return {
+            "left_endpoint_delay_us": _to_int(last_plateau_row.get("delay_us")),
+            "left_bracket_confirmed": True,
+            "last_plateau_delay_us": _to_int(last_plateau_row.get("delay_us")),
+        }
+    prior_delays = [
+        int(dict(row or {}).get("delay_us"))
+        for row in prior_rows
+        if _to_int(dict(row or {}).get("delay_us")) is not None
+    ]
+    if prior_delays:
+        return {
+            "left_endpoint_delay_us": max(prior_delays),
+            "left_bracket_confirmed": False,
+            "last_plateau_delay_us": None,
+        }
+    return {
+        "left_endpoint_delay_us": _to_int(scout_anchor_delay_us),
+        "left_bracket_confirmed": False,
+        "last_plateau_delay_us": None,
+    }
+
+
 def _delay_from_emergence_from_plan(plan: dict | None, delay_us: int | None) -> int | None:
     resolved_plan = dict(plan or {})
     delay_value = _to_int(delay_us)
@@ -516,6 +577,11 @@ def summarize_online_stream_tail_delay(
     classified = _classify_trace_rows([summary], policy=resolved_policy)
     if classified:
         summary.update(classified[0])
+    right_bracket_reason = _right_bracket_reason_for_summary(summary)
+    summary["landmark_detected"] = bool(right_bracket_reason)
+    summary["landmark_reason"] = right_bracket_reason
+    summary["triggered_scout"] = bool(right_bracket_reason)
+    summary["triggered_coarse"] = bool(right_bracket_reason)
     return summary
 
 
@@ -588,7 +654,7 @@ def decide_online_stream_tail_next_action(
         mode_label = "backtrack"
 
     if mode_label == "scout":
-        if bool(summary.get("delay_accepted")) and bool(summary.get("landmark_detected")):
+        if bool(summary.get("landmark_detected")):
             return {
                 "action": "switch_to_backtrack",
                 "tail_phase_status": None,
@@ -680,6 +746,7 @@ def resolve_online_stream_tail_result(
         bracket.get("backtrack_left_delay_us"),
         _to_int(bracket.get("last_nontrigger_delay_us")),
     )
+    left_bracket_extended = bool(bracket.get("left_bracket_extended"))
 
     if landmark_delay_us is None:
         for row in scout_rows:
@@ -731,7 +798,7 @@ def resolve_online_stream_tail_result(
     local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
 
     separation_landmark_delay_from_emergence_us = None
-    for row in list(scout_rows) + list(backtrack_rows):
+    for row in local_trace:
         if bool(row.get("separated_from_nozzle_landmark")):
             separation_landmark_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
             break
@@ -741,6 +808,8 @@ def resolve_online_stream_tail_result(
         row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
         if not bool(row.get("strong_tail_candidate")):
             continue
+        if bool(row.get("attached_width_unavailable_landmark")) or bool(row.get("separated_from_nozzle_landmark")):
+            continue
         if (
             separation_landmark_delay_from_emergence_us is not None
             and row_delay_from_emergence_us is not None
@@ -749,6 +818,12 @@ def resolve_online_stream_tail_result(
             continue
         right_bracket_row = dict(row)
         break
+
+    if right_bracket_row is None:
+        for row in local_trace:
+            if bool(row.get("attached_width_unavailable_landmark")):
+                right_bracket_row = dict(row)
+                break
 
     if right_bracket_row is None and separation_landmark_delay_from_emergence_us is not None:
         for row in local_trace:
@@ -797,19 +872,15 @@ def resolve_online_stream_tail_result(
     tail_start_selection_method = None
     if early_departure_rows:
         captured_candidate = dict(early_departure_rows[0])
-        tail_start_selection_method = "earliest_early_departure_before_strong_tail"
-    elif (
-        right_bracket_row is not None
-        and last_plateau_row is not None
-        and not bool(right_bracket_row.get("separated_from_nozzle_landmark"))
-    ):
+        tail_start_selection_method = "earliest_early_departure_before_right_bracket"
+    elif right_bracket_row is not None and last_plateau_row is not None:
         left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
         right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
         if left_delay_from_emergence_us is not None and right_delay_from_emergence_us is not None:
             midpoint_candidate_delay_from_emergence_us = int(
                 (int(left_delay_from_emergence_us) + int(right_delay_from_emergence_us)) / 2
             )
-            tail_start_selection_method = "plateau_strong_tail_midpoint"
+            tail_start_selection_method = "plateau_right_bracket_midpoint"
 
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
@@ -831,6 +902,7 @@ def resolve_online_stream_tail_result(
         "unresolved_budget_exhausted",
         "unresolved_qc_failure",
         "unresolved_no_landmark",
+        "unresolved_missing_left_bracket",
     }:
         pass
     elif landmark_summary is None:
@@ -852,25 +924,14 @@ def resolve_online_stream_tail_result(
             tail_start_evidence = "backtrack_width_departure"
     elif midpoint_candidate_delay_from_emergence_us is not None:
         tail_phase_status = "captured"
-        termination_reason = termination_reason or "plateau_strong_tail_midpoint"
+        termination_reason = termination_reason or "plateau_right_bracket_midpoint"
         tail_start_delay_from_emergence_us = int(midpoint_candidate_delay_from_emergence_us)
-        tail_start_evidence = "plateau_strong_tail_midpoint"
-    elif str(landmark_summary.get("landmark_reason") or "") == "separated_from_nozzle":
-        tail_phase_status = "advisory_landmark_only"
-        termination_reason = termination_reason or "landmark_only"
-        tail_start_delay_from_emergence_us = _to_int(landmark_summary.get("delay_from_emergence_us"))
-        tail_start_evidence = "landmark_only"
-        if "tail_landmark_only" not in warnings:
-            warnings.append("tail_landmark_only")
-    elif (
-        str(landmark_summary.get("landmark_reason") or "") in {"strong_width_collapse_backup", "attached_width_unavailable"}
-        and any(bool(row.get("plateau_candidate")) for row in local_trace)
-    ):
-        tail_phase_status = "captured"
-        termination_reason = termination_reason or "backtrack_width_departure"
-        tail_start_delay_from_emergence_us = _to_int(landmark_summary.get("delay_from_emergence_us"))
-        tail_start_evidence = str(landmark_summary.get("landmark_reason") or "")
-        tail_start_selection_method = tail_start_selection_method or "landmark_fallback"
+        tail_start_evidence = "plateau_right_bracket_midpoint"
+    elif right_bracket_row is not None:
+        tail_phase_status = "unresolved_missing_left_bracket"
+        termination_reason = termination_reason or "missing_left_bracket"
+        if "unresolved_missing_left_bracket" not in warnings:
+            warnings.append("unresolved_missing_left_bracket")
     else:
         tail_phase_status = "unresolved_no_landmark"
         termination_reason = termination_reason or "no_scout_landmark"
@@ -882,7 +943,7 @@ def resolve_online_stream_tail_result(
     flow_rate = _to_float_or_none(fit.get("flow_rate_nl_per_us"))
     flow_intercept = _to_float_or_none(fit.get("flow_intercept_nl"))
     if (
-        tail_phase_status in {"captured", "advisory_landmark_only"}
+        tail_phase_status == "captured"
         and tail_start_delay_from_emergence_us is not None
         and flow_rate is not None
         and flow_intercept is not None
@@ -931,6 +992,13 @@ def resolve_online_stream_tail_result(
         )
 
     all_summaries = list(scout_rows) + list(backtrack_rows)
+    right_bracket_delay_from_emergence_us = _to_int(
+        None if right_bracket_row is None else right_bracket_row.get("delay_from_emergence_us")
+    )
+    right_bracket_reason = _right_bracket_reason_for_summary(right_bracket_row)
+    last_plateau_delay_from_emergence_us = _to_int(
+        None if last_plateau_row is None else last_plateau_row.get("delay_from_emergence_us")
+    )
     tail_phase = {
         "status": str(tail_phase_status or "unresolved_no_landmark"),
         "plan": _copy_jsonish(plan),
@@ -954,6 +1022,11 @@ def resolve_online_stream_tail_result(
         "refine_delay_summaries": _copy_jsonish(backtrack_rows),
         "landmark_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "landmark_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
+        "right_bracket_delay_from_emergence_us": right_bracket_delay_from_emergence_us,
+        "right_bracket_reason": right_bracket_reason,
+        "last_plateau_delay_from_emergence_us": last_plateau_delay_from_emergence_us,
+        "left_bracket_extended": bool(left_bracket_extended),
+        "left_bracket_confirmed": bool(last_plateau_row is not None),
         "backtrack_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
         "backtrack_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "fine_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
@@ -962,7 +1035,7 @@ def resolve_online_stream_tail_result(
         "tail_start_selection_method": tail_start_selection_method,
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
-        "last_nontrigger_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
+        "last_nontrigger_delay_from_emergence_us": last_plateau_delay_from_emergence_us,
         "synthetic_left_bracket_used": False,
         "late_frame_warning": bool(late_frame_warning),
         "tail_retarget_count": 0,

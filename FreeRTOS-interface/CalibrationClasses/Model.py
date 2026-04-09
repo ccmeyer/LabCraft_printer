@@ -5905,6 +5905,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_landmark_delay_us = None
         self._tail_landmark_reason = None
         self._tail_backtrack_left_delay_us = None
+        self._tail_left_bracket_confirmed = False
+        self._tail_left_bracket_extended = False
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -6816,16 +6818,27 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         return sequence
 
     def _build_tail_backtrack_delay_sequence(self) -> list[int]:
-        return list(
-            online_tail_mod.build_online_stream_tail_backtrack_plan(
-                scout_anchor_delay_us=self._tail_plan.get("scout_anchor_delay_us"),
-                left_endpoint_delay_us=self._tail_backtrack_left_delay_us,
-                landmark_delay_us=self._tail_landmark_delay_us,
-                backtrack_step_us=int(self._tail_plan.get("backtrack_step_us") or 50),
-                fine_prepad_us=int(self._tail_plan.get("fine_prepad_us") or 100),
-                fine_postpad_us=int(self._tail_plan.get("fine_postpad_us") or 100),
+        existing_delay_us = set()
+        for summary in list(getattr(self, "_tail_backtrack_delay_summaries", []) or []):
+            try:
+                delay_us = int(dict(summary or {}).get("delay_us"))
+            except Exception:
+                continue
+            existing_delay_us.add(delay_us)
+        return [
+            int(delay_us)
+            for delay_us in list(
+                online_tail_mod.build_online_stream_tail_backtrack_plan(
+                    scout_anchor_delay_us=self._tail_plan.get("scout_anchor_delay_us"),
+                    left_endpoint_delay_us=self._tail_backtrack_left_delay_us,
+                    landmark_delay_us=self._tail_landmark_delay_us,
+                    backtrack_step_us=int(self._tail_plan.get("backtrack_step_us") or 50),
+                    fine_prepad_us=int(self._tail_plan.get("fine_prepad_us") or 100),
+                    fine_postpad_us=int(self._tail_plan.get("fine_postpad_us") or 100),
+                )
             )
-        )
+            if int(delay_us) not in existing_delay_us
+        ]
 
     def _refresh_plan_snapshot(self):
         self._write_plan_snapshot(force=True)
@@ -7100,6 +7113,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_landmark_delay_us = None
         self._tail_landmark_reason = None
         self._tail_backtrack_left_delay_us = None
+        self._tail_left_bracket_confirmed = False
+        self._tail_left_bracket_extended = False
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -7617,22 +7632,55 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         with open(self._tail_fit_path, "w", encoding="utf-8") as handle:
             json.dump(artifact, handle, indent=2, default=numpy_encoder)
 
-    def _resolve_tail_phase(self):
-        resolve_result = online_tail_mod.resolve_online_stream_tail_result(
+    def _build_tail_trigger_bracket(self) -> dict:
+        return {
+            "tail_phase_status": "" if self._tail_phase_status is None else str(self._tail_phase_status),
+            "termination_reason": str(self._tail_termination_reason or ""),
+            "landmark_delay_us": self._tail_landmark_delay_us,
+            "backtrack_left_delay_us": self._tail_backtrack_left_delay_us,
+            "landmark_reason": self._tail_landmark_reason,
+            "left_bracket_confirmed": bool(getattr(self, "_tail_left_bracket_confirmed", False)),
+            "left_bracket_extended": bool(getattr(self, "_tail_left_bracket_extended", False)),
+            "warnings": list(self._tail_fit_warnings),
+        }
+
+    def _preview_tail_resolve_result(self) -> dict:
+        return online_tail_mod.resolve_online_stream_tail_result(
             flow_fit_result=dict(self._flow_fit_result or {}),
             tail_plan=dict(self._tail_plan or {}),
             scout_summaries=list(self._tail_scout_delay_summaries),
             backtrack_summaries=list(self._tail_backtrack_delay_summaries),
             flow_delay_summaries=list(self._flow_delay_summaries),
-            trigger_bracket={
-                "tail_phase_status": "" if self._tail_phase_status is None else str(self._tail_phase_status),
-                "termination_reason": str(self._tail_termination_reason or ""),
-                "landmark_delay_us": self._tail_landmark_delay_us,
-                "backtrack_left_delay_us": self._tail_backtrack_left_delay_us,
-                "landmark_reason": self._tail_landmark_reason,
-                "warnings": list(self._tail_fit_warnings),
-            },
+            trigger_bracket=self._build_tail_trigger_bracket(),
         )
+
+    def _maybe_extend_tail_left_bracket(self) -> bool:
+        if bool(getattr(self, "_tail_left_bracket_extended", False)):
+            return False
+        scout_anchor_delay_us = self._tail_plan.get("scout_anchor_delay_us")
+        scout_step_us = int(self._tail_plan.get("scout_step_us") or 500)
+        try:
+            current_left_delay_us = int(
+                self._tail_backtrack_left_delay_us
+                if self._tail_backtrack_left_delay_us is not None
+                else scout_anchor_delay_us
+            )
+            scout_anchor_delay_us = int(scout_anchor_delay_us)
+        except Exception:
+            return False
+        extended_left_delay_us = max(int(scout_anchor_delay_us), int(current_left_delay_us) - int(scout_step_us))
+        if int(extended_left_delay_us) >= int(current_left_delay_us):
+            return False
+        self._tail_backtrack_left_delay_us = int(extended_left_delay_us)
+        self._tail_left_bracket_confirmed = False
+        self._tail_left_bracket_extended = True
+        self._tail_delay_sequence = self._build_tail_backtrack_delay_sequence()
+        self._reset_tail_delay_cursor(reset_index=True)
+        return bool(list(self._tail_delay_sequence or []))
+
+    def _resolve_tail_phase(self, resolve_result=None):
+        if resolve_result is None:
+            resolve_result = self._preview_tail_resolve_result()
         self._tail_fit_result = dict(resolve_result or {})
         self._predicted_stream_duration_us = resolve_result.get("predicted_stream_duration_us")
         self._predicted_volume_nl = resolve_result.get("predicted_volume_nl")
@@ -7641,6 +7689,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self._tail_phase_status = str(tail_phase.get("status") or self._tail_phase_status or "")
             self._tail_start_delay_from_emergence_us = tail_phase.get("tail_start_delay_from_emergence_us")
             self._tail_fit_warnings = list(tail_phase.get("warnings") or list(self._tail_fit_warnings))
+            self._tail_left_bracket_confirmed = bool(tail_phase.get("left_bracket_confirmed"))
+            self._tail_left_bracket_extended = bool(tail_phase.get("left_bracket_extended"))
         except Exception:
             pass
         self._write_tail_fit_artifact()
@@ -7673,6 +7723,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_landmark_delay_us = None
         self._tail_landmark_reason = None
         self._tail_backtrack_left_delay_us = None
+        self._tail_left_bracket_confirmed = False
+        self._tail_left_bracket_extended = False
         self._tail_coarse_delay_summaries = []
         self._tail_refine_delay_summaries = []
         self._tail_last_nontrigger_delay_us = None
@@ -8015,20 +8067,14 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     or delay_summary.get("landmark_reason")
                     or ""
                 ) or None
-                prior_scout_delays = sorted(
-                    int(dict(row or {}).get("delay_us"))
-                    for row in list(self._tail_scout_delay_summaries or [])[:-1]
-                    if dict(row or {}).get("delay_us") not in (None, "")
+                left_anchor = online_tail_mod.select_online_stream_tail_left_anchor(
+                    scout_summaries=list(self._tail_scout_delay_summaries or []),
+                    scout_anchor_delay_us=self._tail_plan.get("scout_anchor_delay_us"),
+                    landmark_delay_us=self._tail_landmark_delay_us,
                 )
-                if prior_scout_delays:
-                    self._tail_backtrack_left_delay_us = int(prior_scout_delays[-1])
-                else:
-                    try:
-                        self._tail_backtrack_left_delay_us = int(
-                            self._tail_plan.get("scout_anchor_delay_us")
-                        )
-                    except Exception:
-                        self._tail_backtrack_left_delay_us = None
+                self._tail_backtrack_left_delay_us = left_anchor.get("left_endpoint_delay_us")
+                self._tail_left_bracket_confirmed = bool(left_anchor.get("left_bracket_confirmed"))
+                self._tail_left_bracket_extended = False
                 self._tail_mode = "backtrack"
                 self._tail_delay_sequence = self._build_tail_backtrack_delay_sequence()
                 self._tail_consecutive_failed_delays = 0
@@ -8073,7 +8119,19 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._tail_termination_reason = str(decision.get("termination_reason") or "")
         if self._tail_termination_reason:
             self._append_tail_warning(self._tail_termination_reason)
-        self._resolve_tail_phase()
+        if action == "finish_resolve":
+            preview_result = self._preview_tail_resolve_result()
+            preview_tail_phase = dict(preview_result.get("tail_phase") or {})
+            if (
+                str(preview_tail_phase.get("status") or "") == "unresolved_missing_left_bracket"
+                and self._maybe_extend_tail_left_bracket()
+            ):
+                self._emit_online_stream_debug_payload(self._tail_phase_label())
+                self.nextTailDelay.emit()
+                return
+            self._resolve_tail_phase(resolve_result=preview_result)
+        else:
+            self._resolve_tail_phase()
         self._emit_online_stream_debug_payload(self._tail_phase_label())
         self.tailPhaseFinished.emit()
 
