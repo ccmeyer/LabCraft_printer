@@ -1946,6 +1946,54 @@ def test_online_stream_advance_tail_phase_switches_to_dense_full_window_after_la
     assert proc._tail_delay_sequence == [4650, 4700, 4750, 4800, 4850, 4900, 4950, 5000, 5050, 5100, 5150, 5200, 5250, 5300, 5350]
 
 
+def test_online_stream_advance_tail_phase_switches_to_backtrack_on_attached_width_unavailable_landmark(tmp_path):
+    proc = _flow_proc(tmp_path)
+    _seed_tail_flow_context(proc)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_anchor_delay_us": 4250,
+        "backtrack_step_us": 50,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "fine_prepad_us": 100,
+        "fine_postpad_us": 100,
+        "planned_scout_delay_count": 2,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4750
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_scout",
+            status="rejected_width_qc",
+            delay_us=4750,
+            delay_from_emergence_us=1550,
+            replicate_index=1,
+            qc={"tail_qc_pass": False, "tail_width_usable": False, "tail_landmark_usable": False},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=["attached_width_unavailable", "detached_near_bottom_warning"],
+            failure_reason="attached near-nozzle width unavailable",
+            attached_width_px=None,
+            tail_width_usable=False,
+            tail_landmark_usable=False,
+            separated_from_nozzle_landmark=False,
+            attached_bottom_guard_hit=False,
+            detached_near_bottom_warning=True,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "backtrack"
+    assert proc._tail_landmark_delay_us == 4750
+    assert proc._tail_landmark_reason == "attached_width_unavailable"
+    assert proc._tail_backtrack_left_delay_us == 4250
+    assert proc._tail_delay_sequence == [4250, 4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700, 4750, 4800, 4850]
+
+
 def test_online_stream_advance_tail_phase_stops_when_no_scout_landmark_occurs(tmp_path):
     proc = _flow_proc(tmp_path)
     _seed_tail_flow_context(proc)
@@ -2146,8 +2194,9 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     assert proc.tailPhaseFinished.calls
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "captured"
-    assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
-    assert artifact["result"]["predicted_stream_duration_us"] == 1200
+    assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
+    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
+    assert artifact["result"]["predicted_stream_duration_us"] == 1175
 
 
 def test_online_stream_backtrack_landmark_only_resolves_advisory_tail(tmp_path):

@@ -170,9 +170,27 @@ def _legacy_tail_width_usable(row: dict) -> bool:
 
 
 def _legacy_tail_landmark_usable(row: dict) -> bool:
+    if _attached_width_unavailable_landmark_row(row):
+        return True
     if "tail_landmark_usable" in row:
         return bool(row.get("tail_landmark_usable"))
     return bool(row.get("separated_from_nozzle_landmark"))
+
+
+def _attached_width_unavailable_landmark_row(row: dict) -> bool:
+    summary = dict(row or {})
+    if "attached_width_unavailable_landmark" in summary:
+        return bool(summary.get("attached_width_unavailable_landmark"))
+    qc = dict(summary.get("qc") or {})
+    if bool(summary.get("tail_width_usable")) or bool(qc.get("tail_width_usable")):
+        return False
+    if summary.get("attached_width_px") is not None:
+        return False
+    warnings = list(summary.get("warnings") or [])
+    if "attached_width_unavailable" in warnings:
+        return True
+    failure_reason = str(summary.get("failure_reason") or "").strip().lower()
+    return "attached near-nozzle width unavailable" in failure_reason
 
 
 def _width_ratio_to_baseline(width_px, baseline_width_px):
@@ -204,10 +222,13 @@ def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | i
         "tail_width_usable": bool(delay_accepted and median_width_px is not None),
         "tail_landmark_usable": False,
         "separated_from_nozzle_landmark": False,
+        "attached_width_unavailable_landmark": False,
         "backup_width_collapse_landmark": False,
         "landmark_detected": False,
         "landmark_reason": None,
         "plateau_candidate": False,
+        "early_departure_candidate": False,
+        "strong_tail_candidate": False,
         "tail_affected": False,
         "tail_start_candidate": False,
         "attached_bottom_guard_hit": bool(summary.get("attached_bottom_guard_hit")),
@@ -231,20 +252,33 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
         width_ratio_to_baseline = _to_float_or_none(summary.get("width_ratio_to_baseline"))
         tail_width_usable = bool(summary.get("tail_width_usable"))
         separated_from_nozzle_landmark = bool(summary.get("separated_from_nozzle_landmark"))
+        attached_width_unavailable_landmark = bool(summary.get("attached_width_unavailable_landmark"))
         backup_width_collapse_landmark = bool(summary.get("backup_width_collapse_landmark"))
         plateau_candidate = bool(
             tail_width_usable
             and width_ratio_to_baseline is not None
             and float(width_ratio_to_baseline) >= float(resolved_policy["plateau_width_frac"])
             and not separated_from_nozzle_landmark
+            and not attached_width_unavailable_landmark
         )
-        tail_affected = bool(
+        early_departure_candidate = bool(
+            tail_width_usable
+            and width_ratio_to_baseline is not None
+            and float(resolved_policy["departure_width_frac"]) <= float(width_ratio_to_baseline) < float(resolved_policy["plateau_width_frac"])
+            and not separated_from_nozzle_landmark
+            and not attached_width_unavailable_landmark
+        )
+        strong_tail_candidate = bool(
             (tail_width_usable and width_ratio_to_baseline is not None and float(width_ratio_to_baseline) < float(resolved_policy["departure_width_frac"]))
+            or separated_from_nozzle_landmark
+            or attached_width_unavailable_landmark
             or backup_width_collapse_landmark
         )
         summary["plateau_candidate"] = bool(plateau_candidate)
-        summary["tail_affected"] = bool(tail_affected)
-        summary["tail_start_candidate"] = bool(tail_affected)
+        summary["early_departure_candidate"] = bool(early_departure_candidate)
+        summary["strong_tail_candidate"] = bool(strong_tail_candidate)
+        summary["tail_affected"] = bool(strong_tail_candidate)
+        summary["tail_start_candidate"] = bool(early_departure_candidate or strong_tail_candidate)
         classified.append(summary)
     classified.sort(
         key=lambda item: (
@@ -409,6 +443,10 @@ def summarize_online_stream_tail_delay(
         or ("near_nozzle_detached_warning" in list(row.get("warnings") or []))
         for row in rows
     )
+    attached_width_unavailable_landmark = any(
+        _attached_width_unavailable_landmark_row(row)
+        for row in rows
+    )
     late_frame_warning = bool(
         any(bool(row.get("late_frame_warning")) for row in rows)
         or attached_bottom_guard_hit
@@ -423,11 +461,18 @@ def summarize_online_stream_tail_delay(
         and width_ratio_to_baseline is not None
         and float(width_ratio_to_baseline) <= float(resolved_policy["scout_landmark_width_frac"])
         and not separated_from_nozzle_landmark
+        and not attached_width_unavailable_landmark
     )
-    landmark_detected = bool(separated_from_nozzle_landmark or backup_width_collapse_landmark)
+    landmark_detected = bool(
+        separated_from_nozzle_landmark
+        or attached_width_unavailable_landmark
+        or backup_width_collapse_landmark
+    )
     landmark_reason = None
     if separated_from_nozzle_landmark:
         landmark_reason = "separated_from_nozzle"
+    elif attached_width_unavailable_landmark:
+        landmark_reason = "attached_width_unavailable"
     elif backup_width_collapse_landmark:
         landmark_reason = "strong_width_collapse_backup"
 
@@ -453,6 +498,7 @@ def summarize_online_stream_tail_delay(
         "tail_width_usable": bool(width_usable_replicates > 0),
         "tail_landmark_usable": bool(landmark_usable_replicates > 0),
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
+        "attached_width_unavailable_landmark": bool(attached_width_unavailable_landmark),
         "backup_width_collapse_landmark": bool(backup_width_collapse_landmark),
         "landmark_detected": bool(landmark_detected),
         "landmark_reason": landmark_reason,
@@ -685,18 +731,15 @@ def resolve_online_stream_tail_result(
     local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
 
     separation_landmark_delay_from_emergence_us = None
-    for row in local_trace:
+    for row in list(scout_rows) + list(backtrack_rows):
         if bool(row.get("separated_from_nozzle_landmark")):
             separation_landmark_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
             break
 
-    earliest_plateau_seen = False
-    captured_candidate = None
+    right_bracket_row = None
     for row in local_trace:
         row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
-        if bool(row.get("plateau_candidate")):
-            earliest_plateau_seen = True
-        if not earliest_plateau_seen or not bool(row.get("tail_affected")):
+        if not bool(row.get("strong_tail_candidate")):
             continue
         if (
             separation_landmark_delay_from_emergence_us is not None
@@ -704,8 +747,69 @@ def resolve_online_stream_tail_result(
             and int(row_delay_from_emergence_us) >= int(separation_landmark_delay_from_emergence_us)
         ):
             continue
-        captured_candidate = dict(row)
+        right_bracket_row = dict(row)
         break
+
+    if right_bracket_row is None and separation_landmark_delay_from_emergence_us is not None:
+        for row in local_trace:
+            row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+            if (
+                bool(row.get("separated_from_nozzle_landmark"))
+                and row_delay_from_emergence_us is not None
+                and int(row_delay_from_emergence_us) == int(separation_landmark_delay_from_emergence_us)
+            ):
+                right_bracket_row = dict(row)
+                break
+
+    last_plateau_row = None
+    if right_bracket_row is not None:
+        right_bracket_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
+        for row in local_trace:
+            row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+            if row_delay_from_emergence_us is None or right_bracket_delay_from_emergence_us is None:
+                continue
+            if int(row_delay_from_emergence_us) >= int(right_bracket_delay_from_emergence_us):
+                break
+            if bool(row.get("plateau_candidate")):
+                last_plateau_row = dict(row)
+
+    early_departure_rows = []
+    if right_bracket_row is not None and last_plateau_row is not None:
+        left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
+        right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
+        for row in local_trace:
+            row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+            if (
+                row_delay_from_emergence_us is None
+                or left_delay_from_emergence_us is None
+                or right_delay_from_emergence_us is None
+            ):
+                continue
+            if int(row_delay_from_emergence_us) <= int(left_delay_from_emergence_us):
+                continue
+            if int(row_delay_from_emergence_us) >= int(right_delay_from_emergence_us):
+                continue
+            if bool(row.get("early_departure_candidate")):
+                early_departure_rows.append(dict(row))
+
+    captured_candidate = None
+    midpoint_candidate_delay_from_emergence_us = None
+    tail_start_selection_method = None
+    if early_departure_rows:
+        captured_candidate = dict(early_departure_rows[0])
+        tail_start_selection_method = "earliest_early_departure_before_strong_tail"
+    elif (
+        right_bracket_row is not None
+        and last_plateau_row is not None
+        and not bool(right_bracket_row.get("separated_from_nozzle_landmark"))
+    ):
+        left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
+        right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
+        if left_delay_from_emergence_us is not None and right_delay_from_emergence_us is not None:
+            midpoint_candidate_delay_from_emergence_us = int(
+                (int(left_delay_from_emergence_us) + int(right_delay_from_emergence_us)) / 2
+            )
+            tail_start_selection_method = "plateau_strong_tail_midpoint"
 
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
@@ -746,6 +850,11 @@ def resolve_online_stream_tail_result(
             tail_start_evidence = "width_collapse_backup"
         else:
             tail_start_evidence = "backtrack_width_departure"
+    elif midpoint_candidate_delay_from_emergence_us is not None:
+        tail_phase_status = "captured"
+        termination_reason = termination_reason or "plateau_strong_tail_midpoint"
+        tail_start_delay_from_emergence_us = int(midpoint_candidate_delay_from_emergence_us)
+        tail_start_evidence = "plateau_strong_tail_midpoint"
     elif str(landmark_summary.get("landmark_reason") or "") == "separated_from_nozzle":
         tail_phase_status = "advisory_landmark_only"
         termination_reason = termination_reason or "landmark_only"
@@ -754,13 +863,14 @@ def resolve_online_stream_tail_result(
         if "tail_landmark_only" not in warnings:
             warnings.append("tail_landmark_only")
     elif (
-        str(landmark_summary.get("landmark_reason") or "") == "strong_width_collapse_backup"
+        str(landmark_summary.get("landmark_reason") or "") in {"strong_width_collapse_backup", "attached_width_unavailable"}
         and any(bool(row.get("plateau_candidate")) for row in local_trace)
     ):
         tail_phase_status = "captured"
         termination_reason = termination_reason or "backtrack_width_departure"
         tail_start_delay_from_emergence_us = _to_int(landmark_summary.get("delay_from_emergence_us"))
-        tail_start_evidence = "width_collapse_backup"
+        tail_start_evidence = str(landmark_summary.get("landmark_reason") or "")
+        tail_start_selection_method = tail_start_selection_method or "landmark_fallback"
     else:
         tail_phase_status = "unresolved_no_landmark"
         termination_reason = termination_reason or "no_scout_landmark"
@@ -849,6 +959,7 @@ def resolve_online_stream_tail_result(
         "fine_window_start_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,
         "fine_window_end_delay_from_emergence_us": backtrack_window_end_delay_from_emergence_us,
         "tail_start_evidence": tail_start_evidence,
+        "tail_start_selection_method": tail_start_selection_method,
         "trigger_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "trigger_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
         "last_nontrigger_delay_from_emergence_us": backtrack_window_start_delay_from_emergence_us,

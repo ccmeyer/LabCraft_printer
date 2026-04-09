@@ -192,6 +192,30 @@ def test_summarize_online_stream_tail_delay_uses_width_collapse_backup_landmark(
     assert summary["landmark_reason"] == "strong_width_collapse_backup"
 
 
+def test_summarize_online_stream_tail_delay_uses_attached_width_unavailable_as_landmark():
+    summary = mod.summarize_online_stream_tail_delay(
+        [
+            _tail_frame_row(
+                delay_us=4750,
+                delay_from_emergence_us=1550,
+                status="rejected_width_qc",
+                width_px=None,
+                tail_width_usable=False,
+                tail_landmark_usable=False,
+                warnings=["attached_width_unavailable", "detached_near_bottom_warning"],
+                failure_reason="attached near-nozzle width unavailable",
+            )
+        ],
+        baseline_width_px=74.0,
+    )
+
+    assert summary["delay_accepted"] is True
+    assert summary["tail_landmark_usable"] is True
+    assert summary["attached_width_unavailable_landmark"] is True
+    assert summary["landmark_detected"] is True
+    assert summary["landmark_reason"] == "attached_width_unavailable"
+
+
 def test_summarize_online_stream_tail_delay_keeps_bottom_warnings_out_of_landmark_logic():
     summary = mod.summarize_online_stream_tail_delay(
         [
@@ -315,11 +339,11 @@ def test_resolve_online_stream_tail_result_prefers_earliest_pre_landmark_width_d
                 baseline_width_px=74.0,
             ),
             mod.summarize_online_stream_tail_delay(
-                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.9)],
+                [_tail_frame_row(delay_us=4350, delay_from_emergence_us=1150, phase="tail_backtrack", width_px=73.4)],
                 baseline_width_px=74.0,
             ),
             mod.summarize_online_stream_tail_delay(
-                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=73.0)],
+                [_tail_frame_row(delay_us=4400, delay_from_emergence_us=1200, phase="tail_backtrack", width_px=72.8)],
                 baseline_width_px=74.0,
             ),
         ],
@@ -334,9 +358,10 @@ def test_resolve_online_stream_tail_result_prefers_earliest_pre_landmark_width_d
     )
 
     assert resolved["tail_phase"]["status"] == "captured"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1200
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1150
     assert resolved["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
-    assert resolved["predicted_stream_duration_us"] == 1200
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_strong_tail"
+    assert resolved["predicted_stream_duration_us"] == 1150
     assert resolved["predicted_volume_nl"] is not None
 
 
@@ -377,7 +402,11 @@ def test_resolve_online_stream_tail_result_prefers_backtrack_rows_over_duplicate
                 baseline_width_px=74.0,
             ),
             mod.summarize_online_stream_tail_delay(
-                [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, phase="tail_backtrack", width_px=73.0)],
+                [_tail_frame_row(delay_us=4750, delay_from_emergence_us=1550, phase="tail_backtrack", width_px=73.4)],
+                baseline_width_px=74.0,
+            ),
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4800, delay_from_emergence_us=1600, phase="tail_backtrack", width_px=72.8)],
                 baseline_width_px=74.0,
             ),
             mod.summarize_online_stream_tail_delay(
@@ -408,6 +437,7 @@ def test_resolve_online_stream_tail_result_prefers_backtrack_rows_over_duplicate
     assert resolved["tail_phase"]["status"] == "captured"
     assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
     assert resolved["tail_phase"]["tail_start_evidence"] == "backtrack_width_departure"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "earliest_early_departure_before_strong_tail"
 
 
 def test_resolve_online_stream_tail_result_returns_advisory_landmark_only_without_prelandmark_departure():
@@ -490,8 +520,56 @@ def test_resolve_online_stream_tail_result_captures_backup_width_collapse_landma
     )
 
     assert resolved["tail_phase"]["status"] == "captured"
-    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1550
-    assert resolved["tail_phase"]["tail_start_evidence"] == "width_collapse_backup"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1325
+    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
+
+
+def test_resolve_online_stream_tail_result_uses_midpoint_when_width_unavailable_is_first_right_bracket():
+    resolved = mod.resolve_online_stream_tail_result(
+        flow_fit_result=_flow_fit_result(),
+        tail_plan={
+            "steady_width_baseline_px": 74.0,
+            "scout_anchor_delay_us": 4250,
+            "backtrack_step_us": 50,
+        },
+        scout_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [
+                    _tail_frame_row(
+                        delay_us=4750,
+                        delay_from_emergence_us=1550,
+                        status="rejected_width_qc",
+                        width_px=None,
+                        tail_width_usable=False,
+                        tail_landmark_usable=False,
+                        warnings=["attached_width_unavailable"],
+                        failure_reason="attached near-nozzle width unavailable",
+                    )
+                ],
+                baseline_width_px=74.0,
+            )
+        ],
+        backtrack_summaries=[
+            mod.summarize_online_stream_tail_delay(
+                [_tail_frame_row(delay_us=4300, delay_from_emergence_us=1100, phase="tail_backtrack", width_px=74.1)],
+                baseline_width_px=74.0,
+            ),
+        ],
+        flow_delay_summaries=[_flow_delay_summary(delay_us=4250, delay_from_emergence_us=1050)],
+        trigger_bracket={
+            "tail_phase_status": "",
+            "termination_reason": "",
+            "landmark_delay_us": 4750,
+            "backtrack_left_delay_us": 4250,
+            "landmark_reason": "attached_width_unavailable",
+        },
+    )
+
+    assert resolved["tail_phase"]["status"] == "captured"
+    assert resolved["tail_phase"]["tail_start_delay_from_emergence_us"] == 1325
+    assert resolved["tail_phase"]["tail_start_evidence"] == "plateau_strong_tail_midpoint"
+    assert resolved["tail_phase"]["tail_start_selection_method"] == "plateau_strong_tail_midpoint"
 
 
 def test_build_online_stream_tail_fit_artifact_and_outputs_are_json_serializable():
