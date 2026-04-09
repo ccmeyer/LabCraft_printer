@@ -5873,6 +5873,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.flow_plan.get("delay_offsets_from_emergence_us") or []
         )
         self._flow_captured_delay_offsets_from_emergence_us = []
+        self._flow_confidence_boundary_delay_from_emergence_us = None
         self._flow_scout_boundary_reason = None
         self._flow_right_boundary_delay_from_emergence_us = None
         self._flow_right_boundary_fixed = False
@@ -6423,6 +6424,102 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             return int(start_offset_us)
         return int(max(start_offset_us, int(right_boundary_offset_us) - int(self._flow_safe_densify_window_us())))
 
+    def _flow_recent_active_low_confidence_streak(self) -> int:
+        confidence_floor = float(self._flow_extension_confidence_floor())
+        streak = 0
+        for summary in reversed(list(self._flow_delay_summaries or [])):
+            row = dict(summary or {})
+            if not bool(row.get("delay_accepted")):
+                continue
+            if not bool(row.get("flow_optical_confidence_active")):
+                break
+            try:
+                confidence = float(row.get("flow_point_confidence"))
+            except Exception:
+                break
+            if float(confidence) < confidence_floor:
+                streak += 1
+                continue
+            break
+        return int(streak)
+
+    def _flow_summary_in_late_window(self, summary: dict | None) -> bool:
+        row = dict(summary or {})
+        try:
+            delay_from_emergence_us = int(row.get("delay_from_emergence_us"))
+        except Exception:
+            delay_from_emergence_us = None
+        try:
+            late_delay_min_us = int(
+                self.flow_plan.get("late_coverage_min_delay_us")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_late_coverage_min_delay_us"]
+            )
+        except Exception:
+            late_delay_min_us = int(online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_late_coverage_min_delay_us"])
+        if delay_from_emergence_us is not None and int(delay_from_emergence_us) >= int(late_delay_min_us):
+            return True
+        try:
+            visible_fluid_clearance_px = row.get("min_accepted_fluid_distance_from_bottom_px")
+            if visible_fluid_clearance_px in (None, ""):
+                visible_fluid_clearance_px = row.get("min_attached_bottom_clearance_px")
+            if visible_fluid_clearance_px not in (None, ""):
+                visible_fluid_clearance_px = float(visible_fluid_clearance_px)
+            else:
+                visible_fluid_clearance_px = None
+        except Exception:
+            visible_fluid_clearance_px = None
+        try:
+            late_clearance_px = float(
+                self.flow_plan.get("late_coverage_min_visible_fluid_clearance_px")
+                or online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_late_coverage_min_visible_fluid_clearance_px"]
+            )
+        except Exception:
+            late_clearance_px = float(
+                online_cal_mod.DEFAULT_ONLINE_STREAM_POLICY["flow_late_coverage_min_visible_fluid_clearance_px"]
+            )
+        return bool(
+            visible_fluid_clearance_px is not None
+            and float(visible_fluid_clearance_px) <= float(late_clearance_px)
+        )
+
+    def _flow_last_safe_late_confidence_offset_from_emergence_us(
+        self,
+        *,
+        before_offset_us: int | None = None,
+        include_soft: bool = True,
+    ) -> int | None:
+        confidence_floor = float(self._flow_extension_confidence_floor())
+        safe_offsets = []
+        seen = set()
+        for summary in list(self._flow_delay_summaries or []):
+            row = dict(summary or {})
+            if not bool(row.get("delay_accepted")):
+                continue
+            if not include_soft and online_cal_mod.is_online_stream_flow_soft_boundary(
+                row,
+                policy=self._flow_soft_boundary_policy(),
+            ):
+                continue
+            try:
+                offset_us = int(row.get("delay_from_emergence_us"))
+            except Exception:
+                continue
+            if before_offset_us is not None and int(offset_us) >= int(before_offset_us):
+                continue
+            try:
+                confidence = float(row.get("flow_point_confidence"))
+            except Exception:
+                continue
+            if float(confidence) < confidence_floor:
+                continue
+            if not self._flow_summary_in_late_window(row):
+                continue
+            if offset_us in seen:
+                continue
+            seen.add(offset_us)
+            safe_offsets.append(offset_us)
+        return None if not safe_offsets else int(safe_offsets[-1])
+
     def _set_flow_delay_sequence_from_offsets(self, offsets_from_emergence_us: list[int] | None):
         sequence_offsets = []
         seen = set()
@@ -6782,15 +6879,36 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             policy=self._flow_soft_boundary_policy(),
         )
         confidence_boundary = False
+        confidence_low_warning = False
         try:
-            if (
-                not bool(self._flow_right_boundary_fixed)
-                and bool(summary.get("delay_accepted"))
-                and float(summary.get("flow_point_confidence")) < float(self._flow_extension_confidence_floor())
-            ):
-                confidence_boundary = True
+            confidence_active = bool(summary.get("flow_optical_confidence_active"))
+            current_confidence = float(summary.get("flow_point_confidence"))
+            current_low_confidence = (
+                bool(summary.get("delay_accepted"))
+                and confidence_active
+                and current_confidence < float(self._flow_extension_confidence_floor())
+            )
+            if not bool(self._flow_right_boundary_fixed) and current_low_confidence:
+                confidence_low_warning = True
+                safe_offset_us = self._flow_last_safe_confidence_offset_from_emergence_us(
+                    before_offset_us=current_offset_us,
+                    include_soft=True,
+                )
+                safe_late_offset_us = self._flow_last_safe_late_confidence_offset_from_emergence_us(
+                    before_offset_us=current_offset_us,
+                    include_soft=True,
+                )
+                if (
+                    safe_offset_us is not None
+                    and safe_late_offset_us is not None
+                    and int(self._flow_recent_active_low_confidence_streak()) >= 2
+                ):
+                    confidence_boundary = True
         except Exception:
             confidence_boundary = False
+            confidence_low_warning = False
+        if confidence_low_warning:
+            self._append_flow_warning("flow_low_confidence_warning")
         if geometry_boundary and not bool(self._flow_right_boundary_fixed):
             self._flow_right_boundary_fixed = True
             self._flow_scout_boundary_reason = self._flow_scout_boundary_reason or "geometry_not_axisymmetric"
@@ -7219,6 +7337,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             self.flow_plan.get("delay_offsets_from_emergence_us") or []
         )
         self._flow_captured_delay_offsets_from_emergence_us = []
+        self._flow_confidence_boundary_delay_from_emergence_us = None
         self._flow_scout_boundary_reason = None
         self._flow_right_boundary_delay_from_emergence_us = None
         self._flow_right_boundary_fixed = False
@@ -7477,6 +7596,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             flow_geometry_confidence=summary.get("flow_geometry_confidence"),
             flow_optical_confidence=summary.get("flow_optical_confidence"),
             flow_point_confidence=summary.get("flow_point_confidence"),
+            flow_optical_confidence_active=summary.get("flow_optical_confidence_active"),
+            optical_activation_clearance_px=summary.get("optical_activation_clearance_px"),
             lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
             boundary_chroma_aberration_score=summary.get(
                 "boundary_chroma_aberration_score"
@@ -7509,6 +7630,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
                     flow_geometry_confidence=summary.get("flow_geometry_confidence"),
                     flow_optical_confidence=summary.get("flow_optical_confidence"),
                     flow_point_confidence=summary.get("flow_point_confidence"),
+                    flow_optical_confidence_active=summary.get("flow_optical_confidence_active"),
+                    optical_activation_clearance_px=summary.get("optical_activation_clearance_px"),
                     lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
                     boundary_chroma_aberration_score=summary.get(
                         "boundary_chroma_aberration_score"

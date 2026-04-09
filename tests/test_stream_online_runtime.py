@@ -33,6 +33,32 @@ def _frame_with_near_nozzle_detached_warning():
     return frame
 
 
+def _color_frame_with_component(
+    mask: np.ndarray,
+    *,
+    image_height: int,
+    image_width: int = 220,
+    roi_x0: int = 100,
+    roi_y0: int = 50,
+    highlight_rows: tuple[int, int] | None = None,
+):
+    frame = np.full((image_height, image_width, 3), 230, dtype=np.uint8)
+    height = min(int(mask.shape[0]), max(0, image_height - int(roi_y0)))
+    width = min(int(mask.shape[1]), max(0, image_width - int(roi_x0)))
+    view = frame[int(roi_y0) : int(roi_y0) + height, int(roi_x0) : int(roi_x0) + width]
+    fg = mask[:height, :width] > 0
+    view[fg] = np.array([20, 20, 20], dtype=np.uint8)
+    if highlight_rows is not None:
+        row_start, row_end = highlight_rows
+        for y_local in range(max(0, int(row_start)), min(int(row_end), height)):
+            x_indices = np.flatnonzero(mask[y_local, :width] > 0)
+            if x_indices.size <= 0:
+                continue
+            view[y_local, int(x_indices[0])] = np.array([255, 0, 0], dtype=np.uint8)
+            view[y_local, int(x_indices[-1])] = np.array([0, 0, 255], dtype=np.uint8)
+    return frame
+
+
 def _edge_rows_from_centerline(*, y_start: int, y_end: int, center_fn, half_width: int = 10):
     rows = []
     for y_px in range(y_start, y_end):
@@ -371,6 +397,60 @@ def test_detached_geometry_ignores_immaterial_specks():
 
     assert detail["geometry_ok"] is True
     assert detail["axis_symmetry_score"] is None
+
+
+def test_attached_optical_summary_is_inactive_far_from_lower_fov_even_with_poor_raw_metrics():
+    mask = np.zeros((320, 60), dtype=np.uint8)
+    mask[10:260, 22:38] = 1
+    component = _component_from_mask(mask, component_id="attached_01", anchor_center_x_px=130.0)
+    frame = _color_frame_with_component(
+        mask,
+        image_height=1200,
+        highlight_rows=(190, 260),
+    )
+
+    optical = mod._attached_optical_summary(
+        frame_image=frame,
+        attached_edge_rows=list(component["edge_rows"]),
+        attached_component=component,
+        roi={"x0": 100, "y0": 50, "x1": 160, "y1": 1170},
+        visible_fluid_clearance_px=700.0,
+        lower_row_fraction=0.25,
+        config=mod._resolved_analysis_config(None),
+        geometry_assessable=True,
+    )
+
+    assert optical["flow_optical_confidence_active"] is False
+    assert optical["optical_activation_clearance_px"] == 400.0
+    assert optical["boundary_chroma_aberration_score"] is not None
+    assert optical["boundary_chroma_aberration_score"] > 12.0
+    assert optical["flow_optical_confidence"] == 1.0
+
+
+def test_attached_optical_summary_lowers_confidence_when_active_near_lower_fov():
+    mask = np.zeros((1040, 60), dtype=np.uint8)
+    mask[10:980, 22:38] = 1
+    component = _component_from_mask(mask, component_id="attached_02", anchor_center_x_px=130.0)
+    frame = _color_frame_with_component(
+        mask,
+        image_height=1200,
+        highlight_rows=(850, 980),
+    )
+
+    optical = mod._attached_optical_summary(
+        frame_image=frame,
+        attached_edge_rows=list(component["edge_rows"]),
+        attached_component=component,
+        roi={"x0": 100, "y0": 50, "x1": 160, "y1": 1170},
+        visible_fluid_clearance_px=170.0,
+        lower_row_fraction=0.25,
+        config=mod._resolved_analysis_config(None),
+        geometry_assessable=True,
+    )
+
+    assert optical["flow_optical_confidence_active"] is True
+    assert optical["flow_optical_confidence"] is not None
+    assert optical["flow_optical_confidence"] < 1.0
 
 
 def test_online_runtime_summary_is_json_serializable():

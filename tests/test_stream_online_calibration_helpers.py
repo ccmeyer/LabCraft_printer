@@ -277,6 +277,8 @@ def test_build_online_stream_measurement_row_returns_exact_required_keys():
         "flow_geometry_confidence",
         "flow_optical_confidence",
         "flow_point_confidence",
+        "flow_optical_confidence_active",
+        "optical_activation_clearance_px",
         "lower_edge_jitter_px",
         "boundary_chroma_aberration_score",
     }
@@ -508,6 +510,8 @@ def test_summarize_online_stream_flow_delay_tracks_confidence_and_visible_fluid_
                 flow_geometry_confidence=0.88,
                 flow_optical_confidence=0.74,
                 flow_point_confidence=0.74,
+                flow_optical_confidence_active=True,
+                optical_activation_clearance_px=400,
                 lower_edge_jitter_px=0.8,
                 boundary_chroma_aberration_score=11.0,
             )
@@ -518,6 +522,8 @@ def test_summarize_online_stream_flow_delay_tracks_confidence_and_visible_fluid_
     assert summary["flow_geometry_confidence"] == 0.88
     assert summary["flow_optical_confidence"] == 0.74
     assert summary["flow_point_confidence"] == 0.74
+    assert summary["flow_optical_confidence_active"] is True
+    assert summary["optical_activation_clearance_px"] == 400.0
     assert summary["late_coverage_candidate"] is True
     assert summary["late_coverage_metric"] == "delay_threshold"
 

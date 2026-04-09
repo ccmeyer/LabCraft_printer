@@ -56,7 +56,9 @@ DEFAULT_ONLINE_STREAM_ANALYSIS_CONFIG = {
     "detached_geometry_confidence_zero_symmetry": 0.80,
     "detached_geometry_confidence_full_span_px": 10,
     "detached_geometry_confidence_zero_span_px": 20,
+    "optical_activation_clearance_px": 400,
     "optical_lower_row_fraction": 0.25,
+    "optical_lower_image_band_fraction": 0.25,
     "optical_edge_jitter_confidence_full_px": 0.75,
     "optical_edge_jitter_confidence_zero_px": 2.5,
     "optical_boundary_chroma_confidence_full": 12.0,
@@ -487,6 +489,8 @@ def build_online_stream_measurement_row(
     flow_geometry_confidence: float | int | None = None,
     flow_optical_confidence: float | int | None = None,
     flow_point_confidence: float | int | None = None,
+    flow_optical_confidence_active: bool | None = None,
+    optical_activation_clearance_px: float | int | None = None,
     lower_edge_jitter_px: float | int | None = None,
     boundary_chroma_aberration_score: float | int | None = None,
 ) -> dict:
@@ -519,6 +523,14 @@ def build_online_stream_measurement_row(
         ),
         "flow_point_confidence": (
             None if flow_point_confidence is None else float(flow_point_confidence)
+        ),
+        "flow_optical_confidence_active": (
+            None if flow_optical_confidence_active is None else bool(flow_optical_confidence_active)
+        ),
+        "optical_activation_clearance_px": (
+            None
+            if optical_activation_clearance_px is None
+            else float(optical_activation_clearance_px)
         ),
         "lower_edge_jitter_px": (
             None if lower_edge_jitter_px is None else float(lower_edge_jitter_px)
@@ -618,6 +630,12 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
     median_flow_point_confidence = _median_or_none(
         row.get("flow_point_confidence") for row in accepted_rows
     )
+    flow_optical_confidence_active = any(
+        bool(row.get("flow_optical_confidence_active")) for row in accepted_rows
+    )
+    optical_activation_clearance_px = _median_or_none(
+        row.get("optical_activation_clearance_px") for row in accepted_rows
+    )
     median_lower_edge_jitter_px = _median_or_none(
         row.get("lower_edge_jitter_px") for row in accepted_rows
     )
@@ -675,6 +693,8 @@ def summarize_online_stream_flow_delay(frame_rows: list[dict]) -> dict:
         "flow_geometry_confidence": median_flow_geometry_confidence,
         "flow_optical_confidence": median_flow_optical_confidence,
         "flow_point_confidence": median_flow_point_confidence,
+        "flow_optical_confidence_active": bool(flow_optical_confidence_active),
+        "optical_activation_clearance_px": optical_activation_clearance_px,
         "lower_edge_jitter_px": median_lower_edge_jitter_px,
         "boundary_chroma_aberration_score": median_boundary_chroma_aberration_score,
         "detached_near_bottom_warning": bool(detached_near_bottom_warning),

@@ -112,6 +112,25 @@ def _attached_component_clearance(stage3_metric_row: dict, attached_component_ro
     return int(int(roi_y1) - 1 - int(last_valid_y_px))
 
 
+def _visible_fluid_clearance_px(
+    *,
+    frame_metric_row: dict,
+    attached_bottom_clearance_px,
+):
+    try:
+        clearance_px = frame_metric_row.get("min_accepted_fluid_distance_from_bottom_px")
+    except Exception:
+        clearance_px = None
+    if clearance_px in (None, ""):
+        clearance_px = attached_bottom_clearance_px
+    try:
+        if clearance_px in (None, ""):
+            return None
+        return float(clearance_px)
+    except Exception:
+        return None
+
+
 def _detached_near_bottom_warning(stage3_metric_row: dict, component_rows: list[dict], *, threshold_px: int):
     roi_y1 = stage3_metric_row.get("roi_y1")
     if roi_y1 is None:
@@ -562,12 +581,20 @@ def _attached_optical_summary(
     attached_edge_rows: list[dict],
     attached_component: dict | None,
     roi: dict,
+    visible_fluid_clearance_px,
     lower_row_fraction: float,
     config: dict,
     geometry_assessable: bool,
 ) -> dict:
+    activation_clearance_px = float(config["optical_activation_clearance_px"])
+    optical_confidence_active = bool(
+        visible_fluid_clearance_px is not None
+        and float(visible_fluid_clearance_px) <= activation_clearance_px
+    )
     if not geometry_assessable or attached_component is None:
         return {
+            "flow_optical_confidence_active": bool(optical_confidence_active),
+            "optical_activation_clearance_px": activation_clearance_px,
             "lower_edge_jitter_px": None,
             "boundary_chroma_aberration_score": None,
             "flow_optical_confidence": None,
@@ -584,6 +611,7 @@ def _attached_optical_summary(
     lower_edge_jitter_px = None if not jitter_values else float(max(jitter_values))
 
     boundary_chroma_aberration_score = None
+    flow_optical_confidence = 1.0 if not optical_confidence_active else None
     try:
         display_frame = _coerce_display_frame(frame_image)
         component_mask = _project_component_mask(attached_component, roi, display_frame.shape)
@@ -598,22 +626,63 @@ def _attached_optical_summary(
                 r_channel = display_frame[:, :, 2].astype(np.float32)
                 chroma = np.abs(r_channel - b_channel)
                 boundary_chroma_aberration_score = float(np.mean(chroma[boundary_mask]))
+        if optical_confidence_active:
+            image_height = int(display_frame.shape[0])
+            lower_band_fraction = float(
+                config.get("optical_lower_image_band_fraction")
+                or config.get("optical_lower_row_fraction")
+                or 0.25
+            )
+            lower_band_fraction = float(max(0.0, min(1.0, lower_band_fraction)))
+            lower_band_height_px = int(max(1, np.ceil(float(image_height) * lower_band_fraction)))
+            lower_band_y0 = int(max(0, image_height - lower_band_height_px))
+            band_rows = [
+                dict(row or {})
+                for row in list(attached_edge_rows or [])
+                if int(dict(row or {}).get("y_px") or 0) >= int(lower_band_y0)
+            ]
+            band_left_rms = _fit_residual_rms(band_rows, x_key="x_left_px")
+            band_right_rms = _fit_residual_rms(band_rows, x_key="x_right_px")
+            band_jitter_values = [
+                float(value)
+                for value in (band_left_rms, band_right_rms)
+                if value is not None
+            ]
+            active_lower_edge_jitter_px = None if not band_jitter_values else float(max(band_jitter_values))
+            active_boundary_chroma_aberration_score = None
+            if component_mask is not None and np.any(component_mask > 0):
+                band_boundary_mask = component_mask > 0
+                band_eroded = cv2.erode(component_mask, np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+                band_boundary_mask = band_boundary_mask & ~band_eroded
+                band_boundary_mask[: max(0, lower_band_y0), :] = False
+                if np.any(band_boundary_mask):
+                    b_channel = display_frame[:, :, 0].astype(np.float32)
+                    r_channel = display_frame[:, :, 2].astype(np.float32)
+                    chroma = np.abs(r_channel - b_channel)
+                    active_boundary_chroma_aberration_score = float(np.mean(chroma[band_boundary_mask]))
+            flow_optical_confidence = _min_confidence(
+                _confidence_smaller_better(
+                    active_lower_edge_jitter_px,
+                    full_at=float(config["optical_edge_jitter_confidence_full_px"]),
+                    zero_at=float(config["optical_edge_jitter_confidence_zero_px"]),
+                ),
+                _confidence_smaller_better(
+                    active_boundary_chroma_aberration_score,
+                    full_at=float(config["optical_boundary_chroma_confidence_full"]),
+                    zero_at=float(config["optical_boundary_chroma_confidence_zero"]),
+                ),
+            )
+            if flow_optical_confidence is None:
+                flow_optical_confidence = 1.0
     except Exception:
         boundary_chroma_aberration_score = None
-
-    flow_optical_confidence = _min_confidence(
-        _confidence_smaller_better(
-            lower_edge_jitter_px,
-            full_at=float(config["optical_edge_jitter_confidence_full_px"]),
-            zero_at=float(config["optical_edge_jitter_confidence_zero_px"]),
-        ),
-        _confidence_smaller_better(
-            boundary_chroma_aberration_score,
-            full_at=float(config["optical_boundary_chroma_confidence_full"]),
-            zero_at=float(config["optical_boundary_chroma_confidence_zero"]),
-        ),
-    )
+        if not optical_confidence_active:
+            flow_optical_confidence = 1.0
+        else:
+            flow_optical_confidence = 1.0
     return {
+        "flow_optical_confidence_active": bool(optical_confidence_active),
+        "optical_activation_clearance_px": activation_clearance_px,
         "lower_edge_jitter_px": lower_edge_jitter_px,
         "boundary_chroma_aberration_score": boundary_chroma_aberration_score,
         "flow_optical_confidence": flow_optical_confidence,
@@ -944,6 +1013,10 @@ def analyze_online_stream_frame(
     )
     attached_geometry_ok = attached_geometry.get("attached_volume_geometry_ok")
     detached_geometry_ok = detached_geometry.get("detached_volume_geometry_ok")
+    visible_fluid_clearance_px = _visible_fluid_clearance_px(
+        frame_metric_row=frame_metric_row,
+        attached_bottom_clearance_px=attached_bottom_clearance_px,
+    )
     flow_geometry_confidence = None
     if geometry_assessable:
         flow_geometry_confidence = _min_confidence(
@@ -957,6 +1030,7 @@ def analyze_online_stream_frame(
         attached_edge_rows=attached_edge_rows,
         attached_component=attached_component,
         roi=roi,
+        visible_fluid_clearance_px=visible_fluid_clearance_px,
         lower_row_fraction=float(config["optical_lower_row_fraction"]),
         config=config,
         geometry_assessable=geometry_assessable,
@@ -1059,6 +1133,8 @@ def analyze_online_stream_frame(
         "flow_geometry_confidence": flow_geometry_confidence,
         "flow_optical_confidence": flow_optical_confidence,
         "flow_point_confidence": flow_point_confidence,
+        "flow_optical_confidence_active": optical_summary.get("flow_optical_confidence_active"),
+        "optical_activation_clearance_px": optical_summary.get("optical_activation_clearance_px"),
         "lower_edge_jitter_px": optical_summary.get("lower_edge_jitter_px"),
         "boundary_chroma_aberration_score": optical_summary.get(
             "boundary_chroma_aberration_score"
