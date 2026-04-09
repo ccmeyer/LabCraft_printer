@@ -577,11 +577,6 @@ def summarize_online_stream_tail_delay(
     classified = _classify_trace_rows([summary], policy=resolved_policy)
     if classified:
         summary.update(classified[0])
-    right_bracket_reason = _right_bracket_reason_for_summary(summary)
-    summary["landmark_detected"] = bool(right_bracket_reason)
-    summary["landmark_reason"] = right_bracket_reason
-    summary["triggered_scout"] = bool(right_bracket_reason)
-    summary["triggered_coarse"] = bool(right_bracket_reason)
     return summary
 
 
@@ -797,80 +792,82 @@ def resolve_online_stream_tail_result(
     local_trace = list(local_trace_rows_by_delay.values())
     local_trace = _classify_trace_rows(local_trace, policy=resolved_policy)
 
-    separation_landmark_delay_from_emergence_us = None
-    for row in local_trace:
-        if bool(row.get("separated_from_nozzle_landmark")):
-            separation_landmark_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
-            break
-
-    right_bracket_row = None
+    landmark_delay_from_emergence_us = _summary_delay_from_emergence(landmark_summary, landmark_delay_us)
+    onset_selection_trace = []
     for row in local_trace:
         row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
-        if not bool(row.get("strong_tail_candidate")):
-            continue
-        if bool(row.get("attached_width_unavailable_landmark")) or bool(row.get("separated_from_nozzle_landmark")):
-            continue
         if (
-            separation_landmark_delay_from_emergence_us is not None
+            landmark_delay_from_emergence_us is not None
             and row_delay_from_emergence_us is not None
-            and int(row_delay_from_emergence_us) >= int(separation_landmark_delay_from_emergence_us)
+            and int(row_delay_from_emergence_us) > int(landmark_delay_from_emergence_us)
         ):
             continue
-        right_bracket_row = dict(row)
-        break
-
-    if right_bracket_row is None:
-        for row in local_trace:
-            if bool(row.get("attached_width_unavailable_landmark")):
-                right_bracket_row = dict(row)
-                break
-
-    if right_bracket_row is None and separation_landmark_delay_from_emergence_us is not None:
-        for row in local_trace:
-            row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
-            if (
-                bool(row.get("separated_from_nozzle_landmark"))
-                and row_delay_from_emergence_us is not None
-                and int(row_delay_from_emergence_us) == int(separation_landmark_delay_from_emergence_us)
-            ):
-                right_bracket_row = dict(row)
-                break
+        onset_selection_trace.append(dict(row))
 
     last_plateau_row = None
-    if right_bracket_row is not None:
-        right_bracket_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
-        for row in local_trace:
-            row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
-            if row_delay_from_emergence_us is None or right_bracket_delay_from_emergence_us is None:
-                continue
-            if int(row_delay_from_emergence_us) >= int(right_bracket_delay_from_emergence_us):
-                break
-            if bool(row.get("plateau_candidate")):
-                last_plateau_row = dict(row)
+    for row in onset_selection_trace:
+        row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+        if (
+            landmark_delay_from_emergence_us is not None
+            and row_delay_from_emergence_us is not None
+            and int(row_delay_from_emergence_us) >= int(landmark_delay_from_emergence_us)
+        ):
+            break
+        if bool(row.get("plateau_candidate")):
+            last_plateau_row = dict(row)
 
-    early_departure_rows = []
-    if right_bracket_row is not None and last_plateau_row is not None:
-        left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
-        right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
-        for row in local_trace:
+    candidate_rows = onset_selection_trace
+    if last_plateau_row is not None:
+        last_plateau_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
+        candidate_rows = [
+            dict(row)
+            for row in onset_selection_trace
+            if (
+                _to_int(dict(row or {}).get("delay_from_emergence_us")) is not None
+                and last_plateau_delay_from_emergence_us is not None
+                and int(_to_int(dict(row or {}).get("delay_from_emergence_us")))
+                > int(last_plateau_delay_from_emergence_us)
+            )
+        ]
+
+    early_departure_rows = [
+        dict(row)
+        for row in candidate_rows
+        if bool(row.get("early_departure_candidate"))
+    ]
+    strong_tail_rows = [
+        dict(row)
+        for row in candidate_rows
+        if bool(row.get("strong_tail_candidate"))
+    ]
+
+    right_bracket_row = None
+    if early_departure_rows:
+        earliest_early_departure_delay_from_emergence_us = _to_int(
+            early_departure_rows[0].get("delay_from_emergence_us")
+        )
+        for row in strong_tail_rows:
             row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
             if (
                 row_delay_from_emergence_us is None
-                or left_delay_from_emergence_us is None
-                or right_delay_from_emergence_us is None
+                or earliest_early_departure_delay_from_emergence_us is None
+                or int(row_delay_from_emergence_us)
+                <= int(earliest_early_departure_delay_from_emergence_us)
             ):
                 continue
-            if int(row_delay_from_emergence_us) <= int(left_delay_from_emergence_us):
-                continue
-            if int(row_delay_from_emergence_us) >= int(right_delay_from_emergence_us):
-                continue
-            if bool(row.get("early_departure_candidate")):
-                early_departure_rows.append(dict(row))
+            right_bracket_row = dict(row)
+            break
+        if right_bracket_row is None and landmark_summary is not None:
+            right_bracket_row = dict(landmark_summary)
+    elif strong_tail_rows:
+        right_bracket_row = dict(strong_tail_rows[0])
+    elif landmark_summary is not None:
+        right_bracket_row = dict(landmark_summary)
 
     captured_candidate = None
     midpoint_candidate_delay_from_emergence_us = None
     tail_start_selection_method = None
-    if early_departure_rows:
+    if early_departure_rows and right_bracket_row is not None and last_plateau_row is not None:
         captured_candidate = dict(early_departure_rows[0])
         tail_start_selection_method = "earliest_early_departure_before_right_bracket"
     elif right_bracket_row is not None and last_plateau_row is not None:

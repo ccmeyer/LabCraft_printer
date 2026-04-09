@@ -1844,6 +1844,45 @@ def test_online_stream_advance_tail_phase_continues_scout_without_landmark(tmp_p
     assert proc.nextTailDelay.calls
     assert proc._tail_mode == "scout"
     assert proc._tail_delay_index == 1
+
+
+def test_online_stream_advance_tail_phase_keeps_scout_running_on_single_pixel_tail_dip(tmp_path):
+    proc = _flow_proc(tmp_path)
+    proc._tail_plan = {
+        "steady_width_baseline_px": 74.0,
+        "scout_replicates": 1,
+        "backtrack_replicates": 1,
+        "planned_scout_delay_count": 2,
+    }
+    proc._tail_mode = "scout"
+    proc._tail_delay_sequence = [4750, 5250]
+    proc._tail_delay_index = 0
+    proc._tail_replicate_index = 0
+    proc._tail_current_delay_us = 4750
+    proc._tail_current_delay_frame_rows = [
+        calibration_model.online_cal_mod.build_online_stream_frame_row(
+            phase="tail_scout",
+            status="accepted",
+            delay_us=4750,
+            delay_from_emergence_us=1550,
+            replicate_index=1,
+            qc={"tail_qc_pass": True, "tail_width_usable": True, "tail_landmark_usable": False},
+            image_ref={"capture_id": "cap_tail"},
+            warnings=[],
+            attached_width_px=73.0,
+            tail_width_usable=True,
+            tail_landmark_usable=False,
+            separated_from_nozzle_landmark=False,
+        )
+    ]
+
+    proc.onAdvanceTailPhase()
+
+    assert proc.nextTailDelay.calls
+    assert proc._tail_mode == "scout"
+    assert proc._tail_delay_index == 1
+    assert proc._tail_landmark_delay_us is None
+    assert proc._tail_landmark_reason is None
     assert len(proc._tail_scout_delay_summaries) == 1
 
 
