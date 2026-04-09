@@ -11,6 +11,11 @@ DEFAULT_ONLINE_TAIL_POLICY = {
     "scout_landmark_width_frac": 0.95,
     "plateau_width_frac": 0.995,
     "departure_width_frac": 0.99,
+    "resolver_plateau_width_drop_px": 1.0,
+    "resolver_transition_width_drop_px": 1.0,
+    "resolver_collapse_width_drop_px": 2.0,
+    "resolver_collapse_width_frac": 0.975,
+    "resolver_confirmation_window_us": 100,
     "consecutive_failed_tail_delays_stop": 2,
     "scout_step_us": 500,
     "scout_replicates": 1,
@@ -151,6 +156,19 @@ def _right_bracket_reason_for_summary(summary: dict | None) -> str | None:
     return None
 
 
+def _confirmed_collapse_reason_for_summary(summary: dict | None) -> str | None:
+    row = dict(summary or {})
+    if bool(row.get("separated_from_nozzle_landmark")):
+        return "separated_from_nozzle"
+    if bool(row.get("attached_width_unavailable_landmark")):
+        return "attached_width_unavailable"
+    if bool(row.get("backup_width_collapse_landmark")):
+        return "strong_width_collapse_backup"
+    if bool(row.get("resolver_collapse_candidate")):
+        return "confirmed_width_collapse"
+    return None
+
+
 def select_online_stream_tail_left_anchor(
     *,
     scout_summaries: list[dict] | None,
@@ -268,6 +286,9 @@ def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | i
     delay_from_emergence_us = _to_int(summary.get("delay_from_emergence_us"))
     median_width_px = _to_float_or_none(summary.get("median_width_px"))
     width_ratio_to_baseline = _width_ratio_to_baseline(median_width_px, baseline_width_px)
+    width_drop_from_baseline_px = None
+    if median_width_px is not None and baseline_width_px is not None:
+        width_drop_from_baseline_px = float(float(baseline_width_px) - float(median_width_px))
     delay_accepted = bool(summary.get("delay_accepted"))
     return {
         "phase": str(phase_label),
@@ -280,6 +301,7 @@ def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | i
         "rejected_replicates": _to_int(summary.get("rejected_replicates"), 0),
         "median_width_px": median_width_px,
         "width_ratio_to_baseline": width_ratio_to_baseline,
+        "width_drop_from_baseline_px": width_drop_from_baseline_px,
         "tail_width_usable": bool(delay_accepted and median_width_px is not None),
         "tail_landmark_usable": False,
         "separated_from_nozzle_landmark": False,
@@ -290,6 +312,9 @@ def _flow_anchor_summary(flow_summary: dict | None, baseline_width_px: float | i
         "plateau_candidate": False,
         "early_departure_candidate": False,
         "strong_tail_candidate": False,
+        "resolver_plateau_candidate": False,
+        "resolver_transition_candidate": False,
+        "resolver_collapse_candidate": False,
         "tail_affected": False,
         "tail_start_candidate": False,
         "attached_bottom_guard_hit": bool(summary.get("attached_bottom_guard_hit")),
@@ -310,7 +335,17 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
     classified = []
     for row in list(rows or []):
         summary = dict(row or {})
+        median_width_px = _to_float_or_none(summary.get("median_width_px"))
         width_ratio_to_baseline = _to_float_or_none(summary.get("width_ratio_to_baseline"))
+        width_drop_from_baseline_px = _to_float_or_none(summary.get("width_drop_from_baseline_px"))
+        if (
+            width_drop_from_baseline_px is None
+            and median_width_px is not None
+            and width_ratio_to_baseline is not None
+            and float(width_ratio_to_baseline) > 0.0
+        ):
+            inferred_baseline_px = float(float(median_width_px) / float(width_ratio_to_baseline))
+            width_drop_from_baseline_px = float(inferred_baseline_px - float(median_width_px))
         tail_width_usable = bool(summary.get("tail_width_usable"))
         separated_from_nozzle_landmark = bool(summary.get("separated_from_nozzle_landmark"))
         attached_width_unavailable_landmark = bool(summary.get("attached_width_unavailable_landmark"))
@@ -335,9 +370,46 @@ def _classify_trace_rows(rows: list[dict], *, policy: dict | None = None) -> lis
             or attached_width_unavailable_landmark
             or backup_width_collapse_landmark
         )
+        resolver_plateau_candidate = bool(
+            tail_width_usable
+            and width_drop_from_baseline_px is not None
+            and float(width_drop_from_baseline_px) < float(resolved_policy["resolver_plateau_width_drop_px"])
+            and not separated_from_nozzle_landmark
+            and not attached_width_unavailable_landmark
+        )
+        resolver_transition_candidate = bool(
+            tail_width_usable
+            and width_drop_from_baseline_px is not None
+            and float(width_drop_from_baseline_px) >= float(resolved_policy["resolver_transition_width_drop_px"])
+            and float(width_drop_from_baseline_px) < float(resolved_policy["resolver_collapse_width_drop_px"])
+            and not separated_from_nozzle_landmark
+            and not attached_width_unavailable_landmark
+        )
+        resolver_collapse_candidate = bool(
+            (
+                tail_width_usable
+                and (
+                    (
+                        width_drop_from_baseline_px is not None
+                        and float(width_drop_from_baseline_px) >= float(resolved_policy["resolver_collapse_width_drop_px"])
+                    )
+                    or (
+                        width_ratio_to_baseline is not None
+                        and float(width_ratio_to_baseline) <= float(resolved_policy["resolver_collapse_width_frac"])
+                    )
+                )
+            )
+            or separated_from_nozzle_landmark
+            or attached_width_unavailable_landmark
+            or backup_width_collapse_landmark
+        )
+        summary["width_drop_from_baseline_px"] = width_drop_from_baseline_px
         summary["plateau_candidate"] = bool(plateau_candidate)
         summary["early_departure_candidate"] = bool(early_departure_candidate)
         summary["strong_tail_candidate"] = bool(strong_tail_candidate)
+        summary["resolver_plateau_candidate"] = bool(resolver_plateau_candidate)
+        summary["resolver_transition_candidate"] = bool(resolver_transition_candidate)
+        summary["resolver_collapse_candidate"] = bool(resolver_collapse_candidate)
         summary["tail_affected"] = bool(strong_tail_candidate)
         summary["tail_start_candidate"] = bool(early_departure_candidate or strong_tail_candidate)
         classified.append(summary)
@@ -556,6 +628,11 @@ def summarize_online_stream_tail_delay(
         "rejected_replicates": int(rejected_replicates),
         "median_width_px": median_width_px,
         "width_ratio_to_baseline": width_ratio_to_baseline,
+        "width_drop_from_baseline_px": (
+            None
+            if median_width_px is None or baseline_width_px is None
+            else float(float(baseline_width_px) - float(median_width_px))
+        ),
         "tail_width_usable": bool(width_usable_replicates > 0),
         "tail_landmark_usable": bool(landmark_usable_replicates > 0),
         "separated_from_nozzle_landmark": bool(separated_from_nozzle_landmark),
@@ -804,72 +881,99 @@ def resolve_online_stream_tail_result(
             continue
         onset_selection_trace.append(dict(row))
 
+    confirmation_window_us = int(
+        resolved_policy.get(
+            "resolver_confirmation_window_us",
+            DEFAULT_ONLINE_TAIL_POLICY["resolver_confirmation_window_us"],
+        )
+    )
+    confirmed_collapse_row = None
+    for index, row in enumerate(onset_selection_trace):
+        row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
+        if row_delay_from_emergence_us is None or not bool(row.get("resolver_collapse_candidate")):
+            continue
+        collapse_confirmed = False
+        for later_row in onset_selection_trace[index + 1 :]:
+            later_delay_from_emergence_us = _to_int(later_row.get("delay_from_emergence_us"))
+            if later_delay_from_emergence_us is None:
+                continue
+            if int(later_delay_from_emergence_us) <= int(row_delay_from_emergence_us):
+                continue
+            if int(later_delay_from_emergence_us) > int(row_delay_from_emergence_us) + int(confirmation_window_us):
+                break
+            if bool(later_row.get("resolver_collapse_candidate")):
+                collapse_confirmed = True
+                break
+        if (
+            not collapse_confirmed
+            and landmark_delay_from_emergence_us is not None
+            and int(landmark_delay_from_emergence_us) > int(row_delay_from_emergence_us)
+            and int(landmark_delay_from_emergence_us)
+            <= int(row_delay_from_emergence_us) + int(confirmation_window_us)
+        ):
+            collapse_confirmed = True
+        if collapse_confirmed:
+            confirmed_collapse_row = dict(row)
+            break
+
+    effective_right_bracket_row = (
+        dict(confirmed_collapse_row)
+        if confirmed_collapse_row is not None
+        else (None if landmark_summary is None else dict(landmark_summary))
+    )
+
     last_plateau_row = None
+    effective_right_bracket_delay_from_emergence_us = _to_int(
+        None if effective_right_bracket_row is None else effective_right_bracket_row.get("delay_from_emergence_us")
+    )
     for row in onset_selection_trace:
         row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
         if (
-            landmark_delay_from_emergence_us is not None
+            effective_right_bracket_delay_from_emergence_us is not None
             and row_delay_from_emergence_us is not None
-            and int(row_delay_from_emergence_us) >= int(landmark_delay_from_emergence_us)
+            and int(row_delay_from_emergence_us) >= int(effective_right_bracket_delay_from_emergence_us)
         ):
             break
-        if bool(row.get("plateau_candidate")):
+        if bool(row.get("resolver_plateau_candidate")):
             last_plateau_row = dict(row)
 
-    candidate_rows = onset_selection_trace
-    if last_plateau_row is not None:
-        last_plateau_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
-        candidate_rows = [
-            dict(row)
-            for row in onset_selection_trace
-            if (
-                _to_int(dict(row or {}).get("delay_from_emergence_us")) is not None
-                and last_plateau_delay_from_emergence_us is not None
-                and int(_to_int(dict(row or {}).get("delay_from_emergence_us")))
-                > int(last_plateau_delay_from_emergence_us)
+    transition_rows = []
+    if last_plateau_row is not None and effective_right_bracket_row is not None:
+        left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
+        right_delay_from_emergence_us = _to_int(effective_right_bracket_row.get("delay_from_emergence_us"))
+        transition_window_start_from_emergence_us = None
+        if right_delay_from_emergence_us is not None:
+            transition_window_start_from_emergence_us = int(
+                int(right_delay_from_emergence_us) - int(confirmation_window_us)
             )
-        ]
-
-    early_departure_rows = [
-        dict(row)
-        for row in candidate_rows
-        if bool(row.get("early_departure_candidate"))
-    ]
-    strong_tail_rows = [
-        dict(row)
-        for row in candidate_rows
-        if bool(row.get("strong_tail_candidate"))
-    ]
-
-    right_bracket_row = None
-    if early_departure_rows:
-        earliest_early_departure_delay_from_emergence_us = _to_int(
-            early_departure_rows[0].get("delay_from_emergence_us")
-        )
-        for row in strong_tail_rows:
+        for row in onset_selection_trace:
             row_delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
             if (
                 row_delay_from_emergence_us is None
-                or earliest_early_departure_delay_from_emergence_us is None
-                or int(row_delay_from_emergence_us)
-                <= int(earliest_early_departure_delay_from_emergence_us)
+                or left_delay_from_emergence_us is None
+                or right_delay_from_emergence_us is None
             ):
                 continue
-            right_bracket_row = dict(row)
-            break
-        if right_bracket_row is None and landmark_summary is not None:
-            right_bracket_row = dict(landmark_summary)
-    elif strong_tail_rows:
-        right_bracket_row = dict(strong_tail_rows[0])
-    elif landmark_summary is not None:
-        right_bracket_row = dict(landmark_summary)
+            if int(row_delay_from_emergence_us) <= int(left_delay_from_emergence_us):
+                continue
+            if int(row_delay_from_emergence_us) >= int(right_delay_from_emergence_us):
+                continue
+            if (
+                transition_window_start_from_emergence_us is not None
+                and int(row_delay_from_emergence_us) < int(transition_window_start_from_emergence_us)
+            ):
+                continue
+            if bool(row.get("resolver_transition_candidate")):
+                transition_rows.append(dict(row))
+
+    right_bracket_row = effective_right_bracket_row
 
     captured_candidate = None
     midpoint_candidate_delay_from_emergence_us = None
     tail_start_selection_method = None
-    if early_departure_rows and right_bracket_row is not None and last_plateau_row is not None:
-        captured_candidate = dict(early_departure_rows[0])
-        tail_start_selection_method = "earliest_early_departure_before_right_bracket"
+    if transition_rows and right_bracket_row is not None and last_plateau_row is not None:
+        captured_candidate = dict(transition_rows[0])
+        tail_start_selection_method = "earliest_transition_before_confirmed_collapse"
     elif right_bracket_row is not None and last_plateau_row is not None:
         left_delay_from_emergence_us = _to_int(last_plateau_row.get("delay_from_emergence_us"))
         right_delay_from_emergence_us = _to_int(right_bracket_row.get("delay_from_emergence_us"))
@@ -877,7 +981,7 @@ def resolve_online_stream_tail_result(
             midpoint_candidate_delay_from_emergence_us = int(
                 (int(left_delay_from_emergence_us) + int(right_delay_from_emergence_us)) / 2
             )
-            tail_start_selection_method = "plateau_right_bracket_midpoint"
+            tail_start_selection_method = "plateau_confirmed_collapse_midpoint"
 
     warnings = _unique_strings(
         list(plan.get("warnings") or [])
@@ -993,6 +1097,10 @@ def resolve_online_stream_tail_result(
         None if right_bracket_row is None else right_bracket_row.get("delay_from_emergence_us")
     )
     right_bracket_reason = _right_bracket_reason_for_summary(right_bracket_row)
+    confirmed_collapse_delay_from_emergence_us = _to_int(
+        None if confirmed_collapse_row is None else confirmed_collapse_row.get("delay_from_emergence_us")
+    )
+    confirmed_collapse_reason = _confirmed_collapse_reason_for_summary(confirmed_collapse_row)
     last_plateau_delay_from_emergence_us = _to_int(
         None if last_plateau_row is None else last_plateau_row.get("delay_from_emergence_us")
     )
@@ -1019,6 +1127,8 @@ def resolve_online_stream_tail_result(
         "refine_delay_summaries": _copy_jsonish(backtrack_rows),
         "landmark_delay_from_emergence_us": landmark_delay_from_emergence_us,
         "landmark_reason": landmark_reason or (None if landmark_summary is None else landmark_summary.get("landmark_reason")),
+        "confirmed_collapse_delay_from_emergence_us": confirmed_collapse_delay_from_emergence_us,
+        "confirmed_collapse_reason": confirmed_collapse_reason,
         "right_bracket_delay_from_emergence_us": right_bracket_delay_from_emergence_us,
         "right_bracket_reason": right_bracket_reason,
         "last_plateau_delay_from_emergence_us": last_plateau_delay_from_emergence_us,

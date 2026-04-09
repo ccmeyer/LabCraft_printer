@@ -2234,8 +2234,8 @@ def test_online_stream_successful_backtrack_writes_tail_fit_artifact(tmp_path):
     artifact = json.loads(Path(proc._tail_fit_path).read_text(encoding="utf-8"))
     assert artifact["result"]["tail_phase"]["status"] == "captured"
     assert artifact["result"]["tail_phase"]["tail_start_evidence"] == "plateau_right_bracket_midpoint"
-    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_right_bracket_midpoint"
-    assert artifact["result"]["predicted_stream_duration_us"] == 1175
+    assert artifact["result"]["tail_phase"]["tail_start_selection_method"] == "plateau_confirmed_collapse_midpoint"
+    assert artifact["result"]["predicted_stream_duration_us"] == 1350
 
 
 def test_online_stream_backtrack_separation_without_early_departure_resolves_midpoint_tail(tmp_path):
