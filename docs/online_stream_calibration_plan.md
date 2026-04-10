@@ -2,27 +2,266 @@
 
 ## Status
 
-- Date: 2026-04-06
-- Scope: Phase 1 planning only
-- Goal: convert the offline stream-analysis pipeline into a staged online calibration flow for the droplet camera imager
+- Date: 2026-04-10
+- Scope: current implemented-process reference plus archived planning notes
+- Goal: describe the shipped `OnlineStreamCalibrationProcess` behavior as it exists in the repo today
 
-## Purpose
+## How To Use This Document
 
-The current `tools/stream_analysis` pipeline assumes a dense offline time course and then derives:
+Use this file in two passes:
 
-- per-frame nozzle position
-- a filled stream silhouette
-- visible volume `V(t)`
-- the steady flow-rate fit
-- field-of-view exit timing
-- tail-start timing
+- Read [online_stream_calibration_current_spec.md](online_stream_calibration_current_spec.md) first if you need the current shipped behavior or a run-investigation / replay workflow.
+- Read `Current Call Path`, `Current Policy Snapshot`, and `Current Implemented Process` for the actual behavior that is currently shipped.
+- Use the later archive sections only for design rationale, original constraints, and implementation history.
 
-For online calibration we want the same final outputs, but with far fewer captured frames so reagent waste stays low. The calibration target is a loaded head / reagent pair at a fixed print pressure and pulse width.
+If this document disagrees with the code, the current code in:
 
-The proposed online process should answer two questions:
+- `FreeRTOS-interface/CalibrationClasses/Model.py`
+- `tools/stream_analysis/online_calibration.py`
+- `tools/stream_analysis/online_fit.py`
+- `tools/stream_analysis/online_runtime.py`
+- `tools/stream_analysis/online_tail.py`
 
-1. What steady flow rate should be used for the visible stream body?
-2. When does the tail actually begin, so the steady flow should stop contributing to predicted volume?
+should be treated as the source of truth.
+
+## Current Call Path
+
+The live launch and analysis path is:
+
+`View.py -> Controller.start_online_stream_calibration(...) -> CalibrationManager.start_online_stream_calibration(...) -> OnlineStreamCalibrationProcess -> tools.stream_analysis.online_runtime.analyze_online_stream_frame(...) -> tools.stream_analysis.online_calibration.summarize_online_stream_flow_delay(...) / tools.stream_analysis.online_fit.fit_online_stream_flow_phase(...) -> tools.stream_analysis.online_tail.summarize_online_stream_tail_delay(...) / tools.stream_analysis.online_tail.resolve_online_stream_tail_fit(...)`
+
+In practice the process also emits recorder artifacts and debug payloads through the existing calibration framework:
+
+- `plan_snapshot.json`
+- `prior_resolution.json`
+- `frames.jsonl`
+- `flow_fit.json`
+- `tail_fit.json`
+
+## Current Policy Snapshot
+
+The current implementation is best understood as a two-phase sparse capture process with adaptive control.
+
+### Flow Phase Defaults
+
+| Item | Current default |
+| --- | --- |
+| Start offset | `+650 us` after emergence |
+| Scout step | `100 us` |
+| Target accepted delays | `20` |
+| Minimum accepted delays for fit | `12` |
+| Max printed flow captures | `30` |
+| Nominal / hard capture budget | `55 / 61` |
+| Late coverage threshold | `>= 2250 us` or `<= 300 px` visible-fluid clearance |
+| Extension confidence floor | `0.55` |
+| Late-coverage confidence minimum | `0.70` |
+| Late-slope window | last `4` high-confidence accepted points |
+
+### Tail Phase Defaults
+
+| Item | Current default |
+| --- | --- |
+| Scout anchor | last accepted flow delay |
+| First scout step | `+500 us` from the anchor |
+| Scout step | `500 us` |
+| Max scout delays | `10` |
+| Backtrack step | `50 us` |
+| Prepad / postpad | `100 us / 100 us` |
+| Left extension | one allowed extension |
+| Collapse confirmation window | `100 us` |
+
+### Current Major Guardrails
+
+- Flow frames with materially omitted plausible fluid are excluded from the fit.
+- Lower-FOV optical confidence only becomes active once visible fluid is near the lower image band.
+- Flow can stop early as `tail_budget_preserved` if a usable fit exists and the remaining hard budget is only sufficient for tail.
+- Tail scouting only triggers on robust right-bracket landmarks, not on the first small width dip.
+- Tail onset is selected from a local plateau/transition/collapse bracket and never directly from a separated or unattached frame.
+
+## Current Purpose
+
+The implemented online process answers the same two questions as the original design, but it now does so with a fully adaptive sparse schedule rather than the original fixed five-delay v1 plan:
+
+1. What steady visible-body flow fit best describes `V(t)` before late-image or morphology bias makes later flow frames unsafe?
+2. Where does the visible tail actually begin so the steady flow contribution should stop for predicted volume?
+
+The current implementation is built around a two-phase online calibration:
+
+- an adaptive flow phase that tries to gather enough trusted late coverage for a stable weighted flow fit
+- a tail phase that scouts for a robust late landmark, then backtracks locally to resolve onset
+
+## Current Implemented Process
+
+### Preconditions and session setup
+
+Before the process will run it expects:
+
+- an emergence time
+- an emergence-selected nozzle center in image coordinates
+- a live droplet camera
+- an active printer-head / reagent context
+
+At process start it captures a fresh background image, resolves exact-condition priors when available, writes an initial `plan_snapshot.json`, and then begins flow acquisition.
+
+### Phase 1: Adaptive flow acquisition and fit
+
+The current flow policy lives in `tools/stream_analysis/online_calibration.py` and `tools/stream_analysis/online_fit.py`.
+
+Current default policy:
+
+- start at `emergence + 650 us`
+- scout in `100 us` steps
+- target `20` accepted delay points
+- require at least `12` accepted delay points before a flow fit can resolve
+- allow up to `30` printed flow captures, subject to the global capture budget
+- nominal capture budget `55`, hard capture budget `61`
+
+Each flow capture is analyzed independently through the runtime silhouette / volume path. The current frame-level acceptance logic is stricter than the original plan:
+
+- the silhouette must pass nozzle and geometry QC
+- detached/late geometry contributes confidence rather than only binary warnings
+- lower-FOV optical confidence is only activated when visible fluid approaches the lower image band
+- a frame is rejected from the flow fit if it contains material plausible fluid that was detected but not accepted into the volume set
+
+Important current flow measurements per frame:
+
+- `visible_volume_nl`
+- `attached_width_px`
+- `flow_geometry_confidence`
+- `flow_optical_confidence`
+- `flow_point_confidence`
+- `flow_volume_complete_ok`
+- bottom-of-FOV distances for both attached fluid and any accepted visible fluid
+
+Flow control is now adaptive rather than fixed-step-only:
+
+- `scout`
+  - advances rightward while frames remain acceptable
+- `span_fill`
+  - fills missing offsets inside the safe window once a right boundary is found or the scout cap is reached
+- `ci_refine`
+  - inserts midpoint delays while the fit still needs better coverage or stability
+
+Current flow boundary / stop behavior:
+
+- `attached_bottom_guard_hit` is a hard late-frame boundary
+- `soft_bottom_clearance` fixes a soft right boundary
+- `geometry_not_axisymmetric` fixes a right boundary on geometry failure
+- `confidence_low` can fix a right boundary only after lower-FOV optical confidence is active, there is already an earlier safe late-window point, and two consecutive accepted low-confidence delays occur
+- `tail_budget_preserved` can stop flow early once a usable fit exists and the remaining hard capture budget is only large enough for the dynamically estimated tail phase
+
+The current fit is no longer the original unweighted sparse line:
+
+- accepted delays are summarized across replicates into per-delay medians
+- the fit uses a weighted robust line over accepted delay summaries
+- fit weights are based on `flow_point_confidence`
+- the fit exports `lag_equivalent_us`
+- a late-slope stabilization check compares the global fit slope with the slope from the last high-confidence accepted points
+- `ci_target_met` now requires:
+  - `20` accepted delay points
+  - late coverage
+  - stable late slope
+  - acceptable CI width
+
+Late coverage is currently defined by at least one accepted high-confidence flow point that is either:
+
+- at or beyond `2250 us` after emergence, or
+- within `300 px` of the bottom of the frame when measured using any accepted visible fluid, not only the attached body
+
+### Phase 2: Tail scouting, backtrack, and onset resolution
+
+The current tail policy lives in `tools/stream_analysis/online_tail.py`.
+
+Tail planning now anchors directly from the resolved flow phase:
+
+- it requires a non-null steady-width baseline from the flow fit
+- it uses the last accepted flow delay as the scout anchor
+- the first tail scout capture is one `500 us` scout step after that anchor
+
+Current default tail policy:
+
+- scout step `500 us`
+- scout replicates `1`
+- up to `10` scout delays
+- backtrack step `50 us`
+- backtrack replicates `1`
+- `100 us` prepad and `100 us` postpad around the local bracket
+- one allowed left-bracket extension if the first local window still has no plateau
+
+The current scout trigger is intentionally conservative. Tail scouting only treats these as robust right-bracket landmarks:
+
+- `separated_from_nozzle`
+- `attached_width_unavailable`
+- backup width collapse at `<= 95%` of the flow baseline
+
+The first `< 0.99` width dip no longer triggers tail scouting by itself.
+
+When a landmark is found, the process now:
+
+- walks backward through scout summaries to find the latest plateau-like left anchor
+- builds a dense local backtrack plan at `50 us`
+- expands left once if needed to recover a missing left bracket
+- compresses the backtrack plan when hard budget is tight by:
+  - trimming outer padding first
+  - then coarsening only the plateau-side region to `100 us`
+  - while preserving the dense `400 us` region nearest the landmark
+
+The current resolver is also more structured than the original width-threshold plan. It now uses:
+
+- plateau candidate:
+  - width drop from baseline `< 1 px`
+- transition candidate:
+  - width drop `>= 1 px` and `< 2 px`
+- collapse candidate:
+  - width drop `>= 2 px`
+  - or width ratio `<= 0.975`
+  - or a separation / attached-width-unavailable landmark
+
+Current onset selection behavior:
+
+- find the first confirmed collapse inside the local trace using a `100 us` confirmation window
+- find the last plateau before that confirmed collapse
+- if there is a transition row immediately before the confirmed collapse, choose the earliest such transition
+- otherwise choose the midpoint between the last plateau and the confirmed collapse
+- never use a separated or unattached frame directly as the final tail start
+
+The final predicted volume is still:
+
+- `predicted_volume_nl = flow_intercept_nl + flow_rate_nl_per_us * tail_start_delay_from_emergence_us`
+
+but it is only emitted when both the flow fit and the tail phase resolve successfully.
+
+### Recorder outputs and debug payloads
+
+The current process writes enough detail to replay both the flow and tail decisions.
+
+Important run artifacts:
+
+- `plan_snapshot.json`
+  - actual policy values, priors, and planned schedules used for the run
+- `frames.jsonl`
+  - one row per attempted frame with QC, confidence, completeness, width, volume, and image references
+- `flow_fit.json`
+  - accepted delay summaries, weighted fit diagnostics, late-coverage diagnostics, and flow warnings
+- `tail_fit.json`
+  - scout rows, backtrack rows, local bracket diagnostics, tail budget usage, and final onset selection method
+
+Important current artifact/debug fields that did not exist in the original v1 plan include:
+
+- `flow_optical_confidence_active`
+- `flow_volume_complete_ok`
+- `plausible_unaccepted_visible_volume_nl`
+- `late_slope_stable`
+- `lag_equivalent_us`
+- `required_tail_capture_count`
+- `required_tail_left_extension_capture_count`
+- `tail_backtrack_compressed`
+- `confirmed_collapse_delay_from_emergence_us`
+- `tail_start_selection_method`
+
+## Historical Archive
+
+The remainder of this document is retained as design history from the original planning passes. It is still useful for context and rationale, but it no longer describes the current implemented policy in detail. The sections above should be treated as the reference description of the shipped process.
 
 ## What The Offline Pipeline Currently Does
 
@@ -980,7 +1219,7 @@ The implementation should be split into small milestones that each end in a runn
 - complete the flow phase before adding the tail phase
 - add priors and UI polish only after the base algorithm works reliably
 
-### Current Implementation Status
+### Historical Implementation Status (2026-04-06 Snapshot)
 
 As of `2026-04-06`, the staged plan has progressed as follows:
 
