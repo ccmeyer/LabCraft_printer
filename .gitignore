@@ -46,6 +46,7 @@ firmware/Release_Legacy/
 
 # HIL Reports
 hil_reports/
+logs/
 
 # Eclipse workspace metadata (should not be tracked)
 firmware/.metadata/
