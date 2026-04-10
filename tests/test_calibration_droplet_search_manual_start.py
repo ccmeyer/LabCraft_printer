@@ -34,7 +34,7 @@ def _build_proc(*, manual_start=False, contour_fn=None, characterize_fn=None):
     proc.droplet_image = np.zeros((120, 160, 3), dtype=np.uint8)
     proc.num_images = 3
     proc.image_counter = 0
-    proc.circularity_threshold = 0.95
+    proc.circularity_threshold = 0.90
     proc.droplet_positions = []
     proc.droplet_focus = []
     proc.circularity_values = []
@@ -430,6 +430,47 @@ def test_droplet_search_invalid_characterization_payload_includes_reason_and_dia
     assert payload["focus_moves_done"] == 5
     assert payload["focus_dir_switches"] == 2
     assert payload["best_focus_y_offset_steps"] == 14
+
+
+def test_droplet_search_analysis_accepts_point92_circularity():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.droplet_positions = [(80, 60), (81, 60), (79, 61)]
+    proc.droplet_volumes = [10.1, 10.2, 10.3]
+    proc.circularity_values = [0.92, 0.93, 0.94]
+    proc.droplet_focus = [800_000.0, 820_000.0, 810_000.0]
+    proc.image_counter = 3
+
+    proc.onAnalyzeCharacterization()
+
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["valid"] is True
+    assert payload["invalid_reason"] is None
+    assert payload["accepted_replicates"] == 3
+    assert payload["captured_replicates"] == 3
+
+
+def test_droplet_search_analysis_rejects_below_point90_circularity():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.droplet_positions = [(80, 60), (81, 60), (79, 61)]
+    proc.droplet_volumes = [10.1, 10.2, 10.3]
+    proc.circularity_values = [0.89, 0.88, 0.87]
+    proc.droplet_focus = [800_000.0, 820_000.0, 810_000.0]
+    proc.image_counter = 3
+
+    proc.onAnalyzeCharacterization()
+
+    payload = proc.calibrationDataUpdated.calls[0][0][0]["result"]
+    assert payload["valid"] is False
+    assert payload["invalid_reason"] == "no_good_replicates"
+    assert payload["accepted_replicates"] == 0
+    assert payload["captured_replicates"] == 3
+
+
+def test_droplet_search_count_good_replicates_includes_point90_boundary():
+    proc, _ctx = _build_proc(manual_start=True)
+    proc.circularity_values = [0.90, 0.899, 0.91]
+
+    assert proc._count_good_replicates() == 2
 
 
 def test_droplet_search_manual_move_guard_clamps_target_inside_anchor_envelope():

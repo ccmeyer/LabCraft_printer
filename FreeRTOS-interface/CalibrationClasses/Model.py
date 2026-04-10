@@ -13937,7 +13937,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.droplet_image = None
         self.num_images = 100
         self.image_counter = 0
-        self.circularity_threshold = 0.95
+        self.circularity_threshold = 0.90
         self.droplet_positions, self.droplet_focus = [], []
         self.circularity_values, self.droplet_volumes = [], []
         self.measurements = []
@@ -14746,7 +14746,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self.emitContinueSearch()
 
     def _count_good_replicates(self) -> int:
-        threshold = float(getattr(self, "circularity_threshold", 0.95))
+        threshold = float(getattr(self, "circularity_threshold", 0.90))
         return int(sum(1 for c in list(self.circularity_values or []) if float(c) >= threshold))
 
     def _build_result_payload(self, *, valid: bool, invalid_reason: str | None = None) -> dict:
@@ -15482,7 +15482,8 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         if self._is_dead():
             return
         self.stageChanged.emit("Analyzing droplet characterization")
-        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c >= self.circularity_threshold]
+        threshold = float(getattr(self, "circularity_threshold", 0.90))
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if float(c) >= threshold]
         ratio_reason = self._characterization_ratio_abort_reason()
         invalid_reason = None
         if self._final_invalid_reason:
