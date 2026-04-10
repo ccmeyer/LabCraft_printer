@@ -16268,10 +16268,42 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
     def _count_good_replicates(self) -> int:
         circularity_values = list(getattr(self, "circularity_values", []) or [])
-        threshold = float(getattr(self, "circularity_threshold", 0.95))
+        threshold = float(self._active_circularity_threshold())
         return int(
             sum(1 for c in circularity_values if float(c) >= threshold)
         )
+
+    def _final_phase_circularity_threshold(self, base_threshold: float | None = None) -> float:
+        if base_threshold is None:
+            base_threshold = float(getattr(self, "circularity_threshold", 0.95))
+        else:
+            base_threshold = float(base_threshold)
+        fallback_threshold = float(getattr(self, "final_phase_circularity_threshold", 0.90))
+        return float(max(0.0, min(base_threshold, fallback_threshold)))
+
+    def _active_circularity_threshold(self, base_threshold: float | None = None) -> float:
+        if base_threshold is None:
+            base_threshold = float(getattr(self, "circularity_threshold", 0.95))
+        else:
+            base_threshold = float(base_threshold)
+        retarget_cap = int(max(0, getattr(self, "char_delay_retarget_cap", 2)))
+        retarget_count = int(max(0, getattr(self, "_morphology_retarget_count", 0)))
+        if retarget_cap > 0 and retarget_count >= retarget_cap:
+            return float(self._final_phase_circularity_threshold(base_threshold))
+        return float(base_threshold)
+
+    def _circularity_threshold_context(self) -> dict:
+        base_threshold = float(getattr(self, "circularity_threshold", 0.95))
+        retarget_cap = int(max(0, getattr(self, "char_delay_retarget_cap", 2)))
+        retarget_count = int(max(0, getattr(self, "_morphology_retarget_count", 0)))
+        active_threshold = float(self._active_circularity_threshold())
+        final_phase_active = bool(retarget_cap > 0 and retarget_count >= retarget_cap)
+        return {
+            "circularity_threshold_active": float(active_threshold),
+            "circularity_threshold_default": float(base_threshold),
+            "circularity_threshold_final_phase": float(self._final_phase_circularity_threshold()),
+            "circularity_threshold_final_phase_active": bool(final_phase_active),
+        }
 
     def _pair_capture_context(self) -> dict:
         refs = getattr(self, "_last_capture_refs", {}) or {}
@@ -16465,6 +16497,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
             "pair": self._pair_capture_context(),
         }
+        out.update(self._circularity_threshold_context())
         if isinstance(payload, dict):
             out.update(payload)
         self._record_analysis(out)
@@ -16473,16 +16506,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         if stage_message:
             self.stageChanged.emit(str(stage_message))
         self._bad_reason = str(reason or "unspecified")
+        payload = {
+            "reason": str(self._bad_reason),
+            "pressure": float(getattr(self, "cur_pressure", 0.0)),
+            "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
+            "search_streaks": self._search_streak_snapshot(),
+            "char_ratios": self._char_ratio_snapshot(),
+            "morphology": self._morphology_snapshot(),
+        }
+        payload.update(self._circularity_threshold_context())
         self._record_decision(
             "pressure_invalidated",
-            {
-                "reason": str(self._bad_reason),
-                "pressure": float(getattr(self, "cur_pressure", 0.0)),
-                "flash_delay_us": int(getattr(self, "current_delay_us", getattr(self, "target_delay_us", 0)) or 0),
-                "search_streaks": self._search_streak_snapshot(),
-                "char_ratios": self._char_ratio_snapshot(),
-                "morphology": self._morphology_snapshot(),
-            },
+            payload,
         )
         self._record_pressure_result(valid=False, reason=self._bad_reason)
         self.i += 1
@@ -16570,6 +16605,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "current_delay_us": int(current_anchor_us),
             "morphology": self._morphology_snapshot(),
         }
+        payload.update(self._circularity_threshold_context())
         self._record_pressure_sweep_analysis("pressure_sweep_morphology", payload)
         self._record_decision("morphology_delay_retarget_invalid", payload)
         self._invalidate_current_pressure(str(reason), stage_message=stage_message)
@@ -16660,6 +16696,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "morphology_before": dict(snapshot_before),
             "morphology_after": self._morphology_snapshot(),
         }
+        payload.update(self._circularity_threshold_context())
         self.stageChanged.emit(
             f"Non-round droplets {snapshot_before.get('window_nonround_hits', 0)}/"
             f"{snapshot_before.get('window_evaluable_frames', 0)} → increasing flash delay to "
@@ -16686,7 +16723,11 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         window_frames = int(max(1, getattr(self, "char_delay_retarget_window_frames", 4)))
         if int(getattr(self, "_morphology_window_evaluable_count", 0)) >= int(window_frames):
             return False
-        roundness_min = float(getattr(self, "char_delay_retarget_roundness_min", 0.95))
+        roundness_min = float(
+            self._active_circularity_threshold(
+                getattr(self, "char_delay_retarget_roundness_min", 0.95)
+            )
+        )
         is_nonround = bool(stream_like) or float(ellipse_roundness) < float(roundness_min)
         self._morphology_window_evaluable_count = int(
             getattr(self, "_morphology_window_evaluable_count", 0)
@@ -18217,7 +18258,8 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
     @Slot()
     def onAnalyzeBatch(self):
         # Only keep “good” (circular) replicates
-        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if c >= self.circularity_threshold]
+        active_threshold = float(self._active_circularity_threshold())
+        good = [v for v, c in zip(self.droplet_volumes, self.circularity_values) if float(c) >= active_threshold]
         ratios = self._char_ratio_snapshot()
         morphology = self._morphology_snapshot()
         max_invalid_ratio = float(getattr(self, "char_max_invalid_ratio", 0.45))
@@ -18235,17 +18277,19 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
 
         if invalid_reasons:
             reason = str(invalid_reasons[0])
+            invalid_payload = {
+                "status": "invalid",
+                "reason": str(reason),
+                "all_reasons": list(invalid_reasons),
+                "accepted_replicates": int(len(good)),
+                "required_replicates": int(self.num_images),
+                "ratios": ratios,
+                "morphology": morphology,
+            }
+            invalid_payload.update(self._circularity_threshold_context())
             self._record_pressure_sweep_analysis(
                 "pressure_sweep_batch",
-                {
-                    "status": "invalid",
-                    "reason": str(reason),
-                    "all_reasons": list(invalid_reasons),
-                    "accepted_replicates": int(len(good)),
-                    "required_replicates": int(self.num_images),
-                    "ratios": ratios,
-                    "morphology": morphology,
-                },
+                invalid_payload,
             )
             self.stageChanged.emit(
                 f"Pressure invalid ({reason}); accepted={len(good)}/{self.num_images}, "
@@ -18253,16 +18297,18 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 f"multiple={ratios.get('multiple_ratio', 0.0):.2f}, "
                 f"stream={ratios.get('stream_ratio', 0.0):.2f}"
             )
+            decision_payload = {
+                "reason": str(reason),
+                "all_reasons": list(invalid_reasons),
+                "accepted_replicates": int(len(good)),
+                "required_replicates": int(self.num_images),
+                "ratios": ratios,
+                "morphology": morphology,
+            }
+            decision_payload.update(self._circularity_threshold_context())
             self._record_decision(
                 "batch_invalid",
-                {
-                    "reason": str(reason),
-                    "all_reasons": list(invalid_reasons),
-                    "accepted_replicates": int(len(good)),
-                    "required_replicates": int(self.num_images),
-                    "ratios": ratios,
-                    "morphology": morphology,
-                },
+                decision_payload,
             )
             self._record_pressure_result(
                 valid=False,
@@ -18280,6 +18326,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                     "morphology_nonround_hits": int(morphology.get("nonround_hits", 0)),
                     "morphology_retarget_count": int(morphology.get("retarget_count", 0)),
                     "morphology_retarget_history_us": list(morphology.get("retarget_history_us", [])),
+                    "circularity_threshold_active": float(active_threshold),
                 },
             )
         else:
@@ -18324,31 +18371,37 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
                 "morphology_nonround_hits": int(morphology.get("nonround_hits", 0)),
                 "morphology_retarget_count": int(morphology.get("retarget_count", 0)),
                 "morphology_retarget_history_us": list(morphology.get("retarget_history_us", [])),
+                "circularity_threshold_active": float(active_threshold),
                 "valid": True
             }
+            rec.update(self._circularity_threshold_context())
             rec.update(self._current_targeting_metadata())
             self.samples.append(rec)
+            valid_payload = {
+                "status": "valid",
+                "accepted_replicates": int(len(good)),
+                "required_replicates": int(self.num_images),
+                "mean_volume": float(mean_vol),
+                "cv_volume_percent": float(cv_vol),
+                "ratios": ratios,
+                "morphology": morphology,
+            }
+            valid_payload.update(self._circularity_threshold_context())
             self._record_pressure_sweep_analysis(
                 "pressure_sweep_batch",
-                {
-                    "status": "valid",
-                    "accepted_replicates": int(len(good)),
-                    "required_replicates": int(self.num_images),
-                    "mean_volume": float(mean_vol),
-                    "cv_volume_percent": float(cv_vol),
-                    "ratios": ratios,
-                    "morphology": morphology,
-                },
+                valid_payload,
             )
+            decision_payload = {
+                "accepted_replicates": int(len(good)),
+                "required_replicates": int(self.num_images),
+                "ratios": ratios,
+                "cv_volume_percent": float(cv_vol),
+                "morphology": morphology,
+            }
+            decision_payload.update(self._circularity_threshold_context())
             self._record_decision(
                 "batch_valid",
-                {
-                    "accepted_replicates": int(len(good)),
-                    "required_replicates": int(self.num_images),
-                    "ratios": ratios,
-                    "cv_volume_percent": float(cv_vol),
-                    "morphology": morphology,
-                },
+                decision_payload,
             )
             self._emit_incremental_pressure_step(rec)      # <- NEW incremental emit
 
@@ -18412,6 +18465,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "valid": bool(valid),
             "invalid_reason": (None if valid else (reason or "unspecified"))
         }
+        rec.update(self._circularity_threshold_context())
         rec.update(self._current_targeting_metadata())
         if isinstance(extra, dict):
             rec.update(extra)
