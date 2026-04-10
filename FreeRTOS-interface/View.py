@@ -5651,6 +5651,9 @@ class ExperimentDesignDialog(QDialog):
 
         # Push into the model – this will rebuild factors and uploaded reactions.
         # We default to same droplet volume and units assumptions used elsewhere.
+        if not self._validate_uploaded_design_well_assignments(df):
+            return
+
         self.model.set_uploaded_design_from_dataframe(
             df,
             units_default="",                    # user units come from header; blank defaults to "arb"
@@ -5678,6 +5681,36 @@ class ExperimentDesignDialog(QDialog):
             show_capacity_dialog=False,
             refresh_lock_states=True,
         )
+
+    def _validate_uploaded_design_well_assignments(self, df) -> bool:
+        extract_well_ids = getattr(self.model, "extract_uploaded_design_well_ids_from_dataframe", None)
+        if not callable(extract_well_ids):
+            return True
+
+        uploaded_well_ids = extract_well_ids(df)
+        if not uploaded_well_ids:
+            return True
+
+        well_plate = getattr(getattr(self.main_window, "model", None), "well_plate", None)
+        if well_plate is None:
+            return True
+
+        selected_plate_name = None
+        if hasattr(self, "plate_format_combo") and self.plate_format_combo is not None:
+            selected_plate_name = self.plate_format_combo.currentText().strip() or None
+
+        try:
+            well_plate.validate_explicit_well_ids(
+                uploaded_well_ids,
+                plate_name=selected_plate_name or None,
+            )
+        except ValueError as e:
+            message = str(e)
+            self._set_status(message)
+            QMessageBox.warning(self, "Invalid well assignments", message)
+            return False
+
+        return True
 
     def _on_reset_uploaded_design(self):
         if not self._uploaded_design_active and not self.model.has_uploaded_design():
@@ -6899,7 +6932,11 @@ class ExperimentDesignDialog(QDialog):
                 self.main_window.complete_experiment_design()
                 self._apply_requested = True
         except Exception as e:
+            message = str(e) or "Unknown error applying the experiment design."
+            self._set_status(message)
+            QMessageBox.warning(self, "Could not apply experiment design", message)
             print(f"[ExperimentDesignDialog] finish handoff error: {e}")
+            return
 
         # Close dialog after explicit apply.
         self.accept()

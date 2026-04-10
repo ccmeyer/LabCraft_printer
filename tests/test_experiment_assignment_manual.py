@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 
 from Model import Model
@@ -30,6 +32,27 @@ def test_manual_assignment_uses_explicit_well_ids_exactly(experiment_model_facto
 
     num = em.get_number_of_reactions()
     explicit = [f"A{i+1}" for i in range(num)]
+    em._uploaded_well_ids = explicit
+
+    Model.load_experiment_from_model(model, load_progress=False)
+
+    pairs = _assigned_ordered_pairs(model.well_plate)
+    by_reaction_idx = sorted(pairs, key=lambda p: int(p[0][1:]))
+    assert [wid for _, wid in by_reaction_idx] == explicit
+
+
+def test_manual_assignment_accepts_high_density_wells_on_384_plate(experiment_model_factory):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design_for_manual(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+    explicit = [
+        "G16", "P24", "A1", "B2", "C3", "D4", "E5", "F6",
+        "H7", "I8", "J9", "K10", "L11", "M12", "N13", "O14",
+    ]
+    assert len(explicit) == em.get_number_of_reactions()
     em._uploaded_well_ids = explicit
 
     Model.load_experiment_from_model(model, load_progress=False)
@@ -76,10 +99,15 @@ def test_manual_assignment_rejects_invalid_and_excluded_wells(experiment_model_f
     em_invalid.generate_experiment()
     n = em_invalid.get_number_of_reactions()
     invalid_ids = [f"A{i+1}" for i in range(n)]
-    invalid_ids[0] = "ZZ99"
+    invalid_ids[0] = "G16"
     em_invalid._uploaded_well_ids = invalid_ids
-    with pytest.raises(ValueError, match="does not exist"):
-        Model.load_experiment_from_model(model_invalid, load_progress=False)
+    model_invalid.clear_experiment = Mock()
+    with pytest.raises(ValueError) as excinfo_invalid:
+        Model.load_experiment_from_model(model_invalid, plate_name="96well-8x12", load_progress=False)
+    assert model_invalid.clear_experiment.call_count == 0
+    assert "Explicit well assignments are invalid" in str(excinfo_invalid.value)
+    assert "G16" in str(excinfo_invalid.value)
+    assert "96well-8x12" in str(excinfo_invalid.value)
 
     model_excluded = experiment_model_factory()
     em_excluded = model_excluded.experiment_model
@@ -90,5 +118,9 @@ def test_manual_assignment_rejects_invalid_and_excluded_wells(experiment_model_f
     excluded_ids = [f"C{i+1}" for i in range(n2)]
     em_excluded._uploaded_well_ids = excluded_ids
     model_excluded.well_plate.excluded_wells.add(excluded_ids[0])
-    with pytest.raises(ValueError, match="excluded_wells"):
+    model_excluded.clear_experiment = Mock()
+    with pytest.raises(ValueError) as excinfo_excluded:
         Model.load_experiment_from_model(model_excluded, load_progress=False)
+    assert model_excluded.clear_experiment.call_count == 0
+    assert "Excluded wells" in str(excinfo_excluded.value)
+    assert excluded_ids[0] in str(excinfo_excluded.value)
