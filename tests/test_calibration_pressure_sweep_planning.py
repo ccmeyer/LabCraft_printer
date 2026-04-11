@@ -214,6 +214,25 @@ def _build_pressure_sweep_init_model():
     )
 
 
+def test_pressure_sweep_safe_bounds_prefer_camera_location_before_nozzle_center():
+    proc = PressureSweepCharacterizationProcess.__new__(PressureSweepCharacterizationProcess)
+    proc.nozzle_center_machine = {"X": 100, "Y": 200, "Z": 300}
+    proc.stageChanged = Recorder()
+    proc._record_event = lambda *args, **kwargs: None
+    proc.model = SimpleNamespace(
+        location_model=SimpleNamespace(
+            get_location_dict=lambda name: {"X": 5000, "Y": 6000, "Z": 7000} if name == "camera" else None
+        ),
+        machine_model=SimpleNamespace(
+            get_current_position_dict=lambda: {"X": 9000, "Y": 10000, "Z": 11000}
+        ),
+    )
+
+    assert proc._get_axis_bounds_safe("X", 20_000) == (-15_000, 25_000)
+    assert proc._get_axis_bounds_safe("Y", 10_000) == (-4_000, 16_000)
+    assert proc._get_axis_bounds_safe("Z", 20_000) == (-13_000, 27_000)
+
+
 def test_manager_trajectory_helpers_prefer_explicit_fields():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr._pressure_traj_result = {

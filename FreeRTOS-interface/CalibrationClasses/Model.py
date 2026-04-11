@@ -54,6 +54,58 @@ def numpy_encoder(obj):
     return str(obj)
 
 
+def _coerce_xyz_dict_ints(raw_xyz):
+    if raw_xyz is None:
+        return None
+    if isinstance(raw_xyz, dict):
+        raw = (raw_xyz.get("X"), raw_xyz.get("Y"), raw_xyz.get("Z"))
+    else:
+        try:
+            raw = tuple(raw_xyz)
+        except Exception:
+            return None
+    if len(raw) < 3:
+        return None
+    out = {}
+    for axis, value in zip(("X", "Y", "Z"), raw[:3]):
+        try:
+            f_value = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(f_value):
+            return None
+        out[str(axis)] = int(round(f_value))
+    return out
+
+
+def _resolve_safe_span_origin_xyz(model, nozzle_center_machine):
+    location_model = getattr(model, "location_model", None)
+    get_location_dict = getattr(location_model, "get_location_dict", None)
+    if callable(get_location_dict):
+        try:
+            camera_xyz = _coerce_xyz_dict_ints(get_location_dict("camera"))
+        except Exception:
+            camera_xyz = None
+        if camera_xyz is not None:
+            return dict(camera_xyz), "camera_location"
+
+    machine_model = getattr(model, "machine_model", None)
+    get_current_position_dict = getattr(machine_model, "get_current_position_dict", None)
+    if callable(get_current_position_dict):
+        try:
+            live_xyz = _coerce_xyz_dict_ints(get_current_position_dict())
+        except Exception:
+            live_xyz = None
+        if live_xyz is not None:
+            return dict(live_xyz), "live_position"
+
+    nozzle_xyz = _coerce_xyz_dict_ints(nozzle_center_machine)
+    if nozzle_xyz is not None:
+        return dict(nozzle_xyz), "nozzle_center"
+
+    return {"X": 0, "Y": 0, "Z": 0}, "origin_fallback"
+
+
 class NozzlePositionChecklistStore:
     """
     Manifest-backed image/metadata recorder for NozzlePositionCalibrationProcess.
@@ -14311,13 +14363,53 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
     def _clamp_delay(self, d_us:int)->int:
         return int(max(self.min_delay_us, min(self.max_delay_us, int(d_us))))
 
+    def _get_safe_span_origin_xyz(self):
+        cached_xyz = getattr(self, "_safe_span_origin_xyz", None)
+        cached_source = getattr(self, "_safe_span_origin_source", None)
+        if isinstance(cached_xyz, dict) and cached_source:
+            return dict(cached_xyz), str(cached_source)
+
+        origin_xyz, origin_source = _resolve_safe_span_origin_xyz(
+            getattr(self, "model", None),
+            getattr(self, "nozzle_center_machine", None),
+        )
+        self._safe_span_origin_xyz = dict(origin_xyz)
+        self._safe_span_origin_source = str(origin_source)
+
+        if str(origin_source) == "origin_fallback":
+            msg = (
+                "Droplet search could not resolve machine bounds, camera location, "
+                "live position, or nozzle center; using origin-centered safety span."
+            )
+            try:
+                self.stageChanged.emit(msg)
+            except Exception:
+                pass
+            self._record_event(
+                "safe_span_origin_fallback",
+                {
+                    "source": str(origin_source),
+                    "origin_xyz": [
+                        int(origin_xyz["X"]),
+                        int(origin_xyz["Y"]),
+                        int(origin_xyz["Z"]),
+                    ],
+                },
+                level="warning",
+            )
+        return dict(origin_xyz), str(origin_source)
+
     def _get_axis_bounds_safe(self, axis:str, default_span:int):
-        try:
-            lo, hi = self.model.machine_model.get_axis_bounds(axis)
-            return int(lo), int(hi)
-        except Exception:
-            base = int(self.nozzle_center_machine.get(axis, 0)) if self.nozzle_center_machine else 0
-            return base - default_span, base + default_span
+        get_axis_bounds = getattr(getattr(self.model, "machine_model", None), "get_axis_bounds", None)
+        if callable(get_axis_bounds):
+            try:
+                lo, hi = get_axis_bounds(axis)
+                return int(lo), int(hi)
+            except Exception:
+                pass
+        origin_xyz, _origin_source = self._get_safe_span_origin_xyz()
+        base = int(origin_xyz.get(axis, 0))
+        return base - default_span, base + default_span
 
     def _clamp_abs(self, X:int, Y:int, Z:int):
         Xc = max(self.x_lo, min(self.x_hi, int(X)))
@@ -16109,13 +16201,53 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         return (float(min(vals)), float(max(vals)))
 
     # ---------- helpers (generic) ----------
+    def _get_safe_span_origin_xyz(self):
+        cached_xyz = getattr(self, "_safe_span_origin_xyz", None)
+        cached_source = getattr(self, "_safe_span_origin_source", None)
+        if isinstance(cached_xyz, dict) and cached_source:
+            return dict(cached_xyz), str(cached_source)
+
+        origin_xyz, origin_source = _resolve_safe_span_origin_xyz(
+            getattr(self, "model", None),
+            getattr(self, "nozzle_center_machine", None),
+        )
+        self._safe_span_origin_xyz = dict(origin_xyz)
+        self._safe_span_origin_source = str(origin_source)
+
+        if str(origin_source) == "origin_fallback":
+            msg = (
+                "Pressure sweep could not resolve machine bounds, camera location, "
+                "live position, or nozzle center; using origin-centered safety span."
+            )
+            try:
+                self.stageChanged.emit(msg)
+            except Exception:
+                pass
+            self._record_event(
+                "safe_span_origin_fallback",
+                {
+                    "source": str(origin_source),
+                    "origin_xyz": [
+                        int(origin_xyz["X"]),
+                        int(origin_xyz["Y"]),
+                        int(origin_xyz["Z"]),
+                    ],
+                },
+                level="warning",
+            )
+        return dict(origin_xyz), str(origin_source)
+
     def _get_axis_bounds_safe(self, axis:str, default_span:int):
-        try:
-            lo, hi = self.model.machine_model.get_axis_bounds(axis)
-            return int(lo), int(hi)
-        except Exception:
-            base = int(self.nozzle_center_machine.get(axis, 0)) if self.nozzle_center_machine else 0
-            return base - default_span, base + default_span
+        get_axis_bounds = getattr(getattr(self.model, "machine_model", None), "get_axis_bounds", None)
+        if callable(get_axis_bounds):
+            try:
+                lo, hi = get_axis_bounds(axis)
+                return int(lo), int(hi)
+            except Exception:
+                pass
+        origin_xyz, _origin_source = self._get_safe_span_origin_xyz()
+        base = int(origin_xyz.get(axis, 0))
+        return base - default_span, base + default_span
 
     def _ensure_stage_bounds_initialized(self):
         if not hasattr(self, "x_lo") or not hasattr(self, "x_hi"):
