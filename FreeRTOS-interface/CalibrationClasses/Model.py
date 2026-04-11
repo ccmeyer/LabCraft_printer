@@ -5377,8 +5377,76 @@ class BaseCalibrationProcess(QObject):
         on_timeout=None,
     ):
         settings_obj = dict(settings or {})
-        self._record_event("settings_requested", {"settings": settings_obj, "context": str(context or "")})
-        request_state = {"resolved": False, "timer": None}
+        request_id = str(uuid.uuid4())
+        created_monotonic_ns = int(time.monotonic_ns())
+        timeout_ms = None if guard_timeout_ms is None else int(guard_timeout_ms)
+        request_state = {
+            "resolved": False,
+            "timer": None,
+            "timed_out_monotonic_ns": None,
+        }
+
+        def _fallback_snapshot():
+            return {
+                "request_id": str(request_id),
+                "context": str(context or ""),
+                "requested_settings": dict(settings_obj),
+                "timeout_ms": timeout_ms,
+                "commands": [],
+                "latest_status": {
+                    "Current_command": None,
+                    "Last_completed": None,
+                    "cmd_depth": None,
+                    "Flash_delay": None,
+                    "Flash_droplets": None,
+                    "rx_to_main_thread_ms": None,
+                },
+                "recent_status": [],
+                "recent_command_events": [],
+                "stall_hint": "commands_not_bound",
+            }
+
+        def _build_diagnostic_snapshot():
+            snapshot = _fallback_snapshot()
+            provider = getattr(_wrapped, "_settings_trace_provider", None)
+            if callable(provider):
+                try:
+                    provided = provider()
+                except Exception:
+                    provided = None
+                if isinstance(provided, dict):
+                    snapshot.update(provided)
+                    snapshot.setdefault("request_id", str(request_id))
+                    snapshot.setdefault("context", str(context or ""))
+                    snapshot.setdefault("requested_settings", dict(settings_obj))
+                    snapshot.setdefault("timeout_ms", timeout_ms)
+                    snapshot.setdefault("commands", [])
+                    snapshot.setdefault("latest_status", _fallback_snapshot()["latest_status"])
+                    snapshot.setdefault("recent_status", [])
+                    snapshot.setdefault("recent_command_events", [])
+                    snapshot.setdefault("stall_hint", "unknown")
+            return snapshot
+
+        def _record_bound(payload):
+            bound_payload = dict(payload or {})
+            bound_payload["request_id"] = str(bound_payload.get("request_id") or request_id)
+            bound_payload["context"] = str(bound_payload.get("context") or context or "")
+            bound_payload["settings"] = dict(bound_payload.get("settings") or settings_obj)
+            bound_payload["commands"] = [dict(item or {}) for item in list(bound_payload.get("commands") or [])]
+            completion_command = bound_payload.get("completion_command_number")
+            bound_payload["completion_command_number"] = (
+                None if completion_command in (None, "") else int(completion_command)
+            )
+            self._record_event("settings_bound", bound_payload)
+
+        self._record_event(
+            "settings_requested",
+            {
+                "request_id": str(request_id),
+                "settings": settings_obj,
+                "context": str(context or ""),
+            },
+        )
 
         def _cancel_pending():
             if request_state["resolved"]:
@@ -5388,39 +5456,76 @@ class BaseCalibrationProcess(QObject):
             request_state["timer"] = None
             self._record_event(
                 "settings_cancelled",
-                {"settings": settings_obj, "context": str(context or "")},
+                {
+                    "request_id": str(request_id),
+                    "settings": settings_obj,
+                    "context": str(context or ""),
+                },
                 level="warning",
             )
 
         def _wrapped(*args, **kwargs):
             if request_state["resolved"]:
+                late_completion_ms = None
+                timed_out_monotonic_ns = request_state.get("timed_out_monotonic_ns")
+                if timed_out_monotonic_ns is not None:
+                    late_completion_ms = round(
+                        max(0, int(time.monotonic_ns()) - int(timed_out_monotonic_ns)) / 1_000_000.0,
+                        3,
+                    )
                 self._record_event(
                     "settings_completed_ignored",
-                    {"settings": settings_obj, "context": str(context or "")},
+                    {
+                        "request_id": str(request_id),
+                        "settings": settings_obj,
+                        "context": str(context or ""),
+                        "late_completion_ms": late_completion_ms,
+                        "diagnostic_snapshot": _build_diagnostic_snapshot(),
+                    },
                     level="warning",
                 )
                 return
             request_state["resolved"] = True
             self._cancel_timeout(request_state["timer"])
             request_state["timer"] = None
-            self._record_event("settings_completed", {"settings": settings_obj, "context": str(context or "")})
+            self._record_event(
+                "settings_completed",
+                {
+                    "request_id": str(request_id),
+                    "settings": settings_obj,
+                    "context": str(context or ""),
+                },
+            )
             if callback is not None:
                 callback(*args, **kwargs)
 
-        if guard_timeout_ms is not None:
-            timeout_ms = int(guard_timeout_ms)
+        setattr(_wrapped, "_settings_request_id", str(request_id))
+        setattr(_wrapped, "_settings_context", str(context or ""))
+        setattr(_wrapped, "_settings_requested_settings", dict(settings_obj))
+        setattr(_wrapped, "_settings_created_monotonic_ns", int(created_monotonic_ns))
+        setattr(_wrapped, "_settings_guard_timeout_ms", timeout_ms)
+        setattr(_wrapped, "_settings_bind_callback", _record_bound)
+        setattr(_wrapped, "_settings_trace_provider", _fallback_snapshot)
+        setattr(_wrapped, "_settings_timed_out_monotonic_ns", None)
+
+        if timeout_ms is not None:
             if timeout_ms > 0:
                 def _handle_timeout():
                     if request_state["resolved"]:
                         return
                     request_state["resolved"] = True
                     request_state["timer"] = None
+                    timed_out_monotonic_ns = int(time.monotonic_ns())
+                    request_state["timed_out_monotonic_ns"] = timed_out_monotonic_ns
+                    setattr(_wrapped, "_settings_timed_out_monotonic_ns", timed_out_monotonic_ns)
                     self._record_event(
                         "settings_timeout",
                         {
+                            "request_id": str(request_id),
                             "settings": settings_obj,
                             "context": str(context or ""),
                             "guard_timeout_ms": int(timeout_ms),
+                            "diagnostic_snapshot": _build_diagnostic_snapshot(),
                         },
                         level="warning",
                     )
@@ -23589,7 +23694,11 @@ class DropletTimecourseProcess(BaseCalibrationProcess):
         self.stageChanged.emit(f"Setting flash_delay = {d} us")
         # Only manipulate flash delay and ensure a single droplet per capture
         settings = {"flash_delay": d, "num_droplets": 1}
-        self.calibration_manager.changeSettingsRequested.emit(settings, self.delayApplied.emit)
+        self._request_settings_with_recording(
+            settings,
+            self.delayApplied.emit,
+            context="timecourse_apply_delay",
+        )
 
     @Slot()
     def onCaptureFrame(self):

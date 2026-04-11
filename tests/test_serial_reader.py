@@ -58,6 +58,7 @@ def test_serial_reader_emits_status_and_ack(qapp):
     assert len(statuses) == 1
     assert statuses[0]["Current_command"] == 3
     assert statuses[0]["Last_completed"] == 2
+    assert isinstance(statuses[0]["__host_rx_monotonic_ns"], int)
     assert len(acks) == 1
     assert acks[0]["ack_cmd"] == mfr.HELLO_ACK
     assert acks[0]["seq32"] == 1

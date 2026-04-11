@@ -612,29 +612,49 @@ class Controller(QObject):
         #print(f"Setting relative pressure: {pressure}")
         self.machine.set_relative_refuel_pressure(pressure,manual=manual)
 
-    def set_absolute_print_pressure(self, pressure,handler=None, manual=False):
+    def set_absolute_print_pressure(self, pressure,handler=None, manual=False, trace_metadata=None):
         """Set the absolute pressure for the machine."""
         #print(f"Setting absolute pressure: {pressure}")
-        self.machine.set_absolute_print_pressure(pressure,manual=manual,handler=handler)
+        return self.machine.set_absolute_print_pressure(
+            pressure,
+            manual=manual,
+            handler=handler,
+            trace_metadata=trace_metadata,
+        )
 
-    def set_absolute_refuel_pressure(self, pressure, handler=None, manual=False):
+    def set_absolute_refuel_pressure(self, pressure, handler=None, manual=False, trace_metadata=None):
         """Set the absolute pressure for the machine."""
         #print(f"Setting absolute pressure: {pressure}")
-        self.machine.set_absolute_refuel_pressure(pressure,manual=manual,handler=handler)
+        return self.machine.set_absolute_refuel_pressure(
+            pressure,
+            manual=manual,
+            handler=handler,
+            trace_metadata=trace_metadata,
+        )
 
-    def set_print_pulse_width(self, pulse_width,handler=None, manual=False,update_model=False):
+    def set_print_pulse_width(self, pulse_width,handler=None, manual=False,update_model=False, trace_metadata=None):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")
         if update_model:
             self.model.machine_model.update_print_pulse_width(pulse_width)
-        self.machine.set_print_pulse_width(pulse_width,manual=manual,handler=handler)
+        return self.machine.set_print_pulse_width(
+            pulse_width,
+            manual=manual,
+            handler=handler,
+            trace_metadata=trace_metadata,
+        )
 
-    def set_refuel_pulse_width(self, pulse_width, handler=None, manual=False,update_model=False):
+    def set_refuel_pulse_width(self, pulse_width, handler=None, manual=False,update_model=False, trace_metadata=None):
         """Set the pulse width for the machine."""
         #print(f"Setting pulse width: {pulse_width}")
         if update_model:
             self.model.machine_model.update_refuel_pulse_width(pulse_width)
-        self.machine.set_refuel_pulse_width(pulse_width,manual=manual,handler=handler)
+        return self.machine.set_refuel_pulse_width(
+            pulse_width,
+            manual=manual,
+            handler=handler,
+            trace_metadata=trace_metadata,
+        )
 
     def reset_print_syringe(self):
         """Reset the print syringe."""
@@ -1310,18 +1330,19 @@ class Controller(QObject):
     def stop_read_camera(self):
         self.machine.stop_read_camera()
 
-    def set_flash_duration(self, duration,callback=None):
-        self.machine.set_flash_duration(duration, handler=callback)
+    def set_flash_duration(self, duration,callback=None, trace_metadata=None):
+        return self.machine.set_flash_duration(duration, handler=callback, trace_metadata=trace_metadata)
 
-    def set_flash_delay(self, delay,callback=None):
-        self.machine.set_flash_delay(delay, handler=callback)
+    def set_flash_delay(self, delay,callback=None, trace_metadata=None):
+        return self.machine.set_flash_delay(delay, handler=callback, trace_metadata=trace_metadata)
 
-    def set_imaging_droplets(self, num_droplets, callback=None):
-        self.machine.set_imaging_droplets(num_droplets,handler=callback)
+    def set_imaging_droplets(self, num_droplets, callback=None, trace_metadata=None):
+        return self.machine.set_imaging_droplets(num_droplets,handler=callback, trace_metadata=trace_metadata)
 
-    def set_exposure_time(self, exposure_time,callback=None):
-        self.machine.set_exposure_time(exposure_time,handler=callback)
+    def set_exposure_time(self, exposure_time,callback=None, trace_metadata=None):
+        result = self.machine.set_exposure_time(exposure_time,handler=callback, trace_metadata=trace_metadata)
         self.model.droplet_camera_model.update_exposure_time(exposure_time)
+        return result
 
     def set_droplet_capture_profile(self, profile_name: str):
         self.machine.set_droplet_capture_profile(profile_name)
@@ -1450,31 +1471,104 @@ class Controller(QObject):
 
     def handle_settings_change_request(self, settings, callback):
         # Update the settings in the model and machine.
+        settings = dict(settings or {})
         num_settings = len(settings)
+        request_id = getattr(callback, "_settings_request_id", None)
+        request_context = getattr(callback, "_settings_context", "")
+        requested_settings = dict(getattr(callback, "_settings_requested_settings", settings) or {})
+        request_created_monotonic_ns = getattr(callback, "_settings_created_monotonic_ns", None)
+        timeout_ms = getattr(callback, "_settings_guard_timeout_ms", None)
+        bind_callback = getattr(callback, "_settings_bind_callback", None)
+        bound_commands = []
+        completion_command_number = None
+
+        if request_id and hasattr(self.machine, "get_settings_trace_snapshot"):
+            def _trace_provider():
+                timed_out_monotonic_ns = getattr(callback, "_settings_timed_out_monotonic_ns", None)
+                return self.machine.get_settings_trace_snapshot(
+                    str(request_id),
+                    timed_out_monotonic_ns=timed_out_monotonic_ns,
+                )
+
+            try:
+                setattr(callback, "_settings_trace_provider", _trace_provider)
+            except Exception:
+                pass
+
         current_call_back = self.intermediate_callback  # Default callback for intermediate settings.
         for i, (key, value) in enumerate(settings.items()):
             if i == num_settings - 1:
                 current_call_back = callback
+            trace_metadata = None
+            if request_id:
+                trace_metadata = {
+                    "request_id": str(request_id),
+                    "settings_context": str(request_context or ""),
+                    "setting_key": str(key),
+                    "requested_value": value,
+                    "setting_index": int(i),
+                    "settings_count": int(num_settings),
+                    "request_created_monotonic_ns": request_created_monotonic_ns,
+                }
+            queued_command = None
+            command_type = None
             if key == 'num_droplets':
-                self.set_imaging_droplets(value,callback=current_call_back)
+                command_type = "SET_IMAGE_DROPLETS"
+                queued_command = self.set_imaging_droplets(value,callback=current_call_back, trace_metadata=trace_metadata)
             elif key == 'flash_duration':
-                self.set_flash_duration(value, callback=current_call_back)
+                command_type = "SET_WIDTH_F"
+                queued_command = self.set_flash_duration(value, callback=current_call_back, trace_metadata=trace_metadata)
             elif key == 'flash_delay':
-                self.set_flash_delay(value, callback=current_call_back)
+                command_type = "SET_DELAY_F"
+                queued_command = self.set_flash_delay(value, callback=current_call_back, trace_metadata=trace_metadata)
                 print(f'--Setting flash delay: {value}')
             elif key == 'exposure_time':
-                self.set_exposure_time(value, callback=current_call_back)
+                command_type = "SET_EXPOSURE_TIME"
+                queued_command = self.set_exposure_time(value, callback=current_call_back, trace_metadata=trace_metadata)
             elif key == 'print_pulse_width':
-                self.set_print_pulse_width(value, handler=current_call_back)
+                command_type = "SET_WIDTH_P"
+                queued_command = self.set_print_pulse_width(value, handler=current_call_back, trace_metadata=trace_metadata)
             elif key == 'refuel_pulse_width':
-                self.set_refuel_pulse_width(value, handler=current_call_back)
+                command_type = "SET_WIDTH_R"
+                queued_command = self.set_refuel_pulse_width(value, handler=current_call_back, trace_metadata=trace_metadata)
             elif key == 'print_pressure':
                 print(f'--Setting print pressure: {value}')
-                self.set_absolute_print_pressure(value, handler=current_call_back)
+                command_type = "ABSOLUTE_PRESSURE_P"
+                queued_command = self.set_absolute_print_pressure(value, handler=current_call_back, trace_metadata=trace_metadata)
             elif key == 'refuel_pressure':
-                self.set_absolute_refuel_pressure(value, handler=current_call_back)
+                command_type = "ABSOLUTE_PRESSURE_R"
+                queued_command = self.set_absolute_refuel_pressure(value, handler=current_call_back, trace_metadata=trace_metadata)
             else:
                 print(f'Unknown setting: {key}')
+            if request_id:
+                command_number = getattr(queued_command, "command_number", None)
+                command_type = str(getattr(queued_command, "command_type", command_type or "") or "")
+                bound_commands.append(
+                    {
+                        "command_number": None if command_number is None else int(command_number),
+                        "command_type": command_type,
+                        "setting_key": str(key),
+                        "requested_value": value,
+                    }
+                )
+                if i == num_settings - 1:
+                    completion_command_number = None if command_number is None else int(command_number)
+
+        if request_id:
+            binding_payload = {
+                "request_id": str(request_id),
+                "context": str(request_context or ""),
+                "settings": dict(requested_settings),
+                "timeout_ms": timeout_ms,
+                "request_created_monotonic_ns": request_created_monotonic_ns,
+                "commands": bound_commands,
+                "completion_command_number": completion_command_number,
+            }
+            register = getattr(self.machine, "register_settings_trace_binding", None)
+            if callable(register):
+                register(binding_payload)
+            if callable(bind_callback):
+                bind_callback(binding_payload)
 
     @QtCore.Slot()
     def _on_image_captured(self):

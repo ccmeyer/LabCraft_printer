@@ -521,6 +521,35 @@ def _online_stream_result_payload():
     }
 
 
+def test_timecourse_apply_delay_routes_through_recorded_settings_helper(tmp_path, monkeypatch):
+    _model, _manager, proc, _started = _make_timecourse_process(tmp_path, monkeypatch)
+    captured = {}
+    stage_messages = []
+
+    proc.stageChanged.connect(stage_messages.append)
+
+    def _stub(settings, callback, *, context="", guard_timeout_ms=None, on_timeout=None):
+        captured["settings"] = dict(settings)
+        captured["callback"] = callback
+        captured["context"] = context
+        captured["guard_timeout_ms"] = guard_timeout_ms
+        captured["on_timeout"] = on_timeout
+        return lambda: None
+
+    proc._request_settings_with_recording = _stub
+    proc._delay_index = 0
+
+    proc.onApplyDelay()
+
+    assert captured["settings"] == {"flash_delay": int(proc.delays[0]), "num_droplets": 1}
+    assert captured["callback"] == proc.delayApplied.emit
+    assert captured["context"] == "timecourse_apply_delay"
+    assert captured["guard_timeout_ms"] is None
+    assert captured["on_timeout"] is None
+    assert proc.current_delay_us == int(proc.delays[0])
+    assert "Setting flash_delay" in stage_messages[-1]
+
+
 def _write_run_dir(
     root: Path,
     *,

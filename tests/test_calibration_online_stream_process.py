@@ -3119,3 +3119,150 @@ def test_online_stream_graceful_stop_does_not_emit_success_payload():
     assert proc.calibrationDataUpdated.calls == []
     assert proc.calibrationCompleted.calls == []
     assert proc.calibrationError.calls[-1][0][0] == "Calibration terminated by user"
+
+
+def test_online_stream_guarded_settings_timeout_records_bound_snapshot_and_late_completion(tmp_path):
+    proc = _flow_proc(tmp_path)
+    recorded_events = []
+    timeout_state = {}
+
+    class _SettingsSignal:
+        def __init__(self):
+            self.calls = []
+
+        def emit(self, settings, callback):
+            self.calls.append((dict(settings), callback))
+
+    proc.calibration_manager.changeSettingsRequested = _SettingsSignal()
+    proc.calibration_manager.record_process_event = (
+        lambda event_type, payload, **kwargs: recorded_events.append(
+            {"event_type": str(event_type), "payload": dict(payload or {}), "kwargs": dict(kwargs or {})}
+        )
+    )
+    proc._cancel_timeout = lambda timer: timeout_state.setdefault("cancelled", []).append(timer)
+
+    def _start_timeout(timeout_ms, err_msg=None, on_timeout=None):
+        timeout_state["timeout_ms"] = timeout_ms
+        timeout_state["handler"] = on_timeout
+        return "settings-timer"
+
+    proc._start_timeout = _start_timeout
+
+    proc._request_guarded_settings_update(
+        {"flash_delay": 6000, "num_droplets": 1},
+        lambda: None,
+        context="online_stream_apply_flow_delay",
+        timeout_message="settings timed out",
+    )
+
+    assert proc.calibration_manager.changeSettingsRequested.calls
+    settings, wrapped = proc.calibration_manager.changeSettingsRequested.calls[0]
+    assert settings == {"flash_delay": 6000, "num_droplets": 1}
+    assert wrapped._settings_request_id
+
+    provider_state = {"stall_hint": "state_matches_settings_but_completion_missing", "completion_status": "Sent", "completed_ms": None}
+    wrapped._settings_bind_callback(
+        {
+            "request_id": wrapped._settings_request_id,
+            "context": "online_stream_apply_flow_delay",
+            "settings": settings,
+            "commands": [
+                {
+                    "command_number": 11,
+                    "command_type": "SET_DELAY_F",
+                    "setting_key": "flash_delay",
+                    "requested_value": 6000,
+                },
+                {
+                    "command_number": 12,
+                    "command_type": "SET_IMAGE_DROPLETS",
+                    "setting_key": "num_droplets",
+                    "requested_value": 1,
+                },
+            ],
+            "completion_command_number": 12,
+        }
+    )
+    wrapped._settings_trace_provider = lambda: {
+        "request_id": wrapped._settings_request_id,
+        "context": "online_stream_apply_flow_delay",
+        "requested_settings": dict(settings),
+        "timeout_ms": timeout_state["timeout_ms"],
+        "commands": [
+            {
+                "command_number": 11,
+                "command_type": "SET_DELAY_F",
+                "setting_key": "flash_delay",
+                "requested_value": 6000,
+                "status": "Completed",
+                "queued_ms": 0.0,
+                "sent_ms": 1.0,
+                "executing_ms": 5.0,
+                "completed_ms": 7.0,
+            },
+            {
+                "command_number": 12,
+                "command_type": "SET_IMAGE_DROPLETS",
+                "setting_key": "num_droplets",
+                "requested_value": 1,
+                "status": provider_state["completion_status"],
+                "queued_ms": 0.0,
+                "sent_ms": 2.0,
+                "executing_ms": None,
+                "completed_ms": provider_state["completed_ms"],
+            },
+        ],
+        "latest_status": {
+            "Current_command": 12,
+            "Last_completed": 11,
+            "cmd_depth": 1,
+            "Flash_delay": 6000,
+            "Flash_droplets": 1,
+            "rx_to_main_thread_ms": 0.4,
+        },
+        "recent_status": [
+            {
+                "Current_command": 12,
+                "Last_completed": 11,
+                "cmd_depth": 1,
+                "Flash_delay": 6000,
+                "Flash_droplets": 1,
+                "rx_to_main_thread_ms": 0.4,
+                "observed_ms": 9.0,
+            }
+        ],
+        "recent_command_events": [
+            {
+                "event": "sent",
+                "command_number": 12,
+                "command_type": "SET_IMAGE_DROPLETS",
+                "setting_key": "num_droplets",
+                "requested_value": 1,
+                "status": "Sent",
+                "observed_ms": 2.0,
+            }
+        ],
+        "stall_hint": provider_state["stall_hint"],
+    }
+
+    timeout_state["handler"]()
+    provider_state["stall_hint"] = "late_completion_after_timeout"
+    provider_state["completion_status"] = "Completed"
+    provider_state["completed_ms"] = 10.0
+    wrapped()
+
+    event_types = [event["event_type"] for event in recorded_events]
+    assert "settings_requested" in event_types
+    assert "settings_bound" in event_types
+    assert "settings_timeout" in event_types
+    assert "settings_completed_ignored" in event_types
+
+    timeout_event = next(event for event in recorded_events if event["event_type"] == "settings_timeout")
+    assert timeout_event["payload"]["request_id"] == wrapped._settings_request_id
+    assert timeout_event["payload"]["diagnostic_snapshot"]["stall_hint"] == "state_matches_settings_but_completion_missing"
+    assert timeout_event["payload"]["diagnostic_snapshot"]["commands"][-1]["command_number"] == 12
+
+    ignored_event = next(event for event in recorded_events if event["event_type"] == "settings_completed_ignored")
+    assert ignored_event["payload"]["request_id"] == wrapped._settings_request_id
+    assert ignored_event["payload"]["late_completion_ms"] is not None
+    assert ignored_event["payload"]["diagnostic_snapshot"]["stall_hint"] == "late_completion_after_timeout"

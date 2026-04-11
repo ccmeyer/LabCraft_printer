@@ -1290,6 +1290,7 @@ class SerialReader(QThread):
                 cmd = payload[0]
                 if cmd == CMD_STATUS:
                     data = parse_tlv_payload(payload[1:])
+                    data["__host_rx_monotonic_ns"] = int(time.monotonic_ns())
                     self.status_received.emit(data)
                 elif cmd == RESET_REPORT:
                     report = self._parse_reset_report(payload)
@@ -1558,7 +1559,7 @@ class Command:
     TAG_SEQ32 = 0x10
 
     def __init__(self, command_number, command_type, param1, param2, param3,
-                 handler=None, kwargs=None):
+                 handler=None, kwargs=None, trace_metadata=None):
         self.command_number = int(command_number)
         self.seq8 = self.command_number & 0xFF
         self.command_type   = command_type
@@ -1599,18 +1600,41 @@ class Command:
         self.timestamp = time.time()
         self.handler   = handler
         self.kwargs    = kwargs or {}
+        self.trace_metadata = dict(trace_metadata or {})
+        self.lifecycle_ns = {
+            "queued": int(time.monotonic_ns()),
+            "sent": None,
+            "executing": None,
+            "completed": None,
+        }
         self.signal = f'<{command_type} {self.command_number} {param1},{param2},{param3}>'
 
 
+    def mark_as_dispatched(self):
+        self.status = "Sent"
+        return True
+
     def mark_as_sent(self):
         self.status = "Sent"
+        if self.lifecycle_ns["sent"] is None:
+            self.lifecycle_ns["sent"] = int(time.monotonic_ns())
+            return True
+        return False
 
     def mark_as_executing(self):
         self.status = "Executing"
+        if self.lifecycle_ns["executing"] is None:
+            self.lifecycle_ns["executing"] = int(time.monotonic_ns())
+            return True
+        return False
 
     def mark_as_completed(self):
         self.status = "Completed"
-        self.execute_handler()
+        if self.lifecycle_ns["completed"] is None:
+            self.lifecycle_ns["completed"] = int(time.monotonic_ns())
+            self.execute_handler()
+            return True
+        return False
 
     def get_number(self):
         return self.command_number
@@ -1635,22 +1659,40 @@ class CommandQueue(QObject):
     queue_updated = Signal()  # Signal to emit when the queue is updated
     commands_completed = Signal()  # Signal to emit when all commands are completed
 
-    def __init__(self):
+    def __init__(self, event_callback=None):
         super().__init__()  # Initialize the QObject
         self.queue = deque()
         self.completed = deque()
         self.command_number = 0
         self.max_sent_commands = 8  # Maximum number of commands that can be sent to the machine at once
+        self._event_callback = event_callback
 
-    def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None):
+    def _emit_command_event(self, command, event_name):
+        if callable(self._event_callback):
+            try:
+                self._event_callback(command, str(event_name))
+            except Exception:
+                pass
+
+    def add_command(self, command_type, param1, param2, param3, handler=None, kwargs=None, trace_metadata=None):
         """Add a command to the queue."""
         
         
         self.command_number += 1
         # print(f'type params: {self.command_number}-{command_type} {type(param1)} {type(param2)} {type(param3)}')
         #print(f'Adding command: {command_type} {param1} {param2} {param3}')
-        command = Command(self.command_number, command_type, param1, param2, param3, handler, kwargs)
+        command = Command(
+            self.command_number,
+            command_type,
+            param1,
+            param2,
+            param3,
+            handler,
+            kwargs,
+            trace_metadata=trace_metadata,
+        )
         self.queue.append(command)
+        self._emit_command_event(command, "queued")
         return command
 
     def get_number_of_sent_commands(self):
@@ -1662,7 +1704,7 @@ class CommandQueue(QObject):
         if self.queue and self.get_number_of_sent_commands() < self.max_sent_commands:
             for command in self.queue:
                 if command.status == "Added":
-                    command.mark_as_sent()
+                    command.mark_as_dispatched()
                     return command
         return None
     
@@ -1676,7 +1718,8 @@ class CommandQueue(QObject):
         # 1) Complete everything <= last (this is the main truth)
         for cmd in list(self.queue):
             if cmd.status in ("Sent", "Executing") and cmd.command_number <= last:
-                cmd.mark_as_completed()
+                if cmd.mark_as_completed():
+                    self._emit_command_event(cmd, "completed")
 
         # 2) Optionally mark one command in (last, curr] as Executing
         #    (if multiple were executed between status ticks, this might be empty)
@@ -1688,7 +1731,8 @@ class CommandQueue(QObject):
                     cand = cmd
                     break
             if cand:
-                cand.mark_as_executing()
+                if cand.mark_as_executing():
+                    self._emit_command_event(cand, "executing")
 
         # Trim completed
         while self.queue and self.queue[0].status == "Completed":
@@ -1740,7 +1784,7 @@ class Machine(QObject):
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
-        self.command_queue = CommandQueue()
+        self.command_queue = CommandQueue(event_callback=self._record_command_event)
         self.baud = 115200  # Default baud rate for serial communication
         self.ser = None
         self.reader = None
@@ -1754,6 +1798,10 @@ class Machine(QObject):
         self.sent_command = None
         self._last_reset_report = None
         self._flash_state = default_flash_safety_state()
+        self.status_history = deque(maxlen=128)
+        self.command_event_history = deque(maxlen=256)
+        self._settings_trace_requests = {}
+        self._latest_status_sample = None
 
         # ack_code -> {"timer": QTimer, "ok": callable, "to": callable}
         self._pending_acks = {}
@@ -2321,11 +2369,281 @@ class Machine(QObject):
         if self.execution_timer.isActive():
             self.execution_timer.stop()
 
+    def _coerce_optional_int(self, value):
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    def _relative_ms(self, value_ns, base_ns):
+        value = self._coerce_optional_int(value_ns)
+        base = self._coerce_optional_int(base_ns)
+        if value is None or base is None:
+            return None
+        return round((value - base) / 1_000_000.0, 3)
+
+    def _status_sample_from_dict(self, data, observed_monotonic_ns):
+        data = dict(data or {})
+        now_ns = int(observed_monotonic_ns)
+        host_rx_ns = self._coerce_optional_int(data.get("__host_rx_monotonic_ns"))
+        rx_to_main_thread_ms = None
+        if host_rx_ns is not None:
+            rx_to_main_thread_ms = round(max(0, now_ns - host_rx_ns) / 1_000_000.0, 3)
+        return {
+            "monotonic_ns": now_ns,
+            "Current_command": self._coerce_optional_int(data.get("Current_command")),
+            "Last_completed": self._coerce_optional_int(data.get("Last_completed")),
+            "cmd_depth": self._coerce_optional_int(data.get("cmd_depth")),
+            "Flash_delay": self._coerce_optional_int(data.get("Flash_delay")),
+            "Flash_droplets": self._coerce_optional_int(data.get("Flash_droplets")),
+            "rx_to_main_thread_ms": rx_to_main_thread_ms,
+        }
+
+    def _status_sample_for_output(self, sample, request_created_monotonic_ns=None):
+        sample = dict(sample or {})
+        out = {
+            "Current_command": self._coerce_optional_int(sample.get("Current_command")),
+            "Last_completed": self._coerce_optional_int(sample.get("Last_completed")),
+            "cmd_depth": self._coerce_optional_int(sample.get("cmd_depth")),
+            "Flash_delay": self._coerce_optional_int(sample.get("Flash_delay")),
+            "Flash_droplets": self._coerce_optional_int(sample.get("Flash_droplets")),
+            "rx_to_main_thread_ms": sample.get("rx_to_main_thread_ms"),
+        }
+        observed_ms = self._relative_ms(sample.get("monotonic_ns"), request_created_monotonic_ns)
+        if observed_ms is not None:
+            out["observed_ms"] = observed_ms
+        return out
+
+    def _find_command_by_number(self, command_number):
+        command_number = self._coerce_optional_int(command_number)
+        if command_number is None:
+            return None
+        for command in list(getattr(self.command_queue, "queue", [])):
+            if getattr(command, "command_number", None) == command_number:
+                return command
+        for command in list(getattr(self.command_queue, "completed", [])):
+            if getattr(command, "command_number", None) == command_number:
+                return command
+        return None
+
+    def _record_command_event(self, command, event_name):
+        metadata = dict(getattr(command, "trace_metadata", {}) or {})
+        request_id = metadata.get("request_id")
+        if not request_id:
+            return
+        request_id = str(request_id)
+        observed_ns = int(time.monotonic_ns())
+        request_created_monotonic_ns = metadata.get("request_created_monotonic_ns")
+        event = {
+            "request_id": request_id,
+            "event": str(event_name),
+            "command_number": int(getattr(command, "command_number", 0)),
+            "command_type": str(getattr(command, "command_type", "") or ""),
+            "setting_key": metadata.get("setting_key"),
+            "requested_value": metadata.get("requested_value"),
+            "status": str(getattr(command, "status", "") or ""),
+            "observed_monotonic_ns": observed_ns,
+            "observed_ms": self._relative_ms(observed_ns, request_created_monotonic_ns),
+        }
+        self.command_event_history.append(event)
+
+    def register_settings_trace_binding(self, payload):
+        payload = dict(payload or {})
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return None
+        commands = []
+        for command in list(payload.get("commands") or []):
+            item = dict(command or {})
+            command_number = self._coerce_optional_int(item.get("command_number"))
+            commands.append(
+                {
+                    "command_number": command_number,
+                    "command_type": str(item.get("command_type") or ""),
+                    "setting_key": str(item.get("setting_key") or ""),
+                    "requested_value": item.get("requested_value"),
+                }
+            )
+        record = {
+            "request_id": request_id,
+            "context": str(payload.get("context") or ""),
+            "requested_settings": dict(payload.get("settings") or payload.get("requested_settings") or {}),
+            "timeout_ms": self._coerce_optional_int(payload.get("timeout_ms")),
+            "request_created_monotonic_ns": self._coerce_optional_int(payload.get("request_created_monotonic_ns")),
+            "completion_command_number": self._coerce_optional_int(payload.get("completion_command_number")),
+            "commands": commands,
+            "bound_monotonic_ns": int(time.monotonic_ns()),
+        }
+        self._settings_trace_requests[request_id] = record
+        return dict(record)
+
+    def _status_matches_requested_settings(self, latest_status, requested_settings):
+        latest_status = dict(latest_status or {})
+        requested_settings = dict(requested_settings or {})
+        status_map = {
+            "flash_delay": "Flash_delay",
+            "num_droplets": "Flash_droplets",
+        }
+        matched_any = False
+        for setting_key, status_key in status_map.items():
+            if setting_key not in requested_settings:
+                continue
+            matched_any = True
+            if self._coerce_optional_int(latest_status.get(status_key)) != self._coerce_optional_int(requested_settings.get(setting_key)):
+                return False
+        return matched_any
+
+    def _build_command_trace_summary(self, request_id, request_created_monotonic_ns, command_info):
+        command_info = dict(command_info or {})
+        command_number = self._coerce_optional_int(command_info.get("command_number"))
+        command = self._find_command_by_number(command_number)
+        lifecycle_ns = {
+            "queued": None,
+            "sent": None,
+            "executing": None,
+            "completed": None,
+        }
+        status = None
+        for event in list(self.command_event_history):
+            if str(event.get("request_id") or "") != str(request_id):
+                continue
+            if self._coerce_optional_int(event.get("command_number")) != command_number:
+                continue
+            event_name = str(event.get("event") or "")
+            observed_ns = self._coerce_optional_int(event.get("observed_monotonic_ns"))
+            if event_name in lifecycle_ns and lifecycle_ns[event_name] is None:
+                lifecycle_ns[event_name] = observed_ns
+            if event.get("status"):
+                status = str(event.get("status"))
+        if command is not None:
+            status = str(getattr(command, "status", status or ""))
+            for key in lifecycle_ns:
+                if lifecycle_ns[key] is None:
+                    lifecycle_ns[key] = self._coerce_optional_int(getattr(command, "lifecycle_ns", {}).get(key))
+        if not status:
+            status = "NotQueued" if command_number is None else "Unknown"
+        return {
+            "command_number": command_number,
+            "command_type": str(command_info.get("command_type") or ""),
+            "setting_key": str(command_info.get("setting_key") or ""),
+            "requested_value": command_info.get("requested_value"),
+            "status": status,
+            "queued_ms": self._relative_ms(lifecycle_ns["queued"], request_created_monotonic_ns),
+            "sent_ms": self._relative_ms(lifecycle_ns["sent"], request_created_monotonic_ns),
+            "executing_ms": self._relative_ms(lifecycle_ns["executing"], request_created_monotonic_ns),
+            "completed_ms": self._relative_ms(lifecycle_ns["completed"], request_created_monotonic_ns),
+            "_lifecycle_ns": lifecycle_ns,
+        }
+
+    def get_settings_trace_snapshot(self, request_id, timed_out_monotonic_ns=None):
+        request_id = str(request_id or "")
+        record = dict(self._settings_trace_requests.get(request_id) or {})
+        if not record:
+            return {
+                "request_id": request_id,
+                "context": "",
+                "requested_settings": {},
+                "timeout_ms": None,
+                "commands": [],
+                "latest_status": {
+                    "Current_command": None,
+                    "Last_completed": None,
+                    "cmd_depth": None,
+                    "Flash_delay": None,
+                    "Flash_droplets": None,
+                    "rx_to_main_thread_ms": None,
+                },
+                "recent_status": [],
+                "recent_command_events": [],
+                "stall_hint": "commands_not_bound",
+            }
+
+        request_created_monotonic_ns = self._coerce_optional_int(record.get("request_created_monotonic_ns"))
+        completion_command_number = self._coerce_optional_int(record.get("completion_command_number"))
+        commands = [
+            self._build_command_trace_summary(request_id, request_created_monotonic_ns, info)
+            for info in list(record.get("commands") or [])
+        ]
+        latest_status_sample = dict(self._latest_status_sample or {})
+        latest_status = self._status_sample_for_output(latest_status_sample, request_created_monotonic_ns)
+        recent_status = []
+        for sample in list(self.status_history):
+            if request_created_monotonic_ns is not None:
+                sample_ns = self._coerce_optional_int(sample.get("monotonic_ns"))
+                if sample_ns is not None and sample_ns < request_created_monotonic_ns:
+                    continue
+            recent_status.append(self._status_sample_for_output(sample, request_created_monotonic_ns))
+        recent_status = recent_status[-12:]
+
+        recent_command_events = []
+        for event in list(self.command_event_history):
+            if str(event.get("request_id") or "") != request_id:
+                continue
+            recent_command_events.append(
+                {
+                    "event": str(event.get("event") or ""),
+                    "command_number": self._coerce_optional_int(event.get("command_number")),
+                    "command_type": str(event.get("command_type") or ""),
+                    "setting_key": event.get("setting_key"),
+                    "requested_value": event.get("requested_value"),
+                    "status": str(event.get("status") or ""),
+                    "observed_ms": event.get("observed_ms"),
+                }
+            )
+        recent_command_events = recent_command_events[-16:]
+
+        completion_command = None
+        for item in commands:
+            if self._coerce_optional_int(item.get("command_number")) == completion_command_number:
+                completion_command = item
+                break
+
+        timed_out_ns = self._coerce_optional_int(timed_out_monotonic_ns)
+        stall_hint = "unknown"
+        if not commands or completion_command_number is None or completion_command is None:
+            stall_hint = "commands_not_bound"
+        elif (
+            timed_out_ns is not None
+            and self._coerce_optional_int(completion_command.get("_lifecycle_ns", {}).get("completed")) is not None
+            and self._coerce_optional_int(completion_command.get("_lifecycle_ns", {}).get("completed")) > timed_out_ns
+        ):
+            stall_hint = "late_completion_after_timeout"
+        elif (
+            completion_command.get("completed_ms") is None
+            and self._status_matches_requested_settings(latest_status, record.get("requested_settings"))
+        ):
+            stall_hint = "state_matches_settings_but_completion_missing"
+        elif completion_command.get("sent_ms") is None:
+            stall_hint = "completion_command_not_sent"
+        elif completion_command.get("completed_ms") is None:
+            stall_hint = "completion_command_sent_not_retired"
+
+        for item in commands:
+            item.pop("_lifecycle_ns", None)
+
+        return {
+            "request_id": request_id,
+            "context": str(record.get("context") or ""),
+            "requested_settings": dict(record.get("requested_settings") or {}),
+            "timeout_ms": self._coerce_optional_int(record.get("timeout_ms")),
+            "commands": commands,
+            "latest_status": latest_status,
+            "recent_status": recent_status,
+            "recent_command_events": recent_command_events,
+            "stall_hint": stall_hint,
+        }
+
     def update_status(self, data):
         """
         Update the status of the machine with the received data.
         """
         if isinstance(data, dict):
+            observed_monotonic_ns = int(time.monotonic_ns())
+            sample = self._status_sample_from_dict(data, observed_monotonic_ns)
+            self.status_history.append(sample)
+            self._latest_status_sample = dict(sample)
             if getattr(self, "_waiting_for_post_clear_status", False):
                 depth = data.get("cmd_depth", 0)
                 curr  = data.get("Current_command", 0)
@@ -2356,7 +2674,7 @@ class Machine(QObject):
     def update_command_numbers(self,current_command,last_completed):
         self.command_queue.update_command_status(current_command,last_completed)
 
-    def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False):
+    def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False, trace_metadata=None):
         """Add a command to the queue."""
         # if self.board is None:
         #     print('No board connected')
@@ -2366,7 +2684,15 @@ class Machine(QObject):
         #     if not completed:
         #         print('Cannot add manual command while commands are in queue')
         #         return False
-        return self.command_queue.add_command(command_type, param1, param2, param3, handler, kwargs)
+        return self.command_queue.add_command(
+            command_type,
+            param1,
+            param2,
+            param3,
+            handler,
+            kwargs,
+            trace_metadata=trace_metadata,
+        )
     
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
@@ -2414,7 +2740,8 @@ class Machine(QObject):
                 # 1) Send now so it actually executes and leaves the queue
                 try:
                     self.send_command_to_board(command)
-                    command.mark_as_sent()
+                    if command.mark_as_sent():
+                        self._record_command_event(command, "sent")
                     print(f"Sent command (pre-prompt): {command.command_type} {command.param1} {command.param2} {command.param3}")
                 except Exception as e:
                     print(f"Failed to send command: {e}")
@@ -2433,7 +2760,8 @@ class Machine(QObject):
         # --- Normal path for everything else ---
         try:
             self.send_command_to_board(command)
-            command.mark_as_sent()
+            if command.mark_as_sent():
+                self._record_command_event(command, "sent")
             print(f"Sent command: {command.command_type} {command.param1} {command.param2} {command.param3}")
         except Exception as e:
             print(f"Failed to send command: {e}")
@@ -2680,25 +3008,61 @@ class Machine(QObject):
             pressure = abs(pressure)
             return self.add_command_to_queue('RELATIVE_PRESSURE_R',sign, pressure, 0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False):
+    def set_absolute_print_pressure(self,psi,handler=None,kwargs=None,manual=False,trace_metadata=None):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute print pressure:',pressure)
         if self.check_param_limits(pressure,0,10376):
-            return self.add_command_to_queue('ABSOLUTE_PRESSURE_P',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue(
+                'ABSOLUTE_PRESSURE_P',
+                pressure,
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+                trace_metadata=trace_metadata,
+            )
         
-    def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False):
+    def set_absolute_refuel_pressure(self,psi,handler=None,kwargs=None,manual=False,trace_metadata=None):
         pressure = self.convert_to_raw_pressure(psi)
         print('Setting absolute refuel pressure:',pressure)
         if self.check_param_limits(pressure,0,10376):
-            return self.add_command_to_queue('ABSOLUTE_PRESSURE_R',pressure,0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue(
+                'ABSOLUTE_PRESSURE_R',
+                pressure,
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+                trace_metadata=trace_metadata,
+            )
 
-    def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+    def set_print_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False,trace_metadata=None):
         if self.check_param_limits(pulse_width,100,10000):
-            return self.add_command_to_queue('SET_WIDTH_P',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue(
+                'SET_WIDTH_P',
+                int(pulse_width),
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+                trace_metadata=trace_metadata,
+            )
         
-    def set_refuel_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False):
+    def set_refuel_pulse_width(self,pulse_width,handler=None,kwargs=None,manual=False,trace_metadata=None):
         if self.check_param_limits(pulse_width,100,10000):
-            return self.add_command_to_queue('SET_WIDTH_R',int(pulse_width),0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue(
+                'SET_WIDTH_R',
+                int(pulse_width),
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+                trace_metadata=trace_metadata,
+            )
     
     def enter_print_mode(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('ENABLE_PRINT_PROFILE',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
@@ -2823,27 +3187,45 @@ class Machine(QObject):
     def stop_read_camera(self,handler=None,kwargs=None,manual=False):
         return self.add_command_to_queue('STOP_READ_CAMERA',0,0,0,handler=handler,kwargs=kwargs,manual=manual)
 
-    def set_exposure_time(self, exposure_time, handler=None):
+    def set_exposure_time(self, exposure_time, handler=None, trace_metadata=None):
         return self.droplet_camera.change_exposure_time(exposure_time,handler=handler)
 
     def set_droplet_capture_profile(self, profile_name: str):
         if hasattr(self.droplet_camera, "set_capture_profile"):
             self.droplet_camera.set_capture_profile(profile_name)
     
-    def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False):
+    def set_flash_duration(self,duration,handler=None,kwargs=None,manual=False,trace_metadata=None):
         duration = int(duration)
         # Hardware safety limit to protect LED; firmware also enforces this clamp.
         safe_duration = max(100, min(5000, duration))
         if safe_duration != duration:
             print(f"Clamped flash duration from {duration} ns to {safe_duration} ns for LED safety.")
-        return self.add_command_to_queue('SET_WIDTH_F', safe_duration, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+        return self.add_command_to_queue(
+            'SET_WIDTH_F',
+            safe_duration,
+            0,
+            0,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+            trace_metadata=trace_metadata,
+        )
 
-    def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False):
+    def set_flash_delay(self,delay,handler=None,kwargs=None,manual=False,trace_metadata=None):
         delay = int(round(float(delay), 0))
         if delay >= 100:
-            return self.add_command_to_queue('SET_DELAY_F',delay,0,0,handler=handler,kwargs=kwargs,manual=manual)
+            return self.add_command_to_queue(
+                'SET_DELAY_F',
+                delay,
+                0,
+                0,
+                handler=handler,
+                kwargs=kwargs,
+                manual=manual,
+                trace_metadata=trace_metadata,
+            )
 
-    def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False):
+    def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False,trace_metadata=None):
         return self.add_command_to_queue(
             'SET_IMAGE_DROPLETS',
             int(droplets),
@@ -2851,7 +3233,8 @@ class Machine(QObject):
             0,
             handler=handler,
             kwargs=kwargs,
-            manual=manual
+            manual=manual,
+            trace_metadata=trace_metadata,
         )
 
     def print_only(self,droplet_count,handler=None,kwargs=None,manual=False):
