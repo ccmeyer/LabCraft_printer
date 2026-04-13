@@ -578,6 +578,7 @@ def _detached_geometry_summary(
 def _attached_optical_summary(
     *,
     frame_image,
+    frame_color_order: str,
     attached_edge_rows: list[dict],
     attached_component: dict | None,
     roi: dict,
@@ -613,7 +614,7 @@ def _attached_optical_summary(
     boundary_chroma_aberration_score = None
     flow_optical_confidence = 1.0 if not optical_confidence_active else None
     try:
-        display_frame = _coerce_display_frame(frame_image)
+        display_frame = _coerce_bgr_frame(frame_image, color_order=frame_color_order)
         component_mask = _project_component_mask(attached_component, roi, display_frame.shape)
         if component_mask is not None and np.any(component_mask > 0) and lower_rows:
             boundary_mask = component_mask > 0
@@ -722,6 +723,48 @@ def _coerce_display_frame(frame_image) -> np.ndarray:
     if arr.ndim == 3 and arr.shape[2] >= 3:
         return arr[:, :, :3].copy()
     raise ValueError(f"Unsupported frame shape for online stream overlay: {getattr(arr, 'shape', None)}")
+
+
+def _normalized_color_order(color_order: str | None, *, default: str = "bgr") -> str:
+    text = str(color_order or default).strip().lower()
+    if text in {"rgb", "bgr"}:
+        return text
+    raise ValueError(f"Unsupported color order: {color_order!r}")
+
+
+def _coerce_analysis_gray_frame(frame_image, *, color_order: str = "bgr") -> np.ndarray:
+    arr = np.asarray(frame_image)
+    order = _normalized_color_order(color_order)
+    if arr.ndim == 2:
+        return arr.copy()
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        return arr[:, :, 0].copy()
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        conversion = cv2.COLOR_RGB2GRAY if order == "rgb" else cv2.COLOR_BGR2GRAY
+        return cv2.cvtColor(arr, conversion)
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        conversion = cv2.COLOR_RGBA2GRAY if order == "rgb" else cv2.COLOR_BGRA2GRAY
+        return cv2.cvtColor(arr, conversion)
+    raise ValueError(
+        f"Unsupported frame shape for online stream grayscale conversion: {getattr(arr, 'shape', None)}"
+    )
+
+
+def _coerce_bgr_frame(frame_image, *, color_order: str = "bgr") -> np.ndarray:
+    arr = np.asarray(frame_image)
+    order = _normalized_color_order(color_order)
+    if arr.ndim == 2:
+        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        return cv2.cvtColor(arr[:, :, 0], cv2.COLOR_GRAY2BGR)
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        if order == "rgb":
+            return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        return arr.copy()
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        conversion = cv2.COLOR_RGBA2BGR if order == "rgb" else cv2.COLOR_BGRA2BGR
+        return cv2.cvtColor(arr, conversion)
+    raise ValueError(f"Unsupported frame shape for online stream color conversion: {getattr(arr, 'shape', None)}")
 
 
 def _project_component_mask(component: dict, roi: dict, image_shape) -> np.ndarray | None:
@@ -890,8 +933,15 @@ def analyze_online_stream_frame(
     analysis_config: dict | None = None,
     capture_ref: dict | None = None,
     capture_index: int | None = None,
+    frame_color_order: str = "bgr",
+    background_color_order: str | None = None,
 ) -> dict:
     config = _resolved_analysis_config(analysis_config)
+    frame_color_order = _normalized_color_order(frame_color_order)
+    background_color_order = _normalized_color_order(
+        background_color_order,
+        default=frame_color_order,
+    )
     stage3_frame = silhouette_mod._analyze_stage3_gray(
         "online_stream_runtime",
         _frame_row(
@@ -901,7 +951,7 @@ def analyze_online_stream_frame(
             capture_index=capture_index,
         ),
         _tracked_row(nozzle_center_px),
-        silhouette_mod._coerce_gray_image(frame_image),
+        _coerce_analysis_gray_frame(frame_image, color_order=frame_color_order),
         roi_width_frac=_ROI_WIDTH_FRAC,
         roi_top_frac=_ROI_TOP_FRAC,
         roi_bottom_frac=_ROI_BOTTOM_FRAC,
@@ -1027,6 +1077,7 @@ def analyze_online_stream_frame(
             flow_geometry_confidence = 1.0
     optical_summary = _attached_optical_summary(
         frame_image=frame_image,
+        frame_color_order=frame_color_order,
         attached_edge_rows=attached_edge_rows,
         attached_component=attached_component,
         roi=roi,
@@ -1101,7 +1152,10 @@ def analyze_online_stream_frame(
 
     if background_image is not None:
         try:
-            bg_gray = silhouette_mod._coerce_gray_image(background_image)
+            bg_gray = _coerce_analysis_gray_frame(
+                background_image,
+                color_order=background_color_order,
+            )
             if bg_gray.shape[:2] != stage3_frame["gray"].shape[:2]:
                 warnings.append("background_shape_mismatch")
         except Exception:

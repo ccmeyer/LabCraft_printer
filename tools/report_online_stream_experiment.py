@@ -33,12 +33,19 @@ def main(argv: list[str] | None = None) -> int:
         "--run-id",
         help="Optional Dataset name filter to generate a report for a single run.",
     )
+    parser.add_argument(
+        "--density-g-per-ml",
+        type=float,
+        default=1.0,
+        help="Gravimetric fluid density in g/mL used to convert mg to nL. Defaults to 1.0.",
+    )
     args = parser.parse_args(argv)
 
     payload = online_report_mod.export_online_stream_experiment_report(
         args.experiment_root,
         output_root=args.output_root,
         run_id=args.run_id,
+        density_g_per_ml=args.density_g_per_ml,
     )
     dataset_mod._print_json(payload)
     return 0

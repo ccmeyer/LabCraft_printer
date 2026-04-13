@@ -7724,6 +7724,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             analysis_config=dict(self.analysis_config),
             capture_ref=capture_ref,
             capture_index=self._attempted_capture_count,
+            frame_color_order="rgb",
+            background_color_order="rgb",
         )
         summary = dict(analysis.get("summary") or {})
         overlay = analysis.get("overlay")
@@ -8416,6 +8418,8 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
             analysis_config=dict(self.analysis_config),
             capture_ref=capture_ref,
             capture_index=self._attempted_capture_count + self._tail_attempted_capture_count,
+            frame_color_order="rgb",
+            background_color_order="rgb",
         )
         summary = dict(analysis.get("summary") or {})
         overlay = analysis.get("overlay")

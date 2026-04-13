@@ -6,13 +6,24 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+import cv2
+
 from tools.stream_analysis import dataset as dataset_mod
 from tools.stream_analysis import online_calibration as online_cal_mod
+from tools.stream_analysis import online_chroma_edge_prototype as chroma_proto_mod
+from tools.stream_analysis import online_fit as online_fit_mod
+from tools.stream_analysis import online_replay as online_replay_mod
+from tools.stream_analysis import online_runtime as runtime_mod
+from tools.stream_analysis import online_tail as online_tail_mod
 
 
 PROCESS_NAME = dataset_mod.ONLINE_STREAM_PROCESS_NAME
 STAGE_DIRNAME = "online_stream_report"
+CHROMA_EDGE_V2_STAGE_DIRNAME = "online_stream_report_chroma_edge_v2"
+RUNTIME_RGB_FIX_STAGE_DIRNAME = "online_stream_report_runtime_rgb_fix"
 TAIL_PHASES = {"tail_scout", "tail_backtrack", "tail_coarse", "tail_refine"}
+CORRECTION_MODE_CHROMA_EDGE_V2 = "chroma_edge_v2"
+CORRECTION_MODE_RUNTIME_RGB_FIX = "runtime_rgb_fix"
 
 RUN_SUMMARY_COLUMNS = [
     "run_id",
@@ -21,6 +32,7 @@ RUN_SUMMARY_COLUMNS = [
     "print_pw_us",
     "replicate_index",
     "num_printed",
+    "gravimetric_density_g_per_ml",
     "gravimetric_per_print_nl",
     "predicted_volume_nl",
     "signed_residual_nl",
@@ -142,15 +154,529 @@ def _run_dir_for_row(experiment_root: Path, metadata_row: dict) -> Path:
     return experiment_root / "calibration_recordings" / process_name / run_id
 
 
-def _gravimetric_per_print_nl(metadata_row: dict) -> float | None:
+def _normalized_correction_mode(correction_mode: str | None) -> str | None:
+    text = _clean_text(correction_mode)
+    if text is None:
+        return None
+    lowered = str(text).strip().lower()
+    if lowered in {"none", "off", "false", "0"}:
+        return None
+    if lowered == CORRECTION_MODE_CHROMA_EDGE_V2:
+        return CORRECTION_MODE_CHROMA_EDGE_V2
+    if lowered in {CORRECTION_MODE_RUNTIME_RGB_FIX, "rgb_order_fix"}:
+        return CORRECTION_MODE_RUNTIME_RGB_FIX
+    raise ValueError(
+        f"Unsupported correction_mode={correction_mode!r}. "
+        f"Expected {CORRECTION_MODE_CHROMA_EDGE_V2!r}, "
+        f"{CORRECTION_MODE_RUNTIME_RGB_FIX!r}, or None."
+    )
+
+
+def _default_stage_dirname(correction_mode: str | None) -> str:
+    if correction_mode == CORRECTION_MODE_CHROMA_EDGE_V2:
+        return CHROMA_EDGE_V2_STAGE_DIRNAME
+    if correction_mode == CORRECTION_MODE_RUNTIME_RGB_FIX:
+        return RUNTIME_RGB_FIX_STAGE_DIRNAME
+    return STAGE_DIRNAME
+
+
+def _stream_capture_log_index(experiment_root: Path) -> dict[str, dict]:
+    index = {}
+    for row in _iter_jsonl(experiment_root / dataset_mod.STREAM_CAPTURE_LOG_FILENAME):
+        run_id = _clean_text(row.get("dataset_run_id"))
+        if run_id is None:
+            continue
+        index[str(run_id)] = dict(row)
+    return index
+
+
+def _latest_emergence_result(emergence_run_dir: Path) -> dict:
+    latest = {}
+    for row in _iter_jsonl(emergence_run_dir / "analysis.jsonl"):
+        if str(row.get("kind") or "") != "calibration_data_updated":
+            continue
+        payload = dict(row.get("payload") or {})
+        result = dict(payload.get("result") or {})
+        if not result:
+            continue
+        latest = {
+            "analysis_row": dict(row),
+            "payload": payload,
+            "result": result,
+        }
+    return latest
+
+
+def _fallback_emergence_run_dir(experiment_root: Path, online_run_dir: Path) -> Path | None:
+    emergence_root = experiment_root / "calibration_recordings" / "DropletEmergenceCalibrationProcess"
+    if not emergence_root.exists():
+        return None
+    candidates = [path for path in emergence_root.iterdir() if path.is_dir()]
+    candidates.sort(key=lambda path: path.name)
+    earlier = [path for path in candidates if path.name < online_run_dir.name]
+    if earlier:
+        return earlier[-1]
+    return candidates[-1] if candidates else None
+
+
+def _resolve_online_stream_correction_context(
+    experiment_root: Path,
+    run_dir: Path,
+    *,
+    plan_snapshot: dict,
+    correction_cache: dict | None = None,
+) -> dict:
+    cache = correction_cache if isinstance(correction_cache, dict) else {}
+    context_cache = cache.setdefault("run_contexts", {})
+    run_key = str(Path(run_dir).resolve())
+    if run_key in context_cache:
+        return dict(context_cache[run_key])
+
+    stream_log_index = cache.setdefault(
+        "stream_capture_log_index",
+        _stream_capture_log_index(experiment_root),
+    )
+    run_id = str(Path(run_dir).name)
+    log_entry = dict(stream_log_index.get(run_id) or {})
+    emergence_run_id = None
+    for child in list(log_entry.get("child_processes") or []):
+        child_row = dict(child or {})
+        if str(child_row.get("process_name") or "") != "DropletEmergenceCalibrationProcess":
+            continue
+        emergence_run_id = _clean_text(child_row.get("run_id"))
+        if emergence_run_id is not None:
+            break
+
+    emergence_run_dir = None
+    if emergence_run_id is not None:
+        emergence_run_dir = (
+            experiment_root
+            / "calibration_recordings"
+            / "DropletEmergenceCalibrationProcess"
+            / str(emergence_run_id)
+        )
+        if not emergence_run_dir.exists():
+            emergence_run_dir = None
+    if emergence_run_dir is None:
+        emergence_run_dir = _fallback_emergence_run_dir(experiment_root, run_dir)
+    if emergence_run_dir is None:
+        raise FileNotFoundError(f"Unable to resolve emergence run for online stream run: {run_dir}")
+
+    emergence_result_cache = cache.setdefault("emergence_results", {})
+    emergence_key = str(emergence_run_dir.resolve())
+    emergence_payload = emergence_result_cache.get(emergence_key)
+    if emergence_payload is None:
+        emergence_payload = _latest_emergence_result(emergence_run_dir)
+        emergence_result_cache[emergence_key] = dict(emergence_payload)
+    emergence_result = dict(emergence_payload.get("result") or {})
+    nozzle_center = emergence_result.get("selected_center_px") or emergence_result.get(
+        "pressure_band_nozzle_center_px"
+    )
+    if not isinstance(nozzle_center, (list, tuple)) or len(nozzle_center) < 2:
+        raise ValueError(
+            f"Emergence run {emergence_run_dir.name} does not expose selected_center_px/pressure_band_nozzle_center_px."
+        )
+
+    emergence_time_us = _int_or_none(((plan_snapshot.get("condition") or {}).get("emergence_time_us")))
+    if emergence_time_us is None:
+        emergence_time_us = _int_or_none(emergence_result.get("flash_delay"))
+    if emergence_time_us is None:
+        raise ValueError(f"Unable to resolve emergence_time_us for online stream run: {run_dir}")
+
+    context = {
+        "run_id": run_id,
+        "online_run_dir": str(run_dir),
+        "emergence_run_dir": str(emergence_run_dir),
+        "emergence_run_id": str(emergence_run_dir.name),
+        "emergence_time_us": int(emergence_time_us),
+        "nozzle_center_px": [int(nozzle_center[0]), int(nozzle_center[1])],
+        "resolved_from_stream_capture_log": bool(log_entry),
+        "selected_rule": dict(chroma_proto_mod.SELECTED_V2_RULE),
+    }
+    context_cache[run_key] = dict(context)
+    return context
+
+
+def _corrected_frame_rows_for_run(
+    run_dir: Path,
+    frame_rows: list[dict],
+    *,
+    correction_context: dict,
+    plan_snapshot: dict,
+) -> list[dict]:
+    corrected_rows = []
+    analysis_config = (plan_snapshot.get("analysis_config") or None)
+    for row in list(frame_rows or []):
+        record = dict(row or {})
+        image_ref = dict(record.get("image_ref") or {})
+        image_relpath = _clean_text(image_ref.get("image_relpath")) or _clean_text(record.get("image_relpath"))
+        if image_relpath is None:
+            corrected_rows.append(record)
+            continue
+        if _int_or_none(record.get("delay_us")) is None and _int_or_none(record.get("flash_delay_us")) is None:
+            corrected_rows.append(record)
+            continue
+        corrected = chroma_proto_mod.apply_selected_v2_correction_to_frame_row(
+            record,
+            image_path=run_dir / str(image_relpath),
+            nozzle_center_px=list(correction_context["nozzle_center_px"]),
+            emergence_time_us=int(correction_context["emergence_time_us"]),
+            analysis_config=analysis_config,
+            rule=chroma_proto_mod.SELECTED_V2_RULE,
+        )
+        corrected_rows.append(dict(corrected["corrected_frame_row"]))
+    return corrected_rows
+
+
+def _flow_frame_row_from_runtime_summary(
+    *,
+    delay_us: int,
+    delay_from_emergence_us: int,
+    replicate_index: int,
+    image_ref: dict,
+    summary: dict,
+) -> dict:
+    flow_volume_geometry_ok = (
+        summary.get("flow_volume_geometry_ok")
+        if "flow_volume_geometry_ok" in summary
+        else (True if bool(summary.get("measurement_qc_pass")) else None)
+    )
+    flow_measurement_usable = summary.get("flow_measurement_usable")
+    if flow_measurement_usable is None:
+        flow_measurement_usable = bool(
+            bool(summary.get("measurement_qc_pass"))
+            and flow_volume_geometry_ok is not False
+        )
+    return online_cal_mod.build_online_stream_frame_row(
+        phase="flow_rate",
+        status=str(summary.get("status") or "rejected_measurement_qc"),
+        delay_us=delay_us,
+        delay_from_emergence_us=delay_from_emergence_us,
+        replicate_index=replicate_index,
+        qc={
+            "measurement_qc_pass": bool(summary.get("measurement_qc_pass")),
+            "nozzle_qc_pass": bool(summary.get("nozzle_qc_pass")),
+            "silhouette_qc_pass": bool(summary.get("silhouette_qc_pass")),
+        },
+        image_ref=image_ref,
+        warnings=list(summary.get("warnings") or []),
+        silhouette_status=summary.get("silhouette_status"),
+        failure_reason=summary.get("failure_reason"),
+        attached_width_px=summary.get("attached_width_px"),
+        visible_volume_nl=summary.get("visible_volume_nl"),
+        attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
+        min_accepted_fluid_distance_from_bottom_px=summary.get(
+            "min_accepted_fluid_distance_from_bottom_px"
+        ),
+        accepted_component_count=summary.get("accepted_component_count"),
+        accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+        plausible_unaccepted_component_count=summary.get("plausible_unaccepted_component_count"),
+        plausible_unaccepted_visible_volume_nl=summary.get(
+            "plausible_unaccepted_visible_volume_nl"
+        ),
+        detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+        near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
+        late_frame_warning=bool(summary.get("late_frame_warning")),
+        attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+        attached_lower_centerline_span_px=summary.get("attached_lower_centerline_span_px"),
+        attached_lower_centerline_rms_px=summary.get("attached_lower_centerline_rms_px"),
+        attached_volume_geometry_ok=summary.get("attached_volume_geometry_ok"),
+        detached_volume_geometry_ok=summary.get("detached_volume_geometry_ok"),
+        flow_volume_geometry_ok=flow_volume_geometry_ok,
+        flow_volume_geometry_reasons=list(summary.get("flow_volume_geometry_reasons") or []),
+        detached_geometry_details=list(summary.get("detached_geometry_details") or []),
+        min_detached_axis_symmetry_score=summary.get("min_detached_axis_symmetry_score"),
+        max_detached_local_centerline_span_px=summary.get("max_detached_local_centerline_span_px"),
+        max_detached_axis_offset_px=summary.get("max_detached_axis_offset_px"),
+        flow_geometry_confidence=summary.get("flow_geometry_confidence"),
+        flow_optical_confidence=summary.get("flow_optical_confidence"),
+        flow_point_confidence=summary.get("flow_point_confidence"),
+        flow_optical_confidence_active=summary.get("flow_optical_confidence_active"),
+        optical_activation_clearance_px=summary.get("optical_activation_clearance_px"),
+        lower_edge_jitter_px=summary.get("lower_edge_jitter_px"),
+        boundary_chroma_aberration_score=summary.get("boundary_chroma_aberration_score"),
+        late_coverage_candidate=summary.get("late_coverage_candidate"),
+        late_coverage_metric=summary.get("late_coverage_metric"),
+        flow_volume_complete_ok=summary.get("flow_volume_complete_ok"),
+        flow_volume_completeness_reasons=list(
+            summary.get("flow_volume_completeness_reasons") or []
+        ),
+        flow_measurement_usable=bool(flow_measurement_usable),
+    )
+
+
+def _tail_frame_row_from_runtime_summary(
+    *,
+    phase: str,
+    delay_us: int,
+    delay_from_emergence_us: int,
+    replicate_index: int,
+    image_ref: dict,
+    summary: dict,
+) -> dict:
+    tail_qc_pass = bool(summary.get("tail_width_usable"))
+    status = "accepted" if tail_qc_pass else str(summary.get("status") or "rejected_tail_qc")
+    return online_cal_mod.build_online_stream_frame_row(
+        phase=phase,
+        status=status,
+        delay_us=delay_us,
+        delay_from_emergence_us=delay_from_emergence_us,
+        replicate_index=replicate_index,
+        qc={
+            "measurement_qc_pass": bool(summary.get("measurement_qc_pass")),
+            "nozzle_qc_pass": bool(summary.get("nozzle_qc_pass")),
+            "silhouette_qc_pass": bool(summary.get("silhouette_qc_pass")),
+            "tail_qc_pass": bool(tail_qc_pass),
+            "tail_width_usable": bool(summary.get("tail_width_usable")),
+            "tail_landmark_usable": bool(summary.get("tail_landmark_usable")),
+        },
+        image_ref=image_ref,
+        warnings=list(summary.get("warnings") or []),
+        silhouette_status=summary.get("silhouette_status"),
+        failure_reason=summary.get("failure_reason"),
+        attached_width_px=summary.get("attached_width_px"),
+        visible_volume_nl=summary.get("visible_volume_nl"),
+        attached_bottom_clearance_px=summary.get("attached_bottom_clearance_px"),
+        min_accepted_fluid_distance_from_bottom_px=summary.get(
+            "min_accepted_fluid_distance_from_bottom_px"
+        ),
+        accepted_component_count=summary.get("accepted_component_count"),
+        accepted_detached_component_count=summary.get("accepted_detached_component_count"),
+        tail_width_usable=bool(summary.get("tail_width_usable")),
+        separated_from_nozzle_landmark=bool(summary.get("separated_from_nozzle_landmark")),
+        tail_landmark_usable=bool(summary.get("tail_landmark_usable")),
+        landmark_reason=summary.get("landmark_reason"),
+        detached_near_bottom_warning=bool(summary.get("detached_near_bottom_warning")),
+        near_nozzle_detached_warning=bool(summary.get("near_nozzle_detached_warning")),
+        late_frame_warning=bool(summary.get("late_frame_warning")),
+        attached_bottom_guard_hit=bool(summary.get("attached_bottom_guard_hit")),
+    )
+
+
+def _runtime_rgb_fix_frame_rows_for_run(
+    run_dir: Path,
+    frame_rows: list[dict],
+    *,
+    correction_context: dict,
+    plan_snapshot: dict,
+) -> list[dict]:
+    corrected_rows = []
+    analysis_config = (plan_snapshot.get("analysis_config") or None)
+    tail_phase_labels = set(TAIL_PHASES)
+    for row in list(frame_rows or []):
+        record = dict(row or {})
+        phase = str(record.get("phase") or "")
+        if phase not in {"flow_rate", *tail_phase_labels}:
+            corrected_rows.append(record)
+            continue
+
+        image_ref = dict(record.get("image_ref") or {})
+        image_relpath = _clean_text(image_ref.get("image_relpath")) or _clean_text(record.get("image_relpath"))
+        delay_us = _int_or_none(record.get("delay_us"))
+        delay_from_emergence_us = _int_or_none(record.get("delay_from_emergence_us"))
+        replicate_index = _int_or_none(record.get("replicate_index"))
+        if (
+            image_relpath is None
+            or delay_us is None
+            or delay_from_emergence_us is None
+            or replicate_index is None
+        ):
+            corrected_rows.append(record)
+            continue
+
+        image_path = run_dir / str(image_relpath)
+        frame_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            corrected_rows.append(record)
+            continue
+
+        capture_index = _int_or_none(record.get("capture_index"))
+        if capture_index is None:
+            capture_index = _int_or_none(image_ref.get("capture_index"))
+        analysis = runtime_mod.analyze_online_stream_frame(
+            frame_image=frame_bgr,
+            background_image=None,
+            nozzle_center_px=list(correction_context["nozzle_center_px"]),
+            delay_us=int(delay_us),
+            emergence_time_us=int(correction_context["emergence_time_us"]),
+            analysis_config=analysis_config,
+            capture_ref=image_ref,
+            capture_index=capture_index,
+            frame_color_order="bgr",
+        )
+        summary = dict(analysis.get("summary") or {})
+        if phase == "flow_rate":
+            corrected_rows.append(
+                _flow_frame_row_from_runtime_summary(
+                    delay_us=int(delay_us),
+                    delay_from_emergence_us=int(delay_from_emergence_us),
+                    replicate_index=int(replicate_index),
+                    image_ref=image_ref,
+                    summary=summary,
+                )
+            )
+            continue
+        corrected_rows.append(
+            _tail_frame_row_from_runtime_summary(
+                phase=phase,
+                delay_us=int(delay_us),
+                delay_from_emergence_us=int(delay_from_emergence_us),
+                replicate_index=int(replicate_index),
+                image_ref=image_ref,
+                summary=summary,
+            )
+        )
+    return corrected_rows
+
+
+def _replay_online_stream_run_from_frame_rows(
+    run_dir: Path,
+    *,
+    plan_snapshot: dict,
+    flow_fit_artifact: dict,
+    tail_fit_artifact: dict,
+    frame_rows: list[dict],
+    correction_context: dict | None = None,
+) -> dict:
+    stored_tail_plan = dict(tail_fit_artifact.get("tail_plan") or {})
+    flow_measurements = online_replay_mod._accepted_measurements(
+        frame_rows,
+        phases=("flow_rate",),
+    )
+    flow_delay_summaries = online_replay_mod._group_delay_summaries(
+        frame_rows,
+        phase="flow_rate",
+    )
+    replay_flow_fit = online_fit_mod.fit_online_stream_flow_phase(
+        measurements=flow_measurements,
+        delay_summaries=flow_delay_summaries,
+    )
+
+    baseline_width_px = _float_or_none(replay_flow_fit.get("steady_width_baseline_px"))
+    if baseline_width_px is None:
+        baseline_width_px = _float_or_none((flow_fit_artifact.get("fit") or {}).get("steady_width_baseline_px"))
+    scout_summaries = online_replay_mod._group_delay_summaries(
+        frame_rows,
+        phase=("tail_scout", "tail_coarse"),
+        baseline_width_px=baseline_width_px,
+    )
+    backtrack_summaries = online_replay_mod._group_delay_summaries(
+        frame_rows,
+        phase=("tail_backtrack", "tail_refine"),
+        baseline_width_px=baseline_width_px,
+    )
+    trigger_bracket = online_replay_mod._replay_tail_trigger_bracket(
+        scout_summaries,
+        backtrack_summaries,
+        tail_plan=stored_tail_plan,
+        flow_delay_summaries=flow_delay_summaries,
+    )
+    replay_tail_result = online_tail_mod.resolve_online_stream_tail_result(
+        flow_fit_result=dict(replay_flow_fit or {}),
+        tail_plan=stored_tail_plan,
+        scout_summaries=scout_summaries,
+        backtrack_summaries=backtrack_summaries,
+        trigger_bracket=trigger_bracket,
+        flow_delay_summaries=flow_delay_summaries,
+    )
+    return {
+        "plan_snapshot": plan_snapshot,
+        "correction_context": None if correction_context is None else dict(correction_context),
+        "frame_rows": list(frame_rows or []),
+        "fit": dict(replay_flow_fit or {}),
+        "tail_result": dict(replay_tail_result or {}),
+        "run_dir": run_dir,
+        "flow_artifact": dict(flow_fit_artifact or {}),
+        "tail_artifact": dict(tail_fit_artifact or {}),
+    }
+
+
+def _replay_corrected_online_stream_run(
+    experiment_root: Path,
+    run_dir: Path,
+    *,
+    correction_cache: dict | None = None,
+) -> dict:
+    plan_snapshot = _load_json(run_dir / "plan_snapshot.json")
+    flow_fit_artifact = _load_json(run_dir / "flow_fit.json")
+    tail_fit_artifact = _load_json(run_dir / "tail_fit.json")
+    stored_tail_plan = dict(tail_fit_artifact.get("tail_plan") or {})
+    frame_rows = _iter_jsonl(run_dir / "frames.jsonl")
+    correction_context = _resolve_online_stream_correction_context(
+        experiment_root,
+        run_dir,
+        plan_snapshot=plan_snapshot,
+        correction_cache=correction_cache,
+    )
+    corrected_frame_rows = _corrected_frame_rows_for_run(
+        run_dir,
+        frame_rows,
+        correction_context=correction_context,
+        plan_snapshot=plan_snapshot,
+    )
+    return _replay_online_stream_run_from_frame_rows(
+        run_dir,
+        plan_snapshot=plan_snapshot,
+        flow_fit_artifact=flow_fit_artifact,
+        tail_fit_artifact=tail_fit_artifact,
+        frame_rows=corrected_frame_rows,
+        correction_context=correction_context,
+    )
+
+
+def _replay_runtime_rgb_fix_online_stream_run(
+    experiment_root: Path,
+    run_dir: Path,
+    *,
+    correction_cache: dict | None = None,
+) -> dict:
+    plan_snapshot = _load_json(run_dir / "plan_snapshot.json")
+    flow_fit_artifact = _load_json(run_dir / "flow_fit.json")
+    tail_fit_artifact = _load_json(run_dir / "tail_fit.json")
+    frame_rows = _iter_jsonl(run_dir / "frames.jsonl")
+    correction_context = _resolve_online_stream_correction_context(
+        experiment_root,
+        run_dir,
+        plan_snapshot=plan_snapshot,
+        correction_cache=correction_cache,
+    )
+    corrected_frame_rows = _runtime_rgb_fix_frame_rows_for_run(
+        run_dir,
+        frame_rows,
+        correction_context=correction_context,
+        plan_snapshot=plan_snapshot,
+    )
+    return _replay_online_stream_run_from_frame_rows(
+        run_dir,
+        plan_snapshot=plan_snapshot,
+        flow_fit_artifact=flow_fit_artifact,
+        tail_fit_artifact=tail_fit_artifact,
+        frame_rows=corrected_frame_rows,
+        correction_context=correction_context,
+    )
+
+
+def _validate_density_g_per_ml(density_g_per_ml: float | int | None) -> float:
+    density = _float_or_none(density_g_per_ml)
+    if density is None or float(density) <= 0.0:
+        raise ValueError("gravimetric density must be a positive number in g/mL.")
+    return float(density)
+
+
+def _gravimetric_per_print_nl(
+    metadata_row: dict,
+    *,
+    density_g_per_ml: float | int = 1.0,
+) -> float | None:
+    density = _validate_density_g_per_ml(density_g_per_ml)
     mass_per_print_mg = _float_or_none(metadata_row.get("Mass/print"))
     if mass_per_print_mg is not None:
-        return float(mass_per_print_mg) * 1000.0
+        return (float(mass_per_print_mg) * 1000.0) / float(density)
     mass_change_mg = _float_or_none(metadata_row.get("Mass Change"))
     num_printed = _int_or_none(metadata_row.get("Num printed"))
     if mass_change_mg is None or num_printed in (None, 0):
         return None
-    return (float(mass_change_mg) * 1000.0) / float(num_printed)
+    return (float(mass_change_mg) * 1000.0) / (float(num_printed) * float(density))
 
 
 def _flow_fit_lines(
@@ -323,25 +849,32 @@ def _run_relationship_status(
     return detachment_status, observed_status
 
 
-def _run_context(experiment_root: Path, metadata_row: dict) -> dict:
-    run_id = _clean_text(metadata_row.get("Dataset name"))
-    run_dir = _run_dir_for_row(experiment_root, metadata_row)
-    flow_artifact = _load_json(run_dir / "flow_fit.json")
-    tail_artifact = _load_json(run_dir / "tail_fit.json")
-    frame_rows = _iter_jsonl(run_dir / "frames.jsonl")
-    fit = dict(flow_artifact.get("fit") or {})
-    tail_result = dict(tail_artifact.get("result") or {})
+def _context_from_replay(
+    *,
+    metadata_row: dict,
+    run_dir: Path,
+    frame_rows: list[dict],
+    fit: dict,
+    tail_result: dict,
+    density_g_per_ml: float | int = 1.0,
+    correction_mode: str | None = None,
+    correction_context: dict | None = None,
+    flow_artifact: dict | None = None,
+    tail_artifact: dict | None = None,
+) -> dict:
     tail_phase = dict(tail_result.get("tail_phase") or {})
 
     print_pressure = _float_or_none(metadata_row.get("Print Pressure"))
     print_pw_us = _int_or_none(metadata_row.get("Print PW"))
     replicate_index = _int_or_none(metadata_row.get("Rep"))
-    predicted_volume_nl = (
-        _float_or_none(metadata_row.get("Predicted Volume (nL)"))
-        if _float_or_none(metadata_row.get("Predicted Volume (nL)")) is not None
-        else _float_or_none(tail_result.get("predicted_volume_nl"))
+    predicted_volume_nl = _float_or_none(tail_result.get("predicted_volume_nl"))
+    if predicted_volume_nl is None and correction_mode is None:
+        predicted_volume_nl = _float_or_none(metadata_row.get("Predicted Volume (nL)"))
+    gravimetric_density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
+    gravimetric_per_print_nl = _gravimetric_per_print_nl(
+        metadata_row,
+        density_g_per_ml=gravimetric_density_g_per_ml,
     )
-    gravimetric_per_print_nl = _gravimetric_per_print_nl(metadata_row)
     gravimetric_metrics = _gravimetric_equality_metrics(gravimetric_per_print_nl, fit)
 
     flow_rows = _phase_rows(frame_rows, "flow_rate")
@@ -377,12 +910,13 @@ def _run_context(experiment_root: Path, metadata_row: dict) -> dict:
             predicted_to_grav_ratio = float(predicted_volume_nl) / float(gravimetric_per_print_nl)
 
     summary_row = {
-        "run_id": run_id,
+        "run_id": _clean_text(metadata_row.get("Dataset name")),
         "condition_key": _format_condition_key(print_pressure, print_pw_us),
         "print_pressure": print_pressure,
         "print_pw_us": print_pw_us,
         "replicate_index": replicate_index,
         "num_printed": _int_or_none(metadata_row.get("Num printed")),
+        "gravimetric_density_g_per_ml": gravimetric_density_g_per_ml,
         "gravimetric_per_print_nl": gravimetric_per_print_nl,
         "predicted_volume_nl": predicted_volume_nl,
         "signed_residual_nl": signed_residual_nl,
@@ -426,12 +960,14 @@ def _run_context(experiment_root: Path, metadata_row: dict) -> dict:
         "summary_row": summary_row,
         "run_dir": run_dir,
         "metadata_row": dict(metadata_row),
-        "flow_artifact": flow_artifact,
-        "tail_artifact": tail_artifact,
-        "fit": fit,
-        "tail_result": tail_result,
+        "flow_artifact": dict(flow_artifact or {}),
+        "tail_artifact": dict(tail_artifact or {}),
+        "fit": dict(fit or {}),
+        "tail_result": dict(tail_result or {}),
         "tail_phase": tail_phase,
-        "frame_rows": frame_rows,
+        "correction_mode": correction_mode,
+        "correction_context": None if correction_context is None else dict(correction_context),
+        "frame_rows": list(frame_rows or []),
         "flow_rows": flow_rows,
         "tail_rows": tail_rows,
         "flow_volume_points": flow_volume_points,
@@ -440,6 +976,58 @@ def _run_context(experiment_root: Path, metadata_row: dict) -> dict:
         "width_points": width_points,
         "clearance_points": clearance_points,
     }
+
+
+def _run_context(
+    experiment_root: Path,
+    metadata_row: dict,
+    *,
+    density_g_per_ml: float | int = 1.0,
+    correction_mode: str | None = None,
+    correction_cache: dict | None = None,
+) -> dict:
+    correction_mode = _normalized_correction_mode(correction_mode)
+    run_id = _clean_text(metadata_row.get("Dataset name"))
+    run_dir = _run_dir_for_row(experiment_root, metadata_row)
+    flow_artifact = _load_json(run_dir / "flow_fit.json")
+    tail_artifact = _load_json(run_dir / "tail_fit.json")
+    correction_context = None
+    if correction_mode == CORRECTION_MODE_CHROMA_EDGE_V2:
+        corrected_replay = _replay_corrected_online_stream_run(
+            experiment_root,
+            run_dir,
+            correction_cache=correction_cache,
+        )
+        frame_rows = list(corrected_replay.get("frame_rows") or [])
+        fit = dict(corrected_replay.get("fit") or {})
+        tail_result = dict(corrected_replay.get("tail_result") or {})
+        correction_context = dict(corrected_replay.get("correction_context") or {})
+    elif correction_mode == CORRECTION_MODE_RUNTIME_RGB_FIX:
+        corrected_replay = _replay_runtime_rgb_fix_online_stream_run(
+            experiment_root,
+            run_dir,
+            correction_cache=correction_cache,
+        )
+        frame_rows = list(corrected_replay.get("frame_rows") or [])
+        fit = dict(corrected_replay.get("fit") or {})
+        tail_result = dict(corrected_replay.get("tail_result") or {})
+        correction_context = dict(corrected_replay.get("correction_context") or {})
+    else:
+        frame_rows = _iter_jsonl(run_dir / "frames.jsonl")
+        fit = dict(flow_artifact.get("fit") or {})
+        tail_result = dict(tail_artifact.get("result") or {})
+    return _context_from_replay(
+        metadata_row=metadata_row,
+        run_dir=run_dir,
+        frame_rows=frame_rows,
+        fit=fit,
+        tail_result=tail_result,
+        density_g_per_ml=density_g_per_ml,
+        correction_mode=correction_mode,
+        correction_context=correction_context,
+        flow_artifact=flow_artifact,
+        tail_artifact=tail_artifact,
+    )
 
 
 def _cv(values: list[float]) -> float | None:
@@ -531,6 +1119,119 @@ def _condition_summary_row(condition_key: str, run_rows: list[dict]) -> dict:
             if str(row.get("gravimetric_vs_observed_tail_status") or "") == "after_last_observed_tail_frame"
         ),
         "condition_overlay_png": None,
+    }
+
+
+def _summaries_from_contexts(contexts: list[dict]) -> tuple[list[dict], list[dict], dict[str, list[dict]]]:
+    summary_rows = [dict(context.get("summary_row") or {}) for context in list(contexts or [])]
+    grouped_contexts = defaultdict(list)
+    for context in list(contexts or []):
+        summary_row = dict(context.get("summary_row") or {})
+        grouped_contexts[str(summary_row.get("condition_key") or "unknown")].append(context)
+    condition_summary_rows = [
+        _condition_summary_row(
+            condition_key,
+            [dict(item.get("summary_row") or {}) for item in condition_contexts],
+        )
+        for condition_key, condition_contexts in sorted(grouped_contexts.items())
+    ]
+    return summary_rows, condition_summary_rows, grouped_contexts
+
+
+def _export_report_from_contexts(
+    contexts: list[dict],
+    *,
+    stage_dir: Path,
+    experiment_root: Path | None,
+    run_id_filter: str | None = None,
+    density_g_per_ml: float | int = 1.0,
+    correction_mode: str | None = None,
+    correction_rule: dict | None = None,
+) -> dict:
+    stage_dir = Path(stage_dir).expanduser().resolve()
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = stage_dir / "runs"
+    conditions_dir = stage_dir / "conditions"
+    experiment_dir = stage_dir / "experiment"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    conditions_dir.mkdir(parents=True, exist_ok=True)
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_rows, condition_summary_rows, grouped_contexts = _summaries_from_contexts(contexts)
+    context_by_run_id = {
+        str(dict(context.get("summary_row") or {}).get("run_id") or ""): context
+        for context in list(contexts or [])
+    }
+
+    rendered_summary_rows = []
+    for summary_row in summary_rows:
+        rendered_row = dict(summary_row)
+        run_slug = _safe_slug(rendered_row.get("run_id") or "run")
+        run_report_path = runs_dir / f"{run_slug}.png"
+        context = context_by_run_id.get(str(rendered_row.get("run_id") or ""))
+        if context is not None:
+            _plot_run_report(context, run_report_path)
+            rendered_row["run_report_png"] = str(run_report_path)
+            context["summary_row"] = rendered_row
+        rendered_summary_rows.append(rendered_row)
+
+    rendered_condition_rows = []
+    for condition_row in condition_summary_rows:
+        rendered_row = dict(condition_row)
+        condition_key = str(rendered_row.get("condition_key") or "unknown")
+        condition_slug = _safe_slug(condition_key)
+        overlay_path = conditions_dir / f"{condition_slug}_overlay.png"
+        condition_contexts = list(grouped_contexts.get(condition_key) or [])
+        _plot_condition_overlay(condition_key, condition_contexts, overlay_path)
+        rendered_row["condition_overlay_png"] = str(overlay_path)
+        rendered_condition_rows.append(rendered_row)
+
+    predicted_vs_gravimetric_path = experiment_dir / "predicted_vs_gravimetric.png"
+    delay_gap_path = experiment_dir / "delay_gap_by_condition.png"
+    _plot_predicted_vs_gravimetric(contexts, predicted_vs_gravimetric_path)
+    _plot_delay_gap_by_condition(contexts, delay_gap_path)
+
+    run_summary_csv = stage_dir / "run_summary.csv"
+    run_summary_json = stage_dir / "run_summary.json"
+    condition_summary_csv = stage_dir / "condition_summary.csv"
+    condition_summary_json = stage_dir / "condition_summary.json"
+    manifest_json = stage_dir / "report_manifest.json"
+
+    dataset_mod._write_csv(run_summary_csv, RUN_SUMMARY_COLUMNS, rendered_summary_rows)
+    dataset_mod._write_json(run_summary_json, rendered_summary_rows)
+    dataset_mod._write_csv(condition_summary_csv, CONDITION_SUMMARY_COLUMNS, rendered_condition_rows)
+    dataset_mod._write_json(condition_summary_json, rendered_condition_rows)
+
+    manifest = {
+        "schema_version": 1,
+        "experiment_root": None if experiment_root is None else str(Path(experiment_root).resolve()),
+        "output_root": str(stage_dir),
+        "run_id_filter": None if run_id_filter is None else str(run_id_filter),
+        "gravimetric_density_g_per_ml": float(_validate_density_g_per_ml(density_g_per_ml)),
+        "correction_mode": correction_mode,
+        "correction_rule": None if correction_rule is None else dict(correction_rule),
+        "run_count": len(rendered_summary_rows),
+        "condition_count": len(rendered_condition_rows),
+        "paths": {
+            "run_summary_csv": str(run_summary_csv),
+            "run_summary_json": str(run_summary_json),
+            "condition_summary_csv": str(condition_summary_csv),
+            "condition_summary_json": str(condition_summary_json),
+            "predicted_vs_gravimetric_png": str(predicted_vs_gravimetric_path),
+            "delay_gap_by_condition_png": str(delay_gap_path),
+            "runs_dir": str(runs_dir),
+            "conditions_dir": str(conditions_dir),
+        },
+    }
+    dataset_mod._write_json(manifest_json, manifest)
+    return {
+        **manifest,
+        "summary_rows": rendered_summary_rows,
+        "condition_summary_rows": rendered_condition_rows,
+        "paths": {
+            **manifest["paths"],
+            "report_manifest_json": str(manifest_json),
+        },
     }
 
 
@@ -1075,20 +1776,17 @@ def export_online_stream_experiment_report(
     *,
     output_root: str | Path | None = None,
     run_id: str | None = None,
+    density_g_per_ml: float | int = 1.0,
+    correction_mode: str | None = None,
 ):
     experiment_root = dataset_mod.resolve_experiment_root(experiment_root)
+    density_g_per_ml = _validate_density_g_per_ml(density_g_per_ml)
+    correction_mode = _normalized_correction_mode(correction_mode)
     stage_dir = (
         Path(output_root).expanduser().resolve()
         if output_root is not None
-        else experiment_root / "analysis" / STAGE_DIRNAME
+        else experiment_root / "analysis" / _default_stage_dirname(correction_mode)
     )
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    runs_dir = stage_dir / "runs"
-    conditions_dir = stage_dir / "conditions"
-    experiment_dir = stage_dir / "experiment"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    conditions_dir.mkdir(parents=True, exist_ok=True)
-    experiment_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_rows = []
     for row in _metadata_rows(experiment_root):
@@ -1105,71 +1803,37 @@ def export_online_stream_experiment_report(
             + (f" for run_id={run_id!r}" if run_id is not None else "")
         )
 
-    contexts = [_run_context(experiment_root, row) for row in metadata_rows]
-    summary_rows = []
-    grouped_contexts = defaultdict(list)
-    for context in contexts:
-        summary_row = dict(context.get("summary_row") or {})
-        run_slug = _safe_slug(summary_row.get("run_id") or "run")
-        run_report_path = runs_dir / f"{run_slug}.png"
-        _plot_run_report(context, run_report_path)
-        summary_row["run_report_png"] = str(run_report_path)
-        context["summary_row"] = summary_row
-        summary_rows.append(summary_row)
-        grouped_contexts[str(summary_row.get("condition_key") or "unknown")].append(context)
-
-    condition_summary_rows = []
-    for condition_key, condition_contexts in sorted(grouped_contexts.items()):
-        condition_slug = _safe_slug(condition_key)
-        overlay_path = conditions_dir / f"{condition_slug}_overlay.png"
-        _plot_condition_overlay(condition_key, condition_contexts, overlay_path)
-        condition_row = _condition_summary_row(
-            condition_key,
-            [dict(item.get("summary_row") or {}) for item in condition_contexts],
+    correction_cache = None
+    if correction_mode in {CORRECTION_MODE_CHROMA_EDGE_V2, CORRECTION_MODE_RUNTIME_RGB_FIX}:
+        correction_cache = {}
+    contexts = [
+        _run_context(
+            experiment_root,
+            row,
+            density_g_per_ml=density_g_per_ml,
+            correction_mode=correction_mode,
+            correction_cache=correction_cache,
         )
-        condition_row["condition_overlay_png"] = str(overlay_path)
-        condition_summary_rows.append(condition_row)
-
-    predicted_vs_gravimetric_path = experiment_dir / "predicted_vs_gravimetric.png"
-    delay_gap_path = experiment_dir / "delay_gap_by_condition.png"
-    _plot_predicted_vs_gravimetric(contexts, predicted_vs_gravimetric_path)
-    _plot_delay_gap_by_condition(contexts, delay_gap_path)
-
-    run_summary_csv = stage_dir / "run_summary.csv"
-    run_summary_json = stage_dir / "run_summary.json"
-    condition_summary_csv = stage_dir / "condition_summary.csv"
-    condition_summary_json = stage_dir / "condition_summary.json"
-    manifest_json = stage_dir / "report_manifest.json"
-
-    dataset_mod._write_csv(run_summary_csv, RUN_SUMMARY_COLUMNS, summary_rows)
-    dataset_mod._write_json(run_summary_json, summary_rows)
-    dataset_mod._write_csv(condition_summary_csv, CONDITION_SUMMARY_COLUMNS, condition_summary_rows)
-    dataset_mod._write_json(condition_summary_json, condition_summary_rows)
-
-    manifest = {
-        "schema_version": 1,
-        "experiment_root": str(experiment_root),
-        "output_root": str(stage_dir),
-        "run_id_filter": None if run_id is None else str(run_id),
-        "run_count": len(summary_rows),
-        "condition_count": len(condition_summary_rows),
-        "paths": {
-            "run_summary_csv": str(run_summary_csv),
-            "run_summary_json": str(run_summary_json),
-            "condition_summary_csv": str(condition_summary_csv),
-            "condition_summary_json": str(condition_summary_json),
-            "predicted_vs_gravimetric_png": str(predicted_vs_gravimetric_path),
-            "delay_gap_by_condition_png": str(delay_gap_path),
-            "runs_dir": str(runs_dir),
-            "conditions_dir": str(conditions_dir),
-        },
-    }
-    dataset_mod._write_json(manifest_json, manifest)
-
-    return {
-        **manifest,
-        "paths": {
-            **manifest["paths"],
-            "report_manifest_json": str(manifest_json),
-        },
-    }
+        for row in metadata_rows
+    ]
+    return _export_report_from_contexts(
+        contexts,
+        stage_dir=stage_dir,
+        experiment_root=experiment_root,
+        run_id_filter=run_id,
+        density_g_per_ml=density_g_per_ml,
+        correction_mode=correction_mode,
+        correction_rule=(
+            dict(chroma_proto_mod.SELECTED_V2_RULE)
+            if correction_mode == CORRECTION_MODE_CHROMA_EDGE_V2
+            else (
+                {
+                    "replay_source": "saved_images",
+                    "frame_color_order": "bgr",
+                    "live_runtime_frame_color_order": "rgb",
+                }
+                if correction_mode == CORRECTION_MODE_RUNTIME_RGB_FIX
+                else None
+            )
+        ),
+    )

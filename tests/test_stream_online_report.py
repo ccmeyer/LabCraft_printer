@@ -220,19 +220,28 @@ def test_export_online_stream_report_writes_artifacts_and_expected_timing(tmp_pa
     _write_metadata_csv(exp_dir, [first["metadata_row"], second["metadata_row"]])
 
     payload = mod.export_online_stream_experiment_report(exp_dir)
+    corrected_payload = mod.export_online_stream_experiment_report(
+        exp_dir,
+        output_root=tmp_path / "density_corrected_report",
+        density_g_per_ml=1.25,
+    )
 
     assert payload["run_count"] == 2
     assert payload["condition_count"] == 1
+    assert payload["gravimetric_density_g_per_ml"] == pytest.approx(1.0)
+    assert corrected_payload["gravimetric_density_g_per_ml"] == pytest.approx(1.25)
 
     summary_path = Path(payload["paths"]["run_summary_csv"])
     condition_path = Path(payload["paths"]["condition_summary_csv"])
     predicted_plot = Path(payload["paths"]["predicted_vs_gravimetric_png"])
     delay_plot = Path(payload["paths"]["delay_gap_by_condition_png"])
+    corrected_summary_path = Path(corrected_payload["paths"]["run_summary_csv"])
 
     assert summary_path.exists()
     assert condition_path.exists()
     assert predicted_plot.exists()
     assert delay_plot.exists()
+    assert corrected_summary_path.exists()
 
     with summary_path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -253,6 +262,16 @@ def test_export_online_stream_report_writes_artifacts_and_expected_timing(tmp_pa
     assert run_two["gravimetric_vs_detachment_status"] == "before_first_detachment_landmark"
     assert Path(run_two["run_report_png"]).exists()
 
+    with corrected_summary_path.open("r", encoding="utf-8", newline="") as handle:
+        corrected_rows = list(csv.DictReader(handle))
+
+    corrected_by_run = {row["run_id"]: row for row in corrected_rows}
+    corrected_run_one = corrected_by_run["run_001"]
+    assert float(corrected_run_one["gravimetric_density_g_per_ml"]) == pytest.approx(1.25)
+    assert float(corrected_run_one["gravimetric_per_print_nl"]) == pytest.approx(72.0)
+    assert float(corrected_run_one["gravimetric_equality_delay_us"]) == pytest.approx(3600.0)
+    assert float(corrected_run_one["gravimetric_minus_tail_start_us"]) == pytest.approx(-600.0)
+
     with condition_path.open("r", encoding="utf-8", newline="") as handle:
         condition_rows = list(csv.DictReader(handle))
 
@@ -262,3 +281,31 @@ def test_export_online_stream_report_writes_artifacts_and_expected_timing(tmp_pa
     assert float(condition_row["gravimetric_minus_tail_start_us_mean"]) == pytest.approx(225.0)
     assert condition_row["gravimetric_after_detachment_count"] == "1"
     assert Path(condition_row["condition_overlay_png"]).exists()
+
+
+def test_export_online_stream_report_default_path_does_not_use_chroma_correction(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+
+    exp_dir = tmp_path / "Stream_report_default-20260412_120000"
+    process_root = exp_dir / "calibration_recordings" / dataset_mod.ONLINE_STREAM_PROCESS_NAME
+    run = _make_online_run(
+        process_root,
+        run_id="run_001",
+        replicate_index=1,
+        gravimetric_nl=90.0,
+        predicted_volume_nl=84.0,
+        tail_start_delay_us=4200,
+        first_detachment_delay_us=4400,
+    )
+    _write_metadata_csv(exp_dir, [run["metadata_row"]])
+
+    def _unexpected_corrected_replay(*args, **kwargs):
+        raise AssertionError("default online report should not replay chroma correction")
+
+    monkeypatch.setattr(mod, "_replay_corrected_online_stream_run", _unexpected_corrected_replay)
+
+    payload = mod.export_online_stream_experiment_report(exp_dir)
+
+    assert payload["correction_mode"] is None
+    assert payload["correction_rule"] is None
+    assert Path(payload["output_root"]).name == mod.STAGE_DIRNAME
